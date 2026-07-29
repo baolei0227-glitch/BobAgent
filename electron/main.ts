@@ -359,6 +359,14 @@ function setupAutoUpdater(): void {
     autoUpdater.quitAndInstall();
     return { success: true };
   });
+
+  // 启动后延迟 5 秒自动检查更新
+  setTimeout(() => {
+    if (!mainWindow?.isDestroyed()) {
+      log('Auto-checking for updates...');
+      autoUpdater.checkForUpdates().catch(err => log(`Auto-update check failed: ${err.message}`));
+    }
+  }, 5000);
 }
 
 app.whenReady().then(async () => {
