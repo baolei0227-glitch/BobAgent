@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, FileText, Lightbulb, ChevronDown, ChevronRight, Edit3, Check, AlertCircle, RefreshCw, MessageSquare, Paperclip, FileIcon } from 'lucide-react';
-import { MarkdownRenderer } from './MarkdownRenderer';
+import { HtmlRenderer } from './HtmlRenderer';
 
 /** 单轮问答 */
 interface QARound {
@@ -65,7 +65,7 @@ const MOOD_LABELS: Record<string, string> = {
 };
 
 /** .md 文件中的实际标题 */
-const SECTION_HEADERS = ['摘要', '对话记录', '批注', '便签'];
+const SECTION_HEADERS = ['摘要', '对话记录', '便签'];
 
 /** 解析对话记录为 Q&A 轮次（含附件） */
 function parseConversationRounds(content: string): QARound[] {
@@ -135,10 +135,17 @@ function questionSummary(question: string, maxLen = 60): string {
   return oneLine.length > maxLen ? oneLine.slice(0, maxLen) + '...' : oneLine;
 }
 
+/** 解析便签为条目列表 */
+function parseStickyItems(content: string): string[] {
+  if (!content || content === '(Empty)') return [];
+  return content.split('\n')
+    .map(l => l.replace(/^-\s*/, '').trim())
+    .filter(Boolean);
+}
+
 const SECTION_LABELS: Record<string, string> = {
   '摘要': 'Summary',
   '对话记录': 'Conversation',
-  '批注': 'Notes',
   '便签': 'Sticky Notes',
 };
 
@@ -309,6 +316,19 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
       return;
     }
     loadNodeDocument();
+  }, [nodeMdId, loadNodeDocument]);
+
+  // 监听外部文档更新事件（如 AiChatNode 完成对话后），自动刷新
+  useEffect(() => {
+    if (!nodeMdId) return;
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { node_id?: string };
+      if (detail?.node_id === nodeMdId) {
+        loadNodeDocument();
+      }
+    };
+    window.addEventListener('node-document-updated', handler);
+    return () => window.removeEventListener('node-document-updated', handler);
   }, [nodeMdId, loadNodeDocument]);
 
   const doSave = useCallback(async (contents: Record<string, string>) => {
@@ -541,7 +561,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                 <div className="reader-section-wrap">
                   <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#537D96' }}>{SECTION_LABELS['摘要']}</div>
                   <div className="rounded-lg border-l-[3px] p-4" style={{ borderLeftColor: '#537D96', backgroundColor: '#ffffff', borderColor: 'rgba(0,0,0,0.04)' }}>
-                    <MarkdownRenderer content={sectionContents['摘要']} />
+                    <HtmlRenderer content={sectionContents['摘要']} />
                   </div>
                 </div>
               )}
@@ -614,7 +634,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                                     <div className="mb-2">
                                       <span className="text-[10px] font-semibold" style={{ color: '#537D96' }}>Q:</span>
                                       <div className="mt-0.5 text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>
-                                        <MarkdownRenderer content={round.question} />
+                                        <HtmlRenderer content={round.question} />
                                       </div>
                                       {/* 展开时也显示附件标签 */}
                                       {round.questionAttachments && round.questionAttachments.length > 0 && (
@@ -626,7 +646,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                                     <div>
                                       <span className="text-[10px] font-semibold" style={{ color: '#27ae60' }}>A:</span>
                                       <div className="mt-0.5 text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>
-                                        <MarkdownRenderer content={round.answer} />
+                                        <HtmlRenderer content={round.answer} />
                                       </div>
                                     </div>
                                   </div>
@@ -650,53 +670,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                               <Edit3 className="h-3 w-3" />
                             </button>
                           </div>
-                          <MarkdownRenderer content={sectionContents['对话记录'] && sectionContents['对话记录'] !== '(Empty)' ? sectionContents['对话记录'] : ''} />
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* 批注 */}
-              {sectionContents['批注'] !== undefined && (
-                <div className="reader-section-wrap">
-                  <button
-                    onClick={() => toggleSection('批注')}
-                    className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide transition-opacity hover:opacity-70"
-                    style={{ color: '#2c2416' }}
-                  >
-                    {collapsedSections.has('批注') ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                    {SECTION_LABELS['批注']}
-                  </button>
-                  {!collapsedSections.has('批注') && (
-                    <div className="rounded-lg border p-4" style={{ borderColor: 'rgba(212, 160, 23, 0.2)', backgroundColor: '#ffffff', borderLeftWidth: '3px', borderLeftColor: '#d4a017' }}>
-                      {editingSection === '批注' ? (
-                        <div className="space-y-2">
-                          <textarea
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            className="w-full resize-none rounded-md border p-3 font-mono text-[12px] outline-none leading-relaxed"
-                            style={{ borderColor: 'rgba(212, 160, 23, 0.2)', fontFamily: '"SF Mono", Menlo, monospace', color: '#4a4232', minHeight: '80px' }}
-                            placeholder="Enter notes..."
-                            autoFocus
-                          />
-                          <div className="flex justify-end gap-2">
-                            <button onClick={cancelEdit} className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>Cancel</button>
-                            <button onClick={confirmEdit} className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors" style={{ backgroundColor: '#d4a017', color: '#fff' }}>
-                              <Check className="h-3 w-3" />Save
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          <div className="mb-2 flex items-center justify-between">
-                            <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#d4a017' }}>Notes</span>
-                            <button onClick={() => startEdit('批注')} className="rounded-md p-1 transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>
-                              <Edit3 className="h-3 w-3" />
-                            </button>
-                          </div>
-                          <MarkdownRenderer content={sectionContents['批注'] && sectionContents['批注'] !== '(Empty)' ? sectionContents['批注'] : ''} />
+                          <HtmlRenderer content={sectionContents['对话记录'] && sectionContents['对话记录'] !== '(Empty)' ? sectionContents['对话记录'] : ''} />
                         </div>
                       )}
                     </div>
@@ -742,7 +716,24 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                               <Edit3 className="h-3 w-3" />
                             </button>
                           </div>
-                          <MarkdownRenderer content={sectionContents['便签'] && sectionContents['便签'] !== '(Empty)' ? sectionContents['便签'] : ''} />
+                          {(() => {
+                            const items = parseStickyItems(sectionContents['便签'] || '');
+                            if (items.length === 0) {
+                              return <HtmlRenderer content={sectionContents['便签'] && sectionContents['便签'] !== '(Empty)' ? sectionContents['便签'] : ''} />;
+                            }
+                            return (
+                              <div className="space-y-1">
+                                {items.map((item, i) => (
+                                  <div key={i} className="flex items-start gap-2 rounded px-1.5 py-0.5">
+                                    <span className="mt-0.5 shrink-0 text-[10px] font-mono font-medium" style={{ color: 'oklch(0.50 0.12 220)' }}>
+                                      [{i + 1}]
+                                    </span>
+                                    <span className="text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>{item}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>

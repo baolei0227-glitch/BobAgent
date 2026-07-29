@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, FileText, Image as ImageIcon, File as FileIcon, AlertCircle, RefreshCw, ExternalLink } from 'lucide-react';
-import { MarkdownRenderer } from './MarkdownRenderer';
+import { HtmlRenderer } from './HtmlRenderer';
 
 interface FileInfo {
   name: string;
@@ -17,6 +17,7 @@ interface FileViewerProps {
   fileName: string;
   filePath: string;
   onClose: () => void;
+  mode?: 'standalone' | 'tabbed';
 }
 
 function formatSize(bytes: number): string {
@@ -38,7 +39,7 @@ const LANG_MAP: Record<string, string> = {
   '.sql': 'sql',
 };
 
-export function FileViewer({ projectId, fileName, filePath, onClose }: FileViewerProps) {
+export function FileViewer({ projectId, fileName, filePath, onClose, mode = 'standalone' }: FileViewerProps) {
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -83,11 +84,11 @@ export function FileViewer({ projectId, fileName, filePath, onClose }: FileViewe
   const renderTextContent = () => {
     if (!fileInfo?.content) return null;
 
-    // .md 用 MarkdownRenderer
+    // .md 用 HtmlRenderer
     if (ext === '.md') {
       return (
         <div className="px-6 py-4">
-          <MarkdownRenderer content={fileInfo.content} />
+          <HtmlRenderer content={fileInfo.content} />
         </div>
       );
     }
@@ -182,15 +183,15 @@ export function FileViewer({ projectId, fileName, filePath, onClose }: FileViewe
 
   return (
     <div
-      className="fixed right-0 top-0 flex h-full flex-col"
+      className={mode === 'standalone' ? 'fixed right-0 top-0 flex h-full flex-col' : 'flex h-full flex-col'}
       style={{
-        width: '48%',
-        minWidth: '480px',
-        maxWidth: '780px',
+        width: mode === 'standalone' ? '48%' : '100%',
+        minWidth: mode === 'standalone' ? '480px' : undefined,
+        maxWidth: mode === 'standalone' ? '780px' : undefined,
         backgroundColor: '#faf8f3',
-        borderLeft: '1px solid rgba(0, 0, 0, 0.07)',
-        boxShadow: '-12px 0 32px rgba(0, 0, 0, 0.06)',
-        zIndex: 50,
+        borderLeft: mode === 'standalone' ? '1px solid rgba(0, 0, 0, 0.07)' : undefined,
+        boxShadow: mode === 'standalone' ? '-12px 0 32px rgba(0, 0, 0, 0.06)' : undefined,
+        zIndex: mode === 'standalone' ? 50 : undefined,
       }}
     >
       {/* 头部 */}

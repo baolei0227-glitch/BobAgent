@@ -10,7 +10,7 @@ import {
   type NodeProps,
   type Node,
 } from '@xyflow/react';
-import { X, Send, Sparkles, ChevronDown, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AtSign } from 'lucide-react';
+import { X, Send, Sparkles, ChevronDown, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AtSign, StickyNote } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, MessageAttachment } from '@/lib/types';
 import QuestionPopup, { extractQuestions, type QuestionItem, type AnswerEntry } from './QuestionPopup';
@@ -162,6 +162,7 @@ export function AiChatNode({ id, data, selected }: NodeProps<AiChatNodeType>) {
     assistantContent: string;
   } | null>(null);
   const [hasDisconnectedUpstream, setHasDisconnectedUpstream] = useState(false);
+  const [hasStickies, setHasStickies] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSendRef = useRef<string | null>(null);
   const currentMdId = data.nodeMdId || id;
@@ -416,7 +417,7 @@ ${rows.join('\n')}
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   };
 
-  /** 加载 materials 文件列表 */
+  // 加载 materials 文件列表
   const loadMaterialFiles = useCallback(async () => {
     try {
       const resp = await fetch('/api/materials?action=list');
@@ -426,6 +427,28 @@ ${rows.join('\n')}
       }
     } catch {}
   }, []);
+
+  // 检查节点是否有便签内容
+  const refreshStickies = useCallback(() => {
+    if (!currentMdId) return;
+    fetch(`/api/nodes?id=${currentMdId}&action=raw`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.success && data.content) {
+          const stickyMatch = data.content.match(/## 便签\n([\s\S]*?)(?:\n##|\n*$)/);
+          if (stickyMatch && stickyMatch[1].trim() && stickyMatch[1].trim() !== '（暂无）') {
+            setHasStickies(true);
+          } else {
+            setHasStickies(false);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [currentMdId]);
+
+  useEffect(() => {
+    refreshStickies();
+  }, [refreshStickies]);
 
   /** 选择 @ 引用的文件 */
   const handleMentionSelect = useCallback((file: MaterialItem) => {
@@ -800,6 +823,9 @@ ${rows.join('\n')}
                 setPersistError(null);
                 pendingAppendRef.current = null;
                 appendSuccess = true;
+                refreshStickies();
+                // 通知 MarkdownReader 刷新
+                window.dispatchEvent(new CustomEvent('node-document-updated', { detail: { node_id: currentMdId } }));
                 break;
               }
             } catch {
@@ -1244,6 +1270,20 @@ ${rows.join('\n')}
         >
           {data.title}
         </span>
+        {/* 便签图标 */}
+        {hasStickies && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenReader?.(data.nodeMdId!);
+            }}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[oklch(0.62_0.17_45_/_0.1)]"
+            style={{ color: 'oklch(0.62 0.17 45)' }}
+            title="View sticky notes"
+          >
+            <StickyNote className="h-3.5 w-3.5" />
+          </button>
+        )}
         {/* 断线警告角标 */}
         {hasDisconnectedUpstream && (
           <span
