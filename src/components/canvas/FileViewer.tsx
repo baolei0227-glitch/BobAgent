@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, FileText, Image as ImageIcon, File as FileIcon, AlertCircle, RefreshCw } from 'lucide-react';
+import { X, FileText, Image as ImageIcon, File as FileIcon, AlertCircle, RefreshCw, ExternalLink } from 'lucide-react';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface FileInfo {
@@ -141,18 +141,44 @@ export function FileViewer({ projectId, fileName, filePath, onClose }: FileViewe
     );
   };
 
-  /** 渲染二进制文件占位 */
-  const renderBinary = () => (
-    <div className="flex flex-col items-center justify-center gap-3 py-16">
-      <FileIcon className="h-12 w-12" style={{ color: 'oklch(0.55 0.02 60)' }} />
-      <p className="text-[13px]" style={{ color: 'oklch(0.40 0.01 260)' }}>
-        Binary file cannot be previewed
-      </p>
-      <p className="text-[11px]" style={{ color: 'oklch(0.50 0.01 260)' }}>
-        {formatSize(fileInfo?.size || 0)}
-      </p>
-    </div>
-  );
+  /** 渲染二进制文件占位（支持用系统默认程序打开） */
+  const renderBinary = () => {
+    const handleOpen = async () => {
+      try {
+        if (typeof window !== 'undefined' && window.api?.openFile) {
+          const absPath = filePath.startsWith('/') ? filePath : filePath;
+          await window.api.openFile(absPath);
+        }
+      } catch (e) {
+        console.error('打开文件失败:', e);
+      }
+    };
+
+    const ext = fileInfo?.extension?.toLowerCase() || '';
+    const isWord = ['.doc', '.docx'].includes(ext);
+    const isPdf = ext === '.pdf';
+    const label = isWord ? 'Word 文档' : isPdf ? 'PDF 文档' : '二进制文件';
+
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-16">
+        <FileIcon className="h-12 w-12" style={{ color: 'oklch(0.55 0.02 60)' }} />
+        <p className="text-[13px]" style={{ color: 'oklch(0.40 0.01 260)' }}>
+          {label} — 无法在线预览
+        </p>
+        <p className="text-[11px]" style={{ color: 'oklch(0.50 0.01 260)' }}>
+          {formatSize(fileInfo?.size || 0)}
+        </p>
+        <button
+          onClick={handleOpen}
+          className="mt-2 inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-[12px] font-medium transition-colors"
+          style={{ backgroundColor: '#537D96', color: '#fff' }}
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          用默认程序打开
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div

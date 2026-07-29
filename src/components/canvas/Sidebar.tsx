@@ -74,6 +74,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const [envInfo, setEnvInfo] = useState<{ isolation?: boolean; app_root?: string } | null>(null);
+  const [appVersion, setAppVersion] = useState<string>('');
 
   // 加载环境信息（用于显示 Dev Badge）
   useEffect(() => {
@@ -81,6 +82,13 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
       .then((r) => r.json())
       .then((d) => d && d.success && setEnvInfo(d))
       .catch(() => {});
+  }, []);
+
+  // 加载应用版本号
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.api?.update?.getVersion) {
+      window.api.update.getVersion().then(v => setAppVersion(v)).catch(() => {});
+    }
   }, []);
 
   // 点击外部关闭设置菜单
@@ -528,7 +536,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                 </span>
               ) : (
                 <span className="text-[9px]" style={{ color: 'oklch(0.50 0.02 55)' }}>
-                  v1.0
+                  v{appVersion || '1.0.2'}
                 </span>
               )}
               {/* 设置齿轮图标 */}
