@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Sparkles, Loader2, ChevronDown, ChevronRight, CalendarPlus, AlertCircle, Check, Trash2 } from 'lucide-react';
+import { Sparkles, Loader2, ChevronDown, ChevronRight, CalendarPlus, AlertCircle, Check, Trash2, CalendarDays } from 'lucide-react';
 
 interface SummarizedTask {
   title: string;
@@ -16,9 +16,10 @@ interface SummarizedTask {
 interface TaskPanelProps {
   projectId: string;
   onEventsCreated: () => void; // 创建成功后刷新日历
+  onOpenCalendar?: () => void; // 打开日历面板
 }
 
-export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
+export function TaskPanel({ projectId, onEventsCreated, onOpenCalendar }: TaskPanelProps) {
   const [expanded, setExpanded] = useState(false);
   const [rawText, setRawText] = useState('');
   const [summarizing, setSummarizing] = useState(false);
@@ -113,7 +114,20 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
         style={{ color: 'oklch(0.40 0.02 50)', backgroundColor: 'oklch(0.96 0.012 80)' }}
       >
         <Sparkles className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 220)' }} />
-        <span className="flex-1 text-left font-semibold text-[11px]">Wanted</span>
+        <span className="flex-1 text-left font-semibold text-[11px]">WANTED</span>
+        {onOpenCalendar && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenCalendar();
+            }}
+            className="rounded p-0.5 transition-colors hover:bg-[oklch(0.88_0.01_75)]"
+            style={{ color: 'oklch(0.62 0.17 45)' }}
+            title="Open Calendar"
+          >
+            <CalendarDays className="h-3.5 w-3.5" />
+          </button>
+        )}
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5" style={{ color: 'oklch(0.50 0.02 50)' }} />
         ) : (

@@ -295,7 +295,10 @@ function setupAutoUpdater(): void {
     return;
   }
 
-  autoUpdater.autoDownload = false;
+  autoUpdater.autoDownload = true;
+
+  /** 标记当前是否为手动检查更新（用于区分手动检查和自动检查的 UI 提示） */
+  let isManualCheck = false;
 
   autoUpdater.on('checking-for-update', () => {
     log('Checking for update...');
@@ -309,11 +312,13 @@ function setupAutoUpdater(): void {
       releaseNotes: info.releaseNotes || '',
       releaseDate: info.releaseDate || '',
     });
+    isManualCheck = false;
   });
 
   autoUpdater.on('update-not-available', () => {
     log('No update available');
-    mainWindow?.webContents.send('update:not-available');
+    mainWindow?.webContents.send('update:not-available', { manual: isManualCheck });
+    isManualCheck = false;
   });
 
   autoUpdater.on('download-progress', (progress) => {
@@ -333,14 +338,17 @@ function setupAutoUpdater(): void {
   autoUpdater.on('error', (err) => {
     log(`Update error: ${err.message}`);
     mainWindow?.webContents.send('update:error', err.message);
+    isManualCheck = false;
   });
 
   ipcMain.handle('update:check', async () => {
     try {
+      isManualCheck = true;
       await autoUpdater.checkForUpdates();
       return { success: true };
     } catch (err) {
       log(`Check for updates failed: ${err}`);
+      isManualCheck = false;
       return { success: false, error: String(err) };
     }
   });

@@ -505,6 +505,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
         <TaskPanel
           projectId={projectId}
           onEventsCreated={() => window.dispatchEvent(new Event('calendar-events-changed'))}
+          onOpenCalendar={onOpenCalendar}
         />
 
         {/* 底部：Logo + 功能按钮 */}
@@ -585,18 +586,6 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                     >
                       <Lightbulb className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
                       Skills
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSettingsMenuOpen(false);
-                        onOpenCalendar();
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[oklch(0.95_0.01_80)]"
-                      style={{ color: 'oklch(0.30 0.015 50)' }}
-                    >
-                      <CalendarDays className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                      Calendar
                     </button>
                     <button
                       onClick={(e) => {

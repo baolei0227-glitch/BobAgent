@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { Download, RefreshCw, Check, AlertCircle, X } from 'lucide-react';
 
 export function UpdateNotification() {
-  const [status, setStatus] = useState<'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'checking' | 'available' | 'no-update' | 'downloading' | 'downloaded' | 'error'>('idle');
   const [updateInfo, setUpdateInfo] = useState<{ version: string; releaseNotes: string; releaseDate: string } | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [error, setError] = useState<string>('');
@@ -14,9 +14,20 @@ export function UpdateNotification() {
       window.api.update.onChecking(() => setStatus('checking'));
       window.api.update.onAvailable((info) => {
         setUpdateInfo(info);
-        setStatus('available');
+        // 自动下载模式：直接进入下载状态
+        setStatus('downloading');
+        setProgress(0);
       });
-      window.api.update.onNotAvailable(() => setStatus('idle'));
+      window.api.update.onNotAvailable((info: any) => {
+        // 仅手动检查时提示"已是最新版"，自动检查静默处理
+        if (info?.manual) {
+          setStatus('no-update');
+          // 3 秒后自动消失
+          setTimeout(() => setStatus('idle'), 3000);
+        } else {
+          setStatus('idle');
+        }
+      });
       window.api.update.onDownloadProgress((p) => {
         setProgress(p.percent);
       });
@@ -69,12 +80,14 @@ export function UpdateNotification() {
         <div className="flex items-center gap-2">
           {status === 'checking' && <RefreshCw className="h-4 w-4 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />}
           {status === 'available' && <AlertCircle className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />}
+          {status === 'no-update' && <Check className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 45)' }} />}
           {status === 'downloading' && <Download className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />}
           {status === 'downloaded' && <Check className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 45)' }} />}
           {status === 'error' && <AlertCircle className="h-4 w-4" style={{ color: 'oklch(0.65 0.20 25)' }} />}
           <span className="text-sm font-medium" style={{ color: 'oklch(0.35 0.02 50)' }}>
             {status === 'checking' && 'Checking for updates...'}
             {status === 'available' && `New version v${updateInfo?.version} available`}
+            {status === 'no-update' && 'Current version is up to date'}
             {status === 'downloading' && 'Downloading...'}
             {status === 'downloaded' && 'Update downloaded'}
             {status === 'error' && 'Update check failed'}
