@@ -558,7 +558,7 @@ export function SettingsModal({
                 <div className="flex items-center gap-2">
                   <Sparkles className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 220)' }} />
                   <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    Task Summarizer
+                    Wanted
                   </span>
                 </div>
               </div>
@@ -594,7 +594,7 @@ export function SettingsModal({
                   style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
                 >
                   <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                    No task model configured
+                    No Wanted model configured
                   </span>
                 </div>
               )}
@@ -1027,7 +1027,7 @@ export function SettingsModal({
               <div className="flex items-center gap-2">
                 <Sparkles className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 220)' }} />
                 <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Task Summarizer
+                  Wanted
                 </span>
               </div>
               {taskModelApiKey.trim() && taskModelFetchedModels.length > 0 && (
@@ -1130,7 +1130,7 @@ export function SettingsModal({
             {taskModelFetchedModels.length > 0 && (
               <div className="mt-3">
                 <p className="mb-1 text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                  Select Task Model (single)
+                  Select Wanted Model (single)
                 </p>
                 <div className="space-y-1 max-h-40 overflow-y-auto">
                   {taskModelFetchedModels.map((m) => {

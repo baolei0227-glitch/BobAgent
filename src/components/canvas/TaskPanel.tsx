@@ -25,56 +25,15 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
   const [summarizeError, setSummarizeError] = useState('');
   const [tasks, setTasks] = useState<SummarizedTask[]>([]);
   const [ambiguous, setAmbiguous] = useState<string[]>([]);
-  const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
-  const [importing, setImporting] = useState(false);
-  const [importDone, setImportDone] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadDone, setUploadDone] = useState(false);
+  const [modelUsed, setModelUsed] = useState('');
 
-  const handleSummarize = async () => {
-    const text = rawText.trim();
-    if (!text) return;
-    setSummarizing(true);
-    setSummarizeError('');
-    setTasks([]);
-    setAmbiguous([]);
-    setSelectedIndices(new Set());
-    setImportDone(false);
+  const importToCalendar = async (taskList: SummarizedTask[]) => {
+    if (taskList.length === 0) return;
+    setUploading(true);
     try {
-      const resp = await fetch('/api/tasks/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      const data = await resp.json();
-      if (!data.success) {
-        setSummarizeError(data.error || '归纳失败');
-        return;
-      }
-      setTasks(data.tasks || []);
-      setAmbiguous(data.ambiguous_items || []);
-      // 默认全选
-      setSelectedIndices(new Set((data.tasks || []).map((_: any, i: number) => i)));
-    } catch (err: any) {
-      setSummarizeError(err?.message || '网络错误');
-    } finally {
-      setSummarizing(false);
-    }
-  };
-
-  const toggleTask = (i: number) => {
-    setSelectedIndices((prev) => {
-      const next = new Set(prev);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
-      return next;
-    });
-  };
-
-  const handleImport = async () => {
-    if (selectedIndices.size === 0) return;
-    setImporting(true);
-    try {
-      const selected = tasks.filter((_, i) => selectedIndices.has(i));
-      const payload = selected.map((t) => ({
+      const payload = taskList.map((t) => ({
         title: t.title,
         start_time: t.start_time,
         end_time: t.end_time ?? undefined,
@@ -94,12 +53,48 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
         setSummarizeError(data.error || '导入失败');
         return;
       }
-      setImportDone(true);
+      setUploadDone(true);
       onEventsCreated();
     } catch (err: any) {
       setSummarizeError(err?.message || '网络错误');
     } finally {
-      setImporting(false);
+      setUploading(false);
+    }
+  };
+
+  const handleSummarize = async () => {
+    const text = rawText.trim();
+    if (!text) return;
+    setSummarizing(true);
+    setSummarizeError('');
+    setTasks([]);
+    setAmbiguous([]);
+    setUploadDone(false);
+    setModelUsed('');
+    try {
+      const resp = await fetch('/api/tasks/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const data = await resp.json();
+      if (!data.success) {
+        setSummarizeError(data.error || '归纳失败');
+        return;
+      }
+      const taskList: SummarizedTask[] = data.tasks || [];
+      setTasks(taskList);
+      setAmbiguous(data.ambiguous_items || []);
+      setModelUsed(data.model_used || '');
+
+      // 自动上传到日历
+      if (taskList.length > 0) {
+        await importToCalendar(taskList);
+      }
+    } catch (err: any) {
+      setSummarizeError(err?.message || '网络错误');
+    } finally {
+      setSummarizing(false);
     }
   };
 
@@ -118,7 +113,7 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
         style={{ color: 'oklch(0.40 0.02 50)', backgroundColor: 'oklch(0.96 0.012 80)' }}
       >
         <Sparkles className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 220)' }} />
-        <span className="flex-1 text-left font-semibold text-[11px]">Task Summarizer</span>
+        <span className="flex-1 text-left font-semibold text-[11px]">Wanted</span>
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5" style={{ color: 'oklch(0.50 0.02 50)' }} />
         ) : (
@@ -146,7 +141,7 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
           {/* 归纳按钮 */}
           <button
             onClick={handleSummarize}
-            disabled={summarizing || !rawText.trim()}
+            disabled={summarizing || uploading || !rawText.trim()}
             className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50"
             style={{
               backgroundColor: 'oklch(0.55 0.15 220 / 0.12)',
@@ -158,10 +153,15 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Analyzing...
               </>
+            ) : uploading ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Uploading to Calendar...
+              </>
             ) : (
               <>
                 <Sparkles className="h-3 w-3" />
-                Summarize
+                Analyze &amp; Add to Calendar
               </>
             )}
           </button>
@@ -182,25 +182,35 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
             <div className="mt-2">
               <div className="mb-1.5 flex items-center justify-between">
                 <span className="text-[10px] font-medium" style={{ color: 'oklch(0.50 0.02 50)' }}>
-                  {tasks.length} task{tasks.length > 1 ? 's' : ''} found
+                  {uploadDone ? (
+                    <span style={{ color: 'oklch(0.50 0.12 45)' }}>
+                      <Check className="inline h-3 w-3 mr-0.5" />
+                      {tasks.length} event{tasks.length > 1 ? 's' : ''} added
+                    </span>
+                  ) : (
+                    <>{tasks.length} task{tasks.length > 1 ? 's' : ''} found</>
+                  )}
                 </span>
-                <span className="text-[9px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  {selectedIndices.size} selected
-                </span>
+                {modelUsed && (
+                  <span className="text-[9px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                    {modelUsed}
+                  </span>
+                )}
               </div>
 
               <div className="max-h-[200px] space-y-1 overflow-y-auto">
                 {tasks.map((task, i) => (
-                  <label
+                  <div
                     key={i}
-                    className="flex cursor-pointer items-start gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-[oklch(0.95_0.008_80)]"
+                    className="flex items-start gap-1.5 rounded-md px-1.5 py-1"
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedIndices.has(i)}
-                      onChange={() => toggleTask(i)}
-                      className="mt-0.5"
-                    />
+                    {/* 自动编号 */}
+                    <span
+                      className="mt-0.5 shrink-0 text-[10px] font-mono font-medium"
+                      style={{ color: 'oklch(0.50 0.12 220)' }}
+                    >
+                      [{i + 1}]
+                    </span>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1">
                         <span
@@ -238,7 +248,7 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
                         </div>
                       )}
                     </div>
-                  </label>
+                  </div>
                 ))}
               </div>
 
@@ -255,39 +265,6 @@ export function TaskPanel({ projectId, onEventsCreated }: TaskPanelProps) {
                       </li>
                     ))}
                   </ul>
-                </div>
-              )}
-
-              {/* 导入按钮 */}
-              {!importDone ? (
-                <button
-                  onClick={handleImport}
-                  disabled={importing || selectedIndices.size === 0}
-                  className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-[11px] font-medium transition-colors disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'oklch(0.62 0.17 45 / 0.12)',
-                    color: 'oklch(0.50 0.12 45)',
-                  }}
-                >
-                  {importing ? (
-                    <>
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      Importing...
-                    </>
-                  ) : (
-                    <>
-                      <CalendarPlus className="h-3 w-3" />
-                      Add to Calendar ({selectedIndices.size})
-                    </>
-                  )}
-                </button>
-              ) : (
-                <div
-                  className="mt-2 flex items-center justify-center gap-1 rounded-md py-1.5 text-[11px]"
-                  style={{ backgroundColor: 'oklch(0.50 0.12 45 / 0.08)', color: 'oklch(0.50 0.12 45)' }}
-                >
-                  <Check className="h-3 w-3" />
-                  {selectedIndices.size} event{selectedIndices.size > 1 ? 's' : ''} added
                 </div>
               )}
             </div>

@@ -1747,7 +1747,8 @@ ${rows.join('\n')}
         })}
       </div>
 
-      {/* Input area */}
+      {/* Input area - only visible when node is selected */}
+      {selected && (
       <div
         className={cn('relative border-t p-2 transition-all', dragOver && 'ring-2')}
         style={{
@@ -2293,10 +2294,9 @@ ${rows.join('\n')}
               </button>
             )}
           </div>
-
+        </div>
       </div>
-
-      </div>
+      )}
 
       {/* 提问弹窗 */}
       {questionPopup && (

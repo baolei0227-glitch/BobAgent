@@ -26,7 +26,7 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** 从 settings 中解析任务归纳模型配置，若未配置则降级到可用的普通聊天模型 */
+/** 从 settings 中解析 Wanted 模型配置，若未配置则降级到可用的普通聊天模型 */
 async function resolveTaskModel(): Promise<{ model: string; apiKey: string; baseUrl: string } | null> {
   const settings = await readSettingsFromFile();
 
@@ -219,7 +219,7 @@ export async function POST(req: NextRequest) {
     const cfg = await resolveTaskModel();
     if (!cfg) {
       return NextResponse.json(
-        { success: false, error: '尚未配置任何模型。请在【设置 → 任务归纳模型】中配置，或至少配置一个聊天模型。' },
+        { success: false, error: '尚未配置任何模型。请在【设置 → Wanted】中配置，或至少配置一个聊天模型。' },
         { status: 400 },
       );
     }
