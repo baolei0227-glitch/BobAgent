@@ -20,7 +20,7 @@ cd "$PROJECT_DIR"
 unset BOBAGENT_HOME
 
 APP_NAME="BobAgent"
-VERSION="1.0.2"
+VERSION="1.0.3"
 APP_ID="com.bobagent.app"
 ARCH="${1:-arm64}"
 OUTPUT_DIR="$PROJECT_DIR/release-dist"
