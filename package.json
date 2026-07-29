@@ -1,0 +1,184 @@
+{
+  "name": "bob-agent",
+  "version": "1.0.0",
+  "private": true,
+  "main": "electron/dist/main.js",
+  "scripts": {
+    "build": "bash ./scripts/build.sh",
+    "dev": "bash ./scripts/dev.sh",
+    "preinstall": "npx only-allow pnpm",
+    "lint": "eslint",
+    "lint:build": "eslint . --quiet",
+    "lint:style": "stylelint \"src/**/*.css\"",
+    "start": "bash ./scripts/start.sh",
+    "ts-check": "tsc -p tsconfig.json",
+    "validate": "pnpm dlx concurrently --group --names lint-tsc,lint-build,lint-style \"pnpm ts-check\" \"pnpm lint:build\" \"pnpm lint:style\"",
+    "dev:web": "BOBAGENT_HOME=$HOME/BobAgent-Dev PORT=3000 pnpm tsx watch src/server.ts",
+    "compile:electron": "tsup electron/main.ts electron/preload.ts --format cjs --platform node --target node20 --outDir electron/dist --no-splitting --external electron",
+    "dev:electron": "pnpm compile:electron && electron .",
+    "build:next": "next build",
+    "build:desktop": "bash ./scripts/build-electron.sh",
+    "package:release": "bash ./scripts/package-release.sh",
+    "package:release:both": "bash ./scripts/package-release.sh both",
+    "package:release:x64": "bash ./scripts/package-release.sh x64"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.958.0",
+    "@aws-sdk/lib-storage": "^3.958.0",
+    "@hookform/resolvers": "^5.2.2",
+    "@radix-ui/react-accordion": "^1.2.12",
+    "@radix-ui/react-alert-dialog": "^1.1.15",
+    "@radix-ui/react-aspect-ratio": "^1.1.8",
+    "@radix-ui/react-avatar": "^1.1.11",
+    "@radix-ui/react-checkbox": "^1.3.3",
+    "@radix-ui/react-collapsible": "^1.1.12",
+    "@radix-ui/react-context-menu": "^2.2.16",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-hover-card": "^1.1.15",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-menubar": "^1.1.16",
+    "@radix-ui/react-navigation-menu": "^1.2.14",
+    "@radix-ui/react-popover": "^1.1.15",
+    "@radix-ui/react-progress": "^1.1.8",
+    "@radix-ui/react-radio-group": "^1.3.8",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slider": "^1.3.6",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-toggle": "^1.1.10",
+    "@radix-ui/react-toggle-group": "^1.1.11",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@supabase/supabase-js": "2.95.3",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/turndown": "^5.0.6",
+    "@xyflow/react": "^12.11.2",
+    "better-sqlite3": "^13.0.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "coze-coding-dev-sdk": "^0.7.24",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.3",
+    "drizzle-kit": "^0.31.8",
+    "drizzle-orm": "^0.45.1",
+    "drizzle-zod": "^0.8.3",
+    "electron-updater": "^6.8.9",
+    "embla-carousel-react": "^8.6.0",
+    "gray-matter": "^4.0.3",
+    "input-otp": "^1.4.2",
+    "lucide-react": "^0.468.0",
+    "next": "16.1.1",
+    "next-themes": "^0.4.6",
+    "openai": "^6.49.0",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.16.3",
+    "react": "19.2.3",
+    "react-day-picker": "^9.13.0",
+    "react-dom": "19.2.3",
+    "react-hook-form": "^7.70.0",
+    "react-resizable-panels": "^4.2.0",
+    "recharts": "2.15.4",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^2.6.0",
+    "turndown": "^7.2.4",
+    "vaul": "^1.1.2",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.4",
+    "@react-dev-inspector/babel-plugin": "^2.0.1",
+    "@react-dev-inspector/middleware": "^2.0.1",
+    "@types/node": "^20",
+    "@types/pg": "^8.16.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.5.4",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.1",
+    "only-allow": "^1.2.2",
+    "postcss": "^8.5.24",
+    "react-dev-inspector": "^2.0.1",
+    "shadcn": "latest",
+    "stylelint": "^16.4.0",
+    "stylelint-config-standard": "^38.0.0",
+    "tailwindcss": "3",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "pnpm": ">=9.0.0"
+  },
+  "build": {
+    "appId": "com.bobagent.app",
+    "productName": "BobAgent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "next-standalone",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".next/static",
+        "to": "next-standalone/.next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "public",
+        "to": "next-standalone/public",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "darkModeSupport": true
+    },
+    "dmg": {
+      "title": "${productName} ${version}",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "repo": "BobAgent",
+        "owner": "baolei0227-glitch",
+        "releaseType": "release",
+        "private": false
+      }
+    ]
+  }
+}
