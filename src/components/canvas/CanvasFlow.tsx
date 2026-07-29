@@ -844,7 +844,32 @@ function CanvasFlowInner() {
       ) : hasProject ? (
         <div className="flex h-screen w-screen">
           <Sidebar onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} onOpenCalendar={() => setCalendarOpen(true)} onOpenFile={(projId, name, path) => setOpenedFile({ projectId: projId, fileName: name, filePath: path })} projectId={currentProjectId} />
-          <div ref={wrapperRef} className="paper-canvas flex-1 relative overflow-hidden">
+          <div className="flex flex-1 flex-col overflow-hidden">
+            {/* 拖拽标题栏 */}
+            <div
+              className="flex h-9 shrink-0 items-center justify-center"
+              style={
+                {
+                  WebkitAppRegion: 'drag',
+                  backgroundColor: 'oklch(0.97 0.01 80)',
+                  borderBottom: '1px solid oklch(0.85 0.01 70)',
+                } as React.CSSProperties
+              }
+            >
+              <span
+                className="text-[11px] font-semibold tracking-widest"
+                style={
+                  {
+                    color: 'oklch(0.35 0.02 50)',
+                    fontFamily: "'Noto Serif SC', serif",
+                    WebkitAppRegion: 'drag',
+                  } as React.CSSProperties
+                }
+              >
+                BOBAGENT
+              </span>
+            </div>
+            <div ref={wrapperRef} className="paper-canvas flex-1 relative overflow-hidden">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -1046,6 +1071,7 @@ function CanvasFlowInner() {
 
       {/* 更新通知 */}
       <UpdateNotification />
+          </div>
           </div>
         </div>
       ) : (
