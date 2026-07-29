@@ -1037,6 +1037,106 @@ async function toolReadUpstreamNode(args: Record<string, unknown>): Promise<stri
   }
 }
 
+/** 读取日历待办事项 */
+async function toolReadCalendar(args: Record<string, unknown>): Promise<string> {
+  const filter = (args.filter as string) || 'today'; // today | week | upcoming | all
+  const showDone = (args.include_done as boolean) || false;
+
+  try {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    let rangeStart: string;
+    let rangeEnd: string;
+
+    switch (filter) {
+      case 'today':
+        rangeStart = todayStart.toISOString();
+        rangeEnd = new Date(todayStart.getTime() + 86400000 - 1).toISOString();
+        break;
+      case 'week': {
+        const dayOfWeek = now.getDay();
+        const weekStart = new Date(todayStart.getTime() - dayOfWeek * 86400000);
+        rangeStart = weekStart.toISOString();
+        rangeEnd = new Date(weekStart.getTime() + 7 * 86400000 - 1).toISOString();
+        break;
+      }
+      case 'upcoming':
+        rangeStart = now.toISOString();
+        rangeEnd = new Date(todayStart.getTime() + 30 * 86400000 - 1).toISOString();
+        break;
+      default:
+        rangeStart = new Date(todayStart.getTime() - 30 * 86400000).toISOString();
+        rangeEnd = new Date(todayStart.getTime() + 60 * 86400000 - 1).toISOString();
+    }
+
+    // 调用内部 API
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    let url = `${baseUrl}/api/calendar/events?range_start=${encodeURIComponent(rangeStart)}&range_end=${encodeURIComponent(rangeEnd)}`;
+    if (showDone) url += '&all=true';
+
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    if (!data.success) {
+      return `Calendar query failed: ${data.error || 'Unknown error'}`;
+    }
+
+    const events: Array<{
+      title: string;
+      start_time: string;
+      end_time: string | null;
+      all_day: boolean;
+      status: string;
+      priority: string;
+      description: string | null;
+    }> = data.events || [];
+
+    // 过滤 done/cancelled（除非明确要求）
+    const filtered = showDone ? events : events.filter((e: { status: string }) => e.status === 'scheduled');
+
+    if (filtered.length === 0) {
+      const labels: Record<string, string> = { today: 'today', week: 'this week', upcoming: 'upcoming', all: 'in range' };
+      return `No ${showDone ? '' : 'pending '}tasks ${labels[filter] || labels.all}.`;
+    }
+
+    const lines: string[] = [
+      `${filtered.length} task(s)${showDone ? ' (including done/cancelled)' : ''}:`,
+      '',
+    ];
+
+    // 按日期分组
+    const byDate = new Map<string, typeof filtered>();
+    for (const ev of filtered) {
+      const d = ev.start_time.slice(0, 10);
+      const arr = byDate.get(d) || [];
+      arr.push(ev);
+      byDate.set(d, arr);
+    }
+
+    for (const [date, dayEvents] of byDate) {
+      const dateLabel = new Date(date + 'T00:00:00').toLocaleDateString('zh-CN', {
+        weekday: 'short', month: 'short', day: 'numeric',
+      });
+      lines.push(`📅 ${dateLabel}:`);
+      for (const ev of dayEvents) {
+        const statusIcon = ev.status === 'done' ? '✅' : ev.status === 'cancelled' ? '❌' : '⬜';
+        const timeStr = ev.all_day ? '全天' :
+          new Date(ev.start_time).toTimeString().slice(0, 5) +
+          (ev.end_time ? `-${new Date(ev.end_time).toTimeString().slice(0, 5)}` : '');
+        const prioStr = ev.priority === 'high' ? ' 🔴High' : '';
+        const descStr = ev.description ? ` — ${ev.description.slice(0, 60)}` : '';
+        lines.push(`  ${statusIcon} ${timeStr} ${ev.title}${prioStr}${descStr}`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  } catch (e) {
+    return `Calendar read failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
 // ============================================================
 // 构建工具注册表
 // ============================================================
@@ -1227,6 +1327,28 @@ const toolDefs: Tool[] = [
     category: '文件',
     execute: toolReadMaterial,
     maxOutput: 8000,
+  },
+  {
+    name: 'read_calendar',
+    description: 'Query calendar events/tasks. Use to check today\'s schedule, upcoming tasks, or tasks in a specific time range. Default returns only pending (scheduled) tasks, excluding done/cancelled unless include_done is true.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filter: {
+          type: 'string',
+          enum: ['today', 'week', 'upcoming', 'all'],
+          description: 'Time filter: "today" (default), "week" (this week), "upcoming" (next 30 days), "all" (extended range).',
+        },
+        include_done: {
+          type: 'boolean',
+          description: 'Include completed and cancelled tasks. Default: false (pending only).',
+        },
+      },
+      required: [],
+    },
+    category: '文件',
+    execute: toolReadCalendar,
+    maxOutput: 5000,
   },
 ];
 

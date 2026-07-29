@@ -242,10 +242,16 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   }
 
   const todayStr = toLocalDateStr(new Date());
+  const todayEvents = events.filter((ev) => toLocalDateStr(new Date(ev.start_time)) === todayStr)
+    .sort((a, b) => {
+      if (a.all_day && !b.all_day) return -1;
+      if (!a.all_day && b.all_day) return 1;
+      return a.start_time.localeCompare(b.start_time);
+    });
 
   return (
     <div
-      className="fixed right-0 top-0 z-50 flex h-full flex-col"
+      className="fixed right-0 top-0 z-[51] flex h-full flex-col"
       style={{
         width: '420px',
         backgroundColor: '#faf8f3',
@@ -322,96 +328,185 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             <Loader2 className="h-5 w-5 animate-spin" style={{ color: '#8a8270' }} />
           </div>
         ) : (
-          <div className="grid grid-cols-7">
-            {Array.from({ length: totalCells }).map((_, i) => {
-              const cellDate = new Date(year, month, 1 - startDayOfWeek + i);
-              const cellDateStr = toLocalDateStr(cellDate);
-              const isCurrentMonth = cellDate.getMonth() === month;
-              const isToday = cellDateStr === todayStr;
-              const dayEvents = eventsByDate.get(cellDateStr) || [];
+          <>
+            <div className="grid grid-cols-7">
+              {Array.from({ length: totalCells }).map((_, i) => {
+                const cellDate = new Date(year, month, 1 - startDayOfWeek + i);
+                const cellDateStr = toLocalDateStr(cellDate);
+                const isCurrentMonth = cellDate.getMonth() === month;
+                const isToday = cellDateStr === todayStr;
+                const dayEvents = eventsByDate.get(cellDateStr) || [];
 
-              return (
-                <div
-                  key={i}
-                  className="relative cursor-pointer border-b border-r p-0.5 transition-colors hover:bg-black/[0.02]"
-                  style={{
-                    minHeight: '72px',
-                    borderColor: 'rgba(0, 0, 0, 0.04)',
-                    opacity: isCurrentMonth ? 1 : 0.3,
-                  }}
-                  onClick={() => openCreate(cellDateStr)}
-                >
-                  <div className="flex items-center justify-between">
-                    <span
-                      className="text-[11px] font-medium"
-                      style={{
-                        color: isToday ? '#faf8f3' : '#2c2416',
-                        backgroundColor: isToday ? 'oklch(0.62 0.17 45)' : 'transparent',
-                        borderRadius: isToday ? '9999px' : undefined,
-                        width: isToday ? '20px' : undefined,
-                        height: isToday ? '20px' : undefined,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}
-                    >
-                      {cellDate.getDate()}
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openCreate(cellDateStr);
-                      }}
-                      className="flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity hover:bg-black/5 group-hover:opacity-100"
-                      style={{ color: '#8a8270' }}
-                    >
-                      <Plus className="h-3 w-3" />
-                    </button>
+                return (
+                  <div
+                    key={i}
+                    className="relative cursor-pointer border-b border-r p-0.5 transition-colors hover:bg-black/[0.02]"
+                    style={{
+                      minHeight: '72px',
+                      borderColor: 'rgba(0, 0, 0, 0.04)',
+                      opacity: isCurrentMonth ? 1 : 0.3,
+                    }}
+                    onClick={() => openCreate(cellDateStr)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span
+                        className="text-[11px] font-medium"
+                        style={{
+                          color: isToday ? '#faf8f3' : '#2c2416',
+                          backgroundColor: isToday ? 'oklch(0.62 0.17 45)' : 'transparent',
+                          borderRadius: isToday ? '9999px' : undefined,
+                          width: isToday ? '20px' : undefined,
+                          height: isToday ? '20px' : undefined,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        {cellDate.getDate()}
+                      </span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openCreate(cellDateStr);
+                        }}
+                        className="flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity hover:bg-black/5 group-hover:opacity-100"
+                        style={{ color: '#8a8270' }}
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
+                    </div>
+
+                    {/* 事件标签 */}
+                    <div className="mt-0.5 space-y-px">
+                      {dayEvents.slice(0, 3).map((ev) => {
+                        const statusIconCls = ev.status === 'done'
+                          ? { color: '#10b981', textDecoration: 'line-through' }
+                          : ev.status === 'cancelled'
+                            ? { color: '#9ca3af', textDecoration: 'line-through' }
+                            : { color: ev.color || 'oklch(0.55 0.08 45)', textDecoration: 'none' };
+
+                        return (
+                          <div
+                            key={ev.event_id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEdit(ev);
+                            }}
+                            className="truncate rounded px-1 py-px text-[9px] leading-tight transition-colors hover:brightness-95"
+                            style={{
+                              backgroundColor: `${ev.color || 'oklch(0.55 0.08 45)'}18`,
+                              color: statusIconCls.color,
+                              textDecoration: statusIconCls.textDecoration as any,
+                            }}
+                            title={ev.title}
+                          >
+                            {!ev.all_day && ev.start_time && (
+                              <span style={{ opacity: 0.7 }}>
+                                {new Date(ev.start_time).toTimeString().slice(0, 5)}{' '}
+                              </span>
+                            )}
+                            {ev.title}
+                          </div>
+                        );
+                      })}
+                      {dayEvents.length > 3 && (
+                        <span className="block px-1 text-[8px]" style={{ color: '#8a8270' }}>
+                          +{dayEvents.length - 3} more
+                        </span>
+                      )}
+                    </div>
                   </div>
+                );
+              })}
+            </div>
 
-                  {/* 事件标签 */}
-                  <div className="mt-0.5 space-y-px">
-                    {dayEvents.slice(0, 3).map((ev) => {
-                      const statusIconCls = ev.status === 'done'
-                        ? { color: '#10b981', textDecoration: 'line-through' }
-                        : ev.status === 'cancelled'
-                          ? { color: '#9ca3af', textDecoration: 'line-through' }
-                          : { color: ev.color || 'oklch(0.55 0.08 45)', textDecoration: 'none' };
+            {/* 今日待办 */}
+            <div
+              className="border-t"
+              style={{ borderColor: 'rgba(0, 0, 0, 0.08)' }}
+            >
+              <div
+                className="flex items-center gap-1.5 px-4 py-2"
+                style={{ backgroundColor: 'oklch(0.96 0.008 80)' }}
+              >
+                <Clock className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                <span className="text-[11px] font-semibold" style={{ color: '#2c2416' }}>
+                  Today — {new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })}
+                </span>
+                <span className="text-[10px]" style={{ color: '#8a8270' }}>
+                  ({todayEvents.length} task{todayEvents.length !== 1 ? 's' : ''})
+                </span>
+              </div>
 
-                      return (
+              {todayEvents.length === 0 ? (
+                <div className="px-4 py-6 text-center">
+                  <span className="text-[11px]" style={{ color: '#b0a890' }}>
+                    No tasks for today
+                  </span>
+                </div>
+              ) : (
+                <div className="divide-y divide-[rgba(0,0,0,0.04)]">
+                  {todayEvents.map((ev) => (
+                    <div
+                      key={ev.event_id}
+                      className="flex items-center gap-2 px-4 py-2 transition-colors hover:bg-black/[0.01]"
+                    >
+                      {/* 状态图标 */}
+                      <button
+                        onClick={() => {
+                          const next = ev.status === 'done' ? 'scheduled' : ev.status === 'cancelled' ? 'scheduled' : 'done';
+                          toggleStatus(ev, next);
+                        }}
+                        className="shrink-0 transition-colors hover:opacity-70"
+                        style={{ color: ev.status === 'done' ? '#10b981' : ev.status === 'cancelled' ? '#9ca3af' : '#d1d5db' }}
+                        title={ev.status === 'done' ? 'Mark as scheduled' : ev.status === 'cancelled' ? 'Mark as scheduled' : 'Mark as done'}
+                      >
+                        {ev.status === 'done' ? <CheckCircle2 className="h-4 w-4" /> :
+                         ev.status === 'cancelled' ? <XCircle className="h-4 w-4" /> :
+                         <Circle className="h-4 w-4" />}
+                      </button>
+
+                      {/* 内容 */}
+                      <div
+                        className="flex-1 min-w-0 cursor-pointer"
+                        onClick={() => openEdit(ev)}
+                      >
                         <div
-                          key={ev.event_id}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openEdit(ev);
-                          }}
-                          className="truncate rounded px-1 py-px text-[9px] leading-tight transition-colors hover:brightness-95"
+                          className="truncate text-[11px] font-medium"
                           style={{
-                            backgroundColor: `${ev.color || 'oklch(0.55 0.08 45)'}18`,
-                            color: statusIconCls.color,
-                            textDecoration: statusIconCls.textDecoration as any,
+                            color: ev.status === 'done' ? '#9ca3af' : '#2c2416',
+                            textDecoration: ev.status === 'done' ? 'line-through' : 'none',
                           }}
-                          title={ev.title}
                         >
-                          {!ev.all_day && ev.start_time && (
-                            <span style={{ opacity: 0.7 }}>
-                              {new Date(ev.start_time).toTimeString().slice(0, 5)}{' '}
-                            </span>
-                          )}
                           {ev.title}
                         </div>
-                      );
-                    })}
-                    {dayEvents.length > 3 && (
-                      <span className="block px-1 text-[8px]" style={{ color: '#8a8270' }}>
-                        +{dayEvents.length - 3} more
-                      </span>
-                    )}
-                  </div>
+                        <div className="flex items-center gap-1.5 text-[9px]" style={{ color: '#8a8270' }}>
+                          {ev.all_day ? (
+                            <span>All day</span>
+                          ) : (
+                            <span>
+                              {new Date(ev.start_time).toTimeString().slice(0, 5)}
+                              {ev.end_time && ` - ${new Date(ev.end_time).toTimeString().slice(0, 5)}`}
+                            </span>
+                          )}
+                          {ev.priority === 'high' && (
+                            <span className="rounded px-1 py-px text-[8px]" style={{ backgroundColor: '#fdecea', color: '#ef4444' }}>
+                              High
+                            </span>
+                          )}
+                        </div>
+                        {ev.description && (
+                          <div className="truncate text-[9px]" style={{ color: '#b0a890' }}>
+                            {ev.description}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
+              )}
+            </div>
+          </>
         )}
       </div>
 

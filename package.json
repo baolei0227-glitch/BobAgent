@@ -1,6 +1,6 @@
 {
   "name": "bob-agent",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {
@@ -62,6 +62,7 @@
     "cmdk": "^1.1.1",
     "coze-coding-dev-sdk": "^0.7.24",
     "date-fns": "^4.1.0",
+    "dompurify": "^3.4.12",
     "dotenv": "^17.2.3",
     "drizzle-kit": "^0.31.8",
     "drizzle-orm": "^0.45.1",
@@ -92,6 +93,7 @@
     "@electron/packager": "^20.0.4",
     "@react-dev-inspector/babel-plugin": "^2.0.1",
     "@react-dev-inspector/middleware": "^2.0.1",
+    "@types/dompurify": "^3.2.0",
     "@types/node": "^20",
     "@types/pg": "^8.16.0",
     "@types/react": "^19",

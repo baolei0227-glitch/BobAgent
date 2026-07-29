@@ -109,14 +109,11 @@ function CanvasFlowInner() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const [openedFile, setOpenedFile] = useState<{
-    projectId: string;
-    fileName: string;
-    filePath: string;
-  } | null>(null);
+  const [fileTabs, setFileTabs] = useState<Array<{ id: string; projectId: string; fileName: string; filePath: string }>>([]);
   const [, setProviderConfigs] = useState<ProviderConfig[]>([]);
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
+  const [activePanelTab, setActivePanelTab] = useState<{ type: 'node' | 'file'; id: string } | null>(null);
   const [readerTitles, setReaderTitles] = useState<Record<string, string>>({});
   const [hasProject, setHasProject] = useState<boolean | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<string>('');
@@ -145,6 +142,7 @@ function CanvasFlowInner() {
       return [...prev, nodeMdId];
     });
     setActiveReaderId(nodeMdId);
+    setActivePanelTab({ type: 'node', id: nodeMdId });
     // 获取节点标题用于标签页显示
     fetch(`/api/nodes?id=${nodeMdId}`)
       .then((r) => r.json())
@@ -160,7 +158,18 @@ function CanvasFlowInner() {
       const next = prev.filter((id) => id !== nodeMdId);
       // 如果关闭的是当前活跃的，切换到最后一个
       if (nodeMdId === activeReaderId) {
-        setActiveReaderId(next.length > 0 ? next[next.length - 1] : null);
+        if (next.length > 0) {
+          setActiveReaderId(next[next.length - 1]);
+          setActivePanelTab({ type: 'node', id: next[next.length - 1] });
+        } else {
+          setActiveReaderId(null);
+          // 切换到文件标签（如果有）
+          if (fileTabs.length > 0) {
+            setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
+          } else {
+            setActivePanelTab(null);
+          }
+        }
       }
       return next;
     });
@@ -169,14 +178,43 @@ function CanvasFlowInner() {
       delete next[nodeMdId];
       return next;
     });
-  }, [activeReaderId]);
+  }, [activeReaderId, fileTabs]);
   const bringReaderToFront = useCallback((nodeMdId: string) => {
     setOpenReaderIds((prev) => {
       if (!prev.includes(nodeMdId)) return prev;
       return [...prev.filter((id) => id !== nodeMdId), nodeMdId];
     });
     setActiveReaderId(nodeMdId);
+    setActivePanelTab({ type: 'node', id: nodeMdId });
   }, []);
+
+  // 文件标签页管理
+  const openFileTab = useCallback((projId: string, fileName: string, filePath: string) => {
+    const tabId = `file:${filePath}`;
+    setFileTabs((prev) => {
+      if (prev.some(t => t.id === tabId)) return prev;
+      return [...prev, { id: tabId, projectId: projId, fileName, filePath }];
+    });
+    setActivePanelTab({ type: 'file', id: tabId });
+  }, []);
+
+  const closeFileTab = useCallback((tabId: string) => {
+    setFileTabs((prev) => {
+      const next = prev.filter(t => t.id !== tabId);
+      // 如果关闭的是当前活跃的，切换到最后一个未关闭的
+      if (activePanelTab?.type === 'file' && activePanelTab.id === tabId) {
+        if (next.length > 0) {
+          setActivePanelTab({ type: 'file', id: next[next.length - 1].id });
+        } else if (openReaderIds.length > 0) {
+          setActivePanelTab({ type: 'node', id: openReaderIds[openReaderIds.length - 1] });
+          setActiveReaderId(openReaderIds[openReaderIds.length - 1]);
+        } else {
+          setActivePanelTab(null);
+        }
+      }
+      return next;
+    });
+  }, [activePanelTab, openReaderIds]);
 
   // 检查是否有项目
   useEffect(() => {
@@ -842,32 +880,9 @@ function CanvasFlowInner() {
         </div>
       ) : hasProject ? (
         <div className="flex h-screen w-screen">
-          <Sidebar onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} onOpenCalendar={() => setCalendarOpen(true)} onOpenFile={(projId, name, path) => setOpenedFile({ projectId: projId, fileName: name, filePath: path })} projectId={currentProjectId} />
+          <Sidebar onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} onOpenCalendar={() => setCalendarOpen(true)} onOpenFile={(projId, name, path) => openFileTab(projId, name, path)} projectId={currentProjectId} />
           <div className="flex flex-1 flex-col overflow-hidden">
-            {/* 拖拽标题栏 */}
-            <div
-              className="flex h-9 shrink-0 items-center justify-center"
-              style={
-                {
-                  WebkitAppRegion: 'drag',
-                  backgroundColor: 'oklch(0.97 0.01 80)',
-                  borderBottom: '1px solid oklch(0.85 0.01 70)',
-                } as React.CSSProperties
-              }
-            >
-              <span
-                className="text-[11px] font-semibold tracking-widest"
-                style={
-                  {
-                    color: 'oklch(0.35 0.02 50)',
-                    fontFamily: "'Noto Serif SC', serif",
-                    WebkitAppRegion: 'drag',
-                  } as React.CSSProperties
-                }
-              >
-                BOBAGENT
-              </span>
-            </div>
+            <div className="h-2 shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
             <div ref={wrapperRef} className="paper-canvas flex-1 relative overflow-hidden">
       <ReactFlow
         nodes={nodes}
@@ -995,8 +1010,8 @@ function CanvasFlowInner() {
         />
       )}
 
-      {/* Markdown 阅读器 — 顶部标签页方式展示多个文档 */}
-      {openReaderIds.length > 0 && (
+      {/* 阅读器面板 — 标签页方式展示节点文档和文件 */}
+      {(openReaderIds.length > 0 || fileTabs.length > 0) && (
         <div
           className="fixed right-0 top-0 z-50 flex h-full flex-col"
           style={{
@@ -1019,13 +1034,13 @@ function CanvasFlowInner() {
             {openReaderIds.map((id) => (
               <button
                 key={id}
-                onClick={() => setActiveReaderId(id)}
+                onClick={() => { setActiveReaderId(id); setActivePanelTab({ type: 'node', id }); }}
                 className="group flex shrink-0 items-center gap-1.5 border-r px-3 py-2 text-[12px] transition-colors"
                 style={{
                   borderColor: 'rgba(0, 0, 0, 0.06)',
-                  backgroundColor: id === activeReaderId ? '#faf8f3' : 'transparent',
-                  color: id === activeReaderId ? '#2c2416' : '#8a8270',
-                  borderBottom: id === activeReaderId ? '2px solid oklch(0.62 0.17 45)' : '2px solid transparent',
+                  backgroundColor: activePanelTab?.type === 'node' && activePanelTab.id === id ? '#faf8f3' : 'transparent',
+                  color: activePanelTab?.type === 'node' && activePanelTab.id === id ? '#2c2416' : '#8a8270',
+                  borderBottom: activePanelTab?.type === 'node' && activePanelTab.id === id ? '2px solid oklch(0.62 0.17 45)' : '2px solid transparent',
                   marginBottom: '-1px',
                 }}
               >
@@ -1044,29 +1059,63 @@ function CanvasFlowInner() {
                 </span>
               </button>
             ))}
+            {fileTabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActivePanelTab({ type: 'file', id: tab.id })}
+                className="group flex shrink-0 items-center gap-1.5 border-r px-3 py-2 text-[12px] transition-colors"
+                style={{
+                  borderColor: 'rgba(0, 0, 0, 0.06)',
+                  backgroundColor: activePanelTab?.type === 'file' && activePanelTab.id === tab.id ? '#faf8f3' : 'transparent',
+                  color: activePanelTab?.type === 'file' && activePanelTab.id === tab.id ? '#2c2416' : '#8a8270',
+                  borderBottom: activePanelTab?.type === 'file' && activePanelTab.id === tab.id ? '2px solid oklch(0.55 0.15 220)' : '2px solid transparent',
+                  marginBottom: '-1px',
+                }}
+              >
+                <span className="max-w-[120px] truncate">
+                  {tab.fileName}
+                </span>
+                <span
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeFileTab(tab.id);
+                  }}
+                  className="ml-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full text-[10px] opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100"
+                  style={{ backgroundColor: 'rgba(0,0,0,0.08)', color: '#5c5342' }}
+                >
+                  ×
+                </span>
+              </button>
+            ))}
           </div>
 
-          {/* 当前活跃的阅读器 */}
-          {activeReaderId && (
+          {/* 当前活跃的标签内容 */}
+          {activePanelTab?.type === 'node' && (
             <MarkdownReader
-              key={activeReaderId}
-              nodeMdId={activeReaderId}
+              key={activePanelTab.id}
+              nodeMdId={activePanelTab.id}
               onClose={closeReader}
               mode="tabbed"
             />
           )}
+          {activePanelTab?.type === 'file' && (() => {
+            const ft = fileTabs.find(t => t.id === activePanelTab.id);
+            if (!ft) return null;
+            return (
+              <FileViewer
+                key={ft.id}
+                projectId={ft.projectId}
+                fileName={ft.fileName}
+                filePath={ft.filePath}
+                onClose={() => closeFileTab(ft.id)}
+                mode="tabbed"
+              />
+            );
+          })()}
         </div>
       )}
 
-      {/* 文件查看器 */}
-      {openedFile && (
-        <FileViewer
-          projectId={openedFile.projectId}
-          fileName={openedFile.fileName}
-          filePath={openedFile.filePath}
-          onClose={() => setOpenedFile(null)}
-        />
-      )}
+      {/* 日历面板 */}
       </div>
       </div>
       </div>

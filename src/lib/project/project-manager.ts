@@ -91,6 +91,7 @@ export async function ensureAppRoot(): Promise<void> {
       // 有旧数据：创建默认项目承接旧数据
       const defaultPath = join(PROJECTS_DIR, DEFAULT_PROJECT_ID);
       await fs.mkdir(join(defaultPath, 'nodes'), { recursive: true });
+      await fs.mkdir(join(defaultPath, 'homework'), { recursive: true });
 
       // 迁移数据库
       const newDbPath = join(defaultPath, 'project.db');
@@ -216,6 +217,7 @@ export async function createProject(name: string): Promise<ProjectConfig> {
   const projectPath = join(PROJECTS_DIR, projectId);
   await fs.mkdir(join(projectPath, 'nodes'), { recursive: true });
   await fs.mkdir(join(projectPath, 'materials'), { recursive: true });
+  await fs.mkdir(join(projectPath, 'homework'), { recursive: true });
 
   const now = new Date().toISOString();
   const newProject: ProjectConfig = {
@@ -246,6 +248,7 @@ export async function switchProject(projectId: string): Promise<ProjectConfig> {
 
   // 确保项目目录存在
   await fs.mkdir(join(target.path, 'nodes'), { recursive: true });
+  await fs.mkdir(join(target.path, 'homework'), { recursive: true });
 
   target.last_accessed_at = new Date().toISOString();
   config.current_project_id = projectId;

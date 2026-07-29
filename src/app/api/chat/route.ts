@@ -34,6 +34,14 @@ interface ChatMessage {
 /** 基础系统提示（不包含思考指令） */
 const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在无限画布上的对话节点中与用户交流。回答简洁明了，适合在卡片中阅读。
 
+回答格式说明：
+- 你的回答会被渲染为 HTML 显示在卡片中。你可以直接使用 HTML 标签来美化排版，也可以使用 Markdown 语法（会自动转换）。
+- 支持的 HTML 标签：<h1>-<h3>、<p>、<strong>、<em>、<ul>、<ol>、<li>、<blockquote>、<a>、<img>、<table>、<tr>、<td>、<th>、<hr>、<br>、<details>、<summary>、<code>、<pre>
+- 支持的 Markdown 语法：# 标题、**粗体**、*斜体*、- 列表、> 引用、[链接](url)、![图片](url)、行内代码、代码块（三反引号包裹）
+- 代码块请使用 Markdown 的三反引号语法，不要用 pre 标签
+- 所有内容会经过安全过滤，危险的脚本和样式会被自动移除
+- 不要使用 <script>、<style>、<iframe>、<object>、<embed> 等危险标签
+
 IMPORTANT: 在回答的最末尾，请用以下格式添加一个对话标题建议：
 <!-- TITLE: 简短标题（不超过20字） -->
 标题应简洁概括本次对话的核心主题。不要将标题放在回答的其他位置，只在最后使用此 HTML 注释格式。回答正文中不要重复标题内容。
@@ -48,6 +56,7 @@ IMPORTANT: 在回答的最末尾，请用以下格式添加一个对话标题建
 - read_attachment: 读取用户上传的附件内容
 - read_upstream_node: 读取上游连线节点的完整 .md 文档（传入节点标题）
 - read_material: 读取项目的 materials 文件夹中的参考资料（通过 @ 引用）
+- read_calendar: 查询日历中的待办事项（支持 today/week/upcoming/all 过滤）
 
 当用户的问题需要读取文件、列出目录、搜索文件、执行命令、搜索网络或读取附件时，请主动使用相应的工具来获取信息，然后基于工具返回的结果回答用户。不要猜测文件内容或命令输出，始终通过工具获取真实数据。
 
@@ -413,7 +422,7 @@ export async function POST(request: NextRequest) {
 
     // 注入当前项目路径到系统提示，让 AI 知道文档应该写入哪里
     const projectPathInjection = currentProjectPath
-      ? `\n\n当前项目路径：${currentProjectPath}\n当你需要生成文档（.md、.docx、.pdf 等）时，请写入 ${currentProjectPath}/ 目录下，不要写入沙箱目录。`
+      ? `\n\n当前项目路径：${currentProjectPath}\n当你需要生成文档（.md、.docx、.pdf 等）时，请写入 ${currentProjectPath}/homework/ 目录下，不要写入沙箱目录。homework 文件夹专门存放项目产出文档，与节点的 .md 文件分开。`
       : '';
 
     // off 模式不注入思考提示；非推理模型仍注入 MOOD（不含 <think> 要求），由系统提示区分

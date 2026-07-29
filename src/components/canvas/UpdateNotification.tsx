@@ -33,7 +33,7 @@ export function UpdateNotification() {
       });
       window.api.update.onDownloaded(() => setStatus('downloaded'));
       window.api.update.onError((err) => {
-        setError(err);
+        setError(err.message);
         setStatus('error');
       });
     }

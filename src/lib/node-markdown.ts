@@ -50,7 +50,6 @@ export interface NodeMarkdown {
 const SECTIONS = {
   SUMMARY: '## 摘要',
   CONVERSATION: '## 对话记录',
-  ANNOTATION: '## 批注',
   STICKY: '## 便签',
 } as const;
 
@@ -131,7 +130,7 @@ export function clearCurrentProjectPath(): void {
 
 // ==================== 正文分节解析 ====================
 
-const KNOWN_SECTIONS = new Set(['摘要', '对话记录', '批注', '便签']);
+const KNOWN_SECTIONS = new Set(['摘要', '对话记录', '便签']);
 
 /** 按二级标题分割正文（只分割已知章节标题，保留 AI 回复中的 Markdown 标题） */
 function splitSections(content: string): Map<string, string> {
@@ -310,9 +309,6 @@ export function serializeNode(node: NodeMarkdown): string {
     '',
     `${SECTIONS.CONVERSATION}`,
     conversationText.trim() || '（暂无）',
-    '',
-    `${SECTIONS.ANNOTATION}`,
-    node.annotations || '（暂无）',
     '',
     `${SECTIONS.STICKY}`,
     node.stickies.length > 0 ? node.stickies.map(s => `- ${s}`).join('\n') : '（暂无）',

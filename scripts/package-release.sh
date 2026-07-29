@@ -20,7 +20,7 @@ cd "$PROJECT_DIR"
 unset BOBAGENT_HOME
 
 APP_NAME="BobAgent"
-VERSION="1.0.6"
+VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
 APP_ID="com.bobagent.app"
 ARCH="${1:-arm64}"
 OUTPUT_DIR="$PROJECT_DIR/release-dist"
@@ -30,11 +30,52 @@ GITHUB_REPO="BobAgent"
 
 C_GREEN=$'\033[0;32m'
 C_YELLOW=$'\033[1;33m'
+C_RED=$'\033[0;31m'
 C_RESET=$'\033[0m'
 
 log()  { echo "==> $*"; }
 ok()   { echo "${C_GREEN}✅ $*${C_RESET}"; }
 warn() { echo "${C_YELLOW}⚠️  $*${C_RESET}"; }
+err()  { echo "${C_RED}❌ $*${C_RESET}"; }
+
+# ---------- 0. 版本号冲突检查 ----------
+check_version_conflict() {
+  if [ -z "${GH_TOKEN:-}" ]; then
+    warn "GH_TOKEN 未设置，跳过版本号冲突检查"
+    return 0
+  fi
+
+  local tag="v$VERSION"
+  log "检查 $tag 是否已发布 ..."
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: token $GH_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/tags/$tag" 2>/dev/null)
+
+  if [ "$http_code" = "200" ]; then
+    echo ""
+    echo "============================================"
+    err " 版本号冲突：$tag 已发布在 GitHub Release 上！"
+    echo ""
+    echo "  当前 package.json 版本: $VERSION"
+    echo "  请先更新版本号后再构建："
+    echo ""
+    echo "    # 方式 1：手动修改 package.json 中的 version 字段"
+    echo "    # 方式 2：使用 npm version"
+    echo "    npm version patch    # 1.0.6 -> 1.0.7"
+    echo "    npm version minor    # 1.0.6 -> 1.1.0"
+    echo ""
+    echo "  并在 RELEASES.md 中记录新版本的变更内容。"
+    echo "============================================"
+    exit 1
+  fi
+
+  ok "$tag 未发布，可以构建"
+}
+
+check_version_conflict
 
 # ---------- 1. 清理并准备 ----------
 rm -rf "$OUTPUT_DIR" >/dev/null 2>&1 || true

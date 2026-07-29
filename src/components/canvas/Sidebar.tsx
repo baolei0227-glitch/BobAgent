@@ -83,7 +83,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
   const [updateVersion, setUpdateVersion] = useState<string>('');
   const [updateProgress, setUpdateProgress] = useState<number>(0);
   const [updateError, setUpdateError] = useState<string>('');
-  const updateTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 监听更新事件
   useEffect(() => {
@@ -101,13 +101,13 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
     });
 
     window.api.update.onAvailable((info) => {
-      clearTimeout(updateTimerRef.current);
+      if (updateTimerRef.current) clearTimeout(updateTimerRef.current);
       setUpdateVersion(info.version);
       setUpdateStatus('downloading');
     });
 
     window.api.update.onNotAvailable((info) => {
-      clearTimeout(updateTimerRef.current);
+      if (updateTimerRef.current) clearTimeout(updateTimerRef.current);
       if (info?.manual) {
         setUpdateStatus('no-update');
         setTimeout(() => setUpdateStatus('idle'), 3000);
@@ -125,7 +125,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
     });
 
     window.api.update.onError((info) => {
-      clearTimeout(updateTimerRef.current);
+      if (updateTimerRef.current) clearTimeout(updateTimerRef.current);
       // 自动检查的错误静默忽略
       if (!info?.manual) {
         setUpdateStatus('idle');
@@ -140,7 +140,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
     });
 
     return () => {
-      clearTimeout(updateTimerRef.current);
+      if (updateTimerRef.current) clearTimeout(updateTimerRef.current);
       unsubscribe.forEach(fn => fn());
     };
   }, []);
