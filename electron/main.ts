@@ -302,7 +302,7 @@ function setupAutoUpdater(): void {
 
   autoUpdater.on('checking-for-update', () => {
     log('Checking for update...');
-    mainWindow?.webContents.send('update:checking');
+    mainWindow?.webContents.send('update:checking', { manual: isManualCheck });
   });
 
   autoUpdater.on('update-available', (info) => {
@@ -312,7 +312,6 @@ function setupAutoUpdater(): void {
       releaseNotes: info.releaseNotes || '',
       releaseDate: info.releaseDate || '',
     });
-    isManualCheck = false;
   });
 
   autoUpdater.on('update-not-available', () => {
@@ -333,11 +332,12 @@ function setupAutoUpdater(): void {
   autoUpdater.on('update-downloaded', () => {
     log('Update downloaded');
     mainWindow?.webContents.send('update:downloaded');
+    isManualCheck = false;
   });
 
   autoUpdater.on('error', (err) => {
     log(`Update error: ${err.message}`);
-    mainWindow?.webContents.send('update:error', err.message);
+    mainWindow?.webContents.send('update:error', { message: err.message, manual: isManualCheck });
     isManualCheck = false;
   });
 

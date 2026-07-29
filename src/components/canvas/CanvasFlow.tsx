@@ -29,7 +29,6 @@ import { MarkdownReader } from './MarkdownReader';
 import { FileViewer } from './FileViewer';
 import { Sidebar } from './Sidebar';
 import { CalendarPanel } from './CalendarPanel';
-import { UpdateNotification } from './UpdateNotification';
 import { WelcomeScreen } from './WelcomeScreen';
 import type { AiChatNodeData, NodeRelation, ProviderConfig, ChatMessage } from '@/lib/types';
 import { DEFAULT_MODEL_ID, DEFAULT_THINKING_LEVEL } from '@/lib/types';
@@ -1068,12 +1067,9 @@ function CanvasFlowInner() {
           onClose={() => setOpenedFile(null)}
         />
       )}
-
-      {/* 更新通知 */}
-      <UpdateNotification />
-          </div>
-          </div>
-        </div>
+      </div>
+      </div>
+      </div>
       ) : (
         <WelcomeScreen onCreateProject={handleCreateProject} />
       )}

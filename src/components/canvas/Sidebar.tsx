@@ -17,6 +17,8 @@ import {
   ChevronDown,
   Cog,
   CalendarDays,
+  Download,
+  AlertCircle,
 } from 'lucide-react';
 import { TaskPanel } from './TaskPanel';
 
@@ -75,6 +77,73 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const [envInfo, setEnvInfo] = useState<{ isolation?: boolean; app_root?: string } | null>(null);
   const [appVersion, setAppVersion] = useState<string>('');
+
+  // 更新状态
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'downloading' | 'downloaded' | 'no-update' | 'error'>('idle');
+  const [updateVersion, setUpdateVersion] = useState<string>('');
+  const [updateProgress, setUpdateProgress] = useState<number>(0);
+  const [updateError, setUpdateError] = useState<string>('');
+  const updateTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // 监听更新事件
+  useEffect(() => {
+    if (typeof window.api?.update === 'undefined') return;
+    const unsubscribe: Array<() => void> = [];
+
+    window.api.update.onChecking((info) => {
+      // 自动检查不显示 spinner，仅手动检查显示
+      if (!info?.manual) return;
+      setUpdateStatus('checking');
+      // 10 秒超时自动消失
+      updateTimerRef.current = setTimeout(() => {
+        setUpdateStatus('idle');
+      }, 10000);
+    });
+
+    window.api.update.onAvailable((info) => {
+      clearTimeout(updateTimerRef.current);
+      setUpdateVersion(info.version);
+      setUpdateStatus('downloading');
+    });
+
+    window.api.update.onNotAvailable((info) => {
+      clearTimeout(updateTimerRef.current);
+      if (info?.manual) {
+        setUpdateStatus('no-update');
+        setTimeout(() => setUpdateStatus('idle'), 3000);
+      } else {
+        setUpdateStatus('idle');
+      }
+    });
+
+    window.api.update.onDownloadProgress((p) => {
+      setUpdateProgress(p.percent);
+    });
+
+    window.api.update.onDownloaded(() => {
+      setUpdateStatus('downloaded');
+    });
+
+    window.api.update.onError((info) => {
+      clearTimeout(updateTimerRef.current);
+      // 自动检查的错误静默忽略
+      if (!info?.manual) {
+        setUpdateStatus('idle');
+        return;
+      }
+      setUpdateError(info.message || 'Update check failed');
+      setUpdateStatus('error');
+      setTimeout(() => {
+        setUpdateStatus('idle');
+        setUpdateError('');
+      }, 5000);
+    });
+
+    return () => {
+      clearTimeout(updateTimerRef.current);
+      unsubscribe.forEach(fn => fn());
+    };
+  }, []);
 
   // 加载环境信息（用于显示 Dev Badge）
   useEffect(() => {
@@ -595,12 +664,48 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                           window.api.update.check();
                         }
                       }}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[oklch(0.95_0.01_80)]"
+                      disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[oklch(0.95_0.01_80)] disabled:opacity-50"
                       style={{ color: 'oklch(0.30 0.015 50)' }}
                     >
-                      <RefreshCw className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                      Check for updates
+                      {updateStatus === 'checking' ? (
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                      ) : updateStatus === 'downloading' ? (
+                        <Download className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                      ) : updateStatus === 'downloaded' ? (
+                        <Download className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 45)' }} />
+                      ) : updateStatus === 'no-update' ? (
+                        <Check className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 45)' }} />
+                      ) : updateStatus === 'error' ? (
+                        <AlertCircle className="h-3.5 w-3.5" style={{ color: 'oklch(0.65 0.20 25)' }} />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                      )}
+                      <span className="flex-1 text-left">
+                        {updateStatus === 'checking' ? 'Checking...' : 
+                         updateStatus === 'downloading' ? `Downloading (${Math.round(updateProgress)}%)` :
+                         updateStatus === 'downloaded' ? `Install v${updateVersion}` :
+                         updateStatus === 'no-update' ? 'Already up to date' :
+                         updateStatus === 'error' ? updateError || 'Failed' :
+                         'Check for updates'}
+                      </span>
                     </button>
+                    {/* 下载完成后显示安装按钮 */}
+                    {updateStatus === 'downloaded' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSettingsMenuOpen(false);
+                          if (typeof window.api?.update !== 'undefined') {
+                            window.api.update.install();
+                          }
+                        }}
+                        className="ml-6 mt-1 rounded px-3 py-1.5 text-xs transition-colors hover:opacity-90"
+                        style={{ backgroundColor: 'oklch(0.55 0.15 45)', color: 'white' }}
+                      >
+                        Install and Restart
+                      </button>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

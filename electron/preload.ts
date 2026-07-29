@@ -12,12 +12,12 @@ export interface UpdateApi {
   download: () => Promise<{ success: boolean; error?: string }>;
   install: () => Promise<{ success: boolean }>;
   getVersion: () => Promise<string>;
-  onChecking: (callback: () => void) => void;
+  onChecking: (callback: (info: { manual: boolean }) => void) => void;
   onAvailable: (callback: (info: { version: string; releaseNotes: string; releaseDate: string }) => void) => void;
   onNotAvailable: (callback: (info: { manual: boolean }) => void) => void;
   onDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; downloaded: number; total: number }) => void) => void;
   onDownloaded: (callback: () => void) => void;
-  onError: (callback: (error: string) => void) => void;
+  onError: (callback: (info: { message: string; manual: boolean }) => void) => void;
 }
 
 export interface SettingsApi {
@@ -46,12 +46,12 @@ const api: Api = {
     download: () => ipcRenderer.invoke('update:download'),
     install: () => ipcRenderer.invoke('update:install'),
     getVersion: () => ipcRenderer.invoke('update:get-version'),
-    onChecking: (callback) => ipcRenderer.on('update:checking', callback),
+    onChecking: (callback) => ipcRenderer.on('update:checking', (_, info) => callback(info)),
     onAvailable: (callback) => ipcRenderer.on('update:available', (_, info) => callback(info)),
     onNotAvailable: (callback) => ipcRenderer.on('update:not-available', (_, info) => callback(info)),
     onDownloadProgress: (callback) => ipcRenderer.on('update:download-progress', (_, progress) => callback(progress)),
     onDownloaded: (callback) => ipcRenderer.on('update:downloaded', callback),
-    onError: (callback) => ipcRenderer.on('update:error', (_, error) => callback(error)),
+    onError: (callback) => ipcRenderer.on('update:error', (_, info) => callback(info)),
   },
   settings: {
     load: () => ipcRenderer.invoke('settings:load'),
