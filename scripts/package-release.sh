@@ -20,7 +20,7 @@ cd "$PROJECT_DIR"
 unset BOBAGENT_HOME
 
 APP_NAME="BobAgent"
-VERSION="1.0.1"
+VERSION="1.0.2"
 APP_ID="com.bobagent.app"
 ARCH="${1:-arm64}"
 OUTPUT_DIR="$PROJECT_DIR/release-dist"
@@ -107,10 +107,14 @@ npm --prefix "$STAGING/app" install --omit=dev --no-optional 2>&1 | tail -3
 ok "Electron 主进程依赖安装完成 ($(du -sh "$STAGING/app/node_modules" | awk '{print $1}'))"
 
 # 5c. 生成 app-update.yml
+# GH_TOKEN 从环境变量读取；构建时需设置
+: "${GH_TOKEN:? 构建前请设置 GH_TOKEN 环境变量}"
 cat > "$STAGING/app-update.yml" <<EOF
 provider: github
 owner: $GITHUB_OWNER
 repo: $GITHUB_REPO
+private: true
+token: $GH_TOKEN
 publishAutoUpdate: true
 updaterCacheDirName: bob-updater
 EOF
