@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, FileText, Lightbulb, ChevronDown, ChevronRight, Edit3, Check, AlertCircle, RefreshCw, MessageSquare } from 'lucide-react';
+import { X, FileText, Lightbulb, ChevronDown, ChevronRight, Edit3, Check, AlertCircle, RefreshCw, MessageSquare, Paperclip, FileIcon } from 'lucide-react';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 /** 单轮问答 */
@@ -10,6 +10,16 @@ interface QARound {
   questionTime: string;
   answer: string;
   answerTime: string;
+  questionAttachments?: ConversationAttachment[];
+}
+
+interface ConversationAttachment {
+  id: string;
+  name: string;
+  type: 'image' | 'text' | 'file';
+  mimeType: string;
+  size: number;
+  path: string;
 }
 
 interface NodeData {
@@ -37,7 +47,6 @@ interface MarkdownReaderProps {
   onClose: (nodeMdId: string) => void;
   zIndex?: number;
   onClickToFront?: (nodeMdId: string) => void;
-  /** 面板模式：standalone 固定定位独立面板，tabbed 嵌入标签页容器 */
   mode?: 'standalone' | 'tabbed';
 }
 
@@ -55,10 +64,10 @@ const MOOD_LABELS: Record<string, string> = {
   will: 'Will',
 };
 
-/** .md 文件中的实际标题（中文，用于解析） */
+/** .md 文件中的实际标题 */
 const SECTION_HEADERS = ['摘要', '对话记录', '批注', '便签'];
 
-/** 解析对话记录为 Q&A 轮次 */
+/** 解析对话记录为 Q&A 轮次（含附件） */
 function parseConversationRounds(content: string): QARound[] {
   const rounds: QARound[] = [];
   const lines = content.split('\n');
@@ -71,7 +80,6 @@ function parseConversationRounds(content: string): QARound[] {
     const aMatch = line.match(/^### A\s*(?:\((.+?)\))?\s*$/);
 
     if (qMatch) {
-      // 保存上一轮
       if (currentField === 'a' && currentQA.question) {
         currentQA.answer = currentContent.join('\n').trim();
         rounds.push({ ...currentQA } as QARound);
@@ -84,7 +92,16 @@ function parseConversationRounds(content: string): QARound[] {
 
     if (aMatch) {
       if (currentField === 'q') {
-        currentQA.question = currentContent.join('\n').trim();
+        let questionText = currentContent.join('\n').trim();
+        // 解析附件标记
+        const attMatch = questionText.match(/^<!-- ATTACHMENTS: (.+?) -->\n?/);
+        if (attMatch) {
+          try {
+            currentQA.questionAttachments = JSON.parse(attMatch[1]);
+            questionText = questionText.replace(/^<!-- ATTACHMENTS: .+? -->\n?/, '').trim();
+          } catch { /* ignore parse errors */ }
+        }
+        currentQA.question = questionText;
       }
       currentQA.answerTime = aMatch[1] || '';
       currentField = 'a';
@@ -95,8 +112,16 @@ function parseConversationRounds(content: string): QARound[] {
     currentContent.push(line);
   }
 
-  // 保存最后一轮
   if (currentField === 'a' && currentQA.question) {
+    let questionText = currentContent.join('\n').trim();
+    const attMatch = questionText.match(/^<!-- ATTACHMENTS: (.+?) -->\n?/);
+    if (attMatch) {
+      try {
+        currentQA.questionAttachments = JSON.parse(attMatch[1]);
+        questionText = questionText.replace(/^<!-- ATTACHMENTS: .+? -->\n?/, '').trim();
+      } catch { /* ignore */ }
+    }
+    currentQA.question = questionText;
     currentQA.answer = currentContent.join('\n').trim();
     rounds.push({ ...currentQA } as QARound);
   }
@@ -110,7 +135,6 @@ function questionSummary(question: string, maxLen = 60): string {
   return oneLine.length > maxLen ? oneLine.slice(0, maxLen) + '...' : oneLine;
 }
 
-/** UI 中显示的英文标签 */
 const SECTION_LABELS: Record<string, string> = {
   '摘要': 'Summary',
   '对话记录': 'Conversation',
@@ -125,6 +149,26 @@ function formatTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+/** 文件类型图标与颜色映射 */
+function getFileTypeInfo(mimeType: string): { color: string; bg: string; label: string } {
+  if (mimeType.includes('pdf')) return { color: '#e74c3c', bg: '#fdecea', label: 'PDF' };
+  if (mimeType.includes('word') || mimeType.includes('document')) return { color: '#2b5797', bg: '#e8f0fe', label: 'DOC' };
+  if (mimeType.startsWith('image/')) return { color: '#27ae60', bg: '#eafaf1', label: 'IMG' };
+  if (mimeType.startsWith('text/')) return { color: '#537D96', bg: '#edf3f7', label: 'TXT' };
+  return { color: '#8a8270', bg: '#f5f2ea', label: 'FILE' };
+}
+
+/** 从路径获取文件名 */
+function getFileName(path: string): string {
+  return path.split('/').pop() || path;
 }
 
 function debounce<A extends unknown[]>(fn: (...args: A) => unknown, delay: number) {
@@ -189,7 +233,6 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
   const lastSavedRef = useRef<string>('');
   const fetchKeyRef = useRef(0);
 
-  // 加载节点文档（含重试逻辑）
   const loadNodeDocument = useCallback(async (retryCount = 0) => {
     if (!nodeMdId) return;
     const key = ++fetchKeyRef.current;
@@ -199,19 +242,16 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
     const MAX_RETRIES = 2;
 
     try {
-      // 并行请求：node data + raw content
       const [nodeResp, rawResp] = await Promise.all([
         fetch(`/api/nodes?id=${nodeMdId}`).then(r => r.json()),
         fetch(`/api/nodes?id=${nodeMdId}&action=raw`).then(r => r.json()),
       ]);
 
-      // 防止过期响应覆盖
       if (key !== fetchKeyRef.current) return;
 
       if (nodeResp.success) {
         setNodeData(nodeResp.node);
       } else if (nodeResp.error) {
-        // 节点数据请求失败，记录但继续尝试 raw content
         console.warn('[MarkdownReader] 节点数据加载失败:', nodeResp.error);
       }
 
@@ -227,11 +267,15 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
           contents[name] = sections.get(name) || '';
         }
         setSectionContents(contents);
+
+        // 默认折叠所有对话轮次
+        const rounds = parseConversationRounds(contents['对话记录'] || '');
+        setCollapsedRounds(new Set(rounds.map((_, i) => i)));
+
         setError(null);
       } else {
         const errMsg = rawResp.error || 'Failed to load document';
         if (retryCount < MAX_RETRIES) {
-          // 自动重试
           console.warn(`[MarkdownReader] 加载失败，${500 * (retryCount + 1)}ms 后重试 (${retryCount + 1}/${MAX_RETRIES}):`, errMsg);
           await new Promise(r => setTimeout(r, 500 * (retryCount + 1)));
           if (key !== fetchKeyRef.current) return;
@@ -240,7 +284,6 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
         setError(errMsg);
       }
     } catch (e) {
-      // 防止过期响应覆盖
       if (key !== fetchKeyRef.current) return;
       const errMsg = e instanceof Error ? e.message : 'Network request failed';
       if (retryCount < MAX_RETRIES) {
@@ -340,10 +383,56 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
     }
   }, [editingSection, editValue, handleSectionChange]);
 
+  // 用系统默认程序打开文件（Electron shell.openPath）
+  const handleOpenFile = useCallback(async (filePath: string) => {
+    try {
+      if (typeof window !== 'undefined' && window.api?.openFile) {
+        await window.api.openFile(filePath);
+      } else {
+        // 非 Electron 环境下尝试 window.open
+        window.open(filePath, '_blank');
+      }
+    } catch (e) {
+      console.error('打开文件失败:', e);
+    }
+  }, []);
+
   if (!nodeMdId) return null;
 
   const mood = nodeData?.mood;
   const hasMood = mood && Object.values(mood).some(arr => arr && arr.length > 0);
+  const rounds = parseConversationRounds(sectionContents['对话记录'] || '');
+
+  // 附件标签组件
+  const AttachmentTags = ({ attachments }: { attachments: ConversationAttachment[] }) => {
+    if (!attachments || attachments.length === 0) return null;
+    return (
+      <span className="inline-flex items-center gap-1 ml-1.5">
+        {attachments.map((att, i) => {
+          const info = getFileTypeInfo(att.mimeType);
+          const isPdfOrDoc = att.mimeType.includes('pdf') ||
+            att.mimeType.includes('word') || att.mimeType.includes('document');
+          return (
+            <span
+              key={i}
+              className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium cursor-pointer transition-opacity hover:opacity-70"
+              style={{ backgroundColor: info.bg, color: info.color }}
+              title={`${att.name} (${formatFileSize(att.size)})\n点击打开`}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isPdfOrDoc) {
+                  handleOpenFile(att.path);
+                }
+              }}
+            >
+              {isPdfOrDoc ? <FileIcon className="h-2.5 w-2.5" /> : <Paperclip className="h-2.5 w-2.5" />}
+              <span className="truncate max-w-[60px]">{getFileName(att.name)}</span>
+            </span>
+          );
+        })}
+      </span>
+    );
+  };
 
   return (
     <>
@@ -360,6 +449,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
         }}
         onClick={() => onClickToFront?.(nodeMdId!)}
       >
+        {/* Header */}
         <div
           className="flex shrink-0 items-center gap-3 px-5 py-3"
           style={{ borderBottom: '1px solid rgba(0, 0, 0, 0.05)', backgroundColor: '#faf8f3' }}
@@ -382,6 +472,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
           </button>
         </div>
 
+        {/* Metadata + Mood Bar */}
         {nodeData && (
           <div
             className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 px-5 py-2 text-[11px]"
@@ -400,6 +491,25 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                   </span>
                 ))}
               </span>
+            )}
+            {/* Mood 紧凑展示在元数据栏 */}
+            {hasMood && (
+              <>
+                <span className="mx-0.5" style={{ color: 'rgba(0,0,0,0.1)' }}>|</span>
+                <span className="flex items-center gap-1">
+                  <Lightbulb className="h-3 w-3" />
+                  {(['vibe', 'sparks', 'reflections', 'will'] as const).map(pool => {
+                    const items = mood![pool];
+                    if (!items || items.length === 0) return null;
+                    return (
+                      <span key={pool} className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px]"
+                        style={{ backgroundColor: `${MOOD_COLORS[pool]}12`, color: MOOD_COLORS[pool] }}>
+                        {MOOD_LABELS[pool]}: {items.join(', ')}
+                      </span>
+                    );
+                  })}
+                </span>
+              </>
             )}
           </div>
         )}
@@ -425,8 +535,8 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
         ) : (
           <div className="flex-1 overflow-y-auto ai-canvas-scroll">
             <div className="px-6 py-5 space-y-5">
-              <div className="text-[11px] font-medium" style={{ color: '#8a8270' }}>{nodeData?.title || 'Document'}</div>
 
+              {/* 摘要 */}
               {sectionContents['摘要'] && sectionContents['摘要'] !== '(Empty)' && (
                 <div className="reader-section-wrap">
                   <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#537D96' }}>{SECTION_LABELS['摘要']}</div>
@@ -436,6 +546,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                 </div>
               )}
 
+              {/* 对话记录 */}
               {sectionContents['对话记录'] !== undefined && (
                 <div className="reader-section-wrap">
                   <button
@@ -445,10 +556,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                   >
                     {collapsedSections.has('对话记录') ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                     {SECTION_LABELS['对话记录']}
-                    {(() => {
-                      const rounds = parseConversationRounds(sectionContents['对话记录'] || '');
-                      return rounds.length > 0 ? ` (${rounds.length} rounds)` : '';
-                    })()}
+                    {rounds.length > 0 ? ` (${rounds.length} rounds)` : ''}
                   </button>
                   {!collapsedSections.has('对话记录') && (
                     <div className="space-y-2">
@@ -463,116 +571,94 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                             autoFocus
                           />
                           <div className="flex justify-end gap-2">
-                            <button
-                              onClick={cancelEdit}
-                              className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5"
-                              style={{ color: '#8a8270' }}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              onClick={confirmEdit}
-                              className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors"
-                              style={{ backgroundColor: '#537D96', color: '#fff' }}
-                            >
-                              <Check className="h-3 w-3" />
-                              Save
+                            <button onClick={cancelEdit} className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>Cancel</button>
+                            <button onClick={confirmEdit} className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors" style={{ backgroundColor: '#537D96', color: '#fff' }}>
+                              <Check className="h-3 w-3" />Save
                             </button>
                           </div>
                         </div>
-                      ) : (
-                        (() => {
-                          const rounds = parseConversationRounds(sectionContents['对话记录'] || '');
-                          return rounds.length > 0 ? (
-                            <>
-                              {rounds.map((round, idx) => {
-                                const isCollapsed = collapsedRounds.has(idx);
-                                return (
-                                  <div
-                                    key={idx}
-                                    className="rounded-lg border overflow-hidden"
-                                    style={{ backgroundColor: '#ffffff', borderColor: 'rgba(0,0,0,0.04)' }}
-                                  >
-                                    {/* 折叠头部 - 始终显示 Q */}
-                                    <button
-                                      onClick={() => toggleRound(idx)}
-                                      className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors hover:bg-[rgba(0,0,0,0.015)]"
-                                    >
-                                      {isCollapsed ? (
-                                        <ChevronRight className="h-3.5 w-3.5 shrink-0" style={{ color: '#8a8270' }} />
-                                      ) : (
-                                        <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: '#8a8270' }} />
-                                      )}
-                                      <span className="mr-1 text-[10px] font-semibold shrink-0"
-                                        style={{ color: '#537D96' }}>
-                                        Q{idx + 1}
-                                      </span>
-                                      <span className="flex-1 truncate text-[12px]"
-                                        style={{ color: isCollapsed ? '#4a4232' : '#8a8270' }}>
-                                        {questionSummary(round.question)}
-                                      </span>
-                                      {round.questionTime && (
-                                        <span className="shrink-0 text-[10px]" style={{ color: '#b0a890' }}>
-                                          {formatTime(round.questionTime)}
-                                        </span>
-                                      )}
-                                    </button>
+                      ) : rounds.length > 0 ? (
+                        <>
+                          {rounds.map((round, idx) => {
+                            const isCollapsed = collapsedRounds.has(idx);
+                            return (
+                              <div
+                                key={idx}
+                                className="rounded-lg border overflow-hidden"
+                                style={{ backgroundColor: '#ffffff', borderColor: 'rgba(0,0,0,0.04)' }}
+                              >
+                                <button
+                                  onClick={() => toggleRound(idx)}
+                                  className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors hover:bg-[rgba(0,0,0,0.015)]"
+                                >
+                                  {isCollapsed ? (
+                                    <ChevronRight className="h-3.5 w-3.5 shrink-0" style={{ color: '#8a8270' }} />
+                                  ) : (
+                                    <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: '#8a8270' }} />
+                                  )}
+                                  <span className="mr-1 text-[10px] font-semibold shrink-0" style={{ color: '#537D96' }}>Q{idx + 1}</span>
+                                  <span className="flex-1 truncate text-[12px]" style={{ color: '#4a4232' }}>
+                                    {questionSummary(round.question)}
+                                  </span>
+                                  {/* 附件标签 - 折叠时也显示 */}
+                                  <AttachmentTags attachments={round.questionAttachments || []} />
+                                  {round.questionTime && (
+                                    <span className="shrink-0 text-[10px]" style={{ color: '#b0a890' }}>
+                                      {formatTime(round.questionTime)}
+                                    </span>
+                                  )}
+                                </button>
 
-                                    {/* 展开内容 - Q + A */}
-                                    {!isCollapsed && (
-                                      <div className="border-t px-4 py-3" style={{ borderColor: 'rgba(0,0,0,0.04)' }}>
-                                        <div className="mb-2">
-                                          <span className="text-[10px] font-semibold" style={{ color: '#537D96' }}>Q:</span>
-                                          <div className="mt-0.5 text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>
-                                            <MarkdownRenderer content={round.question} />
-                                          </div>
-                                        </div>
-                                        <div>
-                                          <span className="text-[10px] font-semibold" style={{ color: '#27ae60' }}>A:</span>
-                                          <div className="mt-0.5 text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>
-                                            <MarkdownRenderer content={round.answer} />
-                                          </div>
-                                        </div>
+                                {!isCollapsed && (
+                                  <div className="border-t px-4 py-3" style={{ borderColor: 'rgba(0,0,0,0.04)' }}>
+                                    <div className="mb-2">
+                                      <span className="text-[10px] font-semibold" style={{ color: '#537D96' }}>Q:</span>
+                                      <div className="mt-0.5 text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>
+                                        <MarkdownRenderer content={round.question} />
                                       </div>
-                                    )}
+                                      {/* 展开时也显示附件标签 */}
+                                      {round.questionAttachments && round.questionAttachments.length > 0 && (
+                                        <div className="mt-1.5">
+                                          <AttachmentTags attachments={round.questionAttachments} />
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <span className="text-[10px] font-semibold" style={{ color: '#27ae60' }}>A:</span>
+                                      <div className="mt-0.5 text-[12px] leading-relaxed" style={{ color: '#4a4232' }}>
+                                        <MarkdownRenderer content={round.answer} />
+                                      </div>
+                                    </div>
                                   </div>
-                                );
-                              })}
-                              <div className="flex justify-end">
-                                <button
-                                  onClick={() => startEdit('对话记录')}
-                                  className="rounded-md p-1 transition-colors hover:bg-black/5"
-                                  style={{ color: '#8a8270' }}
-                                >
-                                  <Edit3 className="h-3 w-3" />
-                                </button>
+                                )}
                               </div>
-                            </>
-                          ) : (
-                            <div className="rounded-lg border p-4" style={{ backgroundColor: '#ffffff', borderColor: 'rgba(0,0,0,0.04)' }}>
-                              <div className="mb-2 flex items-center justify-between">
-                                <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#537D96' }}>
-                                  <MessageSquare className="h-3 w-3" />
-                                  Conversation
-                                </span>
-                                <button
-                                  onClick={() => startEdit('对话记录')}
-                                  className="rounded-md p-1 transition-colors hover:bg-black/5"
-                                  style={{ color: '#8a8270' }}
-                                >
-                                  <Edit3 className="h-3 w-3" />
-                                </button>
-                              </div>
-                              <MarkdownRenderer content={sectionContents['对话记录'] && sectionContents['对话记录'] !== '(Empty)' ? sectionContents['对话记录'] : ''} />
-                            </div>
-                          );
-                        })()
+                            );
+                          })}
+                          <div className="flex justify-end">
+                            <button onClick={() => startEdit('对话记录')} className="rounded-md p-1 transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>
+                              <Edit3 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="rounded-lg border p-4" style={{ backgroundColor: '#ffffff', borderColor: 'rgba(0,0,0,0.04)' }}>
+                          <div className="mb-2 flex items-center justify-between">
+                            <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#537D96' }}>
+                              <MessageSquare className="h-3 w-3" />Conversation
+                            </span>
+                            <button onClick={() => startEdit('对话记录')} className="rounded-md p-1 transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>
+                              <Edit3 className="h-3 w-3" />
+                            </button>
+                          </div>
+                          <MarkdownRenderer content={sectionContents['对话记录'] && sectionContents['对话记录'] !== '(Empty)' ? sectionContents['对话记录'] : ''} />
+                        </div>
                       )}
                     </div>
                   )}
                 </div>
               )}
 
+              {/* 批注 */}
               {sectionContents['批注'] !== undefined && (
                 <div className="reader-section-wrap">
                   <button
@@ -596,20 +682,9 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                             autoFocus
                           />
                           <div className="flex justify-end gap-2">
-                            <button
-                              onClick={cancelEdit}
-                              className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5"
-                              style={{ color: '#8a8270' }}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              onClick={confirmEdit}
-                              className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors"
-                              style={{ backgroundColor: '#d4a017', color: '#fff' }}
-                            >
-                              <Check className="h-3 w-3" />
-                              Save
+                            <button onClick={cancelEdit} className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>Cancel</button>
+                            <button onClick={confirmEdit} className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors" style={{ backgroundColor: '#d4a017', color: '#fff' }}>
+                              <Check className="h-3 w-3" />Save
                             </button>
                           </div>
                         </div>
@@ -617,11 +692,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                         <div>
                           <div className="mb-2 flex items-center justify-between">
                             <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#d4a017' }}>Notes</span>
-                            <button
-                              onClick={() => startEdit('批注')}
-                              className="rounded-md p-1 transition-colors hover:bg-black/5"
-                              style={{ color: '#8a8270' }}
-                            >
+                            <button onClick={() => startEdit('批注')} className="rounded-md p-1 transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>
                               <Edit3 className="h-3 w-3" />
                             </button>
                           </div>
@@ -633,6 +704,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                 </div>
               )}
 
+              {/* 便签 */}
               {sectionContents['便签'] !== undefined && (
                 <div className="reader-section-wrap">
                   <button
@@ -656,20 +728,9 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                             autoFocus
                           />
                           <div className="flex justify-end gap-2">
-                            <button
-                              onClick={cancelEdit}
-                              className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5"
-                              style={{ color: '#8a8270' }}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              onClick={confirmEdit}
-                              className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors"
-                              style={{ backgroundColor: '#537D96', color: '#fff' }}
-                            >
-                              <Check className="h-3 w-3" />
-                              Save
+                            <button onClick={cancelEdit} className="rounded-md px-3 py-1 text-[11px] font-medium transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>Cancel</button>
+                            <button onClick={confirmEdit} className="flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium transition-colors" style={{ backgroundColor: '#537D96', color: '#fff' }}>
+                              <Check className="h-3 w-3" />Save
                             </button>
                           </div>
                         </div>
@@ -677,11 +738,7 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                         <div>
                           <div className="mb-2 flex items-center justify-between">
                             <span className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#537D96' }}>Sticky Notes</span>
-                            <button
-                              onClick={() => startEdit('便签')}
-                              className="rounded-md p-1 transition-colors hover:bg-black/5"
-                              style={{ color: '#8a8270' }}
-                            >
+                            <button onClick={() => startEdit('便签')} className="rounded-md p-1 transition-colors hover:bg-black/5" style={{ color: '#8a8270' }}>
                               <Edit3 className="h-3 w-3" />
                             </button>
                           </div>
@@ -690,38 +747,6 @@ export function MarkdownReader({ nodeMdId, onClose, zIndex = 50, onClickToFront,
                       )}
                     </div>
                   )}
-                </div>
-              )}
-
-              {hasMood && (
-                <div className="reader-section-wrap">
-                  <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#2c2416' }}>
-                    <Lightbulb className="h-3 w-3" />
-                    MOOD
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(['vibe', 'sparks', 'reflections', 'will'] as const).map(pool => {
-                      const items = mood![pool];
-                      if (!items || items.length === 0) return null;
-                      return (
-                        <div
-                          key={pool}
-                          className="rounded-lg border p-3"
-                          style={{ borderColor: `${MOOD_COLORS[pool]}20`, backgroundColor: `${MOOD_COLORS[pool]}08` }}
-                        >
-                          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: MOOD_COLORS[pool] }}>{MOOD_LABELS[pool]}</div>
-                          <ul className="space-y-1">
-                            {items.map((item, idx) => (
-                              <li key={idx} className="flex gap-1.5 text-[12px] leading-snug" style={{ color: '#5c5342' }}>
-                                <span style={{ color: `${MOOD_COLORS[pool]}60` }}>—</span>
-                                <span>{item}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      );
-                    })}
-                  </div>
                 </div>
               )}
 

@@ -8,6 +8,7 @@ declare global {
       settings: SettingsApi;
       getPathForFile: (file: File) => string;
       openDevTools: () => Promise<void>;
+      openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }

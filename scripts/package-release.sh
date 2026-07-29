@@ -47,9 +47,13 @@ log "Arch: $ARCH"
 log "============================================"
 
 # ---------- 2. 构建 Next.js standalone ----------
-log "Step 1/6: 构建 Next.js (standalone mode) ..."
-NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=4096" pnpm next build
-ok "Next.js 构建完成"
+if [ "${SKIP_NEXT_BUILD:-0}" != "1" ]; then
+  log "Step 1/6: 构建 Next.js (standalone mode) ..."
+  NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=4096" pnpm next build
+  ok "Next.js 构建完成"
+else
+  log "Step 1/6: 跳过 Next.js 构建 (SKIP_NEXT_BUILD=1)"
+fi
 
 # ---------- 3. 编译 Electron 主进程 ----------
 log "Step 2/6: 编译 Electron main + preload ..."
@@ -289,10 +293,10 @@ create_dmg() {
         set the bounds of container window to {200, 200, 860, 600}
         set viewOptions to the icon view options of container window
         set arrangement of viewOptions to not arranged
-        set icon size of viewOptions to 80
+        set icon size of viewOptions to 68
         set background picture of viewOptions to file ".background:background.png"
-        set position of item "$APP_NAME.app" of container window to {140, 290}
-        set position of item "Applications" of container window to {395, 290}
+        set position of item "$APP_NAME.app" of container window to {170, 290}
+        set position of item "Applications" of container window to {490, 290}
         close
         open
         update without registering applications

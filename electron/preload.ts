@@ -31,6 +31,7 @@ export interface Api {
   settings: SettingsApi;
   getPathForFile: (file: File) => string;
   openDevTools: () => Promise<void>;
+  openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 const api: Api = {
@@ -58,6 +59,7 @@ const api: Api = {
   },
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   openDevTools: () => ipcRenderer.invoke('devtools:open'),
+  openFile: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
 };
 
 contextBridge.exposeInMainWorld('api', api);

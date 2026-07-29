@@ -391,6 +391,17 @@ app.whenReady().then(async () => {
     mainWindow?.webContents.openDevTools({ mode: 'detach' });
   });
 
+  // 用系统默认程序打开文件（PDF/Word 等）
+  ipcMain.handle('shell:openPath', async (_event, filePath: string) => {
+    try {
+      const result = await shell.openPath(filePath);
+      if (result) return { success: false, error: result };
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
   setupAutoUpdater();
 
   log('Creating main window...');
