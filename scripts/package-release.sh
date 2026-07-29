@@ -406,6 +406,79 @@ case "$ARCH" in
   arm64|x64) generate_yml "$ARCH" ;;
 esac
 
+# ---------- 上传到 GitHub Release ----------
+upload_to_github() {
+  if [ -z "${GH_TOKEN:-}" ]; then
+    warn "GH_TOKEN 未设置，跳过 GitHub Release 上传"
+    return 0
+  fi
+
+  local tag="v$VERSION"
+  log "创建 GitHub Release $tag ..."
+
+  local release_resp
+  release_resp=$(curl -s -w "\n%{http_code}" \
+    -X POST \
+    -H "Authorization: token $GH_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases" \
+    -d "{
+      \"tag_name\": \"$tag\",
+      \"name\": \"$tag\",
+      \"body\": \"$(cat "$PROJECT_DIR/RELEASES.md" | sed -n "/^## $tag/,/^---/p" | sed '1d;$d' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' | tr -d '\n')\",
+      \"draft\": false,
+      \"prerelease\": false
+    }")
+
+  local http_code
+  http_code=$(echo "$release_resp" | tail -1)
+  local release_body
+  release_body=$(echo "$release_resp" | sed '$d')
+
+  if [ "$http_code" = "201" ]; then
+    ok "Release $tag 创建成功"
+  elif [ "$http_code" = "422" ]; then
+    log "Release $tag 已存在，获取已有 Release ..."
+    release_body=$(curl -s -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/tags/$tag")
+  else
+    err "创建 Release 失败 (HTTP $http_code): $release_body"
+    return 0
+  fi
+
+  local upload_url
+  upload_url=$(echo "$release_body" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("/dev/stdin","utf8")).upload_url.replace(/\{.*\}/,""))')
+
+  if [ -z "$upload_url" ]; then
+    err "无法获取上传 URL"
+    return 0
+  fi
+
+  # 上传所有产物
+  for file in "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.yml "$OUTPUT_DIR"/latest-mac-arm64.yml "$OUTPUT_DIR"/latest-mac-x64.yml; do
+    if [ ! -f "$file" ]; then continue; fi
+    local fname
+    fname=$(basename "$file")
+    log "上传 $fname ..."
+    local upload_resp
+    upload_resp=$(curl -s -w "\n%{http_code}" \
+      -X POST \
+      -H "Authorization: token $GH_TOKEN" \
+      -H "Accept: application/vnd.github+json" \
+      -H "Content-Type: application/octet-stream" \
+      --data-binary "@$file" \
+      "${upload_url}?name=${fname}")
+    local up_code
+    up_code=$(echo "$upload_resp" | tail -1)
+    if [ "$up_code" = "201" ]; then
+      ok "  $fname 上传成功"
+    else
+      err "  $fname 上传失败 (HTTP $up_code)"
+    fi
+  done
+}
+
+upload_to_github
+
 # ---------- 收尾 ----------
 rm -rf "$STAGING" 2>/dev/null || true
 
@@ -414,7 +487,7 @@ echo "============================================"
 ok "  Release 构建完成！"
 echo "  输出目录: $OUTPUT_DIR"
 echo ""
-ls -lh "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.zip "$OUTPUT_DIR"/*.yml 2>/dev/null
+ls -lh "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.yml 2>/dev/null || true
 echo ""
 echo "📦 安装包下载地址:"
 echo "   https://github.com/baolei0227-glitch/BobAgent/releases/tag/v$VERSION"
