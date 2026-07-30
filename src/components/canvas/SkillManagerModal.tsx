@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, ChevronDown } from 'lucide-react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, ChevronDown, Download, Trash2, Link, FolderSearch, Globe, AlertCircle, X } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -28,6 +28,13 @@ interface SkillCategory {
 interface SkillManagerModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+interface InstallResult {
+  success: boolean;
+  skill?: { name: string; description: string };
+  error?: string;
+  detail?: string;
 }
 
 /** 技能分类 */
@@ -71,7 +78,13 @@ function categorizeSkills(skills: SkillItem[]): SkillCategory[] {
   return all.filter(c => c.skills.length > 0);
 }
 
-function SkillCard({ skill, onToggle }: { skill: SkillItem; onToggle: (name: string) => void }) {
+function SkillCard({ skill, onToggle, onUninstall }: {
+  skill: SkillItem;
+  onToggle: (name: string) => void;
+  onUninstall?: (name: string) => void;
+}) {
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
+
   return (
     <div
       className="rounded-md border px-3 py-2 transition-colors hover:bg-[oklch(0.95_0.008_80)]"
@@ -114,16 +127,47 @@ function SkillCard({ skill, onToggle }: { skill: SkillItem; onToggle: (name: str
             {skill.description}
           </p>
         </div>
+        {skill.source === 'user' && onUninstall && (
+          <div className="shrink-0">
+            {confirmUninstall ? (
+              <span className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => { onUninstall(skill.name); setConfirmUninstall(false); }}
+                  className="text-[10px] rounded px-1.5 py-0.5"
+                  style={{ color: '#fff', backgroundColor: 'oklch(0.55 0.18 35)' }}
+                >确认</button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmUninstall(false)}
+                  className="text-[10px] rounded px-1 py-0.5"
+                  style={{ color: 'oklch(0.50 0.02 50)' }}
+                ><X className="h-3 w-3" /></button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmUninstall(true)}
+                className="rounded p-0.5 transition-colors hover:bg-[oklch(0.90_0.02_50)]"
+                title="卸载技能"
+              >
+                <Trash2 className="h-3 w-3" style={{ color: 'oklch(0.55 0.02 50)' }} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function CategorySection({ category, expanded, onToggle, onToggleCategory }: {
+function CategorySection({ category, expanded, onToggleExpand, onToggleSkill, onToggleCategory, onUninstall }: {
   category: SkillCategory;
   expanded: boolean;
-  onToggle: () => void;
-  onToggleCategory: (enable: boolean) => void;
+  onToggleExpand: () => void;
+  onToggleSkill: (name: string) => void;
+  onToggleCategory: (names: string[], enable: boolean) => void;
+  onUninstall?: (name: string) => void;
 }) {
   const enabledCount = category.skills.filter(s => s.enabled).length;
   const total = category.skills.length;
@@ -134,7 +178,7 @@ function CategorySection({ category, expanded, onToggle, onToggleCategory }: {
       {/* 分类标题栏 */}
       <button
         type="button"
-        onClick={onToggle}
+        onClick={onToggleExpand}
         className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[oklch(0.95_0.008_80)] sticky top-0 z-10"
         style={{ backgroundColor: 'oklch(0.98 0.005 80)' }}
       >
@@ -155,7 +199,7 @@ function CategorySection({ category, expanded, onToggle, onToggleCategory }: {
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            onToggleCategory(!allEnabled);
+            onToggleCategory(category.skills.map(s => s.name), !allEnabled);
           }}
           className="text-[10px] transition-colors hover:underline shrink-0"
           style={{ color: 'oklch(0.55 0.02 50)' }}
@@ -166,17 +210,14 @@ function CategorySection({ category, expanded, onToggle, onToggleCategory }: {
 
       {/* 技能列表 */}
       {expanded && (
-        <div className="space-y-1.5 mt-1">
+        <div className="space-y-1.5 mt-1 ml-4">
           {category.skills.map((skill) => (
             <SkillCard
               key={skill.name}
               skill={skill}
-              onToggle={onToggleCategory instanceof Function ? () => {} : () => {}}
+              onToggle={onToggleSkill}
+              onUninstall={onUninstall}
             />
-          ))}
-          {/* 重新渲染 SkillCard 需要传入正确的 onToggle */}
-          {category.skills.map((skill) => (
-            <div key={skill.name} style={{ display: 'none' }} />
           ))}
         </div>
       )}
@@ -189,6 +230,15 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(['builtin']));
+
+  // 安装表单状态
+  const [showInstall, setShowInstall] = useState(false);
+  const [installSource, setInstallSource] = useState<'github' | 'local'>('github');
+  const [installUrl, setInstallUrl] = useState('');
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState('');
+  const [installSuccess, setInstallSuccess] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -219,6 +269,9 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
   useEffect(() => {
     if (open) {
       loadSkills();
+      setShowInstall(false);
+      setInstallError('');
+      setInstallSuccess('');
     }
   }, [open, loadSkills]);
 
@@ -298,6 +351,72 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
     }
   };
 
+  // 安装技能
+  const handleInstall = async () => {
+    setInstallError('');
+    setInstallSuccess('');
+    if (!installUrl.trim()) {
+      setInstallError('请输入 GitHub URL 或选择本地路径');
+      return;
+    }
+    setInstalling(true);
+    try {
+      const resp = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'install',
+          source: installSource,
+          url: installSource === 'github' ? installUrl.trim() : undefined,
+          localPath: installSource === 'local' ? installUrl.trim() : undefined,
+        }),
+      });
+      const data: InstallResult = await resp.json();
+      if (!resp.ok || !data.success) {
+        setInstallError(data.error || data.detail || '安装失败');
+        return;
+      }
+      setInstallSuccess(`已安装: ${data.skill!.name}`);
+      setInstallUrl('');
+      loadSkills();
+    } catch (e: any) {
+      setInstallError(e?.message || '网络错误');
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  // 卸载用户技能
+  const handleUninstall = async (skillName: string) => {
+    try {
+      const resp = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'uninstall', skillName }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        setError(data.error || '卸载失败');
+        return;
+      }
+      loadSkills();
+    } catch (e) {
+      console.error('Uninstall error:', e);
+    }
+  };
+
+  // 本地路径文件选择
+  const handleLocalFileSelect = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      setInstallUrl(files[0].webkitRelativePath || files[0].name);
+    }
+  };
+
   const categories = categorizeSkills(skills);
   const allEnabled = skills.length > 0 && skills.every((s) => s.enabled);
   const enabledCount = skills.filter(s => s.enabled).length;
@@ -321,115 +440,238 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
             style={{ color: 'oklch(0.55 0.02 50)' }}
           >
             Skills are automatically triggered when your message matches their keywords.
-            Drag skill folders into <code className="rounded px-1 py-0.5" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>~/BobAgent/skills/</code> to install.
+            Install new skills from GitHub or local folder.
           </DialogDescription>
         </DialogHeader>
 
         <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
-          {/* 操作栏 */}
+          {/* 视图切换 + 操作栏 */}
           <div className="flex items-center justify-between mb-3">
-            <span className="text-[11px]" style={{ color: 'oklch(0.50 0.015 50)' }}>
-              {skills.length === 0
-                ? 'No skills found'
-                : `${enabledCount} / ${skills.length} enabled`}
-            </span>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'oklch(0.85 0.01 70)' }}>
               <button
                 type="button"
-                onClick={handleToggleAll}
-                className="text-[11px] transition-colors hover:underline"
-                style={{ color: 'oklch(0.55 0.02 50)' }}
+                onClick={() => setShowInstall(false)}
+                className="rounded px-2.5 py-1 text-[11px] font-medium transition-colors"
+                style={{
+                  color: !showInstall ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
+                  backgroundColor: !showInstall ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
+                }}
               >
-                {allEnabled ? 'Disable All' : 'Enable All'}
+                已安装
               </button>
               <button
                 type="button"
-                onClick={loadSkills}
-                disabled={loading}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors hover:bg-[oklch(0.92_0.015_75)]"
-                style={{ color: 'oklch(0.55 0.02 50)' }}
+                onClick={() => setShowInstall(true)}
+                className="rounded px-2.5 py-1 text-[11px] font-medium transition-colors flex items-center gap-1"
+                style={{
+                  color: showInstall ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
+                  backgroundColor: showInstall ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
+                }}
               >
-                <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-                Refresh
+                <Download className="h-3 w-3" />
+                安装
               </button>
             </div>
+            {!showInstall && (
+              <span className="text-[11px]" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                {skills.length === 0
+                  ? 'No skills found'
+                  : `${enabledCount} / ${skills.length} enabled`}
+              </span>
+            )}
           </div>
 
           {error && (
             <p className="mb-3 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>{error}</p>
           )}
 
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />
-            </div>
-          ) : skills.length === 0 ? (
-            <div
-              className="rounded-md border px-4 py-6 text-center"
-              style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
-            >
-              <Lightbulb className="mx-auto mb-2 h-5 w-5" style={{ color: 'oklch(0.65 0.02 50)' }} />
-              <p className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>No skills installed yet.</p>
-              <p className="mt-1 text-[11px]" style={{ color: 'oklch(0.60 0.02 50)' }}>
-                Drag skill folders into <code className="rounded px-1 py-0.5" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>~/BobAgent/skills/</code>
-              </p>
+          {/* ===== 安装视图 ===== */}
+          {showInstall ? (
+            <div className="space-y-4">
+              {/* 来源选择 */}
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] shrink-0" style={{ color: 'oklch(0.45 0.015 50)' }}>来源:</span>
+                <div className="flex items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'oklch(0.85 0.01 70)' }}>
+                  <button
+                    type="button"
+                    onClick={() => { setInstallSource('github'); setInstallUrl(''); setInstallError(''); }}
+                    className="rounded px-2.5 py-1 text-[11px] transition-colors flex items-center gap-1"
+                    style={{
+                      color: installSource === 'github' ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
+                      backgroundColor: installSource === 'github' ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
+                    }}
+                  >
+                    <Globe className="h-3 w-3" />
+                    GitHub
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setInstallSource('local'); setInstallUrl(''); setInstallError(''); }}
+                    className="rounded px-2.5 py-1 text-[11px] transition-colors flex items-center gap-1"
+                    style={{
+                      color: installSource === 'local' ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
+                      backgroundColor: installSource === 'local' ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
+                    }}
+                  >
+                    <FolderSearch className="h-3 w-3" />
+                    本地
+                  </button>
+                </div>
+              </div>
+
+              {/* 输入区域 */}
+              {installSource === 'github' ? (
+                <div>
+                  <label className="text-[10px] font-medium" style={{ color: 'oklch(0.45 0.015 50)' }}>
+                    GitHub 仓库 URL
+                  </label>
+                  <div className="mt-1 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5"
+                    style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.99 0.003 80)' }}>
+                    <Link className="h-3.5 w-3.5 shrink-0" style={{ color: 'oklch(0.55 0.02 50)' }} />
+                    <input
+                      type="text"
+                      value={installUrl}
+                      onChange={(e) => setInstallUrl(e.target.value)}
+                      placeholder="https://github.com/user/repo"
+                      className="flex-1 bg-transparent text-xs outline-none"
+                      style={{ color: 'oklch(0.30 0.015 50)' }}
+                      disabled={installing}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleInstall(); }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="text-[10px] font-medium" style={{ color: 'oklch(0.45 0.015 50)' }}>
+                    本地技能包路径
+                  </label>
+                  <div className="mt-1 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5"
+                    style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.99 0.003 80)' }}>
+                    <FolderSearch className="h-3.5 w-3.5 shrink-0" style={{ color: 'oklch(0.55 0.02 50)' }} />
+                    <input
+                      type="text"
+                      value={installUrl}
+                      onChange={(e) => setInstallUrl(e.target.value)}
+                      placeholder="/path/to/skill/folder"
+                      className="flex-1 bg-transparent text-xs outline-none"
+                      style={{ color: 'oklch(0.30 0.015 50)' }}
+                      disabled={installing}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleInstall(); }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* 状态提示 */}
+              {installError && (
+                <div className="flex items-start gap-1.5 rounded-md px-2.5 py-2 text-[11px]"
+                  style={{ backgroundColor: 'oklch(0.55 0.18 35 / 0.06)', color: 'oklch(0.50 0.18 35)' }}>
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                  <span className="leading-relaxed">{installError}</span>
+                </div>
+              )}
+              {installSuccess && (
+                <div className="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-[11px]"
+                  style={{ backgroundColor: 'oklch(0.55 0.15 145 / 0.06)', color: 'oklch(0.45 0.12 145)' }}>
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                  <span>{installSuccess}</span>
+                </div>
+              )}
+
+              {/* 安装按钮 */}
+              <button
+                type="button"
+                onClick={handleInstall}
+                disabled={installing || !installUrl.trim()}
+                className="flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                style={{
+                  backgroundColor: 'oklch(0.62 0.17 45)',
+                  color: '#fff',
+                }}
+              >
+                {installing ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    安装中...
+                  </>
+                ) : (
+                  <>
+                    <Download className="h-3.5 w-3.5" />
+                    安装技能
+                  </>
+                )}
+              </button>
+
+              {/* 技能包规范说明 */}
+              <div className="rounded-md border px-3 py-2.5"
+                style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80)' }}>
+                <p className="text-[10px] font-medium mb-1" style={{ color: 'oklch(0.45 0.015 50)' }}>技能包规范</p>
+                <p className="text-[10px] leading-relaxed" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                  技能包需包含 <code className="rounded px-1 py-0.5 text-[9px]" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>SKILL.md</code> 文件，
+                  其中 frontmatter 声明 <code className="rounded px-1 py-0.5 text-[9px]" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>name</code> 和
+                  <code className="rounded px-1 py-0.5 text-[9px]" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>description</code> 字段。
+                  GitHub 仓库将从默认分支下载。
+                </p>
+              </div>
             </div>
           ) : (
-            <div className="space-y-3">
-              {categories.map((cat) => {
-                const expanded = expandedCategories.has(cat.key);
-                return (
-                  <div key={cat.key}>
-                    {/* 分类标题栏 */}
-                    <button
-                      type="button"
-                      onClick={() => toggleCategoryExpand(cat.key)}
-                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[oklch(0.95_0.008_80)]"
-                      style={{ backgroundColor: 'oklch(0.98 0.005 80)' }}
-                    >
-                      <ChevronDown
-                        className="h-3 w-3 shrink-0 transition-transform"
-                        style={{
-                          color: 'oklch(0.55 0.02 50)',
-                          transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-                        }}
-                      />
-                      <span className="text-[11px] font-semibold flex-1" style={{ color: 'oklch(0.35 0.015 50)' }}>
-                        {cat.label}
-                      </span>
-                      <span className="text-[10px] mr-1" style={{ color: 'oklch(0.50 0.015 50 / 0.6)' }}>
-                        {cat.skills.filter(s => s.enabled).length}/{cat.skills.length}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const allEnabled = cat.skills.every(s => s.enabled);
-                          toggleCategory(cat.skills.map(s => s.name), !allEnabled);
-                        }}
-                        className="text-[10px] transition-colors hover:underline shrink-0"
-                        style={{ color: 'oklch(0.55 0.02 50)' }}
-                      >
-                        {cat.skills.every(s => s.enabled) ? '全部禁用' : '全部启用'}
-                      </button>
-                    </button>
+            /* ===== 已安装视图 ===== */
+            <>
+              {/* 操作栏 */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleToggleAll}
+                    className="text-[11px] transition-colors hover:underline"
+                    style={{ color: 'oklch(0.55 0.02 50)' }}
+                  >
+                    {allEnabled ? 'Disable All' : 'Enable All'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={loadSkills}
+                    disabled={loading}
+                    className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors hover:bg-[oklch(0.92_0.015_75)]"
+                    style={{ color: 'oklch(0.55 0.02 50)' }}
+                  >
+                    <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+              </div>
 
-                    {/* 技能列表 */}
-                    {expanded && (
-                      <div className="space-y-1.5 mt-1 ml-4">
-                        {cat.skills.map((skill) => (
-                          <SkillCard
-                            key={skill.name}
-                            skill={skill}
-                            onToggle={toggleSkill}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                </div>
+              ) : skills.length === 0 ? (
+                <div
+                  className="rounded-md border px-4 py-6 text-center"
+                  style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
+                >
+                  <Lightbulb className="mx-auto mb-2 h-5 w-5" style={{ color: 'oklch(0.65 0.02 50)' }} />
+                  <p className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>No skills installed yet.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {categories.map((cat) => {
+                    const expanded = expandedCategories.has(cat.key);
+                    return (
+                      <CategorySection
+                        key={cat.key}
+                        category={cat}
+                        expanded={expanded}
+                        onToggleExpand={() => toggleCategoryExpand(cat.key)}
+                        onToggleSkill={toggleSkill}
+                        onToggleCategory={toggleCategory}
+                        onUninstall={handleUninstall}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
 

@@ -126,6 +126,21 @@ export async function initDb(dbPath: string) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_events_status ON events(project_id, status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_events_node ON events(source_node_id);`);
 
+  // 工作流模板表（项目级）
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_templates (
+      template_id  TEXT PRIMARY KEY,
+      project_id   TEXT NOT NULL,
+      name         TEXT NOT NULL,
+      description  TEXT DEFAULT '',
+      category     TEXT DEFAULT '通用',
+      steps_json   TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_wf_project ON workflow_templates(project_id);`);
+
   return db;
 }
 
@@ -447,4 +462,102 @@ export async function createEventsBulk(db: any, items: CreateEventData[]): Promi
   });
   tx(items);
   return ids;
+}
+
+// ============================================================
+// 工作流模板 CRUD
+// ============================================================
+
+export interface WorkflowStep {
+  order: number;
+  title: string;
+  modelId?: string;
+  thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+  skills: string[];
+  prompt: string;
+  attachmentHint?: string;
+  attachments?: string[];
+}
+
+export interface WorkflowTemplate {
+  template_id: string;
+  project_id: string;
+  name: string;
+  description: string;
+  category: string;
+  steps: WorkflowStep[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateWorkflowTemplateData {
+  project_id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  steps: WorkflowStep[];
+}
+
+function _rowToTemplate(row: any): WorkflowTemplate {
+  return {
+    template_id: row.template_id,
+    project_id: row.project_id,
+    name: row.name,
+    description: row.description || '',
+    category: row.category || '通用',
+    steps: JSON.parse(row.steps_json || '[]'),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export async function createWorkflowTemplate(db: any, data: CreateWorkflowTemplateData): Promise<string> {
+  const template_id = _newId();
+  const now = _now();
+  db.prepare(`
+    INSERT INTO workflow_templates (template_id, project_id, name, description, category, steps_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    template_id,
+    data.project_id,
+    data.name,
+    data.description ?? '',
+    data.category ?? '通用',
+    JSON.stringify(data.steps),
+    now,
+    now,
+  );
+  return template_id;
+}
+
+export async function getWorkflowTemplate(db: any, templateId: string): Promise<WorkflowTemplate | null> {
+  const row = db.prepare(`SELECT * FROM workflow_templates WHERE template_id = ?`).get(templateId);
+  return row ? _rowToTemplate(row) : null;
+}
+
+export async function listWorkflowTemplates(db: any, projectId: string): Promise<WorkflowTemplate[]> {
+  const rows = db.prepare(`SELECT * FROM workflow_templates WHERE project_id = ? ORDER BY updated_at DESC`).all(projectId);
+  return rows.map(_rowToTemplate);
+}
+
+export async function updateWorkflowTemplate(db: any, templateId: string, data: Partial<CreateWorkflowTemplateData>): Promise<void> {
+  const setters: string[] = [];
+  const params: any[] = [];
+
+  if (data.name !== undefined) { setters.push('name = ?'); params.push(data.name); }
+  if (data.description !== undefined) { setters.push('description = ?'); params.push(data.description); }
+  if (data.category !== undefined) { setters.push('category = ?'); params.push(data.category); }
+  if (data.steps !== undefined) { setters.push('steps_json = ?'); params.push(JSON.stringify(data.steps)); }
+
+  if (setters.length === 0) return;
+
+  setters.push('updated_at = ?');
+  params.push(_now());
+  params.push(templateId);
+
+  db.prepare(`UPDATE workflow_templates SET ${setters.join(', ')} WHERE template_id = ?`).run(...params);
+}
+
+export async function deleteWorkflowTemplate(db: any, templateId: string): Promise<void> {
+  db.prepare(`DELETE FROM workflow_templates WHERE template_id = ?`).run(templateId);
 }

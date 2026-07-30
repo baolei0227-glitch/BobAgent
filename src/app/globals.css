@@ -75,6 +75,24 @@ body {
 
 /* ===== HtmlRenderer 全局样式 ===== */
 
+/* 文字选中高亮 */
+::selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+::-moz-selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+.html-renderer ::selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+.html-renderer ::-moz-selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+
 /* 批注标记 */
 .html-renderer mark.annotation {
   text-decoration: underline;
@@ -96,6 +114,33 @@ body {
   background: oklch(0.62 0.17 45 / 0.2);
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* 代码块容器 + 复制按钮 */
+.code-block-wrapper {
+  position: relative;
+}
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid rgba(0,0,0,0.1);
+  background: oklch(0.98 0.005 85);
+  color: oklch(0.45 0.02 50);
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  user-select: none;
+  z-index: 1;
+}
+.code-block-wrapper:hover .code-copy-btn {
+  opacity: 1;
+}
+.code-copy-btn:active {
+  background: oklch(0.92 0.01 80);
 }
 
 /* 代码块 */
@@ -128,15 +173,21 @@ body {
 }
 
 /* 表格 */
-.html-renderer table {
-  width: 100%;
-  border-collapse: collapse;
+.html-renderer .table-wrapper {
+  overflow-x: auto;
   margin: 12px 0;
+  border-radius: 6px;
+  border: 1px solid rgba(0,0,0,0.08);
+  -webkit-overflow-scrolling: touch;
+}
+.html-renderer .table-wrapper table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
   font-size: 12px;
   line-height: 1.6;
-  border: 1px solid rgba(0,0,0,0.08);
-  border-radius: 6px;
-  overflow: hidden;
+  margin: 0;
+  border: none;
 }
 .html-renderer table td,
 .html-renderer table th {
@@ -217,4 +268,20 @@ body {
 .html-renderer p {
   margin: 4px 0;
   line-height: 1.7;
+}
+
+/* 羊皮纸纹理 */
+.sticky-paper {
+  background:
+    radial-gradient(ellipse at 20% 80%, rgba(180,150,100,0.15) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(160,130,80,0.1) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(200,170,120,0.08) 0%, transparent 70%),
+    linear-gradient(180deg, rgba(180,150,100,0.12) 0%, transparent 8%, transparent 92%, rgba(160,130,80,0.1) 100%);
+}
+
+/* 允许节点对话框内文本选择 */
+.react-flow__node-aiChat,
+.react-flow__node-aiChat * {
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }

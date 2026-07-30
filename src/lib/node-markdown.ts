@@ -18,6 +18,10 @@ export interface NodeFrontmatter {
   model?: string;
   mood?: NodeMood;
   tags?: string[];
+  initial_prompt?: string;
+  thinking_level?: 'off' | 'low' | 'medium' | 'high';
+  attachment_hint?: string;
+  skills?: string[];
 }
 
 export interface ConversationAttachment {
@@ -290,6 +294,10 @@ export function serializeNode(node: NodeMarkdown): string {
     ...(node.frontmatter.model ? { model: node.frontmatter.model } : {}),
     ...(node.frontmatter.mood ? { mood: node.frontmatter.mood } : {}),
     ...(node.frontmatter.tags && node.frontmatter.tags.length > 0 ? { tags: node.frontmatter.tags } : {}),
+    ...(node.frontmatter.initial_prompt ? { initial_prompt: node.frontmatter.initial_prompt } : {}),
+    ...(node.frontmatter.thinking_level ? { thinking_level: node.frontmatter.thinking_level } : {}),
+    ...(node.frontmatter.attachment_hint ? { attachment_hint: node.frontmatter.attachment_hint } : {}),
+    ...(node.frontmatter.skills && node.frontmatter.skills.length > 0 ? { skills: node.frontmatter.skills } : {}),
   };
 
   // 对话记录
@@ -351,6 +359,20 @@ export function parseNodeMarkdown(mdString: string): NodeMarkdown {
   };
 }
 
+// ==================== 删除操作 ====================
+
+/** 删除指定索引的一轮问答，返回更新后的完整 .md 字符串 */
+export function removeConversation(mdString: string, roundIndex: number): string {
+  const node = parseNodeMarkdown(mdString);
+  if (roundIndex < 0 || roundIndex >= node.conversations.length) {
+    throw new Error(`roundIndex ${roundIndex} 超出范围 (0-${node.conversations.length - 1})`);
+  }
+  node.conversations.splice(roundIndex, 1);
+  node.frontmatter.updated_at = new Date().toISOString();
+  return serializeNode(node);
+}
+
+
 // ==================== 追加操作 ====================
 
 /** 追加一轮问答到 .md 字符串，返回更新后的完整 .md 字符串（保留历史） */
@@ -383,7 +405,16 @@ export function appendConversation(
 export function createNodeMarkdown(
   nodeId: string,
   title: string,
-  options?: { model?: string; sources?: string[]; mood?: NodeMood; tags?: string[] },
+  options?: {
+    model?: string;
+    sources?: string[];
+    mood?: NodeMood;
+    tags?: string[];
+    initial_prompt?: string;
+    thinking_level?: 'off' | 'low' | 'medium' | 'high';
+    attachment_hint?: string;
+    skills?: string[];
+  },
 ): string {
   const now = new Date().toISOString();
   const node: NodeMarkdown = {
@@ -396,6 +427,10 @@ export function createNodeMarkdown(
       ...(options?.model ? { model: options.model } : {}),
       ...(options?.mood ? { mood: options.mood } : {}),
       ...(options?.tags ? { tags: options.tags } : {}),
+      ...(options?.initial_prompt ? { initial_prompt: options.initial_prompt } : {}),
+      ...(options?.thinking_level ? { thinking_level: options.thinking_level } : {}),
+      ...(options?.attachment_hint ? { attachment_hint: options.attachment_hint } : {}),
+      ...(options?.skills ? { skills: options.skills } : {}),
     },
     summary: '',
     conversations: [],

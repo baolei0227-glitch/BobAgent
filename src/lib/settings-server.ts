@@ -8,6 +8,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { defaultSettings, type AppSettings } from './settings';
 import { resolveAppRoot } from './app-root';
+import { encryptSettings, decryptSettings, hasPlainSecrets } from './secrets';
 
 function getSettingsFilePath(): string {
   return join(resolveAppRoot(), '.settings.json');
@@ -30,7 +31,15 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
     }
     const raw = await fs.readFile(filePath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return { ...defaultSettings(), ...parsed, version: parsed.version ?? 1 };
+    const merged: AppSettings = { ...defaultSettings(), ...parsed, version: parsed.version ?? 1 };
+
+    // 解密敏感字段；如果有明文，顺便回写成加密版（透明迁移）
+    const decrypted = decryptSettings(merged);
+    if (hasPlainSecrets(parsed)) {
+      try {
+        await writeSettingsToFile(decrypted);
+      } catch { /* 回写失败不影响读取 */ }    }
+    return decrypted;
   } catch {
     return defaultSettings();
   }
@@ -39,9 +48,10 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
 export async function writeSettingsToFile(settings: AppSettings): Promise<void> {
   const APP_ROOT = resolveAppRoot();
   await fs.mkdir(APP_ROOT, { recursive: true });
+  const encrypted = encryptSettings(settings);
   await fs.writeFile(
     getSettingsFilePath(),
-    JSON.stringify(settings, null, 2),
+    JSON.stringify(encrypted, null, 2),
     'utf-8',
   );
 }

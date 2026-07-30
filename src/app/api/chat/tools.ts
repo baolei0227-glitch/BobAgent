@@ -16,6 +16,9 @@ import { join, resolve, relative, isAbsolute, sep, extname } from 'path';
 import { homedir } from 'os';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { initDb, listEventsInRange, listAllEvents, type EventRow } from '@/lib/db';
+import type { AppSettings, CustomToolDef } from '@/lib/settings';
+import { mcpManager } from '@/lib/mcp/manager';
+import type { McpToolInfo } from '@/lib/mcp/types';
 
 const execAsync = promisify(exec);
 
@@ -33,13 +36,62 @@ const PROJECTS_DIR = join(homedir(), 'BobAgent', 'projects');
 /** 所有可写根路径（沙箱 + 技能 + 项目） */
 const WRITABLE_ROOTS = [WORKSPACE, SKILLS_DIR, PROJECTS_DIR];
 
+/** 可读根路径（和可写相同，禁止 AI 直接读 ~/.ssh、~/Documents、settings.json 等敏感路径） */
+const READABLE_ROOTS = [WORKSPACE, SKILLS_DIR, PROJECTS_DIR];
+
 /** 确保可写目录存在 */
 try { require('fs').mkdirSync(SKILLS_DIR, { recursive: true }); } catch {}
 try { require('fs').mkdirSync(PROJECTS_DIR, { recursive: true }); } catch {}
 
+/** 工具审计日志路径：~/BobAgent/logs/tool-audit.log */
+const AUDIT_LOG_DIR = join(homedir(), 'BobAgent', 'logs');
+const AUDIT_LOG_PATH = join(AUDIT_LOG_DIR, 'tool-audit.log');
+try { require('fs').mkdirSync(AUDIT_LOG_DIR, { recursive: true }); } catch {}
+
+function auditLog(entry: unknown): void {
+  try {
+    const line = JSON.stringify({ t: new Date().toISOString(), ...(entry as Record<string, unknown>) }) + '\n';
+    require('fs').appendFileSync(AUDIT_LOG_PATH, line, 'utf-8');
+  } catch {}
+}
+
 /** 检查路径是否在可写范围内 */
 function isWritablePath(resolvedPath: string): boolean {
   return WRITABLE_ROOTS.some(root => resolvedPath.startsWith(root + sep) || resolvedPath === root);
+}
+
+/** 检查路径是否在可读范围内（AI 侧文件操作工具统一限制） */
+function isReadablePath(resolvedPath: string): boolean {
+  return READABLE_ROOTS.some(root => resolvedPath.startsWith(root + sep) || resolvedPath === root);
+}
+
+/** 危险命令模式：匹配即拦截（防止不可恢复的破坏性操作） */
+const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+  // 删根 / 删家目录 / 全盘递归删除
+  /\brm\s+(-[rfRvfi]{2,}|--recursive|--force)\s+(\/|~|\/\*|~\*|\/\.\*|~\/\.\*)\b/,
+  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+-[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*\s+-[a-zA-Z]*r[a-zA-Z]*|--[a-z-]*recursive[a-z-]*\s+--[a-z-]*force[a-z-]*)\s+(\/|~|\/home|\/Users|\/System|\/Library|\/private\/etc)\b/,
+  /\brm\s+-[a-zA-Z]*[rfR][a-zA-Z]*\s+\/\s*$/,
+  // 覆写磁盘 / 原始设备
+  /\bdd\s+(if=|of=)\/dev\/(sd|hd|nvme|disk|rdisk|mem|kmem|random|urandom)\b/,
+  // 格式化 / 擦除磁盘
+  /\b(mkfs|newfs|fdisk|diskutil\s+erase|wipefs|blkdiscard|shred)\b/,
+  // 关闭系统 / 杀所有进程
+  /\b(shutdown|halt|poweroff|reboot|killall\s+(-[a-zA-Z]+\s+)?(init|launchd|systemd|Finder|Dock))\b/,
+  // 直接 curl|bash 下载即执行（常见供应链攻击向量）
+  /\b(curl|wget)\s+[^;&|`$()]*\|\s*(bash|sh|zsh|sudo|su)\b/,
+  /\b(curl|wget)\s+[^;&|`$()]*>\s*\/tmp\/[A-Za-z0-9_.-]+\.(sh|py|rb|js)\s*;\s*(bash|sh|zsh|python|python3|node)\s+\/tmp\//,
+  // 注入 sudo 提权（本地无 sudo 密码提示流程，直接失败即可）
+  /\bsudo\s+(-S\s+)?(su|rm|chmod|chown|mount|umount|visudo|apt|yum|dnf|brew)\b/,
+];
+
+/** 对命令字符串做危险检查，返回 null=安全，字符串=拦截原因 */
+function checkDangerousCommand(cmd: string): string | null {
+  for (const re of DANGEROUS_COMMAND_PATTERNS) {
+    if (re.test(cmd)) {
+      return `匹配危险模式 ${re.toString()}`;
+    }
+  }
+  return null;
 }
 
 // ============================================================
@@ -106,6 +158,10 @@ class ToolRegistry {
     for (const t of tools) this.register(t);
   }
 
+  unregister(name: string): boolean {
+    return this._tools.delete(name);
+  }
+
   get(name: string): Tool | undefined {
     return this._tools.get(name);
   }
@@ -132,6 +188,70 @@ class ToolRegistry {
   count(): number {
     return this._tools.size;
   }
+}
+
+/** 视觉模型匹配规则：模型 ID 包含这些关键词的视为支持视觉 */
+const VISION_KEYWORDS = ['vl', 'vision', '-4o', '4o-', 'gemini', 'claude', 'glm-4v', 'glm-4-plus', 'doubao-vision'];
+
+/** 三级视觉模型解析：主模型 → 辅助模型 → 从聊天模型中自动匹配已安装的支持视觉的模型 */
+function resolveVisionConfig(settings: AppSettings): { model: string; apiKey: string; baseUrl?: string } | null {
+  // 第1级：主视觉模型（模型+Key 都配置了）
+  if (settings.vision.defaultModel && settings.vision.apiKey) {
+    return {
+      model: settings.vision.defaultModel,
+      apiKey: settings.vision.apiKey,
+      baseUrl: settings.vision.baseUrl || undefined,
+    };
+  }
+  // 第1.5级：视觉 Key 已配置但模型未指定 → 从聊天模型中匹配视觉模型名，搭配视觉 Key 使用
+  if (settings.vision.apiKey && !settings.vision.defaultModel) {
+    for (const provider of settings.providers) {
+      if (!provider.selectedModels?.length) continue;
+      const visionModel = provider.selectedModels.find(m =>
+        VISION_KEYWORDS.some(kw => m.modelId.toLowerCase().includes(kw))
+      );
+      if (visionModel) {
+        return {
+          model: visionModel.modelId,
+          apiKey: settings.vision.apiKey,
+          baseUrl: settings.vision.baseUrl || undefined,
+        };
+      }
+    }
+  }
+  // 第2级：辅助视觉模型
+  if (settings.vision.auxiliaryModel && settings.vision.auxiliaryApiKey) {
+    return {
+      model: settings.vision.auxiliaryModel,
+      apiKey: settings.vision.auxiliaryApiKey,
+      baseUrl: settings.vision.auxiliaryBaseUrl || undefined,
+    };
+  }
+  // 第3级：从聊天模型的已安装模型中自动匹配支持视觉的模型
+  for (const provider of settings.providers) {
+    if (!provider.apiKey?.trim() || !provider.selectedModels?.length) continue;
+    // 在用户勾选的模型中找支持视觉的
+    const visionModel = provider.selectedModels.find(m =>
+      VISION_KEYWORDS.some(kw => m.modelId.toLowerCase().includes(kw))
+    );
+    if (visionModel) {
+      const baseUrl = getProviderBaseUrl(provider.type);
+      return { model: visionModel.modelId, apiKey: provider.apiKey, baseUrl: baseUrl || undefined };
+    }
+  }
+  return null;
+}
+
+function getProviderBaseUrl(type: string): string {
+  const bases: Record<string, string> = {
+    qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    doubao: 'https://ark.cn-beijing.volces.com/api/v3',
+    glm: 'https://open.bigmodel.cn/api/paas/v4',
+    deepseek: 'https://api.deepseek.com/v1',
+    openai: 'https://api.openai.com/v1',
+    moonshot: 'https://api.moonshot.cn/v1',
+  };
+  return bases[type] || '';
 }
 
 /** read_todo 工具 — 读取 WANTED 待办记录 */
@@ -299,6 +419,11 @@ async function toolReadFile(args: Record<string, unknown>): Promise<string> {
 
   try {
     const filePath = resolvePath(path);
+    if (!isReadablePath(filePath)) {
+      auditLog({ tool: 'read_file', blocked: true, reason: 'readable-path', path, resolved: filePath });
+      return `Error: 路径 "${path}" 不在可读范围内。允许读取：~/BobAgent/sandbox/、~/BobAgent/skills/、~/BobAgent/projects/`;
+    }
+    auditLog({ tool: 'read_file', path, resolved: filePath });
     const content = await readFile(filePath, 'utf-8');
     return truncate(content, 8000);
   } catch (e) {
@@ -311,7 +436,14 @@ async function toolReadFile(args: Record<string, unknown>): Promise<string> {
 
 /** 列出目录内容 */
 async function toolListDirectory(args: Record<string, unknown>): Promise<string> {
-  const dirPath = resolvePath((args.path as string) || '.');
+  const inputPath = (args.path as string) || '.';
+  const dirPath = resolvePath(inputPath);
+
+  if (!isReadablePath(dirPath)) {
+    auditLog({ tool: 'list_directory', blocked: true, reason: 'readable-path', path: inputPath, resolved: dirPath });
+    return `Error: 路径 "${inputPath}" 不在可读范围内。允许读取：~/BobAgent/sandbox/、~/BobAgent/skills/、~/BobAgent/projects/`;
+  }
+  auditLog({ tool: 'list_directory', path: inputPath, resolved: dirPath });
 
   try {
     const entries = await readdir(dirPath, { withFileTypes: true });
@@ -349,7 +481,14 @@ async function toolSearchFiles(args: Record<string, unknown>): Promise<string> {
   const pattern = args.pattern as string;
   if (!pattern) return 'Error: pattern required';
 
-  const searchDir = resolvePath((args.path as string) || '.');
+  const inputPath = (args.path as string) || '.';
+  const searchDir = resolvePath(inputPath);
+  if (!isReadablePath(searchDir)) {
+    auditLog({ tool: 'search_files', blocked: true, reason: 'readable-path', path: inputPath, resolved: searchDir, pattern });
+    return `Error: 路径 "${inputPath}" 不在可读范围内。允许读取：~/BobAgent/sandbox/、~/BobAgent/skills/、~/BobAgent/projects/`;
+  }
+  auditLog({ tool: 'search_files', path: inputPath, resolved: searchDir, pattern });
+
   const maxResults = 50;
   const maxDepth = 8;
   const results: string[] = [];
@@ -404,6 +543,14 @@ async function toolRunCommand(args: Record<string, unknown>): Promise<string> {
   const cmd = args.cmd as string;
   if (!cmd) return 'Error: cmd required';
 
+  // 危险命令黑名单拦截
+  const danger = checkDangerousCommand(cmd);
+  if (danger) {
+    auditLog({ tool: 'run_command', blocked: true, reason: 'dangerous', reasonDetail: danger, cmd: truncate(cmd, 500) });
+    return `BLOCKED: 命令已拒绝（${danger}）。\n如果这是合法操作，请在终端手动执行，或调整脚本降低危险级别。`;
+  }
+  auditLog({ tool: 'run_command', cmd: truncate(cmd, 500) });
+
   const timeout = 30_000;
 
   try {
@@ -442,6 +589,16 @@ async function toolExecuteScript(args: Record<string, unknown>): Promise<string>
   const language = (args.language as string) || 'python';
   const script = args.script as string;
   if (!script) return 'Error: script content is required';
+
+  // Shell 脚本也做危险命令扫描（shell 内部可能嵌套 rm -rf 等）
+  if (language === 'bash' || language === 'shell' || language === 'sh') {
+    const danger = checkDangerousCommand(script);
+    if (danger) {
+      auditLog({ tool: 'execute_script', blocked: true, reason: 'dangerous', reasonDetail: danger, language, script: truncate(script, 500) });
+      return `BLOCKED: Shell 脚本中检测到危险模式（${danger}），已拒绝执行。`;
+    }
+  }
+  auditLog({ tool: 'execute_script', language, scriptBytes: script.length });
 
   // 选择解释器和文件扩展名
   const isPython = language === 'python' || language === 'py';
@@ -774,7 +931,16 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
     const { getCurrentProject, buildVisionModelConfig } = await import('@/lib/project/project-manager');
     const { readSettingsFromFile } = await import('@/lib/settings-server');
     const project = await getCurrentProject();
-    const filePath = join(project.path, path);
+    // 防 ../ 穿越：resolve 后必须仍在 project.path 内
+    const projectRoot = resolve(project.path);
+    const filePath = resolve(join(projectRoot, path));
+    const withinProject =
+      filePath === projectRoot || filePath.startsWith(projectRoot + sep);
+    if (!withinProject) {
+      auditLog({ tool: 'read_attachment', blocked: true, reason: 'path-traversal', path, project: projectRoot, resolved: filePath });
+      return `Error: 附件路径 "${path}" 越出项目目录，拒绝访问。`;
+    }
+    auditLog({ tool: 'read_attachment', path, project: projectRoot, resolved: filePath });
     const ext = extname(filePath).toLowerCase();
 
     const textExts = ['.txt', '.md', '.markdown', '.json', '.csv', '.xml', '.html', '.css', '.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.yaml', '.yml', '.ini', '.conf', '.log'];
@@ -840,17 +1006,32 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
         }
 
         // 扫描件：多级 OCR 降级
+        // 注意：不依赖 pageCount 来判断是否需要 OCR，因为提取器在某些情况下可能返回 pageCount=0
+        // 只要两种文本提取方式都失败（+文本只有少量或没有），就尝试 OCR
         const scannedPages = pyResult.pageCount || fallback.pageCount;
+        const needsOcr = pyResult.text.length <= 20 && fallback.text.length <= 20;
         let ocrLastError = ''; // 记录 OCR 失败原因，用于最终错误信息
 
-        if (scannedPages > 0) {
+        if (needsOcr) {
           const settings = await readSettingsFromFile();
-          const visionModel = settings.vision.defaultModel;
-          const visionApiKey = settings.vision.apiKey;
+          const visionSettingsSummary = {
+            defaultModel: settings.vision?.defaultModel || '(空)',
+            hasApiKey: !!settings.vision?.apiKey,
+            apiKeyLen: settings.vision?.apiKey?.length || 0,
+            baseUrl: settings.vision?.baseUrl || '(空)',
+            auxModel: settings.vision?.auxiliaryModel || '(空)',
+            hasAuxKey: !!settings.vision?.auxiliaryApiKey,
+            providers: settings.providers?.length || 0,
+          };
 
-          if (!visionModel || !visionApiKey) {
-            ocrLastError = '视觉模型未配置（请在设置中配置视觉模型的 API Key 和模型）';
+          // 解析视觉模型配置：主模型 → 辅助模型 → 从聊天模型中自动匹配
+          const visionCfg = resolveVisionConfig(settings);
+
+          if (!visionCfg) {
+            const detail = JSON.stringify(visionSettingsSummary, null, 2);
+            ocrLastError = `视觉模型未配置。当前设置状态:\n${detail}\n\n请确认已在设置 → Vision Model 中填写 API Key 和模型。`;
           } else {
+            const { model: visionModel, apiKey: visionApiKey, baseUrl: visionBaseUrl } = visionCfg;
             // 第1级：高质量多页渲染 + 视觉模型 OCR
             let imgResult: { success: boolean; images: string[]; totalPages: number; rendered: number; dpi: number; tmpDir: string } | null = null;
 
@@ -863,7 +1044,7 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
               imgResult = await renderPdfToImages(filePath, 200, 50);
 
               if (imgResult.success && imgResult.images.length > 0) {
-                const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, settings.vision.baseUrl || undefined);
+                const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, visionBaseUrl);
                 const { parseImage } = await import('@/lib/parse/image-parser');
 
                 // 并行逐页 OCR（并发上限 3，避免 API 限流）
@@ -941,7 +1122,7 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
 
               await execAsync(`sips -s format png --resampleWidth 1654 "${filePath}" --out "${tmpPng}"`, { timeout: 30000 });
 
-              const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, settings.vision.baseUrl || undefined);
+              const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, visionBaseUrl);
               const { parseImage } = await import('@/lib/parse/image-parser');
 
               const pageResult = await parseImage(
@@ -981,17 +1162,20 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
     if (isImageFile) {
       const fileStat = await stat(filePath);
 
-      // 检查是否配置了视觉模型（从全局设置读取）
+      // 三级视觉模型解析：主模型 → 辅助模型 → 从聊天模型中自动匹配
       const settings = await readSettingsFromFile();
-      const visionModel = settings.vision.defaultModel;
-      const visionApiKey = settings.vision.apiKey;
+      const visionCfg = resolveVisionConfig(settings);
 
-      if (!visionModel || !visionApiKey) {
-        return `Attachment: ${path}\nType: Image (${ext})\nSize: ${formatSize(fileStat.size)}\n\nNote: No vision model configured. Please configure a vision model (API Key and model) in project settings.`;
+      if (!visionCfg) {
+        return `Attachment: ${path}\nType: Image (${ext})\nSize: ${formatSize(fileStat.size)}\n\nNote: No vision model configured. Please configure a vision model (API Key and model) in project settings, or ensure at least one chat model with vision support is installed.`;
       }
 
+      const visionModel = visionCfg.model;
+      const visionApiKey = visionCfg.apiKey;
+      const visionBaseUrl = visionCfg.baseUrl;
+
       try {
-        const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, settings.vision.baseUrl || undefined);
+        const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, visionBaseUrl);
         const { parseImage } = await import('@/lib/parse/image-parser');
 
         const result = await parseImage(
@@ -1599,11 +1783,122 @@ const toolDefs: Tool[] = [
 const registry = new ToolRegistry();
 registry.registerAll(toolDefs);
 
+/** 记录内置工具名称，用于区分自定义工具 */
+const builtInToolNames = new Set(toolDefs.map((t) => t.name));
+
+/** 已注册的自定义工具名称集合 */
+let registeredCustomNames = new Set<string>();
+
+/**
+ * 动态注册自定义工具到注册表。
+ * 每次调用会先清除上一次注册的自定义工具，再注册新的。
+ * 在 route.ts 每次请求前调用。
+ */
+export function registerCustomTools(customTools: CustomToolDef[]): void {
+  // 清除上一次的自定义工具
+  for (const name of registeredCustomNames) {
+    registry.unregister(name);
+  }
+  registeredCustomNames = new Set();
+
+  // 注册新的自定义工具
+  for (const ct of customTools) {
+    if (!ct.enabled || !ct.name || !ct.endpoint) continue;
+    // 不允许覆盖内置工具
+    if (builtInToolNames.has(ct.name)) continue;
+
+    const tool: Tool = {
+      name: ct.name,
+      description: ct.description || 'Custom tool',
+      parameters: ct.parameters || { type: 'object', properties: {}, required: [] },
+      category: '网络',
+      maxOutput: ct.maxOutput || 5000,
+      timeoutMs: ct.timeoutMs || 30000,
+      execute: async (args: Record<string, unknown>): Promise<string> => {
+        const controller = new AbortController();
+        const timeout = ct.timeoutMs || 30000;
+        const timer = setTimeout(() => controller.abort(), timeout);
+        try {
+          const method = ct.method || 'POST';
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            ...ct.headers,
+          };
+          const res = await fetch(ct.endpoint, {
+            method,
+            headers,
+            body: method === 'POST' ? JSON.stringify(args) : undefined,
+            signal: controller.signal,
+          });
+          const text = await res.text();
+          if (!res.ok) {
+            return `HTTP ${res.status}: ${text.slice(0, 2000)}`;
+          }
+          return text;
+        } catch (e) {
+          if (e instanceof Error && e.name === 'AbortError') {
+            return `Error: Request timed out after ${timeout}ms`;
+          }
+          return `Error: ${e instanceof Error ? e.message : String(e)}`;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    };
+    registry.register(tool);
+    registeredCustomNames.add(ct.name);
+  }
+}
+
+/** 已注册的 MCP 工具名称集合 */
+let registeredMcpNames = new Set<string>();
+
+/**
+ * 注册 MCP 工具到注册表。
+ * 从 mcpManager 发现的工具动态构造 Tool 对象。
+ */
+export async function registerMcpTools(): Promise<number> {
+  // 清除上一次的 MCP 工具
+  for (const name of registeredMcpNames) {
+    registry.unregister(name);
+  }
+  registeredMcpNames = new Set();
+
+  if (!mcpManager.hasConnections()) return 0;
+
+  const mcpTools = await mcpManager.discoverTools();
+
+  for (const mcpTool of mcpTools) {
+    // 跳过与内置工具同名的
+    if (builtInToolNames.has(mcpTool.fullName)) continue;
+
+    const tool: Tool = {
+      name: mcpTool.fullName,
+      description: `[MCP: ${mcpTool.serverName}] ${mcpTool.description}`,
+      parameters: mcpTool.inputSchema || { type: 'object', properties: {}, required: [] },
+      category: '网络',
+      maxOutput: 10000,
+      execute: async (args: Record<string, unknown>): Promise<string> => {
+        return mcpManager.callTool(mcpTool.fullName, args);
+      },
+    };
+    registry.register(tool);
+    registeredMcpNames.add(mcpTool.fullName);
+  }
+
+  return mcpTools.length;
+}
+
 // ============================================================
 // 导出接口（保持与 route.ts 兼容）
 // ============================================================
 
-/** OpenAI API 格式的工具列表 */
+/** OpenAI API 格式的工具列表（内置 + 已注册的自定义/MCP 工具） */
+export function getToolDefinitions(): ToolDefinition[] {
+  return registry.toApiFormat();
+}
+
+/** 仅内置工具的静态列表（向后兼容） */
 export const TOOL_DEFINITIONS: ToolDefinition[] = registry.toApiFormat();
 
 /**

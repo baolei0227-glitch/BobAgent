@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   createNodeMarkdown,
   appendConversation,
+  removeConversation,
   parseNodeMarkdown,
   writeNodeFile,
   updateNodeFile,
@@ -50,11 +51,22 @@ function stripMoodAndThink(content: string): { cleanAnswer: string; moodText: st
     clean = clean.replace(/<mood>[\s\S]*$/i, '');
   }
 
-  // 移除 think 标签
+  // 移除完整的 think 标签
   clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  // 处理未闭合的 <think> 标签（使用非贪婪 + 行首限制，避免误伤正文内容）
   clean = clean.replace(/<think>[\s\S]*$/i, '');
 
-  return { cleanAnswer: clean.trim(), moodText };
+  const result = clean.trim();
+  // 安全兜底：如果结果为空但原文有实质内容，可能是标签未闭合导致全部被清空
+  if (!result && content.length > 20) {
+    const fallback = content
+      .replace(/<mood>[\s\S]*?<\/mood>/gi, '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .trim();
+    return { cleanAnswer: fallback || content.trim(), moodText };
+  }
+
+  return { cleanAnswer: result, moodText };
 }
 
 /** 将 mood 文本解析为 NodeMood 对象 */
@@ -67,7 +79,9 @@ function parseMoodTextToObject(moodText: string): NodeMood | undefined {
     reflections: [],
     will: [],
   };
+  const poolNames = ['vibe', 'sparks', 'reflections', 'will'] as const;
 
+  // 方式1: 按 "Vibe:" / "Sparks:" 标签分割
   const sections = moodText.split(/(?:^|\n)\s*(?:Vibe|Sparks|Reflections|Will)\s*[:：]\s*/i);
   const labels = moodText.match(/(?:Vibe|Sparks|Reflections|Will)\s*[:：]/gi) || [];
 
@@ -78,6 +92,20 @@ function parseMoodTextToObject(moodText: string): NodeMood | undefined {
         .split('\n')
         .map(s => s.replace(/^[-\u2022\u00b7]\s*/, '').trim())
         .filter(s => s.length > 0);
+    }
+  }
+
+  // 方式2: 如果方式1失败，尝试 <vibe>...</vibe> XML 标签格式
+  if (Object.values(pools).every(arr => arr.length === 0)) {
+    for (const name of poolNames) {
+      const tagRegex = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`, 'i');
+      const match = moodText.match(tagRegex);
+      if (match) {
+        pools[name] = match[1]
+          .split('\n')
+          .map(s => s.replace(/^[-\u2022\u00b7]\s*/, '').trim())
+          .filter(s => s.length > 0);
+      }
     }
   }
 
@@ -135,6 +163,8 @@ export async function POST(request: NextRequest) {
       }
       // 后端兜底：分离 mood 和 think 标签
       const { cleanAnswer, moodText } = stripMoodAndThink(answer);
+      console.log('[nodes:append] 接收 answer 长度:', (answer as string).length, '前200字:', (answer as string).slice(0, 200));
+      console.log('[nodes:append] strip 后 cleanAnswer 长度:', cleanAnswer.length, '前200字:', cleanAnswer.slice(0, 200));
       const parsedMood = moodText ? parseMoodTextToObject(moodText) : undefined;
       const finalMood = mood || parsedMood;
       const content = await fs.readFile(filePath, 'utf-8');
@@ -142,6 +172,22 @@ export async function POST(request: NextRequest) {
         questionTime, answerTime, mood: finalMood, summary,
         questionAttachments: question_attachments,
       });
+      await updateNodeFile(filePath, updatedContent);
+      const parsed = parseNodeMarkdown(updatedContent);
+      return NextResponse.json({ success: true, node_id, conversations_count: parsed.conversations.length, updated_at: parsed.frontmatter.updated_at });
+    }
+
+    if (action === 'remove_round') {
+      const { node_id, round_index } = body;
+      if (!node_id || round_index === undefined) {
+        return NextResponse.json({ error: 'node_id, round_index are required' }, { status: 400 });
+      }
+      const filePath = await findNodeFileById(node_id, project.path);
+      if (!filePath) {
+        return NextResponse.json({ error: '节点文件不存在: ' + node_id }, { status: 404 });
+      }
+      const content = await fs.readFile(filePath, 'utf-8');
+      const updatedContent = removeConversation(content, Number(round_index));
       await updateNodeFile(filePath, updatedContent);
       const parsed = parseNodeMarkdown(updatedContent);
       return NextResponse.json({ success: true, node_id, conversations_count: parsed.conversations.length, updated_at: parsed.frontmatter.updated_at });
@@ -225,6 +271,24 @@ export async function POST(request: NextRequest) {
       const content = await fs.readFile(filePath, 'utf-8');
       const node = parseNodeMarkdown(content);
       node.stickies.push(sticky);
+      node.frontmatter.updated_at = new Date().toISOString();
+      const updatedContent = serializeNode(node);
+      await updateNodeFile(filePath, updatedContent);
+      return NextResponse.json({ success: true, node_id, stickies_count: node.stickies.length });
+    }
+
+    if (action === 'set_stickies') {
+      const { node_id, stickies } = body;
+      if (!node_id || !Array.isArray(stickies)) {
+        return NextResponse.json({ error: 'node_id, stickies array are required' }, { status: 400 });
+      }
+      const filePath = await findNodeFileById(node_id, project.path);
+      if (!filePath) {
+        return NextResponse.json({ error: '节点文件不存在: ' + node_id }, { status: 404 });
+      }
+      const content = await fs.readFile(filePath, 'utf-8');
+      const node = parseNodeMarkdown(content);
+      node.stickies = stickies.filter((s: unknown) => typeof s === 'string' && s.trim().length > 0);
       node.frontmatter.updated_at = new Date().toISOString();
       const updatedContent = serializeNode(node);
       await updateNodeFile(filePath, updatedContent);

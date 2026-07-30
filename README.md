@@ -1,363 +1,166 @@
-# projects
+# BobAgent
 
-这是一个基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 的全栈应用项目，由扣子编程 CLI 创建。
+AI 知识画布桌面应用。基于 [Next.js 16](https://nextjs.org) + [React Flow](https://reactflow.dev) + [shadcn/ui](https://ui.shadcn.com) 构建。
+
+## 核心概念
+
+BobAgent 是一个**无限画布 + AI 对话节点**系统：
+- 在可无限缩放、平移的画布上创建 AI 对话节点
+- 节点之间用连线建立知识网络，上游节点的摘要自动注入下游上下文
+- 每个节点独立配置 AI 模型、思考深度、技能
+- 所有数据本地存储（`~/BobAgent/`），支持多项目管理
 
 ## 快速开始
+
+### 安装依赖
+
+```bash
+pnpm install
+```
 
 ### 启动开发服务器
 
 ```bash
-coze dev
+pnpm dev
 ```
 
-启动后，在浏览器中打开 [http://localhost:5000](http://localhost:5000) 查看应用。
-
-开发服务器支持热更新，修改代码后页面会自动刷新。
+启动后在浏览器中打开 [http://localhost:3000](http://localhost:3000)。
 
 ### 构建生产版本
 
 ```bash
-coze build
+pnpm build
 ```
 
-### 启动生产服务器
+### 构建 Electron 桌面应用
 
 ```bash
-coze start
+cd scripts && bash build-electron.sh
 ```
 
 ## 项目结构
 
 ```
 src/
-├── app/                      # Next.js App Router 目录
-│   ├── layout.tsx           # 根布局组件
-│   ├── page.tsx             # 首页
-│   ├── globals.css          # 全局样式（包含 shadcn 主题变量）
-│   └── [route]/             # 其他路由页面
-├── components/              # React 组件目录
-│   └── ui/                  # shadcn/ui 基础组件（优先使用）
-│       ├── button.tsx
-│       ├── card.tsx
-│       └── ...
-├── lib/                     # 工具函数库
-│   └── utils.ts            # cn() 等工具函数
-└── hooks/                   # 自定义 React Hooks（可选）
-
-server/
-├── index.ts                 # 自定义服务器入口
-├── tsconfig.json           # Server TypeScript 配置
-└── dist/                    # 编译输出目录（自动生成）
+├── app/                        # Next.js App Router
+│   ├── api/                    # API 路由
+│   │   ├── chat/              # AI 对话接口
+│   │   ├── nodes/             # 节点 CRUD
+│   │   ├── edges/             # 连线 CRUD
+│   │   ├── projects/          # 项目管理（含归档）
+│   │   ├── skills/            # 技能安装/管理
+│   │   ├── text/              # 文本编辑/预设
+│   │   ├── calendar/          # 日历事件
+│   │   ├── materials/         # 素材文件管理
+│   │   ├── attachments/       # 附件上传/解析
+│   │   └── workflow/          # 工作流模板
+│   ├── globals.css            # 全局样式
+│   └── layout.tsx             # 根布局
+├── components/
+│   ├── canvas/                # 画布核心组件
+│   │   ├── CanvasFlow.tsx     # 主画布（React Flow）
+│   │   ├── AiChatNode.tsx     # AI 对话节点
+│   │   ├── HtmlReader.tsx     # Markdown 阅读器
+│   │   ├── HtmlRenderer.tsx   # HTML/Markdown 渲染器
+│   │   ├── Sidebar.tsx        # 侧边栏（项目/文件/WANTED）
+│   │   ├── CalendarPanel.tsx  # 日历面板
+│   │   ├── TaskPanel.tsx      # WANTED 任务面板
+│   │   ├── SettingsModal.tsx  # 设置面板
+│   │   ├── SkillManagerModal.tsx # 技能管理器
+│   │   ├── ProjectArchiveDialog.tsx # 项目归档确认
+│   │   ├── TextEditPopup.tsx  # 文本编辑弹窗
+│   │   ├── TextSelectionActions.tsx # 选中文字按钮组
+│   │   ├── TemplateEditor.tsx # 工作流模板编辑器
+│   │   └── TemplateApplyDialog.tsx # 模板应用对话框
+│   └── ui/                    # shadcn/ui 基础组件
+├── lib/                       # 核心库
+│   ├── db/                    # SQLite 数据库操作
+│   ├── node/                  # 节点工具
+│   │   └── context-assembler.ts # 上游上下文注入
+│   ├── edge/                  # 连线工具
+│   │   └── cycle-detector.ts  # 循环检测
+│   ├── mcp/                   # MCP 协议支持
+│   │   ├── manager.ts         # MCP 客户端管理
+│   │   └── types.ts           # MCP 类型定义（含7个预置）
+│   ├── parse/                 # 附件解析
+│   │   ├── vision-adapter.ts  # 视觉模型适配
+│   │   ├── image-parser.ts    # 图片解析
+│   │   └── cache.ts           # 解析缓存
+│   ├── project/               # 项目管理
+│   │   └── project-manager.ts # 项目 CRUD + 归档
+│   ├── skills/                # 技能系统
+│   ├── node-markdown.ts       # .md 文件读写
+│   ├── settings.ts            # 设置管理
+│   └── types.ts               # 核心类型定义
+├── hooks/                     # React Hooks
+├── electron/                  # Electron 主进程
+└── scripts/                   # 构建/发布脚本
 ```
 
-## 核心开发规范
-
-### 1. 组件开发
-
-**优先使用 shadcn/ui 基础组件**
-
-本项目已预装完整的 shadcn/ui 组件库，位于 `src/components/ui/` 目录。开发时应优先使用这些组件作为基础：
-
-```tsx
-// ✅ 推荐：使用 shadcn 基础组件
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-
-export default function MyComponent() {
-  return (
-    <Card>
-      <CardHeader>标题</CardHeader>
-      <CardContent>
-        <Input placeholder="输入内容" />
-        <Button>提交</Button>
-      </CardContent>
-    </Card>
-  );
-}
-```
-
-**可用的 shadcn 组件清单**
-
-- 表单：`button`, `input`, `textarea`, `select`, `checkbox`, `radio-group`, `switch`, `slider`
-- 布局：`card`, `separator`, `tabs`, `accordion`, `collapsible`, `scroll-area`
-- 反馈：`alert`, `alert-dialog`, `dialog`, `toast`, `sonner`, `progress`
-- 导航：`dropdown-menu`, `menubar`, `navigation-menu`, `context-menu`
-- 数据展示：`table`, `avatar`, `badge`, `hover-card`, `tooltip`, `popover`
-- 其他：`calendar`, `command`, `carousel`, `resizable`, `sidebar`
-
-详见 `src/components/ui/` 目录下的具体组件实现。
-
-### 2. 路由开发
-
-Next.js 使用文件系统路由，在 `src/app/` 目录下创建文件夹即可添加路由：
-
-```bash
-# 创建新路由 /about
-src/app/about/page.tsx
-
-# 创建动态路由 /posts/[id]
-src/app/posts/[id]/page.tsx
-
-# 创建路由组（不影响 URL）
-src/app/(marketing)/about/page.tsx
-
-# 创建 API 路由
-src/app/api/users/route.ts
-```
-
-**页面组件示例**
-
-```tsx
-// src/app/about/page.tsx
-import { Button } from '@/components/ui/button';
-
-export const metadata = {
-  title: '关于我们',
-  description: '关于页面描述',
-};
-
-export default function AboutPage() {
-  return (
-    <div>
-      <h1>关于我们</h1>
-      <Button>了解更多</Button>
-    </div>
-  );
-}
-```
-
-**动态路由示例**
-
-```tsx
-// src/app/posts/[id]/page.tsx
-export default async function PostPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
-
-  return <div>文章 ID: {id}</div>;
-}
-```
-
-**API 路由示例**
-
-```tsx
-// src/app/api/users/route.ts
-import { NextResponse } from 'next/server';
-
-export async function GET() {
-  return NextResponse.json({ users: [] });
-}
-
-export async function POST(request: Request) {
-  const body = await request.json();
-  return NextResponse.json({ success: true });
-}
-```
-
-### 3. 依赖管理
-
-**必须使用 pnpm 管理依赖**
-
-```bash
-# ✅ 安装依赖
-pnpm install
-
-# ✅ 添加新依赖
-pnpm add package-name
-
-# ✅ 添加开发依赖
-pnpm add -D package-name
-
-# ❌ 禁止使用 npm 或 yarn
-# npm install  # 错误！
-# yarn add     # 错误！
-```
-
-项目已配置 `preinstall` 脚本，使用其他包管理器会报错。
-
-### 4. 样式开发
-
-**使用 Tailwind CSS v4**
-
-本项目使用 Tailwind CSS v4 进行样式开发，并已配置 shadcn 主题变量。
-
-```tsx
-// 使用 Tailwind 类名
-<div className="flex items-center gap-4 p-4 rounded-lg bg-background">
-  <Button className="bg-primary text-primary-foreground">
-    主要按钮
-  </Button>
-</div>
-
-// 使用 cn() 工具函数合并类名
-import { cn } from '@/lib/utils';
-
-<div className={cn(
-  "base-class",
-  condition && "conditional-class",
-  className
-)}>
-  内容
-</div>
-```
-
-**主题变量**
-
-主题变量定义在 `src/app/globals.css` 中，支持亮色/暗色模式：
-
-- `--background`, `--foreground`
-- `--primary`, `--primary-foreground`
-- `--secondary`, `--secondary-foreground`
-- `--muted`, `--muted-foreground`
-- `--accent`, `--accent-foreground`
-- `--destructive`, `--destructive-foreground`
-- `--border`, `--input`, `--ring`
-
-### 5. 表单开发
-
-推荐使用 `react-hook-form` + `zod` 进行表单开发：
-
-```tsx
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-
-const formSchema = z.object({
-  username: z.string().min(2, '用户名至少 2 个字符'),
-  email: z.string().email('请输入有效的邮箱'),
-});
-
-export default function MyForm() {
-  const form = useForm({
-    resolver: zodResolver(formSchema),
-    defaultValues: { username: '', email: '' },
-  });
-
-  const onSubmit = (data: z.infer<typeof formSchema>) => {
-    console.log(data);
-  };
-
-  return (
-    <form onSubmit={form.handleSubmit(onSubmit)}>
-      <Input {...form.register('username')} />
-      <Input {...form.register('email')} />
-      <Button type="submit">提交</Button>
-    </form>
-  );
-}
-```
-
-### 6. 数据获取
-
-**服务端组件（推荐）**
-
-```tsx
-// src/app/posts/page.tsx
-async function getPosts() {
-  const res = await fetch('https://api.example.com/posts', {
-    cache: 'no-store', // 或 'force-cache'
-  });
-  return res.json();
-}
-
-export default async function PostsPage() {
-  const posts = await getPosts();
-
-  return (
-    <div>
-      {posts.map(post => (
-        <div key={post.id}>{post.title}</div>
-      ))}
-    </div>
-  );
-}
-```
-
-**客户端组件**
-
-```tsx
-'use client';
-
-import { useEffect, useState } from 'react';
-
-export default function ClientComponent() {
-  const [data, setData] = useState(null);
-
-  useEffect(() => {
-    fetch('/api/data')
-      .then(res => res.json())
-      .then(setData);
-  }, []);
-
-  return <div>{JSON.stringify(data)}</div>;
-}
-```
-
-## 常见开发场景
-
-### 添加新页面
-
-1. 在 `src/app/` 下创建文件夹和 `page.tsx`
-2. 使用 shadcn 组件构建 UI
-3. 根据需要添加 `layout.tsx` 和 `loading.tsx`
-
-### 创建业务组件
-
-1. 在 `src/components/` 下创建组件文件（非 UI 组件）
-2. 优先组合使用 `src/components/ui/` 中的基础组件
-3. 使用 TypeScript 定义 Props 类型
-
-### 添加全局状态
-
-推荐使用 React Context 或 Zustand：
-
-```tsx
-// src/lib/store.ts
-import { create } from 'zustand';
-
-interface Store {
-  count: number;
-  increment: () => void;
-}
-
-export const useStore = create<Store>((set) => ({
-  count: 0,
-  increment: () => set((state) => ({ count: state.count + 1 })),
-}));
-```
-
-### 集成数据库
-
-推荐使用 Prisma 或 Drizzle ORM，在 `src/lib/db.ts` 中配置。
+## 核心功能
+
+### 画布交互
+- 无限缩放/平移画布（仅空白区域触发，防误触机制）
+- React Flow 节点拖拽、连线、框选
+- 工作流模板的创建、保存与应用
+
+### AI 对话
+- 多供应商支持（DeepSeek / GLM / Moonshot / Qwen / OpenAI / Doubao）
+- 流式回复 + 工具调用
+- 视觉模型 Bridge（图片 → 文字描述）
+- 自动模式 + 思考深度调节
+
+### 节点关联
+- 节点连线建立知识网络
+- 上游上下文自动注入（拓扑排序，50000 字符上限）
+- 循环检测 + 重复连线检测
+- 边断开/删除（软删除 + 硬删除）
+
+### 项目管理
+- 多项目独立存储
+- 项目归档/取消归档
+- 活跃/归档分组显示
+- Wi-Fi 欢迎引导
+
+### 阅读与编辑
+- Markdown 阅读器（摘要 / 对话记录 / 批注 / 便签）
+- 文本选中后系统级编辑按钮（铅笔/发送/复制）
+- TextEditPopup + 批注（mark 标签）
+- HtmlRenderer 安全渲染（DOMPurify）
+
+### MCP 集成
+- 7 个预置 MCP 服务器：Filesystem / Brave Search / Context7 / Sequential Thinking / Playwright / GitHub / Notion
+- 自定义 MCP 服务器管理
+- 响应式流式 MCP 通信
+
+### 其他
+- 日历面板 + WANTED 任务总结
+- 技能管理（安装/启用/禁用）
+- 自定义工具注册
+- Electron 桌面功能（自动更新、窗口拖拽）
 
 ## 技术栈
 
-- **框架**: Next.js 16.1.1 (App Router)
-- **UI 组件**: shadcn/ui (基于 Radix UI)
-- **样式**: Tailwind CSS v4
-- **表单**: React Hook Form + Zod
-- **图标**: Lucide React
-- **字体**: Geist Sans & Geist Mono
-- **包管理器**: pnpm 9+
-- **TypeScript**: 5.x
+- **框架**: Next.js 16 (App Router)
+- **画布**: @xyflow/react (React Flow)
+- **UI**: shadcn/ui (Radix UI) + Tailwind CSS v4
+- **数据库**: better-sqlite3
+- **MCP**: @modelcontextprotocol/sdk
+- **渲染**: DOMPurify + Mermaid
+- **桌面**: Electron
+- **包管理**: pnpm 9+
 
-## 参考文档
+## 数据存储
 
-- [Next.js 官方文档](https://nextjs.org/docs)
-- [shadcn/ui 组件文档](https://ui.shadcn.com)
-- [Tailwind CSS 文档](https://tailwindcss.com/docs)
-- [React Hook Form](https://react-hook-form.com)
+所有数据在 `~/BobAgent/` 目录下，每个项目独立子文件夹：
+- `nodes/` — .md 文件（frontmatter + 固定四段结构）
+- `project.db` — SQLite（边、日历、会话）
+- `materials/` — 项目素材
+- `assets/` — 节点附件
 
-## 重要提示
+## 发布
 
-1. **必须使用 pnpm** 作为包管理器
-2. **优先使用 shadcn/ui 组件** 而不是从零开发基础组件
-3. **遵循 Next.js App Router 规范**，正确区分服务端/客户端组件
-4. **使用 TypeScript** 进行类型安全开发
-5. **使用 `@/` 路径别名** 导入模块（已配置）
+版本发布流程见 [RELEASES.md](./RELEASES.md)。构建前需：
+1. 在 RELEASES.md 记录变更
+2. 确保 package.json 版本号不与已发布版本重复
+3. 运行 `scripts/package-release.sh` 生成 DMG

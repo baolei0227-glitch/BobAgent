@@ -13,7 +13,7 @@ interface HtmlRendererProps {
 const whitelist: SanitizeWhitelist = {
   tags: ['details', 'summary', 'mark'],
   attributes: {
-    mark: ['data-note'],
+    mark: ['data-note', 'class'],
     a: ['target', 'rel'],
     code: ['class'],
     pre: ['class'],
@@ -35,6 +35,22 @@ const renderer = createRenderer({
   sanitizeWhitelist: whitelist,
 });
 
+/** 为表格包裹横向滚动容器，避免宽表格溢出气泡 */
+function wrapTables(html: string): string {
+  return html.replace(/<table([\s\S]*?)<\/table>/g, (match) => {
+    return `<div class="table-wrapper">${match}</div>`;
+  });
+}
+
+/** 为 pre 代码块包裹容器 + 复制按钮 */
+function wrapCodeBlocks(html: string): string {
+  return html.replace(
+    /<pre(\s[^>]*)?>([\s\S]*?)<\/pre>/g,
+    (_, attrs, inner) =>
+      `<div class="code-block-wrapper"><button class="code-copy-btn">复制</button><pre${attrs || ''}>${inner}</pre></div>`,
+  );
+}
+
 /** 基于 unified.js 生态的 Markdown/HTML 统一渲染器 */
 export function HtmlRenderer({ content }: HtmlRendererProps) {
   const html = useMemo(() => {
@@ -42,16 +58,28 @@ export function HtmlRenderer({ content }: HtmlRendererProps) {
 
     try {
       const result = renderer.markdownSync(content);
-      return result.html;
+      return wrapCodeBlocks(wrapTables(result.html));
     } catch {
       // 渲染失败时回退为纯文本
       return `<p>${escapeHtml(content.slice(0, 500))}</p>`;
     }
   }, [content]);
 
+  const handleClick = (e: React.MouseEvent) => {
+    const btn = (e.target as HTMLElement).closest('.code-copy-btn');
+    if (!btn) return;
+    const code = btn.parentElement?.querySelector('code');
+    if (code) {
+      navigator.clipboard.writeText(code.textContent || '');
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = '复制'; }, 2000);
+    }
+  };
+
   return (
     <div
       className="html-renderer"
+      onClick={handleClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );

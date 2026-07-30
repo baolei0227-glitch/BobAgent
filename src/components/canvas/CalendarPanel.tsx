@@ -258,7 +258,8 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         borderLeft: '1px solid rgba(0, 0, 0, 0.07)',
         boxShadow: '-12px 0 32px rgba(0, 0, 0, 0.06)',
         fontFamily: "'Noto Serif SC', serif",
-      }}
+        WebkitAppRegion: 'no-drag',
+      } as React.CSSProperties}
     >
       {/* 头部 */}
       <div

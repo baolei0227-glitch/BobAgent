@@ -572,7 +572,6 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
 
         {/* 任务归纳面板（独立区块，项目列表与 Logo 之间） */}
         <TaskPanel
-          projectId={projectId}
           onEventsCreated={() => window.dispatchEvent(new Event('calendar-events-changed'))}
           onOpenCalendar={onOpenCalendar}
         />
@@ -618,9 +617,15 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                   }}
                   className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[oklch(0.92_0.015_75)]"
                   style={{ color: 'oklch(0.50 0.02 55)' }}
-                  title="Settings"
+                  title={updateStatus === 'downloaded' ? `Update v${updateVersion} ready to install` : 'Settings'}
                 >
                   <Cog className="h-3.5 w-3.5" />
+                  {updateStatus === 'downloaded' && (
+                    <span
+                      className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2"
+                      style={{ backgroundColor: 'oklch(0.55 0.22 30)', borderColor: 'oklch(0.98 0.015 80)' }}
+                    />
+                  )}
                 </button>
                 {settingsMenuOpen && (
                   <div
@@ -689,6 +694,12 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                          updateStatus === 'error' ? updateError || 'Failed' :
                          'Check for updates'}
                       </span>
+                      {updateStatus === 'downloaded' && (
+                        <span
+                          className="ml-auto h-2 w-2 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: 'oklch(0.55 0.22 30)' }}
+                        />
+                      )}
                     </button>
                     {/* 下载完成后显示安装按钮 */}
                     {updateStatus === 'downloaded' && (
@@ -706,6 +717,26 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                         Install and Restart
                       </button>
                     )}
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (typeof window.api?.update?.clearCache === 'function') {
+                          try {
+                            const r = await window.api.update.clearCache();
+                            if (r.success) {
+                              alert(`已清除 ${r.deletedCount} 个更新缓存目录，释放 ${r.freedMB}MB`);
+                            }
+                          } catch {
+                            alert('清除失败，请稍后重试');
+                          }
+                        }
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[oklch(0.95_0.01_80)]"
+                      style={{ color: 'oklch(0.30 0.015 50)' }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.02 50)' }} />
+                      Clear update cache
+                    </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

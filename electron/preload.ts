@@ -11,6 +11,8 @@ export interface UpdateApi {
   check: () => Promise<{ success: boolean; error?: string }>;
   download: () => Promise<{ success: boolean; error?: string }>;
   install: () => Promise<{ success: boolean }>;
+  clearCache: () => Promise<{ success: boolean; deletedCount: number; freedMB: number }>;
+  notify: (title: string, body: string) => Promise<boolean>;
   getVersion: () => Promise<string>;
   onChecking: (callback: (info: { manual: boolean }) => void) => void;
   onAvailable: (callback: (info: { version: string; releaseNotes: string; releaseDate: string }) => void) => void;
@@ -45,6 +47,8 @@ const api: Api = {
     check: () => ipcRenderer.invoke('update:check'),
     download: () => ipcRenderer.invoke('update:download'),
     install: () => ipcRenderer.invoke('update:install'),
+    clearCache: () => ipcRenderer.invoke('update:clear-cache'),
+    notify: (title: string, body: string) => ipcRenderer.invoke('notify', title, body),
     getVersion: () => ipcRenderer.invoke('update:get-version'),
     onChecking: (callback) => ipcRenderer.on('update:checking', (_, info) => callback(info)),
     onAvailable: (callback) => ipcRenderer.on('update:available', (_, info) => callback(info)),

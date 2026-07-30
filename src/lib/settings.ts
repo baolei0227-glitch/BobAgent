@@ -12,6 +12,8 @@
  */
 
 import type { ProviderConfig, SearchConfig } from './types';
+import type { McpServerConfig } from './mcp/types';
+import { MCP_PRESETS } from './mcp/types';
 
 // ============================================================
 // 接口定义 — 所有全局设置集中于此
@@ -22,6 +24,11 @@ export interface VisionSettings {
   defaultModel?: string;
   apiKey?: string;
   baseUrl?: string;
+  /** 辅助视觉模型：主模型失败时自动切换 */
+  auxiliaryProvider?: string;
+  auxiliaryModel?: string;
+  auxiliaryApiKey?: string;
+  auxiliaryBaseUrl?: string;
 }
 
 /** 任务归纳小模型配置（与视觉模型同结构） */
@@ -40,15 +47,76 @@ export interface GeneralSettings {
   language: string;
 }
 
+/** 自定义工具定义：用户注册的 HTTP 工具，AI 可通过 function calling 调用 */
+export interface CustomToolDef {
+  /** 工具名称，需为合法函数名（如 get_weather） */
+  name: string;
+  /** 工具描述，AI 根据此描述决定是否调用 */
+  description: string;
+  /** HTTP endpoint URL */
+  endpoint: string;
+  /** HTTP 方法，默认 POST */
+  method?: 'GET' | 'POST';
+  /** 自定义请求头 */
+  headers?: Record<string, string>;
+  /** JSON Schema 参数定义 */
+  parameters?: Record<string, unknown>;
+  /** 是否启用 */
+  enabled: boolean;
+  /** 最大输出长度（字符），默认 5000 */
+  maxOutput?: number;
+  /** 请求超时（毫秒），默认 30000 */
+  timeoutMs?: number;
+}
+
 export interface AppSettings {
   version: number;
   providers: ProviderConfig[];
   search: SearchConfig;
   vision: VisionSettings;
   taskModel: TaskModelSettings;
+  textEditModel: TaskModelSettings;
   ui: UISettings;
   general: GeneralSettings;
+  textPresets: TextPreset[];
+  customTools: CustomToolDef[];
+  mcpServers: McpServerConfig[];
 }
+
+export interface TextPreset {
+  name: string;
+  prompt: string;
+  children?: TextPreset[]; // 子预设，有则展开二级菜单
+}
+
+const DEFAULT_PRESETS: TextPreset[] = [
+  // 内容加工
+  { name: '精简', prompt: '精简：删除冗余表述，保留核心信息，使文字更紧凑有力。' },
+  { name: '润色', prompt: '润色：改善表达，优化措辞，使文字更流畅优雅，不改变原意。' },
+  { name: '扩写', prompt: '扩写：在保持原意的基础上丰富细节，使内容更充实。' },
+  { name: '修正错别字', prompt: '修正所有错别字、语法错误和标点符号问题，不改变其他内容。' },
+  // 图表生成
+  {
+    name: '图表',
+    prompt: '',
+    children: [
+      { name: '表格', prompt: '将以下内容转为整洁的 HTML 表格，表头加粗居中，数据行交替浅灰背景，边框简洁。' },
+      { name: '流程图', prompt: '将以下流程描述转为 Mermaid flowchart 代码，节点用中文，方向自上而下(TD)。只输出 ```mermaid 代码块。' },
+      { name: '时序图', prompt: '将以下交互描述转为 Mermaid sequenceDiagram 代码，参与者用中文。只输出 ```mermaid 代码块。' },
+      { name: '列表', prompt: '提取关键信息生成嵌套的 HTML 无序列表，层级清晰，要点加粗。' },
+    ],
+  },
+  // 格式重组
+  { name: '总结摘要', prompt: '提取核心要点，生成简洁摘要，不超过原文的三分之一。' },
+  { name: '列表化', prompt: '将段落内容重组为清晰的要点列表（bullet points），每条一行，简洁明了。' },
+  { name: '学术风格', prompt: '将文字改写为学术论文风格，用词严谨规范，逻辑清晰，避免口语化表达。' },
+  { name: '技术文档', prompt: '将文字改写为技术文档风格，准确、简洁、无歧义，适合开发者阅读。' },
+  // 语言转换
+  { name: '翻译为英文', prompt: '将以下中文翻译为英文，保持专业语气。' },
+  { name: '翻译为中文', prompt: '将以下英文翻译为中文，保持专业语气。' },
+  { name: '正式语气', prompt: '将文字改写为正式、专业的语气，适合商务场合。' },
+  { name: '口语化', prompt: '将文字改写为自然、口语化的表达。' },
+];
 
 /** 默认设置 */
 export function defaultSettings(): AppSettings {
@@ -58,8 +126,12 @@ export function defaultSettings(): AppSettings {
     search: { apiKey: '', baseUrl: '' },
     vision: {},
     taskModel: {},
+    textEditModel: {},
     ui: { sidebarCollapsed: false },
     general: { language: 'zh-CN' },
+    textPresets: [...DEFAULT_PRESETS],
+    customTools: [],
+    mcpServers: [...MCP_PRESETS],
   };
 }
 
@@ -207,9 +279,43 @@ export async function updateTaskModel(taskModel: TaskModelSettings): Promise<voi
   await saveSettings(settings);
 }
 
+/** 更新 textEditModel（文本编辑模型）并保存 */
+export async function updateTextEditModel(textEditModel: TaskModelSettings): Promise<void> {
+  const settings = await loadSettings();
+  settings.textEditModel = textEditModel;
+  await saveSettings(settings);
+}
+
 /** 更新 ui 并保存 */
 export async function updateUI(ui: Partial<UISettings>): Promise<void> {
   const settings = await loadSettings();
   settings.ui = { ...settings.ui, ...ui };
+  await saveSettings(settings);
+}
+
+/** 获取文本编辑预设提示词 */
+export async function getTextPresets(): Promise<TextPreset[]> {
+  const settings = await loadSettings();
+  return settings.textPresets || [];
+}
+
+/** 更新文本编辑预设提示词 */
+export async function updateTextPresets(presets: TextPreset[]): Promise<void> {
+  const settings = await loadSettings();
+  settings.textPresets = presets;
+  await saveSettings(settings);
+}
+
+/** 更新自定义工具列表并保存 */
+export async function updateCustomTools(tools: CustomToolDef[]): Promise<void> {
+  const settings = await loadSettings();
+  settings.customTools = tools;
+  await saveSettings(settings);
+}
+
+/** 更新 MCP 服务器列表并保存 */
+export async function updateMcpServers(servers: McpServerConfig[]): Promise<void> {
+  const settings = await loadSettings();
+  settings.mcpServers = servers;
   await saveSettings(settings);
 }

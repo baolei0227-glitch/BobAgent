@@ -5,7 +5,7 @@
  * 生产模式下从打包资源中启动 Next.js 服务；开发模式下连接 pnpm dev。
  */
 
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, Notification } from 'electron';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as http from 'http';
@@ -366,6 +366,62 @@ function setupAutoUpdater(): void {
   ipcMain.handle('update:install', () => {
     autoUpdater.quitAndInstall();
     return { success: true };
+  });
+
+  // 清除更新缓存（ShipIt + updater cache）
+  ipcMain.handle('update:clear-cache', async () => {
+    const dirsToClean = [
+      path.join(app.getPath('userData'), 'updater-cache'),
+      path.join(app.getPath('userData'), '__update__'),
+      path.join(app.getPath('home'), 'Library', 'Caches', 'com.bobagent.app.ShipIt'),
+      path.join(app.getPath('home'), 'Library', 'Caches', 'com.bobagent.app.ShipItTemp'),
+    ];
+    let deletedCount = 0;
+    let freedBytes = 0;
+
+    const getDirSize = (dir: string): number => {
+      try {
+        let size = 0;
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fp = path.join(dir, entry.name);
+          if (entry.isDirectory()) { size += getDirSize(fp); }
+          else { try { size += fs.statSync(fp).size; } catch {} }
+        }
+        return size;
+      } catch { return 0; }
+    };
+
+    for (const dir of dirsToClean) {
+      try {
+        const size = getDirSize(dir);
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          deletedCount++;
+          freedBytes += size;
+          log(`Cleared update cache: ${dir} (${(size / 1024 / 1024).toFixed(1)}MB)`);
+        }
+      } catch (e) {
+        log(`Failed to clear ${dir}: ${String(e)}`);
+      }
+    }
+
+    return {
+      success: true,
+      deletedCount,
+      freedBytes,
+      freedMB: +(freedBytes / 1024 / 1024).toFixed(2),
+    };
+  });
+
+  // 系统通知
+  ipcMain.handle('notify', (_event, title: string, body: string) => {
+    if (Notification.isSupported()) {
+      const n = new Notification({ title, body });
+      n.show();
+      return true;
+    }
+    return false;
   });
 
   // 启动后延迟 5 秒自动检查更新

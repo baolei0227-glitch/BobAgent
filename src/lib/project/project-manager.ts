@@ -44,6 +44,8 @@ export interface ProjectConfig {
   vision_model?: string;
   vision_api_key?: string;
   vision_base_url?: string;
+  archived?: boolean;
+  archived_at?: string;
 }
 
 export interface ProjectsConfig {
@@ -151,6 +153,9 @@ export async function readConfig(): Promise<ProjectsConfig> {
     // 兼容旧数据：确保字段完整
     if (!config.projects) config.projects = [];
     if (!config.current_project_id) config.current_project_id = '';
+    for (const p of config.projects) {
+      if (p.archived === undefined) p.archived = false;
+    }
     return config;
   } catch {
     // 配置文件损坏，返回空配置
@@ -171,10 +176,19 @@ async function writeConfig(config: ProjectsConfig): Promise<void> {
 }
 
 /** 列出所有项目 */
-export async function listProjects(): Promise<{ projects: ProjectConfig[]; currentId: string }> {
+export async function listProjects(): Promise<{
+  projects: ProjectConfig[];
+  active_projects: ProjectConfig[];
+  archived_projects: ProjectConfig[];
+  currentId: string;
+}> {
   const config = await readConfig();
+  const active = config.projects.filter((p) => !p.archived);
+  const archived = config.projects.filter((p) => p.archived);
   return {
     projects: config.projects,
+    active_projects: active,
+    archived_projects: archived,
     currentId: config.current_project_id,
   };
 }
@@ -182,15 +196,26 @@ export async function listProjects(): Promise<{ projects: ProjectConfig[]; curre
 /** 获取当前活跃项目；无项目时抛出错误 */
 export async function getCurrentProject(): Promise<ProjectConfig> {
   const config = await readConfig();
-  if (!config.current_project_id || config.projects.length === 0) {
+  const activeProjects = config.projects.filter((p) => !p.archived);
+  if (!config.current_project_id || activeProjects.length === 0) {
     throw new Error('NO_PROJECT');
   }
-  const current = config.projects.find((p) => p.id === config.current_project_id);
+  let current = config.projects.find((p) => p.id === config.current_project_id);
+  // 当前项目已归档：自动切换到第一个非归档项目
+  if (current && current.archived) {
+    const firstActive = activeProjects[0];
+    if (firstActive) {
+      await switchProject(firstActive.id);
+      current = firstActive;
+    } else {
+      throw new Error('NO_PROJECT');
+    }
+  }
   if (!current) {
-    // 当前项目不存在，回退到第一个项目
-    if (config.projects.length > 0) {
-      await switchProject(config.projects[0].id);
-      return config.projects[0];
+    // 当前项目不存在，回退到第一个非归档项目
+    if (activeProjects.length > 0) {
+      await switchProject(activeProjects[0].id);
+      return activeProjects[0];
     }
     throw new Error('NO_PROJECT');
   }
@@ -219,6 +244,24 @@ export async function createProject(name: string): Promise<ProjectConfig> {
   await fs.mkdir(join(projectPath, 'materials'), { recursive: true });
   await fs.mkdir(join(projectPath, 'homework'), { recursive: true });
 
+  // 确保全局 wanted 目录存在（与 projects 同级）
+  const wantedDir = join(APP_ROOT, 'wanted');
+  const todoPath = join(wantedDir, 'todo.md');
+  try {
+    await fs.access(wantedDir);
+  } catch {
+    await fs.mkdir(wantedDir, { recursive: true });
+  }
+  try {
+    await fs.access(todoPath);
+  } catch {
+    await fs.writeFile(todoPath, `# TODO 待办记录
+
+> 记录 WANTED 面板添加的所有待办事项，按日期和优先级分类
+
+`, 'utf-8');
+  }
+
   const now = new Date().toISOString();
   const newProject: ProjectConfig = {
     id: projectId,
@@ -245,16 +288,98 @@ export async function switchProject(projectId: string): Promise<ProjectConfig> {
   if (!target) {
     throw new Error(`项目不存在: ${projectId}`);
   }
+  if (target.archived) {
+    throw new Error('ARCHIVED_PROJECT');
+  }
 
   // 确保项目目录存在
   await fs.mkdir(join(target.path, 'nodes'), { recursive: true });
   await fs.mkdir(join(target.path, 'homework'), { recursive: true });
+
+  // 确保全局 wanted/todo.md 存在
+  const wantedDir = join(APP_ROOT, 'wanted');
+  try { await fs.access(wantedDir); } catch { await fs.mkdir(wantedDir, { recursive: true }); }
+  try { await fs.access(join(wantedDir, 'todo.md')); } catch {
+    await fs.writeFile(join(wantedDir, 'todo.md'), `# TODO 待办记录
+
+> 记录 WANTED 面板添加的所有待办事项，按日期和优先级分类
+
+`, 'utf-8');
+  }
 
   target.last_accessed_at = new Date().toISOString();
   config.current_project_id = projectId;
   await writeConfig(config);
 
   return target;
+}
+
+/** 归档项目 */
+export async function archiveProject(projectId: string): Promise<ProjectConfig> {
+  const config = await readConfig();
+  const target = config.projects.find((p) => p.id === projectId);
+  if (!target) {
+    throw new Error(`项目不存在: ${projectId}`);
+  }
+  if (target.archived) return target;
+
+  target.archived = true;
+  target.archived_at = new Date().toISOString();
+
+  // 如果是当前项目，切换到第一个非归档项目
+  if (config.current_project_id === projectId) {
+    const firstActive = config.projects.find((p) => !p.archived && p.id !== projectId);
+    if (firstActive) {
+      config.current_project_id = firstActive.id;
+      firstActive.last_accessed_at = new Date().toISOString();
+    } else {
+      config.current_project_id = '';
+    }
+  }
+  await writeConfig(config);
+  return target;
+}
+
+/** 取消归档项目 */
+export async function unarchiveProject(projectId: string): Promise<ProjectConfig> {
+  const config = await readConfig();
+  const target = config.projects.find((p) => p.id === projectId);
+  if (!target) {
+    throw new Error(`项目不存在: ${projectId}`);
+  }
+  if (!target.archived) return target;
+
+  target.archived = false;
+  delete target.archived_at;
+  await writeConfig(config);
+  return target;
+}
+
+/** 获取项目统计（节点数 + 数据库大小 + 天龄） */
+export async function getProjectStats(projectId: string): Promise<{ nodeCount: number; dbSizeKB: number; createdDaysAgo: number }> {
+  const config = await readConfig();
+  const target = config.projects.find((p) => p.id === projectId);
+  if (!target) throw new Error(`项目不存在: ${projectId}`);
+
+  let nodeCount = 0;
+  try {
+    const files = await fs.readdir(join(target.path, 'nodes'));
+    nodeCount = files.filter((f) => f.endsWith('.md')).length;
+  } catch { /* nodes 文件夹不存在 */ }
+
+  let dbSizeKB = 0;
+  try {
+    const st = await fs.stat(join(target.path, 'project.db'));
+    dbSizeKB = Math.round(st.size / 1024);
+  } catch { /* db 不存在 */ }
+
+  let createdDaysAgo = 0;
+  try {
+    const created = new Date(target.created_at).getTime();
+    createdDaysAgo = Math.max(0, Math.floor((Date.now() - created) / (1000 * 60 * 60 * 24)));
+  } catch { /* ignore */ }
+
+  return { nodeCount, dbSizeKB, createdDaysAgo };
 }
 
 /** 删除项目（连同文件夹一起删除） */

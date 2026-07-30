@@ -6,6 +6,124 @@
 
 ---
 
+## v1.0.23 (2026-07-31)
+
+- Skill 安装功能：SkillManagerModal 新增"安装"标签页，支持 GitHub URL / 本地路径导入
+  - 安装到 ~/BobAgent/skills/，带"用户"标签，支持卸载
+- 项目归档：支持将项目归档/取消归档，侧边栏分组显示活跃/归档项目
+  - 归档确认弹窗显示节点数、数据库大小等统计信息
+- TextEditPopup 批注修复：mark 标签 class 属性加入 DOMPurify 白名单，批注正常显示
+- 新增 HtmlReader、MermaidRenderer 组件
+- 扩展 API 路由：text/todo/vision-diag/workflows 等端点
+
+---
+
+## v1.0.22 (2026-07-31)
+
+- 安全加固（5 项）
+  - 读路径白名单：read_file / list_directory / search_files 限制在 sandbox/skills/projects 内
+  - 附件路径防穿越：../ 穿越项目目录被拒绝
+  - 危险命令拦截：rm -rf /、dd of=/dev/*、mkfs、sudo、curl|bash 等模式自动拒绝
+  - settings.json API Key 加密：AES-256-GCM + 硬件指纹派生密钥，换机器无法解密
+  - 工具执行审计日志：~/BobAgent/logs/tool-audit.log
+- MCP 预置新增 Playwright、GitHub、Notion
+  - 启用高风险 MCP 弹确认对话框，保存时二次确认
+  - 新用户默认 7 个预置，老用户按 id 去重合并
+- 更新体验
+  - UpdateNotification 正式挂载（之前定义了但从未 import）
+  - 下载完成自动弹模态对话框 + Release Notes
+  - Sidebar 齿轮红点角标 + 设置菜单内红点
+  - 清除更新缓存菜单项
+- 系统通知（macOS 通知中心）
+  - 对话出错 / 回答完成（窗口非前台）时弹通知
+
+---
+
+## v1.0.21 (2026-07-30)
+
+- 完整 MCP (Model Context Protocol) 生态接入
+  - 新增 src/lib/mcp/ 模块：单例客户端管理器，支持 stdio 和 streamable-http 两种传输
+  - 预置 4 个推荐 MCP 服务器：Context7（远程，默认开）、Sequential Thinking（本地，默认开）、Brave Search（需 Key，默认关）、Filesystem（默认关）
+  - MCP 工具名 mcp__<serverId>__<toolName> 命名空间隔离，不与内置工具冲突
+  - 连接跨请求持久化复用，新对话自动 syncServers 同步配置
+- 自定义 Tool/Function Calling：用户可在设置里注册 HTTP 工具（名称、描述、Endpoint、参数 Schema），AI 对话时自动调用
+  - settings.ts 新增 CustomToolDef 接口和 updateCustomTools
+  - tools.ts 新增 registerCustomTools，execute 通过 fetch 调用用户配置的 endpoint
+- SettingsModal 新增 Custom Tools 和 MCP Servers 两个分区（Home 概览 + Add 完整编辑器）
+- next.config.ts serverExternalPackages 新增 @modelcontextprotocol/sdk
+
+---
+
+## v1.0.20 (2026-07-30)
+
+- HtmlReader 去段落化重写：改用 HtmlRenderer 一条通道统一渲染（1195→480 行，-60%）
+  - 移除 splitSections / parseConversationRounds / 折叠编辑 / 逐段保存逻辑
+  - 节点 .md 和文件树 .md 渲染逻辑完全统一
+- HtmlRenderer 代码块复制按钮：hover 显示"复制"按钮，点击写入剪贴板
+- 节点输入框仅在选中时显示（未选中只展示对话记录）
+- FileViewer PDF 区域填满修复（flex-col 布局）
+- HtmlReader 日志前缀修复（MarkdownReader → HtmlReader）
+
+---
+
+## v1.0.19 (2026-07-30)
+
+- 修复 OCR 路径条件 bug：pageCount=0 时不进入 OCR，错误提示"视觉模型未配置"
+  - 改为基于文本提取结果判断是否需要 OCR（两种方法均失败就尝试 OCR）
+  - 不再依赖 pageCount 判断，避免提取器异常时跳过 OCR
+
+---
+
+## v1.0.18 (2026-07-30)
+
+- /api/vision-diag 诊断端点，返回服务端实际读取的视觉配置和解析结果
+- OCR 失败时输出详细视觉配置状态 JSON
+
+---
+
+## v1.0.17 (2026-07-30)
+
+- Vision Bridge 自动处理图片附件，通过视觉模型转换为文字描述
+- HtmlReader 折叠功能 + 面板右上角小按钮
+
+---
+
+## v1.0.16 (2026-07-30)
+
+- 视觉模型 OCR 增加详细诊断日志（OCR-PDF + resolveVisionConfig 输出）
+
+---
+
+## v1.0.15 (2026-07-30)
+
+- 视觉模型三级解析：主模型 → 辅助模型 → 从聊天模型自动匹配，不再推荐未安装模型
+- SettingsModal 支持主/辅双视觉模型配置（Provider + Key + Model 选择）
+- 图片读取硬编码兜底替换为 resolveVisionConfig，统一三级降级逻辑
+- 表格溢出优化：.table-wrapper 独立横向滚动，不影响气泡
+- 附件标签调小（图标、间距、字号全面缩减）
+- 选中文字按钮组改为单圆角矩形 + 细竖杠分隔
+- TextEditPopup 整体缩小（480→400px，720→560px）
+- 折叠面板按钮移至右上角
+- 节点仅标题栏可拖拽（Messages + Input 区添加 nodrag）
+- 便签缩小态移入标题栏内，不再遮挡标题
+
+---
+
+## v1.0.15 (2026-07-30)
+
+- 视觉模型三级解析：主模型 → 辅助模型 → 从聊天模型自动匹配，不再推荐未安装模型
+- SettingsModal 支持主/辅双视觉模型配置（Provider + Key + Model 选择）
+- 图片读取硬编码兜底替换为 resolveVisionConfig，统一三级降级逻辑
+- 表格溢出优化：.table-wrapper 独立横向滚动，不影响气泡
+- 附件标签调小（图标、间距、字号全面缩减）
+- 选中文字按钮组改为单圆角矩形 + 细竖杠分隔
+- TextEditPopup 整体缩小（480→400px，720→560px）
+- 折叠面板按钮移至右上角
+- 节点仅标题栏可拖拽（Messages + Input 区添加 nodrag）
+- 便签缩小态移入标题栏内，不再遮挡标题
+
+---
+
 ## v1.0.14 (2026-07-30)
 
 - HtmlRenderer 重写为 unified-renderer：基于 Unified.js 生态，支持 GFM、代码高亮、安全过滤

@@ -2,11 +2,13 @@
  * /api/skills — 技能管理 API
  *
  * GET  /api/skills          — 列出所有技能及其启用状态
- * POST /api/skills          — 更新技能启用状态 { action: 'enable'|'disable'|'enableAll', skillName?: string }
+ * POST /api/skills          — 更新技能启用状态 / 安装技能 / 卸载技能
+ *   { action: 'enable'|'disable'|'enableAll'|'install'|'uninstall', ... }
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getAllSkills } from '@/lib/skills/loader-server';
+import { installSkill, uninstallSkill } from '@/lib/skills/installer-server';
 import {
   enableSkillForAgent,
   disableSkillForAgent,
@@ -62,7 +64,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { action, skillName } = body as {
-      action: 'enable' | 'disable' | 'enableAll';
+      action: 'enable' | 'disable' | 'enableAll' | 'install' | 'uninstall';
       skillName?: string;
     };
 
@@ -90,6 +92,34 @@ export async function POST(request: NextRequest) {
           enableSkillForAgent(AGENT_ID, s.meta.name);
         }
         break;
+      case 'install': {
+        const { source, url, localPath, autoEnable, force } = body as any;
+        if (!source) {
+          return NextResponse.json({ success: false, error: '"source" is required (github|local|url)' }, { status: 400 });
+        }
+        const result = await installSkill({ source, url, localPath, autoEnable, force });
+        if (!result.success) {
+          const status = result.detail?.includes('already installed') ? 409 : 400;
+          return NextResponse.json(result, { status });
+        }
+        // 安装成功后自动启用
+        if (result.skill && (autoEnable !== false)) {
+          enableSkillForAgent(AGENT_ID, result.skill.name);
+        }
+        return NextResponse.json(result);
+      }
+      case 'uninstall': {
+        if (!skillName) {
+          return NextResponse.json({ success: false, error: 'skillName required' }, { status: 400 });
+        }
+        const result = uninstallSkill(skillName);
+        if (!result.success) {
+          return NextResponse.json(result, { status: 400 });
+        }
+        // 卸载后从注册表中移除
+        disableSkillForAgent(AGENT_ID, skillName);
+        return NextResponse.json(result);
+      }
       default:
         return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
     }

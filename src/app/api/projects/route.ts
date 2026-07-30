@@ -6,6 +6,9 @@ import {
   switchProject,
   deleteProject,
   renameProject,
+  archiveProject,
+  unarchiveProject,
+  getProjectStats,
   getProjectVisionModel,
   setProjectVisionModel,
   getProjectVisionApiKey,
@@ -67,16 +70,64 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const action = searchParams.get('action');
 
+    // PDF 等二进制文件的代理流
+    if (action === 'file_proxy') {
+      const projectId = searchParams.get('project_id');
+      const filePath = searchParams.get('file_path');
+      if (!projectId || !filePath) {
+        return new NextResponse('Missing params', { status: 400 });
+      }
+      const { projects } = await listProjects();
+      const project = projects.find((p: ProjectConfig) => p.id === projectId);
+      if (!project) {
+        return new NextResponse('Project not found', { status: 404 });
+      }
+      const fullPath = join(project.path, filePath);
+      if (!fullPath.startsWith(project.path)) {
+        return new NextResponse('Forbidden', { status: 403 });
+      }
+
+      try {
+        const stat = await fs.stat(fullPath);
+        const buffer = await fs.readFile(fullPath);
+        const ext = extname(fullPath).toLowerCase();
+        const mimeMap: Record<string, string> = {
+          '.pdf': 'application/pdf',
+        };
+        return new NextResponse(buffer, {
+          status: 200,
+          headers: {
+            'Content-Type': mimeMap[ext] || 'application/octet-stream',
+            'Content-Length': String(stat.size),
+            'Cache-Control': 'public, max-age=3600',
+          },
+        });
+      } catch {
+        return new NextResponse('File not found', { status: 404 });
+      }
+    }
+
     if (action === 'current') {
       const current = await getCurrentProject();
       return NextResponse.json({ success: true, project: current });
     }
 
-    // 默认返回项目列表
+    if (action === 'stats') {
+      const projectId = searchParams.get('project_id');
+      if (!projectId) {
+        return NextResponse.json({ success: false, error: 'project_id is required' }, { status: 400 });
+      }
+      const stats = await getProjectStats(projectId);
+      return NextResponse.json({ success: true, stats });
+    }
+
+    // 默认返回项目列表（含分组）
     const result = await listProjects();
     return NextResponse.json({
       success: true,
       projects: result.projects,
+      active_projects: result.active_projects,
+      archived_projects: result.archived_projects,
       current_id: result.currentId,
     });
   } catch (error) {
@@ -138,6 +189,24 @@ export async function POST(request: NextRequest) {
         );
       }
       const project = await renameProject(project_id, new_name.trim());
+      return NextResponse.json({ success: true, project });
+    }
+
+    if (action === 'archive') {
+      const { project_id } = body;
+      if (!project_id) {
+        return NextResponse.json({ success: false, error: 'project_id is required' }, { status: 400 });
+      }
+      const project = await archiveProject(project_id);
+      return NextResponse.json({ success: true, project });
+    }
+
+    if (action === 'unarchive') {
+      const { project_id } = body;
+      if (!project_id) {
+        return NextResponse.json({ success: false, error: 'project_id is required' }, { status: 400 });
+      }
+      const project = await unarchiveProject(project_id);
       return NextResponse.json({ success: true, project });
     }
 
@@ -212,7 +281,6 @@ export async function POST(request: NextRequest) {
         );
       }
       const fullPath = join(project.path, file_path);
-      // 安全检查：确保路径在项目目录内
       if (!fullPath.startsWith(project.path)) {
         return NextResponse.json(
           { success: false, error: 'Invalid file path' },
@@ -240,6 +308,7 @@ export async function POST(request: NextRequest) {
             size: stat.size,
             extension: ext,
             name: file_path.split('/').pop() || file_path,
+            full_path: fullPath,
           });
         }
 
@@ -258,6 +327,7 @@ export async function POST(request: NextRequest) {
             size: buffer.length,
             extension: ext,
             name: file_path.split('/').pop() || file_path,
+            full_path: fullPath,
           });
         }
 
@@ -269,6 +339,7 @@ export async function POST(request: NextRequest) {
           size: stat.size,
           extension: ext,
           name: file_path.split('/').pop() || file_path,
+          full_path: fullPath,
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

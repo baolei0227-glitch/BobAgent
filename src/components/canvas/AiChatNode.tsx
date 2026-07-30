@@ -10,7 +10,7 @@ import {
   type NodeProps,
   type Node,
 } from '@xyflow/react';
-import { X, Send, Sparkles, ChevronDown, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AtSign, Pin } from 'lucide-react';
+import { X, Send, Sparkles, ChevronDown, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AtSign, Pin, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, MessageAttachment } from '@/lib/types';
 import QuestionPopup, { extractQuestions, type QuestionItem, type AnswerEntry } from './QuestionPopup';
@@ -198,7 +198,7 @@ export function AiChatNode({ id, data, selected }: NodeProps<AiChatNodeType>) {
   const [stickyAnimPhase, setStickyAnimPhase] = useState<'idle' | 'opening' | 'visible' | 'closing'>('idle');
   const [stickyOrigin, setStickyOrigin] = useState('right top');
   const pinRef = useRef<HTMLButtonElement>(null);
-  const miniStickyRef = useRef<HTMLButtonElement>(null);
+  const miniStickyRef = useRef<HTMLDivElement>(null);
   const stickyPanelRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSendRef = useRef<string | null>(null);
@@ -382,6 +382,19 @@ ${rows.join('\n')}
     return `${header}\n\n${table}\n${toolHint}${footer}`;
   };
 
+  /** File → base64 (不含 data: 前缀) */
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        resolve(result.split(',')[1] || '');
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleFileSelect = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0 || !currentMdId) return;
 
@@ -391,13 +404,18 @@ ${rows.join('\n')}
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i];
       try {
-        const formData = new FormData();
-        formData.append('nodeId', currentMdId);
-        formData.append('file', file);
+        // 用 base64 + JSON 上传，避免 Turbopack FormData bug
+        const base64 = await fileToBase64(file);
 
         const resp = await fetch('/api/attachments', {
           method: 'POST',
-          body: formData,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nodeId: currentMdId,
+            fileName: file.name,
+            fileType: file.type || 'application/octet-stream',
+            data: base64,
+          }),
         });
         const data = await resp.json();
         if (data.success && data.attachment) {
@@ -406,7 +424,11 @@ ${rows.join('\n')}
           console.error('上传附件失败:', file.name, data.error);
         }
       } catch (e) {
-        console.error('上传附件失败:', file.name, e);
+        if (e instanceof DOMException && e.name === 'NotReadableError') {
+          console.warn(`附件无法读取（文件可能已被移动或删除）: ${file.name}`);
+        } else {
+          console.error('上传附件失败:', file.name, e);
+        }
       }
     }
     setUploadingAttachment(false);
@@ -837,10 +859,19 @@ ${rows.join('\n')}
             ),
           );
         }
+        // 出错时系统通知
+        if (typeof window.api?.update?.notify === 'function') {
+          window.api.update.notify('BobAgent', `对话出错: ${error.message}`).catch(() => {});
+        }
       }
     } finally {
       if (mountedRef.current) {
         setIsStreaming(false);
+        // 回答完成 → 仅窗口不在前台时发系统通知
+        if (document.hidden && assistantContent && !assistantContent.startsWith('Error:') && typeof window.api?.update?.notify === 'function') {
+          const preview = assistantContent.slice(0, 80).replace(/\n/g, ' ');
+          window.api.update.notify('BobAgent 回答完成', preview + (assistantContent.length > 80 ? '...' : '')).catch(() => {});
+        }
         const finalMessages: ChatMessage[] = [
           ...baseMessages,
           {
@@ -1226,15 +1257,53 @@ ${rows.join('\n')}
     }
   }, []);
 
-  // 便签打开：从缩小态位置平滑展开为编辑面板
+  // 删除一轮对话
+  const handleDeleteRound = useCallback(async (msgIndex: number) => {
+    // msgIndex 是消息在 messages 数组中的索引，只处理 user 消息
+    const msg = messages[msgIndex];
+    if (!msg || msg.role !== 'user') return;
+
+    // 计算 round index（user 消息在 conversations 中的位置）
+    const userMsgCount = messages.slice(0, msgIndex + 1).filter(m => m.role === 'user').length;
+    const roundIndex = userMsgCount - 1;
+
+    // 从 state 中移除 user 和接下来的 assistant 消息
+    setMessages(prev => {
+      const next = [...prev];
+      // 移除 user 消息
+      next.splice(msgIndex, 1);
+      // 如果下一条是 assistant 消息，也移除
+      if (msgIndex < next.length && next[msgIndex]?.role === 'assistant') {
+        next.splice(msgIndex, 1);
+      }
+      return next;
+    });
+
+    // 同步删除 .md 文件中的记录
+    if (currentMdId && roundIndex >= 0) {
+      try {
+        await fetch('/api/nodes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'remove_round',
+            node_id: currentMdId,
+            round_index: roundIndex,
+          }),
+        });
+        window.dispatchEvent(new CustomEvent('node-document-updated', { detail: { node_id: currentMdId } }));
+      } catch {
+        // 静默失败
+      }
+    }
+  }, [messages, currentMdId]);
+
+  // 便签打开：从标题栏便签标签位置平滑展开为编辑面板
   const handleStickyOpen = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     setStickyInput(hasStickies ? stickyLines.join('\n') : '');
-    // 计算 transform-origin：缩小态便签在展开面板坐标系中的位置
-    // 缩小态: left: -16px, top: -22px, 宽 120px → 中心 x=-16+60=44, y≈-22+25=3
-    // 展开面板: right: -20 (即 left: 90px), top: 40px, 宽 250px
-    // origin = (44-90, 3-40) = (-46, -37)
-    setStickyOrigin('-46px -37px');
+    // 动画原点：从左侧便签纸位置展开
+    setStickyOrigin('right top');
     setStickyExpanded(true);
     setStickyAnimPhase('opening');
     requestAnimationFrame(() => {
@@ -1340,67 +1409,6 @@ ${rows.join('\n')}
     >
       {/* 扩展 hover 触发面积（超出节点 40px），鼠标离开节点后按钮不立即消失 */}
       <div className="absolute -inset-10 z-0" />
-      {/* 图钉钉便签 - 有便签时显示 */}
-      {hasStickies && stickyLines.length > 0 && !stickyExpanded && (
-        <>
-          {/* 缩小态：溢出节点的便签 + 📌 */}
-          <button
-            ref={miniStickyRef}
-            onClick={handleStickyOpen}
-            className="absolute z-20 transition-transform hover:scale-105"
-            style={{
-              left: '-16px',
-              top: '-22px',
-              filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.18))',
-              transform: 'rotate(-3deg)',
-            }}
-            title="点击编辑便签"
-          >
-            {/* 便签纸 */}
-            <div
-              className="relative flex flex-col"
-              style={{
-                width: '120px',
-                minHeight: '44px',
-                backgroundColor: 'oklch(0.93 0.04 95)',
-                borderRadius: '2px 2px 6px 2px',
-                padding: '12px 8px 6px 8px',
-                border: '1px solid oklch(0.82 0.04 85 / 0.5)',
-              }}
-            >
-              {/* 📌 图钉 */}
-              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 text-xl leading-none" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}>
-                📌
-              </div>
-              {/* 文字内容 */}
-              <div
-                className="text-[10px] leading-tight"
-                style={{
-                  color: 'oklch(0.35 0.02 30)',
-                  fontFamily: "'Noto Serif SC', serif",
-                  overflow: 'hidden',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical',
-                  textOverflow: 'ellipsis',
-                }}
-              >
-                {stickyLines.slice(0, 2).map((line, i) => (
-                  <span key={i} className="block">
-                    {line.length > 20 ? line.slice(0, 20) + '...' : line}
-                  </span>
-                ))}
-              </div>
-              {stickyLines.length > 2 && (
-                <span className="text-[8px] mt-0.5" style={{ color: 'oklch(0.50 0.02 40)', textAlign: 'right' }}>
-                  +{stickyLines.length - 2} more
-                </span>
-              )}
-            </div>
-          </button>
-        </>
-      )}
-
       {/* 展开态：编辑面板 — 带缩放展开/收缩动效 */}
       {stickyExpanded && (
         <div
@@ -1420,14 +1428,15 @@ ${rows.join('\n')}
           }}
           onWheel={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
         >
           <div
-            className="flex flex-col rounded-lg"
+            className="flex flex-col sticky-paper"
             style={{
-              backgroundColor: 'oklch(0.96 0.04 95)',
-              borderRadius: '3px 3px 10px 3px',
-              border: '1.5px solid oklch(0.80 0.04 85 / 0.6)',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.22)',
+              backgroundColor: '#f5e6c8',
+              borderRadius: '0',
+              border: '1px solid oklch(0.88 0.10 95 / 0.5)',
+              boxShadow: '2px 5px 14px rgba(0,0,0,0.12), -1px 3px 6px rgba(0,0,0,0.06)',
               fontFamily: "'Noto Serif SC', serif",
             }}
             onClick={(e) => e.stopPropagation()}
@@ -1435,7 +1444,7 @@ ${rows.join('\n')}
             {/* Header */}
             <div
               className="flex items-center justify-between px-3 py-2"
-              style={{ borderBottom: '1px solid oklch(0.80 0.04 85 / 0.3)' }}
+              style={{ borderBottom: '1px solid oklch(0.82 0.08 90 / 0.4)' }}
             >
               <div className="flex items-center gap-1.5">
                 <span className="text-base">📌</span>
@@ -1455,11 +1464,11 @@ ${rows.join('\n')}
               <textarea
                 value={stickyInput}
                 onChange={(e) => setStickyInput(e.target.value)}
-                className="w-full resize-y rounded border px-3 py-2 text-xs leading-relaxed"
+                className="nodrag w-full resize-y rounded border px-3 py-2 text-xs leading-relaxed"
                 style={{
-                  minHeight: '80px',
-                  backgroundColor: 'oklch(0.98 0.01 90)',
-                  borderColor: 'oklch(0.80 0.04 85 / 0.5)',
+                  minHeight: '120px',
+                  backgroundColor: '#faf3e0',
+                  borderColor: 'oklch(0.84 0.08 92 / 0.6)',
                   color: 'oklch(0.28 0.02 50)',
                   outline: 'none',
                   fontSize: '12px',
@@ -1468,7 +1477,6 @@ ${rows.join('\n')}
                 rows={4}
                 onKeyDown={handleStickyKeyDown}
                 onWheel={(e) => e.stopPropagation()}
-                onPointerDown={(e) => e.stopPropagation()}
               />
             </div>
 
@@ -1493,6 +1501,7 @@ ${rows.join('\n')}
           </div>
         </div>
       )}
+
       {/* Inner card */}
       <div
         className={cn(
@@ -1637,24 +1646,62 @@ ${rows.join('\n')}
             <AlertTriangle className="h-3 w-3" style={{ color: 'oklch(0.55 0.22 35)' }} />
           </span>
         )}
-        {/* sticky notes 图标 — 始终显示，有内容时高亮 */}
-        <button
-          ref={pinRef}
-          onClick={handleStickyOpen}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors"
-          style={{
-            color: hasStickies ? 'oklch(0.55 0.12 45)' : 'oklch(0.55 0.02 50 / 0.35)',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = 'oklch(0.62 0.17 45 / 0.08)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = 'transparent';
-          }}
-          title={hasStickies ? '编辑便签' : '添加便签'}
-        >
-          <Pin className="h-3.5 w-3.5" />
-        </button>
+        {/* sticky notes — 缩小便签钉在备忘录图标上 */}
+        <span className="relative shrink-0">
+          <button
+            ref={pinRef}
+            onClick={handleStickyOpen}
+            className="flex shrink-0 items-center transition-opacity hover:opacity-70 relative z-10"
+            title={hasStickies ? `${stickyLines.length} 条便签` : '添加便签'}
+          >
+            <span className="text-[13px] leading-none">📝</span>
+          </button>
+          {hasStickies && stickyLines.length > 0 && !stickyExpanded && (
+            <div
+              ref={miniStickyRef}
+              onClick={handleStickyOpen}
+              className="nodrag absolute z-20 cursor-pointer sticky-paper transition-all hover:scale-[1.05] active:scale-95"
+              style={{
+                bottom: '-26px',
+                right: '0px',
+                width: '50px',
+                height: '53px',
+                backgroundColor: '#f5e6c8',
+                border: '1px solid oklch(0.88 0.10 95 / 0.5)',
+                borderRadius: '0',
+                boxShadow: '2px 5px 14px rgba(0,0,0,0.08), -1px 3px 6px rgba(0,0,0,0.04)',
+                fontFamily: "'Noto Serif SC', serif",
+                transform: 'rotate(-3deg)',
+                padding: '5px 6px',
+                overflow: 'visible',
+              }}
+            >
+              <div className="flex flex-col gap-px text-[7px] leading-tight" style={{ color: 'oklch(0.34 0.02 40)' }}>
+                {stickyLines.slice(0, 2).map((line, i) => (
+                  <div key={i} className="truncate">{line}</div>
+                ))}
+                {stickyLines.length > 2 && (
+                  <div className="text-[6px]" style={{ color: 'oklch(0.50 0.02 40 / 0.6)' }}>+{stickyLines.length - 2}</div>
+                )}
+              </div>
+              {/* 图钉 */}
+              <span
+                className="absolute pointer-events-none"
+                style={{
+                  top: '-2px',
+                  right: '-3px',
+                  fontSize: '12px',
+                  lineHeight: 1,
+                  transform: 'rotate(15deg)',
+                  filter: 'drop-shadow(0px 1.5px 1.5px rgba(0,0,0,0.3))',
+                  display: 'inline-block',
+                  overflow: 'hidden',
+                  height: '9px',
+                }}
+              >📌</span>
+            </div>
+          )}
+        </span>
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -1678,7 +1725,8 @@ ${rows.join('\n')}
       {/* Messages */}
       <div
         ref={scrollRef}
-        className="flex max-h-[300px] min-h-[60px] flex-col gap-2 overflow-y-auto p-3 ai-canvas-scroll"
+        onMouseDown={(e) => e.stopPropagation()}
+        className="nodrag flex max-h-[300px] min-h-[60px] flex-col gap-2 overflow-y-auto p-3 ai-canvas-scroll"
       >
         {messages.length === 0 && (
           <div className="flex flex-1 items-center justify-center py-4">
@@ -2019,12 +2067,11 @@ ${rows.join('\n')}
               </div>
             ) : null}
 
-            {/* Message bubble wrapper - hover area for copy button */}
-            <div className="relative group/msg-container">
+            {/* Message bubble wrapper */}
+            <div className={cn('relative group/msg-container', msg.role === 'user' ? 'ml-auto max-w-[85%]' : 'w-full')}>
               <div
                 className={cn(
-                  'group/msg max-w-[85%] rounded-lg px-3 py-1.5 text-[13px] leading-relaxed',
-                  msg.role === 'user' && cleanContent ? 'pb-5 min-w-[60px]' : '',
+                  'group/msg rounded-lg px-3 py-1.5 text-[13px] leading-relaxed',
                 )}
                 style={{
                   backgroundColor:
@@ -2035,41 +2082,37 @@ ${rows.join('\n')}
                         : 'oklch(0.93 0.015 75)',
                   color:
                     msg.role === 'user'
-                      ? 'oklch(0.25 0.02 50)'
+                      ? 'oklch(0.35 0.02 50)'
                       : cleanContent.startsWith('[')
                         ? 'oklch(0.50 0.15 25)'
                         : 'oklch(0.28 0.02 50)',
                 }}
               >
                 {msg.attachments && msg.attachments.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-2">
+                  <div className="mb-2 flex flex-wrap gap-0.5">
                     {msg.attachments.map((att) => (
-                      <div
+                      <span
                         key={att.id}
-                        className="flex items-center gap-2 rounded-md border px-2 py-1"
+                        className="inline-flex items-center gap-0.5 rounded-full px-1 py-px"
                         style={{
-                          borderColor: msg.role === 'user' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.08)',
-                          backgroundColor: msg.role === 'user' ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.5)',
+                          backgroundColor: msg.role === 'user' ? 'oklch(0.62 0.17 45 / 0.08)' : 'rgba(255,255,255,0.5)',
+                          border: `1px solid ${msg.role === 'user' ? 'oklch(0.62 0.17 45 / 0.2)' : 'rgba(0,0,0,0.08)'}`,
                         }}
                       >
                         {att.type === 'image' && att.dataUrl ? (
-                          <img
-                            src={att.dataUrl}
-                            alt={att.name}
-                            className="h-8 w-8 rounded object-cover"
-                          />
+                          <img src={att.dataUrl} alt={att.name} className="h-3 w-3 rounded-sm object-cover" />
                         ) : att.type === 'text' ? (
-                          <FileText className="h-4 w-4" style={{ color: '#537D96' }} />
+                          <FileText className="h-2.5 w-2.5" style={{ color: '#537D96' }} />
                         ) : (
-                          <FileIcon className="h-4 w-4" style={{ color: '#7a7260' }} />
+                          <Paperclip className="h-2.5 w-2.5" style={{ color: '#7a7260' }} />
                         )}
-                        <span className="max-w-[150px] truncate text-[11px]" style={{ color: msg.role === 'user' ? 'oklch(0.30 0.02 50)' : '#5c5342' }}>
+                        <span className="max-w-[48px] truncate text-[9px]" style={{ color: msg.role === 'user' ? 'oklch(0.45 0.02 55 / 0.8)' : '#a09880' }}>
                           {att.name}
                         </span>
-                        <span className="text-[10px]" style={{ color: msg.role === 'user' ? 'oklch(0.45 0.02 50 / 0.7)' : '#a09880' }}>
+                        <span className="text-[8px]" style={{ color: msg.role === 'user' ? 'oklch(0.45 0.02 50 / 0.5)' : '#a09880' }}>
                           {formatFileSize(att.size)}
                         </span>
-                      </div>
+                      </span>
                     ))}
                   </div>
                 )}
@@ -2128,27 +2171,38 @@ ${rows.join('\n')}
                   </span>
                 ) : null}
               </div>
-              {/* 复制按钮 - 文字右下角，hover 整个消息区域时显示 */}
+              {/* 用户消息：复制 + 删除按钮在文字下方 */}
               {msg.role === 'user' && cleanContent && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    navigator.clipboard.writeText(msg.content);
-                    setCopiedMsgId(msg.id);
-                    setTimeout(() => setCopiedMsgId(null), 1500);
-                  }}
-                  className="absolute right-1 bottom-0.5 p-1 rounded-md opacity-0 transition-opacity group-hover/msg-container:opacity-70 hover:!opacity-100"
-                  title="Copy"
-                  style={{
-                    backgroundColor: 'oklch(0.92 0.035 50)',
-                  }}
-                >
-                  {copiedMsgId === msg.id ? (
-                    <ClipboardCheck className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.12 45)' }} />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" style={{ color: 'oklch(0.50 0.03 55 / 0.6)' }} />
-                  )}
-                </button>
+                <div className="flex items-center justify-end gap-0.5 mt-0.5 opacity-0 group-hover/msg-container:opacity-100 transition-opacity">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText(msg.content);
+                      setCopiedMsgId(msg.id);
+                      setTimeout(() => setCopiedMsgId(null), 1500);
+                    }}
+                    className="flex items-center justify-center rounded p-0 transition-colors hover:opacity-80"
+                    style={{ color: 'oklch(0.50 0.02 55 / 0.6)' }}
+                    title="复制"
+                  >
+                    {copiedMsgId === msg.id ? (
+                      <ClipboardCheck className="h-2.5 w-2.5" style={{ color: 'oklch(0.55 0.12 45)' }} />
+                    ) : (
+                      <Copy className="h-2.5 w-2.5" />
+                    )}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteRound(messages.indexOf(msg));
+                    }}
+                    className="flex items-center justify-center rounded p-0.5 transition-colors hover:opacity-80"
+                    style={{ color: 'oklch(0.50 0.15 25 / 0.6)' }}
+                    title="删除本轮对话"
+                  >
+                    <Trash2 className="h-2.5 w-2.5" />
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -2159,7 +2213,7 @@ ${rows.join('\n')}
       {/* Input area - visible when selected, or on new/empty nodes, or when reference tag is set */}
       {(selected || messages.length === 0 || referenceTag) && (
       <div
-        className={cn('relative border-t p-2 transition-all', dragOver && 'ring-2')}
+        className={cn('nodrag relative border-t p-2 transition-all', dragOver && 'ring-2')}
         style={{
           borderColor: dragOver ? 'oklch(0.62 0.17 45 / 0.5)' : 'oklch(0.80 0.03 60 / 0.3)',
           backgroundColor: dragOver ? 'oklch(0.62 0.17 45 / 0.06)' : 'transparent',
@@ -2170,11 +2224,11 @@ ${rows.join('\n')}
       >
         {/* 待发送附件预览 — 小图标模式 */}
         {pendingAttachments.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-1">
+          <div className="mb-1.5 flex flex-wrap gap-0.5">
             {pendingAttachments.map((att) => (
               <span
                 key={att.id}
-                className="group inline-flex items-center gap-1 rounded-full px-1.5 py-0.5"
+                className="group inline-flex items-center gap-0.5 rounded-full px-1 py-px"
                 style={{
                   backgroundColor: 'oklch(0.62 0.17 45 / 0.08)',
                   border: '1px solid oklch(0.62 0.17 45 / 0.2)',
@@ -2182,13 +2236,13 @@ ${rows.join('\n')}
                 title={`${att.name} (${formatFileSize(att.size)})`}
               >
                 {att.type === 'image' && att.dataUrl ? (
-                  <img src={att.dataUrl} alt={att.name} className="h-3.5 w-3.5 rounded-sm object-cover" />
+                  <img src={att.dataUrl} alt={att.name} className="h-3 w-3 rounded-sm object-cover" />
                 ) : att.type === 'text' ? (
-                  <FileText className="h-3 w-3" style={{ color: '#537D96' }} />
+                  <FileText className="h-2.5 w-2.5" style={{ color: '#537D96' }} />
                 ) : (
-                  <Paperclip className="h-3 w-3" style={{ color: '#7a7260' }} />
+                  <Paperclip className="h-2.5 w-2.5" style={{ color: '#7a7260' }} />
                 )}
-                <span className="max-w-[60px] truncate text-[10px]" style={{ color: 'oklch(0.40 0.02 50)' }}>
+                <span className="max-w-[48px] truncate text-[9px]" style={{ color: 'oklch(0.40 0.02 50)' }}>
                   {att.name}
                 </span>
                 <button
@@ -2196,10 +2250,10 @@ ${rows.join('\n')}
                     e.stopPropagation();
                     removePendingAttachment(att.id);
                   }}
-                  className="ml-0.5 rounded-full p-px opacity-0 transition-opacity group-hover:opacity-100"
+                  className="ml-0 rounded-full p-px opacity-0 transition-opacity group-hover:opacity-100"
                   style={{ color: 'oklch(0.50 0.02 55 / 0.6)' }}
                 >
-                  <X className="h-2.5 w-2.5" />
+                  <X className="h-2 w-2" />
                 </button>
               </span>
             ))}
@@ -2373,24 +2427,8 @@ ${rows.join('\n')}
         <div className="mt-1.5 flex items-center justify-between">
           {/* 左侧：附件 + 技能 */}
           <div className="flex items-center gap-1.5">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                handleFileSelect(e.target.files);
-                e.target.value = '';
-              }}
-              disabled={isStreaming}
-            />
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                fileInputRef.current?.click();
-              }}
-              disabled={isStreaming || uploadingAttachment}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-50"
+            <label
+              className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors disabled:opacity-50"
               style={{
                 backgroundColor: 'oklch(0.94 0.01 70)',
                 color: 'oklch(0.50 0.02 55 / 0.7)',
@@ -2405,12 +2443,24 @@ ${rows.join('\n')}
                 e.currentTarget.style.backgroundColor = 'oklch(0.94 0.01 70)';
               }}
             >
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="absolute opacity-0 pointer-events-none"
+                style={{ width: 0, height: 0 }}
+                onChange={(e) => {
+                  handleFileSelect(e.target.files);
+                  e.target.value = '';
+                }}
+                disabled={isStreaming || uploadingAttachment}
+              />
               {uploadingAttachment ? (
                 <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-r-transparent" />
               ) : (
                 <Paperclip className="h-3.5 w-3.5" />
               )}
-            </button>
+            </label>
 
             {/* 技能选择按钮 */}
             {availableSkills.length > 0 && (

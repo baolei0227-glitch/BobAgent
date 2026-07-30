@@ -9,6 +9,7 @@ interface SummarizedTask {
   end_time?: string | null;
   all_day: boolean;
   priority?: 'high' | 'normal' | 'low';
+  category_path?: string[];  // 主题层级分类，最多3级，如 ["工作", "项目A", "前端"]
   description?: string;      // 模型补充说明
   source_raw?: string;       // 对应的原始文本片段
 }
@@ -83,10 +84,11 @@ async function callModelForTasks(
   "tasks": [
     {
       "title": "简短任务标题，不超过20字",
-      "start_time": "ISO 8601格式的绝对时间，如 2026-07-29T14:00:00+08:00。全任务填当天的09:00",
+      "start_time": "ISO 8601格式的绝对时间，如 2026-07-29T14:00:00+08:00。全日任务填当天的09:00",
       "end_time": "ISO 8601格式或null（未指定结束时间）",
       "all_day": true 或 false,
       "priority": "high" | "normal" | "low",
+      "category_path": ["一级主题", "二级主题", "三级主题"] 最多3级，按任务所属领域/项目/模块归纳，如 ["工作", "项目Alpha", "前端"]、["生活", "健康"]、["学习"]。时间/地点不作为分类依据，
       "description": "模型补充的说明（选填），或原始文本对应片段",
       "source_raw": "该任务对应的原始文本片段（尽可能完整保留）"
     }
@@ -109,7 +111,9 @@ async function callModelForTasks(
 3. 优先级：含"紧急/重要/尽快/截止/马上"等高优先级关键词 → high；
    含"有时间/有空/顺便"等低优先级关键词 → low；其余 normal。
 4. 标题要简洁，不要写"任务1"、"Todo"等无意义前缀；使用中文动词开头更清晰。
-5. 保持原文的意图，不要过度脑补细节；不确定的信息放入 ambiguous_items 而不是编造。`;
+5. 主题分类（category_path）：根据任务内容推断所属领域/项目/模块层级，最多3级。
+   时间、地点、人名不作为分类依据。如无明确主题填 ["其他"]。
+6. 保持原文的意图，不要过度脑补细节；不确定的信息放入 ambiguous_items 而不是编造。`;
 
   const userPrompt = `请将以下原始文本解析为结构化任务，并返回严格 JSON：
 
@@ -117,7 +121,7 @@ async function callModelForTasks(
 ${userText}
 --- 原始文本结束 ---
 
-请只返回 JSON，不要加任何其他文字。`;
+请只返回 JSON，不要加任何其他文字。重要：必须返回原始文本中识别到的所有任务，不要遗漏任何一条。tasks 数组中应包含每一条可识别的任务。`;
 
   const endpoint = cfg.baseUrl.replace(/\/$/, '') + '/chat/completions';
   const resp = await fetch(endpoint, {
@@ -128,12 +132,11 @@ ${userText}
     },
     body: JSON.stringify({
       model: cfg.model,
-      temperature: 0.2,
+      temperature: 0.3,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
-      response_format: { type: 'json_object' as any },
     }),
   });
 
@@ -147,11 +150,17 @@ ${userText}
     || data?.choices?.[0]?.delta?.content
     || '';
 
-  // 清理 markdown 代码块包裹
-  const cleaned = content
+  // 提取 JSON：先尝试移除 markdown 代码块，再查找 JSON 对象
+  let cleaned = content
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/, '')
     .trim();
+  // 如果仍有包装文字，尝试提取第一个 { 到最后一个 } 之间的内容
+  const jsonStart = cleaned.indexOf('{');
+  const jsonEnd = cleaned.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd > jsonStart) {
+    cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+  }
 
   let parsed: any;
   try {
@@ -181,6 +190,7 @@ ${userText}
       end_time: t.end_time ?? null,
       all_day: t.all_day === true || t.all_day === 'true',
       priority: (t.priority === 'high' || t.priority === 'low') ? t.priority : 'normal',
+      category_path: Array.isArray(t.category_path) ? t.category_path.slice(0, 3).filter((s: any) => typeof s === 'string' && s.trim()) : undefined,
       description: t.description ?? undefined,
       source_raw: t.source_raw ?? undefined,
     });

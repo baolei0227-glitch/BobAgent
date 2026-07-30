@@ -10,6 +10,7 @@ interface FileInfo {
   content?: string;
   size: number;
   extension: string;
+  full_path?: string;
 }
 
 interface FileViewerProps {
@@ -24,6 +25,12 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/** 剥离 .md 文件的 frontmatter */
+function stripFrontmatter(content: string): string {
+  const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  return match ? match[2] : content;
 }
 
 /** 代码文件扩展名到语言的映射 */
@@ -84,11 +91,11 @@ export function FileViewer({ projectId, fileName, filePath, onClose, mode = 'sta
   const renderTextContent = () => {
     if (!fileInfo?.content) return null;
 
-    // .md 用 HtmlRenderer
+    // .md 用 HtmlRenderer（先剥离 frontmatter）
     if (ext === '.md') {
       return (
         <div className="px-6 py-4">
-          <HtmlRenderer content={fileInfo.content} />
+          <HtmlRenderer content={stripFrontmatter(fileInfo.content)} />
         </div>
       );
     }
@@ -142,12 +149,26 @@ export function FileViewer({ projectId, fileName, filePath, onClose, mode = 'sta
     );
   };
 
+  /** 渲染 PDF（内嵌预览） */
+  const renderPdf = () => {
+    const proxyUrl = `/api/projects?action=file_proxy&project_id=${encodeURIComponent(projectId || '')}&file_path=${encodeURIComponent(filePath)}`;
+    return (
+      <div className="flex-1">
+        <iframe
+          src={proxyUrl}
+          className="h-full w-full border-0"
+          title={fileName}
+        />
+      </div>
+    );
+  };
+
   /** 渲染二进制文件占位（支持用系统默认程序打开） */
   const renderBinary = () => {
     const handleOpen = async () => {
       try {
-        if (typeof window !== 'undefined' && window.api?.openFile) {
-          const absPath = filePath.startsWith('/') ? filePath : filePath;
+        const absPath = fileInfo?.full_path;
+        if (absPath && typeof window !== 'undefined' && window.api?.openFile) {
           await window.api.openFile(absPath);
         }
       } catch (e) {
@@ -157,8 +178,7 @@ export function FileViewer({ projectId, fileName, filePath, onClose, mode = 'sta
 
     const ext = fileInfo?.extension?.toLowerCase() || '';
     const isWord = ['.doc', '.docx'].includes(ext);
-    const isPdf = ext === '.pdf';
-    const label = isWord ? 'Word 文档' : isPdf ? 'PDF 文档' : '二进制文件';
+    const label = isWord ? 'Word 文档' : '二进制文件';
 
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-16">
@@ -224,7 +244,7 @@ export function FileViewer({ projectId, fileName, filePath, onClose, mode = 'sta
       </div>
 
       {/* 内容区 */}
-      <div className="flex-1 overflow-y-auto ai-canvas-scroll">
+      <div className="flex flex-1 flex-col overflow-y-auto ai-canvas-scroll">
         {loading ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-r-transparent" style={{ color: '#537D96' }} />
@@ -237,6 +257,7 @@ export function FileViewer({ projectId, fileName, filePath, onClose, mode = 'sta
           </div>
         ) : fileInfo ? (
           fileInfo.type === 'image' ? renderImage() :
+          fileInfo.extension === '.pdf' ? renderPdf() :
           fileInfo.type === 'binary' ? renderBinary() :
           renderTextContent()
         ) : null}

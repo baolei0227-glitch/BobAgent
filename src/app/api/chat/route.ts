@@ -9,7 +9,7 @@ import {
   REASONING_EFFORT_MAP,
   SYSTEM_PROMPT_INJECTIONS,
 } from '@/lib/types';
-import { TOOL_DEFINITIONS, executeTool, getToolSummary } from './tools';
+import { TOOL_DEFINITIONS, getToolDefinitions, registerCustomTools, registerMcpTools, executeTool, getToolSummary } from './tools';
 import { getCurrentProject, buildVisionModelConfig } from '@/lib/project/project-manager';
 import { parseImage } from '@/lib/parse/image-parser';
 import { readSettingsFromFile } from '@/lib/settings-server';
@@ -93,6 +93,16 @@ IMPORTANT: 在回答的最末尾，请用以下格式添加一个对话标题建
 - web_search 每个问题最多调用 1-2 次，获取到结果后立即基于结果回答，不要反复搜索同一问题
 - 拿到工具结果后应直接组织回答，不要重复调用相同工具
 - 如果工具返回的结果足够回答问题，就不要再调用其他工具
+
+当现有工具无法直接解决问题时：
+- 先判断缺的是什么：
+  - 缺可执行程序（如 ffmpeg、rembg、pandoc 等）→ 使用 run_command 安装
+  - 缺外部信息 → 使用 web_search 搜索
+  - 缺专业知识/工作流程 → 先尝试基于自身知识推理解决
+- 如果专业知识超出你的能力范围，搜索 GitHub 上的社区技能：
+  - 使用 web_search 搜索：site:github.com SKILL.md <关键词>
+  - 如果找到相关技能 → 向用户提议安装，等待确认后用 run_command git clone 到 ~/BobAgent/skills/
+  - 如果找不到 → 诚实承认 + 主动提出："我可以帮你写一个新的 skill 来覆盖这个场景"
 
 与用户互动原则：
 - 当用户需求不明确、信息不足或存在多种可能的理解时，主动向用户提问以澄清需求，而不是猜测
@@ -447,6 +457,17 @@ export async function POST(request: NextRequest) {
       // ---- 使用 OpenAI SDK 调用自定义提供商（支持工具调用循环） ----
       const client = new OpenAI({ apiKey, baseURL: baseUrl });
 
+      // 注册自定义工具（每次请求都刷新，确保与 settings 同步）
+      const settingsForTools = await readSettingsFromFile();
+      registerCustomTools(settingsForTools.customTools || []);
+
+      // 同步 MCP 服务器配置并注册 MCP 工具
+      const { mcpManager } = await import('@/lib/mcp/manager');
+      await mcpManager.syncServers(settingsForTools.mcpServers || []);
+      await registerMcpTools().catch((e) => console.error('[MCP] 工具注册失败:', e));
+
+      const toolDefs = getToolDefinitions();
+
       const isMoonshotThinking = baseUrl.includes('moonshot') && /kimi-k\d/i.test(providerModelId);
       const isDeepseekReasoner = baseUrl.includes('deepseek') && /reason/i.test(providerModelId);
       const finalTemp = isMoonshotThinking || isDeepseekReasoner ? 1 : (temperature ?? 0.7);
@@ -489,7 +510,7 @@ export async function POST(request: NextRequest) {
 
               // 最后一轮不传 tools，强制模型输出文本
               if (!isLastRound) {
-                requestBody.tools = TOOL_DEFINITIONS;
+                requestBody.tools = toolDefs;
               }
 
               if (reasoningEffort && modelSupportsThinking) {
