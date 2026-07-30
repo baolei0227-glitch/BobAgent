@@ -1,6 +1,6 @@
 {
   "name": "bob-agent",
-  "version": "1.0.8",
+  "version": "1.0.14",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {
@@ -70,6 +70,7 @@
     "electron-updater": "^6.8.9",
     "embla-carousel-react": "^8.6.0",
     "gray-matter": "^4.0.3",
+    "highlight.js": "^11.11.1",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.468.0",
     "next": "16.1.1",
@@ -86,6 +87,7 @@
     "sonner": "^2.0.7",
     "tailwind-merge": "^2.6.0",
     "turndown": "^7.2.4",
+    "unified-renderer": "file:/Users/baolei/Desktop/AiCanvas/assets/unified-renderer",
     "vaul": "^1.1.2",
     "zod": "^4.3.5"
   },

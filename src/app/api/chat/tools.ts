@@ -11,9 +11,11 @@
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { readFile, writeFile, unlink, readdir, stat } from 'fs/promises';
+import { readFile, writeFile, unlink, readdir, stat, mkdir, access } from 'fs/promises';
 import { join, resolve, relative, isAbsolute, sep, extname } from 'path';
 import { homedir } from 'os';
+import { getCurrentProject } from '@/lib/project/project-manager';
+import { initDb, listEventsInRange, listAllEvents, type EventRow } from '@/lib/db';
 
 const execAsync = promisify(exec);
 
@@ -129,6 +131,84 @@ class ToolRegistry {
 
   count(): number {
     return this._tools.size;
+  }
+}
+
+/** read_todo 工具 — 读取 WANTED 待办记录 */
+async function toolReadTodo(args: Record<string, unknown>): Promise<string> {
+  const filter = (args.filter as string) || 'all'; // all | recent | week | today
+  const category = (args.category as string) || ''; // 会议 | 开发 | 文档 | 学习 | 沟通 | 生活 | 规划 | 其他
+
+  try {
+    const { resolveAppRoot } = await import('@/lib/app-root');
+    const APP_ROOT = resolveAppRoot();
+    const wantedDir = join(APP_ROOT, 'wanted');
+    const todoPath = join(wantedDir, 'todo.md');
+
+    // 确保目录和文件存在
+    try {
+      await access(wantedDir);
+    } catch {
+      await mkdir(wantedDir, { recursive: true });
+    }
+    try {
+      await access(todoPath);
+    } catch {
+      await writeFile(todoPath, '# TODO 待办记录\n\n> 暂无记录\n\n', 'utf-8');
+      return 'TODO file is empty. No tasks have been recorded yet.';
+    }
+
+    let content = await readFile(todoPath, 'utf-8');
+
+    // 按时间过滤
+    if (filter === 'today') {
+      const today = new Date().toISOString().slice(0, 10);
+      const dateSection = `## ${today}`;
+      const idx = content.indexOf(dateSection);
+      if (idx < 0) return `No tasks found for today (${today}).`;
+      // 提取今天的内容
+      const nextSection = content.slice(idx + dateSection.length).match(/\n## /);
+      content = dateSection + (nextSection
+        ? content.slice(idx + dateSection.length, idx + dateSection.length + nextSection.index!)
+        : content.slice(idx + dateSection.length));
+    } else if (filter === 'recent' || filter === 'week') {
+      const now = new Date();
+      const weekAgo = new Date(now.getTime() - 7 * 86400000);
+      const lines = content.split('\n');
+      const recentLines: string[] = [];
+      let keepSection = false;
+
+      for (const line of lines) {
+        const dateMatch = line.match(/^## (\d{4}-\d{2}-\d{2})/);
+        if (dateMatch) {
+          keepSection = new Date(dateMatch[1]) >= weekAgo;
+        }
+        if (keepSection) {
+          recentLines.push(line);
+        }
+      }
+      content = recentLines.join('\n');
+    }
+
+    // 按分类过滤
+    if (category) {
+      const lines = content.split('\n').filter(l => {
+        if (l.startsWith('#')) return true;
+        if (l.startsWith('>')) return true;
+        return l.includes(`[${category}]`);
+      });
+      content = lines.join('\n');
+    }
+
+    if (!content.trim() || content === '# TODO 待办记录\n\n> 暂无记录') {
+      const filterDesc = filter === 'today' ? 'today' : filter === 'week' ? 'this week' : 'recorded';
+      const catDesc = category ? ` in category "${category}"` : '';
+      return `No tasks found for ${filterDesc}${catDesc}.`;
+    }
+
+    return content.length > 5000 ? truncate(content, 5000) : content;
+  } catch (e) {
+    return `Error reading TODO: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -759,22 +839,28 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
           );
         }
 
-        // 扫描件：高质量多页渲染 + 视觉模型 OCR
+        // 扫描件：多级 OCR 降级
         const scannedPages = pyResult.pageCount || fallback.pageCount;
+        let ocrLastError = ''; // 记录 OCR 失败原因，用于最终错误信息
+
         if (scannedPages > 0) {
           const settings = await readSettingsFromFile();
           const visionModel = settings.vision.defaultModel;
           const visionApiKey = settings.vision.apiKey;
 
-          if (visionModel && visionApiKey) {
+          if (!visionModel || !visionApiKey) {
+            ocrLastError = '视觉模型未配置（请在设置中配置视觉模型的 API Key 和模型）';
+          } else {
+            // 第1级：高质量多页渲染 + 视觉模型 OCR
+            let imgResult: { success: boolean; images: string[]; totalPages: number; rendered: number; dpi: number; tmpDir: string } | null = null;
+
             try {
               const { renderPdfToImages } = await import('@/lib/pdf/extractor');
               const { exec } = await import('child_process');
               const { promisify } = await import('util');
               const execAsync = promisify(exec);
 
-              // pypdf 分页 + sips 200 DPI 渲染
-              const imgResult = await renderPdfToImages(filePath, 200, 50);
+              imgResult = await renderPdfToImages(filePath, 200, 50);
 
               if (imgResult.success && imgResult.images.length > 0) {
                 const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, settings.vision.baseUrl || undefined);
@@ -782,7 +868,7 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
 
                 // 并行逐页 OCR（并发上限 3，避免 API 限流）
                 const concurrency = 3;
-                const ocrResults: { index: number; text: string }[] = [];
+                const ocrResults: { index: number; text: string; error?: string }[] = [];
                 for (let batch = 0; batch < imgResult.images.length; batch += concurrency) {
                   const batchSlice = imgResult.images.slice(batch, batch + concurrency);
                   const batchResults = await Promise.all(
@@ -795,8 +881,8 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
                           { model: modelConfig.model, apiKey: modelConfig.apiKey, baseUrl: modelConfig.baseUrl, mode: 'document' }
                         );
                         return { index: pageNum, text: `[Page ${pageNum}]\n${pageResult.extracted_text}` };
-                      } catch {
-                        return { index: pageNum, text: `[Page ${pageNum}] OCR failed` };
+                      } catch (e) {
+                        return { index: pageNum, text: `[Page ${pageNum}] OCR failed`, error: e instanceof Error ? e.message : String(e) };
                       }
                     }),
                   );
@@ -804,27 +890,48 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
                 }
                 ocrResults.sort((a, b) => a.index - b.index);
 
-                // 清理临时文件
-                await execAsync(`rm -rf "${imgResult.tmpDir}"`).catch(() => {});
+                const successPages = ocrResults.filter(r => !r.error);
+                const failedPages = ocrResults.filter(r => r.error);
 
-                return truncate(
-                  `Attachment: ${path} (${formatSize(fileStat.size)}, Scanned PDF, ${imgResult.rendered}/${imgResult.totalPages} pages at ${imgResult.dpi} DPI)\n\n${ocrResults.map(r => r.text).join('\n\n')}`,
-                  50000,
-                );
+                // 至少有一页成功就返回结果
+                if (successPages.length > 0) {
+                  // 清理临时文件
+                  await execAsync(`rm -rf "${imgResult.tmpDir}"`).catch(() => {});
+
+                  const result = truncate(
+                    `Attachment: ${path} (${formatSize(fileStat.size)}, Scanned PDF, ${imgResult.rendered}/${imgResult.totalPages} pages at ${imgResult.dpi} DPI)\n\n${ocrResults.map(r => r.text).join('\n\n')}`,
+                    50000,
+                  );
+
+                  if (failedPages.length > 0) {
+                    const failedNums = failedPages.map(r => r.index).join(', ');
+                    ocrLastError = `部分页面 OCR 失败（页码: ${failedNums}），原因: ${failedPages[0].error}`;
+                  }
+                  return result;
+                }
+
+                // 全部页面 OCR 失败，记录错误
+                if (failedPages.length > 0) {
+                  ocrLastError = `所有页面 OCR 失败，原因: ${failedPages[0].error}`;
+                }
+              } else {
+                ocrLastError = `PDF 渲染为图片失败（可能是文件损坏或 sips 不支持该 PDF 格式）`;
               }
             } catch (ocrErr) {
-              // 回退到单页 sips
+              ocrLastError = `多页 OCR 异常: ${ocrErr instanceof Error ? ocrErr.message : String(ocrErr)}`;
             }
-          }
-        }
 
-        // 回退：单页 sips + 视觉模型
-        if (scannedPages > 0) {
-          const settings = await readSettingsFromFile();
-          const visionModel = settings.vision.defaultModel;
-          const visionApiKey = settings.vision.apiKey;
+            // 清理多页渲染的临时文件（如果尚未清理）
+            if (imgResult?.tmpDir) {
+              try {
+                const { exec } = await import('child_process');
+                const { promisify } = await import('util');
+                const execAsync = promisify(exec);
+                await execAsync(`rm -rf "${imgResult.tmpDir}"`).catch(() => {});
+              } catch {}
+            }
 
-          if (visionModel && visionApiKey) {
+            // 第2级：回退到单页 sips + 视觉模型（仅当多页渲染成功但 OCR 全部失败时）
             try {
               const { exec } = await import('child_process');
               const { promisify } = await import('util');
@@ -837,7 +944,7 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
               const modelConfig = await buildVisionModelConfig(visionModel, visionApiKey, settings.vision.baseUrl || undefined);
               const { parseImage } = await import('@/lib/parse/image-parser');
 
-              const imgResult = await parseImage(
+              const pageResult = await parseImage(
                 tmpPng,
                 project.path,
                 { model: modelConfig.model, apiKey: modelConfig.apiKey, baseUrl: modelConfig.baseUrl, mode: 'document' }
@@ -845,17 +952,22 @@ async function toolReadAttachment(args: Record<string, unknown>): Promise<string
 
               await execAsync(`rm -f "${tmpPng}"`).catch(() => {});
 
-              return truncate(
-                `Attachment: ${path} (${formatSize(fileStat.size)}, Scanned PDF, OCR via vision model)\n\n${imgResult.extracted_text}`,
-                50000,
-              );
-            } catch (ocrErr) {
-              // 也失败
+              if (pageResult.extracted_text) {
+                return truncate(
+                  `Attachment: ${path} (${formatSize(fileStat.size)}, Scanned PDF, OCR via vision model (single-page fallback))\n\n${pageResult.extracted_text}`,
+                  50000,
+                );
+              }
+              ocrLastError = '单页回退 OCR 完成但未提取到文字（视觉模型返回为空）';
+            } catch (fallbackErr) {
+              if (!ocrLastError) {
+                ocrLastError = `单页回退 OCR 失败: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`;
+              }
             }
           }
         }
 
-        return `Attachment: ${path}\nType: PDF (${pyResult.pageCount} pages)\nSize: ${formatSize(fileStat.size)}\n\nUnable to extract text from this PDF. It may be scanned or image-based.`;
+        return `Attachment: ${path}\nType: PDF (${scannedPages} pages)\nSize: ${formatSize(fileStat.size)}\n\n无法提取文字：此 PDF 为扫描件或图片型文档。${ocrLastError ? `OCR 尝试失败 — ${ocrLastError}` : '请确认已配置视觉模型（设置 → 视觉模型）。'}`;
       } catch (extractErr) {
         const fileStat = await stat(filePath);
         return `Attachment: ${path}\nType: PDF\nSize: ${formatSize(fileStat.size)}\n\nPDF text extraction failed: ${extractErr instanceof Error ? extractErr.message : String(extractErr)}`;
@@ -1043,6 +1155,13 @@ async function toolReadCalendar(args: Record<string, unknown>): Promise<string> 
   const showDone = (args.include_done as boolean) || false;
 
   try {
+    const project = await getCurrentProject();
+    if (!project?.path) {
+      return 'Error: No active project';
+    }
+
+    const dbPath = join(project.path, 'project.db');
+    const db = await initDb(dbPath);
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -1070,30 +1189,13 @@ async function toolReadCalendar(args: Record<string, unknown>): Promise<string> 
         rangeEnd = new Date(todayStart.getTime() + 60 * 86400000 - 1).toISOString();
     }
 
-    // 调用内部 API
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-    let url = `${baseUrl}/api/calendar/events?range_start=${encodeURIComponent(rangeStart)}&range_end=${encodeURIComponent(rangeEnd)}`;
-    if (showDone) url += '&all=true';
-
-    const resp = await fetch(url);
-    const data = await resp.json();
-
-    if (!data.success) {
-      return `Calendar query failed: ${data.error || 'Unknown error'}`;
-    }
-
-    const events: Array<{
-      title: string;
-      start_time: string;
-      end_time: string | null;
-      all_day: boolean;
-      status: string;
-      priority: string;
-      description: string | null;
-    }> = data.events || [];
+    // 直接查 DB，避免 HTTP fetch 自身导致的失败
+    const rows: EventRow[] = showDone
+      ? await listAllEvents(db, project.id, 1000)
+      : await listEventsInRange(db, project.id, rangeStart, rangeEnd);
 
     // 过滤 done/cancelled（除非明确要求）
-    const filtered = showDone ? events : events.filter((e: { status: string }) => e.status === 'scheduled');
+    const filtered = showDone ? rows : rows.filter((e: EventRow) => e.status === 'scheduled');
 
     if (filtered.length === 0) {
       const labels: Record<string, string> = { today: 'today', week: 'this week', upcoming: 'upcoming', all: 'in range' };
@@ -1133,6 +1235,9 @@ async function toolReadCalendar(args: Record<string, unknown>): Promise<string> 
 
     return lines.join('\n');
   } catch (e) {
+    if (e instanceof Error && e.message === 'NO_PROJECT') {
+      return 'No active project. Please create or select a project first.';
+    }
     return `Calendar read failed: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
@@ -1140,6 +1245,96 @@ async function toolReadCalendar(args: Record<string, unknown>): Promise<string> 
 // ============================================================
 // 构建工具注册表
 // ============================================================
+
+/** draw 工具 — 生成图表/图形 */
+async function toolDraw(args: Record<string, unknown>): Promise<string> {
+  const type = (args.type as string) || 'diagram'; // chart | diagram
+  const code = args.code as string;
+  if (!code) return 'Error: code is required';
+
+  const fileName = (args.filename as string) || `drawing_${Date.now()}`;
+
+  if (type === 'chart') {
+    // 用 Python matplotlib 生成图表 PNG
+    const tmpScriptName = `.bobagent_chart_${Date.now()}.py`;
+    const tmpScriptPath = join(WORKSPACE, tmpScriptName);
+    const outputFile = `${fileName}.png`;
+    const outputPath = join(WORKSPACE, outputFile);
+
+    try {
+      // 包裹用户代码，确保保存到指定路径
+      const wrappedCode = `
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+${code}
+
+plt.savefig("${outputPath}", dpi=120, bbox_inches='tight')
+plt.close()
+`;
+      await writeFile(tmpScriptPath, wrappedCode, 'utf-8');
+
+      const { stdout, stderr } = await execAsync(`python3 "${tmpScriptPath}"`, {
+        cwd: WORKSPACE,
+        timeout: 30000,
+        maxBuffer: 1024 * 512,
+      });
+
+      let output = stdout;
+      if (stderr) output += output ? `\n[stderr]\n${stderr}` : stderr;
+
+      // 检查文件是否生成成功
+      try {
+        const fileStat = await stat(outputPath);
+        return `Chart generated successfully (${(fileStat.size / 1024).toFixed(1)}KB)` +
+          `\nFile: ~/BobAgent/sandbox/${outputFile}` +
+          (output.trim() ? `\n\nScript output:\n${truncate(output, 2000)}` : '');
+      } catch {
+        return `Chart generation failed. Script executed but no output file was created.\n\nScript output:\n${truncate(output, 3000)}`;
+      }
+    } catch (e) {
+      const err = e as { killed?: boolean; stdout?: string; stderr?: string; message?: string };
+      if (err.killed) return 'Chart generation timed out (30s)';
+      let output = err.stdout || '';
+      if (err.stderr) output += output ? `\n${err.stderr}` : err.stderr;
+      if (!output.trim()) output = err.message || String(e);
+      return `Chart generation failed:\n${truncate(output, 3000)}`;
+    } finally {
+      try { await unlink(tmpScriptPath); } catch { /* ignore */ }
+    }
+  }
+
+  // diagram 类型：生成 HTML 文件内嵌 mermaid.js
+  const htmlFile = `${fileName}.html`;
+  const htmlPath = join(WORKSPACE, htmlFile);
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${fileName}</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"><\/script>
+<script>mermaid.initialize({startOnLoad:true,theme:'default'});<\/script>
+<style>
+  body { margin: 0; padding: 24px; background: #faf8f3; font-family: -apple-system, sans-serif; display: flex; justify-content: center; }
+  .container { max-width: 100%; overflow-x: auto; }
+  .mermaid { text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+<pre class="mermaid">
+${code}
+</pre>
+</div>
+</body>
+</html>`;
+
+  await writeFile(htmlPath, html, 'utf-8');
+  return `Diagram HTML generated. Open the file in a browser to view the rendered diagram.\nFile: ~/BobAgent/sandbox/${htmlFile}`;
+}
 
 /** 工具定义：name + schema + executor + 元数据 */
 const toolDefs: Tool[] = [
@@ -1279,7 +1474,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_attachment',
-    description: 'Read user-uploaded attachment content. Supports text files (txt, md, json, csv, code files etc.), .docx auto text extraction, and image files (.png, .jpg, .jpeg, .gif, .webp etc.) auto analyzed by vision model. When user questions involve attachment content, proactively call this tool.',
+    description: 'Read user-uploaded attachment content. Supports text files (txt, md, json, csv, code files etc.), .docx auto text extraction, PDF documents (auto text extraction for native PDFs, OCR via vision model for scanned PDFs), and image files (.png, .jpg, .jpeg, .gif, .webp etc.) auto analyzed by vision model. When user questions involve attachment content, proactively call this tool.',
     parameters: {
       type: 'object',
       properties: {
@@ -1348,6 +1543,54 @@ const toolDefs: Tool[] = [
     },
     category: '文件',
     execute: toolReadCalendar,
+    maxOutput: 5000,
+  },
+  {
+    name: 'draw',
+    description: 'Generate charts, graphs, and diagrams. For "chart" type: write Python code using matplotlib to create bar charts, line charts, pie charts, scatter plots etc. The code should plot data using plt.plot/bar/pie/scatter etc. Do NOT call plt.show() or plt.savefig(). For "diagram" type: provide Mermaid syntax to generate flowcharts, sequence diagrams, class diagrams, state diagrams, Gantt charts, pie charts etc. Use for visualizing data, illustrating processes, or creating technical diagrams.',
+    parameters: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['chart', 'diagram'],
+          description: 'Type of drawing: "chart" for matplotlib data charts (bar/line/pie/scatter etc), "diagram" for Mermaid diagrams (flowchart/sequence/class/state/Gantt/pie etc).',
+        },
+        code: {
+          type: 'string',
+          description: 'For chart: Python matplotlib code that creates the chart (already imports matplotlib and numpy, do NOT include import statements or plt.show/savefig). For diagram: Mermaid syntax code.',
+        },
+        filename: {
+          type: 'string',
+          description: 'Optional output filename without extension (e.g. "sales_report", "user_flow"). Default: auto-generated.',
+        },
+      },
+      required: ['type', 'code'],
+    },
+    category: '文件',
+    execute: toolDraw,
+    maxOutput: 4000,
+  },
+  {
+    name: 'read_todo',
+    description: 'Read WANTED todo records from the current project. Use to query what tasks were recently added, tasks of a specific category (会议/开发/文档/学习/沟通/生活/规划/其他), or today\'s schedule. Supports filtering by time range (today/week/all) and category.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filter: {
+          type: 'string',
+          enum: ['today', 'week', 'all'],
+          description: 'Time filter: "today" for today\'s tasks, "week" for recent 7 days, "all" for everything (default).',
+        },
+        category: {
+          type: 'string',
+          description: 'Category filter: 会议(meetings), 开发(development), 文档(documentation), 学习(learning), 沟通(communication), 生活(life), 规划(planning), 其他(other). Leave empty for all categories.',
+        },
+      },
+      required: [],
+    },
+    category: '文件',
+    execute: toolReadTodo,
     maxOutput: 5000,
   },
 ];

@@ -6,6 +6,69 @@
 
 ---
 
+## v1.0.14 (2026-07-30)
+
+- HtmlRenderer 重写为 unified-renderer：基于 Unified.js 生态，支持 GFM、代码高亮、安全过滤
+- 节点内 AI 回复改为显示完整内容 + Markdown 渲染（替换摘要卡片）
+- 扫描件 PDF OCR 错误处理重写：每级降级记录失败原因，AI 不再拿到无意义错误
+- 便签 textarea 选中文字修复：onPointerDown stopPropagation 阻止画布拖拽
+- 清理旧版 CSS：移除 .code-block / .inline-code / .md-table 等废弃样式
+
+---
+
+## v1.0.13 (2026-07-30)
+
+- 统一悬浮面板：所有文档标签页集中到右侧单一面板，支持拖拽和折叠
+- read_attachment 工具描述补充 PDF 支持，修复扫描件 OCR 识别失败
+- WANTED 任务归纳：移除 response_format json_object 兼容更多模型，增强 JSON 提取
+- TextEditPopup 标题栏新增齿轮图标，预设提示词编辑器从设置移至弹窗内
+- 便签编辑面板选中文字修复：移除 onPointerDown 阻止，恢复原生选择
+- handleAskQuestion 提问按钮豁免 mousedown 清理，修复点击后选区丢失
+
+---
+
+## v1.0.12 (2026-07-30)
+
+- HtmlReader 悬浮窗口：文档在画布上独立浮动，支持拖拽、折叠/展开
+- 便签平滑展开/收缩动效：从图标位置缩放展开为完整编辑框
+- 便签 textarea Enter 自动编号
+- .md 渲染修复：引用（blockquote）和代码块解析
+- handleAskQuestion 提级到系统层级，全局提取文字发送到活跃节点
+- 节点名称仅首次生成时自动更新
+- HtmlReader 折叠按钮改为 ChevronsRight，折叠画布悬浮区域
+
+---
+
+## v1.0.11 (2026-07-30)
+
+- extEditPopup 和 handleAskQuestion 提级到系统层级
+- 用户消息排版修复（whitespace-pre-line + min-w）
+- 节点标题引用标签显示在输入框上方
+- 节点名称限制仅首次生成时更新
+- HtmlReader 通用 .md 模式支持
+
+---
+
+## v1.0.10 (2026-07-30)
+
+- WANTED 去除独立折叠区块，直接嵌入侧边栏
+- todo.md 按主题层级分类（最多三级），时间/地点为事项信息
+- 选择文字默认单选，提示可全选，点击一键全选
+- 选中文字添加到节点引用（通过自定义事件跨组件通信）
+- 节点弹窗三指滑动不再触发画布拖拽
+
+---
+
+## v1.0.9 (2026-07-29)
+
+- 节点复制按钮移到文字右下角，扩大触发区域
+- 编辑/提问按钮提示简化
+- WANTED 目录移至与 projects 同级
+- 节点便签图标无内容时也可打开编辑
+- HtmlReader 折叠按钮折叠整个页面
+
+---
+
 ## v1.0.8 (2026-07-29)
 
 - fix: FileViewer 支持 tabbed 模式，修复侧边栏文件无法在标签面板中打开

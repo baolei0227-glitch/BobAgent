@@ -10,10 +10,11 @@ import {
   type NodeProps,
   type Node,
 } from '@xyflow/react';
-import { X, Send, Sparkles, ChevronDown, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AtSign, StickyNote } from 'lucide-react';
+import { X, Send, Sparkles, ChevronDown, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AtSign, Pin } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, MessageAttachment } from '@/lib/types';
 import QuestionPopup, { extractQuestions, type QuestionItem, type AnswerEntry } from './QuestionPopup';
+import { HtmlRenderer } from './HtmlRenderer';
 import {
   DEFAULT_MODEL_ID,
   DEFAULT_THINKING_LEVEL,
@@ -67,7 +68,17 @@ function parseThinkMood(content: string): { think: string; mood: string; content
     clean = clean.replace(/<mood>[\s\S]*$/i, '');
   }
 
-  return { think: think.trim(), mood: mood.trim(), content: clean.trim() };
+  const result = clean.trim();
+  // 安全兜底：如果结果为空但原文有实质内容，可能是 <think> 未闭合导致全部清空
+  if (!result && content.length > 20) {
+    const fallback = content
+      .replace(/<mood>[\s\S]*?<\/mood>/gi, '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .trim();
+    return { think: think.trim(), mood: mood.trim(), content: fallback || content.trim() };
+  }
+
+  return { think: think.trim(), mood: mood.trim(), content: result };
 }
 
 /** 从回答内容中提取 <!-- TITLE: xxx --> 格式的标题建议 */
@@ -91,7 +102,9 @@ function parseMoodTextToObject(moodText: string): { vibe?: string[]; sparks?: st
     reflections: [],
     will: [],
   };
+  const poolNames = ['vibe', 'sparks', 'reflections', 'will'] as const;
 
+  // 方式1: 按 "Vibe:" / "Sparks:" 标签分割
   const sections = moodText.split(/(?:^|\n)\s*(?:Vibe|Sparks|Reflections|Will)\s*[:：]\s*/i);
   const labels = moodText.match(/(?:Vibe|Sparks|Reflections|Will)\s*[:：]/gi) || [];
 
@@ -105,7 +118,21 @@ function parseMoodTextToObject(moodText: string): { vibe?: string[]; sparks?: st
     }
   }
 
-  // 如果解析失败，整体作为 vibe
+  // 方式2: 如果方式1失败，尝试 <vibe>...</vibe> XML 标签格式
+  if (Object.values(pools).every(arr => arr.length === 0)) {
+    for (const name of poolNames) {
+      const tagRegex = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`, 'i');
+      const match = moodText.match(tagRegex);
+      if (match) {
+        pools[name] = match[1]
+          .split('\n')
+          .map(s => s.replace(/^[-•·]\s*/, '').trim())
+          .filter(s => s.length > 0);
+      }
+    }
+  }
+
+  // 如果仍然解析失败，整体作为 vibe
   if (Object.values(pools).every(arr => arr.length === 0) && moodText.trim()) {
     pools.vibe = [moodText.trim()];
   }
@@ -163,9 +190,35 @@ export function AiChatNode({ id, data, selected }: NodeProps<AiChatNodeType>) {
   } | null>(null);
   const [hasDisconnectedUpstream, setHasDisconnectedUpstream] = useState(false);
   const [hasStickies, setHasStickies] = useState(false);
+  const [stickyLines, setStickyLines] = useState<string[]>([]);
+  const [stickyExpanded, setStickyExpanded] = useState(false);
+  const [stickyInput, setStickyInput] = useState('');
+  const [stickySaving, setStickySaving] = useState(false);
+  // 便签动画：idle → opening → visible → closing
+  const [stickyAnimPhase, setStickyAnimPhase] = useState<'idle' | 'opening' | 'visible' | 'closing'>('idle');
+  const [stickyOrigin, setStickyOrigin] = useState('right top');
+  const pinRef = useRef<HTMLButtonElement>(null);
+  const miniStickyRef = useRef<HTMLButtonElement>(null);
+  const stickyPanelRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSendRef = useRef<string | null>(null);
   const currentMdId = data.nodeMdId || id;
+
+  // 引用标签（从 HtmlReader 选中文字后插入）
+  const [referenceTag, setReferenceTag] = useState<{ text: string } | null>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+        const detail = (e as CustomEvent).detail as { node_id: string; selected_text: string };
+        if (detail?.node_id === currentMdId && detail?.selected_text) {
+        setReferenceTag({ text: detail.selected_text });
+        // 自动聚焦输入框
+        setTimeout(() => textareaRef.current?.focus(), 100);
+      }
+    };
+    window.addEventListener('insert-node-reference', handler);
+    return () => window.removeEventListener('insert-node-reference', handler);
+  }, [currentMdId]);
 
   // Materials @ mention state
   interface MaterialItem { id: string; name: string; path: string; size: number; extension: string; type: string; uploadedAt: string }
@@ -438,8 +491,14 @@ ${rows.join('\n')}
           const stickyMatch = data.content.match(/## 便签\n([\s\S]*?)(?:\n##|\n*$)/);
           if (stickyMatch && stickyMatch[1].trim() && stickyMatch[1].trim() !== '（暂无）') {
             setHasStickies(true);
+            // 提取便签内容行（去掉 - 前缀和空行）
+            const lines = stickyMatch[1].trim().split('\n')
+              .map((l: string) => l.replace(/^-\s*/, '').trim())
+              .filter((l: string) => l.length > 0);
+            setStickyLines(lines);
           } else {
             setHasStickies(false);
+            setStickyLines([]);
           }
         }
       })
@@ -449,6 +508,18 @@ ${rows.join('\n')}
   useEffect(() => {
     refreshStickies();
   }, [refreshStickies]);
+
+  // 监听 HtmlReader 端的 sticky notes 更新 → 双向联动
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { node_id: string };
+      if (detail?.node_id === currentMdId) {
+        refreshStickies();
+      }
+    };
+    window.addEventListener('sticky-notes-updated', handler);
+    return () => window.removeEventListener('sticky-notes-updated', handler);
+  }, [currentMdId, refreshStickies]);
 
   /** 选择 @ 引用的文件 */
   const handleMentionSelect = useCallback((file: MaterialItem) => {
@@ -488,6 +559,13 @@ ${rows.join('\n')}
 
     setMatchedSkills([]);
     setHasDisconnectedUpstream(false);
+
+    // 如果有引用标签，拼接到消息中
+    let effectiveContent = userInput;
+    if (referenceTag) {
+      effectiveContent = `> ${referenceTag.text}\n\n${userInput}`;
+      setReferenceTag(null); // 发送后清除引用标签
+    }
 
     let currentModelId = modelId;
 
@@ -536,7 +614,6 @@ ${rows.join('\n')}
     }
 
     // 构建带材料引用的消息内容（发送给 AI 时使用）
-    let effectiveContent = userInput;
     if (Object.keys(materialFileMap).length > 0) {
       const materialInfo = Object.entries(materialFileMap).map(([ref, file], i) => {
         return `  ${i + 1}. ${file.name} (${file.type}, ${formatFileSize(file.size)})\n     路径: ${file.path}`;
@@ -799,6 +876,25 @@ ${rows.join('\n')}
           // 从回答中提取标题建议
           const { title: suggestedTitle, cleanContent: cleanAnswer } = extractTitleSuggestion(answerWithoutMood);
 
+          console.log('[AiChatNode:save] assistantContent 长度:', assistantContent.length, '前200字:', assistantContent.slice(0, 200));
+          console.log('[AiChatNode:save] answerWithoutMood 长度:', answerWithoutMood.length, '前200字:', answerWithoutMood.slice(0, 200));
+          console.log('[AiChatNode:save] cleanAnswer 长度:', cleanAnswer.length, '前200字:', cleanAnswer.slice(0, 200));
+
+          // 安全兜底：如果解析后的答案异常短但原文很长，可能是 <think> 标签未闭合导致内容被清空
+          let finalAnswer = cleanAnswer;
+          if (cleanAnswer.length < 10 && assistantContent.length > 100) {
+            console.warn('[AiChatNode:save] 解析后答案异常短，可能 <think> 未闭合，使用原文兜底');
+            // 尝试只去除已知安全的部分：mood 标签和 TITLE 注释
+            let fallback = assistantContent
+              .replace(/<mood>[\s\S]*?<\/mood>/gi, '')
+              .replace(/<!--\s*TITLE:\s*.+?\s*-->/gi, '')
+              .trim();
+            if (fallback.length > cleanAnswer.length) {
+              finalAnswer = fallback;
+              console.log('[AiChatNode:save] 兜底答案长度:', finalAnswer.length);
+            }
+          }
+
           // 从用户消息中获取附件（移除 dataUrl 以减少存储）
           const savedAttachments = userMsg.attachments?.map(({ dataUrl, ...rest }) => rest) || [];
 
@@ -813,7 +909,7 @@ ${rows.join('\n')}
                   action: 'append',
                   node_id: currentMdId,
                   question: userInput,
-                  answer: cleanAnswer,
+                  answer: finalAnswer,
                   mood: moodObj,
                   question_attachments: savedAttachments,
                   title: data.title || 'AI Chat',
@@ -824,7 +920,7 @@ ${rows.join('\n')}
                 pendingAppendRef.current = null;
                 appendSuccess = true;
                 refreshStickies();
-                // 通知 MarkdownReader 刷新
+                // 通知 HtmlReader 刷新
                 window.dispatchEvent(new CustomEvent('node-document-updated', { detail: { node_id: currentMdId } }));
                 break;
               }
@@ -847,8 +943,8 @@ ${rows.join('\n')}
             setPersistError('Save failed, click to retry');
           }
 
-          // 2. 更新节点标题（如果有标题建议，且 append 成功）
-          if (appendSuccess && suggestedTitle && suggestedTitle.length > 2 && suggestedTitle.length <= 50) {
+          // 2. 更新节点标题（仅当标题为默认值时，即首次对话后自动命名）
+          if (appendSuccess && data.title === 'AI Chat' && suggestedTitle && suggestedTitle.length > 2 && suggestedTitle.length <= 50) {
             try {
               const renameResp = await fetch('/api/nodes', {
                 method: 'POST',
@@ -1130,12 +1226,273 @@ ${rows.join('\n')}
     }
   }, []);
 
+  // 便签打开：从缩小态位置平滑展开为编辑面板
+  const handleStickyOpen = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setStickyInput(hasStickies ? stickyLines.join('\n') : '');
+    // 计算 transform-origin：缩小态便签在展开面板坐标系中的位置
+    // 缩小态: left: -16px, top: -22px, 宽 120px → 中心 x=-16+60=44, y≈-22+25=3
+    // 展开面板: right: -20 (即 left: 90px), top: 40px, 宽 250px
+    // origin = (44-90, 3-40) = (-46, -37)
+    setStickyOrigin('-46px -37px');
+    setStickyExpanded(true);
+    setStickyAnimPhase('opening');
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setStickyAnimPhase('visible');
+      });
+    });
+  }, [hasStickies, stickyLines]);
+
+  // 便签关闭：反向收缩回缩小态位置
+  const handleStickyClose = useCallback(() => {
+    setStickyAnimPhase('closing');
+    setTimeout(() => {
+      setStickyExpanded(false);
+      setStickyAnimPhase('idle');
+    }, 300);
+  }, []);
+
+  // 便签 Enter 自动编号：已有的行自动编号，并创建下一个编号行
+  const handleStickyKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      const textarea = e.currentTarget;
+      const currentText = textarea.value;
+      const lines = currentText.split('\n');
+
+      // 找出已有编号中的最大值（格式：N. 或 N) ）
+      let lastNum = 0;
+      const numbered: boolean[] = new Array(lines.length).fill(false);
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(/^(\d+)[.)]\s*/);
+        if (match) {
+          lastNum = Math.max(lastNum, parseInt(match[1], 10));
+          numbered[i] = true;
+        }
+      }
+
+      // 为未编号的非空行自动编号
+      const resultLines: string[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) continue;
+        if (numbered[i]) {
+          resultLines.push(lines[i]);
+        } else {
+          lastNum++;
+          resultLines.push(`${lastNum}. ${trimmed}`);
+        }
+      }
+
+      // 添加下一个编号空行
+      lastNum++;
+      const newLine = `${lastNum}. `;
+      resultLines.push(newLine);
+
+      const newText = resultLines.join('\n');
+      setStickyInput(newText);
+
+      // 光标放到新行末尾
+      setTimeout(() => {
+        textarea.selectionStart = newText.length;
+        textarea.selectionEnd = newText.length;
+      }, 0);
+    }
+  }, []);
+
+  const handleStickySave = useCallback(async () => {
+    if (!currentMdId || stickySaving) return;
+    const lines = stickyInput
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    setStickySaving(true);
+    try {
+      const resp = await fetch('/api/nodes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'set_stickies',
+          node_id: currentMdId,
+          stickies: lines,
+        }),
+      });
+      if (resp.ok) {
+        setStickyLines(lines);
+        setHasStickies(lines.length > 0);
+        handleStickyClose();
+        setStickyInput('');
+        // 通知 HtmlReader 同步更新
+        window.dispatchEvent(new CustomEvent('sticky-notes-updated', { detail: { node_id: currentMdId } }));
+      }
+    } catch {
+      // save failed silently
+    } finally {
+      setStickySaving(false);
+    }
+  }, [currentMdId, stickyInput, stickySaving]);
+
   return (
     <div
       className="ai-node-wrapper group relative w-[320px]"
     >
       {/* 扩展 hover 触发面积（超出节点 40px），鼠标离开节点后按钮不立即消失 */}
       <div className="absolute -inset-10 z-0" />
+      {/* 图钉钉便签 - 有便签时显示 */}
+      {hasStickies && stickyLines.length > 0 && !stickyExpanded && (
+        <>
+          {/* 缩小态：溢出节点的便签 + 📌 */}
+          <button
+            ref={miniStickyRef}
+            onClick={handleStickyOpen}
+            className="absolute z-20 transition-transform hover:scale-105"
+            style={{
+              left: '-16px',
+              top: '-22px',
+              filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.18))',
+              transform: 'rotate(-3deg)',
+            }}
+            title="点击编辑便签"
+          >
+            {/* 便签纸 */}
+            <div
+              className="relative flex flex-col"
+              style={{
+                width: '120px',
+                minHeight: '44px',
+                backgroundColor: 'oklch(0.93 0.04 95)',
+                borderRadius: '2px 2px 6px 2px',
+                padding: '12px 8px 6px 8px',
+                border: '1px solid oklch(0.82 0.04 85 / 0.5)',
+              }}
+            >
+              {/* 📌 图钉 */}
+              <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 text-xl leading-none" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}>
+                📌
+              </div>
+              {/* 文字内容 */}
+              <div
+                className="text-[10px] leading-tight"
+                style={{
+                  color: 'oklch(0.35 0.02 30)',
+                  fontFamily: "'Noto Serif SC', serif",
+                  overflow: 'hidden',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {stickyLines.slice(0, 2).map((line, i) => (
+                  <span key={i} className="block">
+                    {line.length > 20 ? line.slice(0, 20) + '...' : line}
+                  </span>
+                ))}
+              </div>
+              {stickyLines.length > 2 && (
+                <span className="text-[8px] mt-0.5" style={{ color: 'oklch(0.50 0.02 40)', textAlign: 'right' }}>
+                  +{stickyLines.length - 2} more
+                </span>
+              )}
+            </div>
+          </button>
+        </>
+      )}
+
+      {/* 展开态：编辑面板 — 带缩放展开/收缩动效 */}
+      {stickyExpanded && (
+        <div
+          ref={stickyPanelRef}
+          className="absolute z-30"
+          style={{
+            right: '-20px',
+            top: '40px',
+            width: '250px',
+            transform: stickyAnimPhase === 'visible' ? 'scale(1)' : 'scale(0.48)',
+            opacity: stickyAnimPhase === 'closing' ? 0 : 1,
+            transformOrigin: stickyOrigin,
+            transition: stickyAnimPhase === 'visible' || stickyAnimPhase === 'opening'
+              ? 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease'
+              : 'transform 0.28s cubic-bezier(0.5, 0, 0.75, 0), opacity 0.2s ease',
+            pointerEvents: stickyAnimPhase === 'visible' ? 'auto' : 'none',
+          }}
+          onWheel={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <div
+            className="flex flex-col rounded-lg"
+            style={{
+              backgroundColor: 'oklch(0.96 0.04 95)',
+              borderRadius: '3px 3px 10px 3px',
+              border: '1.5px solid oklch(0.80 0.04 85 / 0.6)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.22)',
+              fontFamily: "'Noto Serif SC', serif",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div
+              className="flex items-center justify-between px-3 py-2"
+              style={{ borderBottom: '1px solid oklch(0.80 0.04 85 / 0.3)' }}
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="text-base">📌</span>
+                <span className="text-xs font-semibold" style={{ color: 'oklch(0.30 0.02 30)' }}>Sticky Notes</span>
+              </div>
+              <button
+                onClick={handleStickyClose}
+                className="flex h-5 w-5 items-center justify-center rounded text-xs"
+                style={{ color: 'oklch(0.50 0.02 50)' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* 编辑区 */}
+            <div className="p-3">
+              <textarea
+                value={stickyInput}
+                onChange={(e) => setStickyInput(e.target.value)}
+                className="w-full resize-y rounded border px-3 py-2 text-xs leading-relaxed"
+                style={{
+                  minHeight: '80px',
+                  backgroundColor: 'oklch(0.98 0.01 90)',
+                  borderColor: 'oklch(0.80 0.04 85 / 0.5)',
+                  color: 'oklch(0.28 0.02 50)',
+                  outline: 'none',
+                  fontSize: '12px',
+                }}
+                placeholder="输入便签，每行一条..."
+                rows={4}
+                onKeyDown={handleStickyKeyDown}
+                onWheel={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+              />
+            </div>
+
+            {/* 底部按钮 */}
+            <div className="flex justify-end gap-2 px-3 pb-3">
+              <button
+                onClick={handleStickyClose}
+                className="rounded px-3 py-1.5 text-xs font-medium transition-colors"
+                style={{ color: 'oklch(0.50 0.02 50)' }}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleStickySave}
+                disabled={stickySaving}
+                className="rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+                style={{ backgroundColor: 'oklch(0.62 0.17 45)', color: 'white' }}
+              >
+                {stickySaving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Inner card */}
       <div
         className={cn(
@@ -1270,20 +1627,6 @@ ${rows.join('\n')}
         >
           {data.title}
         </span>
-        {/* 便签图标 */}
-        {hasStickies && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenReader?.(data.nodeMdId!);
-            }}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[oklch(0.62_0.17_45_/_0.1)]"
-            style={{ color: 'oklch(0.62 0.17 45)' }}
-            title="View sticky notes"
-          >
-            <StickyNote className="h-3.5 w-3.5" />
-          </button>
-        )}
         {/* 断线警告角标 */}
         {hasDisconnectedUpstream && (
           <span
@@ -1294,6 +1637,24 @@ ${rows.join('\n')}
             <AlertTriangle className="h-3 w-3" style={{ color: 'oklch(0.55 0.22 35)' }} />
           </span>
         )}
+        {/* sticky notes 图标 — 始终显示，有内容时高亮 */}
+        <button
+          ref={pinRef}
+          onClick={handleStickyOpen}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors"
+          style={{
+            color: hasStickies ? 'oklch(0.55 0.12 45)' : 'oklch(0.55 0.02 50 / 0.35)',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'oklch(0.62 0.17 45 / 0.08)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'transparent';
+          }}
+          title={hasStickies ? '编辑便签' : '添加便签'}
+        >
+          <Pin className="h-3.5 w-3.5" />
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -1410,9 +1771,8 @@ ${rows.join('\n')}
           // Tool calls collapse logic — 默认折叠
           const toolsExpanded = expandedReasoning.has(msg.id + '-tools');
 
-          // AI 回复：显示完整内容 + 摘要 + .md 附件卡片
-          const isAssistantDone = msg.role === 'assistant' && !isStreaming && cleanContent && !cleanContent.startsWith('[');
-          const nodeSummary = msg.role === 'assistant' ? (msg as ChatMessage & { summary?: string }).summary : undefined;
+          // AI 回复：显示完整内容 + .md 附件卡片
+          const isAssistantDone = msg.role === 'assistant' && !isStreaming && cleanContent && !/^\[?(Error|工具|tool)/i.test(cleanContent) && !cleanContent.startsWith('Error:');
 
           return (
           <div
@@ -1456,7 +1816,7 @@ ${rows.join('\n')}
                         { label: 'Reflections', cls: 'reflections', color: 'oklch(0.55 0.10 230)', items: [] },
                         { label: 'Will', cls: 'will', color: 'oklch(0.55 0.15 145)', items: [] },
                       ];
-                      // 按标签分割
+                      // 方式1: 按 "Vibe:" / "Sparks:" 标签分割
                       const sections = moodText.split(/(?:^|\n)\s*(?:Vibe|Sparks|Reflections|Will)\s*[:：]\s*/i);
                       const labels = moodText.match(/(?:Vibe|Sparks|Reflections|Will)\s*[:：]/gi) || [];
                       for (let i = 0; i < labels.length && i + 1 < sections.length; i++) {
@@ -1469,7 +1829,20 @@ ${rows.join('\n')}
                             .filter(s => s.length > 0);
                         }
                       }
-                      // 如果解析失败，整体作为 Vibe
+                      // 方式2: 如果方式1失败，尝试 <vibe>...</vibe> XML 标签格式
+                      if (pools.every(p => p.items.length === 0)) {
+                        for (const pool of pools) {
+                          const tagRegex = new RegExp(`<${pool.cls}>([\\s\\S]*?)</${pool.cls}>`, 'i');
+                          const match = moodText.match(tagRegex);
+                          if (match) {
+                            pool.items = match[1]
+                              .split('\n')
+                              .map(s => s.replace(/^[-•·]\s*/, '').trim())
+                              .filter(s => s.length > 0);
+                          }
+                        }
+                      }
+                      // 如果仍然解析失败，整体作为 Vibe
                       if (pools.every(p => p.items.length === 0) && moodText.trim()) {
                         pools[0].items = [moodText.trim()];
                       }
@@ -1646,123 +2019,116 @@ ${rows.join('\n')}
               </div>
             ) : null}
 
-            {/* Message bubble */}
-            <div
-              className={cn(
-                'group/msg max-w-[85%] rounded-lg px-3 py-1.5 text-[13px] leading-relaxed',
-                msg.role === 'user' && 'relative',
-              )}
-              style={{
-                backgroundColor:
-                  msg.role === 'user'
-                    ? 'oklch(0.92 0.035 50)'
-                    : cleanContent.startsWith('[')
-                      ? 'oklch(0.95 0.04 25 / 0.8)'
-                      : 'oklch(0.93 0.015 75)',
-                color:
-                  msg.role === 'user'
-                    ? 'oklch(0.25 0.02 50)'
-                    : cleanContent.startsWith('[')
-                      ? 'oklch(0.50 0.15 25)'
-                      : 'oklch(0.28 0.02 50)',
-              }}
-            >
-              {msg.attachments && msg.attachments.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-2">
-                  {msg.attachments.map((att) => (
-                    <div
-                      key={att.id}
-                      className="flex items-center gap-2 rounded-md border px-2 py-1"
-                      style={{
-                        borderColor: msg.role === 'user' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.08)',
-                        backgroundColor: msg.role === 'user' ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.5)',
-                      }}
-                    >
-                      {att.type === 'image' && att.dataUrl ? (
-                        <img
-                          src={att.dataUrl}
-                          alt={att.name}
-                          className="h-8 w-8 rounded object-cover"
-                        />
-                      ) : att.type === 'text' ? (
-                        <FileText className="h-4 w-4" style={{ color: '#537D96' }} />
-                      ) : (
-                        <FileIcon className="h-4 w-4" style={{ color: '#7a7260' }} />
-                      )}
-                      <span className="max-w-[150px] truncate text-[11px]" style={{ color: msg.role === 'user' ? 'oklch(0.30 0.02 50)' : '#5c5342' }}>
-                        {att.name}
-                      </span>
-                      <span className="text-[10px]" style={{ color: msg.role === 'user' ? 'oklch(0.45 0.02 50 / 0.7)' : '#a09880' }}>
-                        {formatFileSize(att.size)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {cleanContent ? (
-                <>
-                  {isAssistantDone ? (
-                    <>
+            {/* Message bubble wrapper - hover area for copy button */}
+            <div className="relative group/msg-container">
+              <div
+                className={cn(
+                  'group/msg max-w-[85%] rounded-lg px-3 py-1.5 text-[13px] leading-relaxed',
+                  msg.role === 'user' && cleanContent ? 'pb-5 min-w-[60px]' : '',
+                )}
+                style={{
+                  backgroundColor:
+                    msg.role === 'user'
+                      ? 'oklch(0.92 0.035 50)'
+                      : cleanContent.startsWith('[')
+                        ? 'oklch(0.95 0.04 25 / 0.8)'
+                        : 'oklch(0.93 0.015 75)',
+                  color:
+                    msg.role === 'user'
+                      ? 'oklch(0.25 0.02 50)'
+                      : cleanContent.startsWith('[')
+                        ? 'oklch(0.50 0.15 25)'
+                        : 'oklch(0.28 0.02 50)',
+                }}
+              >
+                {msg.attachments && msg.attachments.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {msg.attachments.map((att) => (
                       <div
-                        className="rounded-lg border-l-4 p-3 text-[14px] leading-relaxed"
+                        key={att.id}
+                        className="flex items-center gap-2 rounded-md border px-2 py-1"
                         style={{
-                          borderLeftColor: '#537D96',
-                          backgroundColor: 'rgba(83, 125, 150, 0.04)',
-                          color: '#2c2416',
+                          borderColor: msg.role === 'user' ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.08)',
+                          backgroundColor: msg.role === 'user' ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.5)',
                         }}
                       >
-                        <span className="mr-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#537D96', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>Summary</span>
-                        {nodeSummary || cleanContent.slice(0, 120).trim() + '...'}
+                        {att.type === 'image' && att.dataUrl ? (
+                          <img
+                            src={att.dataUrl}
+                            alt={att.name}
+                            className="h-8 w-8 rounded object-cover"
+                          />
+                        ) : att.type === 'text' ? (
+                          <FileText className="h-4 w-4" style={{ color: '#537D96' }} />
+                        ) : (
+                          <FileIcon className="h-4 w-4" style={{ color: '#7a7260' }} />
+                        )}
+                        <span className="max-w-[150px] truncate text-[11px]" style={{ color: msg.role === 'user' ? 'oklch(0.30 0.02 50)' : '#5c5342' }}>
+                          {att.name}
+                        </span>
+                        <span className="text-[10px]" style={{ color: msg.role === 'user' ? 'oklch(0.45 0.02 50 / 0.7)' : '#a09880' }}>
+                          {formatFileSize(att.size)}
+                        </span>
                       </div>
-                      {data.nodeMdId && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onOpenReader?.(data.nodeMdId!);
-                          }}
-                          className="mt-2 flex w-full items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-opacity hover:opacity-80"
-                          style={{
-                            borderColor: 'rgba(83, 125, 150, 0.12)',
-                            backgroundColor: '#fffef9',
-                            color: '#537D96',
-                          }}
-                        >
-                          <FileText className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{data.title || 'Document'}.md</span>
-                        </button>
-                      )}
-                    </>
-                  ) : (
-                    <span className="whitespace-pre-wrap break-words">
-                      {cleanContent}
-                    </span>
-                  )}
-                </>
-              ) : !showThinkBlock ? (
-                <span className="inline-flex items-center gap-1 py-0.5">
-                  <span
-                    className="h-1.5 w-1.5 animate-bounce rounded-full"
-                    style={{
-                      backgroundColor: 'oklch(0.55 0.15 45)',
-                      animationDelay: '0ms',
-                    }}
-                  />
-                  <span
-                    className="h-1.5 w-1.5 animate-bounce rounded-full"
-                    style={{
-                      backgroundColor: 'oklch(0.55 0.15 45)',
-                      animationDelay: '150ms',
-                    }}
-                  />
-                  <span
-                    className="h-1.5 w-1.5 animate-bounce rounded-full"
-                    style={{
-                      backgroundColor: 'oklch(0.55 0.15 45)',
-                      animationDelay: '300ms',
-                    }}
-                  />
-                </span>
-              ) : null}
+                    ))}
+                  </div>
+                )}
+                {cleanContent ? (
+                  <>
+                    {isAssistantDone ? (
+                      <>
+                        <HtmlRenderer content={cleanContent} />
+                        {data.nodeMdId && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenReader?.(data.nodeMdId!);
+                            }}
+                            className="mt-2 flex w-full items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-opacity hover:opacity-80"
+                            style={{
+                              borderColor: 'rgba(83, 125, 150, 0.12)',
+                              backgroundColor: '#fffef9',
+                              color: '#537D96',
+                            }}
+                          >
+                            <FileText className="h-3.5 w-3.5 shrink-0" />
+                            <span className="truncate">{data.title || 'Document'}.md</span>
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <span className={msg.role === 'user' ? 'whitespace-pre-line break-words' : 'whitespace-pre-wrap break-words'}>
+                        {cleanContent}
+                      </span>
+                    )}
+                  </>
+                ) : !showThinkBlock ? (
+                  <span className="inline-flex items-center gap-1 py-0.5">
+                    <span
+                      className="h-1.5 w-1.5 animate-bounce rounded-full"
+                      style={{
+                        backgroundColor: 'oklch(0.55 0.15 45)',
+                        animationDelay: '0ms',
+                      }}
+                    />
+                    <span
+                      className="h-1.5 w-1.5 animate-bounce rounded-full"
+                      style={{
+                        backgroundColor: 'oklch(0.55 0.15 45)',
+                        animationDelay: '150ms',
+                      }}
+                    />
+                    <span
+                      className="h-1.5 w-1.5 animate-bounce rounded-full"
+                      style={{
+                        backgroundColor: 'oklch(0.55 0.15 45)',
+                        animationDelay: '300ms',
+                      }}
+                    />
+                  </span>
+                ) : null}
+              </div>
+              {/* 复制按钮 - 文字右下角，hover 整个消息区域时显示 */}
               {msg.role === 'user' && cleanContent && (
                 <button
                   onClick={(e) => {
@@ -1771,8 +2137,11 @@ ${rows.join('\n')}
                     setCopiedMsgId(msg.id);
                     setTimeout(() => setCopiedMsgId(null), 1500);
                   }}
-                  className="absolute -left-7 top-1/2 -translate-y-1/2 opacity-0 transition-opacity group-hover/msg:opacity-60 hover:!opacity-100"
+                  className="absolute right-1 bottom-0.5 p-1 rounded-md opacity-0 transition-opacity group-hover/msg-container:opacity-70 hover:!opacity-100"
                   title="Copy"
+                  style={{
+                    backgroundColor: 'oklch(0.92 0.035 50)',
+                  }}
                 >
                   {copiedMsgId === msg.id ? (
                     <ClipboardCheck className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.12 45)' }} />
@@ -1787,8 +2156,8 @@ ${rows.join('\n')}
         })}
       </div>
 
-      {/* Input area - only visible when node is selected */}
-      {selected && (
+      {/* Input area - visible when selected, or on new/empty nodes, or when reference tag is set */}
+      {(selected || messages.length === 0 || referenceTag) && (
       <div
         className={cn('relative border-t p-2 transition-all', dragOver && 'ring-2')}
         style={{
@@ -1929,6 +2298,23 @@ ${rows.join('\n')}
           </div>
         )}
 
+        {/* 引用标签 — 在输入框上方 */}
+        {referenceTag && (
+          <div className="mb-1.5 flex items-center gap-1.5 rounded-full px-2.5 py-1 w-fit" style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.08)', border: '1px solid oklch(0.62 0.17 45 / 0.2)' }}>
+            <img src="/pumpkin-icon.png" alt="" className="h-3.5 w-3.5 object-contain" />
+            <span className="max-w-[200px] truncate text-[11px]" style={{ color: 'oklch(0.45 0.12 40)' }}>
+              {referenceTag.text}
+            </span>
+            <button
+              onClick={() => setReferenceTag(null)}
+              className="ml-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full text-[10px]"
+              style={{ color: 'oklch(0.50 0.02 50)' }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         <div className="flex items-end gap-2">
           {/* textarea 独占上部 */}
           <textarea
@@ -1969,6 +2355,10 @@ ${rows.join('\n')}
               backgroundColor: 'oklch(0.95 0.015 75)',
               borderColor: 'oklch(0.80 0.03 60 / 0.4)',
               color: 'oklch(0.25 0.02 50)',
+            }}
+            onPointerDown={(e) => {
+              // 阻止 pointer 事件冒泡，避免三指手势拖动节点
+              e.stopPropagation();
             }}
             onFocus={(e) => {
               e.currentTarget.style.borderColor = 'oklch(0.62 0.17 45 / 0.4)';
