@@ -118,16 +118,22 @@ export async function POST(
         nodes.push({ node_id: nodeId, title: cleanedTitle, position });
       }
 
-      // 2. 顺序创建连线（step[0] → step[1] → step[2] ...）
+      // 2. 创建连线（支持分支：默认顺序，或按 nextSteps 指定）
       const edges: Array<{ edge_id: string; from: string; to: string }> = [];
-      for (let i = 0; i < nodeIds.length - 1; i++) {
-        const edgeId = await createEdge(db, {
-          project_id: projectId,
-          from_node_id: nodeIds[i],
-          to_node_id: nodeIds[i + 1],
-          edge_type: 'vertical',
-        });
-        edges.push({ edge_id: edgeId, from: nodeIds[i], to: nodeIds[i + 1] });
+      for (let i = 0; i < template.steps.length; i++) {
+        const step = template.steps[i];
+        const nextOrders = step.nextSteps || (i < template.steps.length - 1 ? [i + 1] : []);
+        for (const nextOrder of nextOrders) {
+          if (nextOrder >= 0 && nextOrder < nodeIds.length) {
+            const edgeId = await createEdge(db, {
+              project_id: projectId,
+              from_node_id: nodeIds[i],
+              to_node_id: nodeIds[nextOrder],
+              edge_type: 'vertical',
+            });
+            edges.push({ edge_id: edgeId, from: nodeIds[i], to: nodeIds[nextOrder] });
+          }
+        }
       }
 
       return NextResponse.json({

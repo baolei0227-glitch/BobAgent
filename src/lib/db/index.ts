@@ -477,6 +477,7 @@ export interface WorkflowStep {
   prompt: string;
   attachmentHint?: string;
   attachments?: string[];
+  nextSteps?: number[];
 }
 
 export interface WorkflowTemplate {

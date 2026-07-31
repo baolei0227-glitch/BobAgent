@@ -9,6 +9,7 @@ export interface NodeItem {
 }
 
 interface TextSelectionActionsProps {
+  selectedText: string;
   selectionPos: { x: number; y: number };
   nodes: NodeItem[];
   onEdit: () => void;
@@ -28,6 +29,7 @@ function clampPos(x: number, y: number) {
 }
 
 export function TextSelectionActions({
+  selectedText,
   selectionPos,
   nodes,
   onEdit,
@@ -50,9 +52,17 @@ export function TextSelectionActions({
   }, []);
 
   useEffect(() => {
+    // 优先从当前选区获取 Range，如果已丢失则从 mouseup 时同步保存的 Range 恢复
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) {
       savedRangeRef.current = sel.getRangeAt(0).cloneRange();
+    } else if ((window as any).__textSelectionRange) {
+      savedRangeRef.current = (window as any).__textSelectionRange;
+      // 恢复浏览器原生高亮
+      if (sel && savedRangeRef.current) {
+        sel.removeAllRanges();
+        sel.addRange(savedRangeRef.current);
+      }
     }
   }, []);
 
@@ -115,11 +125,12 @@ export function TextSelectionActions({
   };
 
   const handleCopy = () => {
-    const text = savedRangeRef.current?.toString() || window.getSelection()?.toString() || '';
-    if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
+    if (!selectedText) return;
+    navigator.clipboard.writeText(selectedText).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {
+      // clipboard API failed, ignore
     });
   };
 
@@ -218,6 +229,20 @@ export function TextSelectionActions({
         }}
       >
         <button
+          onClick={handleCopy}
+          onMouseDown={(e) => e.preventDefault()}
+          className="flex items-center justify-center rounded-full transition-colors hover:bg-[oklch(0.90_0.02_85)]"
+          style={{ width: '28px', height: '28px', userSelect: 'none' }}
+          title="复制"
+        >
+          {copied
+            ? <Check className="h-3.5 w-3.5 pointer-events-none" style={{ color: 'oklch(0.55 0.15 145)' }} />
+            : <Copy className="h-3.5 w-3.5 pointer-events-none" style={{ color: 'oklch(0.42 0.02 45)' }} />}
+        </button>
+
+        <span style={{ width: '1px', height: '16px', backgroundColor: 'oklch(0.75 0.02 60 / 0.4)', margin: '0 3px' }} />
+
+        <button
           onClick={handleEdit}
           onMouseDown={(e) => e.preventDefault()}
           className="flex items-center justify-center rounded-full transition-colors hover:bg-[oklch(0.90_0.02_85)]"
@@ -237,20 +262,6 @@ export function TextSelectionActions({
           title="发送到节点"
         >
           <Send className="h-3.5 w-3.5 pointer-events-none" style={{ color: 'oklch(0.42 0.12 180)' }} />
-        </button>
-
-        <span style={{ width: '1px', height: '16px', backgroundColor: 'oklch(0.75 0.02 60 / 0.4)', margin: '0 3px' }} />
-
-        <button
-          onClick={handleCopy}
-          onMouseDown={(e) => e.preventDefault()}
-          className="flex items-center justify-center rounded-full transition-colors hover:bg-[oklch(0.90_0.02_85)]"
-          style={{ width: '28px', height: '28px', userSelect: 'none' }}
-          title="复制"
-        >
-          {copied
-            ? <Check className="h-3.5 w-3.5 pointer-events-none" style={{ color: 'oklch(0.55 0.15 145)' }} />
-            : <Copy className="h-3.5 w-3.5 pointer-events-none" style={{ color: 'oklch(0.42 0.02 45)' }} />}
         </button>
       </div>
     </div>

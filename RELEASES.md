@@ -6,6 +6,18 @@
 
 ---
 
+## v0.50.1 (2026-07-31)
+
+- 节点关系重构：横向连线 = child（子节点/上下文注入），纵向连线 = sibling（暂留，无上下文）
+  - 移除拖拽自动转换 sibling→child 逻辑
+  - fetchUpstreamContext 只收集 child 边
+- 修复鼠标在对话框中显示小手图标（React Flow selectable cursor 覆盖）
+- 修复选中文字后高亮丢失（mouseup 同步保存 Range，挂载后恢复）
+- 修复复制按钮取不到文本（改用 selectedText prop 代替 Range.toString）
+- 复制按钮移至工具栏第一位
+
+---
+
 ## v0.50.0 (2026-07-31)
 
 > 版本号重置，从此版本起算

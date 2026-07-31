@@ -33,7 +33,7 @@ interface TemplateApplyDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   templateId: string | null;
-  onApplied?: (nodes: Array<{ node_id: string; title: string; position: { x: number; y: number } }>) => void;
+  onApplied?: (nodes: Array<{ node_id: string; title: string; position: { x: number; y: number } }>, edges: Array<{ edge_id: string; from: string; to: string }>) => void;
 }
 
 /** 从 steps 的 prompt 中提取所有自定义变量 */
@@ -127,7 +127,7 @@ export function TemplateApplyDialog({
         setError(data.error || '应用失败');
         return;
       }
-      onApplied?.(data.nodes);
+      onApplied?.(data.nodes, data.edges || []);
       onOpenChange(false);
     } catch (e: any) {
       setError(e?.message || '网络错误');

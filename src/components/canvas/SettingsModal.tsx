@@ -81,6 +81,7 @@ function isHighRisk(server: McpServerConfig): { id: string; title: string; messa
 }
 
 interface SettingsModalProps {
+  initialSection?: 'all' | 'mcp' | 'custom_tools';
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfigsChange: (configs: ProviderConfig[]) => void;
@@ -102,6 +103,7 @@ export function SettingsModal({
   open,
   onOpenChange,
   onConfigsChange,
+  initialSection = 'all',
 }: SettingsModalProps) {
   const [apiKeys, setApiKeys] = useState<Record<ProviderType, string>>({
     deepseek: '',
@@ -144,7 +146,7 @@ export function SettingsModal({
     doubao: '',
   });
   const [saved, setSaved] = useState(false);
-  const [view, setView] = useState<'home' | 'add'>('home');
+  const [view, setView] = useState<'home' | 'add' | 'mcp' | 'custom_tools'>('home');
   const [searchConfig, setSearchConfig] = useState<SearchConfig>({ apiKey: '', baseUrl: '' });
   const [expandedModels, setExpandedModels] = useState<ModelDetailState>({});
 
@@ -277,6 +279,15 @@ export function SettingsModal({
       load();
     }
   }, [open]);
+
+  // initialSection 跳转到专属视图
+  useEffect(() => {
+    if (open && initialSection === 'mcp') {
+      setView('mcp');
+    } else if (open && initialSection === 'custom_tools') {
+      setView('custom_tools');
+    }
+  }, [open, initialSection]);
 
   const toggleModel = (type: ProviderType, modelId: string) => {
     setSelectedModels((prev) => {
@@ -659,7 +670,422 @@ export function SettingsModal({
           </DialogDescription>
         </DialogHeader>
 
-        {view === 'home' ? (
+        {view === 'mcp' ? (
+          /* ========== MCP 专属视图 ========== */
+          <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
+            <button
+              type="button"
+              onClick={() => setView('home')}
+              className="mb-4 flex items-center gap-1 text-xs transition-colors hover:underline"
+              style={{ color: 'oklch(0.55 0.02 50)' }}
+            >
+              <ArrowLeft className="h-3 w-3" />
+              Back to Settings
+            </button>
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Plug className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
+                  MCP Servers
+                </span>
+                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                  标准 AI 工具协议，自动发现并调用
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setMcpServers([
+                    ...mcpServers,
+                    {
+                      id: `custom-${Date.now()}`,
+                      name: '',
+                      transport: 'stdio',
+                      command: 'npx',
+                      args: [],
+                      enabled: true,
+                    },
+                  ]);
+                }}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
+                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.1)', color: 'oklch(0.50 0.12 45)' }}
+              >
+                <Plus className="h-3 w-3" />
+                Add
+              </button>
+            </div>
+
+            {mcpServers.length === 0 && (
+              <div
+                className="rounded-lg border px-3 py-4 text-center"
+                style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
+              >
+                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                  No MCP servers configured
+                </span>
+              </div>
+            )}
+
+            {mcpServers.map((server, idx) => (
+              <div
+                key={server.id || idx}
+                className="mb-3 rounded-lg border p-3"
+                style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80 / 0.5)' }}
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                    {server.name || `Server #${idx + 1}`}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const turningOn = !server.enabled;
+                        if (turningOn) {
+                          const risk = isHighRisk(server);
+                          if (risk) {
+                            const ok = window.confirm(`${risk.title}\n\n${risk.message}`);
+                            if (!ok) return;
+                          }
+                        }
+                        const updated = [...mcpServers];
+                        updated[idx] = { ...server, enabled: turningOn ? true : false };
+                        setMcpServers(updated);
+                      }}
+                      className="flex h-5 w-9 items-center rounded-full transition-colors"
+                      style={{
+                        backgroundColor: server.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.85 0.01 70)',
+                      }}
+                      title={isHighRisk(server)?.message || ''}
+                    >
+                      <span
+                        className="h-3.5 w-3.5 rounded-full bg-white transition-transform"
+                        style={{ transform: server.enabled ? 'translateX(18px)' : 'translateX(2px)' }}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMcpServers(mcpServers.filter((_, i) => i !== idx))}
+                      className="rounded p-1 transition-colors hover:bg-[oklch(0.55_0.18_35/0.1)]"
+                      style={{ color: 'oklch(0.55 0.18 35)' }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>名称</label>
+                    <Input
+                      type="text" placeholder="Context7"
+                      value={server.name}
+                      onChange={(e) => {
+                        const updated = [...mcpServers];
+                        updated[idx] = { ...server, name: e.target.value, id: server.id || `mcp-${e.target.value.toLowerCase().replace(/\s/g, '-')}` };
+                        setMcpServers(updated);
+                      }}
+                      className="h-7 text-xs" style={paperInputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>传输类型</label>
+                    <select
+                      value={server.transport}
+                      onChange={(e) => {
+                        const updated = [...mcpServers];
+                        updated[idx] = { ...server, transport: e.target.value as 'stdio' | 'streamable-http' };
+                        setMcpServers(updated);
+                      }}
+                      className="h-7 w-full rounded-md border px-2 text-xs"
+                      style={{ fontFamily: "'Noto Serif SC', serif", backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)' }}
+                    >
+                      <option value="stdio">stdio (本地)</option>
+                      <option value="streamable-http">streamable-http (远程)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {server.transport === 'stdio' ? (
+                  <>
+                    <div className="mt-2">
+                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>命令</label>
+                      <Input
+                        type="text" placeholder="npx"
+                        value={server.command || ''}
+                        onChange={(e) => { const updated = [...mcpServers]; updated[idx] = { ...server, command: e.target.value }; setMcpServers(updated); }}
+                        className="h-7 text-xs" style={paperInputStyle}
+                      />
+                    </div>
+                    <div className="mt-2">
+                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>参数 (每行一个)</label>
+                      <textarea
+                        value={(server.args || []).join('\n')}
+                        onChange={(e) => { const updated = [...mcpServers]; updated[idx] = { ...server, args: e.target.value.split('\n').filter(a => a.trim()) }; setMcpServers(updated); }}
+                        className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
+                        style={{ backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)', minHeight: '40px', resize: 'vertical' }}
+                        placeholder={'-y\n@modelcontextprotocol/server-sequential-thinking'}
+                      />
+                    </div>
+                    <div className="mt-2">
+                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>环境变量 (JSON)</label>
+                      <textarea
+                        value={JSON.stringify(server.env || {}, null, 2)}
+                        onChange={(e) => { try { const parsed = JSON.parse(e.target.value); const updated = [...mcpServers]; updated[idx] = { ...server, env: parsed }; setMcpServers(updated); } catch {} }}
+                        className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
+                        style={{ backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)', minHeight: '40px', resize: 'vertical' }}
+                        placeholder='{}'
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-2">
+                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>URL</label>
+                    <Input
+                      type="text" placeholder="https://mcp.example.com/mcp"
+                      value={server.url || ''}
+                      onChange={(e) => { const updated = [...mcpServers]; updated[idx] = { ...server, url: e.target.value }; setMcpServers(updated); }}
+                      className="h-7 text-xs" style={paperInputStyle}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : view === 'custom_tools' ? (
+          /* ========== Custom Tools 专属视图 ========== */
+          <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
+            <button
+              type="button"
+              onClick={() => {
+                setView('home');
+              }}
+              className="mb-4 flex items-center gap-1 text-xs transition-colors hover:underline"
+              style={{ color: 'oklch(0.55 0.02 50)' }}
+            >
+              <ArrowLeft className="h-3 w-3" />
+              Back
+            </button>
+
+          {/* 自定义工具设置 */}
+          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Wrench className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
+                  Custom Tools
+                </span>
+                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                  AI 可自动调用的 HTTP 工具
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const ok = window.confirm(
+                    '注册自定义 HTTP 工具\n\nAI 会把对话中的参数发送到你配置的 endpoint，可能包含敏感信息。仅添加你完全信任的服务器。确认要新增工具吗？',
+                  );
+                  if (!ok) return;
+                  setCustomTools([
+                    ...customTools,
+                    {
+                      name: '',
+                      description: '',
+                      endpoint: '',
+                      method: 'POST',
+                      parameters: { type: 'object', properties: {}, required: [] },
+                      enabled: true,
+                    },
+                  ]);
+                }}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
+                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.1)', color: 'oklch(0.50 0.12 45)' }}
+              >
+                <Plus className="h-3 w-3" />
+                Add
+              </button>
+            </div>
+
+            {/* 自定义工具安全警告横幅 */}
+            {customTools.length > 0 && (
+              <div
+                className="mb-3 flex items-start gap-2 rounded-md border px-3 py-2"
+                style={{
+                  backgroundColor: 'oklch(0.85 0.10 70 / 0.12)',
+                  borderColor: 'oklch(0.70 0.14 55 / 0.4)',
+                }}
+              >
+                <span style={{ color: 'oklch(0.55 0.18 35)' }}>⚠</span>
+                <span className="text-[10px] leading-relaxed" style={{ color: 'oklch(0.40 0.08 40)' }}>
+                  AI 调用自定义工具时，会根据描述把对话上下文和参数 POST/GET 到你配置的 URL。
+                  请勿将内部 Token、业务数据发送到不信任的第三方服务器。保存时会额外确认一次。
+                </span>
+              </div>
+            )}
+
+            {customTools.length === 0 && (
+              <div
+                className="rounded-lg border px-3 py-4 text-center"
+                style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
+              >
+                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                  暂无自定义工具。点击 Add 注册一个 HTTP 工具，AI 会在需要时自动调用。
+                </span>
+              </div>
+            )}
+
+            {customTools.map((tool, idx) => (
+              <div
+                key={idx}
+                className="mb-3 rounded-lg border p-3"
+                style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80 / 0.5)' }}
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                    Tool #{idx + 1}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = [...customTools];
+                        updated[idx] = { ...tool, enabled: !tool.enabled };
+                        setCustomTools(updated);
+                      }}
+                      className="flex h-5 w-9 items-center rounded-full transition-colors"
+                      style={{
+                        backgroundColor: tool.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.85 0.01 70)',
+                      }}
+                    >
+                      <span
+                        className="h-3.5 w-3.5 rounded-full bg-white transition-transform"
+                        style={{ transform: tool.enabled ? 'translateX(18px)' : 'translateX(2px)' }}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomTools(customTools.filter((_, i) => i !== idx));
+                      }}
+                      className="rounded p-1 transition-colors hover:bg-[oklch(0.55_0.18_35/0.1)]"
+                      style={{ color: 'oklch(0.55 0.18 35)' }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                      名称 (函数名)
+                    </label>
+                    <Input
+                      type="text"
+                      placeholder="get_weather"
+                      value={tool.name}
+                      onChange={(e) => {
+                        const updated = [...customTools];
+                        updated[idx] = { ...tool, name: e.target.value };
+                        setCustomTools(updated);
+                      }}
+                      className="h-7 text-xs"
+                      style={paperInputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                      HTTP 方法
+                    </label>
+                    <select
+                      value={tool.method || 'POST'}
+                      onChange={(e) => {
+                        const updated = [...customTools];
+                        updated[idx] = { ...tool, method: e.target.value as 'GET' | 'POST' };
+                        setCustomTools(updated);
+                      }}
+                      className="h-7 w-full rounded-md border px-2 text-xs"
+                      style={{
+                        fontFamily: "'Noto Serif SC', serif",
+                        backgroundColor: 'oklch(0.97 0.008 80)',
+                        borderColor: 'oklch(0.85 0.01 70)',
+                        color: 'oklch(0.25 0.02 50)',
+                      }}
+                    >
+                      <option value="POST">POST</option>
+                      <option value="GET">GET</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="mt-2">
+                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                    描述 (AI 根据此描述决定是否调用)
+                  </label>
+                  <Input
+                    type="text"
+                    placeholder="获取指定城市的天气信息"
+                    value={tool.description}
+                    onChange={(e) => {
+                      const updated = [...customTools];
+                      updated[idx] = { ...tool, description: e.target.value };
+                      setCustomTools(updated);
+                    }}
+                    className="h-7 text-xs"
+                    style={paperInputStyle}
+                  />
+                </div>
+
+                <div className="mt-2">
+                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                    Endpoint URL
+                  </label>
+                  <Input
+                    type="text"
+                    placeholder="https://api.example.com/weather"
+                    value={tool.endpoint}
+                    onChange={(e) => {
+                      const updated = [...customTools];
+                      updated[idx] = { ...tool, endpoint: e.target.value };
+                      setCustomTools(updated);
+                    }}
+                    className="h-7 text-xs"
+                    style={paperInputStyle}
+                  />
+                </div>
+
+                <div className="mt-2">
+                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
+                    参数 (JSON Schema)
+                  </label>
+                  <textarea
+                    value={JSON.stringify(tool.parameters || { type: 'object', properties: {}, required: [] }, null, 2)}
+                    onChange={(e) => {
+                      try {
+                        const parsed = JSON.parse(e.target.value);
+                        const updated = [...customTools];
+                        updated[idx] = { ...tool, parameters: parsed };
+                        setCustomTools(updated);
+                      } catch {
+                        // 解析失败时不更新，允许用户继续编辑
+                      }
+                    }}
+                    className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
+                    style={{
+                      backgroundColor: 'oklch(0.97 0.008 80)',
+                      borderColor: 'oklch(0.85 0.01 70)',
+                      color: 'oklch(0.25 0.02 50)',
+                      minHeight: '60px',
+                      resize: 'vertical',
+                    }}
+                    placeholder={`{\n  "type": "object",\n  "properties": {\n    "city": {\n      "type": "string",\n      "description": "城市名"\n    }\n  },\n  "required": ["city"]\n}`}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        ) : view === 'home' ? (
           /* ========== 首页：已安装模型总览 ========== */
           <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
             {/* 已安装聊天模型 */}
@@ -1788,223 +2214,6 @@ export function SettingsModal({
             )}
           </div>
 
-          {/* 自定义工具设置 */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Wrench className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Custom Tools
-                </span>
-                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  AI 可自动调用的 HTTP 工具
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  const ok = window.confirm(
-                    '注册自定义 HTTP 工具\n\nAI 会把对话中的参数发送到你配置的 endpoint，可能包含敏感信息。仅添加你完全信任的服务器。确认要新增工具吗？',
-                  );
-                  if (!ok) return;
-                  setCustomTools([
-                    ...customTools,
-                    {
-                      name: '',
-                      description: '',
-                      endpoint: '',
-                      method: 'POST',
-                      parameters: { type: 'object', properties: {}, required: [] },
-                      enabled: true,
-                    },
-                  ]);
-                }}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
-                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.1)', color: 'oklch(0.50 0.12 45)' }}
-              >
-                <Plus className="h-3 w-3" />
-                Add
-              </button>
-            </div>
-
-            {/* 自定义工具安全警告横幅 */}
-            {customTools.length > 0 && (
-              <div
-                className="mb-3 flex items-start gap-2 rounded-md border px-3 py-2"
-                style={{
-                  backgroundColor: 'oklch(0.85 0.10 70 / 0.12)',
-                  borderColor: 'oklch(0.70 0.14 55 / 0.4)',
-                }}
-              >
-                <span style={{ color: 'oklch(0.55 0.18 35)' }}>⚠</span>
-                <span className="text-[10px] leading-relaxed" style={{ color: 'oklch(0.40 0.08 40)' }}>
-                  AI 调用自定义工具时，会根据描述把对话上下文和参数 POST/GET 到你配置的 URL。
-                  请勿将内部 Token、业务数据发送到不信任的第三方服务器。保存时会额外确认一次。
-                </span>
-              </div>
-            )}
-
-            {customTools.length === 0 && (
-              <div
-                className="rounded-lg border px-3 py-4 text-center"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-              >
-                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  暂无自定义工具。点击 Add 注册一个 HTTP 工具，AI 会在需要时自动调用。
-                </span>
-              </div>
-            )}
-
-            {customTools.map((tool, idx) => (
-              <div
-                key={idx}
-                className="mb-3 rounded-lg border p-3"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80 / 0.5)' }}
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    Tool #{idx + 1}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, enabled: !tool.enabled };
-                        setCustomTools(updated);
-                      }}
-                      className="flex h-5 w-9 items-center rounded-full transition-colors"
-                      style={{
-                        backgroundColor: tool.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.85 0.01 70)',
-                      }}
-                    >
-                      <span
-                        className="h-3.5 w-3.5 rounded-full bg-white transition-transform"
-                        style={{ transform: tool.enabled ? 'translateX(18px)' : 'translateX(2px)' }}
-                      />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCustomTools(customTools.filter((_, i) => i !== idx));
-                      }}
-                      className="rounded p-1 transition-colors hover:bg-[oklch(0.55_0.18_35/0.1)]"
-                      style={{ color: 'oklch(0.55 0.18 35)' }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      名称 (函数名)
-                    </label>
-                    <Input
-                      type="text"
-                      placeholder="get_weather"
-                      value={tool.name}
-                      onChange={(e) => {
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, name: e.target.value };
-                        setCustomTools(updated);
-                      }}
-                      className="h-7 text-xs"
-                      style={paperInputStyle}
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      HTTP 方法
-                    </label>
-                    <select
-                      value={tool.method || 'POST'}
-                      onChange={(e) => {
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, method: e.target.value as 'GET' | 'POST' };
-                        setCustomTools(updated);
-                      }}
-                      className="h-7 w-full rounded-md border px-2 text-xs"
-                      style={{
-                        fontFamily: "'Noto Serif SC', serif",
-                        backgroundColor: 'oklch(0.97 0.008 80)',
-                        borderColor: 'oklch(0.85 0.01 70)',
-                        color: 'oklch(0.25 0.02 50)',
-                      }}
-                    >
-                      <option value="POST">POST</option>
-                      <option value="GET">GET</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-2">
-                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    描述 (AI 根据此描述决定是否调用)
-                  </label>
-                  <Input
-                    type="text"
-                    placeholder="获取指定城市的天气信息"
-                    value={tool.description}
-                    onChange={(e) => {
-                      const updated = [...customTools];
-                      updated[idx] = { ...tool, description: e.target.value };
-                      setCustomTools(updated);
-                    }}
-                    className="h-7 text-xs"
-                    style={paperInputStyle}
-                  />
-                </div>
-
-                <div className="mt-2">
-                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    Endpoint URL
-                  </label>
-                  <Input
-                    type="text"
-                    placeholder="https://api.example.com/weather"
-                    value={tool.endpoint}
-                    onChange={(e) => {
-                      const updated = [...customTools];
-                      updated[idx] = { ...tool, endpoint: e.target.value };
-                      setCustomTools(updated);
-                    }}
-                    className="h-7 text-xs"
-                    style={paperInputStyle}
-                  />
-                </div>
-
-                <div className="mt-2">
-                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    参数 (JSON Schema)
-                  </label>
-                  <textarea
-                    value={JSON.stringify(tool.parameters || { type: 'object', properties: {}, required: [] }, null, 2)}
-                    onChange={(e) => {
-                      try {
-                        const parsed = JSON.parse(e.target.value);
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, parameters: parsed };
-                        setCustomTools(updated);
-                      } catch {
-                        // 解析失败时不更新，允许用户继续编辑
-                      }
-                    }}
-                    className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
-                    style={{
-                      backgroundColor: 'oklch(0.97 0.008 80)',
-                      borderColor: 'oklch(0.85 0.01 70)',
-                      color: 'oklch(0.25 0.02 50)',
-                      minHeight: '60px',
-                      resize: 'vertical',
-                    }}
-                    placeholder={`{\n  "type": "object",\n  "properties": {\n    "city": {\n      "type": "string",\n      "description": "城市名"\n    }\n  },\n  "required": ["city"]\n}`}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
 
           {/* MCP 服务器设置 */}
           <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">

@@ -20,6 +20,10 @@ import {
   Download,
   AlertCircle,
   ArrowDownCircle,
+  Wrench,
+  FolderPlus,
+  Upload,
+  Package,
 } from 'lucide-react';
 import { TaskPanel } from './TaskPanel';
 import { TemplatePanel } from './TemplatePanel';
@@ -41,8 +45,20 @@ interface FileNode {
   extension?: string;
 }
 
+interface MaterialTreeNode {
+  name: string;
+  type: 'file' | 'directory';
+  children?: MaterialTreeNode[];
+  size?: number;
+  extension?: string;
+  mimeType?: string;
+  path: string;
+  uploadedAt?: string;
+}
+
 interface SidebarProps {
   onOpenSettings: () => void;
+  onOpenCustomTools: () => void;
   onOpenSkills: () => void;
   onOpenCalendar: () => void;
   onOpenFile?: (projectId: string, fileName: string, filePath: string) => void;
@@ -70,7 +86,7 @@ function fileIcon(ext?: string): { color: string; label: string } {
   }
 }
 
-export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFile, projectId }: SidebarProps) {
+export function Sidebar({ onOpenSettings, onOpenCustomTools, onOpenSkills, onOpenCalendar, onOpenFile, projectId }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [currentId, setCurrentId] = useState<string>('');
@@ -95,6 +111,17 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
   const [applyDialogOpen, setApplyDialogOpen] = useState(false);
   const [applyingTemplateId, setApplyingTemplateId] = useState<string | null>(null);
   const [templateRefreshTrigger, setTemplateRefreshTrigger] = useState(0);
+
+  // Materials 相关状态
+  const [materialsTree, setMaterialsTree] = useState<MaterialTreeNode[]>([]);
+  const [materialsLoading, setMaterialsLoading] = useState(false);
+  const [materialsExpanded, setMaterialsExpanded] = useState<Set<string>>(new Set());
+  const [materialsCollapsed, setMaterialsCollapsed] = useState(true);
+  const [newFolderParent, setNewFolderParent] = useState<string>('');
+  const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderVisible, setNewFolderVisible] = useState(false);
+  const [uploadTargetFolder, setUploadTargetFolder] = useState<string>('');
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   // 监听更新事件
   useEffect(() => {
@@ -336,6 +363,99 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
     });
   }, []);
 
+  // 加载 Materials 树
+  const loadMaterials = useCallback(async () => {
+    setMaterialsLoading(true);
+    try {
+      const resp = await fetch('/api/materials?action=list');
+      const data = await resp.json();
+      if (data.success) {
+        setMaterialsTree(data.tree || []);
+      }
+    } catch (err) {
+      console.error('加载 materials 失败:', err);
+    } finally {
+      setMaterialsLoading(false);
+    }
+  }, []);
+
+  // Materials 折叠切换时加载
+  useEffect(() => {
+    if (!materialsCollapsed) {
+      loadMaterials();
+    }
+  }, [materialsCollapsed, loadMaterials]);
+
+  // 创建文件夹
+  const handleCreateFolder = useCallback(async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    try {
+      const folderPath = newFolderParent ? newFolderParent + '/' + name : name;
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create_folder', folderPath }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setNewFolderVisible(false);
+        setNewFolderName('');
+        loadMaterials();
+      }
+    } catch (err) {
+      console.error('创建文件夹失败:', err);
+    }
+  }, [newFolderName, newFolderParent, loadMaterials]);
+
+  // 上传文件
+  const handleUploadMaterial = useCallback(async (file: File) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (uploadTargetFolder) {
+        formData.append('folder', uploadTargetFolder);
+      }
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await resp.json();
+      if (data.success) {
+        loadMaterials();
+      }
+    } catch (err) {
+      console.error('上传失败:', err);
+    }
+  }, [uploadTargetFolder, loadMaterials]);
+
+  // 删除文件/文件夹
+  const handleDeleteMaterial = useCallback(async (path: string, isDir: boolean) => {
+    const label = isDir ? 'folder' : 'file';
+    if (!confirm('Delete this ' + label + '?')) return;
+    try {
+      const resp = await fetch('/api/materials?path=' + encodeURIComponent(path), {
+        method: 'DELETE',
+      });
+      const data = await resp.json();
+      if (data.success) {
+        loadMaterials();
+      }
+    } catch (err) {
+      console.error('删除失败:', err);
+    }
+  }, [loadMaterials]);
+
+  // 切换 materials 文件夹展开
+  const toggleMaterialsFolder = useCallback((path: string) => {
+    setMaterialsExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
   const sidebarWidth = collapsed ? '56px' : '240px';
 
   /** 递归渲染文件树 */
@@ -402,6 +522,118 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
             </span>
           )}
         </button>
+      );
+    });
+  };
+
+  /** 递归渲染 Materials 树 */
+  const renderMaterialsTree = (nodes: MaterialTreeNode[], depth: number) => {
+    return nodes.map((node) => {
+      const isExpanded = materialsExpanded.has(node.path);
+
+      if (node.type === 'directory') {
+        return (
+          <div key={node.path}>
+            <div className="group flex items-center gap-0.5 rounded-md transition-colors hover:bg-[oklch(0.92_0.01_75)]"
+              style={{ paddingLeft: `${8 + depth * 14}px` }}
+            >
+              <button
+                onClick={() => toggleMaterialsFolder(node.path)}
+                className="flex flex-1 items-center gap-1.5 py-0.5 text-left"
+              >
+                {isExpanded ? (
+                  <ChevronDown className="h-3 w-3 flex-shrink-0" style={{ color: 'oklch(0.50 0.02 50)' }} />
+                ) : (
+                  <ChevronRight className="h-3 w-3 flex-shrink-0" style={{ color: 'oklch(0.50 0.02 50)' }} />
+                )}
+                {isExpanded ? (
+                  <FolderOpen className="h-3 w-3 flex-shrink-0" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                ) : (
+                  <Folder className="h-3 w-3 flex-shrink-0" style={{ color: 'oklch(0.55 0.08 45)' }} />
+                )}
+                <span className="truncate text-[11px]" style={{ color: 'oklch(0.40 0.02 50)' }}>
+                  {node.name}
+                </span>
+              </button>
+              {/* 上传到此处按钮 */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setUploadTargetFolder(node.path);
+                  uploadInputRef.current?.click();
+                }}
+                className="hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[oklch(0.88_0.01_75)] group-hover:block"
+                style={{ color: 'oklch(0.50 0.02 50)' }}
+                title="Upload to this folder"
+              >
+                <Upload className="h-3 w-3" />
+              </button>
+              {/* 在此文件夹下新建 */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setNewFolderParent(node.path);
+                  setNewFolderName('');
+                  setNewFolderVisible(true);
+                }}
+                className="hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[oklch(0.88_0.01_75)] group-hover:block"
+                style={{ color: 'oklch(0.50 0.02 50)' }}
+                title="New folder inside"
+              >
+                <FolderPlus className="h-3 w-3" />
+              </button>
+              {/* 删除文件夹 */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDeleteMaterial(node.path, true);
+                }}
+                className="hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-red-100 group-hover:block"
+                style={{ color: 'oklch(0.55 0.18 25)' }}
+                title="Delete folder"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+            {isExpanded && node.children && (
+              <div>{renderMaterialsTree(node.children, depth + 1)}</div>
+            )}
+          </div>
+        );
+      }
+
+      // 文件节点
+      const icon = fileIcon(node.extension);
+      return (
+        <div key={node.path} className="group flex items-center gap-0.5 rounded-md transition-colors hover:bg-[oklch(0.92_0.01_75)]"
+          style={{ paddingLeft: `${8 + depth * 14}px` }}
+        >
+          <span className="flex flex-1 items-center gap-1.5 py-0.5">
+            <FileText className="h-3 w-3 flex-shrink-0" style={{ color: icon.color }} />
+            <span className="truncate text-[11px]" style={{ color: 'oklch(0.40 0.02 50)' }}>
+              {node.name}
+            </span>
+            {node.extension && (
+              <span
+                className="flex-shrink-0 rounded px-1 py-0 text-[8px] font-medium"
+                style={{ backgroundColor: `${icon.color}18`, color: icon.color }}
+              >
+                {icon.label}
+              </span>
+            )}
+          </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDeleteMaterial(node.path, false);
+            }}
+            className="hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-red-100 group-hover:block"
+            style={{ color: 'oklch(0.55 0.18 25)' }}
+            title="Delete file"
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
       );
     });
   };
@@ -598,6 +830,134 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
           />
         </div>
 
+        {/* Materials 面板 */}
+        {!collapsed && (
+          <div className="px-1">
+            {/* Materials 标题栏 */}
+            <button
+              onClick={() => setMaterialsCollapsed((v) => !v)}
+              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[oklch(0.92_0.015_75)]"
+              style={{ color: 'oklch(0.50 0.02 50)' }}
+            >
+              {materialsCollapsed ? (
+                <ChevronRight className="h-3 w-3 flex-shrink-0" />
+              ) : (
+                <ChevronDown className="h-3 w-3 flex-shrink-0" />
+              )}
+              <Package className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'oklch(0.55 0.08 45)' }} />
+              <span className="flex-1 text-left text-[11px] font-medium">Materials</span>
+              {!materialsCollapsed && (
+                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                  {materialsTree.length}
+                </span>
+              )}
+            </button>
+
+            {/* Materials 内容 */}
+            {!materialsCollapsed && (
+              <div className="ml-1 mt-0.5">
+                {/* 操作按钮行 */}
+                <div className="flex items-center gap-1 mb-1 px-1">
+                  <button
+                    onClick={() => {
+                      setNewFolderParent('');
+                      setNewFolderName('');
+                      setNewFolderVisible(true);
+                    }}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[oklch(0.92_0.015_75)]"
+                    style={{ color: 'oklch(0.50 0.02 50)' }}
+                    title="New folder"
+                  >
+                    <FolderPlus className="h-3 w-3" />
+                    Folder
+                  </button>
+                  <button
+                    onClick={() => {
+                      setUploadTargetFolder('');
+                      uploadInputRef.current?.click();
+                    }}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[oklch(0.92_0.015_75)]"
+                    style={{ color: 'oklch(0.50 0.02 50)' }}
+                    title="Upload file"
+                  >
+                    <Upload className="h-3 w-3" />
+                    Upload
+                  </button>
+                  <button
+                    onClick={loadMaterials}
+                    className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[oklch(0.92_0.015_75)]"
+                    style={{ color: 'oklch(0.50 0.02 50)' }}
+                    title="Refresh"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${materialsLoading ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+
+                {/* 隐藏的文件上传 input */}
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleUploadMaterial(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+
+                {/* 新建文件夹输入 */}
+                {newFolderVisible && (
+                  <div className="flex items-center gap-1 px-1 mb-1">
+                    <input
+                      type="text"
+                      autoFocus
+                      placeholder="Folder name"
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleCreateFolder();
+                        if (e.key === 'Escape') {
+                          setNewFolderVisible(false);
+                          setNewFolderName('');
+                        }
+                      }}
+                      className="flex-1 rounded border px-1.5 py-0.5 text-[11px] outline-none"
+                      style={{
+                        backgroundColor: 'oklch(1 0 0 / 0.6)',
+                        borderColor: 'oklch(0.80 0.03 60 / 0.4)',
+                        color: 'oklch(0.40 0.02 50)',
+                      }}
+                    />
+                    <button
+                      onClick={handleCreateFolder}
+                      disabled={!newFolderName.trim()}
+                      className="rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[oklch(0.92_0.015_75)] disabled:opacity-40"
+                      style={{ color: 'oklch(0.50 0.12 45)' }}
+                    >
+                      OK
+                    </button>
+                  </div>
+                )}
+
+                {/* 文件夹树 */}
+                {materialsLoading && materialsTree.length === 0 ? (
+                  <div className="py-2 text-center text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                    Loading...
+                  </div>
+                ) : materialsTree.length === 0 ? (
+                  <div className="py-2 text-center text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+                    Empty
+                  </div>
+                ) : (
+                  renderMaterialsTree(materialsTree, 0)
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* 任务归纳面板（独立区块，项目列表与 Logo 之间） */}
         <TaskPanel
           onEventsCreated={() => window.dispatchEvent(new Event('calendar-events-changed'))}
@@ -703,6 +1063,18 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                     >
                       <Lightbulb className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
                       Skills
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSettingsMenuOpen(false);
+                        onOpenCustomTools();
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[oklch(0.95_0.01_80)]"
+                      style={{ color: 'oklch(0.30 0.015 50)' }}
+                    >
+                      <Wrench className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                      Custom Tools
                     </button>
                     <button
                       onClick={(e) => {

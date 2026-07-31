@@ -31,6 +31,7 @@ interface WorkflowStep {
   prompt: string;
   attachmentHint?: string;
   attachments?: string[];
+  nextSteps?: number[];
 }
 
 interface TemplateEditorProps {
@@ -255,6 +256,37 @@ function StepEditor({
         className="w-full rounded border px-2 py-1 text-[11px] outline-none resize-y"
         style={{ borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.30 0.015 50)' }}
       />
+      {/* 下一步骤分支选择 */}
+      {total > 1 && (
+        <div className="mt-2">
+          <p className="text-[9px] mb-1" style={{ color: 'oklch(0.50 0.02 50)' }}>下一步：</p>
+          <div className="flex flex-wrap gap-1">
+            {Array.from({ length: total }, (_, i) => i).filter(i => i !== idx).map(i => {
+              const selected = step.nextSteps?.includes(i);
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => {
+                    const current = step.nextSteps || [idx + 1 < total ? idx + 1 : -1].filter(n => n >= 0);
+                    const newNext = selected
+                      ? current.filter(n => n !== i)
+                      : [...current, i];
+                    onChange({ ...step, nextSteps: newNext.length > 0 ? newNext : undefined });
+                  }}
+                  className="text-[9px] rounded px-1.5 py-0.5 transition-colors"
+                  style={{
+                    backgroundColor: selected ? 'oklch(0.62 0.17 45 / 0.12)' : 'oklch(0.95 0.008 80)',
+                    color: selected ? 'oklch(0.50 0.12 45)' : 'oklch(0.55 0.02 50)',
+                  }}
+                >
+                  {selected ? '✓ ' : ''}Step {i + 1}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -408,18 +440,26 @@ export function TemplateEditor({
     selectable: false,
   }));
 
-  const previewEdges: Edge[] = steps.slice(0, -1).map((_, i) => ({
-    id: `edge-${i}`,
-    source: `step-${i}`,
-    target: `step-${i + 1}`,
-    type: 'smoothstep',
-    style: { stroke: 'oklch(0.62 0.17 45 / 0.4)', strokeWidth: 2 },
-  }));
+  const previewEdges: Edge[] = [];
+  steps.forEach((step, i) => {
+    const nextOrders = step.nextSteps || (i < steps.length - 1 ? [i + 1] : []);
+    for (const nextOrder of nextOrders) {
+      if (nextOrder >= 0 && nextOrder < steps.length) {
+        previewEdges.push({
+          id: `edge-${i}-${nextOrder}`,
+          source: `step-${i}`,
+          target: `step-${nextOrder}`,
+          type: 'smoothstep',
+          style: { stroke: 'oklch(0.62 0.17 45 / 0.4)', strokeWidth: 2 },
+        });
+      }
+    }
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-4xl gap-0 p-0"
+        className="max-w-[95vw] max-h-[92vh] gap-0 p-0"
         style={{ fontFamily: "'Noto Serif SC', serif" }}
       >
         <DialogHeader className="px-6 pt-6 pb-3">
@@ -431,9 +471,9 @@ export function TemplateEditor({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="flex gap-4 px-6 pb-2" style={{ height: '65vh' }}>
+        <div className="flex gap-4 px-6 pb-2" style={{ height: 'calc(92vh - 160px)' }}>
           {/* 左侧：编辑区 */}
-          <div className="w-1/2 overflow-y-auto pr-2">
+          <div className="w-[60%] overflow-y-auto pr-2">
             {/* 基本信息 */}
             <div className="space-y-2 mb-3">
               <input
@@ -493,7 +533,7 @@ export function TemplateEditor({
 
           {/* 右侧：画布映射预览 */}
           <div
-            className="w-1/2 rounded-md border overflow-hidden"
+            className="w-[40%] rounded-md border overflow-hidden"
             style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80)' }}
           >
             <div

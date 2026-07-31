@@ -228,6 +228,8 @@ export function AiChatNode({ id, data, selected }: NodeProps<AiChatNodeType>) {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionAtPos, setMentionAtPos] = useState(-1);
   const mentionRef = useRef<HTMLDivElement>(null);
+  const [pendingMaterials, setPendingMaterials] = useState<MaterialItem[]>([]);
+  const [pendingMaterialPaths, setPendingMaterialPaths] = useState<Set<string>>(new Set());
 
   // 加载已配置的提供商，并监听设置变更事件
   useEffect(() => {
@@ -326,9 +328,9 @@ export function AiChatNode({ id, data, selected }: NodeProps<AiChatNodeType>) {
     const allEdges = getEdges();
     const allNodes = getNodes();
 
-    // 找到所有连接到当前节点的活跃上游边
+    // 找到所有连接到当前节点的活跃上游边（仅 child 关系参与上下文注入）
     const upstreamEdges = allEdges.filter(
-      (e) => e.target === id && !e.data?.disconnected,
+      (e) => e.target === id && !e.data?.disconnected && e.data?.relation === 'child',
     );
     if (upstreamEdges.length === 0) return '';
 
@@ -407,21 +409,22 @@ ${rows.join('\n')}
         // 用 base64 + JSON 上传，避免 Turbopack FormData bug
         const base64 = await fileToBase64(file);
 
-        const resp = await fetch('/api/attachments', {
+        const resp: Response = await fetch('/api/attachments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             nodeId: currentMdId,
+            nodeTitle: data.title || '',
             fileName: file.name,
             fileType: file.type || 'application/octet-stream',
             data: base64,
           }),
         });
-        const data = await resp.json();
-        if (data.success && data.attachment) {
-          setPendingAttachments((prev) => [...prev, data.attachment]);
+        const respData = await resp.json();
+        if (respData.success && respData.attachment) {
+          setPendingAttachments((prev) => [...prev, respData.attachment]);
         } else {
-          console.error('上传附件失败:', file.name, data.error);
+          console.error('上传附件失败:', file.name, respData.error);
         }
       } catch (e) {
         if (e instanceof DOMException && e.name === 'NotReadableError') {
@@ -546,16 +549,21 @@ ${rows.join('\n')}
   /** 选择 @ 引用的文件 */
   const handleMentionSelect = useCallback((file: MaterialItem) => {
     if (mentionAtPos < 0) return;
+    // 移除输入框中的 @xxx 查询文字
     const beforeAt = input.slice(0, mentionAtPos);
     const afterQuery = input.slice(mentionAtPos + 1 + mentionQuery.length);
-    const newInput = `${beforeAt}@${file.name} ${afterQuery}`;
-    setInput(newInput);
+    setInput(`${beforeAt}${afterQuery}`);
+    // 添加到 pendingMaterials（去重）
+    if (!pendingMaterialPaths.has(file.path)) {
+      setPendingMaterials(prev => [...prev, file]);
+      setPendingMaterialPaths(prev => new Set(prev).add(file.path));
+    }
     setMentionOpen(false);
     setMentionQuery('');
     setMentionAtPos(-1);
     setMentionIndex(0);
     setTimeout(() => textareaRef.current?.focus(), 0);
-  }, [input, mentionAtPos, mentionQuery]);
+  }, [input, mentionAtPos, mentionQuery, pendingMaterialPaths]);
 
   /** 关闭 mention 弹窗 */
   const closeMention = useCallback(() => {
@@ -618,26 +626,15 @@ ${rows.join('\n')}
       attachments: pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
     };
 
-    // 提取用户输入中的 @ 引用并构建材料表
-    const materialRefs = userInput.match(/@([^\s@]+)/g);
+    // 使用 pendingMaterials 构建材料引用表
     const materialFileMap: Record<string, MaterialItem> = {};
-    if (materialRefs && materialRefs.length > 0) {
-      await loadMaterialFiles(); // 刷新列表
-      // 重新加载后的文件列表
-      const refetched = await fetch('/api/materials?action=list').then(r => r.json()).catch(() => ({ files: [] }));
-      const allFiles: MaterialItem[] = refetched.files || [];
-      for (const ref of materialRefs) {
-        const refName = ref.slice(1); // 去掉 @
-        const matched = allFiles.find((f: MaterialItem) => f.name === refName || f.name.startsWith(refName));
-        if (matched) {
-          materialFileMap[ref] = matched;
-        }
-      }
+    for (const mat of pendingMaterials) {
+      materialFileMap[mat.path] = mat;
     }
 
     // 构建带材料引用的消息内容（发送给 AI 时使用）
-    if (Object.keys(materialFileMap).length > 0) {
-      const materialInfo = Object.entries(materialFileMap).map(([ref, file], i) => {
+    if (pendingMaterials.length > 0) {
+      const materialInfo = pendingMaterials.map((file, i) => {
         return `  ${i + 1}. ${file.name} (${file.type}, ${formatFileSize(file.size)})\n     路径: ${file.path}`;
       }).join('\n');
       effectiveContent += `\n\n--- 引用资料列表 ---\n${materialInfo}\n如需了解资料详细内容，请使用 read_material 工具读取。`;
@@ -655,6 +652,8 @@ ${rows.join('\n')}
     setMessages(newMessages);
     setInput('');
     setPendingAttachments([]);
+    setPendingMaterials([]);
+    setPendingMaterialPaths(new Set());
     setIsStreaming(true);
 
     // 获取上游节点上下文，注入到系统提示中
@@ -1405,7 +1404,7 @@ ${rows.join('\n')}
 
   return (
     <div
-      className="ai-node-wrapper group relative w-[320px]"
+      className="ai-node-wrapper group relative w-[320px] cursor-default"
     >
       {/* 扩展 hover 触发面积（超出节点 40px），鼠标离开节点后按钮不立即消失 */}
       <div className="absolute -inset-10 z-0" />
@@ -2284,6 +2283,37 @@ ${rows.join('\n')}
                     });
                   }}
                   className="rounded-full p-px transition-colors hover:bg-[oklch(0.62_0.17_45_/_0.2)]"
+                >
+                  <X className="h-2 w-2" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* 引用材料标签 — 在输入框上方 */}
+        {pendingMaterials.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-0.5">
+            {pendingMaterials.map((mat) => (
+              <span
+                key={mat.path}
+                className="group inline-flex items-center gap-0.5 rounded-full px-1.5 py-px"
+                style={{
+                  backgroundColor: 'oklch(0.60 0.12 200 / 0.08)',
+                  border: '1px solid oklch(0.60 0.12 200 / 0.2)',
+                }}
+              >
+                <AtSign className="h-2.5 w-2.5" style={{ color: 'oklch(0.50 0.12 200)' }} />
+                <span className="max-w-[80px] truncate text-[9px]" style={{ color: 'oklch(0.35 0.02 50)' }}>
+                  {mat.name}
+                </span>
+                <button
+                  onClick={() => {
+                    setPendingMaterials(prev => prev.filter(m => m.path !== mat.path));
+                    setPendingMaterialPaths(prev => { const s = new Set(prev); s.delete(mat.path); return s; });
+                  }}
+                  className="ml-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ color: 'oklch(0.50 0.02 50 / 0.5)' }}
                 >
                   <X className="h-2 w-2" />
                 </button>

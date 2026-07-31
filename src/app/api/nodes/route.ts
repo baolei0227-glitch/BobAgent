@@ -432,7 +432,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (action === 'list' || (!nodeId && !action)) {
-      const nodesDir = join(project.path, 'nodes');
+      const nodesDir = join(project.path, 'notes-memory');
       try {
         const files = await fs.readdir(nodesDir);
         const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'example_node.md');

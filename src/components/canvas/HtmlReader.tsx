@@ -191,8 +191,15 @@ export function HtmlReader({ nodeMdId, filePath, projectId, fileName, onClose, z
 
   // 监听文字选中
   const handleContentMouseUp = useCallback(() => {
+    // 同步保存 Range，防止 React 重渲染后丢失浏览器原生高亮
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim()) {
+      (window as any).__textSelectionRange = sel.getRangeAt(0).cloneRange();
+    } else {
+      (window as any).__textSelectionRange = null;
+    }
+
     setTimeout(() => {
-      const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.toString().trim()) {
         setSelectedText('');
         setSelectionPos(null);

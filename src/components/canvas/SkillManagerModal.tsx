@@ -84,6 +84,16 @@ function SkillCard({ skill, onToggle, onUninstall }: {
   onUninstall?: (name: string) => void;
 }) {
   const [confirmUninstall, setConfirmUninstall] = useState(false);
+  const [descExpanded, setDescExpanded] = useState(false);
+  const descRef = useRef<HTMLParagraphElement>(null);
+  const [needsExpand, setNeedsExpand] = useState(false);
+
+  useEffect(() => {
+    const el = descRef.current;
+    if (el) {
+      setNeedsExpand(el.scrollHeight > el.clientHeight + 2);
+    }
+  }, [skill.description]);
 
   return (
     <div
@@ -123,9 +133,23 @@ function SkillCard({ skill, onToggle, onUninstall }: {
               </span>
             )}
           </div>
-          <p className="mt-0.5 text-[10px] leading-relaxed line-clamp-2" style={{ color: 'oklch(0.55 0.02 50)' }}>
+          <p
+            ref={descRef}
+            className={descExpanded ? 'mt-0.5 text-[10px] leading-relaxed' : 'mt-0.5 text-[10px] leading-relaxed line-clamp-2'}
+            style={{ color: 'oklch(0.55 0.02 50)' }}
+          >
             {skill.description}
           </p>
+          {needsExpand && (
+            <button
+              type="button"
+              onClick={() => setDescExpanded(!descExpanded)}
+              className="mt-0.5 text-[9px] transition-colors hover:underline"
+              style={{ color: 'oklch(0.50 0.12 45)' }}
+            >
+              {descExpanded ? '收起' : '展开全部'}
+            </button>
+          )}
         </div>
         {skill.source === 'user' && onUninstall && (
           <div className="shrink-0">

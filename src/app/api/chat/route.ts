@@ -151,6 +151,7 @@ function injectSkillContext(messages: ChatMessage[], forcedSkills?: string[]): {
     'user-guide',
     'intern-lawyer',
     'legal-drafter',
+    'quiet-musing',
   ]);
   const enabledSet = hasAgentConfig(AGENT_ID)
     ? getEnabledSkillsForAgent(AGENT_ID)

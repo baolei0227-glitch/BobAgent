@@ -1308,7 +1308,7 @@ async function toolReadUpstreamNode(args: Record<string, unknown>): Promise<stri
     const { join } = await import('path');
 
     const project = await getCurrentProject();
-    const nodesDir = join(project.path, 'nodes');
+    const nodesDir = join(project.path, 'notes-memory');
 
     // 读取所有节点的 .md 文件，按标题匹配
     const files = await readdir(nodesDir);

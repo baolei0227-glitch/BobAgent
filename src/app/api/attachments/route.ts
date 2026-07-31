@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import { join, extname, basename } from 'path';
 import { getCurrentProject } from '@/lib/project/project-manager';
-import { randomUUID } from 'crypto';
+
 
 export const maxDuration = 60;
 
@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
     // 优先尝试 JSON（Turbopack 兼容），回退到 FormData
     const contentType = request.headers.get('content-type') || '';
     let nodeId: string;
+    let nodeTitle = "";
     let fileName: string;
     let fileType: string;
     let buffer: Buffer;
@@ -31,6 +32,7 @@ export async function POST(request: NextRequest) {
     if (contentType.includes('application/json')) {
       const body = await request.json();
       nodeId = body.nodeId;
+      nodeTitle = body.nodeTitle || '';
       fileName = body.fileName;
       fileType = body.fileType || 'application/octet-stream';
       buffer = Buffer.from(body.data, 'base64');
@@ -50,22 +52,42 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'nodeId and fileName are required' }, { status: 400 });
     }
 
+    // 用短 UUID + 标题命名文件夹，便于辨认
+    const shortId = nodeId.slice(0, 4);
+    const safeTitle = nodeTitle
+      ? nodeTitle.replace(/[\/:*?"<>|]/g, '_').slice(0, 30).trim()
+      : '';
+    const assetFolderName = safeTitle ? `${shortId}_${safeTitle}` : nodeId;
+
     if (buffer.length > MAX_SIZE) {
       return NextResponse.json({ error: 'File too large (max 500MB)' }, { status: 400 });
     }
 
-    const assetsDir = join(projectPath, 'assets', nodeId);
+    const assetsDir = join(projectPath, 'assets', assetFolderName);
     await fs.mkdir(assetsDir, { recursive: true });
 
-    const fileId = randomUUID();
     const safeName = basename(fileName).replace(/[\\/:*?"<>|\n\r\t]/g, '_');
-    const destName = `${fileId}_${safeName}`;
+    const ext = extname(safeName);
+    const base = safeName.slice(0, safeName.length - ext.length);
+
+    // 冲突时加数字后缀，如 name.ext -> name (1).ext
+    let destName = safeName;
+    let counter = 1;
+    while (true) {
+      try {
+        await fs.access(join(assetsDir, destName));
+        destName = `${base} (${counter})${ext}`;
+        counter++;
+      } catch {
+        break;
+      }
+    }
     const filePath = join(assetsDir, destName);
 
     await fs.writeFile(filePath, buffer);
 
     const type = getAttachmentType(fileType, fileName);
-    const relativePath = `assets/${nodeId}/${destName}`;
+    const relativePath = `assets/${assetFolderName}/${destName}`;
 
     let dataUrl: string | undefined;
     if (buffer.length < 2 * 1024 * 1024) {
@@ -76,7 +98,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       attachment: {
-        id: fileId,
+        id: destName,
         name: fileName,
         type,
         mimeType: fileType,

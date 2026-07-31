@@ -27,6 +27,7 @@ const DEFAULT_ENABLED_SKILLS = new Set([
   'user-guide',
   'intern-lawyer',
   'legal-drafter',
+  'quiet-musing',
 ]);
 
 export async function GET() {

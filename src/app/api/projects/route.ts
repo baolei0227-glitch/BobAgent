@@ -40,8 +40,11 @@ async function scanDirectory(dirPath: string, maxDepth = 3): Promise<FileNode[]>
     return result;
   }
 
-  // 目录优先，然后按名称排序
+  // homework 目录置顶，然后目录优先，最后按名称排序
   entries.sort((a, b) => {
+    const aHw = a.isDirectory() && a.name === 'homework';
+    const bHw = b.isDirectory() && b.name === 'homework';
+    if (aHw !== bHw) return aHw ? -1 : 1;
     if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
     return a.name.localeCompare(b.name);
   });

@@ -23,6 +23,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { AiChatNode, NodeReaderContext } from './AiChatNode';
+import { NodeMap } from './NodeMap';
 import { FloatingEdge, FloatingEdgeDefs } from './FloatingEdge';
 import { SettingsModal } from './SettingsModal';
 import { SkillManagerModal } from './SkillManagerModal';
@@ -33,6 +34,7 @@ import { FileViewer } from './FileViewer';
 import { Sidebar } from './Sidebar';
 import { CalendarPanel } from './CalendarPanel';
 import { WelcomeScreen } from './WelcomeScreen';
+import { TemplateApplyDialog } from './TemplateApplyDialog';
 import { TemplateEditor } from './TemplateEditor';
 import type { AiChatNodeData, NodeRelation, ProviderConfig, ChatMessage } from '@/lib/types';
 import { DEFAULT_MODEL_ID, DEFAULT_THINKING_LEVEL } from '@/lib/types';
@@ -342,11 +344,14 @@ function CanvasFlowInner() {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const lastActiveNodeIdRef = useRef<string | null>(null); // 当前活跃节点，用于全局文字选择
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<'all' | 'custom_tools'>('all');
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   const [templateInitialSteps, setTemplateInitialSteps] = useState<any[] | undefined>(undefined);
   const [templateInitialName, setTemplateInitialName] = useState<string | undefined>(undefined);
+  const [applyDialogOpen, setApplyDialogOpen] = useState(false);
+  const [applyTemplateId, setApplyTemplateId] = useState<string | null>(null);
   // 统一悬浮面板
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [fileTabs, setFileTabs] = useState<Array<{ id: string; projectId: string; fileName: string; filePath: string }>>([]);
@@ -684,10 +689,10 @@ function CanvasFlowInner() {
         }
       }
 
-      // 确定关系类型（垂直=子节点，水平=同级）
-      const isVertical = handleId === 'top' || handleId === 'bottom';
-      const edgeType = isVertical ? 'vertical' : 'parallel';
-      const relation = isVertical ? 'child' : 'sibling';
+      // 确定关系类型（横向=子节点/层级，纵向=其他）
+      const isHorizontal = handleId === 'left' || handleId === 'right';
+      const edgeType = isHorizontal ? 'parallel' : 'vertical';
+      const relation = isHorizontal ? 'child' : 'sibling';
 
       // 创建节点文件
       fetch('/api/nodes', {
@@ -762,10 +767,10 @@ function CanvasFlowInner() {
     // 根据 sourceHandle 和 targetHandle 判断连线类型
     const sourceHandle = connection.sourceHandle || '';
     const targetHandle = connection.targetHandle || '';
-    const isVertical = sourceHandle.includes('top') || sourceHandle.includes('bottom') ||
-                       targetHandle.includes('top') || targetHandle.includes('bottom');
-    const edgeType = isVertical ? 'vertical' : 'parallel';
-    const relation = isVertical ? 'child' : 'sibling';
+    const isHorizontal = sourceHandle.includes('left') || sourceHandle.includes('right') ||
+                         targetHandle.includes('left') || targetHandle.includes('right');
+    const edgeType = isHorizontal ? 'parallel' : 'vertical';
+    const relation = isHorizontal ? 'child' : 'sibling';
 
     fetch('/api/edges', {
       method: 'POST',
@@ -815,45 +820,19 @@ function CanvasFlowInner() {
     }
   }, []);
 
-  // 拖拽停止后检查同级节点是否移到了源节点下方，若是则转为子节点关系
+  // 拖拽停止后不做关系类型自动转换（关系由连线方向决定，不支持拖拽更换）
   const onNodeDragStop = useCallback(() => {
-    const allNodes = getNodes();
-    setEdges((eds) =>
-      eds.map((edge) => {
-        if (edge.data?.relation !== 'sibling') return edge;
-
-        const sourceNode = allNodes.find((n) => n.id === edge.source);
-        const targetNode = allNodes.find((n) => n.id === edge.target);
-        if (!sourceNode || !targetNode) return edge;
-
-        const sw = sourceNode.measured?.width ?? 320;
-        const sh = sourceNode.measured?.height ?? 200;
-        const tw = targetNode.measured?.width ?? 320;
-        const th = targetNode.measured?.height ?? 200;
-
-        const sc = { x: sourceNode.position.x + sw / 2, y: sourceNode.position.y + sh / 2 };
-        const tc = { x: targetNode.position.x + tw / 2, y: targetNode.position.y + th / 2 };
-
-        const dx = Math.abs(tc.x - sc.x);
-        const dy = tc.y - sc.y;
-
-        // 目标节点在源节点下方且垂直距离大于水平距离 → 转为子节点
-        if (dy > 0 && dy > dx) {
-          return { ...edge, data: { ...edge.data, relation: 'child' as NodeRelation } };
-        }
-
-        return edge;
-      }),
-    );
-  }, [getNodes, setEdges]);
+    // no-op: relation type is fixed at edge creation time
+  }, []);
 
 
   // 双击空白处创建新节点
   const handlePaneDoubleClick = useCallback(
     (event: React.MouseEvent) => {
-      // 检查是否双击在节点上，如果是则忽略
+      // 检查是否双击在非空白区域上，如果是则忽略（节点/控件/浮层等）
       const target = event.target as HTMLElement;
-      if (target.closest('.react-flow__node')) return;
+      if (target.closest('.react-flow__node, .react-flow__controls, .react-flow__handle, .react-flow__edge')) return;
+      if (target.closest('[data-canvas-ui="overlay"]')) return;
 
       const position = screenToFlowPosition({
         x: event.clientX,
@@ -1172,6 +1151,49 @@ function CanvasFlowInner() {
     setTemplateEditorOpen(true);
   }, [selectedNodeIds, getNodes]);
 
+  // 监听 Sidebar 模板"保存并应用"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.template_id) {
+        setApplyTemplateId(detail.template_id);
+        setApplyDialogOpen(true);
+      }
+    };
+    window.addEventListener('apply-workflow-template', handler);
+    return () => window.removeEventListener('apply-workflow-template', handler);
+  }, []);
+
+  // 模板应用成功后，把新节点和连线添加到画布
+  const handleTemplateApplied = useCallback(
+    (newNodes: Array<{ node_id: string; title: string; position: { x: number; y: number } }>, newEdges: Array<{ edge_id: string; from: string; to: string }>) => {
+      const flowNodes: Node<AiChatNodeData>[] = newNodes.map(n => ({
+        id: n.node_id,
+        type: 'aiChat',
+        position: n.position,
+        data: {
+          title: n.title,
+          messages: [],
+          isStreaming: false,
+          modelId: DEFAULT_MODEL_ID,
+          thinkingLevel: DEFAULT_THINKING_LEVEL,
+          nodeMdId: n.node_id,
+        },
+      }));
+      setNodes(prev => [...prev, ...flowNodes]);
+
+      const flowEdges: Edge[] = newEdges.map(e => ({
+        id: e.edge_id,
+        source: e.from,
+        target: e.to,
+        type: 'floating',
+        data: { relation: 'child', disconnected: false },
+      }));
+      setEdges(prev => [...prev, ...flowEdges]);
+    },
+    [setNodes, setEdges],
+  );
+
   // 跟踪 viewport 变换，用于计算选中节点边界框的屏幕位置
   const [viewport, setViewportState] = useState({ x: 0, y: 0, zoom: 1 });
 
@@ -1295,8 +1317,15 @@ function CanvasFlowInner() {
   // 全局 mouseup：在非 reader 区域选中文字时，发送到当前活跃节点
   useEffect(() => {
     const handleGlobalMouseUp = () => {
+      // 同步保存 Range，防止 React 重渲染后丢失浏览器原生高亮
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && sel.toString().trim()) {
+        (window as any).__textSelectionRange = sel.getRangeAt(0).cloneRange();
+      } else {
+        (window as any).__textSelectionRange = null;
+      }
+
       setTimeout(() => {
-        const sel = window.getSelection();
         if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
 
         // 跳过 reader 内容区（由 HtmlReader 自己的 handler 处理）
@@ -1359,7 +1388,14 @@ function CanvasFlowInner() {
         </div>
       ) : hasProject ? (
         <div className="flex h-screen w-screen">
-          <Sidebar onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} onOpenCalendar={() => setCalendarOpen(true)} onOpenFile={(projId, name, path) => openFileTab(projId, name, path)} projectId={currentProjectId} />
+          <Sidebar
+            onOpenSettings={() => { setSettingsOpen(true); setSettingsInitialSection('all'); }}
+            onOpenCustomTools={() => { setSettingsOpen(true); setSettingsInitialSection('custom_tools'); }}
+            onOpenSkills={() => setSkillsOpen(true)}
+            onOpenCalendar={() => setCalendarOpen(true)}
+            onOpenFile={(projId, name, path) => openFileTab(projId, name, path)}
+            projectId={currentProjectId}
+          />
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* 顶部拖拽区域 */}
             <div
@@ -1425,6 +1461,7 @@ function CanvasFlowInner() {
         />
         <Controls showInteractive={false} className="!border-0 !shadow-lg" />
         <FloatingEdgeDefs />
+        <NodeMap />
       </ReactFlow>
 
       {/* 框选矩形 */}
@@ -1508,6 +1545,7 @@ function CanvasFlowInner() {
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
           onConfigsChange={setProviderConfigs}
+          initialSection={settingsInitialSection}
         />
 
         <SkillManagerModal
@@ -1527,6 +1565,14 @@ function CanvasFlowInner() {
           }}
           initialSteps={templateInitialSteps}
           initialName={templateInitialName}
+        />
+
+        {/* 应用模板对话框 */}
+        <TemplateApplyDialog
+          open={applyDialogOpen}
+          onOpenChange={setApplyDialogOpen}
+          templateId={applyTemplateId}
+          onApplied={handleTemplateApplied}
         />
 
         {/* 日历面板 */}
@@ -1562,6 +1608,7 @@ function CanvasFlowInner() {
       {/* 系统级：选中文字后的按钮组（fixed 定位，组件自身带 overlay 标记） */}
       {textSelection && (
         <TextSelectionActions
+          selectedText={textSelection.selectedText}
           selectionPos={textSelection.selectionPos}
           nodes={nodes.map(n => ({ id: n.data.nodeMdId || n.id, title: n.data.title }))}
           onEdit={handleSystemInsertReference}

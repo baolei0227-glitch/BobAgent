@@ -2,53 +2,71 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import { join, extname, basename } from 'path';
 import { getCurrentProject } from '@/lib/project/project-manager';
-import { randomUUID } from 'crypto';
 
 const MAX_SIZE = 500 * 1024 * 1024;
 
-interface MaterialFile {
-  id: string;
+interface MaterialTreeNode {
   name: string;
+  type: 'file' | 'directory';
+  children?: MaterialTreeNode[];
+  size?: number;
+  extension?: string;
+  mimeType?: string;
   path: string;
-  size: number;
-  extension: string;
-  type: 'image' | 'text' | 'pdf' | 'file';
-  uploadedAt: string;
+  uploadedAt?: string;
 }
 
-async function listMaterials(projectPath: string): Promise<MaterialFile[]> {
-  const materialsPath = join(projectPath, 'materials');
-  await fs.mkdir(materialsPath, { recursive: true });
+function getMimeType(ext: string): string {
+  const mimeMap: Record<string, string> = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
+    '.json': 'application/json', '.csv': 'text/csv',
+  };
+  return mimeMap[ext] || 'application/octet-stream';
+}
 
-  const entries = await fs.readdir(materialsPath, { withFileTypes: true });
-  const files: MaterialFile[] = [];
+async function scanMaterialsTree(dirPath: string, prefix: string, maxDepth: number): Promise<MaterialTreeNode[]> {
+  if (maxDepth <= 0) return [];
 
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const filePath = join(materialsPath, entry.name);
-    const stat = await fs.stat(filePath);
-    const ext = extname(entry.name).toLowerCase();
-    const idMatch = entry.name.match(/^([a-f0-9-]+)_/);
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  const nodes: MaterialTreeNode[] = [];
 
-    const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'];
-    const textExts = ['.md', '.txt', '.json', '.csv', '.xml', '.html', '.css', '.js', '.ts', '.py', '.java', '.cpp', '.go', '.yaml', '.yml'];
-    let fileType: MaterialFile['type'] = 'file';
-    if (imageExts.includes(ext)) fileType = 'image';
-    else if (ext === '.pdf') fileType = 'pdf';
-    else if (textExts.includes(ext)) fileType = 'text';
+  const sorted = [...entries].sort((a, b) => {
+    if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
 
-    files.push({
-      id: idMatch ? idMatch[1] : entry.name,
-      name: entry.name.replace(/^[a-f0-9-]+_/, ''),
-      path: `materials/${entry.name}`,
-      size: stat.size,
-      extension: ext,
-      type: fileType,
-      uploadedAt: stat.mtime.toISOString(),
-    });
+  for (const entry of sorted) {
+    const fullPath = join(dirPath, entry.name);
+    const relPath = prefix ? prefix + '/' + entry.name : entry.name;
+
+    if (entry.isDirectory()) {
+      const children = await scanMaterialsTree(fullPath, relPath, maxDepth - 1);
+      nodes.push({
+        name: entry.name,
+        type: 'directory',
+        path: relPath,
+        children: children.length > 0 ? children : [],
+      });
+    } else {
+      const stat = await fs.stat(fullPath);
+      const ext = extname(entry.name).toLowerCase();
+      const displayName = entry.name.replace(/^[a-f0-9-]+_/, '');
+
+      nodes.push({
+        name: displayName,
+        type: 'file',
+        path: relPath,
+        size: stat.size,
+        extension: ext,
+        mimeType: getMimeType(ext),
+        uploadedAt: stat.mtime.toISOString(),
+      });
+    }
   }
 
-  return files.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+  return nodes;
 }
 
 export async function GET(request: NextRequest) {
@@ -60,8 +78,10 @@ export async function GET(request: NextRequest) {
     const projectPath = project.path;
 
     if (action === 'list') {
-      const files = await listMaterials(projectPath);
-      return NextResponse.json({ success: true, files });
+      const materialsPath = join(projectPath, 'materials');
+      await fs.mkdir(materialsPath, { recursive: true });
+      const tree = await scanMaterialsTree(materialsPath, '', 3);
+      return NextResponse.json({ success: true, tree });
     }
 
     if (action === 'read') {
@@ -69,20 +89,14 @@ export async function GET(request: NextRequest) {
       if (!filePath) {
         return NextResponse.json({ error: 'path is required' }, { status: 400 });
       }
-      const fullPath = join(projectPath, filePath);
+      const fullPath = join(projectPath, 'materials', filePath);
       if (!fullPath.startsWith(join(projectPath, 'materials'))) {
         return NextResponse.json({ error: 'Invalid path' }, { status: 403 });
       }
 
       const content = await fs.readFile(fullPath);
       const ext = extname(fullPath).toLowerCase();
-      const mimeMap: Record<string, string> = {
-        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-        '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
-        '.json': 'application/json', '.csv': 'text/csv',
-      };
-      const mimeType = mimeMap[ext] || 'application/octet-stream';
+      const mimeType = getMimeType(ext);
 
       return new NextResponse(content, {
         headers: {
@@ -102,6 +116,31 @@ export async function POST(request: NextRequest) {
   try {
     const project = await getCurrentProject();
     const projectPath = project.path;
+    const materialsPath = join(projectPath, 'materials');
+    await fs.mkdir(materialsPath, { recursive: true });
+
+    const contentType = request.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+      const body = await request.json();
+      const action = body.action;
+
+      if (action === 'create_folder') {
+        const folderPath = body.folderPath || '';
+        if (!folderPath.trim()) {
+          return NextResponse.json({ error: 'folderPath is required' }, { status: 400 });
+        }
+        const safeName = folderPath.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim();
+        if (!safeName) {
+          return NextResponse.json({ error: 'Invalid folder name' }, { status: 400 });
+        }
+        const targetPath = join(materialsPath, safeName);
+        await fs.mkdir(targetPath, { recursive: true });
+        return NextResponse.json({ success: true, path: safeName });
+      }
+
+      return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
+    }
 
     const formData = await request.formData();
     const file = formData.get('file') as File | null;
@@ -114,42 +153,38 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'File too large (max 500MB)' }, { status: 400 });
     }
 
-    const materialsPath = join(projectPath, 'materials');
-    await fs.mkdir(materialsPath, { recursive: true });
+    const folder = (formData.get('folder') as string) || '';
+    let targetDir = materialsPath;
+    if (folder) {
+      const safeFolder = folder.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim();
+      targetDir = join(materialsPath, safeFolder);
+      await fs.mkdir(targetDir, { recursive: true });
+    }
 
-    const fileId = randomUUID();
-    const safeName = basename(file.name).replace(/[\\/:*?"<>|\n\r\t]/g, '_');
-    const fileName = `${fileId}_${safeName}`;
-    const filePath = join(materialsPath, fileName);
+    const fileName = basename(file.name).replace(/[\\/:*?"<>|\n\r\t]/g, '_');
+    const filePath = join(targetDir, fileName);
 
     const buffer = Buffer.from(await file.arrayBuffer());
     await fs.writeFile(filePath, buffer);
 
     const ext = extname(file.name).toLowerCase();
-    const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'];
-    const textExts = ['.md', '.txt', '.json', '.csv', '.xml', '.html', '.css', '.js', '.ts', '.py', '.java', '.cpp', '.go', '.yaml', '.yml'];
-    let fileType: string = 'file';
-    if (imageExts.includes(ext)) fileType = 'image';
-    else if (ext === '.pdf') fileType = 'pdf';
-    else if (textExts.includes(ext)) fileType = 'text';
-
     const stat = await fs.stat(filePath);
+
+    const relPath = folder ? folder + '/' + fileName : fileName;
 
     return NextResponse.json({
       success: true,
       file: {
-        id: fileId,
         name: file.name,
-        path: `materials/${fileName}`,
+        path: relPath,
         size: stat.size,
         extension: ext,
-        type: fileType,
         uploadedAt: stat.mtime.toISOString(),
       },
     });
   } catch (e) {
-    console.error('Materials upload failed:', e);
-    return NextResponse.json({ error: 'Upload failed' }, { status: 500 });
+    console.error('Materials operation failed:', e);
+    return NextResponse.json({ error: 'Operation failed' }, { status: 500 });
   }
 }
 
@@ -164,12 +199,17 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'path is required' }, { status: 400 });
     }
 
-    const fullPath = join(projectPath, filePath);
+    const fullPath = join(projectPath, 'materials', filePath);
     if (!fullPath.startsWith(join(projectPath, 'materials'))) {
       return NextResponse.json({ error: 'Invalid path' }, { status: 403 });
     }
 
-    await fs.unlink(fullPath);
+    const stat = await fs.stat(fullPath);
+    if (stat.isDirectory()) {
+      await fs.rm(fullPath, { recursive: true });
+    } else {
+      await fs.unlink(fullPath);
+    }
     return NextResponse.json({ success: true });
   } catch (e) {
     return NextResponse.json({ error: 'Delete failed' }, { status: 500 });
