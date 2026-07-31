@@ -53,16 +53,16 @@
 ## 4. 文件路径规则
 
 ```
-<项目目录>/nodes/<node_id前8位>_<标题slug>.md
+<项目目录>/notes-memory/<node_id前8位>_<标题slug>.md
 ```
 
 - `node_id 前 8 位`：取 UUID 前 8 个字符
 - `标题 slug`：将标题转为 URL 安全的 slug（小写、空格转连字符、去除特殊字符）
-- 示例：`nodes/a1b2c3d4_陈楚生演唱会最新进展-20260727.md`
+- 示例：`notes-memory/a1b2c3d4_陈楚生演唱会最新进展-20260727.md`
 
 ## 5. 示例
 
-见 `nodes/example_node.md`。
+见 `notes-memory/example_node.md`。
 
 ## 6. 读写约定
 

@@ -1,6 +1,6 @@
 {
   "name": "bob-agent",
-  "version": "1.0.23",
+  "version": "0.50",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {

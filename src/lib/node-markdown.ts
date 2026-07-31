@@ -106,7 +106,7 @@ export function titleToFileName(title: string, maxLen: number = 30): string {
 export function buildFilePath(_nodeId: string, title: string, date?: Date): string {
   const name = titleToFileName(title);
   const stamp = dateStamp(date);
-  return `nodes/${name}-${stamp}.md`;
+  return `notes-memory/${name}-${stamp}.md`;
 }
 
 /**
@@ -510,7 +510,7 @@ export async function readNodeFile(nodeId: string, title: string): Promise<NodeM
 export async function findNodeFileById(nodeId: string, projectPath?: string): Promise<string | null> {
   // 显式传入 projectPath 避免全局变量竞态；兼容旧调用
   const root = projectPath ?? getWorkspaceRoot();
-  const nodesDir = join(root, 'nodes');
+  const nodesDir = join(root, 'notes-memory');
   console.log('[findNodeFileById] nodeId:', nodeId, 'root:', root, 'nodesDir:', nodesDir);
 
   try {

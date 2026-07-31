@@ -19,8 +19,12 @@ import {
   CalendarDays,
   Download,
   AlertCircle,
+  ArrowDownCircle,
 } from 'lucide-react';
 import { TaskPanel } from './TaskPanel';
+import { TemplatePanel } from './TemplatePanel';
+import { TemplateEditor } from './TemplateEditor';
+import { TemplateApplyDialog } from './TemplateApplyDialog';
 
 export interface ProjectInfo {
   id: string;
@@ -84,6 +88,13 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
   const [updateProgress, setUpdateProgress] = useState<number>(0);
   const [updateError, setUpdateError] = useState<string>('');
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 模板相关状态
+  const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState<string | undefined>(undefined);
+  const [applyDialogOpen, setApplyDialogOpen] = useState(false);
+  const [applyingTemplateId, setApplyingTemplateId] = useState<string | null>(null);
+  const [templateRefreshTrigger, setTemplateRefreshTrigger] = useState(0);
 
   // 监听更新事件
   useEffect(() => {
@@ -568,6 +579,23 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
               <span>New project</span>
             </button>
           )}
+
+          {/* 工作流模板 */}
+          <TemplatePanel
+            onCreateNew={() => {
+              setEditingTemplateId(undefined);
+              setTemplateEditorOpen(true);
+            }}
+            onEditTemplate={(templateId) => {
+              setEditingTemplateId(templateId);
+              setTemplateEditorOpen(true);
+            }}
+            onApplyTemplate={(templateId) => {
+              setApplyingTemplateId(templateId);
+              setApplyDialogOpen(true);
+            }}
+            refreshTrigger={templateRefreshTrigger}
+          />
         </div>
 
         {/* 任务归纳面板（独立区块，项目列表与 Logo 之间） */}
@@ -608,8 +636,20 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                   v{appVersion || '1.0.2'}
                 </span>
               )}
-              {/* 设置齿轮图标 */}
-              <div className="relative ml-auto" ref={settingsMenuRef}>
+              {/* 设置齿轮图标 + 更新状态指示 */}
+              <div className="relative ml-auto flex items-center gap-0.5" ref={settingsMenuRef}>
+                {/* 更新状态指示 - 显示在齿轮左侧 */}
+                {updateStatus === 'checking' && (
+                  <RefreshCw className="h-3 w-3 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                )}
+                {updateStatus === 'downloading' && (
+                  <span className="text-[10px] font-medium tabular-nums" style={{ color: 'oklch(0.62 0.17 45)' }}>
+                    {Math.round(updateProgress)}%
+                  </span>
+                )}
+                {updateStatus === 'error' && (
+                  <AlertCircle className="h-3 w-3" style={{ color: 'oklch(0.65 0.20 25)' }} />
+                )}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -617,14 +657,17 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                   }}
                   className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[oklch(0.92_0.015_75)]"
                   style={{ color: 'oklch(0.50 0.02 55)' }}
-                  title={updateStatus === 'downloaded' ? `Update v${updateVersion} ready to install` : 'Settings'}
+                  title={
+                    updateStatus === 'downloading' ? `Downloading v${updateVersion} (${Math.round(updateProgress)}%)` :
+                    updateStatus === 'downloaded' ? `Update v${updateVersion} ready to install` :
+                    updateStatus === 'checking' ? 'Checking for updates...' :
+                    'Settings'
+                  }
                 >
-                  <Cog className="h-3.5 w-3.5" />
-                  {updateStatus === 'downloaded' && (
-                    <span
-                      className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2"
-                      style={{ backgroundColor: 'oklch(0.55 0.22 30)', borderColor: 'oklch(0.98 0.015 80)' }}
-                    />
+                  {updateStatus === 'downloaded' ? (
+                    <ArrowDownCircle className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 45)' }} />
+                  ) : (
+                    <Cog className="h-3.5 w-3.5" />
                   )}
                 </button>
                 {settingsMenuOpen && (
@@ -664,9 +707,16 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSettingsMenuOpen(false);
-                        if (typeof window.api?.update !== 'undefined') {
-                          window.api.update.check();
+                        if (updateStatus === 'downloaded') {
+                          setSettingsMenuOpen(false);
+                          if (typeof window.api?.update !== 'undefined') {
+                            window.api.update.install();
+                          }
+                        } else {
+                          setSettingsMenuOpen(false);
+                          if (typeof window.api?.update !== 'undefined') {
+                            window.api.update.check();
+                          }
                         }
                       }}
                       disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
@@ -678,7 +728,7 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                       ) : updateStatus === 'downloading' ? (
                         <Download className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
                       ) : updateStatus === 'downloaded' ? (
-                        <Download className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 45)' }} />
+                        <ArrowDownCircle className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 45)' }} />
                       ) : updateStatus === 'no-update' ? (
                         <Check className="h-3.5 w-3.5" style={{ color: 'oklch(0.55 0.15 45)' }} />
                       ) : updateStatus === 'error' ? (
@@ -701,22 +751,6 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
                         />
                       )}
                     </button>
-                    {/* 下载完成后显示安装按钮 */}
-                    {updateStatus === 'downloaded' && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSettingsMenuOpen(false);
-                          if (typeof window.api?.update !== 'undefined') {
-                            window.api.update.install();
-                          }
-                        }}
-                        className="ml-6 mt-1 rounded px-3 py-1.5 text-xs transition-colors hover:opacity-90"
-                        style={{ backgroundColor: 'oklch(0.55 0.15 45)', color: 'white' }}
-                      >
-                        Install and Restart
-                      </button>
-                    )}
                     <button
                       onClick={async (e) => {
                         e.stopPropagation();
@@ -839,6 +873,26 @@ export function Sidebar({ onOpenSettings, onOpenSkills, onOpenCalendar, onOpenFi
           </div>
         </div>
       )}
+      {/* 模板编辑器对话框 */}
+      <TemplateEditor
+        open={templateEditorOpen}
+        onOpenChange={setTemplateEditorOpen}
+        templateId={editingTemplateId}
+        onSaved={() => {
+          setTemplateRefreshTrigger((v) => v + 1);
+        }}
+      />
+
+      {/* 模板应用对话框 */}
+      <TemplateApplyDialog
+        open={applyDialogOpen}
+        onOpenChange={setApplyDialogOpen}
+        templateId={applyingTemplateId}
+        onApplied={(nodes) => {
+          // 触发刷新
+          setTemplateRefreshTrigger((v) => v + 1);
+        }}
+      />
     </>
   );
 }

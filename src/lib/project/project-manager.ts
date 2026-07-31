@@ -10,10 +10,10 @@
  * ├── .projects.json         # 项目列表配置（隐藏）
  * └── projects/              # 所有项目数据
  *     ├── <项目A>/
- *     │   ├── nodes/         # 节点 .md 文件
+ *     │   ├── notes-memory/         # 节点 .md 文件
  *     │   └── project.db     # 项目数据库（连线等）
  *     └── <项目B>/
- *         ├── nodes/
+ *         ├── notes-memory/
  *         └── project.db
  */
 
@@ -92,7 +92,7 @@ export async function ensureAppRoot(): Promise<void> {
     if (hasOldData) {
       // 有旧数据：创建默认项目承接旧数据
       const defaultPath = join(PROJECTS_DIR, DEFAULT_PROJECT_ID);
-      await fs.mkdir(join(defaultPath, 'nodes'), { recursive: true });
+      await fs.mkdir(join(defaultPath, 'notes-memory'), { recursive: true });
       await fs.mkdir(join(defaultPath, 'homework'), { recursive: true });
 
       // 迁移数据库
@@ -103,7 +103,7 @@ export async function ensureAppRoot(): Promise<void> {
       } catch { /* ignore */ }
 
       // 迁移 nodes
-      const newNodesDir = join(defaultPath, 'nodes');
+      const newNodesDir = join(defaultPath, 'notes-memory');
       try {
         await fs.access(oldNodesDir);
         const files = await fs.readdir(oldNodesDir);
@@ -240,7 +240,7 @@ export async function createProject(name: string): Promise<ProjectConfig> {
 
   // 创建项目目录
   const projectPath = join(PROJECTS_DIR, projectId);
-  await fs.mkdir(join(projectPath, 'nodes'), { recursive: true });
+  await fs.mkdir(join(projectPath, 'notes-memory'), { recursive: true });
   await fs.mkdir(join(projectPath, 'materials'), { recursive: true });
   await fs.mkdir(join(projectPath, 'homework'), { recursive: true });
 
@@ -293,7 +293,7 @@ export async function switchProject(projectId: string): Promise<ProjectConfig> {
   }
 
   // 确保项目目录存在
-  await fs.mkdir(join(target.path, 'nodes'), { recursive: true });
+  await fs.mkdir(join(target.path, 'notes-memory'), { recursive: true });
   await fs.mkdir(join(target.path, 'homework'), { recursive: true });
 
   // 确保全局 wanted/todo.md 存在
@@ -363,9 +363,9 @@ export async function getProjectStats(projectId: string): Promise<{ nodeCount: n
 
   let nodeCount = 0;
   try {
-    const files = await fs.readdir(join(target.path, 'nodes'));
+    const files = await fs.readdir(join(target.path, 'notes-memory'));
     nodeCount = files.filter((f) => f.endsWith('.md')).length;
-  } catch { /* nodes 文件夹不存在 */ }
+  } catch { /* notes-memory 文件夹不存在 */ }
 
   let dbSizeKB = 0;
   try {
