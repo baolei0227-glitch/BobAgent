@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Sparkles, ArrowRight } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 
 interface WelcomeScreenProps {
   onCreateProject: (name: string) => Promise<void>;
@@ -27,116 +28,114 @@ export function WelcomeScreen({ onCreateProject }: WelcomeScreenProps) {
 
   return (
     <div
-      className="flex h-screen w-screen items-center justify-center"
+      className="flex h-screen w-screen items-center justify-center px-6"
       style={{
-        background: 'linear-gradient(135deg, oklch(0.96 0.01 80) 0%, oklch(0.94 0.015 65) 100%)',
+        background:
+          'linear-gradient(135deg, var(--canvas-bg) 0%, color-mix(in oklab, var(--canvas-bg) 85%, var(--primary) 15%) 100%)',
       }}
     >
-      <div className="w-full max-w-md px-6">
-        {/* Logo */}
-        <div className="mb-8 flex justify-center">
-          <img
-            src="/bobagent-logo.png"
-            alt="BobAgent"
-            className="h-16 w-16 rounded-2xl object-contain shadow-lg"
-          />
-        </div>
-
-        {/* 标题 */}
-        <h1
-          className="mb-2 text-center text-2xl font-medium"
-          style={{
-            color: 'oklch(0.35 0.02 50)',
-            fontFamily: "'Noto Serif SC', serif",
-          }}
-        >
-          Welcome to BobAgent
-        </h1>
-        <p
-          className="mb-10 text-center text-sm"
-          style={{
-            color: 'oklch(0.55 0.02 55)',
-            fontFamily: "'Noto Serif SC', serif",
-          }}
-        >
-          Build your knowledge network with AI-powered nodes on an infinite canvas
-        </p>
-
-        {/* 创建项目卡片 */}
-        <div
-          className="rounded-2xl p-6 shadow-xl"
-          style={{
-            backgroundColor: 'oklch(0.98 0.01 80 / 0.9)',
-            border: '1px solid oklch(0.82 0.025 65 / 0.4)',
-            backdropFilter: 'blur(8px)',
-          }}
-        >
-          <div className="mb-4 flex items-center gap-2">
-            <Sparkles className="h-4 w-4" style={{ color: 'oklch(0.65 0.17 45)' }} />
-            <span
-              className="text-sm font-medium"
-              style={{
-                color: 'oklch(0.40 0.02 50)',
-                fontFamily: "'Noto Serif SC', serif",
-              }}
-            >
-              Create Your First Project
-            </span>
-          </div>
-
-          <input
-            type="text"
-            autoFocus
-            placeholder="Enter project name, e.g., Research Notes, Product Design..."
-            value={projectName}
-            onChange={(e) => setProjectName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !creating && projectName.trim()) {
-                handleCreate();
-              }
-            }}
-            disabled={creating}
-            className="w-full rounded-lg border px-4 py-3 text-sm outline-none transition-colors focus:border-amber-400"
+      <EmptyState
+        size="lg"
+        tone="primary"
+        title={
+          <span
             style={{
-              backgroundColor: 'oklch(1 0 0 / 0.7)',
-              borderColor: 'oklch(0.82 0.025 65 / 0.5)',
-              color: 'oklch(0.40 0.02 50)',
-              fontFamily: "'Noto Serif SC', serif",
-            }}
-          />
-
-          <button
-            onClick={handleCreate}
-            disabled={creating || !projectName.trim()}
-            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg py-3 text-sm font-medium transition-all disabled:opacity-50 hover:shadow-md"
-            style={{
-              background: 'linear-gradient(135deg, oklch(0.72 0.18 50), oklch(0.62 0.17 45))',
-              color: 'white',
-              fontFamily: "'Noto Serif SC', serif",
+              fontFamily: "var(--font-sans)",
             }}
           >
-            {creating ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-r-transparent" />
-            ) : (
-              <>
-                <span>Create Project</span>
-                <ArrowRight className="h-4 w-4" />
-              </>
-            )}
-          </button>
-        </div>
+            Welcome to BobWork
+          </span>
+        }
+        description={
+          <span
+            style={{
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            Build your knowledge network with AI-powered nodes on an infinite canvas
+          </span>
+        }
+        className="w-full max-w-lg"
+        icon={
+          <img
+            src="/bobwork-logo.png"
+            alt="BobWork"
+            className="h-full w-full rounded-[inherit] object-contain p-1"
+            draggable={false}
+          />
+        }
+        action={
+          <div
+            className="w-full rounded-2xl p-5 shadow-xl"
+            style={{
+              backgroundColor: 'var(--popover)',
+              border: '1px solid var(--line)',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <div className="mb-3 flex items-center gap-2">
+              <Sparkles className="h-4 w-4" style={{ color: 'var(--primary)' }} />
+              <span
+                className="text-sm font-medium"
+                style={{
+                  color: 'var(--ink)',
+                  fontFamily: "var(--font-sans)",
+                }}
+              >
+                Create Your First Project
+              </span>
+            </div>
 
-        {/* 底部提示 */}
-        <p
-          className="mt-6 text-center text-xs"
-          style={{
-            color: 'oklch(0.55 0.02 55 / 0.7)',
-            fontFamily: "'Noto Serif SC', serif",
-          }}
-        >
-          Project data is stored under ~/BobAgent/
-        </p>
-      </div>
+            <input
+              type="text"
+              autoFocus
+              placeholder="Enter project name, e.g., Research Notes, Product Design..."
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !creating && projectName.trim()) {
+                  handleCreate();
+                }
+              }}
+              disabled={creating}
+              className="w-full rounded-lg border px-4 py-3 text-sm outline-none transition-colors"
+              style={{
+                backgroundColor: 'var(--input-bg)',
+                borderColor: 'var(--line)',
+                color: 'var(--ink)',
+                fontFamily: "var(--font-sans)",
+              }}
+            />
+
+            <button
+              onClick={handleCreate}
+              disabled={creating || !projectName.trim()}
+              className="btn btn-primary mt-4 h-11 w-full gap-2 text-sm font-medium disabled:opacity-50"
+              style={{ fontFamily: "var(--font-sans)" }}
+            >
+              {creating ? (
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-r-transparent" />
+              ) : (
+                <>
+                  <span>Create Project</span>
+                  <ArrowRight className="h-4 w-4" />
+                </>
+              )}
+            </button>
+          </div>
+        }
+        subAction={
+          <p
+            className="text-center text-xs"
+            style={{
+              color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)',
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            Project data is stored under ~/BobWork/BobWorkspace/
+          </p>
+        }
+      />
     </div>
   );
 }

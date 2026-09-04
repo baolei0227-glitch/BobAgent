@@ -6,7 +6,7 @@ export async function GET(_req: NextRequest) {
     success: true,
     app_root: resolveAppRoot(),
     isolation: isDevIsolation(),
-    bobagent_home: process.env.BOBAGENT_HOME || null,
+    bobwork_home: process.env.BOBWORK_HOME || null,
     node_env: process.env.NODE_ENV || 'development',
   });
 }

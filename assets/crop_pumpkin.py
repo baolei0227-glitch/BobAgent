@@ -7,9 +7,9 @@ from PIL import Image
 import os
 
 # 源文件路径
-src_path = "/Users/baolei/Desktop/BobAgent/projects/assets/南瓜表情包-无文字六宫图-1785234477365.png"
+src_path = "/Users/baolei/Desktop/BobWork/projects/assets/南瓜表情包-无文字六宫图-1785234477365.png"
 # 输出目录
-out_dir = "/Users/baolei/Desktop/BobAgent/projects/assets/南瓜表情包_裁切"
+out_dir = "/Users/baolei/Desktop/BobWork/projects/assets/南瓜表情包_裁切"
 
 # 加载原图
 img = Image.open(src_path)

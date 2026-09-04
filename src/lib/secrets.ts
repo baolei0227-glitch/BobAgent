@@ -19,7 +19,7 @@ const IVLEN = 12; // GCM 推荐
 const TAGLEN = 16;
 
 /** 内置 pepper（仅用于提升暴力破解成本，不是安全边界） */
-const PEPPER = 'BobAgent.Secrets.Pepper::v1::2026-07';
+const PEPPER = 'BobWork.Secrets.Pepper::v1::2026-07';
 
 /** 机器唯一特征，尽量稳定（用户改 hostname 不影响 hw.uuid） */
 function getMachineFingerprint(): string {
@@ -45,7 +45,7 @@ let cachedKey: Buffer | null = null;
 function getKey(): Buffer {
   if (cachedKey) return cachedKey;
   const material = `${PEPPER}::${getMachineFingerprint()}`;
-  cachedKey = scryptSync(material, 'BobAgent.Secrets.Salt', KEYLEN, { N: 16384, r: 8, p: 1 });
+  cachedKey = scryptSync(material, 'BobWork.Secrets.Salt', KEYLEN, { N: 16384, r: 8, p: 1 });
   return cachedKey;
 }
 
@@ -97,7 +97,6 @@ const SENSITIVE_PATHS: Array<Array<string | '*'>> = [
   ['vision', 'apiKey'],
   ['vision', 'auxiliaryApiKey'],
   ['taskModel', 'apiKey'],
-  ['textEditModel', 'apiKey'],
   // customTools.headers 是 Record<string,string>，也含 Token
   ['customTools', '*', 'headers'],
   // MCP env 是 Record<string,string>，含 BRAVE_API_KEY / GITHUB_TOKEN / NOTION_KEY 等

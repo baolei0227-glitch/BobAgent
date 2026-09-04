@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "note": "BobWork 技能自动获取内置 registry 快照（随包分发，冷启动零网络依赖）。条目 id 为安装唯一标识；仅 vetted=true 的条目可被自动安装。远程清单刷新与合并为 Phase 2 能力。",
+    "updated_at": "2026-08-04"
+  },
+  "skills": [
+    {
+      "id": "pdf-splitter",
+      "name": "pdf-splitter",
+      "description": "拆分 PDF 为单页或自定义页码范围，输出独立文件",
+      "capabilities": ["pdf", "split", "pages", "extract"],
+      "source": {
+        "type": "zip",
+        "url": "https://github.com/bob/skills/archive/main.zip",
+        "mirror": "https://gitcode.com/bob/skills/-/archive/main/skills-main.zip",
+        "subpath": "skills/pdf-splitter"
+      },
+      "version": "1.2.0",
+      "sha256": "",
+      "license": "MIT",
+      "vetted": true
+    },
+    {
+      "id": "web-scraper",
+      "name": "web-scraper",
+      "description": "抓取网页正文内容，提取标题、正文与链接清单",
+      "capabilities": ["web", "scrape", "html", "extract"],
+      "source": {
+        "type": "zip",
+        "url": "https://github.com/bob/skills/archive/main.zip",
+        "mirror": "https://gitcode.com/bob/skills/-/archive/main/skills-main.zip",
+        "subpath": "skills/web-scraper"
+      },
+      "version": "0.9.0",
+      "sha256": "",
+      "license": "MIT",
+      "vetted": true
+    },
+    {
+      "id": "ocr-extractor",
+      "name": "ocr-extractor",
+      "description": "本地 OCR 识别图片与扫描件中的文字，输出纯文本",
+      "capabilities": ["ocr", "image", "scan", "text"],
+      "source": {
+        "type": "zip",
+        "url": "https://github.com/bob/skills/archive/main.zip",
+        "mirror": "https://gitcode.com/bob/skills/-/archive/main/skills-main.zip",
+        "subpath": "skills/ocr-extractor"
+      },
+      "version": "1.0.1",
+      "sha256": "",
+      "license": "MIT",
+      "vetted": true
+    },
+    {
+      "id": "slide-craft",
+      "name": "slide-craft",
+      "description": "生成零依赖、动画丰富的自包含 HTML 演示文稿（幻灯片/PPT/路演/演讲/分享/汇报），支持 11 种视觉风格组合与 PPT 网页版转换。负责独立完整演示文稿；报告内嵌翻页章节走 bob-html-artifact 的 deck 形态",
+      "capabilities": ["presentation", "slides", "ppt", "deck", "html", "slide"],
+      "source": {
+        "type": "zip",
+        "url": "https://github.com/bob/skills/archive/main.zip",
+        "mirror": "https://gitcode.com/bob/skills/-/archive/main/skills-main.zip",
+        "subpath": "skills/slide-craft"
+      },
+      "version": "3.0.0",
+      "sha256": "",
+      "license": "MIT",
+      "vetted": true
+    }
+  ]
+}

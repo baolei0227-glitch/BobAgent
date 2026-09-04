@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { join } from 'path';
+import { promises as fs } from 'fs';
+import { PROJECT_DB_FILENAME } from '@/lib/app-root';
 import {
   initDb,
   createEdge,
@@ -12,12 +14,29 @@ import {
 } from '@/lib/db';
 import { wouldCreateCycle, type EdgeInfo } from '@/lib/edge/cycle-detector';
 import { getCurrentProject } from '@/lib/project/project-manager';
+import { findNodeFileById, parseNodeMarkdown, serializeNode, updateNodeFile, type NodeMarkdown } from '@/lib/node-markdown';
 
 /** 获取数据库实例（基于当前项目路径） */
 async function getDb() {
   const project = await getCurrentProject();
-  const dbPath = join(project.path, 'project.db');
-  return await initDb(dbPath);
+  if (!project) throw new Error('项目不存在');
+  const dbPath = join(project.path, PROJECT_DB_FILENAME);
+  return initDb(dbPath);
+}
+
+/** 将节点标记为 stale（断边通知下游：上游成果块不再可用） */
+async function markStale(nodeId: string, projectPath: string): Promise<void> {
+  try {
+    const childPath = await findNodeFileById(nodeId, projectPath);
+    if (!childPath) return;
+    const childContent = await fs.readFile(childPath, 'utf-8');
+    const child = parseNodeMarkdown(childContent);
+    child.frontmatter.outcome_status = 'stale';
+    child.frontmatter.updated_at = new Date().toISOString();
+    await updateNodeFile(childPath, serializeNode(child));
+  } catch (e) {
+    console.warn('[edges] 标记下游 stale 失败 nodeId:', nodeId, e instanceof Error ? e.message : String(e));
+  }
 }
 
 /** 获取当前项目 ID（作为 edges 表的 project_id） */
@@ -76,6 +95,34 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // R-8: 未锁定节点不得建立出边（成果块是唯一向下传播的东西）
+      // 例外：edge_type='bobby' 是「执行关联边」（Bobby 插件观察/授权节点），
+      // edge_type='team' 是「执行关联边」（Agent Teams 观察节点），
+      // 均由主 Agent 调用对应插件工具时自动建立，非成果块传播，不适用锁定约束。
+      // sticky（思路便签）零成果块，其「成果」即便签文本本身，同样豁免（前端已跳过锁定，
+      // 此处若不豁免会出现前后端不一致：便签出边一律被 400 拒绝）。
+      const isBobbyEdge = edge_type === 'bobby' || edge_type === 'team';
+      if (!isBobbyEdge) {
+        const project = await getCurrentProject();
+        const fromFile = await findNodeFileById(from, project.path);
+        if (!fromFile) {
+          return NextResponse.json(
+            { success: false, error: '上游节点不存在: ' + from },
+            { status: 400 },
+          );
+        }
+        const fromContent = await fs.readFile(fromFile, 'utf-8');
+        const fromNode = parseNodeMarkdown(fromContent);
+        // 兼容存量 sticky（旧名）与新建 note（更名后）两类便签节点
+        const isStickySource = fromNode.frontmatter.node_type === 'sticky' || fromNode.frontmatter.node_type === 'note';
+        if (!isStickySource && fromNode.frontmatter.outcome_status !== 'locked') {
+          return NextResponse.json(
+            { success: false, error: 'R-8 上游节点成果块尚未锁定，无法建立出边（请先锁定上游节点）' },
+            { status: 400 },
+          );
+        }
+      }
+
       // 防环检测
       const db = await getDb();
       const projectId = await getCurrentProjectId();
@@ -131,7 +178,17 @@ export async function POST(request: NextRequest) {
       }
 
       const db = await getDb();
+      const project = await getCurrentProject();
+      // 断开前查一下边信息，用于标记下游 stale
+      const projectId = await getCurrentProjectId();
+      const allEdges = await listActiveEdges(db, projectId);
+      const target = allEdges.find((r) => r.edge_id === edge_id);
       await disconnectEdge(db, edge_id);
+
+      // 标记下游节点为 stale（上游已断开，成果块不再可用）
+      if (target && project) {
+        await markStale(target.to_node_id, project.path);
+      }
 
       return NextResponse.json({ success: true, disconnected: true });
     }
@@ -163,7 +220,16 @@ export async function POST(request: NextRequest) {
       }
 
       const db = await getDb();
+      const project = await getCurrentProject();
+      const projectId = await getCurrentProjectId();
+      const allEdges = await listActiveEdges(db, projectId);
+      const target = allEdges.find((r) => r.edge_id === edge_id);
       await deleteEdge(db, edge_id);
+
+      // 标记下游节点为 stale
+      if (target && project) {
+        await markStale(target.to_node_id, project.path);
+      }
 
       return NextResponse.json({ success: true });
     }
@@ -178,6 +244,7 @@ export async function POST(request: NextRequest) {
       }
 
       const db = await getDb();
+      const project = await getCurrentProject();
       const projectId = await getCurrentProjectId();
       const rows = await listActiveEdges(db, projectId);
       const target = rows.find(
@@ -186,6 +253,10 @@ export async function POST(request: NextRequest) {
 
       if (target) {
         await disconnectEdge(db, target.edge_id);
+        // 标记下游节点为 stale
+        if (project) {
+          await markStale(target.to_node_id, project.path);
+        }
       }
 
       return NextResponse.json({ success: true, disconnected: true });

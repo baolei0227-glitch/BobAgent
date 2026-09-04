@@ -11,7 +11,10 @@
 
 import type { SkillMeta, SkillMatchResult, SkillDefinition } from './types';
 
-const MAX_L2_BODY_CHARS = 3000;
+// 单个技能正文注入上限：须能容纳 slide-craft 等长技能的全部交互指令
+// （其「Phase 1 提问表格 / Phase 2 风格选择 / Phase 3 配图与内容预览确认」分布在正文 2.6k–11.2k 字符处，
+//  旧值 3000 会把提问表格截断在中间，导致技能执行时不会主动询问用户）
+const MAX_L2_BODY_CHARS = 16000;
 const MAX_TOTAL_CHARS = 50000;
 
 function buildL1(availableSkills: SkillMeta[]): string {
@@ -20,13 +23,17 @@ function buildL1(availableSkills: SkillMeta[]): string {
   const lines = [
     '## 可用技能目录',
     '',
-    '以下技能可在需要时触发。当用户的问题匹配技能描述中的关键词时，',
-    '请参考对应技能的 SKILL.md 正文获取详细指令。',
+    '以下是本机技能库（名称 + 一句话用途）。当用户请求涉及某个技能领域时，先调用 `load_skill` 工具加载该技能的完整操作指令，再严格按其执行。已手动勾选强制注入的技能（见下方「已触发技能」段落）已直接给出完整指令，无需再调用 load_skill。',
     '',
   ];
 
+  // 只列名称 + 一句话用途（截断）：完整正文由模型按需 load_skill 加载，不预注入
   for (const s of availableSkills) {
-    lines.push(`- **${s.name}**: ${s.description}`);
+    const brief = s.description.length > 60 ? s.description.slice(0, 60) + '…' : s.description;
+    // 场景徽标：非通用技能标注场景类别，帮助模型感知能力分组
+    const scene = s.scenes && s.scenes[0] !== 'general' ? s.scenes[0] : '';
+    const sceneTag = scene ? ` [${scene}]` : '';
+    lines.push(`- **${s.name}**${sceneTag}：${brief}`);
   }
 
   return lines.join('\n');

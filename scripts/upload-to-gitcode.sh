@@ -1,0 +1,206 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# ============================================================
+# BobWork GitCode Release 上传脚本
+#
+# 将构建产物（.dmg / .zip / .yml）上传到 GitCode Release，
+# 作为国内镜像源加速自动更新下载。
+#
+# 依赖环境变量：
+#   GITCODE_TOKEN   GitCode 访问令牌（必填）
+#   GITCODE_OWNER   仓库所属用户/组织（默认 baolei89）
+#   GITCODE_REPO    仓库名（默认 BobWork）
+#
+# 用法（在 projects/ 目录下执行）：
+#   bash ./scripts/upload-to-gitcode.sh
+#
+# 产物下载地址：
+#   https://gitcode.com/<owner>/<repo>/releases/download/v<version>/<file>
+#   https://gitcode.com/<owner>/<repo>/releases/download/latest/latest-mac.yml
+# ============================================================
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
+# ---------- 配置 ----------
+: "${GITCODE_TOKEN:? 请设置 GITCODE_TOKEN 环境变量}"
+GITCODE_OWNER="${GITCODE_OWNER:-baolei89}"
+GITCODE_REPO="${GITCODE_REPO:-BobWork}"
+VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
+TAG="v$VERSION"
+OUTPUT_DIR="$PROJECT_DIR/release-dist"
+GITCODE_API="https://api.gitcode.com/api/v5"
+DOWNLOAD_BASE="https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}/releases/download"
+
+C_GREEN=$'\033[0;32m'
+C_YELLOW=$'\033[1;33m'
+C_RED=$'\033[0;31m'
+C_RESET=$'\033[0m'
+
+log()  { echo "==> $*"; }
+ok()   { echo "${C_GREEN}✅ $*${C_RESET}"; }
+warn() { echo "${C_YELLOW}⚠️  $*${C_RESET}"; }
+err()  { echo "${C_RED}❌ $*${C_RESET}"; }
+
+# ---------- 1. 检查产物文件 ----------
+log "检查构建产物 ..."
+FILES=()
+for f in \
+  "$OUTPUT_DIR/BobWork-${VERSION}-macos-arm64.dmg" \
+  "$OUTPUT_DIR/BobWork-${VERSION}-macos-arm64.zip" \
+  "$OUTPUT_DIR/latest-mac-arm64.yml" \
+  "$OUTPUT_DIR/latest-mac.yml"; do
+  [ -f "$f" ] && FILES+=("$f")
+done
+
+if [ ${#FILES[@]} -eq 0 ]; then
+  err "未找到任何构建产物（在 $OUTPUT_DIR）"
+  err "请先执行 package-release.sh 生成产物"
+  exit 1
+fi
+
+log "待上传文件："
+for f in "${FILES[@]}"; do
+  echo "  - $(basename "$f") ($(du -h "$f" | awk '{print $1}'))"
+done
+
+# ---------- 2. 提取 Release Notes ----------
+RELEASE_NOTES=$(python3 - "$PROJECT_DIR/RELEASES.md" "$TAG" <<'PYEOF'
+import json, re, sys
+path, tag = sys.argv[1], sys.argv[2]
+try:
+    text = open(path, encoding="utf-8").read()
+    m = re.search(r"^## " + re.escape(tag) + r"[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    notes = m.group(1).strip() if m else ""
+except Exception:
+    notes = ""
+print(json.dumps(notes))
+PYEOF
+)
+
+# ---------- 3. 创建 Release ----------
+log "创建 GitCode Release $TAG ..."
+
+create_release() {
+  local resp http_code body
+  resp=$(curl -s -w "\n%{http_code}" \
+    -X POST \
+    -H "Content-Type: application/json" \
+    "${GITCODE_API}/repos/${GITCODE_OWNER}/${GITCODE_REPO}/releases?access_token=${GITCODE_TOKEN}" \
+    -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":${RELEASE_NOTES},\"release_status\":\"latest\"}")
+  http_code=$(echo "$resp" | tail -1)
+  body=$(echo "$resp" | sed '$d')
+
+  if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+    ok "Release $TAG 创建成功"
+    return 0
+  fi
+  if echo "$body" | grep -q "already exist" 2>/dev/null; then
+    warn "Release $TAG 已存在，复用"
+    return 0
+  fi
+  err "创建 Release 失败 (HTTP $http_code): $body"
+  return 1
+}
+
+create_release || exit 1
+
+# ---------- 4. 上传单个文件 ----------
+upload_file() {
+  local file_path="$1"
+  local fname
+  fname=$(basename "$file_path")
+  log "上传 $fname ..."
+
+  # 4a. 获取 OBS 上传地址（含签名 URL + 必需 headers）
+  local upload_info obs_url
+  upload_info=$(curl -s \
+    "${GITCODE_API}/repos/${GITCODE_OWNER}/${GITCODE_REPO}/releases/${TAG}/upload_url?access_token=${GITCODE_TOKEN}&file_name=${fname}")
+
+  obs_url=$(echo "$upload_info" | node -e '
+    const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    if (!d.url) { console.error("未获取到上传 URL:", JSON.stringify(d)); process.exit(1); }
+    console.log(d.url);
+  ') || { err "  获取上传地址失败"; return 1; }
+
+  # 4b. 构造 headers 参数（必须原样传回 OBS）
+  local header_args=()
+  while IFS= read -r line; do
+    header_args+=("-H" "$line")
+  done < <(echo "$upload_info" | node -e '
+    const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    for (const [k, v] of Object.entries(d.headers || {})) {
+      console.log(k + ": " + v);
+    }
+  ')
+
+  # 4c. PUT 上传二进制到 OBS
+  local up_code
+  up_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X PUT \
+    "${header_args[@]}" \
+    --data-binary "@${file_path}" \
+    "$obs_url")
+
+  if [ "$up_code" = "200" ]; then
+    ok "  $fname 上传成功"
+    return 0
+  fi
+  err "  $fname 上传失败 (HTTP $up_code)"
+  return 1
+}
+
+# ---------- 5. 上传所有产物（含重试） ----------
+MAX_RETRIES=3
+FAIL_COUNT=0
+
+for f in "${FILES[@]}"; do
+  fname=$(basename "$f")
+  success=false
+  for attempt in $(seq 1 $MAX_RETRIES); do
+    if upload_file "$f"; then
+      success=true
+      break
+    fi
+    warn "  重试 $attempt/$MAX_RETRIES ..."
+    sleep 3
+  done
+  if [ "$success" != "true" ]; then
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+done
+
+# ---------- 6. 验证 latest-mac.yml 可访问 ----------
+log "验证 latest-mac.yml 下载地址 ..."
+YML_CHECK=$(curl -s -o /dev/null -w "%{http_code}" -L \
+  "${DOWNLOAD_BASE}/latest/latest-mac.yml")
+if [ "$YML_CHECK" = "200" ]; then
+  ok "latest-mac.yml 可访问: ${DOWNLOAD_BASE}/latest/latest-mac.yml"
+else
+  warn "latest-mac.yml 暂不可访问 (HTTP $YML_CHECK)，可能需要等待 CDN 缓存刷新"
+fi
+
+# ---------- 7. 输出下载地址 ----------
+echo ""
+echo "============================================"
+if [ "$FAIL_COUNT" -eq 0 ]; then
+  ok "  GitCode 上传完成！"
+else
+  err "  GitCode 上传完成（$FAIL_COUNT 个文件失败）"
+fi
+echo ""
+echo "📦 GitCode 下载地址（国内推荐）:"
+echo "   ${DOWNLOAD_BASE}/${TAG}/"
+echo ""
+echo "🔗 latest-mac.yml（自动更新清单）:"
+echo "   ${DOWNLOAD_BASE}/latest/latest-mac.yml"
+echo ""
+echo "🌐 Release 页面:"
+echo "   https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}/releases/${TAG}"
+echo "============================================"
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+  exit 1
+fi

@@ -1,29 +1,112 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* shadcn/ui CSS 变量 - 浅色主题 */
+/* shadcn/ui CSS 变量 - 浅色基底（warm 默认主题 = dynamic-ui 默认紫色） */
 :root {
-  --background: oklch(0.96 0.01 80);
-  --foreground: oklch(0.25 0.02 50);
-  --card: #faf8f3;
-  --card-foreground: oklch(0.25 0.02 50);
-  --popover: #faf8f3;
-  --popover-foreground: oklch(0.25 0.02 50);
-  --primary: oklch(0.62 0.17 45);
+  --background: #f7f7f8;
+  --foreground: #171717;
+  --card: #f7f7f8;
+  --card-foreground: #171717;
+  --popover: #f7f7f8;
+  --popover-foreground: #171717;
+  --primary: #4b3fe3;
   --primary-foreground: #fff;
-  --secondary: oklch(0.92 0.015 75);
-  --secondary-foreground: oklch(0.35 0.02 50);
-  --muted: oklch(0.94 0.01 75);
-  --muted-foreground: oklch(0.55 0.02 55);
-  --accent: oklch(0.92 0.015 75);
-  --accent-foreground: oklch(0.35 0.02 50);
-  --destructive: oklch(0.55 0.2 25);
+  --secondary: #efeff2;
+  --secondary-foreground: #171717;
+  --muted: #efeff2;
+  --muted-foreground: #52525b;
+  --accent: #efeff2;
+  --accent-foreground: #171717;
+  --destructive: #e8463a;
   --destructive-foreground: #fff;
-  --border: oklch(0.85 0.01 70);
-  --input: oklch(0.85 0.01 70);
-  --ring: oklch(0.62 0.17 45);
+  --border: rgba(23, 23, 23, 0.12);
+  --input: rgba(23, 23, 23, 0.12);
+  --ring: #4b3fe3;
 }
+
+/* ============================================================
+   主题切换：借鉴 canvas-agent-themes.css 五套配色，
+   映射到 shadcn 变量体系；html 根节点 data-theme 切换。
+   --canvas-bg：画布背景（区别于全局 --background）
+   ============================================================ */
+
+/* ============================================================
+   BobWork 统一主题：Purple（dynamic-ui 默认紫色主题）
+   对齐 dynamic-ui 三层 Token：Neutral 中性 / Brand 品牌 / Semantic 语义 / Chart 图表。
+   旧变量名（--primary/--ink/--paper/--line 等）保留为别名，存量组件与小程序零改动。
+   ============================================================ */
+:root:not([data-theme]),
+[data-theme="warm"] {
+  /* 画布背景：中性浅灰，与节点表面（--paper）拉开亮度差，凸显节点 */
+  --canvas-bg: #e6e6ec;
+
+  /* 纸张色系 — 4 级层次，间距更分明 */
+  --paper: #f7f7f8;
+  --paper-soft: #efeff2;
+  --paper-hover: #e8e8ec;
+  --paper-muted: #ececef;
+
+  /* 文字色系 — 中性灰黑 */
+  --ink: #171717;
+  --ink-strong: #0f0f11;
+  --ink-muted: #52525b;
+  --ink-faint: #71717a;
+
+  /* 边框色系 */
+  --line: rgba(23, 23, 23, 0.12);
+  --line-soft: rgba(23, 23, 23, 0.08);
+
+  /* 主色系 — 紫罗兰（dynamic-ui 品牌色 #4B3FE3） */
+  --primary: #4b3fe3;
+  --primary-soft: #f2f7ff;
+  --primary-strong: #3c2eca;
+
+  /* ===== 统一 Token（dynamic-ui 三层模型）===== */
+  /* Brand 组：主题唯一可变源（单一品牌色 Purple） */
+  --brand: #4b3fe3;
+  --brand-strong: #3c2eca;
+  --brand-soft: #f2f7ff;
+  --brand-soft-strong: #e5eaff;
+  --brand-text: #1a1759;
+  --brand-on: #fff;
+  /* Neutral 组：表面/文字/边框 */
+  --surface: #f7f7f8;
+  --surface-muted: #efeff2;
+  --text: #171717;
+  --text-muted: #52525b;
+  --border: rgba(23, 23, 23, 0.12);
+  /* Chart 组：dynamic-ui 紫色 family 阶梯（主/浅/中间/邻近 + 其他） */
+  --chart-series-1: #3c2eca;
+  --chart-series-2: #a9aeff;
+  --chart-series-3: #6f6fff;
+  --chart-series-4: #22a5f7;
+  --chart-other: #d3d4da;
+
+  /* 状态色系 — 对齐 dynamic-ui 语义色（success/warning/danger 固定） */
+  --info: #22a5f7;
+  --info-soft: rgba(34, 165, 247, 0.10);
+  --success: #1dc981;
+  --success-soft: rgba(29, 201, 129, 0.10);
+  --warn: #efaa17;
+  --warn-soft: rgba(239, 170, 23, 0.10);
+  --danger: #e8463a;
+  --danger-soft: rgba(232, 70, 58, 0.10);
+  --purple: #6f6fff;
+  --purple-soft: rgba(111, 111, 255, 0.10);
+  --teal: #27d2bf;
+  --teal-soft: rgba(39, 210, 191, 0.10);
+
+  /* 输入控件 */
+  --input-bg: #f7f7f8;
+  --input-border: rgba(23, 23, 23, 0.12);
+}
+
+/* ============================================================
+   全局基础样式（原主题 2-7 预设已移除，统一为 dynamic-ui Purple）
+   ============================================================ */
 
 * {
   border-color: var(--border);
@@ -32,20 +115,31 @@
 body {
   background-color: var(--background);
   color: var(--foreground);
+  font-size: 14px;
 }
 
-/* React Flow 画布背景 */
+/* React Flow 画布背景（跟随主题 --canvas-bg） */
 .react-flow {
-  background-color: oklch(0.96 0.01 80) !important;
+  background-color: var(--canvas-bg) !important;
 }
 .react-flow__pane {
-  background-color: oklch(0.96 0.01 80) !important;
+  background-color: var(--canvas-bg) !important;
 }
 
-/* 自定义弹窗动画 */
+/* 自定义弹窗动画（Apple 风格：减速进入 + 加速退出） */
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+/* 步骤卡状态图标切换：淡入 + 缩放（状态从 pending→running→done/error 时平滑过渡，替代硬跳变） */
+@keyframes step-icon-in {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: scale(1); }
+}
+/* 步骤卡生长：新步骤从下方滑入 + 淡入（执行过程"逐步长出"，替代瞬间蹦出） */
+@keyframes step-card-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 @keyframes fade-out {
   from { opacity: 1; }
@@ -59,18 +153,218 @@ body {
   from { opacity: 1; transform: scale(1); }
   to { opacity: 0; transform: scale(0.95); }
 }
+@keyframes dialog-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 10px)) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+@keyframes dialog-exit {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 6px)) scale(0.98);
+  }
+}
 
 [data-state="open"].dialog-animate-in {
-  animation: fade-in 200ms ease-out, zoom-in-95 200ms ease-out;
+  animation: dialog-enter 260ms cubic-bezier(.16, 1, .3, 1) both;
 }
 [data-state="closed"].dialog-animate-out {
-  animation: fade-out 200ms ease-in, zoom-out-95 200ms ease-in;
+  animation: dialog-exit 180ms cubic-bezier(.4, 0, 1, 1) both;
 }
 [data-state="open"].dialog-overlay-in {
-  animation: fade-in 200ms ease-out;
+  animation: fade-in 200ms cubic-bezier(.4, 0, .2, 1) both;
 }
 [data-state="closed"].dialog-overlay-out {
-  animation: fade-out 200ms ease-in;
+  animation: fade-out 150ms cubic-bezier(.4, 0, 1, 1) both;
+}
+
+/* 对话消息完成态淡入（AiChatNode）：流式纯文本 → 完成态富文本切换时平滑过渡 */
+.msg-done-fade {
+  animation: fade-in 200ms ease-out;
+}
+
+/* 思考折叠栏活跃呼吸灯：暖橙脉冲外发光，2s 周期，表示模型正在流式执行任务 */
+@keyframes think-breathe {
+  0%, 100% {
+    box-shadow: 0 0 6px 0 oklch(0.62 0.17 45 / 0.18), 0 0 2px 0 oklch(0.55 0.15 45 / 0.12);
+  }
+  50% {
+    box-shadow: 0 0 18px 0 oklch(0.62 0.17 45 / 0.45), 0 0 6px 0 oklch(0.55 0.15 45 / 0.25);
+  }
+}
+.think-breathing {
+  animation: think-breathe 2s ease-in-out infinite;
+}
+
+/* 思考折叠栏动态省略号：三个圆点依次跳动，表示模型正在流式执行中（避免静态指示让人误以为卡住） */
+@keyframes think-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+.think-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background-color: currentColor;
+  animation: think-dot 1.2s ease-in-out infinite;
+}
+.think-dot:nth-child(2) { animation-delay: 0.15s; }
+.think-dot:nth-child(3) { animation-delay: 0.3s; }
+
+/* AI Coding 节点唤醒呼吸灯：蓝色脉冲外发光，2s 周期，表示 AI 正在编程执行 */
+@keyframes coding-breathe {
+  0%, 100% {
+    box-shadow: 0 0 6px 0 oklch(0.52 0.12 220 / 0.20), 0 0 2px 0 oklch(0.45 0.12 220 / 0.12);
+  }
+  50% {
+    box-shadow: 0 0 18px 0 oklch(0.52 0.12 220 / 0.50), 0 0 6px 0 oklch(0.45 0.12 220 / 0.25);
+  }
+}
+.coding-breathing {
+  animation: coding-breathe 2s ease-in-out infinite;
+}
+
+/* 节点标题栏图标呼吸效果：透明度脉动，1.5s 周期，表示节点正在执行任务 */
+@keyframes icon-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.icon-breathing {
+  animation: icon-breathe 1.5s ease-in-out infinite;
+}
+
+/* 阶段提示文字呼吸灯：文字常态可见（opacity 低谷 0.55），紫色光晕随呼吸强弱起伏（text-shadow 渐强渐弱） */
+.stage-hint-sweep {
+  display: inline-block;
+  animation: stage-hint-breathe 2.2s ease-in-out infinite;
+}
+@keyframes stage-hint-breathe {
+  0%, 100% {
+    opacity: 0.55;
+    text-shadow: none;
+  }
+  50% {
+    opacity: 1;
+    text-shadow:
+      0 0 6px color-mix(in oklab, var(--primary) 55%, transparent),
+      0 0 16px color-mix(in oklab, var(--primary) 28%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-hint-sweep {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* 工具确认等待呼吸灯：警示琥珀色脉冲外发光，1.2s 周期，表示该节点有工具正等待用户确认 */
+@keyframes confirm-breathe {
+  0%, 100% {
+    box-shadow: 0 0 8px 0 oklch(0.72 0.16 75 / 0.35), 0 0 2px 0 oklch(0.68 0.15 75 / 0.20);
+  }
+  50% {
+    box-shadow: 0 0 26px 0 oklch(0.72 0.16 75 / 0.75), 0 0 8px 0 oklch(0.68 0.15 75 / 0.40);
+  }
+}
+.confirm-breathing {
+  animation: confirm-breathe 1.2s ease-in-out infinite;
+}
+
+/* ImageGen 生成中遮罩呼吸：遮罩背景明暗呼吸（1.8s），表示正在生成；动画作用于背景色，
+   文字徽章不随之闪烁，保持清晰可读 */
+@keyframes imagegen-breathe {
+  0%, 100% { background-color: rgba(0, 0, 0, 0.30); }
+  50% { background-color: rgba(0, 0, 0, 0.62); }
+}
+.imagegen-breathe {
+  animation: imagegen-breathe 1.8s ease-in-out infinite;
+}
+
+/* 便签一键找回落地高亮：品牌紫脉冲环（1.2s 单次），让用户一眼看到便签出现位置 */
+@keyframes sticky-note-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(75, 63, 227, 0.0);
+  }
+  45% {
+    box-shadow: 0 0 0 4px rgba(75, 63, 227, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 4px rgba(75, 63, 227, 0.0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .imagegen-breathe {
+    animation: none;
+    background-color: rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* 项目面板待办按钮呼吸灯：未完成待办 > 0 时红色脉冲呼吸（透明度 + 红色外发光），提醒待处理；
+   待办 >= 3 时前端以更短的 animation-duration 加速节奏 */
+@keyframes todo-breathe {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--danger) 0%, transparent);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 7px 1px color-mix(in oklab, var(--danger) 42%, transparent);
+  }
+}
+.todo-breathing {
+  animation: todo-breathe 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .todo-breathing {
+    animation: none;
+    box-shadow: none;
+  }
+}
+
+/* ===== WANTED 悬浮球：全息玻璃球呼吸光晕 ===== */
+@keyframes wanted-orb-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.10),
+      0 0 12px 2px oklch(0.62 0.15 250 / 0.18),
+      0 4px 14px rgba(0,0,0,0.18),
+      inset 0 1px 0 rgba(255,255,255,0.35),
+      inset 0 -3px 6px rgba(0,0,0,0.12);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.14),
+      0 0 22px 4px oklch(0.62 0.15 250 / 0.38),
+      0 4px 14px rgba(0,0,0,0.18),
+      inset 0 1px 0 rgba(255,255,255,0.45),
+      inset 0 -3px 6px rgba(0,0,0,0.12);
+  }
+}
+.wanted-orb-breathing {
+  animation: wanted-orb-glow 3s ease-in-out infinite;
+}
+.wanted-orb-hover {
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.16),
+    0 0 28px 6px oklch(0.62 0.15 250 / 0.50),
+    0 6px 20px rgba(0,0,0,0.22),
+    inset 0 1px 0 rgba(255,255,255,0.50),
+    inset 0 -3px 6px rgba(0,0,0,0.12) !important;
+  transform: scale(1.06);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wanted-orb-breathing { animation: none; }
+  .wanted-orb-hover { transform: none; }
 }
 
 /* ===== HtmlRenderer 全局样式 ===== */
@@ -93,22 +387,38 @@ body {
   color: inherit !important;
 }
 
-/* 批注标记 */
-.html-renderer mark.annotation {
-  text-decoration: underline;
-  text-decoration-style: wavy;
-  text-decoration-color: oklch(0.55 0.15 220);
-  text-underline-offset: 3px;
-  background: oklch(0.55 0.15 220 / 0.08);
-  border-radius: 2px;
-  padding: 0 1px;
-  cursor: pointer;
-  transition: background 0.15s;
+/* 便签输入区：输入/编辑时禁用选中高亮块（金色 ::selection 会干扰便签编辑视觉） */
+[data-canvas-ui="overlay"] ::selection {
+  background-color: transparent !important;
+  color: inherit !important;
 }
-.html-renderer mark.annotation:hover {
-  background: oklch(0.55 0.15 220 / 0.18);
+[data-canvas-ui="overlay"] ::-moz-selection {
+  background-color: transparent !important;
+  color: inherit !important;
 }
 
+/* 便签输入区：防御性移除聚焦 halo（全局 :focus-visible 紫色外框已于 2026-09 收敛，
+   此规则保留以防后续恢复；outline 已全局禁用） */
+[data-sticky-note] :is(input, [contenteditable]):focus-visible {
+  box-shadow: none;
+}
+
+.html-renderer {
+  /* 全局约束：任何长文本（中文、长英文、URL、标签）的最小宽度不能突破父容器；
+     AI 流式输出中常出现超长连字或 URL，会把节点 width:auto 的建议宽撑破 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-break: anywhere;
+  /* 防止 nowrap 子项（表格首列/标签）把最小宽度推爆：
+     flex/grid 子项在 flex-basis:auto 时 min-width 默认为 auto（内容宽），
+     加 min-width:0 允许内部 nowrap 元素被约束到父级宽度内出滚动条 */
+  min-width: 0;
+  max-width: 100%;
+  /* 彻底方案：最后防线——任何残留的宽内容（内联尺寸图片等）都不再撑出横向拖拽条。
+     注意：展开态（.ai-node-expanded）下此规则被覆盖为 visible，
+     见下方 .ai-node-expanded .html-renderer 的说明 */
+  overflow-x: hidden;
+}
 /* 搜索高亮 */
 .html-renderer mark:not(.annotation) {
   background: oklch(0.62 0.17 45 / 0.2);
@@ -125,11 +435,11 @@ body {
   top: 6px;
   right: 6px;
   padding: 2px 8px;
-  font-size: 11px;
+  font-size: 12px;
   border-radius: 4px;
-  border: 1px solid rgba(0,0,0,0.1);
-  background: oklch(0.98 0.005 85);
-  color: oklch(0.45 0.02 50);
+  border: 1px solid var(--line);
+  background: var(--paper-soft);
+  color: var(--ink-muted);
   opacity: 0;
   transition: opacity 0.15s;
   cursor: pointer;
@@ -140,13 +450,13 @@ body {
   opacity: 1;
 }
 .code-copy-btn:active {
-  background: oklch(0.92 0.01 80);
+  background: var(--paper-hover);
 }
 
 /* 代码块 */
 .html-renderer pre {
-  background: oklch(0.96 0.005 80);
-  border: 1px solid rgba(0,0,0,0.06);
+  background: var(--paper-soft);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px 16px;
   margin: 8px 0;
@@ -154,22 +464,53 @@ body {
   line-height: 1.6;
 }
 .html-renderer pre code {
-  font-family: 'SF Mono', Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
-  color: oklch(0.30 0.02 50);
+  color: var(--ink);
+  background: none;
+  padding: 0;
+}
+/* DocEditor NodeView 代码块（contentDOM 为 div，非 code） */
+.html-renderer pre .code-block-content {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
   background: none;
   padding: 0;
 }
 
 /* 行内代码 */
 .html-renderer :not(pre) > code {
-  background: oklch(0.95 0.01 80);
-  border: 1px solid rgba(0,0,0,0.06);
+  background: var(--paper-hover);
+  border: 1px solid var(--line);
   border-radius: 3px;
   padding: 1px 5px;
-  font-family: 'SF Mono', Menlo, monospace;
-  font-size: 11px;
-  color: oklch(0.35 0.02 40);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+
+/* Mermaid 图表（DocEditor / UnifiedViewer 中的 ```mermaid 代码块，beautiful-mermaid 渲染） */
+.mermaid-code-block {
+  margin: 2px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  /* 彻底方案：图表溢出即压缩显示，不产生横向滚动条 */
+  overflow: hidden;
+}
+.mermaid-code-block .mermaid-svg {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.mermaid-code-block .mermaid-svg svg {
+  max-width: 100% !important;
+  max-height: 60vh !important;
+  height: auto !important;
+  display: block;
+  overflow: hidden !important; /* 裁剪超出 SVG 边界的内容，防止文字溢出 */
 }
 
 /* 表格 */
@@ -179,6 +520,37 @@ body {
   border-radius: 6px;
   border: 1px solid rgba(0,0,0,0.08);
   -webkit-overflow-scrolling: touch;
+}
+
+/* ===== 展开态对话节点：壳列分离阅读宽度 =====
+   外壳 min(72vw, 880px)，滚动区 px-10 → 内容盒 = S−80；正文列限宽 720px 居中，
+   保证约 45 汉字/行的舒适行长。收起态（无 .ai-node-expanded）不受影响。
+   注：外壳宽度常量见 ChatNodeKernel.tsx EXPANDED_WIDTH_MAX/VW，两处需同步修改 */
+.ai-node-expanded .reading-col {
+  /* --bob-shell-w 由 ChatNodeKernel 按节点实际外壳宽注入（受可视区上限压缩时变小），
+     --wide-bleed 据此计算，避免节点被压缩后代码块 breakout 仍按 880px 外扩导致右缘被裁 */
+  --wide-bleed: max((var(--bob-shell-w, min(72vw, 880px)) - 800px) / 2, 0px);
+
+  max-width: min(720px, 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 展开态：放开正文容器的横向溢出，让代码块的 breakout（负 margin 外扩）真正可见。
+   否则 .html-renderer 的 overflow-x:hidden 会把外扩部分硬剪掉（代码右缘内容丢失且无滚动条）。
+   内部滚动仍由 .code-block-wrapper/.table-wrapper 承担，外层 .ai-node-expanded wrapper 的
+   overflow-x:hidden 继续兜底，防止任何残留宽内容撑出全局横向滚动条。收起态不受影响 */
+.ai-node-expanded .html-renderer {
+  overflow-x: visible;
+}
+
+/* 宽内容越界（breakout）：仅代码块左右各外扩 --wide-bleed，
+   恰好铺满壳内容盒并与标题栏对齐；窄屏时 B=0 自动退化为不越界。
+   表格不再外扩，随正文列宽自适应；更宽的内容由 .table-wrapper 内部横向滚动消化，不会顶破外壳 */
+.ai-node-expanded .reading-col .html-renderer pre {
+  width: calc(100% + var(--wide-bleed) * 2);
+  margin-left: calc(var(--wide-bleed) * -1);
+  margin-right: calc(var(--wide-bleed) * -1);
 }
 .html-renderer .table-wrapper table {
   width: max-content;
@@ -201,7 +573,7 @@ body {
   background-color: oklch(0.96 0.008 80);
   font-weight: 600;
   color: oklch(0.30 0.02 40);
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
@@ -211,8 +583,20 @@ body {
 .html-renderer table tr:hover td {
   background-color: oklch(0.62 0.17 45 / 0.04);
 }
-.html-renderer table td:first-child {
-  white-space: nowrap;
+.html-renderer:not(.doc-editor-content) table td:first-child {
+  /* 允许 nowrap，但不能突破父级宽度：td 宽度由 table-layout + 父容器共同约束，
+     这里限制每格最大宽度 40% 防止首列把整个表格推爆；内容过长可在格内允许 wrap 兜底 */
+  max-width: 40%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* 标签 / 徽标：去掉 nowrap，超长时自动换行，避免撑破节点；
+   保留 inline-flex 外观不变 */
+.html-renderer .ai-badge {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 /* 引用块 */
@@ -226,20 +610,70 @@ body {
   font-style: italic;
 }
 
+/* 脚注（GFM，remark-gfm 渲染）— Apple 风格小上标 + 定义区分隔 */
+.html-renderer sup[data-footnote-ref] {
+  font-size: 0.72em;
+  line-height: 0;
+  vertical-align: super;
+  margin-left: 1px;
+}
+.html-renderer sup[data-footnote-ref] a {
+  color: var(--primary, #4b3fe3);
+  text-decoration: none;
+  font-weight: 600;
+}
+/* 定义区：顶部细分隔线 + 小字 + 次级文字色 */
+.html-renderer .footnotes {
+  margin-top: 2em;
+  padding-top: 12px;
+  border-top: 1px solid var(--line, rgba(23, 23, 23, 0.12));
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-muted, #52525b);
+}
+.html-renderer .footnotes h2 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--ink-muted, #52525b);
+}
+.html-renderer .footnotes ol {
+  padding-left: 1.4em;
+  margin: 0;
+}
+.html-renderer .footnotes li {
+  margin: 4px 0;
+}
+/* 返回引用链接：去除下划线，弱化 */
+.html-renderer .footnotes a[data-footnote-backref] {
+  text-decoration: none;
+  color: var(--ink-muted, #52525b);
+  margin-left: 4px;
+}
+
 /* 列表 */
+/* Tailwind preflight 会重置 ul/ol 的 list-style，这里显式恢复，
+   否则编辑器/预览中的无序、有序列表不显示点号和数字 */
 .html-renderer ul, .html-renderer ol {
   margin: 6px 0;
   padding-left: 20px;
 }
+.html-renderer ul:not(.contains-task-list) { list-style: disc; }
+.html-renderer ol { list-style: decimal; }
 .html-renderer li {
   margin: 2px 0;
   line-height: 1.6;
 }
 
 /* 标题 */
-.html-renderer h1 { font-size: 18px; font-weight: 700; margin: 16px 0 8px; color: oklch(0.25 0.02 40); }
-.html-renderer h2 { font-size: 15px; font-weight: 600; margin: 14px 0 6px; color: oklch(0.30 0.02 40); }
-.html-renderer h3 { font-size: 13px; font-weight: 600; margin: 12px 0 4px; color: oklch(0.35 0.02 40); }
+.html-renderer h1 { font-size: 20px; font-weight: 700; margin: 16px 0 8px; color: oklch(0.25 0.02 40); }
+.html-renderer h2 { font-size: 16px; font-weight: 600; margin: 14px 0 6px; color: oklch(0.30 0.02 40); }
+.html-renderer h3 { font-size: 14px; font-weight: 600; margin: 12px 0 4px; color: oklch(0.35 0.02 40); }
+
+/* DocEditor 文本块末尾清空下边距：widget 消息中标题/段落与图表紧贴，避免间距过大 */
+.doc-editor-content > :last-child {
+  margin-bottom: 0;
+}
 
 /* 分割线 */
 .html-renderer hr {
@@ -261,7 +695,45 @@ body {
 /* 图片 */
 .html-renderer img {
   border-radius: 4px;
-  max-width: 100%;
+  /* 彻底方案：压制模型输出内联 width/height 属性（markdown 图片常带固定尺寸，
+     按固有尺寸渲染会撑破容器产生横向拖拽条）；宽高强制自适应容器，保持比例 */
+  max-width: 100% !important;
+  height: auto !important;
+  width: auto !important;
+  cursor: zoom-in; /* 提示可点击放大预览 */
+}
+
+/* 图片限高（AI 回复等展示场景）：过高图片等比缩小，避免撑出外层消息容器的纵向滚动条；
+   文档编辑器（doc-editor-content）为整页编辑面，不限制，保持原始尺寸。
+   45vh：收敛到节点消息可视区内，单图 + 上下文文字一屏可见（无需上下滑动）；
+   细节需要放大查看时点击图片（cursor: zoom-in）走 Lightbox。 */
+.html-renderer:not(.doc-editor-content) img {
+  max-height: 45vh;
+  width: auto;
+  object-fit: contain;
+}
+
+/* WidgetRenderer 自适应：SVG 收缩到容器内。
+   彻底方案：SVG 溢出即压缩显示（display:block 去基线间隙、margin auto 居中），
+   禁止任何横向滚动条——图表超宽时整体等比缩小而不是出现拖拽条；
+   同时约束 max-height：竖向长图（纵向流程/树状图）缩进框内，避免撑出竖向滚动条 */
+.widget-renderer svg {
+  display: block;
+  max-width: 100% !important;
+  max-height: 60vh !important;
+  height: auto !important;
+  overflow: hidden !important;
+  margin: 0 auto;
+}
+
+/* Mermaid 图表节点文字换行：长文本（连续中文/长句）自动换行，避免溢出节点框或图表边界
+   （htmlLabels 模式下节点 label 为 HTML div，可被 CSS 换行；SVG text 由 mermaid 按 wrappingWidth 自行换行） */
+.widget-renderer svg div,
+.widget-renderer svg foreignObject div,
+.mermaid-code-block .mermaid-svg div {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
 }
 
 /* 段落 */
@@ -270,18 +742,645 @@ body {
   line-height: 1.7;
 }
 
-/* 羊皮纸纹理 */
-.sticky-paper {
-  background:
-    radial-gradient(ellipse at 20% 80%, rgba(180,150,100,0.15) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 20%, rgba(160,130,80,0.1) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(200,170,120,0.08) 0%, transparent 70%),
-    linear-gradient(180deg, rgba(180,150,100,0.12) 0%, transparent 8%, transparent 92%, rgba(160,130,80,0.1) 100%);
-}
-
-/* 允许节点对话框内文本选择 */
-.react-flow__node-aiChat,
-.react-flow__node-aiChat * {
+/* 允许节点对话框内文本选择：
+   覆盖 @xyflow/react base.css 的 .react-flow__node { user-select: none }。
+   对所有画布节点生效（含动态注册的 agent-* 节点：agent-chat / agent-coding / agent-note 等，
+   不再逐类枚举，避免新 agent 节点漏配）。
+   拖动与选择的分工由 d3-drag 保证：非 .nodrag 区域（节点外壳/头部）mousedown 被
+   preventDefault → 照常拖拽节点；.nodrag 区域（消息内容等）→ 允许原生文本选中。 */
+.react-flow__node,
+.react-flow__node * {
   -webkit-user-select: text !important;
   user-select: text !important;
+}
+
+/* 节点位置重排平滑过渡：拉线创建 / 连线布局 / Fit 重排时位置变化平滑过渡；
+   拖拽中（.dragging）禁用 transition，保证跟手不卡顿。
+   时长与 .ai-node-wrapper 的 transform 过渡对齐（dur-base=240ms），
+   避免外层 360ms、内层 240ms 不同步导致移开 hover 时出现"余震模糊"伪影。 */
+.react-flow__node {
+  transition: transform var(--dur-base) var(--ease-base);
+}
+.react-flow__node.dragging {
+  transition: none;
+}
+
+/* 节点拖拽不显示抓手（手型）光标：覆盖 ReactFlow 默认 .draggable → grab，
+   保持默认箭头（与画布其余区域一致，符合用户对画布光标的统一偏好） */
+.react-flow__node.draggable,
+.react-flow__node.draggable:hover,
+.react-flow__node.dragging,
+.react-flow__node.dragging:hover {
+  cursor: default;
+}
+
+/* ImageGen 节点：允许下方 Prompt Bar 浮层溢出显示（不被裁剪） */
+.react-flow__node-imageGen {
+  overflow: visible !important;
+}
+
+/* 允许 Reader 内容面板内文本选择 */
+[data-reader-content],
+[data-reader-content] * {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
+/* 项目看板（ProjectBoardView）：显式允许文字选中 —— 兜底保证（浏览器默认已可选中，
+   此处防止任何继承/未来改动导致禁选；按钮/下拉等交互控件不受影响） */
+[data-project-board],
+[data-project-board] * {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+
+/* ===== yarl 图片查看器工具栏尺寸收敛 =====
+   yarl 默认图标 32px、按钮 padding 8px，相对全局图标标准（12-16px）明显偏大。
+   通过 CSS 变量覆盖（yarl 内部 width/padding 引用这些变量），
+   不依赖样式加载顺序，任何情况下都生效。 */
+.yarl__button {
+  --yarl__button_padding: 6px;
+}
+.yarl__icon {
+  --yarl__icon_size: 16px;
+}
+
+/* yarl 顶部工具栏：毛玻璃半透明背景，降低对图片内容的遮挡感
+   （yarl 默认 toolbar 无背景，悬浮在图片上方会盖住顶部内容） */
+.yarl__toolbar {
+  background: rgba(20, 22, 28, 0.42);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+}
+
+/* ===== ImageGen Prompt Bar 富文本输入框（contentEditable + #region chip） =====
+   contentEditable 无法用 placeholder 属性，通过 :empty + data-placeholder 伪元素模拟 */
+.region-input:empty::before {
+  content: attr(data-placeholder);
+  color: rgba(255, 255, 255, 0.32);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* #region 内嵌 chip（仿飞书/微博 @提及，contentEditable=false 整块删除） */
+.region-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0 2px;
+  padding: 0 3px 0 7px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 19px;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: default;
+  background-color: rgba(96, 84, 241, 0.16);
+  border: 1px solid rgba(96, 84, 241, 0.42);
+  color: #C7BEFF;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.region-chip > span {
+  pointer-events: none;
+}
+.region-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-left: 1px;
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(231, 226, 255, 0.85);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.region-chip button:hover {
+  background-color: rgba(96, 84, 241, 0.4);
+  color: #fff;
+}
+
+/* ===== AI Edit 面板输入区（contentEditable + 内嵌 @chip，与 ImageGen 同机制） ===== */
+/* 批注卡片修订中：黄色呼吸动效（border + 光晕），逐条修改时指示当前正在处理的批注 */
+@keyframes md-annotation-breathing {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(250, 204, 21, 0);
+    border-color: rgba(250, 204, 21, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 12px 2px rgba(250, 204, 21, 0.55);
+    border-color: rgba(250, 204, 21, 0.95);
+  }
+}
+.md-annotation-processing {
+  animation: md-annotation-breathing 1.4s ease-in-out infinite;
+}
+.md-edit-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--ink-faint);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 浅色主题下覆盖 chip 配色为品牌紫 */
+.md-edit-chip {
+  background-color: color-mix(in oklab, var(--primary) 13%, transparent);
+  border-color: rgba(75, 63, 227, 0.42);
+  color: var(--primary);
+}
+.md-edit-chip button {
+  color: var(--primary);
+  opacity: 0.65;
+}
+.md-edit-chip button:hover {
+  background-color: color-mix(in oklab, var(--primary) 22%, transparent);
+  color: var(--primary);
+  opacity: 1;
+}
+
+/* ===== ChatNode contentEditable 输入框（@ 文件引用 chip） =====
+   与 ImageGen 的 region 机制一致：:empty + data-placeholder 模拟 placeholder */
+.node-input:empty::before {
+  content: attr(data-placeholder);
+  color: color-mix(in oklab, var(--ink-muted) 60%, transparent);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* @文件引用 chip（contentEditable=false 整块删除，含 × 移除按钮） */
+.node-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0 2px;
+  padding: 0 3px 0 7px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 19px;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: default;
+  background-color: var(--primary-soft);
+  border: 1px solid color-mix(in oklab, var(--primary) 40%, transparent);
+  color: var(--primary-strong);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.node-file-chip > span {
+  pointer-events: none;
+}
+.node-file-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-left: 1px;
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1;
+  color: color-mix(in oklab, var(--primary-strong) 85%, transparent);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.node-file-chip button:hover {
+  background-color: color-mix(in oklab, var(--primary) 35%, transparent);
+  color: #fff;
+}
+
+/* ============================================================
+   Phase 1 · Design System Tokens + @layer(base/components) 统一层
+   ============================================================ */
+
+/* ——— Scale Tokens：全从每个主题已定义的基础色派生，6 套主题自动适配 ——— */
+:root {
+  /* ---- 墨色：在 4 档（strong/muted/faint）基础上补 dim（装饰/分隔用，≈25% ink） ---- */
+  --ink-dim: color-mix(in oklab, var(--ink-faint) 75%, transparent);
+
+  /* ---- 6 色语义统一 3 档：FAINT(5% 背景微染) / SOFT(12% 卡片底) / SOLID(100% 字/描边) ----
+       SOFT 各主题已提供，这里补上 FAINT 统一避免散拼 3%/4%/5%/6% 透明度 */
+  --primary-faint: color-mix(in oklab, var(--primary) 5%, transparent);
+  --primary-solid: var(--primary);
+  --info-faint:    color-mix(in oklab, var(--info) 5%, transparent);
+  --info-solid:    var(--info);
+  --success-faint: color-mix(in oklab, var(--success) 5%, transparent);
+  --success-solid: var(--success);
+  --warn-faint:    color-mix(in oklab, var(--warn) 5%, transparent);
+  --warn-solid:    var(--warn);
+  --danger-faint:  color-mix(in oklab, var(--danger) 5%, transparent);
+  --danger-solid:  var(--danger);
+  --purple-faint:  color-mix(in oklab, var(--purple) 5%, transparent);
+  --purple-solid:  var(--purple);
+
+  /* ---- Radius 7 档（统一刻度：与 tailwind rounded-* 同源，px 锤定不随字号缩放）----
+       锚定常规 web 曲率：2/4/6/8/12/16；此前 tailwind rem 在 15px 根下渲染 1.875~15px
+       散值，且随 data-fontscale 连坐缩放圆角（圆角本不应随字号变）。 */
+  --radius-xs:   2px;
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-2xl:  16px;
+  --radius-full: 9999px;
+
+  /* ---- Shadow 6 档 + Focus Ring ---- */
+  --shadow-xs:    0 1px 1px rgba(0, 0, 0, 0.04);
+  --shadow-sm:    0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md:    0 1px 2px rgba(0, 0, 0, 0.03), 0 4px 12px rgba(0, 0, 0, 0.04), 0 16px 32px -8px rgba(0, 0, 0, 0.08);
+  --shadow-lg:    0 4px 12px -2px rgba(0, 0, 0, 0.05), 0 24px 48px -12px rgba(0, 0, 0, 0.12);
+  --shadow-xl:    0 12px 32px -12px rgba(0, 0, 0, 0.12), 0 48px 96px -24px rgba(0, 0, 0, 0.20);
+
+  /* ---- Font size × Line height（正文 = --fs-md, 卡片标题 lg, 徽标 xs） ---- */
+  --fs-xs:   13px;  --lh-xs:   16px;
+  --fs-sm:   14px;  --lh-sm:   18px;
+  --fs-md:   15px;  --lh-md:   21px;
+  --fs-base: 16px;  --lh-base: 23px;
+  --fs-lg:   18px;  --lh-lg:   28px;
+  --fs-xl:   21px;  --lh-xl:   30px;
+  --fs-2xl:  25px;  --lh-2xl:  34px;
+
+  /* ---- Spacing 9 档（padding / gap / margin 统一 scale） ---- */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 24px;
+  --sp-8: 32px;
+  --sp-9: 40px;
+
+  /* ---- Transition 5 档 dur + 3 条 easing 曲线 ---- */
+  --dur-xs:   80ms;   --ease-xs:   cubic-bezier(.4, 0, .2, 1);
+  --dur-fast: 150ms;  --ease-fast: cubic-bezier(.4, 0, .2, 1);
+  --dur-base: 240ms;  --ease-base: cubic-bezier(.16, 1, .3, 1);
+  --dur-slow: 360ms;  --ease-slow: cubic-bezier(.16, 1, .3, 1);
+  --dur-xl:   520ms;  --ease-xl:   cubic-bezier(.16, 1, .3, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+
+  /* ---- Font family tokens（Apple 风格系统字体栈） ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --font-pixel: "Press Start 2P", "Courier New", ui-monospace, monospace;
+}
+
+/* ============================================================
+   全局字号档位：L 为默认（写 data-fontscale="l"）；
+   M 缩小（删除属性，回 :root 基准）/ XL 更大。
+   Settings → Theme & Appearance → Font Size 切换，
+   通过 html[data-fontscale] 覆盖 :root 内的 --fs-* / --lh-* 变量，
+   全 UI（含 html/body 正文）即时生效，无需重启。
+   ============================================================ */
+:root[data-fontscale="l"] {
+  --fs-xs:   15px;  --lh-xs:   18px;
+  --fs-sm:   16px;  --lh-sm:   20px;
+  --fs-md:   17px;  --lh-md:   23px;
+  --fs-base: 18px;  --lh-base: 25px;
+  --fs-lg:   20px;  --lh-lg:   30px;
+  --fs-xl:   23px;  --lh-xl:   32px;
+  --fs-2xl:  27px;  --lh-2xl:  36px;
+}
+
+:root[data-fontscale="xl"] {
+  --fs-xs:   17px;  --lh-xs:   20px;
+  --fs-sm:   18px;  --lh-sm:   22px;
+  --fs-md:   19px;  --lh-md:   25px;
+  --fs-base: 20px;  --lh-base: 27px;
+  --fs-lg:   22px;  --lh-lg:   32px;
+  --fs-xl:   25px;  --lh-xl:   34px;
+  --fs-2xl:  29px;  --lh-2xl:  38px;
+}
+
+/* ——— Base Layer：焦点态 / 动效尊重 / 全局字号 ——— */
+@layer base {
+  /* 全局收敛 halo（2026-09）：不再为聚焦元素加 --shadow-focus 紫色光环（便签、⌘F 输入框此前
+     已逐个豁免；现改为全局无紫色外框，保持界面干净）。focus 仅去掉默认 outline，不新增视觉框。 */
+  :focus-visible {
+    outline: none;
+    border-radius: inherit;
+  }
+  :focus {
+    outline: none;
+  }
+
+  /* 前庭敏感 / 省电：全局降级 / 取消动画 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* 正文字号行高 + 墨色（由主题控制） */
+  html, body {
+    font-size: var(--fs-md);
+    line-height: var(--lh-md);
+    font-family: var(--font-sans);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ——— Components Layer：Button 6 变体 × 2 尺寸 / Card 3 层级 / Loading 态 ——— */
+@layer components {
+  /* ===== Button 基类 =====
+     所有按钮：inline-flex / gap-2 / 禁止选中 / 仅 pointerdown 微缩放 / disabled 50% 不可点。
+     aria-busy=true 自动出现 spinner 并禁止交互。 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+    user-select: none;
+    -webkit-user-select: none;
+    white-space: nowrap;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    transition:
+      background-color var(--dur-fast) var(--ease-fast),
+      color var(--dur-fast) var(--ease-fast),
+      border-color var(--dur-fast) var(--ease-fast),
+      box-shadow var(--dur-fast) var(--ease-fast),
+      transform var(--dur-xs) var(--ease-xs),
+      opacity var(--dur-fast) var(--ease-fast);
+    cursor: pointer;
+  }
+  .btn:active:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateY(0.5px) scale(0.985);
+  }
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  .btn[aria-busy="true"] {
+    cursor: progress;
+    pointer-events: none;
+  }
+  /* 自动 spinner：2px 宽环，右边透明，顺时针转 */
+  .btn[aria-busy="true"]::before {
+    content: "";
+    display: inline-block;
+    width: 0.9em;
+    height: 0.9em;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: var(--radius-full);
+    animation: btn-spin 0.8s linear infinite;
+    margin-right: -1px;
+  }
+  @keyframes btn-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* ——— 两个尺寸 ——— */
+  .btn-sm {
+    padding: 3px var(--sp-4);
+    font-size: var(--fs-xs);
+    line-height: var(--lh-xs);
+    border-radius: var(--radius-sm);
+  }
+  .btn-md {
+    padding: var(--sp-2) var(--sp-5);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-sm);
+  }
+
+  /* ——— 6 种变体 ——— */
+  .btn-primary {
+    background-color: var(--primary);
+    color: var(--primary-foreground, #ffffff);
+    border-radius: var(--radius-full);
+    box-shadow: var(--shadow-sm);
+  }
+  .btn-primary:hover:not(:disabled):not([aria-disabled="true"]) {
+    background-color: var(--primary-strong);
+    box-shadow: 0 4px 12px -2px color-mix(in oklab, var(--primary) 35%, transparent);
+    transform: translateY(-0.5px);
+  }
+
+  .btn-secondary {
+    background-color: var(--paper-soft);
+    color: var(--ink-strong);
+    border-color: var(--line-soft);
+  }
+  .btn-secondary:hover:not(:disabled):not([aria-disabled="true"]) {
+    background-color: var(--paper-hover);
+    border-color: var(--line);
+  }
+
+  .btn-outline {
+    background-color: transparent;
+    color: var(--ink);
+    border-color: var(--line);
+  }
+  .btn-outline:hover:not(:disabled):not([aria-disabled="true"]) {
+    background-color: var(--paper-soft);
+    border-color: var(--line-soft);
+  }
+
+  .btn-ghost {
+    background-color: transparent;
+    color: var(--ink);
+    border-color: transparent;
+  }
+  .btn-ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+    background-color: var(--paper-hover);
+  }
+
+  .btn-danger {
+    background-color: var(--danger);
+    color: #ffffff;
+    box-shadow: var(--shadow-sm);
+  }
+  .btn-danger:hover:not(:disabled):not([aria-disabled="true"]) {
+    background-color: color-mix(in oklab, var(--danger) 88%, #000);
+  }
+
+  .btn-muted {
+    background-color: var(--paper-muted);
+    color: var(--ink-muted);
+  }
+  .btn-muted:hover:not(:disabled):not([aria-disabled="true"]) {
+    background-color: var(--paper-hover);
+    color: var(--ink);
+  }
+
+  /* ===== Card 三层级（画布节点 / 浮层面板 / 模态弹窗） =====
+     视觉分层：阴影 / 圆角 随层级扩大 */
+  .card {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid color-mix(in oklab, var(--line) 30%, transparent);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+  }
+  .card-elevated {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid color-mix(in oklab, var(--line) 35%, transparent);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+  }
+  .card-modal {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid color-mix(in oklab, var(--line) 35%, transparent);
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-xl);
+  }
+}
+
+/* ===== Apple 风格毛玻璃面板 ===== */
+.glass-panel {
+  background: color-mix(in oklab, var(--paper) 78%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  transition: background-color var(--dur-fast) var(--ease-fast);
+}
+.glass-panel-border-b {
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 30%, transparent);
+}
+.glass-panel-border-r {
+  border-right: 1px solid color-mix(in oklab, var(--line) 30%, transparent);
+}
+
+/* ===== 侧边栏展开进入动画（GPU transform，避免首帧 layout/paint 掉帧）===== */
+@keyframes sidebar-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+.sidebar-panel-enter {
+  animation: sidebar-panel-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: left center;
+  will-change: transform, opacity;
+}
+
+/* ===== Apple 风格字体工具类 ===== */
+.font-sans {
+  font-family: var(--font-sans);
+}
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ===== Lucide 图标统一线宽 ===== */
+.lucide {
+  stroke-width: 1.5;
+}
+
+/* ===== Apple 风格动效工具类 ===== */
+.transition-apple {
+  transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-base);
+}
+.hover-lift {
+  transition: transform var(--dur-base) var(--ease-base), box-shadow var(--dur-base) var(--ease-base);
+}
+.hover-lift:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+}
+.press:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: scale(0.98);
+}
+
+/* ===== Game Boy 灰绿 LCD 显示屏（TaskPanel wanted 界面） =====
+   LCD 屏幕为固定灰绿配色（不随主题），进度条为不确定态循环滑动。 */
+@keyframes lcd-progress-slide {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(340%); }
+}
+.lcd-progress {
+  height: 10px;
+  border: 2px solid #0F380F;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #8BAC0F;
+}
+.lcd-progress-fill {
+  width: 30%;
+  height: 100%;
+  background: #0F380F;
+  animation: lcd-progress-slide 1.1s linear infinite;
+}
+/* 邮件投递箭头：向右脉冲跳动（8-bit 阶梯运动），暗示内容已发送 */
+@keyframes lcd-mail-arrow {
+  0%, 100% { transform: translateX(0); }
+  50%      { transform: translateX(3px); }
+}
+.lcd-mail-arrow {
+  animation: lcd-mail-arrow 0.7s steps(2, end) infinite;
+}
+/* LCD 顶栏 BobMail 入口（信封图标）：悬停时液晶像素反色提示可点击 */
+.lcd-mail-btn {
+  transition: background-color 0.15s steps(2, end);
+}
+.lcd-mail-btn:hover {
+  background-color: rgba(15, 56, 15, 0.18);
+}
+/* 项目面板：开庭提示呼吸灯（开庭前3天开始，随日期临近频率与亮度递增，紫色系） */
+/* 档0=开庭当天（最快最亮）… 档3=前3天（最慢最弱），duration 由徽标内联 --court-dur 控制 */
+@keyframes court-breathe-0 {
+  0%, 100% { box-shadow: 0 0 2px 0 rgba(91, 72, 216, 0.4); }
+  50%      { box-shadow: 0 0 14px 5px rgba(124, 92, 255, 0.75); }
+}
+@keyframes court-breathe-1 {
+  0%, 100% { box-shadow: 0 0 2px 0 rgba(91, 72, 216, 0.32); }
+  50%      { box-shadow: 0 0 12px 4px rgba(124, 92, 255, 0.6); }
+}
+@keyframes court-breathe-2 {
+  0%, 100% { box-shadow: 0 0 2px 0 rgba(91, 72, 216, 0.24); }
+  50%      { box-shadow: 0 0 10px 3px rgba(124, 92, 255, 0.45); }
+}
+@keyframes court-breathe-3 {
+  0%, 100% { box-shadow: 0 0 2px 0 rgba(91, 72, 216, 0.16); }
+  50%      { box-shadow: 0 0 8px 3px rgba(124, 92, 255, 0.32); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --court-dur: 0s; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lcd-progress-fill { animation: none; width: 100%; }
+  .lcd-mail-arrow { animation: none; }
+}
+
+/* ===== Note（思路便签）节点：source 连线箭头悬停显示 =====
+   CSS :hover 控制（非 JS）：鼠标悬停在凸出面板外的箭头（后代元素）上时，
+   父级 .sticky-thought-node 仍匹配 :hover，箭头不会因离开节点边界而消失，
+   保证用户能稳定悬停并拖拽到箭头。 */
+.sticky-thought-node .sticky-thought__handle {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.sticky-thought-node:hover .sticky-thought__handle {
+  opacity: 1;
 }

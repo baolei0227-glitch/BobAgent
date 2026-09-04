@@ -1,18 +1,24 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { KeyRound, Check, X, Loader2, Zap, Image, ArrowLeft, Pencil, Brain, Sparkles, ChevronRight, Plus, Wrench, Trash2, Plug } from 'lucide-react';
+import { useEffect, useState, useRef, useMemo } from 'react';
+import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, RefreshCw, Keyboard, Trash, ClipboardCheck, Bot, BookOpen, CalendarDays, Gauge } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { Callout } from '@/components/ui/callout';
+import { Chip } from '@/components/ui/chip';
+import { Badge } from '@/components/ui/badge';
 import {
   PROVIDER_PRESETS,
+  PROVIDER_VENDOR,
+  VENDOR_BADGE_STYLE,
+  sanitizeBaseUrl,
   type ProviderConfig,
   type ProviderType,
   type SelectedModel,
@@ -21,77 +27,38 @@ import {
 } from '@/lib/types';
 import {
   loadSettings,
-  updateProviders,
-  updateSearch,
-  updateVision,
-  updateTaskModel,
-  updateTextEditModel,
-  updateCustomTools,
-  updateMcpServers,
+  updateSettingsFields,
   migrateOldSettingsIfNeeded,
+  applyTheme,
+  applyFontScale,
+  getQuickPrompts,
+  updateQuickPrompts,
   type AppSettings,
-  type CustomToolDef,
+  type QuickPrompt,
 } from '@/lib/settings';
-import type { McpServerConfig } from '@/lib/mcp/types';
-import { MCP_PRESETS } from '@/lib/mcp/types';
 import { inferModelSpec } from '@/lib/model-matcher';
-
-/** 高权限 MCP 服务器：启用时弹确认，防止误开 */
-const HIGH_RISK_MCP: Record<string, { title: string; message: string }> = {
-  playwright: {
-    title: '启用 Playwright？',
-    message:
-      'Playwright 可以完全控制你的浏览器：访问所有打开的网站、读取 Cookie、提交表单、下载文件，包括 localhost 管理面板。仅在你信任当前对话的前提下启用。确认启用吗？',
-  },
-  filesystem: {
-    title: '启用 Filesystem MCP？',
-    message:
-      'Filesystem MCP 可读取和修改指定目录下的任意文件。默认限制为 ~/BobAgent/sandbox，但操作错误仍可能覆盖重要数据。确认启用吗？',
-  },
-  github: {
-    title: '启用 GitHub MCP？',
-    message:
-      'GitHub MCP 持有 GITHUB_PERSONAL_ACCESS_TOKEN，可以代表你创建 Issue、提交代码、修改仓库设置。请确认 Token 权限范围最小化。确认启用吗？',
-  },
-  'brave-search': {
-    title: '启用 Brave Search？',
-    message:
-      'Brave Search MCP 会把 AI 生成的搜索关键词发送到 Brave 服务器。虽然搜索本身是匿名的，但关键词可能包含敏感信息。确认启用吗？',
-  },
-  notion: {
-    title: '启用 Notion MCP？',
-    message:
-      'Notion MCP 可以读写你授权的所有 Notion 页面和数据库，包括私人笔记。请确认已在 Notion 控制台限制了集成范围。确认启用吗？',
-  },
-};
-
-function isHighRisk(server: McpServerConfig): { id: string; title: string; message: string } | null {
-  if (HIGH_RISK_MCP[server.id]) return { id: server.id, ...HIGH_RISK_MCP[server.id] };
-  // 非预置、名字里带 filesystem / shell / exec / playwright / browser 的也提示
-  const name = (server.name || '').toLowerCase();
-  const custom = [
-    { kw: 'filesystem', title: '启用文件系统 MCP？', message: `即将启用 "${server.name}"，可能具备读取和修改本地文件的能力，请确认来源可信。确认启用吗？` },
-    { kw: 'shell', title: '启用 Shell MCP？', message: `即将启用 "${server.name}"，它可能可以执行任意终端命令。请非常小心，仅对完全信任的 MCP 启用。确认启用吗？` },
-    { kw: 'exec', title: '启用执行类 MCP？', message: `即将启用 "${server.name}"，名称中含 exec，可能可以执行本地命令。确认启用吗？` },
-    { kw: 'playwright', title: '启用浏览器控制 MCP？', message: `即将启用 "${server.name}"，它可以控制你的浏览器访问任意网页。确认启用吗？` },
-    { kw: 'browser', title: '启用浏览器控制 MCP？', message: `即将启用 "${server.name}"，它可以控制你的浏览器访问任意网页。确认启用吗？` },
-  ].find((x) => name.includes(x.kw));
-  if (custom) return { id: server.id, title: custom.title, message: custom.message };
-  return null;
-}
+import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normalizeVendorName } from '@/lib/model-tags';
+import { desktop, isDesktop } from '@/lib/desktop-adapter';
+import { TemplateLibraryModal } from './TemplateLibraryModal';
+import { WechatBindModal } from './WechatBindModal';
+import { AgentSettingsModal } from './AgentSettingsModal';
+import { UsagePanel } from './UsagePanel';
 
 interface SettingsModalProps {
-  initialSection?: 'all' | 'mcp' | 'custom_tools';
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfigsChange: (configs: ProviderConfig[]) => void;
+  /** 打开时聚焦的区块（'chat' | 'roles' | 'icons' | 'theme' | 'diagram'），缺省 'chat' */
+  initialSection?: 'chat' | 'roles' | 'icons' | 'theme' | 'diagram';
 }
 
 interface FetchedModel {
   modelId: string;
   ownedBy: string;
+  /** 真实来源厂商（千问/DashScope 聚合平台下由模型 id 推断，如 DeepSeek/GLM/Kimi/MiniMax/Qwen） */
+  vendor?: string;
   thinking: boolean;
-  category: 'chat' | 'embedding' | 'vision' | 'audio' | 'rerank' | 'other';
+  category: 'chat' | 'embedding' | 'vision' | 'ocr' | 'audio' | 'image' | 'rerank' | 'other';
   spec?: ModelSpec;
 }
 
@@ -99,2373 +66,2493 @@ interface ModelDetailState {
   [key: string]: boolean;
 }
 
+/** API Key 获取地址（每个厂商） */
+const PROVIDER_KEY_URLS: Record<ProviderType, string> = {
+  deepseek: 'https://platform.deepseek.com/api_keys',
+  glm: 'https://open.bigmodel.cn/usercenter/apikeys',
+  moonshot: 'https://platform.moonshot.cn/docs/intro#%E4%B8%AD%E7%94%B3%E6%96%87%E6%A1%A3',
+  qwen: 'https://dashscope.console.aliyun.com/apiKey',
+  openai: 'https://platform.openai.com/api-keys',
+  doubao: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+  siliconflow: 'https://cloud.siliconflow.cn/account/ak',
+  agentplan: 'https://www.volcengine.com/product/agent-plan',
+  codingplan: 'https://www.volcengine.com/product/code-plan',
+  // Ollama 本地服务无需 API Key，链接指向下载页/官网
+  ollama: 'https://ollama.com',
+  // BobMultimodal 本地多模态服务：无鉴权，链接指向本地服务状态页
+  bobmultimodal: 'http://127.0.0.1:8080/api/status',
+};
+
+/** 绑定模式：通用（Fetch 自动发现）/ 混合（Fetch + 手动）/ 自定义（仅手动 Bind）/ 专用协议（非模型） */
+type BindingMode = 'fetch' | 'hybrid' | 'custom' | 'dedicated';
+
+/** 基于 PROVIDER_PRESETS（ProviderType 真源）构造所有 ProviderRecord，避免每加厂商改 N 处。 */
+function buildProviderRecord<T>(factory: (type: ProviderType) => T): Record<ProviderType, T> {
+  return PROVIDER_PRESETS.reduce((acc, preset) => {
+    acc[preset.type] = factory(preset.type);
+    return acc;
+  }, {} as Record<ProviderType, T>);
+}
+
+/** Provider 绑定模式（决定 UI 区块 & 流程说明） */
+const PROVIDER_BINDING_MODE: Record<ProviderType, BindingMode> = {
+  deepseek: 'fetch',
+  glm: 'fetch',
+  moonshot: 'fetch',
+  qwen: 'fetch',
+  openai: 'fetch',
+  doubao: 'fetch',
+  siliconflow: 'fetch',
+  // Agent Plan 官方订阅：不支持 /models 列表接口，手动 Add 添加模型
+  agentplan: 'custom',
+  // Coding Plan 官方订阅：同为订阅网关，手动 Add 添加模型
+  codingplan: 'custom',
+  // Ollama 本地模型：/v1/models 自动发现
+  ollama: 'fetch',
+  // BobMultimodal 本地多模态：/v1/models 自动发现（模型默认清空，由用户手动绑定）
+  bobmultimodal: 'fetch',
+};
+
+const BINDING_MODE_LABEL: Record<BindingMode, string> = {
+  fetch: 'Generic',
+  hybrid: 'Hybrid',
+  custom: 'Custom',
+  dedicated: 'Dedicated',
+};
+
+const BINDING_MODE_STYLE: Record<BindingMode, { bg: string; fg: string }> = {
+  fetch:    { bg: 'color-mix(in srgb, var(--info) 14%, transparent)',      fg: 'var(--info)' },
+  hybrid:   { bg: 'color-mix(in srgb, var(--warning) 14%, transparent)',   fg: 'var(--warning)' },
+  custom:   { bg: 'color-mix(in srgb, var(--primary) 14%, transparent)',   fg: 'var(--primary-strong)' },
+  dedicated:{ bg: 'color-mix(in srgb, var(--ink-muted) 14%, transparent)', fg: 'var(--ink-muted)' },
+};
+
+/** 本地无鉴权厂商（BobMultimodal / Ollama）：无需 API Key，连接验证与模型列表拉取跳过 Key 校验 */
+const NO_AUTH_LOCAL_PROVIDERS = new Set<ProviderType>(['bobmultimodal', 'ollama']);
+
+/** Provider 侧栏分组（视觉分组，不影响类型真源） */
+const PROVIDER_SIDEBAR_GROUPS: Array<{ label: string; types: ProviderType[] }> = [
+  { label: 'Mainland China', types: ['deepseek', 'glm', 'moonshot', 'qwen', 'siliconflow'] },
+  { label: 'Volcengine Ark', types: ['doubao', 'agentplan', 'codingplan'] },
+  { label: 'Others', types: ['openai', 'ollama', 'bobmultimodal'] },
+];
+
+/** 标题标签（已去除弹窗功能，仅渲染标题文本） */
+function HintLabel({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  hint?: React.ReactNode;
+  className?: string;
+  icon?: boolean;
+}) {
+  return <span className={className || ''}>{children}</span>;
+}
+
+/** 用途标签（模型池统一仓库）：把 FetchedModel.category 映射为角色用途。
+ *  chat=Chat / stt=STT / image=Image / ocr=OCR（vision 角色已随视觉模型配置一并移除，由 bob-ocr-mcp 插件管理） */
+type ModelPurpose = 'chat' | 'stt' | 'image' | 'ocr';
+
+function categoryToPurpose(cat: FetchedModel['category']): ModelPurpose | undefined {
+  switch (cat) {
+    case 'chat': return 'chat';
+    case 'ocr': return 'ocr';
+    case 'audio': return 'stt';
+    case 'image': return 'image';
+    case 'other': return 'image';
+    default: return undefined; // vision / embedding / rerank 不参与角色
+  }
+}
+
+const PURPOSE_TAG: Record<ModelPurpose, { label: string; bg: string; fg: string }> = {
+  chat: { label: 'Chat', bg: 'var(--primary-soft)', fg: 'var(--primary-strong)' },
+  stt: { label: 'STT', bg: 'var(--purple-soft)', fg: 'var(--purple)' },
+  image: { label: 'Image', bg: 'var(--warn-soft)', fg: 'var(--warn)' },
+  ocr: { label: 'OCR', bg: 'var(--success-soft)', fg: 'var(--success)' },
+};
+
+/** 按模型名关键词推断分类（与 /api/models 的 NON_CHAT_PATTERNS 共用 model-tags 单一来源，用于加载时恢复分类） */
+function inferModelCategory(modelId: string): FetchedModel['category'] {
+  const id = modelId.toLowerCase();
+  // OCR 专用模型优先：它们只能转录文字，不能作为通用视觉模型（qwen-vl-ocr 同时含 vl 与 ocr）
+  if (OCR_MODEL_PATTERN.test(id)) return 'ocr';
+  if (VISION_MODEL_PATTERN.test(id)) return 'vision';
+  if (/embedding|bge-/i.test(id)) return 'embedding';
+  if (/tts|asr|whisper|speech|qwen-audio/i.test(id)) return 'audio';
+  if (/dall-?e|qwen-image|wan[.\-]?2|wan[.\-]?3|z-image|flux|sdxl|stable-diffusion|image-2[.\-]|image-3[.\-]|seedream|seededit|image-edit|gpt-image|kolors|imagen|cogview|midjourney|recraft|hunyuan-image|sensecog/i.test(id)) return 'image';
+  if (/moderation/i.test(id)) return 'other';
+  if (/rerank/i.test(id)) return 'rerank';
+  return 'chat';
+}
+
+/** 按模型 id 前缀/关键词推断真实来源厂商（千问/DashScope 是模型大融合聚合平台，owned_by 常为 system） */
+function inferModelVendor(modelId: string): string {
+  const id = modelId.toLowerCase();
+  const hit = MODEL_VENDOR_PATTERNS.find((p) => p.pattern.test(id));
+  return hit ? hit.vendor : '';
+}
+
+/** 模型拉取错误的友好提示：识别 401/403 等鉴权失败，直接引导用户去对应平台获取 API Key */
+function friendlyModelFetchError(status: number, raw: string, provider: string): string {
+  const apiMsg = (raw.match(/"message"\s*:\s*"([^"]*)"/)?.[1] || raw || '').slice(0, 150);
+  const isAuthError =
+    status === 401 ||
+    status === 403 ||
+    /authentication|unauthorized|permission|invalid.{0,12}key|api key (doesn'?t exist|not found|is incorrect|format is incorrect)|access.{0,10}(denied|forbidden)/i.test(raw);
+  if (isAuthError) {
+    const hintByProvider: Record<string, string> = {
+      doubao: 'Get a new API Key in the Volcengine Ark console (console.volcengine.com/ark → API Key Management) and re-enter it',
+      'doubao-stream': 'Get a new API Key in the Volcengine Ark console (console.volcengine.com/ark → API Key Management) and re-enter it',
+      agentplan: 'Use the Agent Plan dedicated API Key (do not mix with other Ark platform keys) — get it in the Agent Plan console',
+      codingplan: 'Use the Coding Plan dedicated API Key (do not mix with other Ark platform keys) — get it in the Coding Plan console',
+      openai: 'Generate a new API Key at platform.openai.com/api-keys and re-enter it',
+      qwen: 'Get an API Key at dashscope.console.aliyun.com/apiKey and re-enter it',
+      dashscope: 'Get an API Key at dashscope.console.aliyun.com/apiKey and re-enter it',
+      siliconflow: 'Get an API Key at cloud.siliconflow.cn/account/ak and re-enter it',
+    };
+    const hint = hintByProvider[provider] || 'Check that the API Key is correct (it may be mistyped, expired, or from another platform)';
+    return `Invalid or missing API Key (${apiMsg || `HTTP ${status}`}). ${hint}.`;
+  }
+  return `API returned ${status}: ${apiMsg}`;
+}
+
+/** 厂商徽标配色（模型大融合：千问/DashScope 聚合的多家厂商）已移至 lib/types.ts 统一导出 */
+
+/** 设置弹窗标题跟随当前标签页（历史遗留：曾是固定 "Model Providers"，与角色派发等模块并列显得误导） */
+const SECTION_TITLES: Record<string, string> = {
+  chat: 'Model Pool',
+  roles: 'Role Assignment',
+  icons: 'Icons & Avatars',
+  theme: 'Theme & Appearance',
+  diagram: 'Architecture',
+  quickprompts: 'Quick Prompts',
+  templates: 'Templates',
+  wechat: 'WeChat Bind',
+  agents: 'Agents',
+  usage: 'Model Usage',
+};
+
 export function SettingsModal({
   open,
   onOpenChange,
   onConfigsChange,
-  initialSection = 'all',
+  initialSection,
 }: SettingsModalProps) {
-  const [apiKeys, setApiKeys] = useState<Record<ProviderType, string>>({
-    deepseek: '',
-    glm: '',
-    moonshot: '',
-    qwen: '',
-    openai: '',
-    doubao: '',
-  });
-  const [selectedModels, setSelectedModels] = useState<Record<ProviderType, Set<string>>>({
-    deepseek: new Set(),
-    glm: new Set(),
-    moonshot: new Set(),
-    qwen: new Set(),
-    openai: new Set(),
-    doubao: new Set(),
-  });
-  const [fetchedModels, setFetchedModels] = useState<Record<ProviderType, FetchedModel[]>>({
-    deepseek: [],
-    glm: [],
-    moonshot: [],
-    qwen: [],
-    openai: [],
-    doubao: [],
-  });
-  const [testing, setTesting] = useState<Record<ProviderType, boolean>>({
-    deepseek: false,
-    glm: false,
-    moonshot: false,
-    qwen: false,
-    openai: false,
-    doubao: false,
-  });
-  const [testError, setTestError] = useState<Record<ProviderType, string>>({
-    deepseek: '',
-    glm: '',
-    moonshot: '',
-    qwen: '',
-    openai: '',
-    doubao: '',
-  });
+  // 初始区块 ref（外层通过 open-settings 事件指定聚焦区块，仅打开瞬间生效）
+  const initialSectionRef = useRef<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | undefined>(initialSection);
+  initialSectionRef.current = initialSection;
+  // ===================== state =====================
+  // 基于 PROVIDER_PRESETS 自动生成，扩展 provider 无需改此处
+  const [apiKeys, setApiKeys] = useState<Record<ProviderType, string>>(() =>
+    buildProviderRecord(() => ''),
+  );
+  // 自定义 baseUrl（每个厂商独立，空字符串=用默认）
+  const [customBaseUrls, setCustomBaseUrls] = useState<Record<ProviderType, string>>(() =>
+    buildProviderRecord(() => ''),
+  );
+  const [keyVisible, setKeyVisible] = useState<Record<ProviderType, boolean>>(() =>
+    buildProviderRecord(() => false),
+  );
+  const [selectedModels, setSelectedModels] = useState<Record<ProviderType, Set<string>>>(() =>
+    buildProviderRecord(() => new Set<string>()),
+  );
+  const [fetchedModels, setFetchedModels] = useState<Record<ProviderType, FetchedModel[]>>(() =>
+    buildProviderRecord<FetchedModel[]>(() => []),
+  );
+  const [testing, setTesting] = useState<Record<ProviderType, boolean>>(() =>
+    buildProviderRecord(() => false),
+  );
+  const [testError, setTestError] = useState<Record<ProviderType, string>>(() =>
+    buildProviderRecord(() => ''),
+  );
+  const [testSuccess, setTestSuccess] = useState<Record<ProviderType, { msg: string; count: number } | null>>(() =>
+    buildProviderRecord(() => null),
+  );
   const [saved, setSaved] = useState(false);
-  const [view, setView] = useState<'home' | 'add' | 'mcp' | 'custom_tools'>('home');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  // 单模型添加验证中（勾选 / Add 时的连接测试），驱动 spinner 与防重复点击
+  const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
+  // 统一导航：左栏目录选中项，右栏显示对应面板
+  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'agents' | 'usage'>('roles');
+  // Model Pool 以独立弹窗方式打开（从 Role Assignment 的按钮进入，左侧导航不再包含该项）
+  const [modelPoolOpen, setModelPoolOpen] = useState(false);
+  // 默认保存目录已固定为内置 BobWorkspace（~/BobWork/BobWorkspace），不提供自定义存储位置
+  // 手动检查更新状态（设置面板标题栏常驻入口）
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'no-update' | 'error'>('idle');
+  const [updateVersion, setUpdateVersion] = useState<string>('');
+  useEffect(() => {
+    if (!isDesktop()) return;
+    const unsubs = [
+      desktop.update.onChecking(() => setUpdateStatus('checking')),
+      desktop.update.onAvailable((info) => {
+        setUpdateVersion(info?.version || '');
+        setUpdateStatus('available');
+      }),
+      desktop.update.onNotAvailable(() => setUpdateStatus('no-update')),
+      desktop.update.onError(() => setUpdateStatus('error')),
+    ];
+    return () => unsubs.forEach((fn) => fn());
+  }, []);
+  // 架构图全屏放大
+  const [diagramZoom, setDiagramZoom] = useState(false);
   const [searchConfig, setSearchConfig] = useState<SearchConfig>({ apiKey: '', baseUrl: '' });
   const [expandedModels, setExpandedModels] = useState<ModelDetailState>({});
 
-  // 视觉模型状态（与普通模型设置一致的模式）
-  const [visionProvider, setVisionProvider] = useState<ProviderType>('glm');
-  const [visionApiKey, setVisionApiKey] = useState<string>('');
-  const [visionFetchedModels, setVisionFetchedModels] = useState<FetchedModel[]>([]);
-  const [visionTesting, setVisionTesting] = useState(false);
-  const [visionTestError, setVisionTestError] = useState('');
-  const [selectedVisionModel, setSelectedVisionModel] = useState<string>('');
+  // 脏标记：用户修改后未保存时为 true，保存后清除
+  const [isDirty, setIsDirty] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isLoadingRef = useRef(true);
+  // Theme → Keyboard Shortcuts（只读清单，可折叠，默认折叠）
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
-  // 辅助视觉模型状态（主模型失败时自动切换）
-  const [auxVisionProvider, setAuxVisionProvider] = useState<ProviderType>('qwen');
-  const [auxVisionApiKey, setAuxVisionApiKey] = useState<string>('');
-  const [auxVisionFetchedModels, setAuxVisionFetchedModels] = useState<FetchedModel[]>([]);
-  const [auxVisionTesting, setAuxVisionTesting] = useState(false);
-  const [auxVisionTestError, setAuxVisionTestError] = useState('');
-  const [selectedAuxVisionModel, setSelectedAuxVisionModel] = useState<string>('');
+  // 角色派发区块折叠状态（默认全部折叠，点击标题展开/收起）
+  const [rolesCollapsed, setRolesCollapsed] = useState<Record<string, boolean>>({
+    chat: true, ocr: true, stt: true, image: true,
+  });
+  // 模型管理界面单一真源：pickerSide = 当前选中厂商（selectedChatProvider 即它本身）
+  const [pickerSide, setPickerSide] = useState<ProviderType>('deepseek');
+  // 聊天气泡 / settings 里的「当前聊天厂商」（单一来源 = pickerSide）
+  const selectedChatProvider: ProviderType = pickerSide;
+  // 兼容旧调用点（极少位置需要主动设置聊天厂商→走派生源头）
+  const setSelectedChatProvider = (value: ProviderType | ((prev: ProviderType) => ProviderType)) => {
+    setPickerSide((prevSide) => {
+      if (typeof value === 'function') return value(prevSide);
+      return value;
+    });
+  };
 
-  // 任务归纳模型（与视觉模型同结构）
-  const [taskModelProvider, setTaskModelProvider] = useState<ProviderType>('glm');
-  const [taskModelApiKey, setTaskModelApiKey] = useState<string>('');
-  const [taskModelFetchedModels, setTaskModelFetchedModels] = useState<FetchedModel[]>([]);
-  const [taskModelTesting, setTaskModelTesting] = useState(false);
-  const [taskModelTestError, setTaskModelTestError] = useState('');
-  const [selectedTaskModel, setSelectedTaskModel] = useState<string>('');
+  const toggleRoleSection = (key: string) =>
+    setRolesCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  // 文本编辑模型（独立于 Wanted）
-  const [editModelProvider, setEditModelProvider] = useState<ProviderType>('glm');
-  const [editModelApiKey, setEditModelApiKey] = useState<string>('');
-  const [editModelFetchedModels, setEditModelFetchedModels] = useState<FetchedModel[]>([]);
-  const [editModelTesting, setEditModelTesting] = useState(false);
-  const [editModelTestError, setEditModelTestError] = useState('');
-  const [selectedEditModel, setSelectedEditModel] = useState<string>('');
+  // 模型搜索 + 分类过滤（当前选中的聊天厂商）
+  const [modelSearch, setModelSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<'all' | 'chat' | 'vision' | 'ocr' | 'audio' | 'other'>('all');
+  // Agent Plan / Coding Plan 填表配置：模型 ID 手填输入框（Add 后进入候选清单并勾选），两者共用（同一时刻只显示一个 hybrid provider）
+  const [planModelInput, setPlanModelInput] = useState('');
+  // 统一模型 ID 输入框（所有厂商通用，Test & Add 流程使用）
+  const [newModelIdInput, setNewModelIdInput] = useState('');
+  // Test & Add 结果反馈
+  const [testAddFeedback, setTestAddFeedback] = useState<{ provider: ProviderType; ok: boolean; msg: string } | null>(null);
+  const [customBaseUrlMode, setCustomBaseUrlMode] = useState<Record<ProviderType, boolean>>(() =>
+    buildProviderRecord(() => false),
+  );
 
-  // 自定义工具列表
-  const [customTools, setCustomTools] = useState<CustomToolDef[]>([]);
 
-  // MCP 服务器列表
-  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([]);
+  // 模型分类覆盖（L3）：用户纠正自动分类，写入 settings.modelOverrides，运行时优先于命名正则
+  const [modelOverrides, setModelOverrides] = useState<Record<string, string>>({});
 
+  /** 纠正某模型的分类（''/auto = 清除覆盖回到自动推断）；同时同步 fetchedModels 让徽标/筛选即时生效 */
+  const setModelOverride = (modelId: string, cat: string) => {
+    setModelOverrides((prev) => {
+      const next = { ...prev };
+      if (!cat || cat === 'auto') delete next[modelId];
+      else next[modelId] = cat;
+      return next;
+    });
+    setFetchedModels((prev) => {
+      const next: Record<ProviderType, FetchedModel[]> = { ...prev };
+      (Object.keys(next) as ProviderType[]).forEach((t) => {
+        next[t] = next[t].map((m) =>
+          m.modelId === modelId
+            ? { ...m, category: (!cat || cat === 'auto' ? inferModelCategory(modelId) : cat) as FetchedModel['category'] }
+            : m,
+        );
+      });
+      return next;
+    });
+  };
+
+  // 模型管理（Model Pool）已作为设置弹窗的一级 section 内联渲染，不再使用独立 overlay 弹窗
+
+  // 主对话模型（Role Assignment 指定）
+  // - selectedChatModel：旧配置残留（历史"星标"模型，UI 已无标星入口，仅读取；空 = 用候选池首个）
+  // - chatModelPool：主对话候选池（多个模型，自动并入厂商勾选，进入节点模型选择）
+  const [selectedChatModel, setSelectedChatModel] = useState<string>('');
+  const [chatModelPool, setChatModelPool] = useState<Array<{ provider: string; modelId: string }>>([]);
+
+  // STT
+  const [sttProvider, setSttProvider] = useState<'doubao-stream' | 'doubao' | 'dashscope' | 'siliconflow' | 'openai' | 'bobmultimodal'>('doubao-stream');
+  const [sttModel, setSttModel] = useState<string>('');
+  // STT 候选池（与 Chat 统一：首个 model 为活动模型）
+  const [sttPool, setSttPool] = useState<Array<{ provider: string; modelId: string }>>([]);
+
+  // 图像编辑（Image Edit）：独立配置（图像编辑走 images API，与聊天模型不同形态）
+  const [imageEditProvider, setImageEditProvider] = useState<'openai' | 'doubao' | 'qwen' | 'siliconflow' | 'bobmultimodal' | 'ollama'>('doubao');
+  const [imageEditModel, setImageEditModel] = useState<string>('');
+  // 已选模型 chips（同 Key 下多选，标题旁展示；ImageAiEditor 下拉候选 + 路由 fallback 依据）
+  const [imageEditSelectedModels, setImageEditSelectedModels] = useState<string[]>([]);
+  // 图像编辑候选池（与 Chat 统一：首个 model 为活动模型）
+  const [imagePool, setImagePool] = useState<Array<{ provider: string; modelId: string }>>([]);
+
+  // 头像设置
+  const [avatarMode, setAvatarMode] = useState<'random' | 'fixed'>('random');
+  const [avatarSelected, setAvatarSelected] = useState<string>('');
+  const [avatarList, setAvatarList] = useState<Array<{ id: string; name: string; dataUrl: string; builtin: boolean }>>([]);
+  const [avatarAdding, setAvatarAdding] = useState(false);
+  // 侧边栏品牌 logo（独立于欢迎头像选择）
+  const [brandLogo, setBrandLogo] = useState<string>('');
+  // 界面主题
+  const [theme, setTheme] = useState<string>('warm');
+  // 全局字号档位（'m' | 'l' | 'xl'，undefined = 'l' 默认）
+  const [fontScale, setFontScale] = useState<'m' | 'l' | 'xl'>('l');
+  // 左栏导航搜索词（P3）
+  const [navQuery, setNavQuery] = useState<string>('');
+  // 快捷指令全局库（Quick Prompts 页签：集中管理，节点按 id 选用）
+  const [quickPrompts, setQuickPrompts] = useState<QuickPrompt[]>([]);
+  /** 快捷指令新建/编辑草稿：null=关闭；mode='new' 新建；mode='edit' 编辑（含 id） */
+  const [qpEditor, setQpEditor] = useState<{ mode: 'new' | 'edit'; id?: string; name: string; content: string; category: string } | null>(null);
+  /** 快捷指令按分类筛选：'all' = 全部 */
+  const [qpCategoryFilter, setQpCategoryFilter] = useState<string>('all');
+
+  // 快捷指令可选分类去重列表 + 按分类过滤后的列表
+  const qpCategories = useMemo(() => {
+    const set = new Set<string>();
+    quickPrompts.forEach((q) => { if (q.category) set.add(q.category); });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [quickPrompts]);
+  const filteredQuickPrompts = useMemo(() => {
+    return qpCategoryFilter === 'all' ? quickPrompts : quickPrompts.filter((q) => q.category === qpCategoryFilter);
+  }, [quickPrompts, qpCategoryFilter]);
+
+  // 角色区块滚动锚点 ref
+  const sttSectionRef = useRef<HTMLDivElement>(null);
+  const imageEditSectionRef = useRef<HTMLDivElement>(null);
+
+  // ===================== effects =====================
   useEffect(() => {
     if (open) {
       const load = async () => {
-        // 先尝试迁移旧数据
         let settings: AppSettings = await migrateOldSettingsIfNeeded() || await loadSettings();
-
         setSearchConfig(settings.search);
 
-        const newKeys: Record<ProviderType, string> = { deepseek: '', glm: '', moonshot: '', qwen: '', openai: '', doubao: '' };
-        const newSelected: Record<ProviderType, Set<string>> = {
-          deepseek: new Set(),
-          glm: new Set(),
-          moonshot: new Set(),
-          qwen: new Set(),
-          openai: new Set(),
-          doubao: new Set(),
-        };
+        // 基于 PROVIDER_PRESETS 统一构造：扩展新 provider 时无需改此处
+        const newKeys = buildProviderRecord(() => '');
+        const newBaseUrls = buildProviderRecord(() => '');
+        const newSelected = buildProviderRecord(() => new Set<string>());
+        const newFetched = buildProviderRecord<FetchedModel[]>(() => []);
+        const overrides = settings.modelOverrides || {};
         for (const cfg of settings.providers) {
+          if (!(cfg.type in newKeys)) continue; // 兼容废弃 provider（未来可做迁移提示）
           newKeys[cfg.type] = cfg.apiKey;
+          if (cfg.baseUrl) newBaseUrls[cfg.type] = sanitizeBaseUrl(cfg.baseUrl);
           newSelected[cfg.type] = new Set((cfg.selectedModels ?? []).map((s) => s.modelId));
-        }
-        const newFetched: Record<ProviderType, FetchedModel[]> = {
-          deepseek: [],
-          glm: [],
-          moonshot: [],
-          qwen: [],
-          openai: [],
-          doubao: [],
-        };
-        for (const cfg of settings.providers) {
-          newFetched[cfg.type] = (cfg.selectedModels ?? []).map((s) => ({
+          const saved = (cfg.selectedModels ?? []).map((s) => ({
             modelId: s.modelId,
             ownedBy: cfg.type,
+            vendor: inferModelVendor(s.modelId),
             thinking: s.thinking,
-            category: 'chat' as const,
+            // L3：用户纠正的分类优先于命名推断
+            category: (overrides[s.modelId] as FetchedModel['category']) || inferModelCategory(s.modelId),
           }));
+          newFetched[cfg.type] = saved;
         }
+        setModelOverrides(overrides);
         setApiKeys(newKeys);
+        setCustomBaseUrls(newBaseUrls);
         setSelectedModels(newSelected);
         setFetchedModels(newFetched);
-        setTestError({ deepseek: '', glm: '', moonshot: '', qwen: '', openai: '', doubao: '' });
+        setTestError(buildProviderRecord(() => ''));
+        setTestSuccess(buildProviderRecord(() => null));
         setSaved(false);
-        setView('home');
-
-        // 视觉模型配置从全局 settings 读取
-        if (settings.vision) {
-          setVisionApiKey(settings.vision.apiKey || '');
-          setSelectedVisionModel(settings.vision.defaultModel || '');
-          if (settings.vision.defaultProvider) {
-            setVisionProvider(settings.vision.defaultProvider as ProviderType);
-          }
+        // Model Pool 不再是左侧 section：外部 initialSection='chat'（如节点模型选择器入口）改为弹窗方式打开
+        const initSection = initialSectionRef.current;
+        if (initSection === 'chat') {
+          setActiveSection('roles');
+          setModelPoolOpen(true);
+        } else {
+          setActiveSection(initSection || 'roles');
         }
+        // 加载快捷指令全局库
+        const qps = await getQuickPrompts();
+        setQuickPrompts(qps);
+        setQpEditor(null);
+        setIsDirty(false);
+        isLoadingRef.current = true; // 加载期间抑制 dirty 监听
 
-        // 辅助视觉模型配置
-        if (settings.vision) {
-          setAuxVisionApiKey(settings.vision.auxiliaryApiKey || '');
-          setSelectedAuxVisionModel(settings.vision.auxiliaryModel || '');
-          if (settings.vision.auxiliaryProvider) {
-            setAuxVisionProvider(settings.vision.auxiliaryProvider as ProviderType);
-          }
+        if (settings.chatModel) {
+          setSelectedChatModel(settings.chatModel.defaultModel || '');
+          setChatModelPool(settings.chatModel.pool || []);
         }
-
-        // 任务归纳模型配置
-        if (settings.taskModel) {
-          setTaskModelApiKey(settings.taskModel.apiKey || '');
-          setSelectedTaskModel(settings.taskModel.defaultModel || '');
-          if (settings.taskModel.defaultProvider) {
-            setTaskModelProvider(settings.taskModel.defaultProvider as ProviderType);
-          }
+        // 笔记专属模型已随笔记系统拆分到 bob-notes-mcp 插件域（插件大脑自持模型配置），宿主不再维护
+        if (settings.stt) {
+          setSttProvider((settings.stt.provider as typeof sttProvider) || 'doubao-stream');
+          setSttModel(settings.stt.model || '');
+          const sttPoolProv = settings.stt.provider === 'dashscope' ? 'qwen' : (settings.stt.provider === 'doubao-stream' || settings.stt.provider === 'doubao') ? 'doubao' : settings.stt.provider;
+          setSttPool(settings.stt.pool?.length ? settings.stt.pool : (settings.stt.model ? [{ provider: (sttPoolProv as string) || 'qwen', modelId: settings.stt.model }] : []));
         }
-        // 文本编辑模型配置
-        if (settings.textEditModel) {
-          setEditModelApiKey(settings.textEditModel.apiKey || '');
-          setSelectedEditModel(settings.textEditModel.defaultModel || '');
-          if (settings.textEditModel.defaultProvider) {
-            setEditModelProvider(settings.textEditModel.defaultProvider as ProviderType);
-          }
+        if (settings.imageEdit) {
+          setImageEditProvider((settings.imageEdit.provider as typeof imageEditProvider) || 'doubao');
+          setImageEditModel(settings.imageEdit.model || '');
+          setImageEditSelectedModels(settings.imageEdit.selectedModels?.filter((s) => s.trim()) || []);
+          setImagePool(settings.imageEdit.pool?.length ? settings.imageEdit.pool : (settings.imageEdit.model ? [{ provider: settings.imageEdit.provider || 'doubao', modelId: settings.imageEdit.model }] : []));
         }
-
-        // 自定义工具
-        setCustomTools(settings.customTools || []);
-
-        // MCP 服务器：合并已保存配置 + 新增预置（按 id 去重，用户自定义的在前，保留 enabled 状态）
-        const saved = settings.mcpServers && settings.mcpServers.length > 0 ? settings.mcpServers : [];
-        const savedIds = new Set(saved.map((s) => s.id));
-        const newPresets = MCP_PRESETS.filter((p) => !savedIds.has(p.id));
-        setMcpServers([...saved, ...newPresets]);
+        // 头像设置
+        setAvatarMode(settings.avatar?.mode ?? 'random');
+        setAvatarSelected(settings.avatar?.selected ?? '');
+        setBrandLogo(settings.brandLogo ?? '');
+        setTheme(settings.theme ?? 'warm');
+        setFontScale(settings.fontScale ?? 'l');
+        try {
+          const api = (window as unknown as { api: { avatar: { list: () => Promise<Array<{ id: string; name: string; dataUrl: string; builtin: boolean }>> } } }).api;
+          if (api?.avatar) {
+            const avatars = await api.avatar.list();
+            setAvatarList(avatars);
+          }
+        } catch { /* 非 Electron 环境无 avatar API */ }
       };
-      load();
+      const apply = () => load().then(() => {
+        // 下一轮事件循环再解除抑制，确保上面所有 setState 批量完成后不再误触发 dirty
+        setTimeout(() => { isLoadingRef.current = false; }, 0);
+      });
+      apply();
+      // AI 对话配置工具写盘后自动刷新表单（仅弹窗打开时生效，关闭自动移除）。
+      // 独立监听 app-config-changed：自身保存广播的 provider-configs-changed 不回灌刷新，
+      // 避免把保存后的 Saved 状态覆盖掉。
+      const handler = () => { apply(); };
+      window.addEventListener('app-config-changed', handler);
+      return () => window.removeEventListener('app-config-changed', handler);
     }
   }, [open]);
 
-  // initialSection 跳转到专属视图
+  // ===================== helpers =====================
+  // 脏标记监听：任一设置项变化时标记 dirty（加载期间抑制）
   useEffect(() => {
-    if (open && initialSection === 'mcp') {
-      setView('mcp');
-    } else if (open && initialSection === 'custom_tools') {
-      setView('custom_tools');
+    if (isLoadingRef.current) return;
+    setIsDirty(true);
+    setSaved(false);
+    if (savedTimerRef.current) { clearTimeout(savedTimerRef.current); savedTimerRef.current = null; }
+  }, [
+    apiKeys, customBaseUrls, selectedModels, searchConfig,
+    selectedChatModel, chatModelPool,
+    sttProvider, sttModel, sttPool,
+    imageEditProvider, imageEditModel, imageEditSelectedModels, imagePool,
+    // App Icons（欢迎窗口头像 / 侧边栏品牌 Logo；头像池增删走 Electron API 直接落盘，不需保存设置）
+    avatarMode, avatarSelected, brandLogo,
+    theme,
+  ]);
+
+  // 组件卸载时清理定时器
+  useEffect(() => {
+    return () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); };
+  }, []);
+
+  const resolveBaseUrl = (type: ProviderType): string => {
+    // 清理误存的端点后缀（历史版本可能把完整 URL 如 .../images/generations 存进 Base URL），
+    // 只保留网关根地址，避免拼接 /chat/completions 后变成 .../images/generations/chat/completions → 404
+    const custom = sanitizeBaseUrl(customBaseUrls[type]);
+    if (custom) return custom;
+    return PROVIDER_PRESETS.find((p) => p.type === type)?.baseUrl || '';
+  };
+
+  /** OCR 凭据继承来源显示：显式厂商优先，否则按模型名前缀推断所在厂商 */
+  const provKeyLabel = (prov: string, model: string): string => {
+    const mLow = model.toLowerCase();
+    const inferred = prov
+      ? prov
+      : mLow.startsWith('qwen') ? 'qwen'
+      : mLow.startsWith('glm') ? 'glm'
+      : mLow.startsWith('deepseek') ? 'deepseek'
+      : mLow.startsWith('kimi') || mLow.startsWith('moonshot') ? 'moonshot'
+      : mLow.startsWith('gpt') || /^o[134]/.test(mLow) ? 'openai'
+      : mLow.startsWith('doubao') ? 'doubao'
+      : '';
+    if (inferred) return `Model Pool → ${PROVIDER_VENDOR[inferred as ProviderType] || inferred}`;
+    return '未配置';
+  };
+
+  /** 单模型连接验证：发极简请求确认 API Key / Base URL / 模型名真实可用。
+   * TRAE 式时机——在"添加模型到模型池"（勾选 / Add）那一刻验证，而非攒到保存时批量验证。
+   * 图片生成模型（category='image'）走 images API，其余走 chat/completions（由 /api/test-model 分流）。 */
+  const verifyModelConnection = async (type: ProviderType, modelId: string): Promise<{ ok: boolean; error?: string }> => {
+    const apiKey = apiKeys[type].trim();
+    if (!apiKey) return { ok: false, error: '请先填写 API Key' };
+    const baseUrl = resolveBaseUrl(type);
+    if (/[\u0080-\uFFFF]/.test(baseUrl)) return { ok: false, error: 'Base URL 含非法字符' };
+    try {
+      const resp = await fetch('/api/test-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providers: [{ provider: type, apiKey, baseUrl, models: [modelId], category: fetchedModels[type]?.find((m) => m.modelId === modelId)?.category }],
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      const r = (data as { results?: Array<{ ok: boolean; error?: string }> }).results?.[0];
+      return r ? { ok: r.ok, error: r.error } : { ok: resp.ok, error: `HTTP ${resp.status}` };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
-  }, [open, initialSection]);
+  };
+
+  /** 模型列表勾选入口：新增勾选前先连接验证，通过才加入模型池；取消勾选直接移除，不验证 */
+  const checkModelAdd = async (type: ProviderType, modelId: string) => {
+    if (selectedModels[type].has(modelId)) {
+      toggleModel(type, modelId);
+      return;
+    }
+    setVerifyingModelId(modelId);
+    setTestError((prev) => ({ ...prev, [type]: '' }));
+    try {
+      // 本地无鉴权厂商（BobMultimodal/Ollama）无需连接验证——后端调用失败时会给出明确报错
+      const { ok, error } = NO_AUTH_LOCAL_PROVIDERS.has(type)
+        ? { ok: true as const }
+        : await verifyModelConnection(type, modelId);
+      if (ok) {
+        toggleModel(type, modelId);
+      } else {
+        setTestError((prev) => ({
+          ...prev,
+          [type]: `模型 ${modelId} 连接验证失败，未加入模型池${error ? `：${error}` : ''}`,
+        }));
+      }
+    } finally {
+      setVerifyingModelId(null);
+    }
+  };
 
   const toggleModel = (type: ProviderType, modelId: string) => {
     setSelectedModels((prev) => {
       const next = new Set(prev[type]);
-      if (next.has(modelId)) {
-        next.delete(modelId);
-      } else {
-        next.add(modelId);
-      }
+      next.has(modelId) ? next.delete(modelId) : next.add(modelId);
       return { ...prev, [type]: next };
     });
   };
 
-  const testConnection = async (type: ProviderType, preset: typeof PROVIDER_PRESETS[0]) => {
-    const apiKey = apiKeys[type].trim();
-    if (!apiKey) return;
+  /** Agent Plan / Coding Plan 填表配置：手填模型 ID 直接加入候选清单并勾选（无需依赖 Fetch）。
+   * 两订阅共用，provider 由调用方指定。添加前先做连接验证，通过才加入（TRAE 式）。 */
+  const addPlanModel = async (provider: 'agentplan' | 'codingplan') => {
+    const id = planModelInput.trim();
+    if (!id) return;
+    setVerifyingModelId(id);
+    setTestError((prev) => ({ ...prev, [provider]: '' }));
+    try {
+      const { ok, error } = await verifyModelConnection(provider, id);
+      if (!ok) {
+        setTestError((prev) => ({
+          ...prev,
+          [provider]: `模型 ${id} 连接验证失败，未添加${error ? `：${error}` : ''}`,
+        }));
+        return;
+      }
+      setSelectedModels((prev) => {
+        const next = new Set(prev[provider]);
+        next.add(id);
+        return { ...prev, [provider]: next };
+      });
+      setFetchedModels((prev) => {
+        if (prev[provider].some((m) => m.modelId === id)) return prev;
+        return {
+          ...prev,
+          [provider]: [...prev[provider], {
+            modelId: id,
+            ownedBy: provider,
+            vendor: inferModelVendor(id),
+            thinking: true,
+            category: inferModelCategory(id),
+          }],
+        };
+      });
+      setPlanModelInput('');
+    } finally {
+      setVerifyingModelId(null);
+    }
+  };
 
-    setTesting((prev) => ({ ...prev, [type]: true }));
-    setTestError((prev) => ({ ...prev, [type]: '' }));
+  /** 统一 Test & Add：所有厂商通用流程 — 填写 API Key + 模型 ID → 一键测试连接，通过后自动加入模型池。
+   *  替代原"Fetch + 手动勾选"与"Add 按钮"的双路径，简化为单路径操作。 */
+  const testAndAddModel = async (provider: ProviderType) => {
+    const id = newModelIdInput.trim();
+    if (!id) return;
+    const apiKey = apiKeys[provider].trim();
+    const preset = PROVIDER_PRESETS.find((p) => p.type === provider)!;
+
+    // Ollama/BobMultimodal 本地服务无需 Key
+    if (!apiKey && !NO_AUTH_LOCAL_PROVIDERS.has(provider)) {
+      setTestAddFeedback({ provider, ok: false, msg: '请先填写 API Key' });
+      return;
+    }
+
+    setVerifyingModelId(id);
+    setTestAddFeedback(null);
+    setTestError((prev) => ({ ...prev, [provider]: '' }));
 
     try {
-      const resp = await fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: type,
-          apiKey,
-          baseUrl: preset.baseUrl,
-        }),
-      });
+      const { ok, error } = NO_AUTH_LOCAL_PROVIDERS.has(provider)
+        ? { ok: true as const }
+        : await verifyModelConnection(provider, id);
 
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        setTestError((prev) => ({ ...prev, [type]: data.error || 'Connection failed' }));
-        setFetchedModels((prev) => ({ ...prev, [type]: [] }));
+      if (!ok) {
+        setTestAddFeedback({ provider, ok: false, msg: `连接验证失败${error ? `：${error}` : ''}` });
         return;
       }
 
-      const models: FetchedModel[] = (data.models || []).map((m: { modelId: string; ownedBy?: string; thinking?: boolean; type?: string }) => {
-        const modelId = m.modelId;
-        const thinking = m.thinking || false;
-        const presetModel = preset.models.find((pm) => pm.modelId === modelId);
-        let spec: ModelSpec | undefined = presetModel?.spec;
-
-        if (!spec) {
-          spec = inferModelSpec(modelId, thinking);
-        }
-
+      // 测试通过 → 加入模型池并勾选
+      setSelectedModels((prev) => {
+        const next = new Set(prev[provider]);
+        next.add(id);
+        return { ...prev, [provider]: next };
+      });
+      setFetchedModels((prev) => {
+        if (prev[provider]?.some((m) => m.modelId === id)) return prev;
+        const isLocalNoAuth = NO_AUTH_LOCAL_PROVIDERS.has(provider);
         return {
-          modelId,
-          ownedBy: m.ownedBy || '',
-          thinking,
-          category: (m.type as FetchedModel['category']) || 'chat',
-          spec,
+          ...prev,
+          [provider]: [
+            ...(prev[provider] || []),
+            {
+              modelId: id,
+              ownedBy: isLocalNoAuth ? provider : preset.type,
+              vendor: inferModelVendor(id),
+              thinking: true,
+              category: inferModelCategory(id),
+            },
+          ],
         };
       });
+      setTestAddFeedback({ provider, ok: true, msg: `已添加 ${id} 到模型池` });
+      setNewModelIdInput('');
+    } finally {
+      setVerifyingModelId(null);
+    }
+  };
 
-      setFetchedModels((prev) => ({ ...prev, [type]: models }));
+  // 批量选择：按分类过滤后全选/反选/清空
+  const applyBatchAction = (action: 'invert') => {
+    const type = selectedChatProvider;
+    const models = fetchedModels[type];
+    if (!models.length) return;
+    setSelectedModels((prev) => {
+      const curr = new Set(prev[type]);
+      models.forEach((m) => (curr.has(m.modelId) ? curr.delete(m.modelId) : curr.add(m.modelId)));
+      return { ...prev, [type]: curr };
+    });
+  };
 
-      // 默认选中所有 chat 类模型
-      setSelectedModels((prev) => {
-        const chatModels = models.filter((m) => m.category === 'chat');
-        if (prev[type].size === 0 && chatModels.length > 0) {
-          return { ...prev, [type]: new Set(chatModels.map((m) => m.modelId)) };
+  // 一键清除当前厂商的所有模型选择
+  const clearAllSelections = () => {
+    setSelectedModels((prev) => ({ ...prev, [selectedChatProvider]: new Set() }));
+  };
+
+  // ===================== actions =====================
+  const testConnection = async (type: ProviderType, preset: typeof PROVIDER_PRESETS[0]): Promise<boolean> => {
+    // 外层兜底：无论是同步异常 / fetch 异常 / 非 JSON 响应 / 上游超时，都必须释放 isTesting，
+    // 避免"Fetching..."卡住后按钮永远 disabled（用户感知为"输入 API 后获取按钮无法操作"）
+    try {
+      const apiKey = apiKeys[type].trim();
+      // 本地无鉴权厂商（BobMultimodal/Ollama）无需 API Key
+      if (!apiKey && !NO_AUTH_LOCAL_PROVIDERS.has(type)) return false;
+
+      const baseUrl = resolveBaseUrl(type);
+      if (/[\u0080-\uFFFF]/.test(baseUrl)) {
+        setTestError((prev) => ({ ...prev, [type]: '请求地址 / Base URL 包含非法字符（如中文），请先修正后再获取模型。' }));
+        return false;
+      }
+
+      setTesting((prev) => ({ ...prev, [type]: true }));
+      setTestError((prev) => ({ ...prev, [type]: '' }));
+      setTestSuccess((prev) => ({ ...prev, [type]: null }));
+
+      // 前端请求侧也加 30s 绝对超时：后端即便因 thinking 探测或外部网络长时间挂起，
+      // 前端也能自行释放按钮；同时部分网关（智谱/火山）在弱网环境下 fetch 可能久挂不抛
+      let ctrl: AbortController | undefined;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      if (typeof AbortController !== 'undefined') {
+        ctrl = new AbortController();
+        timeoutId = setTimeout(() => ctrl?.abort(new DOMException('Aborted', 'AbortError')), 30000);
+      }
+
+      try {
+        const resp = await fetch('/api/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: type,
+            apiKey,
+            baseUrl,
+          }),
+          signal: ctrl?.signal,
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          setTestError((prev) => ({ ...prev, [type]: data.error || 'Connection failed' }));
+          setFetchedModels((prev) => ({ ...prev, [type]: [] }));
+          return false;
         }
-        return prev;
-      });
-    } catch {
-      setTestError((prev) => ({ ...prev, [type]: 'Network request failed' }));
+
+        const models: FetchedModel[] = (data.models || []).map((m: { modelId: string; ownedBy?: string; vendor?: string; thinking?: boolean; type?: string }) => {
+          const modelId = m.modelId;
+          const thinking = m.thinking ?? true;
+          const presetModel = preset.models.find((pm) => pm.modelId === modelId);
+          let spec: ModelSpec | undefined = presetModel?.spec;
+          if (!spec) spec = inferModelSpec(modelId, thinking);
+          return {
+            modelId,
+            ownedBy: m.ownedBy || '',
+            vendor: m.vendor || inferModelVendor(modelId),
+            thinking,
+            // L3：用户纠正的分类优先于 /api/models 返回的类型
+            // 后端 image-gen → 前端 image 统一映射（避免 categoryToPurpose 不识别 image-gen）
+            category: (modelOverrides[modelId] as FetchedModel['category']) || (m.type === 'image-gen' ? 'image' : m.type as FetchedModel['category']) || 'chat',
+            spec,
+          };
+        });
+
+        setFetchedModels((prev) => ({ ...prev, [type]: models }));
+        setTestSuccess((prev) => ({
+          ...prev,
+          [type]: {
+            msg: 'Connection OK',
+            count: models.length,
+          },
+        }));
+        return true;
+      } catch (err) {
+        // 区分：AbortError（前端 30s 超时兜底）给用户明确提示，其余归为网络失败
+        const isAbort =
+          (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError') ||
+          (err instanceof Error && /abort|timeout/i.test(err.message));
+        setTestError((prev) => ({
+          ...prev,
+          [type]: isAbort
+            ? '请求超时（30s）：已自动取消，请检查网络或稍后重试。'
+            : 'Network request failed',
+        }));
+        setFetchedModels((prev) => ({ ...prev, [type]: prev[type] ?? [] }));
+        return false;
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+    } catch (syncErr) {
+      // 同步入口 / 外层兜底（理论上不应触发，作为最终保险）
+      const msg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+      setTestError((prev) => ({
+        ...prev,
+        [type]: msg && msg !== 'undefined' ? msg : 'Network request failed',
+      }));
+      return false;
     } finally {
       setTesting((prev) => ({ ...prev, [type]: false }));
     }
   };
 
-  // 视觉模型获取列表
-  const testVisionConnection = async () => {
-    const apiKey = visionApiKey.trim();
-    if (!apiKey) return;
-
-    const preset = PROVIDER_PRESETS.find((p) => p.type === visionProvider);
-    if (!preset) return;
-
-    setVisionTesting(true);
-    setVisionTestError('');
-
-    try {
-      const resp = await fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: visionProvider,
-          apiKey,
-          baseUrl: preset.baseUrl,
-        }),
-      });
-
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        setVisionTestError(data.error || 'Connection failed');
-        setVisionFetchedModels([]);
-        return;
-      }
-
-      const models: FetchedModel[] = (data.models || [])
-        .filter((m: { type?: string }) => m.type === 'vision')
-        .map((m: { modelId: string; ownedBy?: string; thinking?: boolean; type?: string }) => {
-          const modelId = m.modelId;
-          const thinking = m.thinking || false;
-          return {
-            modelId,
-            ownedBy: m.ownedBy || '',
-            thinking,
-            category: (m.type as FetchedModel['category']) || 'chat',
-            spec: inferModelSpec(modelId, thinking),
-          };
-        });
-
-      setVisionFetchedModels(models);
-    } catch {
-      setVisionTestError('Network request failed');
-    } finally {
-      setVisionTesting(false);
-    }
-  };
-
-  // 辅助视觉模型获取列表
-  const testAuxVisionConnection = async () => {
-    const apiKey = auxVisionApiKey.trim();
-    if (!apiKey) return;
-
-    const preset = PROVIDER_PRESETS.find((p) => p.type === auxVisionProvider);
-    if (!preset) return;
-
-    setAuxVisionTesting(true);
-    setAuxVisionTestError('');
-
-    try {
-      const resp = await fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: auxVisionProvider,
-          apiKey,
-          baseUrl: preset.baseUrl,
-        }),
-      });
-
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        setAuxVisionTestError(data.error || 'Connection failed');
-        setAuxVisionFetchedModels([]);
-        return;
-      }
-
-      const models: FetchedModel[] = (data.models || [])
-        .filter((m: { type?: string }) => m.type === 'vision')
-        .map((m: { modelId: string; ownedBy?: string; thinking?: boolean; type?: string }) => {
-          const modelId = m.modelId;
-          const thinking = m.thinking || false;
-          return {
-            modelId,
-            ownedBy: m.ownedBy || '',
-            thinking,
-            category: (m.type as FetchedModel['category']) || 'chat',
-            spec: inferModelSpec(modelId, thinking),
-          };
-        });
-
-      setAuxVisionFetchedModels(models);
-    } catch {
-      setAuxVisionTestError('Network request failed');
-    } finally {
-      setAuxVisionTesting(false);
-    }
-  };
-
-  // 任务归纳模型获取列表（过滤 chat 类模型）
-  const testTaskModelConnection = async () => {
-    const apiKey = taskModelApiKey.trim();
-    if (!apiKey) return;
-
-    const preset = PROVIDER_PRESETS.find((p) => p.type === taskModelProvider);
-    if (!preset) return;
-
-    setTaskModelTesting(true);
-    setTaskModelTestError('');
-
-    try {
-      const resp = await fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: taskModelProvider,
-          apiKey,
-          baseUrl: preset.baseUrl,
-        }),
-      });
-
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        setTaskModelTestError(data.error || 'Connection failed');
-        setTaskModelFetchedModels([]);
-        return;
-      }
-
-      const models: FetchedModel[] = (data.models || [])
-        .filter((m: { type?: string }) => m.type === 'chat' || !m.type || m.type === 'other')
-        .filter((m: { modelId: string }) => !/vision|vl|embedding|rerank|audio/i.test(m.modelId))
-        .map((m: { modelId: string; ownedBy?: string; thinking?: boolean; type?: string }) => {
-          const modelId = m.modelId;
-          const thinking = m.thinking || false;
-          return {
-            modelId,
-            ownedBy: m.ownedBy || '',
-            thinking,
-            category: (m.type as FetchedModel['category']) || 'chat',
-            spec: inferModelSpec(modelId, thinking),
-          };
-        });
-
-      setTaskModelFetchedModels(models);
-    } catch {
-      setTaskModelTestError('Network request failed');
-    } finally {
-      setTaskModelTesting(false);
-    }
-  };
-
-  // 文本编辑模型获取列表（同任务归纳模型逻辑）
-  const testEditModelConnection = async () => {
-    const apiKey = editModelApiKey.trim();
-    if (!apiKey) return;
-
-    const preset = PROVIDER_PRESETS.find((p) => p.type === editModelProvider);
-    if (!preset) return;
-
-    setEditModelTesting(true);
-    setEditModelTestError('');
-
-    try {
-      const resp = await fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: editModelProvider,
-          apiKey,
-          baseUrl: preset.baseUrl,
-        }),
-      });
-
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        setEditModelTestError(data.error || 'Connection failed');
-        setEditModelFetchedModels([]);
-        return;
-      }
-
-      const models: FetchedModel[] = (data.models || [])
-        .filter((m: { type?: string }) => m.type === 'chat' || !m.type || m.type === 'other')
-        .filter((m: { modelId: string }) => !/vision|vl|embedding|rerank|audio/i.test(m.modelId))
-        .map((m: { modelId: string; ownedBy?: string; thinking?: boolean; type?: string }) => {
-          const modelId = m.modelId;
-          const thinking = m.thinking || false;
-          return {
-            modelId,
-            ownedBy: m.ownedBy || '',
-            thinking,
-            category: (m.type as FetchedModel['category']) || 'chat',
-            spec: inferModelSpec(modelId, thinking),
-          };
-        });
-
-      setEditModelFetchedModels(models);
-    } catch {
-      setEditModelTestError('Network request failed');
-    } finally {
-      setEditModelTesting(false);
-    }
-  };
-
   const handleSave = async () => {
-    // 保存前风险确认（有自定义工具或开启了高风险 MCP）
-    const activeCustomTools = customTools.filter((t) => t.enabled);
-    const activeHighRiskMcp = mcpServers.filter((s) => s.enabled && isHighRisk(s));
-    let confirmed = true;
-    if (activeCustomTools.length > 0 || activeHighRiskMcp.length > 0) {
-      const lines: string[] = [];
-      if (activeCustomTools.length > 0)
-        lines.push(`• ${activeCustomTools.length} 个启用的自定义 HTTP 工具：${activeCustomTools.map((t) => t.name || '(unnamed)').join('、')}`);
-      if (activeHighRiskMcp.length > 0)
-        lines.push(`• ${activeHighRiskMcp.length} 个启用的高权限 MCP：${activeHighRiskMcp.map((s) => s.name || s.id).join('、')}`);
-      const msg =
-        '保存并启用以下高权限功能？\n\n' +
-        lines.join('\n') +
-        '\n\nAI 在对话中会根据描述自动调用这些功能，可能把对话数据发送到外部服务器或修改本地文件。请确认完全理解风险后再保存。';
-      confirmed = window.confirm(msg);
+    setSaving(true);
+    setSaveError('');
+    setSaved(false);
+    try {
+      const newConfigs: ProviderConfig[] = [];
+      (Object.keys(apiKeys) as ProviderType[]).forEach((type) => {
+        const key = apiKeys[type].trim();
+        if (!key) return;
+        const ids = Array.from(selectedModels[type]);
+        const sel: SelectedModel[] = ids.map((id) => {
+          const fetched = fetchedModels[type].find((m) => m.modelId === id);
+          return {
+            modelId: id,
+            thinking: true,
+            // 用途标签：按分类推断（chat/stt/image/ocr），角色区据此过滤
+            purpose: fetched ? categoryToPurpose(fetched.category) : undefined,
+          };
+        });
+        const baseUrl = sanitizeBaseUrl(customBaseUrls[type]) || undefined;
+        newConfigs.push({ type, apiKey: key, selectedModels: sel, baseUrl });
+      });
+
+      const resolveRoleFromChat = (modelId: string): {
+        provider: ProviderType; apiKey: string; baseUrl: string;
+      } | null => {
+        if (!modelId) return null;
+        for (const cfg of newConfigs) {
+          if (cfg.selectedModels?.some((m) => m.modelId === modelId)) {
+            return {
+              provider: cfg.type,
+              apiKey: cfg.apiKey,
+              baseUrl: cfg.baseUrl || (PROVIDER_PRESETS.find((p) => p.type === cfg.type)?.baseUrl || ''),
+            };
+          }
+        }
+        return null;
+      };
+
+      // 各角色候选池模型自动并入对应厂商勾选（进入节点模型选择列表，无需再去 Chat Models 手动勾选）
+      const allRolePools = [
+        ...chatModelPool,
+      ];
+      for (const item of allRolePools) {
+        const cfg = newConfigs.find((c) => c.type === item.provider);
+        if (cfg) {
+          const existing = new Set((cfg.selectedModels || []).map((m) => m.modelId));
+          if (!existing.has(item.modelId)) {
+            const fetched = fetchedModels[item.provider as ProviderType]?.find((m) => m.modelId === item.modelId);
+            cfg.selectedModels = [...(cfg.selectedModels || []), { modelId: item.modelId, thinking: true }];
+          }
+        }
+      }
+
+      // 历史"星标"功能已移除：主对话模型默认取候选池首个；
+      // selectedChatModel 为旧配置残留（只读），仅在仍有值且存在于候选池时优先使用
+      const chatRole = resolveRoleFromChat(selectedChatModel || chatModelPool[0]?.modelId || '');
+
+      // 连接验证已前移到"添加模型到模型池"时（勾选 checkbox / Add 即测，TRAE 式），
+      // 保存时不再批量测试，避免一个失效模型阻塞整次配置保存。
+
+      // 一次读 + 一次写，避免并发写同一 settings.json 互相覆盖（否则后写者用旧值覆盖新加的 provider）
+      await updateSettingsFields({
+        providers: newConfigs,
+        search: { apiKey: searchConfig.apiKey.trim(), baseUrl: searchConfig.baseUrl.trim() },
+        taskModel: undefined,
+        outcomeModel: undefined,
+        chatModel: {
+          defaultProvider: chatRole?.provider ?? '',
+          defaultModel: selectedChatModel || chatModelPool[0]?.modelId || '',
+          apiKey: chatRole?.apiKey ?? '',
+          baseUrl: chatRole?.baseUrl ?? '',
+          pool: chatModelPool,
+        },
+        // 笔记专属模型已随笔记系统拆分到 bob-notes-mcp 插件域，宿主不再写 notesModel
+        stt: {
+          provider: sttPool[0]?.provider || sttProvider,
+          model: sttPool[0]?.modelId || undefined,
+          pool: sttPool,
+        },
+        imageEdit: {
+          // 与 STT 一致：默认 provider/model 取候选池首个（池为空时回退旧字段），保证后端默认路径可解析
+          provider: imagePool[0]?.provider || imageEditProvider,
+          model: imagePool[0]?.modelId || imageEditModel.trim() || undefined,
+          selectedModels: imageEditSelectedModels.filter((s) => s.trim()),
+          pool: imagePool,
+        },
+        // 识别配置（onlineOcr / glmOcr）已收敛到 Bob OCR 插件（bob-ocr-mcp）管理，
+        // BobWork 不再保存/覆盖这两个字段（updateSettingsFields merge 语义 → 保留插件主导的原值）
+        // L3：模型分类覆盖持久化（用户纠正的分类，运行时优先于命名正则）
+        modelOverrides,
+        avatar: { mode: avatarMode, selected: avatarMode === 'fixed' ? avatarSelected : undefined },
+        brandLogo: brandLogo || undefined,
+        theme: 'warm',
+      });
+
+      // 立即应用主题（data-theme 写入 document.documentElement），无需重启
+      applyTheme('warm');
+      onConfigsChange(newConfigs);
+      window.dispatchEvent(new Event('provider-configs-changed'));
+      // 主题变更：通知 sandbox 预览刷新注入的 CSS 变量
+      window.dispatchEvent(new Event('theme-changed'));
+      setSaved(true);
+      setIsDirty(false);
+      // 2.5s 后自动隐藏"Saved"提示
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      console.error('Save settings error:', e);
+      setSaveError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setSaving(false);
     }
-    if (!confirmed) return;
-
-    const newConfigs: ProviderConfig[] = [];
-    (Object.keys(apiKeys) as ProviderType[]).forEach((type) => {
-      const key = apiKeys[type].trim();
-      if (!key) return;
-      const ids = Array.from(selectedModels[type]);
-      const sel: SelectedModel[] = ids.map((id) => {
-        const fetched = fetchedModels[type].find((m) => m.modelId === id);
-        return { modelId: id, thinking: fetched?.thinking ?? false };
-      });
-      newConfigs.push({
-        type,
-        apiKey: key,
-        selectedModels: sel,
-      });
-    });
-
-    // 保存到统一 settings
-    await updateProviders(newConfigs);
-    await updateSearch({
-      apiKey: searchConfig.apiKey.trim(),
-      baseUrl: searchConfig.baseUrl.trim(),
-    });
-    await updateVision({
-      defaultProvider: visionProvider,
-      defaultModel: selectedVisionModel,
-      apiKey: visionApiKey.trim(),
-      baseUrl: PROVIDER_PRESETS.find((p) => p.type === visionProvider)?.baseUrl || '',
-      auxiliaryProvider: auxVisionProvider,
-      auxiliaryModel: selectedAuxVisionModel,
-      auxiliaryApiKey: auxVisionApiKey.trim(),
-      auxiliaryBaseUrl: PROVIDER_PRESETS.find((p) => p.type === auxVisionProvider)?.baseUrl || '',
-    });
-
-    await updateTaskModel({
-      defaultProvider: taskModelProvider,
-      defaultModel: selectedTaskModel,
-      apiKey: taskModelApiKey.trim(),
-      baseUrl: PROVIDER_PRESETS.find((p) => p.type === taskModelProvider)?.baseUrl || '',
-    });
-
-    await updateTextEditModel({
-      defaultProvider: editModelProvider,
-      defaultModel: selectedEditModel,
-      apiKey: editModelApiKey.trim(),
-      baseUrl: PROVIDER_PRESETS.find((p) => p.type === editModelProvider)?.baseUrl || '',
-    });
-
-    await updateCustomTools(customTools);
-
-    await updateMcpServers(mcpServers);
-
-    onConfigsChange(newConfigs);
-    window.dispatchEvent(new Event('provider-configs-changed'));
-
-    setSaved(true);
-    setTimeout(() => onOpenChange(false), 600);
   };
 
   const paperInputStyle = {
-    fontFamily: "'Noto Serif SC', serif",
-    backgroundColor: 'oklch(0.97 0.008 80)',
-    borderColor: 'oklch(0.85 0.01 70)',
-    color: 'oklch(0.25 0.02 50)',
+    backgroundColor: 'var(--paper)',
+    borderColor: 'var(--line)',
+    color: 'var(--ink-strong)',
   } as const;
 
+  // ===================== render =====================
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md gap-0 p-0" style={{ fontFamily: "'Noto Serif SC', serif" }}>
+      <DialogContent
+        className="gap-0 p-0"
+        style={{
+          width: '60rem',
+          maxWidth: '60rem',
+          height: '85vh',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        <TooltipProvider delayDuration={150}>
         <DialogHeader className="px-6 pt-6 pb-3">
-          <DialogTitle className="flex items-center gap-2 text-base" style={{ color: 'oklch(0.30 0.015 50)' }}>
-            <KeyRound className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-            Model Providers
-          </DialogTitle>
-          <DialogDescription className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-            Enter your API Key and click 'Fetch Models' to auto-discover available models. Keys are stored locally only.
-          </DialogDescription>
+          <div className="flex items-center justify-between gap-2">
+            {/* 左侧高亮已指示当前区块，顶栏不再显示标题（sr-only 保留无障碍语义） */}
+            <DialogTitle className="sr-only" style={{ color: 'var(--ink)' }}>
+              {SECTION_TITLES[activeSection] ?? 'Settings'}
+            </DialogTitle>
+            {isDesktop() && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (updateStatus === 'checking') return;
+                  setUpdateStatus('checking');
+                  desktop.update.check().then((r) => {
+                    if (r && !r.success) {
+                      setUpdateStatus('error');
+                      setTimeout(() => setUpdateStatus('idle'), 3000);
+                    }
+                  }).catch(() => {
+                    setUpdateStatus('error');
+                    setTimeout(() => setUpdateStatus('idle'), 3000);
+                  });
+                }}
+                title={updateStatus === 'checking' ? 'Checking for updates…' : 'Check for updates'}
+                className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)', border: '1px solid var(--line)' }}
+              >
+                {updateStatus === 'checking' ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                <span>
+                  {updateStatus === 'checking' && 'Checking…'}
+                  {updateStatus === 'available' && `v${updateVersion} available`}
+                  {updateStatus === 'no-update' && 'Up to date'}
+                  {updateStatus === 'error' && 'Check failed'}
+                  {updateStatus === 'idle' && 'Check for updates'}
+                </span>
+              </button>
+            )}
+          </div>
         </DialogHeader>
 
-        {view === 'mcp' ? (
-          /* ========== MCP 专属视图 ========== */
-          <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
-            <button
-              type="button"
-              onClick={() => setView('home')}
-              className="mb-4 flex items-center gap-1 text-xs transition-colors hover:underline"
-              style={{ color: 'oklch(0.55 0.02 50)' }}
-            >
-              <ArrowLeft className="h-3 w-3" />
-              Back to Settings
-            </button>
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Plug className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  MCP Servers
-                </span>
-                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  标准 AI 工具协议，自动发现并调用
-                </span>
+        {/* ===== P0 首次设置向导：三步动线引导条（首次设置完成即隐藏，不再显示"Setup complete"提示） ===== */}
+        {(() => {
+          const hasKey = (Object.keys(apiKeys) as ProviderType[]).some((t) => apiKeys[t].trim());
+          const hasModels = (Object.keys(selectedModels) as ProviderType[]).some((t) => selectedModels[t].size > 0);
+          const hasChatRole = !!(selectedChatModel || chatModelPool.length > 0);
+          if (hasKey && hasModels && hasChatRole) return null;
+          const steps = [
+            { label: 'Add API Key', done: hasKey, go: () => setModelPoolOpen(true) },
+            { label: 'Fetch & Select Models', done: hasModels, go: () => setModelPoolOpen(true) },
+            { label: 'Set Chat Model', done: hasChatRole, go: () => setActiveSection('roles') },
+          ];
+          return (
+            <div className="mx-6 mb-4 rounded-xl border px-4 py-3" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}>
+              <div className="mb-2 flex items-center gap-1.5 text-11 font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+                <Zap className="h-3 w-3" /> Quick Start
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setMcpServers([
-                    ...mcpServers,
-                    {
-                      id: `custom-${Date.now()}`,
-                      name: '',
-                      transport: 'stdio',
-                      command: 'npx',
-                      args: [],
-                      enabled: true,
-                    },
-                  ]);
-                }}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
-                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.1)', color: 'oklch(0.50 0.12 45)' }}
-              >
-                <Plus className="h-3 w-3" />
-                Add
-              </button>
-            </div>
-
-            {mcpServers.length === 0 && (
-              <div
-                className="rounded-lg border px-3 py-4 text-center"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-              >
-                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  No MCP servers configured
-                </span>
-              </div>
-            )}
-
-            {mcpServers.map((server, idx) => (
-              <div
-                key={server.id || idx}
-                className="mb-3 rounded-lg border p-3"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80 / 0.5)' }}
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    {server.name || `Server #${idx + 1}`}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const turningOn = !server.enabled;
-                        if (turningOn) {
-                          const risk = isHighRisk(server);
-                          if (risk) {
-                            const ok = window.confirm(`${risk.title}\n\n${risk.message}`);
-                            if (!ok) return;
-                          }
-                        }
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, enabled: turningOn ? true : false };
-                        setMcpServers(updated);
-                      }}
-                      className="flex h-5 w-9 items-center rounded-full transition-colors"
+              <div className="flex flex-wrap items-center gap-1">
+                {steps.map((s, i) => (
+                  <button
+                    key={s.label}
+                    type="button"
+                    onClick={s.go}
+                    className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ color: s.done ? 'var(--success)' : 'var(--ink)' }}
+                    title={`Go to: ${s.label}`}
+                  >
+                    <span
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-11 font-bold"
                       style={{
-                        backgroundColor: server.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.85 0.01 70)',
+                        backgroundColor: s.done ? 'var(--success)' : 'var(--paper)',
+                        border: s.done ? 'none' : '1px solid var(--line)',
+                        color: s.done ? '#fff' : 'var(--ink-muted)',
                       }}
-                      title={isHighRisk(server)?.message || ''}
                     >
-                      <span
-                        className="h-3.5 w-3.5 rounded-full bg-white transition-transform"
-                        style={{ transform: server.enabled ? 'translateX(18px)' : 'translateX(2px)' }}
-                      />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setMcpServers(mcpServers.filter((_, i) => i !== idx))}
-                      className="rounded p-1 transition-colors hover:bg-[oklch(0.55_0.18_35/0.1)]"
-                      style={{ color: 'oklch(0.55 0.18 35)' }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
+                      {s.done ? <Check className="h-3 w-3" /> : i + 1}
+                    </span>
+                    <span className="whitespace-nowrap">{s.label}</span>
+                    {i < steps.length - 1 && <ChevronRight className="h-3 w-3" style={{ color: 'var(--ink-faint)' }} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>名称</label>
-                    <Input
-                      type="text" placeholder="Context7"
-                      value={server.name}
-                      onChange={(e) => {
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, name: e.target.value, id: server.id || `mcp-${e.target.value.toLowerCase().replace(/\s/g, '-')}` };
-                        setMcpServers(updated);
-                      }}
-                      className="h-7 text-xs" style={paperInputStyle}
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>传输类型</label>
-                    <select
-                      value={server.transport}
-                      onChange={(e) => {
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, transport: e.target.value as 'stdio' | 'streamable-http' };
-                        setMcpServers(updated);
-                      }}
-                      className="h-7 w-full rounded-md border px-2 text-xs"
-                      style={{ fontFamily: "'Noto Serif SC', serif", backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)' }}
-                    >
-                      <option value="stdio">stdio (本地)</option>
-                      <option value="streamable-http">streamable-http (远程)</option>
-                    </select>
-                  </div>
-                </div>
-
-                {server.transport === 'stdio' ? (
-                  <>
-                    <div className="mt-2">
-                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>命令</label>
-                      <Input
-                        type="text" placeholder="npx"
-                        value={server.command || ''}
-                        onChange={(e) => { const updated = [...mcpServers]; updated[idx] = { ...server, command: e.target.value }; setMcpServers(updated); }}
-                        className="h-7 text-xs" style={paperInputStyle}
-                      />
-                    </div>
-                    <div className="mt-2">
-                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>参数 (每行一个)</label>
-                      <textarea
-                        value={(server.args || []).join('\n')}
-                        onChange={(e) => { const updated = [...mcpServers]; updated[idx] = { ...server, args: e.target.value.split('\n').filter(a => a.trim()) }; setMcpServers(updated); }}
-                        className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
-                        style={{ backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)', minHeight: '40px', resize: 'vertical' }}
-                        placeholder={'-y\n@modelcontextprotocol/server-sequential-thinking'}
-                      />
-                    </div>
-                    <div className="mt-2">
-                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>环境变量 (JSON)</label>
-                      <textarea
-                        value={JSON.stringify(server.env || {}, null, 2)}
-                        onChange={(e) => { try { const parsed = JSON.parse(e.target.value); const updated = [...mcpServers]; updated[idx] = { ...server, env: parsed }; setMcpServers(updated); } catch {} }}
-                        className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
-                        style={{ backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)', minHeight: '40px', resize: 'vertical' }}
-                        placeholder='{}'
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <div className="mt-2">
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>URL</label>
-                    <Input
-                      type="text" placeholder="https://mcp.example.com/mcp"
-                      value={server.url || ''}
-                      onChange={(e) => { const updated = [...mcpServers]; updated[idx] = { ...server, url: e.target.value }; setMcpServers(updated); }}
-                      className="h-7 text-xs" style={paperInputStyle}
-                    />
-                  </div>
+        <div className="flex min-h-0 flex-1">
+          {/* ========== 左栏导航 ========== */}
+          <div
+            className="w-44 shrink-0 overflow-y-auto border-r py-3"
+            style={{
+              borderColor: 'var(--line-soft)',
+              backgroundColor: 'var(--paper-soft)',
+              maxHeight: '100%',
+            }}
+          >
+            {/* P3 搜索框：按名称/关键词过滤导航项（含扩展项） */}
+            <div className="mb-2 px-2.5">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" style={{ color: 'var(--ink-faint)' }} />
+                <input
+                  value={navQuery}
+                  onChange={(e) => setNavQuery(e.target.value)}
+                  placeholder="Search settings…"
+                  className="h-7 w-full rounded-md border pl-7 pr-6 text-xs outline-none transition-colors"
+                  style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+                />
+                {navQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setNavQuery('')}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-70"
+                    style={{ color: 'var(--ink-faint)' }}
+                    title="Clear search"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
                 )}
               </div>
-            ))}
-          </div>
-        ) : view === 'custom_tools' ? (
-          /* ========== Custom Tools 专属视图 ========== */
-          <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
-            <button
-              type="button"
-              onClick={() => {
-                setView('home');
-              }}
-              className="mb-4 flex items-center gap-1 text-xs transition-colors hover:underline"
-              style={{ color: 'oklch(0.55 0.02 50)' }}
-            >
-              <ArrowLeft className="h-3 w-3" />
-              Back
-            </button>
-
-          {/* 自定义工具设置 */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Wrench className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Custom Tools
-                </span>
-                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  AI 可自动调用的 HTTP 工具
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  const ok = window.confirm(
-                    '注册自定义 HTTP 工具\n\nAI 会把对话中的参数发送到你配置的 endpoint，可能包含敏感信息。仅添加你完全信任的服务器。确认要新增工具吗？',
-                  );
-                  if (!ok) return;
-                  setCustomTools([
-                    ...customTools,
-                    {
-                      name: '',
-                      description: '',
-                      endpoint: '',
-                      method: 'POST',
-                      parameters: { type: 'object', properties: {}, required: [] },
-                      enabled: true,
-                    },
-                  ]);
-                }}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
-                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.1)', color: 'oklch(0.50 0.12 45)' }}
-              >
-                <Plus className="h-3 w-3" />
-                Add
-              </button>
             </div>
 
-            {/* 自定义工具安全警告横幅 */}
-            {customTools.length > 0 && (
-              <div
-                className="mb-3 flex items-start gap-2 rounded-md border px-3 py-2"
-                style={{
-                  backgroundColor: 'oklch(0.85 0.10 70 / 0.12)',
-                  borderColor: 'oklch(0.70 0.14 55 / 0.4)',
-                }}
-              >
-                <span style={{ color: 'oklch(0.55 0.18 35)' }}>⚠</span>
-                <span className="text-[10px] leading-relaxed" style={{ color: 'oklch(0.40 0.08 40)' }}>
-                  AI 调用自定义工具时，会根据描述把对话上下文和参数 POST/GET 到你配置的 URL。
-                  请勿将内部 Token、业务数据发送到不信任的第三方服务器。保存时会额外确认一次。
-                </span>
-              </div>
-            )}
-
-            {customTools.length === 0 && (
-              <div
-                className="rounded-lg border px-3 py-4 text-center"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-              >
-                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  暂无自定义工具。点击 Add 注册一个 HTTP 工具，AI 会在需要时自动调用。
-                </span>
-              </div>
-            )}
-
-            {customTools.map((tool, idx) => (
-              <div
-                key={idx}
-                className="mb-3 rounded-lg border p-3"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80 / 0.5)' }}
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    Tool #{idx + 1}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, enabled: !tool.enabled };
-                        setCustomTools(updated);
-                      }}
-                      className="flex h-5 w-9 items-center rounded-full transition-colors"
-                      style={{
-                        backgroundColor: tool.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.85 0.01 70)',
-                      }}
-                    >
-                      <span
-                        className="h-3.5 w-3.5 rounded-full bg-white transition-transform"
-                        style={{ transform: tool.enabled ? 'translateX(18px)' : 'translateX(2px)' }}
-                      />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCustomTools(customTools.filter((_, i) => i !== idx));
-                      }}
-                      className="rounded p-1 transition-colors hover:bg-[oklch(0.55_0.18_35/0.1)]"
-                      style={{ color: 'oklch(0.55 0.18 35)' }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+            {/* P1 扁平导航：全部设置项依次平铺（无分组），搜索按名称/关键词过滤 */}
+            {(() => {
+              const q = navQuery.trim().toLowerCase();
+              const match = (label: string, keywords: string[]) =>
+                !q || label.toLowerCase().includes(q) || keywords.some((k) => k.includes(q));
+              const groups: Array<{
+                label: string;
+                note?: string;
+                items: Array<{
+                  id: string;
+                  label: string;
+                  icon: React.ReactNode;
+                  keywords: string[];
+                  ext?: boolean;
+                }>;
+              }> = [
+                {
+                  label: 'Models',
+              items: [
+                {
+                  id: 'roles',
+                  label: 'Role Assignment',
+                  icon: <Sparkles className="h-3.5 w-3.5" />,
+                  keywords: ['role', 'task', 'outcome', 'stt', 'image', 'edit', 'chat model', 'assign', 'model', 'api key', 'provider', 'fetch', 'base url', 'pool', 'candidate pool', 'manage models'],
+                },
+                {
+                  id: 'usage',
+                  label: 'Model Usage',
+                  icon: <Gauge className="h-3.5 w-3.5" />,
+                  keywords: ['usage', 'token', 'cost', 'spend', 'model usage', '用量', 'token 消耗', '费用'],
+                },
+              ],
+                },
+                {
+                  label: 'Appearance',
+                  items: [
+                    {
+                      id: 'theme',
+                      label: 'Theme & Appearance',
+                      icon: <Palette className="h-3.5 w-3.5" />,
+                      keywords: ['color', 'skin', 'dark', 'light', 'appearance'],
+                    },
+                    {
+                      id: 'icons',
+                      label: 'Icons & Avatars',
+                      icon: <Image className="h-3.5 w-3.5" />,
+                      keywords: ['avatar', 'icon', 'logo', 'welcome'],
+                    },
+                  ],
+                },
+                {
+                  label: 'Prompts',
+                  items: [
+                    {
+                      id: 'quickprompts',
+                      label: 'Quick Prompts',
+                      icon: <Zap className="h-3.5 w-3.5" />,
+                      keywords: ['quick', 'prompt', 'shortcut', '指令', '快捷', '提示词'],
+                    },
+                  ],
+                },
+                {
+                  label: 'Extensions',
+                  items: [
+                    {
+                      id: 'templates',
+                      label: 'Templates',
+                      icon: <FileText className="h-3.5 w-3.5" />,
+                      keywords: ['template', 'item', 'docx', 'word', 'fill', '模板', '合同'],
+                    },
+                    {
+                      id: 'wechat',
+                      label: 'WeChat Bind',
+                      icon: <MessageCircle className="h-3.5 w-3.5" />,
+                      keywords: ['wechat', 'bind', 'qr', 'weixin', '微信'],
+                    },
+                  ],
+                },
+                {
+                  label: 'Agents',
+                  items: [
+                    {
+                      id: 'agents',
+                      label: 'Agents',
+                      icon: <Bot className="h-3.5 w-3.5" />,
+                      keywords: ['agent', 'specialized', 'coding', 'profile', 'prompt', '专项', '智能体'],
+                    },
+                  ],
+                },
+                {
+                  label: 'Overview',
+                  items: [
+                    {
+                      id: 'diagram',
+                      label: 'Architecture',
+                      icon: (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /><path d="M10 6.5h4M17 10v4M10 17.5h4M6.5 10v4" /></svg>
+                      ),
+                      keywords: ['architecture', 'diagram', 'flow', 'overview'],
+                    },
+                  ],
+                },
+              ];
+              const items = groups.flatMap((g) => g.items).filter((it) => match(it.label, it.keywords));
+              if (items.length === 0) {
+                return (
+                  <div className="px-4 py-2 text-xs" style={{ color: 'var(--ink-faint)' }}>
+                    No settings found
                   </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      名称 (函数名)
-                    </label>
-                    <Input
-                      type="text"
-                      placeholder="get_weather"
-                      value={tool.name}
-                      onChange={(e) => {
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, name: e.target.value };
-                        setCustomTools(updated);
-                      }}
-                      className="h-7 text-xs"
-                      style={paperInputStyle}
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      HTTP 方法
-                    </label>
-                    <select
-                      value={tool.method || 'POST'}
-                      onChange={(e) => {
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, method: e.target.value as 'GET' | 'POST' };
-                        setCustomTools(updated);
-                      }}
-                      className="h-7 w-full rounded-md border px-2 text-xs"
-                      style={{
-                        fontFamily: "'Noto Serif SC', serif",
-                        backgroundColor: 'oklch(0.97 0.008 80)',
-                        borderColor: 'oklch(0.85 0.01 70)',
-                        color: 'oklch(0.25 0.02 50)',
-                      }}
-                    >
-                      <option value="POST">POST</option>
-                      <option value="GET">GET</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-2">
-                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    描述 (AI 根据此描述决定是否调用)
-                  </label>
-                  <Input
-                    type="text"
-                    placeholder="获取指定城市的天气信息"
-                    value={tool.description}
-                    onChange={(e) => {
-                      const updated = [...customTools];
-                      updated[idx] = { ...tool, description: e.target.value };
-                      setCustomTools(updated);
-                    }}
-                    className="h-7 text-xs"
-                    style={paperInputStyle}
-                  />
-                </div>
-
-                <div className="mt-2">
-                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    Endpoint URL
-                  </label>
-                  <Input
-                    type="text"
-                    placeholder="https://api.example.com/weather"
-                    value={tool.endpoint}
-                    onChange={(e) => {
-                      const updated = [...customTools];
-                      updated[idx] = { ...tool, endpoint: e.target.value };
-                      setCustomTools(updated);
-                    }}
-                    className="h-7 text-xs"
-                    style={paperInputStyle}
-                  />
-                </div>
-
-                <div className="mt-2">
-                  <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    参数 (JSON Schema)
-                  </label>
-                  <textarea
-                    value={JSON.stringify(tool.parameters || { type: 'object', properties: {}, required: [] }, null, 2)}
-                    onChange={(e) => {
-                      try {
-                        const parsed = JSON.parse(e.target.value);
-                        const updated = [...customTools];
-                        updated[idx] = { ...tool, parameters: parsed };
-                        setCustomTools(updated);
-                      } catch {
-                        // 解析失败时不更新，允许用户继续编辑
-                      }
-                    }}
-                    className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
-                    style={{
-                      backgroundColor: 'oklch(0.97 0.008 80)',
-                      borderColor: 'oklch(0.85 0.01 70)',
-                      color: 'oklch(0.25 0.02 50)',
-                      minHeight: '60px',
-                      resize: 'vertical',
-                    }}
-                    placeholder={`{\n  "type": "object",\n  "properties": {\n    "city": {\n      "type": "string",\n      "description": "城市名"\n    }\n  },\n  "required": ["city"]\n}`}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-        ) : view === 'home' ? (
-          /* ========== 首页：已安装模型总览 ========== */
-          <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
-            {/* 已安装聊天模型 */}
-            <div className="mb-4">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Brain className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                  <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    Installed Models
-                  </span>
-                </div>
-              </div>
-
-              {(() => {
-                const installedProviders = (Object.keys(apiKeys) as ProviderType[]).filter(
-                  (type) => apiKeys[type].trim() && selectedModels[type].size > 0
                 );
-                if (installedProviders.length === 0) {
-                  return (
-                    <div
-                      className="rounded-lg border px-3 py-4 text-center"
-                      style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-                    >
-                      <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                        No models installed
-                      </span>
-                    </div>
-                  );
-                }
-                return installedProviders.map((type) => {
-                  const preset = PROVIDER_PRESETS.find((p) => p.type === type);
-                  const models = Array.from(selectedModels[type]);
-                  const fetched = fetchedModels[type];
-                  return (
-                    <div
-                      key={type}
-                      className="mb-2 rounded-lg border px-3 py-2"
-                      style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
-                    >
-                      <div className="mb-1.5 flex items-center justify-between">
-                        <span className="text-xs font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                          {preset?.label || type}
-                        </span>
-                        <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                          {models.length} model{models.length > 1 ? 's' : ''}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {models.map((modelId) => {
-                          const info = fetched.find((m) => m.modelId === modelId);
-                          const presetModel = preset?.models.find((pm) => pm.modelId === modelId);
-                          const label = presetModel?.label || modelId;
-                          return (
-                            <span
-                              key={modelId}
-                              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]"
-                              style={{
-                                backgroundColor: 'oklch(0.90 0.02 80)',
-                                color: 'oklch(0.35 0.02 50)',
-                              }}
-                            >
-                              <span
-                                className="inline-block h-1 w-1 rounded-full"
-                                style={{
-                                  backgroundColor: (info?.thinking ?? false)
-                                    ? 'oklch(0.55 0.15 45)'
-                                    : 'oklch(0.65 0.02 55)',
-                                }}
-                              />
-                              {label}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-
-            {/* 视觉模型 */}
-            <div className="mb-4 border-t pt-4" style={{ borderColor: 'oklch(0.88 0.01 70)' }}>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Image className="h-4 w-4" style={{ color: 'oklch(0.50 0.12 45)' }} />
-                  <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    Vision Model
-                  </span>
-                </div>
-              </div>
-
-              {selectedVisionModel ? (
-                <div
-                  className="rounded-lg border px-3 py-2"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-medium" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                        {selectedVisionModel}
-                      </span>
-                      <span className="ml-2 text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                        {PROVIDER_PRESETS.find((p) => p.type === visionProvider)?.label || visionProvider}
-                      </span>
-                    </div>
-                    <span
-                      className="rounded px-1.5 py-0.5 text-[9px]"
-                      style={{
-                        backgroundColor: 'oklch(0.62 0.17 45 / 0.12)',
-                        color: 'oklch(0.50 0.12 45)',
-                      }}
-                    >
-                      Primary
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="rounded-lg border px-3 py-4 text-center"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-                >
-                  <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                    No vision model configured
-                  </span>
-                </div>
-              )}
-
-              {selectedAuxVisionModel && (
-                <div
-                  className="mt-2 rounded-lg border px-3 py-2"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-medium" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                        {selectedAuxVisionModel}
-                      </span>
-                      <span className="ml-2 text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                        {PROVIDER_PRESETS.find((p) => p.type === auxVisionProvider)?.label || auxVisionProvider}
-                      </span>
-                    </div>
-                    <span
-                      className="rounded px-1.5 py-0.5 text-[9px]"
-                      style={{
-                        backgroundColor: 'oklch(0.55 0.15 220 / 0.12)',
-                        color: 'oklch(0.50 0.12 220)',
-                      }}
-                    >
-                      Backup
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* 任务归纳模型 */}
-            <div className="border-t pt-4" style={{ borderColor: 'oklch(0.88 0.01 70)' }}>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 220)' }} />
-                  <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    Wanted
-                  </span>
-                </div>
-              </div>
-
-              {selectedTaskModel ? (
-                <div
-                  className="rounded-lg border px-3 py-2"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-medium" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                        {selectedTaskModel}
-                      </span>
-                      <span className="ml-2 text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                        {PROVIDER_PRESETS.find((p) => p.type === taskModelProvider)?.label || taskModelProvider}
-                      </span>
-                    </div>
-                    <span
-                      className="rounded px-1.5 py-0.5 text-[9px]"
-                      style={{
-                        backgroundColor: 'oklch(0.55 0.15 220 / 0.12)',
-                        color: 'oklch(0.50 0.12 220)',
-                      }}
-                    >
-                      Active
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="rounded-lg border px-3 py-4 text-center"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-                >
-                  <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                    No Wanted model configured
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* 文本编辑模型 */}
-            <div className="border-t pt-4" style={{ borderColor: 'oklch(0.88 0.01 70)' }}>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Pencil className="h-4 w-4" style={{ color: 'oklch(0.50 0.12 180)' }} />
-                  <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    Text Edit
-                  </span>
-                </div>
-              </div>
-
-              {selectedEditModel ? (
-                <div
-                  className="rounded-lg border px-3 py-2"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-medium" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                        {selectedEditModel}
-                      </span>
-                      <span className="ml-2 text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                        {PROVIDER_PRESETS.find((p) => p.type === editModelProvider)?.label || editModelProvider}
-                      </span>
-                    </div>
-                    <span
-                      className="rounded px-1.5 py-0.5 text-[9px]"
-                      style={{
-                        backgroundColor: 'oklch(0.50 0.12 180 / 0.12)',
-                        color: 'oklch(0.50 0.12 180)',
-                      }}
-                    >
-                      Active
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="rounded-lg border px-3 py-4 text-center"
-                  style={{ borderColor: 'oklch(0.88 0.01 70)', borderStyle: 'dashed' }}
-                >
-                  <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                    No text edit model configured (falls back to Wanted / chat)
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* 自定义工具 */}
-            <div className="mb-4 border-t pt-4" style={{ borderColor: 'oklch(0.88 0.01 70)' }}>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Wrench className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                  <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    Custom Tools
-                  </span>
-                </div>
-                {customTools.filter((t) => t.enabled).length > 0 && (
-                  <span className="flex items-center gap-1 text-xs" style={{ color: 'oklch(0.50 0.12 45)' }}>
-                    <Check className="h-3 w-3" />
-                    {customTools.filter((t) => t.enabled).length} active
-                  </span>
-                )}
-              </div>
-              {customTools.length === 0 ? (
-                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  No custom tools configured
-                </span>
-              ) : (
-                <div className="flex flex-wrap gap-1.5">
-                  {customTools.map((tool, idx) => (
-                    <span
-                      key={idx}
-                      className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px]"
-                      style={{
-                        backgroundColor: tool.enabled ? 'oklch(0.62 0.17 45 / 0.08)' : 'oklch(0.95 0.005 80)',
-                        color: tool.enabled ? 'oklch(0.50 0.12 45)' : 'oklch(0.55 0.02 50 / 0.5)',
-                        border: `1px solid ${tool.enabled ? 'oklch(0.62 0.17 45 / 0.2)' : 'oklch(0.88 0.01 70)'}`,
-                      }}
-                    >
-                      {tool.name}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* MCP 服务器 */}
-            <div className="mb-4 border-t pt-4" style={{ borderColor: 'oklch(0.88 0.01 70)' }}>
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Plug className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                  <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                    MCP Servers
-                  </span>
-                </div>
-                {mcpServers.filter((s) => s.enabled).length > 0 && (
-                  <span className="flex items-center gap-1 text-xs" style={{ color: 'oklch(0.50 0.12 45)' }}>
-                    <Check className="h-3 w-3" />
-                    {mcpServers.filter((s) => s.enabled).length} connected
-                  </span>
-                )}
-              </div>
-              {mcpServers.length === 0 ? (
-                <span className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  No MCP servers configured
-                </span>
-              ) : (
-                <div className="flex flex-wrap gap-1.5">
-                  {mcpServers.map((server) => (
-                    <span
-                      key={server.id}
-                      className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px]"
-                      style={{
-                        backgroundColor: server.enabled ? 'oklch(0.62 0.17 45 / 0.08)' : 'oklch(0.95 0.005 80)',
-                        color: server.enabled ? 'oklch(0.50 0.12 45)' : 'oklch(0.55 0.02 50 / 0.5)',
-                        border: `1px solid ${server.enabled ? 'oklch(0.62 0.17 45 / 0.2)' : 'oklch(0.88 0.01 70)'}`,
-                      }}
-                    >
-                      {server.name}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* 修改按钮 */}
-            <div className="mt-4">
-              <button
-                type="button"
-                onClick={() => setView('add')}
-                className="flex w-full items-center justify-center gap-2 rounded-lg py-2 text-xs font-medium transition-colors"
-                style={{
-                  backgroundColor: 'oklch(0.62 0.17 45 / 0.1)',
-                  color: 'oklch(0.50 0.12 45)',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = 'oklch(0.62 0.17 45 / 0.18)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = 'oklch(0.62 0.17 45 / 0.1)';
-                }}
-              >
-                <Pencil className="h-3.5 w-3.5" />
-                Modify
-              </button>
-            </div>
+              }
+              return items.map((it) => {
+                const active = activeSection === it.id;
+                return (
+                  <button
+                    key={it.id}
+                    type="button"
+                    onClick={() => setActiveSection(it.id as typeof activeSection)}
+                    className="mx-2 mb-0.5 flex w-[calc(100%-16px)] items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{
+                      backgroundColor: active ? 'var(--purple-soft)' : 'transparent',
+                      color: active ? 'var(--purple)' : 'var(--ink-muted)',
+                      boxShadow: active ? 'inset 3px 0 0 var(--purple)' : 'none',
+                    }}
+                  >
+                    {it.icon}
+                    <span className="flex-1 truncate text-sm font-medium">{it.label}</span>
+                  </button>
+                );
+              });
+            })()}
           </div>
-        ) : (
-          /* ========== 第二级：添加/管理模型 ========== */
-          <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
-            {/* 返回按钮 */}
-            <button
-              type="button"
-              onClick={() => setView('home')}
-              className="mb-2 flex items-center gap-1 text-xs transition-colors hover:underline"
-              style={{ color: 'oklch(0.55 0.02 50)' }}
-            >
-              <ArrowLeft className="h-3 w-3" />
-              Back
-            </button>
 
-            {PROVIDER_PRESETS.map((preset) => {
-            const hasKey = apiKeys[preset.type].trim().length > 0;
-            const models = fetchedModels[preset.type];
-            const isTesting = testing[preset.type];
-            const error = testError[preset.type];
-
-            return (
-              <div key={preset.type} className="border-b py-4 last:border-b-0" style={{ borderColor: 'oklch(0.88 0.01 70)' }}>
-                <div className="mb-2 flex items-center justify-between">
-                  <div>
-                    <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                      {preset.label}
-                    </span>
-                    <span className="ml-2 text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                      {preset.description}
-                    </span>
-                  </div>
-                  {hasKey && models.length > 0 && (
-                    <span className="flex items-center gap-1 text-xs" style={{ color: 'oklch(0.50 0.12 45)' }}>
-                      <Check className="h-3 w-3" />
-                      {models.length} models
-                    </span>
-                  )}
-                </div>
-
-                {/* API Key 输入 */}
-                <div className="relative">
-                  <Input
-                    type="text"
-                    placeholder={`Enter ${preset.label} API Key`}
-                    value={apiKeys[preset.type]}
-                    onChange={(e) =>
-                      setApiKeys((prev) => ({ ...prev, [preset.type]: e.target.value }))
-                    }
-                    className="h-8 pr-9 text-xs"
-                    style={paperInputStyle}
-                  />
-                </div>
-
-                {/* 获取模型按钮 */}
-                {hasKey && (
-                  <div className="mt-2 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => testConnection(preset.type, preset)}
-                      disabled={isTesting}
-                      className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50"
-                      style={{
-                        backgroundColor: 'oklch(0.62 0.17 45 / 0.12)',
-                        color: 'oklch(0.50 0.12 45)',
-                      }}
-                    >
-                      {isTesting ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Zap className="h-3 w-3" />
-                      )}
-                      {isTesting ? 'Fetching...' : 'Fetch Models'}
-                    </button>
-
-                    {hasKey && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setApiKeys((prev) => ({ ...prev, [preset.type]: '' }));
-                          setSelectedModels((prev) => ({ ...prev, [preset.type]: new Set() }));
-                          setFetchedModels((prev) => ({ ...prev, [preset.type]: [] }));
-                          setTestError((prev) => ({ ...prev, [preset.type]: '' }));
-                        }}
-                        className="flex items-center gap-1 text-[10px] transition-colors hover:underline"
-                        style={{ color: 'oklch(0.55 0.02 50)' }}
-                      >
-                        <X className="h-2.5 w-2.5" />
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* 错误提示 */}
-                {error && (
-                  <p className="mt-2 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>
-                    {error}
-                  </p>
-                )}
-
-                {/* 获取到的模型列表 */}
-                {models.length > 0 && (
-                  <div className="mt-3">
-                    <p className="mb-1 text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      Select Model ({models.filter((m) => m.category === 'chat').length} chat / {models.filter((m) => m.category !== 'chat').length} other)
-                    </p>
-                    <div className="space-y-1 max-h-40 overflow-y-auto">
-                      {models.map((m) => {
-                        const checked = selectedModels[preset.type].has(m.modelId);
-                        const key = `${preset.type}-${m.modelId}`;
-                        const isExpanded = expandedModels[key];
-                        const presetModel = preset.models.find((pm) => pm.modelId === m.modelId);
-                        const spec: ModelSpec | undefined = presetModel?.spec;
-
-                        return (
-                          <div key={key}>
-                            <label
-                              className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[oklch(0.95_0.01_80)]"
-                            >
-                              <button
-                                type="button"
-                                onClick={() => toggleModel(preset.type, m.modelId)}
-                                className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors"
-                                style={{
-                                  backgroundColor: checked ? 'oklch(0.62 0.17 45)' : 'transparent',
-                                  borderColor: checked ? 'oklch(0.62 0.17 45)' : 'oklch(0.75 0.02 60)',
-                                }}
-                              >
-                                {checked && <Check className="h-3 w-3 text-white" />}
-                              </button>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-xs font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                                    {m.modelId}
-                                  </span>
-                                  {m.thinking && (
-                                    <span
-                                      className="shrink-0 rounded px-1 py-px text-[9px] leading-tight"
-                                      style={{
-                                        backgroundColor: 'oklch(0.62 0.17 45 / 0.12)',
-                                        color: 'oklch(0.50 0.12 45)',
-                                      }}
-                                    >
-                                      Thinking
-                                    </span>
-                                  )}
-                                  {m.category !== 'chat' && (
-                                    <span
-                                      className="shrink-0 rounded px-1 py-px text-[9px] leading-tight"
-                                      style={{
-                                        backgroundColor: 'oklch(0.70 0.01 60 / 0.15)',
-                                        color: 'oklch(0.50 0.01 50)',
-                                      }}
-                                    >
-                                      {m.category === 'embedding' ? 'Embedding' : m.category === 'vision' ? 'Vision' : m.category === 'audio' ? 'Voice' : 'Other'}
-                                    </span>
-                                  )}
-                                </div>
-                                {m.ownedBy && (
-                                  <span className="text-[10px]" style={{ color: 'oklch(0.60 0.015 50)' }}>
-                                    {m.ownedBy}
-                                  </span>
-                                )}
-                              </div>
-                              {spec && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setExpandedModels((prev) => ({ ...prev, [key]: !isExpanded }));
-                                  }}
-                                  className="mt-0.5 text-[10px] transition-colors"
-                                  style={{ color: 'oklch(0.55 0.02 50)' }}
-                                >
-                                  {isExpanded ? 'Collapse' : 'Details'}
-                                </button>
-                              )}
-                            </label>
-
-                            {isExpanded && spec && (
-                              <div className="ml-6 mt-1 rounded-md border p-2" style={{ backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)' }}>
-                                {spec.capabilities && spec.capabilities.length > 0 && (
-                                  <div className="mb-1.5">
-                                    <span className="text-[9px] font-semibold" style={{ color: 'oklch(0.50 0.02 50)' }}>Capabilities:</span>
-                                    <div className="flex flex-wrap gap-1">
-                                      {spec.capabilities.map((cap) => (
-                                        <span
-                                          key={cap}
-                                          className="rounded px-1 py-px text-[9px]"
-                                          style={{ backgroundColor: 'oklch(0.90 0.02 80)', color: 'oklch(0.45 0.02 50)' }}
-                                        >
-                                          {cap === 'reasoning' ? 'Reasoning' : cap === 'conversation' ? 'Chat' : cap === 'coding' ? 'Code' : cap === 'creative' ? 'Creativity' : cap === 'analysis' ? 'Analysis' : cap === 'multilingual' ? 'Multilingual' : cap === 'long-context' ? 'Long Context' : cap}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                {spec.strengths && spec.strengths.length > 0 && (
-                                  <div className="mb-1.5">
-                                    <span className="text-[9px] font-semibold" style={{ color: 'oklch(0.50 0.12 45)' }}>Advantages:</span>
-                                    <div className="flex flex-wrap gap-1">
-                                      {spec.strengths.map((s) => (
-                                        <span key={s} className="text-[9px]" style={{ color: 'oklch(0.45 0.02 50)' }}>• {s}</span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                {spec.useCases && spec.useCases.length > 0 && (
-                                  <div>
-                                    <span className="text-[9px] font-semibold" style={{ color: 'oklch(0.50 0.02 50)' }}>Use Cases:</span>
-                                    <div className="flex flex-wrap gap-1">
-                                      {spec.useCases.map((uc) => (
-                                        <span key={uc} className="text-[9px]" style={{ color: 'oklch(0.50 0.02 50)' }}>• {uc}</span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                {spec.contextWindow && (
-                                  <div className="mt-1.5 text-[9px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                                    Context Window:{(spec.contextWindow / 1000).toFixed(0)}K
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          {/* 视觉模型设置（与普通模型设置一致的模式） */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Image className="h-4 w-4" style={{ color: 'oklch(0.50 0.12 45)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Vision Model
-                </span>
-              </div>
-              {visionApiKey.trim() && visionFetchedModels.length > 0 && (
-                <span className="flex items-center gap-1 text-xs" style={{ color: 'oklch(0.50 0.12 45)' }}>
-                  <Check className="h-3 w-3" />
-                  {visionFetchedModels.length} models
-                </span>
-              )}
-            </div>
-
-            {/* 提供商选择 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                Select Provider
-              </label>
-              <select
-                value={visionProvider}
-                onChange={(e) => {
-                  setVisionProvider(e.target.value as ProviderType);
-                  setVisionFetchedModels([]);
-                  setVisionTestError('');
-                  setSelectedVisionModel('');
-                }}
-                className="w-full h-8 rounded-md border px-3 text-xs"
-                style={{
-                  fontFamily: "'Noto Serif SC', serif",
-                  backgroundColor: 'oklch(0.97 0.008 80)',
-                  borderColor: 'oklch(0.85 0.01 70)',
-                  color: 'oklch(0.25 0.02 50)',
-                }}
-              >
-                {PROVIDER_PRESETS.map((preset) => (
-                  <option key={preset.type} value={preset.type}>
-                    {preset.label} ({preset.description})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* API Key 输入 */}
-            <div className="relative">
-              <Input
-                type="text"
-                placeholder={`Enter ${PROVIDER_PRESETS.find((p) => p.type === visionProvider)?.label || ''} API Key`}
-                value={visionApiKey}
-                onChange={(e) => setVisionApiKey(e.target.value)}
-                className="h-8 pr-9 text-xs"
-                style={paperInputStyle}
-              />
-            </div>
-
-            {/* 获取模型按钮 */}
-            {visionApiKey.trim() && (
-              <div className="mt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={testVisionConnection}
-                  disabled={visionTesting}
-                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'oklch(0.62 0.17 45 / 0.12)',
-                    color: 'oklch(0.50 0.12 45)',
-                  }}
-                >
-                  {visionTesting ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Zap className="h-3 w-3" />
-                  )}
-                  {visionTesting ? 'Fetching...' : 'Fetch Models'}
-                </button>
-
-                {visionApiKey.trim() && (
+          {/* ========== 右栏面板容器 ========== */}
+          <div
+            className="flex-1 min-w-0 overflow-y-auto"
+            style={{ maxHeight: '100%' }}
+          >
+        {activeSection === 'icons' && (
+          /* ========== 应用图标 ========== */
+          <div className="px-5 py-4">
+            {/* 应用图标（欢迎窗口 + 侧边栏，共用头像池） */}
+            <div className="mb-4">
+              {/* ── 欢迎窗口头像 ── */}
+              <div className="mb-2 rounded-lg p-2.5" style={{ backgroundColor: 'var(--paper)' }}>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
+                    Welcome Window
+                    <span className="ml-1.5 text-sm" style={{ color: 'var(--ink-muted)' }}>{avatarMode === 'random' ? 'Random' : 'Fixed'}</span>
+                  </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      setVisionApiKey('');
-                      setVisionFetchedModels([]);
-                      setSelectedVisionModel('');
-                      setVisionTestError('');
+                    onClick={() => { setAvatarMode(avatarMode === 'random' ? 'fixed' : 'random'); setSaved(false); }}
+                    className="rounded px-1.5 py-0.5 text-xs font-medium transition-colors"
+                    style={{
+                      backgroundColor: avatarMode === 'fixed' ? 'var(--primary-soft)' : 'var(--paper-hover)',
+                      color: avatarMode === 'fixed' ? 'var(--primary-strong)' : 'var(--ink-muted)',
                     }}
-                    className="flex items-center gap-1 text-[10px] transition-colors hover:underline"
-                    style={{ color: 'oklch(0.55 0.02 50)' }}
                   >
-                    <X className="h-2.5 w-2.5" />
-                    Clear
+                    {avatarMode === 'random' ? 'Switch to Fixed' : 'Switch to Random'}
                   </button>
-                )}
-              </div>
-            )}
-
-            {/* 错误提示 */}
-            {visionTestError && (
-              <p className="mt-2 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>
-                {visionTestError}
-              </p>
-            )}
-
-            {/* 获取到的模型列表（单选） */}
-            {visionFetchedModels.length > 0 && (
-              <div className="mt-3">
-                <p className="mb-1 text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                  Select Vision Model (single)
-                </p>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {visionFetchedModels.map((m) => {
-                    const checked = selectedVisionModel === m.modelId;
-                    const key = `vision-${m.modelId}`;
-
-                    return (
-                      <label
-                        key={key}
-                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[oklch(0.95_0.01_80)]"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setSelectedVisionModel(m.modelId)}
-                          className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors"
-                          style={{
-                            borderColor: checked ? 'oklch(0.62 0.17 45)' : 'oklch(0.75 0.02 60)',
-                          }}
-                        >
-                          {checked && (
-                            <span
-                              className="h-2 w-2 rounded-full"
-                              style={{ backgroundColor: 'oklch(0.62 0.17 45)' }}
-                            />
-                          )}
-                        </button>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                              {m.modelId}
-                            </span>
-                            {m.category !== 'chat' && (
-                              <span
-                                className="shrink-0 rounded px-1 py-px text-[9px] leading-tight"
-                                style={{
-                                  backgroundColor: 'oklch(0.70 0.01 60 / 0.15)',
-                                  color: 'oklch(0.50 0.01 50)',
-                                }}
-                              >
-                                {m.category === 'embedding' ? 'Embedding' : m.category === 'vision' ? 'Vision' : m.category === 'audio' ? 'Voice' : 'Other'}
-                              </span>
-                            )}
-                          </div>
-                          {m.ownedBy && (
-                            <span className="text-[10px]" style={{ color: 'oklch(0.60 0.015 50)' }}>
-                              {m.ownedBy}
-                            </span>
-                          )}
-                        </div>
-                      </label>
-                    );
-                  })}
                 </div>
-              </div>
-            )}
-          {/* 辅助视觉模型设置（主模型失败时自动切换） */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Image className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 220)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Vision Model (Backup)
-                </span>
-              </div>
-              {auxVisionApiKey.trim() && auxVisionFetchedModels.length > 0 && (
-                <span className="flex items-center gap-1 text-xs" style={{ color: 'oklch(0.55 0.15 220)' }}>
-                  <Check className="h-3 w-3" />
-                  {auxVisionFetchedModels.length} models
-                </span>
-              )}
-            </div>
-            <p className="mb-3 text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-              Automatically switches to this model when the primary vision model fails.
-            </p>
-
-            {/* 提供商选择 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                Select Provider
-              </label>
-              <select
-                value={auxVisionProvider}
-                onChange={(e) => {
-                  setAuxVisionProvider(e.target.value as ProviderType);
-                  setAuxVisionFetchedModels([]);
-                  setAuxVisionTestError('');
-                  setSelectedAuxVisionModel('');
-                }}
-                className="w-full h-8 rounded-md border px-3 text-xs"
-                style={{
-                  fontFamily: "'Noto Serif SC', serif",
-                  backgroundColor: 'oklch(0.97 0.008 80)',
-                  borderColor: 'oklch(0.85 0.01 70)',
-                  color: 'oklch(0.25 0.02 50)',
-                }}
-              >
-                {PROVIDER_PRESETS.map((preset) => (
-                  <option key={preset.type} value={preset.type}>
-                    {preset.label} ({preset.description})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* API Key 输入 */}
-            <div className="relative">
-              <Input
-                type="text"
-                placeholder={`Enter ${PROVIDER_PRESETS.find((p) => p.type === auxVisionProvider)?.label || ''} API Key`}
-                value={auxVisionApiKey}
-                onChange={(e) => setAuxVisionApiKey(e.target.value)}
-                className="h-8 pr-9 text-xs"
-                style={paperInputStyle}
-              />
-            </div>
-
-            {/* 获取模型按钮 */}
-            {auxVisionApiKey.trim() && (
-              <div className="mt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={testAuxVisionConnection}
-                  disabled={auxVisionTesting}
-                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'oklch(0.55 0.15 220 / 0.12)',
-                    color: 'oklch(0.50 0.12 220)',
-                  }}
-                >
-                  {auxVisionTesting ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Zap className="h-3 w-3" />
-                  )}
-                  {auxVisionTesting ? 'Fetching...' : 'Fetch Models'}
-                </button>
-
-                {auxVisionApiKey.trim() && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuxVisionApiKey('');
-                      setAuxVisionFetchedModels([]);
-                      setSelectedAuxVisionModel('');
-                      setAuxVisionTestError('');
-                    }}
-                    className="flex items-center gap-1 text-[10px] transition-colors hover:underline"
-                    style={{ color: 'oklch(0.55 0.02 50)' }}
-                  >
-                    <X className="h-2.5 w-2.5" />
-                    Clear
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* 错误提示 */}
-            {auxVisionTestError && (
-              <p className="mt-2 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>
-                {auxVisionTestError}
-              </p>
-            )}
-
-            {/* 获取到的模型列表（单选） */}
-            {auxVisionFetchedModels.length > 0 && (
-              <div className="mt-3">
-                <p className="mb-1 text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                  Select Backup Vision Model (single)
-                </p>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {auxVisionFetchedModels.map((m) => {
-                    const checked = selectedAuxVisionModel === m.modelId;
-                    const key = `aux-vision-${m.modelId}`;
-
-                    return (
-                      <label
-                        key={key}
-                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[oklch(0.95_0.01_80)]"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setSelectedAuxVisionModel(m.modelId)}
-                          className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors"
-                          style={{
-                            borderColor: checked ? 'oklch(0.55 0.15 220)' : 'oklch(0.75 0.02 60)',
-                          }}
-                        >
-                          {checked && (
-                            <span
-                              className="h-2 w-2 rounded-full"
-                              style={{ backgroundColor: 'oklch(0.55 0.15 220)' }}
-                            />
-                          )}
-                        </button>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                              {m.modelId}
-                            </span>
-                            {m.category !== 'chat' && (
-                              <span
-                                className="shrink-0 rounded px-1 py-px text-[9px] leading-tight"
-                                style={{
-                                  backgroundColor: 'oklch(0.70 0.01 60 / 0.15)',
-                                  color: 'oklch(0.50 0.01 50)',
-                                }}
-                              >
-                                {m.category === 'embedding' ? 'Embedding' : m.category === 'vision' ? 'Vision' : m.category === 'audio' ? 'Voice' : 'Other'}
-                              </span>
-                            )}
-                          </div>
-                          {m.ownedBy && (
-                            <span className="text-[10px]" style={{ color: 'oklch(0.60 0.015 50)' }}>
-                              {m.ownedBy}
-                            </span>
-                          )}
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-          {/* 任务归纳模型设置 */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4" style={{ color: 'oklch(0.55 0.15 220)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Wanted
-                </span>
-              </div>
-              {taskModelApiKey.trim() && taskModelFetchedModels.length > 0 && (
-                <span className="flex items-center gap-1 text-xs" style={{ color: 'oklch(0.55 0.15 220)' }}>
-                  <Check className="h-3 w-3" />
-                  {taskModelFetchedModels.length} models
-                </span>
-              )}
-            </div>
-
-            {/* 提供商选择 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                Select Provider
-              </label>
-              <select
-                value={taskModelProvider}
-                onChange={(e) => {
-                  setTaskModelProvider(e.target.value as ProviderType);
-                  setTaskModelFetchedModels([]);
-                  setTaskModelTestError('');
-                  setSelectedTaskModel('');
-                }}
-                className="w-full h-8 rounded-md border px-3 text-xs"
-                style={{
-                  fontFamily: "'Noto Serif SC', serif",
-                  backgroundColor: 'oklch(0.97 0.008 80)',
-                  borderColor: 'oklch(0.85 0.01 70)',
-                  color: 'oklch(0.25 0.02 50)',
-                }}
-              >
-                {PROVIDER_PRESETS.map((preset) => (
-                  <option key={preset.type} value={preset.type}>
-                    {preset.label} ({preset.description})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* API Key 输入 */}
-            <div className="relative">
-              <Input
-                type="text"
-                placeholder={`Enter ${PROVIDER_PRESETS.find((p) => p.type === taskModelProvider)?.label || ''} API Key`}
-                value={taskModelApiKey}
-                onChange={(e) => setTaskModelApiKey(e.target.value)}
-                className="h-8 pr-9 text-xs"
-                style={paperInputStyle}
-              />
-            </div>
-
-            {/* 获取模型按钮 */}
-            {taskModelApiKey.trim() && (
-              <div className="mt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={testTaskModelConnection}
-                  disabled={taskModelTesting}
-                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50"
-                  style={{
-                    backgroundColor: 'oklch(0.55 0.15 220 / 0.12)',
-                    color: 'oklch(0.50 0.12 220)',
-                  }}
-                >
-                  {taskModelTesting ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Zap className="h-3 w-3" />
-                  )}
-                  {taskModelTesting ? 'Fetching...' : 'Fetch Models'}
-                </button>
-
-                {taskModelApiKey.trim() && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTaskModelApiKey('');
-                      setTaskModelFetchedModels([]);
-                      setSelectedTaskModel('');
-                      setTaskModelTestError('');
-                    }}
-                    className="flex items-center gap-1 text-[10px] transition-colors hover:underline"
-                    style={{ color: 'oklch(0.55 0.02 50)' }}
-                  >
-                    <X className="h-2.5 w-2.5" />
-                    Clear
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* 错误提示 */}
-            {taskModelTestError && (
-              <p className="mt-2 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>
-                {taskModelTestError}
-              </p>
-            )}
-
-            {/* 获取到的模型列表（单选） */}
-            {taskModelFetchedModels.length > 0 && (
-              <div className="mt-3">
-                <p className="mb-1 text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                  Select Wanted Model (single)
-                </p>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {taskModelFetchedModels.map((m) => {
-                    const checked = selectedTaskModel === m.modelId;
-                    const key = `task-${m.modelId}`;
-
-                    return (
-                      <label
-                        key={key}
-                        className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[oklch(0.95_0.01_80)]"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setSelectedTaskModel(m.modelId)}
-                          className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors"
-                          style={{
-                            borderColor: checked ? 'oklch(0.55 0.15 220)' : 'oklch(0.75 0.02 60)',
-                          }}
-                        >
-                          {checked && (
-                            <span
-                              className="h-2 w-2 rounded-full"
-                              style={{ backgroundColor: 'oklch(0.55 0.15 220)' }}
-                            />
-                          )}
-                        </button>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                              {m.modelId}
-                            </span>
-                            {m.thinking && (
-                              <span
-                                className="shrink-0 rounded px-1 py-px text-[9px] leading-tight"
-                                style={{
-                                  backgroundColor: 'oklch(0.55 0.15 220 / 0.12)',
-                                  color: 'oklch(0.50 0.12 220)',
-                                }}
-                              >
-                                Thinking
-                              </span>
-                            )}
-                          </div>
-                          {m.ownedBy && (
-                            <span className="text-[10px]" style={{ color: 'oklch(0.60 0.015 50)' }}>
-                              {m.ownedBy}
-                            </span>
-                          )}
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-          {/* 文本编辑模型设置 */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Pencil className="h-4 w-4" style={{ color: 'oklch(0.50 0.12 180)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  Text Edit
-                </span>
-              </div>
-            </div>
-            <div className="mb-2">
-              <label className="mb-1 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>Select Provider</label>
-              <select value={editModelProvider} onChange={(e) => { setEditModelProvider(e.target.value as ProviderType); setEditModelFetchedModels([]); setEditModelTestError(''); setSelectedEditModel(''); }} className="w-full h-8 rounded-md border px-3 text-xs" style={{ fontFamily: "'Noto Serif SC', serif", backgroundColor: 'oklch(0.97 0.008 80)', borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.25 0.02 50)' }}>
-                {PROVIDER_PRESETS.map((p) => <option key={p.type} value={p.type}>{p.label} ({p.description})</option>)}
-              </select>
-            </div>
-            <div className="relative">
-              <Input type="text" placeholder={`Enter ${PROVIDER_PRESETS.find(p => p.type === editModelProvider)?.label || ''} API Key`} value={editModelApiKey} onChange={(e) => setEditModelApiKey(e.target.value)} className="h-8 pr-9 text-xs" style={paperInputStyle} />
-            </div>
-            {editModelApiKey.trim() && (
-              <div className="mt-2 flex items-center gap-2">
-                <button type="button" onClick={testEditModelConnection} disabled={editModelTesting} className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50" style={{ backgroundColor: 'oklch(0.50 0.12 180 / 0.12)', color: 'oklch(0.50 0.12 180)' }}>
-                  {editModelTesting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-                  {editModelTesting ? 'Fetching...' : 'Fetch Models'}
-                </button>
-                <button type="button" onClick={() => { setEditModelApiKey(''); setEditModelFetchedModels([]); setSelectedEditModel(''); setEditModelTestError(''); }} className="flex items-center gap-1 text-[10px] transition-colors hover:underline" style={{ color: 'oklch(0.55 0.02 50)' }}><X className="h-2.5 w-2.5" />Clear</button>
-              </div>
-            )}
-            {editModelTestError && <p className="mt-2 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>{editModelTestError}</p>}
-            {editModelFetchedModels.length > 0 && (
-              <div className="mt-3"><p className="mb-1 text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>Select Text Edit Model (single)</p>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {editModelFetchedModels.map((m) => { const checked = selectedEditModel === m.modelId;
-                    return (<label key={`edit-${m.modelId}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-[oklch(0.95_0.01_80)]">
-                      <button type="button" onClick={() => setSelectedEditModel(m.modelId)} className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors" style={{ borderColor: checked ? 'oklch(0.50 0.12 180)' : 'oklch(0.75 0.02 60)' }}>{checked && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: 'oklch(0.50 0.12 180)' }} />}</button>
-                      <div className="flex-1 min-w-0"><div className="flex items-center gap-1.5"><span className="text-xs font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>{m.modelId}</span>{m.thinking && <span className="shrink-0 rounded px-1 py-px text-[9px] leading-tight" style={{ backgroundColor: 'oklch(0.50 0.12 180 / 0.12)', color: 'oklch(0.50 0.12 180)' }}>Thinking</span>}</div>{m.ownedBy && <span className="text-[10px]" style={{ color: 'oklch(0.60 0.015 50)' }}>{m.ownedBy}</span>}</div>
-                    </label>);
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-
-
-          {/* MCP 服务器设置 */}
-          <div className="border-t border-[oklch(0.88_0.01_70)] mt-4 pt-4 pb-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Plug className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-                <span className="text-sm font-semibold" style={{ color: 'oklch(0.30 0.015 50)' }}>
-                  MCP Servers
-                </span>
-                <span className="text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  标准 AI 工具协议，自动发现并调用
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setMcpServers([
-                    ...mcpServers,
-                    {
-                      id: `custom-${Date.now()}`,
-                      name: '',
-                      transport: 'stdio',
-                      command: 'npx',
-                      args: [],
-                      enabled: true,
-                    },
-                  ]);
-                }}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
-                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.1)', color: 'oklch(0.50 0.12 45)' }}
-              >
-                <Plus className="h-3 w-3" />
-                Add
-              </button>
-            </div>
-
-            {mcpServers.map((server, idx) => (
-              <div
-                key={server.id || idx}
-                className="mb-3 rounded-lg border p-3"
-                style={{ borderColor: 'oklch(0.88 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80 / 0.5)' }}
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[11px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                    {server.name || `Server #${idx + 1}`}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        // 关闭时不需要确认；打开高风险项弹确认
-                        const turningOn = !server.enabled;
-                        if (turningOn) {
-                          const risk = isHighRisk(server);
-                          if (risk) {
-                            const ok = window.confirm(`${risk.title}\n\n${risk.message}`);
-                            if (!ok) return;
-                          }
-                        }
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, enabled: turningOn ? true : false };
-                        setMcpServers(updated);
-                      }}
-                      className="flex h-5 w-9 items-center rounded-full transition-colors"
-                      style={{
-                        backgroundColor: server.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.85 0.01 70)',
-                      }}
-                      title={isHighRisk(server)?.message || ''}
-                    >
-                      <span
-                        className="h-3.5 w-3.5 rounded-full bg-white transition-transform"
-                        style={{ transform: server.enabled ? 'translateX(18px)' : 'translateX(2px)' }}
-                      />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMcpServers(mcpServers.filter((_, i) => i !== idx));
-                      }}
-                      className="rounded p-1 transition-colors hover:bg-[oklch(0.55_0.18_35/0.1)]"
-                      style={{ color: 'oklch(0.55 0.18 35)' }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                {avatarList.length === 0 ? (
+                  <div className="rounded border px-3 py-3 text-center" style={{ borderColor: 'var(--line-soft)', borderStyle: 'dashed' }}>
+                    <span className="text-sm" style={{ color: 'var(--ink-muted)' }}>No avatars yet. Add one first.</span>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      名称
-                    </label>
-                    <Input
-                      type="text"
-                      placeholder="Context7"
-                      value={server.name}
-                      onChange={(e) => {
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, name: e.target.value, id: server.id || `mcp-${e.target.value.toLowerCase().replace(/\s/g, '-')}` };
-                        setMcpServers(updated);
-                      }}
-                      className="h-7 text-xs"
-                      style={paperInputStyle}
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      传输类型
-                    </label>
-                    <select
-                      value={server.transport}
-                      onChange={(e) => {
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, transport: e.target.value as 'stdio' | 'streamable-http' };
-                        setMcpServers(updated);
-                      }}
-                      className="h-7 w-full rounded-md border px-2 text-xs"
-                      style={{
-                        fontFamily: "'Noto Serif SC', serif",
-                        backgroundColor: 'oklch(0.97 0.008 80)',
-                        borderColor: 'oklch(0.85 0.01 70)',
-                        color: 'oklch(0.25 0.02 50)',
-                      }}
-                    >
-                      <option value="stdio">stdio (本地)</option>
-                      <option value="streamable-http">streamable-http (远程)</option>
-                    </select>
-                  </div>
-                </div>
-
-                {server.transport === 'stdio' ? (
-                  <>
-                    <div className="mt-2">
-                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                        命令
-                      </label>
-                      <Input
-                        type="text"
-                        placeholder="npx"
-                        value={server.command || ''}
-                        onChange={(e) => {
-                          const updated = [...mcpServers];
-                          updated[idx] = { ...server, command: e.target.value };
-                          setMcpServers(updated);
-                        }}
-                        className="h-7 text-xs"
-                        style={paperInputStyle}
-                      />
-                    </div>
-                    <div className="mt-2">
-                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                        参数 (每行一个)
-                      </label>
-                      <textarea
-                        value={(server.args || []).join('\n')}
-                        onChange={(e) => {
-                          const updated = [...mcpServers];
-                          updated[idx] = { ...server, args: e.target.value.split('\n').filter((a) => a.trim()) };
-                          setMcpServers(updated);
-                        }}
-                        className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
-                        style={{
-                          backgroundColor: 'oklch(0.97 0.008 80)',
-                          borderColor: 'oklch(0.85 0.01 70)',
-                          color: 'oklch(0.25 0.02 50)',
-                          minHeight: '40px',
-                          resize: 'vertical',
-                        }}
-                        placeholder={'-y\n@modelcontextprotocol/server-sequential-thinking'}
-                      />
-                    </div>
-                    <div className="mt-2">
-                      <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                        环境变量 (JSON)
-                      </label>
-                      <textarea
-                        value={JSON.stringify(server.env || {}, null, 2)}
-                        onChange={(e) => {
-                          try {
-                            const parsed = JSON.parse(e.target.value);
-                            const updated = [...mcpServers];
-                            updated[idx] = { ...server, env: parsed };
-                            setMcpServers(updated);
-                          } catch {}
-                        }}
-                        className="w-full rounded-md border px-2 py-1.5 text-[10px] font-mono"
-                        style={{
-                          backgroundColor: 'oklch(0.97 0.008 80)',
-                          borderColor: 'oklch(0.85 0.01 70)',
-                          color: 'oklch(0.25 0.02 50)',
-                          minHeight: '40px',
-                          resize: 'vertical',
-                        }}
-                        placeholder='{}'
-                      />
-                    </div>
-                  </>
                 ) : (
-                  <div className="mt-2">
-                    <label className="mb-0.5 block text-[10px] font-medium" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                      URL
-                    </label>
-                    <Input
-                      type="text"
-                      placeholder="https://mcp.example.com/mcp"
-                      value={server.url || ''}
-                      onChange={(e) => {
-                        const updated = [...mcpServers];
-                        updated[idx] = { ...server, url: e.target.value };
-                        setMcpServers(updated);
-                      }}
-                      className="h-7 text-xs"
-                      style={paperInputStyle}
-                    />
+                  <div className="flex flex-wrap gap-1.5">
+                    {avatarList.map((av) => {
+                      const isSelected = avatarMode === 'fixed' && avatarSelected === av.id;
+                      return (
+                        <button
+                          key={av.id}
+                          type="button"
+                          onClick={() => { setAvatarMode('fixed'); setAvatarSelected(av.id); setSaved(false); }}
+                          className="overflow-hidden rounded-md border-2 transition-all"
+                          style={{ width: 40, height: 40, borderColor: isSelected ? 'var(--primary)' : 'transparent', backgroundColor: '#fff' }}
+                          title={av.name + (av.builtin ? ' (Built-in)' : ' (Custom)')}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={av.dataUrl} alt={av.name} className="h-full w-full object-contain" />
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
-            ))}
-          </div>
 
+              {/* ── 侧边栏品牌图标 ── */}
+              <div className="mb-2 rounded-lg p-2.5" style={{ backgroundColor: 'var(--paper)' }}>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
+                    Sidebar
+                    <span className="ml-1.5 text-sm" style={{ color: 'var(--ink-muted)' }}>{brandLogo ? 'Custom' : 'Default'}</span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!brandLogo}
+                    onClick={() => { setBrandLogo(''); setSaved(false); }}
+                    className="rounded px-1.5 py-0.5 text-xs font-medium transition-colors"
+                    style={{
+                      backgroundColor: brandLogo ? 'var(--paper-hover)' : 'var(--paper-soft)',
+                      color: brandLogo ? 'var(--ink-muted)' : 'var(--line)',
+                      cursor: brandLogo ? 'pointer' : 'not-allowed',
+                    }}
+                  >
+                    Restore Default
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {/* 默认 Logo */}
+                  <button
+                    type="button"
+                    onClick={() => { setBrandLogo(''); setSaved(false); }}
+                    className="overflow-hidden rounded-md border-2 transition-all"
+                    style={{ width: 40, height: 40, borderColor: !brandLogo ? 'var(--purple)' : 'transparent', backgroundColor: '#fff' }}
+                    title="Default Logo"
+                  >
+                    <img src="/bobwork-logo.png" alt="Default" className="h-full w-full object-contain" />
+                  </button>
+                  {avatarList.map((av) => {
+                    const isSelected = brandLogo === av.id;
+                    return (
+                      <button
+                        key={av.id}
+                        type="button"
+                        onClick={() => { setBrandLogo(av.id); setSaved(false); }}
+                        className="overflow-hidden rounded-md border-2 transition-all"
+                        style={{ width: 40, height: 40, borderColor: isSelected ? 'var(--purple)' : 'transparent', backgroundColor: '#fff' }}
+                        title={av.name + (av.builtin ? ' (Built-in)' : ' (Custom)')}
+                      >
+                        <img src={av.dataUrl} alt={av.name} className="h-full w-full object-contain" />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* ── 头像池管理（添加 / 删除自定义） ── */}
+              {avatarList.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {avatarList.map((av) => (
+                    <div key={av.id} className="group relative">
+                      <div className="overflow-hidden rounded-md border" style={{ width: 36, height: 36, borderColor: 'var(--line-soft)', backgroundColor: '#fff' }}>
+                        <img src={av.dataUrl} alt={av.name} className="h-full w-full object-contain" />
+                      </div>
+                      {!av.builtin && (
+                        <button
+                          type="button"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                              const api = (window as unknown as { api: { avatar: { delete: (id: string) => Promise<{ success: boolean; avatars?: typeof avatarList }> } } }).api;
+                              const res = await api.avatar.delete(av.id);
+                              if (res.success && res.avatars) {
+                                setAvatarList(res.avatars);
+                                if (avatarSelected === av.id) setAvatarSelected('');
+                                if (brandLogo === av.id) setBrandLogo('');
+                              }
+                            } catch { /* ignore */ }
+                          }}
+                          className="absolute -right-1 -top-1 hidden rounded-full p-0.5 group-hover:flex"
+                          style={{ backgroundColor: 'var(--primary-strong)', color: '#fff' }}
+                          title="Delete Custom Avatar"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {/* 添加自定义头像 */}
+                  <button
+                    type="button"
+                    disabled={avatarAdding}
+                    onClick={async () => {
+                      setAvatarAdding(true);
+                      try {
+                        const api = (window as unknown as { api: { avatar: { add: () => Promise<{ success: boolean; avatars?: typeof avatarList; canceled?: boolean }> } } }).api;
+                        const res = await api.avatar.add();
+                        if (res.success && res.avatars) setAvatarList(res.avatars);
+                      } catch { /* ignore */ }
+                      setAvatarAdding(false);
+                    }}
+                    className="flex items-center justify-center rounded-md border-2 border-dashed transition-colors"
+                    style={{ width: 36, height: 36, borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+                    title="Add Custom Avatar"
+                    onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--purple)'; e.currentTarget.style.color = 'var(--purple)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--line)'; e.currentTarget.style.color = 'var(--ink-muted)'; }}
+                  >
+                    {avatarAdding ? <Loader2 className="h-4 w-4 animate-spin" /> : <span className="text-lg leading-none">+</span>}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
         )}
 
+        {activeSection === 'quickprompts' && (
+          /* ========== 快捷指令全局库 ========== */
+          <div className="px-5 py-4">
+            {/* 新建/编辑表单 */}
+            {qpEditor && (
+              <div className="mb-4 flex flex-col gap-2 rounded-xl border p-3" style={{ borderColor: 'color-mix(in oklab, var(--purple) 30%, transparent)', backgroundColor: 'var(--purple-soft)' }}>
+                <span className="text-xs font-semibold" style={{ color: 'var(--ink-strong)' }}>
+                  {qpEditor.mode === 'new' ? 'New quick prompt' : 'Edit quick prompt'}
+                </span>
+                <input
+                  value={qpEditor.name}
+                  onChange={(e) => setQpEditor({ ...qpEditor, name: e.target.value })}
+                  placeholder="Name"
+                  className="rounded-md border px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)', backgroundColor: 'var(--paper)', color: 'var(--ink-strong)' }}
+                />
+                <input
+                  value={qpEditor.category}
+                  onChange={(e) => setQpEditor({ ...qpEditor, category: e.target.value })}
+                  placeholder="Category (optional)"
+                  className="rounded-md border px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)', backgroundColor: 'var(--paper)', color: 'var(--ink-strong)' }}
+                />
+                <textarea
+                  value={qpEditor.content}
+                  onChange={(e) => setQpEditor({ ...qpEditor, content: e.target.value })}
+                  placeholder="Prompt content — inserted into the input box on click"
+                  rows={3}
+                  className="w-full resize-none rounded-md border px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)', backgroundColor: 'var(--paper)', color: 'var(--ink-strong)' }}
+                />
+                <div className="flex justify-end gap-1.5">
+                  <button type="button" onClick={() => setQpEditor(null)} className="rounded-md px-2.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!qpEditor || !qpEditor.name.trim() || !qpEditor.content.trim()) return;
+                      const now = new Date().toISOString();
+                      let next: QuickPrompt[];
+                      if (qpEditor.mode === 'new') {
+                        next = [...quickPrompts, { id: 'qp-' + Date.now().toString(36), name: qpEditor.name.trim(), content: qpEditor.content.trim(), category: qpEditor.category.trim() || undefined, updatedAt: now }];
+                      } else {
+                        next = quickPrompts.map((q) => q.id === qpEditor.id ? { ...q, name: qpEditor.name.trim(), content: qpEditor.content.trim(), category: qpEditor.category.trim() || undefined, updatedAt: now } : q);
+                      }
+                      await updateQuickPrompts(next);
+                      setQuickPrompts(next);
+                      setQpEditor(null);
+                      window.dispatchEvent(new Event('provider-configs-changed'));
+                    }}
+                    disabled={!qpEditor.name.trim() || !qpEditor.content.trim()}
+                    className="rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
+                    style={{ backgroundColor: 'var(--purple)', color: '#fff' }}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setQpEditor({ mode: 'new', name: '', content: '', category: '' })}
+                className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ borderColor: 'color-mix(in oklab, var(--purple) 40%, transparent)', color: 'var(--purple)' }}
+              >
+                <ClipboardCheck className="h-3.5 w-3.5" /> New prompt
+              </button>
+              {qpCategories.length > 0 && (
+                <select
+                  value={qpCategoryFilter}
+                  onChange={(e) => setQpCategoryFilter(e.target.value)}
+                  className="rounded-lg border bg-transparent px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+                >
+                  <option value="all">All categories</option>
+                  {qpCategories.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            {/* 指令列表 */}
+            <div className="grid grid-cols-2 gap-1.5">
+              {quickPrompts.length === 0 && (
+                <div className="col-span-2 rounded-xl border p-4 text-xs" style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}>
+                  No quick prompts yet. Create one with the button above.
+                </div>
+              )}
+              {quickPrompts.length > 0 && filteredQuickPrompts.length === 0 && (
+                <div className="col-span-2 rounded-xl border p-4 text-xs" style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}>
+                  No prompts in this category.
+                </div>
+              )}
+              {filteredQuickPrompts.map((q, idx) => {
+                const origIdx = quickPrompts.findIndex((x) => x.id === q.id);
+                return (
+                <div key={q.id} className="flex items-center gap-2.5 rounded-xl border px-3 py-2.5" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium" style={{ color: 'var(--ink-strong)' }}>{q.name}</span>
+                      {q.category && (
+                        <span className="shrink-0 rounded px-1.5 py-px text-10" style={{ backgroundColor: 'var(--purple-soft)', color: 'var(--purple)' }}>{q.category}</span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>{q.content}</div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (origIdx <= 0) return;
+                        const next = [...quickPrompts];
+                        [next[origIdx - 1], next[origIdx]] = [next[origIdx], next[origIdx - 1]];
+                        await updateQuickPrompts(next);
+                        setQuickPrompts(next);
+                        window.dispatchEvent(new Event('provider-configs-changed'));
+                      }}
+                      disabled={origIdx === 0}
+                      className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-30"
+                      style={{ color: 'var(--ink-muted)' }}
+                      title="Move up"
+                    >
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (origIdx >= quickPrompts.length - 1) return;
+                        const next = [...quickPrompts];
+                        [next[origIdx + 1], next[origIdx]] = [next[origIdx], next[origIdx + 1]];
+                        await updateQuickPrompts(next);
+                        setQuickPrompts(next);
+                        window.dispatchEvent(new Event('provider-configs-changed'));
+                      }}
+                      disabled={origIdx === quickPrompts.length - 1}
+                      className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-30"
+                      style={{ color: 'var(--ink-muted)' }}
+                      title="Move down"
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setQpEditor({ mode: 'edit', id: q.id, name: q.name, content: q.content, category: q.category || '' })}
+                      className="rounded px-1.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                      style={{ color: 'var(--ink-muted)' }}
+                      title="Edit"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const next = quickPrompts.filter((x) => x.id !== q.id);
+                        await updateQuickPrompts(next);
+                        setQuickPrompts(next);
+                        window.dispatchEvent(new Event('provider-configs-changed'));
+                      }}
+                      className="rounded px-1.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                      style={{ color: 'var(--danger, #e8463a)' }}
+                      title="Delete"
+                    >
+                      <Trash className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {activeSection === 'theme' && (
+          /* ========== 界面主题 ========== */
+          <div className="px-5 py-4">
+            {/* 统一主题：单一品牌色 Purple（对齐 dynamic-ui Token，App/小程序/Widget 同源） */}
+            <div className="flex items-center gap-3 rounded-xl border-2 p-3" style={{ borderColor: 'var(--line)', backgroundColor: '#fff' }}>
+              {/* 迷你预览 */}
+              <div className="flex h-[52px] items-stretch overflow-hidden rounded-lg" style={{ backgroundColor: '#efeff2' }}>
+                <div className="flex w-4 shrink-0 flex-col items-center gap-1 py-1.5" style={{ backgroundColor: '#e8e8ec' }}>
+                  <span className="h-1 w-2 rounded-full" style={{ backgroundColor: '#4b3fe3', opacity: 0.9 }} />
+                  <span className="h-1 w-1.5 rounded-full" style={{ backgroundColor: '#171717', opacity: 0.35 }} />
+                </div>
+                <div className="relative w-14">
+                  <div className="absolute left-1 top-1.5 h-7 w-9 rounded border p-1" style={{ backgroundColor: '#f7f7f8', borderColor: '#e4e4e7' }}>
+                    <span className="block h-1 w-3 rounded-full" style={{ backgroundColor: '#4b3fe3' }} />
+                  </div>
+                  <span className="absolute bottom-1 left-1 h-2.5 w-5 rounded" style={{ backgroundColor: '#4b3fe3' }} />
+                </div>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-sm font-medium" style={{ color: 'var(--ink)' }}>Purple · Unified theme</span>
+                  <span className="shrink-0 rounded px-1 py-px text-10 font-semibold uppercase tracking-wide" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>Live</span>
+                </div>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  Single brand color — App / Mini Programs / Widgets share the same token set.
+                </p>
+              </div>
+            </div>
+
+            {/* ========== 全局字号档位 ========== */}
+            <div className="mt-6 border-t pt-4" style={{ borderColor: 'var(--line)' }}>
+              <div className="mb-3 flex items-center gap-2">
+                <Type className="h-4 w-4" style={{ color: 'var(--purple)' }} />
+                <span className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                  Font Size
+                </span>
+              </div>
+              <div className="flex gap-2">
+                {(
+                  [
+                    { id: 'm' as const, label: 'M', desc: 'Small' },
+                    { id: 'l' as const, label: 'L', desc: 'Default' },
+                    { id: 'xl' as const, label: 'XL', desc: 'Extra Large' },
+                  ]
+                ).map((opt) => {
+                  const selected = fontScale === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={async () => {
+                        if (fontScale === opt.id) return;
+                        setFontScale(opt.id);
+                        applyFontScale(opt.id);
+                        try {
+                          await updateSettingsFields({ fontScale: opt.id });
+                          setSaved(true);
+                          setIsDirty(false);
+                        } catch {
+                          setIsDirty(true);
+                          setSaved(false);
+                        }
+                      }}
+                      className="flex flex-1 flex-col items-center gap-0.5 rounded-xl border-2 px-3 py-2.5 transition-all"
+                      style={{
+                        borderColor: selected ? 'var(--purple)' : 'var(--line)',
+                        boxShadow: selected ? '0 2px 10px var(--purple-soft)' : 'none',
+                        backgroundColor: selected ? 'var(--purple-soft)' : 'transparent',
+                        cursor: 'pointer',
+                      }}
+                      title={`${opt.label} — ${opt.desc} font size`}
+                    >
+                      <span className="text-base font-bold leading-tight" style={{ fontSize: opt.id === 'm' ? 15 : opt.id === 'l' ? 17 : 19, color: selected ? 'var(--purple)' : 'var(--ink)' }}>
+                        A
+                      </span>
+                      <span className="text-xs font-semibold" style={{ color: selected ? 'var(--purple)' : 'var(--ink)' }}>
+                        {opt.label}
+                      </span>
+                      <span className="text-10" style={{ color: 'var(--ink-muted)' }}>
+                        {opt.desc}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ========== 键盘快捷键（只读清单，可折叠，默认折叠） ========== */}
+            <div className="mt-6 border-t pt-4" style={{ borderColor: 'var(--line)' }}>
+              <button
+                type="button"
+                onClick={() => setShortcutsOpen((v) => !v)}
+                className="flex w-full items-center justify-between gap-2"
+                title={shortcutsOpen ? 'Collapse keyboard shortcuts' : 'Expand keyboard shortcuts'}
+              >
+                <span className="flex items-center gap-2">
+                  <Keyboard className="h-4 w-4" style={{ color: 'var(--purple)' }} />
+                  <span className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    Keyboard Shortcuts
+                  </span>
+                </span>
+                <ChevronDown
+                  className="h-3.5 w-3.5 shrink-0 transition-transform"
+                  style={{ color: 'var(--ink-muted)', transform: shortcutsOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}
+                />
+              </button>
+              {shortcutsOpen && (
+                <div className="mt-3 divide-y rounded-xl border" style={{ borderColor: 'var(--line)' }}>
+                  {(
+                    [
+                      { keys: ['⌘', 'R'], label: 'Fit canvas & arrange sticky notes' },
+                      { keys: ['⌘', 'G'], label: 'Open Project Board' },
+                      { keys: ['⌘', 'S'], label: 'Save document' },
+                      { keys: ['⌘', 'Enter'], label: 'Send message (in input fields)' },
+                      { keys: ['⌘/Ctrl', 'Scroll'], label: 'Zoom canvas' },
+                      { keys: ['J', 'K'], label: 'Prev / next mail (BobMail)' },
+                      { keys: ['R'], label: 'Focus reply (BobMail)' },
+                      { keys: ['E'], label: 'Archive mail (BobMail)' },
+                      { keys: ['S'], label: 'Star mail (BobMail)' },
+                      { keys: ['⌘', '⇧', 'D'], label: 'Delete mail (BobMail)' },
+                    ]
+                  ).map((item) => (
+                    <div key={item.label} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <span className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>
+                        {item.label}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        {item.keys.map((k) => (
+                          <kbd
+                            key={k}
+                            className="rounded border px-1.5 py-0.5 text-10 font-semibold"
+                            style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-hover)', color: 'var(--ink)' }}
+                          >
+                            {k}
+                          </kbd>
+                        ))}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeSection === 'diagram' && (
+          /* ========== Space Station: global capability map ========== */
+          <div className="px-5 py-4">
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                BobWork · Space Station
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDiagramZoom(true)}
+                className="flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors hover:opacity-90"
+                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              >
+                <ExternalLink className="h-3 w-3" /> Zoom
+              </button>
+            </div>
+
+            {(() => {
+              // ===== 空间站舱段布局：顶部接入舱 → Command Core → 底部动力/输出舱 =====
+              const canvasW = 920;
+              const canvasH = 700;
+              const coreRect = { x: 66, y: 210, w: 788, h: 250 };
+
+              // Command Core 乘员：画布上可创建的 Agent 节点舱
+              const crew = [
+                { id: 'crew-chat', title: 'Chat', icon: <MessageSquare className="h-4 w-4" /> },
+                { id: 'crew-coding', title: 'Coding', icon: <Wrench className="h-4 w-4" /> },
+                { id: 'crew-kar', title: 'Kar', icon: <BookOpen className="h-4 w-4" /> },
+                { id: 'crew-planner', title: 'Planner', icon: <ClipboardCheck className="h-4 w-4" /> },
+                { id: 'crew-imagegen', title: 'ImageGen', icon: <Image className="h-4 w-4" /> },
+              ];
+              const crewPos = crew.map((_, i) => ({
+                x: coreRect.x + 28 + i * 150,
+                y: coreRect.y + 46,
+                w: 132,
+                h: 150,
+              }));
+
+              // 舱段卡：顶部为接入外部能力的模块，底部为动力与产出系统
+              const modules: {
+                id: string;
+                name: string;
+                icon: React.ReactNode;
+                power?: boolean;
+                x: number;
+                y: number;
+                w: number;
+                h: number;
+              }[] = [
+                { id: 'comms', name: 'Communications', icon: <MessageCircle className="h-4 w-4" />, x: 66, y: 52, w: 176, h: 96 },
+                { id: 'dock', name: 'Docking Port', icon: <Plug className="h-4 w-4" />, x: 270, y: 52, w: 176, h: 96 },
+                { id: 'lab', name: 'Science Lab', icon: <Box className="h-4 w-4" />, x: 474, y: 52, w: 176, h: 96 },
+                { id: 'sensing', name: 'Sensing Array', icon: <Zap className="h-4 w-4" />, x: 678, y: 52, w: 176, h: 96 },
+                { id: 'energy', name: 'Energy Core', icon: <Brain className="h-4 w-4" />, power: true, x: 66, y: 560, w: 176, h: 96 },
+                { id: 'knowledge', name: 'Knowledge Bay', icon: <FileText className="h-4 w-4" />, x: 270, y: 560, w: 176, h: 96 },
+                { id: 'schedule', name: 'Schedule Deck', icon: <CalendarDays className="h-4 w-4" />, x: 474, y: 560, w: 176, h: 96 },
+                { id: 'support', name: 'Support Systems', icon: <Palette className="h-4 w-4" />, x: 678, y: 560, w: 176, h: 96 },
+              ];
+
+              const stationSvg = (
+                <svg
+                  viewBox={`0 0 ${canvasW} ${canvasH}`}
+                  style={{
+                    display: 'block',
+                    margin: '0 auto',
+                    width: '100%',
+                    height: 'auto',
+                    maxWidth: canvasW,
+                    aspectRatio: `${canvasW} / ${canvasH}`,
+                  }}
+                >
+                  <defs>
+                    <marker id="arrow-gray" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                      <path d="M0,0 L0,6 L9,3 z" fill="var(--ink-faint)" />
+                    </marker>
+                    <marker id="arrow-accent" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                      <path d="M0,0 L0,6 L9,3 z" fill="var(--primary)" />
+                    </marker>
+                  </defs>
+
+                  {/* === 连线：顶部模块 → Command Core === */}
+                  {modules.filter((m) => m.y < coreRect.y).map((m) => {
+                    const sx = m.x + m.w / 2;
+                    const tx = Math.min(Math.max(sx, coreRect.x + 44), coreRect.x + coreRect.w - 44);
+                    return (
+                      <line
+                        key={`in-${m.id}`}
+                        x1={sx}
+                        y1={m.y + m.h}
+                        x2={tx}
+                        y2={coreRect.y}
+                        stroke="var(--ink-faint)"
+                        strokeWidth="1.3"
+                        strokeDasharray="3 2"
+                        markerEnd="url(#arrow-gray)"
+                      />
+                    );
+                  })}
+
+                  {/* === 连线：Command Core → 底部模块 === */}
+                  {modules.filter((m) => m.y > coreRect.y + coreRect.h).map((m) => {
+                    const sx = Math.min(Math.max(m.x + m.w / 2, coreRect.x + 44), coreRect.x + coreRect.w - 44);
+                    const tx = m.x + m.w / 2;
+                    return (
+                      <line
+                        key={`out-${m.id}`}
+                        x1={sx}
+                        y1={coreRect.y + coreRect.h}
+                        x2={tx}
+                        y2={m.y}
+                        stroke={m.power ? 'var(--primary)' : 'var(--ink-faint)'}
+                        strokeWidth="1.3"
+                        strokeDasharray={m.power ? 'none' : '3 2'}
+                        markerEnd={m.power ? 'url(#arrow-accent)' : 'url(#arrow-gray)'}
+                      />
+                    );
+                  })}
+
+                  {/* === 舱段卡 === */}
+                  {modules.map((m) => {
+                    const isPower = !!m.power;
+                    const chipTop = m.y + (m.h - 24) / 2;
+                    return (
+                      <g key={m.id}>
+                        <rect
+                          x={m.x} y={m.y} width={m.w} height={m.h} rx={14}
+                          fill={isPower ? 'var(--primary-soft)' : 'var(--paper)'}
+                          stroke={isPower ? 'var(--primary)' : 'var(--line)'}
+                          strokeWidth={isPower ? 1.4 : 1.2}
+                        />
+                        <rect
+                          x={m.x + 14} y={chipTop} width={24} height={24} rx={7}
+                          fill="var(--primary-soft)"
+                        />
+                        <g transform={`translate(${m.x + 18}, ${chipTop + 4})`} style={{ color: 'var(--primary-strong)' }}>
+                          {m.icon}
+                        </g>
+                        <text
+                          x={m.x + 52}
+                          y={m.y + m.h / 2 + 4.5}
+                          fontSize="13"
+                          fontWeight="700"
+                          fill="var(--ink)"
+                        >
+                          {m.name}
+                        </text>
+                      </g>
+                    );
+                  })}
+
+                  {/* === Command Core（节点画布） === */}
+                  <g>
+                    <rect
+                      x={coreRect.x} y={coreRect.y} width={coreRect.w} height={coreRect.h} rx={20}
+                      fill="var(--paper)"
+                      stroke="var(--primary)"
+                      strokeWidth="1.4"
+                      strokeDasharray="8 4"
+                    />
+                    {/* 头部标题带 */}
+                    <rect x={coreRect.x} y={coreRect.y} width={coreRect.w} height={44} rx={20} fill="var(--primary-soft)" />
+                    <rect x={coreRect.x} y={coreRect.y + 26} width={coreRect.w} height={18} fill="var(--primary-soft)" />
+                    <circle cx={coreRect.x + 24} cy={coreRect.y + 22} r={5} fill="var(--primary)" />
+                    <text x={coreRect.x + 42} y={coreRect.y + 27} fontSize="13.5" fontWeight="800" fill="var(--primary-strong)">
+                      Command Core · Node Canvas
+                    </text>
+
+                    {/* === Command Core 乘员舱 === */}
+                    {crew.map((s, i) => {
+                      const p = crewPos[i];
+                      const cx = p.x + p.w / 2;
+                      const chipTop = p.y + 26;
+                      return (
+                        <g key={s.id}>
+                          <rect x={p.x} y={p.y} width={p.w} height={p.h} rx={14} fill="var(--paper)" stroke="var(--line)" strokeWidth="1.2" />
+                          <rect x={cx - 17} y={chipTop} width={34} height={34} rx={10} fill="var(--primary-soft)" />
+                          <g transform={`translate(${cx - 8}, ${chipTop + 9})`} style={{ color: 'var(--primary-strong)' }}>
+                            {s.icon}
+                          </g>
+                          <text x={cx} y={p.y + p.h - 28} textAnchor="middle" fontSize="12.5" fontWeight="700" fill="var(--ink)">
+                            {s.title}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                </svg>
+              );
+
+              return (
+                <>
+                  <div className="overflow-x-auto">
+                    {/* 可点击放大的空间站图（按容器宽度等比缩放） */}
+                    <div className="cursor-zoom-in" onClick={() => setDiagramZoom(true)} title="Click to zoom">
+                      {stationSvg}
+                    </div>
+                  </div>
+
+                  {/* === 空间站图全屏放大 overlay === */}
+                  {diagramZoom && (
+                    <div
+                      className="fixed inset-0 z-[2000] flex items-center justify-center"
+                      style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}
+                      onClick={() => setDiagramZoom(false)}
+                    >
+                      <div
+                        className="relative max-h-[92vh] max-w-[96vw] overflow-auto rounded-xl p-5"
+                        style={{ backgroundColor: 'var(--paper)' }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setDiagramZoom(false)}
+                          className="absolute right-3 top-3 z-10 flex h-7 w-7 items-center justify-center rounded-full text-sm font-semibold transition-colors hover:bg-[var(--paper-hover)]"
+                          style={{ backgroundColor: 'var(--paper)', color: 'var(--ink)' }}
+                          title="Close"
+                        >
+                          ✕
+                        </button>
+                        <div className="pt-6" style={{ maxWidth: 960, margin: '0 auto' }}>
+                          {stationSvg}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ===== 角色派发（主对话 / 视觉 / OCR / STT / 图像编辑，从已勾选聊天模型下拉选择；任务归纳与成果编辑复用 chatModel） ===== */}
+        {activeSection === 'roles' && (() => {
+                const selectedOptions: { modelId: string; provider: ProviderType; apiKey: string; baseUrl: string; category: string }[] = [];
+                (Object.keys(selectedModels) as ProviderType[]).forEach((type) => {
+                  const key = apiKeys[type].trim();
+                  if (!key) return;
+                  const baseUrl = resolveBaseUrl(type);
+                  selectedModels[type].forEach((modelId) => {
+                    const fetched = fetchedModels[type].find((m) => m.modelId === modelId);
+                    selectedOptions.push({ modelId, provider: type, apiKey: key, baseUrl, category: fetched?.category ?? 'chat' });
+                  });
+                });
+
+                /** 角色候选池渲染：singleSelect 模式下一键替换，多选模式追加 */
+                const renderRolePool = (
+                  label: string,
+                  color: string,
+                  pool: Array<{ provider: string; modelId: string }>,
+                  setPool: (next: Array<{ provider: string; modelId: string }>) => void,
+                  purpose?: ModelPurpose,
+                  singleSelect?: boolean,
+                ) => {
+                  return (
+                    <>
+                      {pool.length === 0 ? (
+                        <p className="mb-2 text-sm italic" style={{ color: 'var(--ink-muted)' }}>
+                          No models in {label} pool yet. Add models below.
+                        </p>
+                      ) : (
+                        <div className="mb-2 flex flex-wrap gap-1.5">
+                          {pool.map((item) => {
+                            const preset = PROVIDER_PRESETS.find((p) => p.type === item.provider as ProviderType);
+                            return (
+                              <Chip
+                                key={`${item.provider}-${item.modelId}`}
+                                variant="paper"
+                                size="md"
+                                dismissible
+                                onDismiss={() => {
+                                  setPool(pool.filter((p) => !(p.provider === item.provider && p.modelId === item.modelId)));
+                                }}
+                                className="w-full sm:w-auto sm:max-w-[280px] !justify-normal"
+                                title={`Remove ${item.modelId} from pool`}
+                                label={
+                                  <span className="flex min-w-0 items-center gap-1.5">
+                                    <span className="min-w-0 flex-1 truncate text-sm font-medium" style={{ color: 'var(--ink)' }}>
+                                      {item.modelId}
+                                    </span>
+                                    <Badge variant="primary" size="sm" label={preset?.label || item.provider} />
+                                  </span>
+                                }
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (!v) return;
+                          const idx = v.indexOf('|');
+                          if (idx === -1) return;
+                          const provider = v.slice(0, idx);
+                          const modelId = v.slice(idx + 1);
+                          if (singleSelect) {
+                            if (pool.some((p) => p.provider === provider && p.modelId === modelId)) return;
+                            setPool([{ provider, modelId }]);
+                          } else {
+                            setPool(pool.some((p) => p.provider === provider && p.modelId === modelId)
+                              ? pool
+                              : [...pool, { provider, modelId }]);
+                          }
+                        }}
+                        className="h-8 w-full rounded-md border px-3 text-sm"
+                        style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+                      >
+                        <option value="">+ Add model to {label} pool…</option>
+                        {(() => {
+                          const added = new Set(pool.map((p) => `${p.provider}|${p.modelId}`));
+                          // 本地无鉴权厂商（BobMultimodal / Ollama）无需 API Key 即可加入角色池
+                          const noAuthLocal = NO_AUTH_LOCAL_PROVIDERS;
+                          return (Object.keys(fetchedModels) as ProviderType[]).flatMap((type) => {
+                            const key = apiKeys[type].trim();
+                            if (!key && !noAuthLocal.has(type)) return [];
+                            const preset = PROVIDER_PRESETS.find((p) => p.type === type);
+                            // 仅显示模型池内（Manage Models 勾选）的模型
+                            const selected = selectedModels[type] || new Set<string>();
+                            const list = (fetchedModels[type] || []).filter((m) => selected.has(m.modelId));
+                            return list
+                              .filter((m) => !added.has(`${type}|${m.modelId}`))
+                              .filter((m) => {
+                                if (purpose) return categoryToPurpose(m.category) === purpose;
+                                return true;
+                              })
+                              .map((m) => (
+                                <option key={`${type}|${m.modelId}`} value={`${type}|${m.modelId}`}>
+                                  {m.modelId} — {preset?.label || type}
+                                </option>
+                              ));
+                          });
+                        })()}
+                      </select>
+                    </>
+                  );
+                };
+
+                return (
+                  <div className="px-5 py-4">
+                    {/* 一级菜单入口：以弹窗方式打开 Model Pool（配 API Key、fetch、勾选候选） */}
+                    <div className="mb-4">
+                      <button
+                        type="button"
+                        onClick={() => { setModelSearch(''); setCategoryFilter('all'); setModelPoolOpen(true); }}
+                        className="flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                        style={{ color: 'var(--primary-strong)' }}
+                        title="Open Model Pool — add API Keys, fetch models, and check candidates"
+                      >
+                        <Brain className="h-3.5 w-3.5" /> Model Pool
+                      </button>
+                    </div>
+
+                    {/* P2 dependency hint: guide to Model Pool when no models available */}
+                    {selectedOptions.length === 0 && (
+                      <Callout
+                        variant="warn"
+                        className="mb-4"
+                        icon={<AlertCircle className="h-4 w-4" />}
+                        title="Model pool is empty"
+                        description="Configure an API Key and check models in Manage Models first."
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => { setModelSearch(''); setCategoryFilter('all'); setModelPoolOpen(true); }}
+                            className="btn btn-primary btn-sm"
+                          >
+                            Go to Model Pool
+                          </button>
+                        }
+                      />
+                    )}
+
+                    {/* 主对话模型（Chat Model）：候选池，首个模型为默认主对话模型 */}
+                    <div className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('chat')} className="mb-3 flex w-full items-center gap-2.5 text-left">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
+                          <MessageSquare className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel icon={false} hint="Add to chat pool. Pool models are auto-checked in their provider and visible in every node's model selector.">Chat Model</HintLabel>
+                        </span>
+                        {rolesCollapsed.chat
+                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                      </button>
+                      {!rolesCollapsed.chat && (
+                      <>
+                      {/* 候选池列表 */}
+                      {chatModelPool.length === 0 ? (
+                        <p className="mb-2 text-sm italic" style={{ color: 'var(--ink-muted)' }}>
+                          No models in chat pool yet. Add models below — they will be auto-checked in their provider and appear in every node's model selector.
+                        </p>
+                      ) : (
+                        <div className="mb-2 space-y-1">
+                          {chatModelPool.map((item) => {
+                            const preset = PROVIDER_PRESETS.find((p) => p.type === item.provider as ProviderType);
+                            return (
+                              <div key={`${item.provider}-${item.modelId}`} className="flex items-center gap-2 rounded-md px-2 py-1" style={{ backgroundColor: 'var(--paper-hover)' }}>
+                                <span className="flex-1 truncate text-sm font-medium" style={{ color: 'var(--ink)' }}>{item.modelId}</span>
+                                <span className="shrink-0 rounded px-1 py-px text-xs" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
+                                  {preset?.label || item.provider}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setChatModelPool((prev) => prev.filter((p) => !(p.provider === item.provider && p.modelId === item.modelId)));
+                                    if (selectedChatModel === item.modelId) setSelectedChatModel('');
+                                  }}
+                                  title="Remove from pool"
+                                  className="shrink-0 text-sm transition-colors hover:opacity-70"
+                                  style={{ color: 'var(--ink-muted)' }}
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* 添加模型到候选池（仅模型池内：Manage Models 已勾选的模型） */}
+                      <div className="flex items-center gap-2">
+                        <select
+                          value=""
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (!v) return;
+                            const idx = v.indexOf('|');
+                            if (idx === -1) return;
+                            const provider = v.slice(0, idx);
+                            const modelId = v.slice(idx + 1);
+                            setChatModelPool((prev) =>
+                              prev.some((p) => p.provider === provider && p.modelId === modelId)
+                                ? prev
+                                : [...prev, { provider, modelId }],
+                            );
+                            // 首个加入候选池的模型作为默认主对话模型（历史标星入口已移除，不再单独指定）
+                          }}
+                          title="Only models in the Model Pool (checked in Manage Models) can be added"
+                          className="h-8 w-full rounded-md border px-3 text-sm"
+                          style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+                        >
+                          <option value="">+ Add model to chat pool…</option>
+                          {(() => {
+                            const added = new Set(chatModelPool.map((p) => `${p.provider}|${p.modelId}`));
+                            return (Object.keys(fetchedModels) as ProviderType[]).flatMap((type) => {
+                              const key = apiKeys[type].trim();
+                              if (!key) return [];
+                              const preset = PROVIDER_PRESETS.find((p) => p.type === type);
+                              // 仅显示模型池内（Manage Models 勾选）的模型
+                              const selected = selectedModels[type] || new Set<string>();
+                              return (fetchedModels[type] || [])
+                                .filter((m) => selected.has(m.modelId))
+                                .filter((m) => !added.has(`${type}|${m.modelId}`))
+                                .map((m) => (
+                                  <option key={`${type}|${m.modelId}`} value={`${type}|${m.modelId}`}>
+                                    {m.modelId} — {preset?.label || type}
+                                  </option>
+                                ));
+                            });
+                          })()}
+                        </select>
+                      </div>
+                      </>
+                      )}
+                    </div>
+
+                    {/* 音频转写模型（STT） */}
+                    <div ref={sttSectionRef} className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('stt')} className="mb-3 flex w-full items-center gap-2.5 text-left">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--purple-soft)', color: 'var(--purple)' }}>
+                          <Zap className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel icon={false} hint="Speech → Text (STT) via cloud engines (Doubao / DashScope / SiliconFlow / OpenAI-compatible) or local BobMultimodal (Qwen3-ASR, no API key). Configure a provider and API Key below.">Audio STT Model</HintLabel>
+                        </span>
+                        {rolesCollapsed.stt
+                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                      </button>
+                      {!rolesCollapsed.stt && (
+                      <>
+                      {renderRolePool('STT', 'var(--purple)', sttPool, setSttPool, 'stt', true)}
+                      </>
+                      )}
+                    </div>
+
+                    {/* 图像编辑模型（Image Edit） */}
+                    <div ref={imageEditSectionRef} className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('image')} className="mb-3 flex w-full items-center gap-2.5 text-left">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--purple-soft)', color: 'var(--purple)' }}>
+                          <Image className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel icon={false} hint="AI image editing for the preview panel. Image-edit models (e.g. Doubao SeedEdit / OpenAI gpt-image-1 / Qwen qwen-image-edit) use the images API — independent from chat models, so they are configured separately. Local no-auth providers (BobMultimodal SDXL / Ollama) also work here — base URL is auto-filled from the provider preset or inherited from the Model Pool when left empty.">Image Edit Model</HintLabel>
+                        </span>
+                        {rolesCollapsed.image
+                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                      </button>
+                      {/* 已选模型 chips：同 Key 下多选，仅展开时显示（折叠时标题标签已显示默认模型） */}
+                      {!rolesCollapsed.image && imageEditSelectedModels.length > 0 && (
+                        <div className="-mt-1 mb-2 flex flex-wrap items-center gap-1">
+                          {imageEditSelectedModels.map((m) => {
+                            const isDefault = m === imageEditModel.trim();
+                            return (
+                              <span
+                                key={m}
+                                title={isDefault ? `${m} (default)` : m}
+                                className="inline-flex max-w-[160px] items-center gap-1 rounded border px-1.5 py-px text-11 font-medium"
+                                style={{
+                                  backgroundColor: 'color-mix(in oklab, var(--purple) 10%, transparent)',
+                                  borderColor: isDefault ? 'var(--purple)' : 'color-mix(in oklab, var(--purple) 28%, transparent)',
+                                  color: 'var(--purple)',
+                                  boxShadow: isDefault ? '0 0 0 1px color-mix(in oklab, var(--purple) 30%, transparent)' : undefined,
+                                }}
+                              >
+                                <span className="truncate">{m}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setImageEditSelectedModels((prev) => prev.filter((x) => x !== m))}
+                                  className="shrink-0 rounded-full p-px transition-colors hover:bg-[var(--paper-hover)]"
+                                  title={`Remove ${m}`}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {!rolesCollapsed.image && (
+                      <>
+                      {renderRolePool('Image Edit', 'var(--warn)', imagePool, setImagePool, 'image')}
+                      </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+      {/* Templates / WeChat Bind 等：直接在右侧面板内嵌显示（不再弹窗） */}
+      {activeSection === 'templates' && (
+        <TemplateLibraryModal embedded open onOpenChange={() => {}} />
+      )}
+      {activeSection === 'wechat' && (
+        <WechatBindModal embedded open onOpenChange={() => {}} />
+      )}
+      {activeSection === 'agents' && (
+        <AgentSettingsModal embedded open onOpenChange={() => {}} />
+      )}
+      {activeSection === 'usage' && (
+        <UsagePanel embedded onClose={() => setActiveSection('roles')} />
+      )}
+
+      {/* Model Pool（Manage Models）：从 Role Assignment 的按钮以独立弹窗方式打开（左侧导航不包含该项） */}
+      <Dialog open={modelPoolOpen} onOpenChange={setModelPoolOpen}>
+        <DialogContent className="flex flex-col gap-0 p-0" style={{ width: '60rem', maxWidth: '60rem', height: '70vh' }}>
+        <DialogTitle className="sr-only">Manage Models</DialogTitle>
+        {(() => {
+        const preset = PROVIDER_PRESETS.find((p) => p.type === selectedChatProvider)!;
+        const pickerAll = fetchedModels[selectedChatProvider] || [];
+        const searchLower = modelSearch.trim().toLowerCase();
+        const pickerList = pickerAll.filter((m) => {
+          if (categoryFilter !== 'all') {
+            if (categoryFilter === 'other' && (['chat', 'vision', 'ocr', 'audio'].includes(m.category))) return false;
+            if (categoryFilter !== 'other' && m.category !== categoryFilter) return false;
+          }
+          if (searchLower && !m.modelId.toLowerCase().includes(searchLower)) return false;
+          return true;
+        })
+        .sort((a, b) => {
+          const presetOrder = new Map(PROVIDER_PRESETS.find((p) => p.type === selectedChatProvider)?.models.map((pm, i) => [pm.modelId, i]) || []);
+          const ai = presetOrder.has(a.modelId) ? presetOrder.get(a.modelId)! : Infinity;
+          const bi = presetOrder.has(b.modelId) ? presetOrder.get(b.modelId)! : Infinity;
+          return ai - bi;
+        });
+        const isTesting = testing[selectedChatProvider];
+        // 本地无鉴权厂商（BobMultimodal/Ollama）无 Key 也可 Fetch Models
+        const hasKey = apiKeys[selectedChatProvider].trim().length > 0 || NO_AUTH_LOCAL_PROVIDERS.has(selectedChatProvider);
+        // 跨厂商候选池聚合（原 Model Pool 弹窗的概览，合并到本弹窗顶部，避免多层嵌套）
+        const poolItems: { provider: ProviderType; modelId: string }[] = [];
+        (Object.keys(selectedModels) as ProviderType[]).forEach((type) => {
+          selectedModels[type].forEach((modelId) => poolItems.push({ provider: type, modelId }));
+        });
+        const poolCount = poolItems.length;
+        return (
+          <div className="flex min-h-0 flex-1 flex-col" style={{ overflow: 'hidden' }}>
+              {/* Header：弹窗顶栏，仅保留关闭按钮 */}
+              <div className="flex items-center justify-end border-b px-4 py-3" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}>
+                <button type="button" onClick={() => setModelPoolOpen(false)} className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }} title="Close Model Pool">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Candidate pool overview（原 Model Pool 弹窗概览，合并至此） */}
+              <div className="border-b px-4 py-2.5" style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}>
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                    Candidate Pool ({poolCount})
+                  </span>
+                  <span className="text-11" style={{ color: 'var(--ink-faint)' }}>— checked models across all providers</span>
+                </div>
+                {poolCount === 0 ? (
+                  <p className="text-xs italic" style={{ color: 'var(--ink-muted)' }}>Pool is empty — check models below to add them.</p>
+                ) : (
+                  <div className="flex max-h-[72px] flex-wrap gap-1 overflow-y-auto">
+                    {poolItems.map(({ provider, modelId }) => {
+                      const fetched = fetchedModels[provider]?.find((m) => m.modelId === modelId);
+                      const preset = PROVIDER_PRESETS.find((p) => p.type === provider);
+                      const vendorLabel = fetched?.vendor || preset?.label || provider;
+                      return (
+                        <span key={`${provider}-${modelId}`} className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-hover)', color: 'var(--ink)' }}>
+                          <span className="max-w-[140px] truncate font-medium">{modelId}</span>
+                          <span className="shrink-0 rounded px-1 text-10 font-semibold" style={{ backgroundColor: VENDOR_BADGE_STYLE[vendorLabel]?.bg || 'var(--line-soft)', color: VENDOR_BADGE_STYLE[vendorLabel]?.fg || 'var(--ink-muted)' }}>{vendorLabel}</span>
+                          <button type="button" onClick={() => toggleModel(provider, modelId)} title="Remove" className="shrink-0 transition-colors hover:opacity-70" style={{ color: 'var(--ink-muted)' }}>
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Body: compact stacked layout */}
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+                    {/* Provider selector */}
+                    <div>
+                      <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Provider</label>
+                      <select
+                        value={pickerSide}
+                        onChange={(e) => { setPickerSide(e.target.value as ProviderType); setModelSearch(''); setCategoryFilter('all'); }}
+                        className="h-9 w-full rounded-md border px-2 text-sm"
+                        style={paperInputStyle}
+                      >
+                        {PROVIDER_SIDEBAR_GROUPS.map((group) => (
+                          <optgroup key={group.label} label={group.label}>
+                            {group.types.map((t) => {
+                              const p = PROVIDER_PRESETS.find((pp) => pp.type === t);
+                              if (!p) return null;
+                              return (
+                                <option key={t} value={t}>
+                                  {p.label}
+                                </option>
+                              );
+                            })}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Base URL */}
+                    <div>
+                      <label className="mb-1 flex items-center justify-between text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                        <span>Base URL</span>
+                        <button
+                          type="button"
+                          onClick={() => setCustomBaseUrlMode((prev) => ({ ...prev, [selectedChatProvider]: !prev[selectedChatProvider] }))}
+                          className="text-xs font-medium transition-colors hover:underline"
+                          style={{ color: 'var(--primary-strong)' }}
+                        >
+                          {customBaseUrlMode[selectedChatProvider] ? 'Reset' : 'Customize'}
+                        </button>
+                      </label>
+                      {customBaseUrlMode[selectedChatProvider] ? (
+                        <Input
+                          type="text"
+                          placeholder={preset.baseUrl}
+                          value={customBaseUrls[selectedChatProvider]}
+                          onChange={(e) => setCustomBaseUrls((prev) => ({ ...prev, [selectedChatProvider]: e.target.value }))}
+                          className="h-9 w-full text-sm"
+                          style={paperInputStyle}
+                        />
+                      ) : (
+                        <div className="flex h-9 items-center rounded-md border px-2 font-mono text-sm" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)' }}>
+                          {resolveBaseUrl(selectedChatProvider)}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* API Key */}
+                    <div>
+                      <label className="mb-1 flex items-center justify-between text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                        <span className="flex items-center gap-2">
+                          <span>API Key</span>
+                          <span
+                            className="rounded-full px-1.5 py-0.5 text-10 font-medium"
+                            style={{
+                              backgroundColor: BINDING_MODE_STYLE[PROVIDER_BINDING_MODE[selectedChatProvider]].bg,
+                              color: BINDING_MODE_STYLE[PROVIDER_BINDING_MODE[selectedChatProvider]].fg,
+                            }}
+                          >
+                            {BINDING_MODE_LABEL[PROVIDER_BINDING_MODE[selectedChatProvider]]}
+                          </span>
+                        </span>
+                        <a
+                          href={PROVIDER_KEY_URLS[selectedChatProvider]}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 text-xs transition-colors hover:underline"
+                          style={{ color: 'var(--primary-strong)' }}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          {NO_AUTH_LOCAL_PROVIDERS.has(selectedChatProvider) ? 'No Key Needed' : 'Get Key'}
+                        </a>
+                      </label>
+                      <div className="relative">
+                        <Input
+                          type={keyVisible[selectedChatProvider] ? 'text' : 'password'}
+                          placeholder={NO_AUTH_LOCAL_PROVIDERS.has(selectedChatProvider) ? 'Local service — any value works' : `Enter ${preset.label} API Key`}
+                          value={apiKeys[selectedChatProvider]}
+                          onChange={(e) => setApiKeys((prev) => ({ ...prev, [selectedChatProvider]: e.target.value }))}
+                          className="h-9 w-full pr-9 text-sm"
+                          style={paperInputStyle}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setKeyVisible((prev) => ({ ...prev, [selectedChatProvider]: !prev[selectedChatProvider] }))}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 transition-colors hover:bg-[var(--line-soft)]"
+                          style={{ color: 'var(--ink-muted)' }}
+                          title={keyVisible[selectedChatProvider] ? 'Hide' : 'Show'}
+                        >
+                          {keyVisible[selectedChatProvider] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Model ID + Test & Add */}
+                    <div>
+                      <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Model ID</label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="text"
+                          placeholder="e.g. deepseek-v4-flash"
+                          value={newModelIdInput}
+                          onChange={(e) => setNewModelIdInput(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && newModelIdInput.trim() && !verifyingModelId) { e.preventDefault(); testAndAddModel(selectedChatProvider); } }}
+                          className="h-9 flex-1 text-sm"
+                          style={paperInputStyle}
+                        />
+                        <Button
+                          size="sm"
+                          onClick={() => testAndAddModel(selectedChatProvider)}
+                          disabled={!newModelIdInput.trim() || !!verifyingModelId}
+                          style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                        >
+                          {verifyingModelId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                          <span className="ml-1">{verifyingModelId ? 'Testing…' : 'Test & Add'}</span>
+                        </Button>
+                      </div>
+                      {testAddFeedback && testAddFeedback.provider === selectedChatProvider && (
+                        <p className="mt-1 text-xs" style={{ color: testAddFeedback.ok ? 'var(--success)' : 'var(--danger)' }}>
+                          {testAddFeedback.ok ? <Check className="mr-0.5 inline h-3 w-3" /> : <AlertCircle className="mr-0.5 inline h-3 w-3" />}
+                          {testAddFeedback.msg}
+                        </p>
+                      )}
+                    </div>
+
+
+
+
+              </div>
+
+              {/* Footer: selected count + done */}
+              <div className="flex items-center justify-between border-t px-4 py-3" style={{ borderColor: 'var(--line)' }}>
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  {selectedModels[selectedChatProvider].size} selected
+                </span>
+                <Button size="sm" onClick={() => setModelPoolOpen(false)} style={{ backgroundColor: 'var(--primary)', color: '#fff' }}>
+                  Done
+                </Button>
+              </div>
+            </div>
+        );
+      })()}
+        </DialogContent>
+      </Dialog>
+          </div>
+        </div>
+
         <div className="flex items-center justify-end gap-2 px-6 py-4">
-          {saved && (
-            <span className="mr-auto flex items-center gap-1 text-xs" style={{ color: 'oklch(0.50 0.12 45)' }}>
-              <Check className="h-3.5 w-3.5" />
-              Saved
-            </span>
+          {saveError && (
+            <div className="mr-auto min-w-0 max-w-[360px]">
+              <Callout variant="danger" size="sm" description={saveError} icon={<AlertCircle className="h-4 w-4" />} />
+            </div>
+          )}
+          {saved && !saveError && (
+            <div className="mr-auto min-w-0 max-w-[200px]">
+              <Callout variant="success" size="sm" title="Saved" icon={<Check className="h-4 w-4" />} />
+            </div>
+          )}
+          {!saved && !saveError && isDirty && (
+            <div className="mr-auto min-w-0 max-w-[260px]">
+              <Callout
+                variant="warn"
+                size="sm"
+                description="Unsaved changes"
+                icon={<span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: 'var(--warn-solid)' }} />}
+              />
+            </div>
           )}
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => onOpenChange(false)}
-            className="text-xs"
-            style={{ color: 'oklch(0.55 0.02 50)' }}
+            onClick={() => {
+              if (isDirty && !confirm('You have unsaved changes. Close anyway?')) return;
+              onOpenChange(false);
+            }}
+            className="text-sm"
+            style={{ color: 'var(--ink-muted)' }}
           >
             Cancel
           </Button>
           <Button
             size="sm"
             onClick={handleSave}
-            className="text-xs"
+            disabled={saving || (!isDirty && !saved)}
+            className="text-sm"
             style={{
-              backgroundColor: 'oklch(0.62 0.17 45)',
+              backgroundColor: 'var(--primary)',
               color: 'white',
+              opacity: (saving || (!isDirty && !saved)) ? 0.5 : 1,
             }}
           >
-            Save
+            {saving ? (
+              <span className="flex items-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Saving...
+              </span>
+            ) : 'Save'}
           </Button>
         </div>
+        </TooltipProvider>
+
+
+
       </DialogContent>
     </Dialog>
   );

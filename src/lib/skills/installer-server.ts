@@ -1,34 +1,18 @@
 /**
  * skills/installer-server.ts — 技能安装与卸载
  *
- * 仅在 Next.js 服务端运行，不可被客户端组件导入。
+ * 仅在 Next.js 服务端路由 handler（app/api/* / route.ts）内部 import，
+ * 不可被客户端组件导入。不使用 `server-only` 哨兵包。
  */
-
-import 'server-only';
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { resolveAppRoot } from '../app-root';
-import type { SkillMeta, SkillFrontmatter } from './types';
+import { parseFrontmatter, SKILL_SCENES, BUILTIN_SKILLS_DIR } from './loader-server';
+import type { SkillMeta, SkillScene } from './types';
 
-const USER_SKILLS_DIR = path.join(resolveAppRoot(), 'skills');
-
-/** 简易 frontmatter 解析（避免依赖 loader-server 的未导出函数） */
-function parseFrontmatter(content: string): { fm: SkillFrontmatter; body: string } {
-  const stripped = content.replace(/^\ufeff/, '');
-  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
-  if (!match) {
-    return { fm: { name: '', description: '' }, body: stripped };
-  }
-  const fm: Record<string, string> = {};
-  const lines = match[1].split(/\r?\n/);
-  for (const line of lines) {
-    const kv = line.match(/^([a-zA-Z_-]+):\s*(.*)$/);
-    if (kv) fm[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
-  }
-  return { fm: fm as unknown as SkillFrontmatter, body: match[2].trimStart() };
-}
+export const USER_SKILLS_DIR = path.join(resolveAppRoot(), 'skills');
 
 export interface InstallOptions {
   source: 'github' | 'local' | 'url';
@@ -114,12 +98,18 @@ function parseSkillMeta(skillDir: string): SkillMeta | null {
 
   if (!fm.name || !fm.description) return null;
 
+  const scenes: SkillScene[] =
+    fm.scenes && fm.scenes.length > 0
+      ? (fm.scenes as SkillScene[])
+      : (SKILL_SCENES[fm.name] ?? ['general']);
+
   return {
     name: fm.name,
     description: fm.description,
     path: skillDir,
     source: 'user',
     version: fm.version || '1.0.0',
+    scenes,
   };
 }
 
@@ -245,31 +235,163 @@ export async function installSkill(opts: InstallOptions): Promise<InstallResult>
 }
 
 /**
+ * 下载制技能物化安装：从随包源 assets/skills/<name> 复制到用户技能目录
+ * （~/BobWork/skills/<name>/），下载后即普通本地文件夹，用户可自由编辑。
+ * - 同名已下载且未带 force → 冲突（不静默覆盖本地自定义副本，A 方案）
+ * - force=true 仅用于用户主动点击「重新下载/覆盖本地」时
+ */
+export async function installBuiltinSkill(
+  name: string,
+  opts: { force?: boolean } = {},
+): Promise<InstallResult> {
+  if (!VALID_NAME_RE.test(name)) {
+    return { success: false, error: `Invalid skill name: "${name}"` };
+  }
+  const srcDir = path.join(BUILTIN_SKILLS_DIR, name);
+  if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
+    return {
+      success: false,
+      error: `Skill "${name}" is not available for download`,
+      detail: 'No builtin source found in the app bundle',
+    };
+  }
+  return installSkill({ source: 'local', localPath: srcDir, force: opts.force });
+}
+
+/**
  * 卸载用户安装的技能
  *
  * @param skillName 技能名称
  * @returns 是否成功
  */
+// 外部兼容源（与 loader-server 保持一致）
+const EXTERNAL_DIRS = [
+  path.join(os.homedir(), '.claude', 'skills'),
+  path.join(os.homedir(), '.cursor', 'skills'),
+];
+
+/** 在 SKILL.md frontmatter 中追加字段（不存在 frontmatter 时在文件头新建） */
+function addFrontmatterFields(skillMdPath: string, fields: Record<string, string>): void {
+  const content = fs.readFileSync(skillMdPath, 'utf-8');
+  const lines = content.split(/\r?\n/);
+  const additions = Object.entries(fields).map(([k, v]) => `${k}: ${v}`);
+
+  if (lines[0] === '---') {
+    let endIdx = -1;
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i] === '---') {
+        endIdx = i;
+        break;
+      }
+    }
+    if (endIdx > 0) {
+      lines.splice(endIdx, 0, ...additions);
+      fs.writeFileSync(skillMdPath, lines.join('\n'), 'utf-8');
+      return;
+    }
+  }
+  const fm = `---\n${additions.join('\n')}\n---\n\n`;
+  fs.writeFileSync(skillMdPath, fm + content, 'utf-8');
+}
+
+/**
+ * 从 zip buffer 安装技能（Skill Auto-Fetch 专用）。
+ * 流程：解压 → 校验 → frontmatter 写入（default-enabled / installed-from）→ 落盘。
+ * 与 installSkill 的 url 分支共用解压/校验逻辑，但来源是已下载并校验过的内存 buffer。
+ */
+export async function installSkillFromZip(
+  zipBuffer: Buffer,
+  opts: { installedFrom?: string; defaultEnabled?: boolean; force?: boolean } = {},
+): Promise<InstallResult> {
+  const tmpDir = path.join(os.tmpdir(), `bob-skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    // 1. 解压并定位技能根目录（含 SKILL.md 的那一层）
+    const rootDir = await extractFromZip(zipBuffer, tmpDir);
+    const files = fs.readdirSync(rootDir);
+    for (const file of files) {
+      fs.renameSync(path.join(rootDir, file), path.join(tmpDir, file));
+    }
+
+    // 2. 校验
+    const meta = parseSkillMeta(tmpDir);
+    if (!meta) {
+      return {
+        success: false,
+        error: 'Invalid skill package',
+        detail: 'SKILL.md not found or missing required fields (name, description)',
+      };
+    }
+    if (!VALID_NAME_RE.test(meta.name)) {
+      return {
+        success: false,
+        error: `Invalid skill name: "${meta.name}"`,
+        detail: 'Skill name must only contain lowercase letters, numbers, hyphens, and underscores',
+      };
+    }
+
+    // 3. frontmatter 写入来源与默认启用标记
+    try {
+      addFrontmatterFields(path.join(tmpDir, 'SKILL.md'), {
+        'default-enabled': opts.defaultEnabled === false ? 'false' : 'true',
+        ...(opts.installedFrom ? { 'installed-from': opts.installedFrom } : {}),
+      });
+    } catch (e) {
+      console.warn('[installer] frontmatter 写入失败:', e);
+    }
+
+    // 4. 冲突检测 + 安装
+    const targetDir = path.join(USER_SKILLS_DIR, meta.name);
+    if (fs.existsSync(targetDir) && !opts.force) {
+      return {
+        success: false,
+        error: `Skill "${meta.name}" is already installed`,
+        detail: 'Use force: true to overwrite',
+      };
+    }
+    fs.mkdirSync(USER_SKILLS_DIR, { recursive: true });
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    fs.renameSync(tmpDir, targetDir);
+
+    return {
+      success: true,
+      skill: { ...meta, path: targetDir },
+    };
+  } catch (err: any) {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    return { success: false, error: err?.message || 'Unknown install error' };
+  }
+}
+
 export function uninstallSkill(skillName: string): { success: boolean; error?: string } {
   if (!VALID_NAME_RE.test(skillName)) {
     return { success: false, error: `Invalid skill name: "${skillName}"` };
   }
 
-  const targetDir = path.join(USER_SKILLS_DIR, skillName);
-
-  if (!fs.existsSync(targetDir)) {
-    return { success: false, error: `Skill "${skillName}" is not installed` };
+  // 先尝试用户技能目录
+  const userTargetDir = path.join(USER_SKILLS_DIR, skillName);
+  if (fs.existsSync(userTargetDir)) {
+    const realTarget = fs.realpathSync(userTargetDir);
+    const realUserDir = fs.realpathSync(USER_SKILLS_DIR);
+    if (!realTarget.startsWith(realUserDir + path.sep) && realTarget !== realUserDir) {
+      return { success: false, error: 'Security: cannot delete outside user skills directory' };
+    }
+    fs.rmSync(userTargetDir, { recursive: true, force: true });
+    return { success: true };
   }
 
-  // 安全检查：确保删除的是用户技能目录的子目录
-  const realTarget = fs.realpathSync(targetDir);
-  const realUserDir = fs.realpathSync(USER_SKILLS_DIR);
-  if (!realTarget.startsWith(realUserDir + path.sep) && realTarget !== realUserDir) {
-    return { success: false, error: 'Security: cannot delete outside user skills directory' };
+  // 再尝试外部兼容目录
+  for (const extDir of EXTERNAL_DIRS) {
+    const extTargetDir = path.join(extDir, skillName);
+    if (fs.existsSync(extTargetDir)) {
+      fs.rmSync(extTargetDir, { recursive: true, force: true });
+      return { success: true };
+    }
   }
 
-  fs.rmSync(targetDir, { recursive: true, force: true });
-  return { success: true };
+  return { success: false, error: `Skill "${skillName}" is not installed` };
 }
 
 /**

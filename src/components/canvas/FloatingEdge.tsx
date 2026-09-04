@@ -13,14 +13,16 @@ import {
 } from '@xyflow/react';
 
 type FloatingEdgeData = {
-  relation?: 'child' | 'sibling';
+  relation?: 'child';
   disconnected?: boolean;
+  /** 相连节点正在执行任务：边显示"输送电流"发光流动效果 */
+  executing?: boolean;
 };
 
 /** 节点中心坐标 */
 function getNodeCenter(node: InternalNode<Node>): { x: number; y: number } {
   const { position, measured } = node;
-  const width = measured?.width ?? 320;
+  const width = measured?.width ?? 400;
   const height = measured?.height ?? 400;
   return {
     x: position.x + width / 2,
@@ -33,7 +35,7 @@ function sideCoords(
   node: InternalNode<Node>,
   pos: Position,
 ): { x: number; y: number } {
-  const w = node.measured?.width ?? 320;
+  const w = node.measured?.width ?? 400;
   const h = node.measured?.height ?? 400;
   switch (pos) {
     case Position.Top:
@@ -47,7 +49,7 @@ function sideCoords(
   }
 }
 
-/** 计算两个节点之间最近的侧边连接参数 */
+/** 计算两个节点之间最近的侧边连接参数（普通 child 边仅使用 Left/Right 连接点） */
 function getEdgeParams(
   source: InternalNode<Node>,
   target: InternalNode<Node>,
@@ -55,19 +57,13 @@ function getEdgeParams(
   const sourceCenter = getNodeCenter(source);
   const targetCenter = getNodeCenter(target);
 
-  const dx = targetCenter.x - sourceCenter.x;
-  const dy = targetCenter.y - sourceCenter.y;
-
   let sourcePos: Position;
   let targetPos: Position;
 
-  if (Math.abs(dx) > Math.abs(dy)) {
-    sourcePos = dx > 0 ? Position.Right : Position.Left;
-    targetPos = dx > 0 ? Position.Left : Position.Right;
-  } else {
-    sourcePos = dy > 0 ? Position.Bottom : Position.Top;
-    targetPos = dy > 0 ? Position.Top : Position.Bottom;
-  }
+  // 普通 child 边仅使用 Left/Right 连接点（纵向 Handle 未渲染）
+  const dx = targetCenter.x - sourceCenter.x;
+  sourcePos = dx > 0 ? Position.Right : Position.Left;
+  targetPos = dx > 0 ? Position.Left : Position.Right;
 
   const s = sideCoords(source, sourcePos);
   const t = sideCoords(target, targetPos);
@@ -86,8 +82,12 @@ export function FloatingEdge({
 }: EdgeProps<Edge<FloatingEdgeData>>) {
   const sourceNode = useInternalNode(source);
   const targetNode = useInternalNode(target);
-  const relation = data?.relation ?? 'child';
   const disconnected = data?.disconnected ?? false;
+  const isChild = data?.relation === 'child';
+  const executing = data?.executing ?? false;
+  // note（思路便签）参与的边：隐藏中点断开圆圈——便签树为轻量思路组织，连线短且密集，
+  // 圆圈会遮挡卡片内容；断开的 note 边仍保留 ✕ 徽标以便重连
+  const isNoteEdge = sourceNode?.type === 'note' || targetNode?.type === 'note';
   const { setEdges } = useReactFlow();
 
   // 拖拽断开状态
@@ -134,7 +134,7 @@ export function FloatingEdge({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'delete', edge_id: id }),
-      }).catch((err) => console.error('连线断开出错:', err));
+      }).catch((err) => console.error('Edge disconnect error:', err));
     }
   }, [dragging, id, setEdges]);
 
@@ -180,15 +180,13 @@ export function FloatingEdge({
   const midX = (sx + tx) / 2;
   const midY = (sy + ty) / 2;
 
-  const isChild = relation === 'child';
-
   const strokeColor = disconnected
     ? 'oklch(0.65 0.01 60 / 0.4)'
-    : isChild
-      ? 'oklch(0.55 0.12 45 / 0.5)'
-      : 'oklch(0.55 0.12 45 / 0.3)';
-  const strokeWidth = disconnected ? 1.5 : isChild ? 2 : 1.5;
-  const dashArray = disconnected ? '3 5' : isChild ? '8 4' : '6 4';
+    : 'oklch(0.55 0.12 45 / 0.5)';
+  const strokeWidth = disconnected ? 1.5 : 2;
+  const dashArray = disconnected ? '3 5' : '8 4';
+  // 执行中"电流"颜色：普通 child 边亮琥珀
+  const executingColor = 'oklch(0.78 0.16 75)';
 
   // 拖拽时的临时连线（从中点到鼠标位置）
   const dragLinePath = dragging && dragPos
@@ -197,7 +195,7 @@ export function FloatingEdge({
 
   return (
     <>
-      {/* 主连线 */}
+      {/* 主连线：普通 child 边单向 */}
       <path
         id={id}
         d={edgePath}
@@ -208,6 +206,32 @@ export function FloatingEdge({
         markerEnd={!disconnected && isChild ? 'url(#floating-arrow)' : undefined}
         style={!disconnected && isChild ? { animation: 'dashflow 0.8s linear infinite' } : undefined}
       />
+
+      {/* 相连节点执行中："输送电流"效果 —— 亮色光晕 + 亮点沿路径从源流向目标 */}
+      {executing && !disconnected && (
+        <>
+          <path
+            d={edgePath}
+            fill="none"
+            stroke={executingColor}
+            strokeWidth={5}
+            strokeLinecap="round"
+            opacity={0.22}
+            strokeDasharray="2 12"
+            style={{ animation: 'edge-current-flow 1s linear infinite', filter: 'blur(2px)', pointerEvents: 'none' }}
+          />
+          <path
+            d={edgePath}
+            fill="none"
+            stroke={executingColor}
+            strokeWidth={2}
+            strokeLinecap="round"
+            opacity={0.9}
+            strokeDasharray="3 10"
+            style={{ animation: 'edge-current-flow 0.8s linear infinite', pointerEvents: 'none' }}
+          />
+        </>
+      )}
 
       {/* 拖拽时的临时虚线 */}
       {dragLinePath && (
@@ -221,8 +245,8 @@ export function FloatingEdge({
         />
       )}
 
-      {/* 活跃连线的中点圆圈：拖拽断开 */}
-      {!disconnected && (
+      {/* 活跃连线的中点圆圈：拖拽断开（note 边隐藏） */}
+      {!disconnected && !isNoteEdge && (
         <g
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
@@ -268,9 +292,9 @@ export function FloatingEdge({
               textAnchor="middle"
               fontSize={8}
               fill="oklch(0.55 0.12 45 / 0.9)"
-              style={{ fontFamily: 'sans-serif', pointerEvents: 'none', fontWeight: 500 }}
+              style={{ fontFamily: "var(--font-sans)", pointerEvents: 'none', fontWeight: 500 }}
             >
-              拖拽断开
+              Drag to disconnect
             </text>
           )}
         </g>
@@ -296,7 +320,7 @@ export function FloatingEdge({
             textAnchor="middle"
             fontSize={9}
             fill="oklch(0.50 0.15 25)"
-            style={{ fontFamily: 'sans-serif', pointerEvents: 'none', fontWeight: 600 }}
+            style={{ fontFamily: "var(--font-sans)", pointerEvents: 'none', fontWeight: 600 }}
           >
             ✕
           </text>
@@ -312,6 +336,12 @@ export function FloatingEdge({
 export function FloatingEdgeDefs() {
   return (
     <svg className="absolute" style={{ width: 0, height: 0 }}>
+      <style>{`
+        /* 电流输送动画：stroke-dashoffset 递减 → 亮点沿路径从 source 流向 target */
+        @keyframes edge-current-flow {
+          to { stroke-dashoffset: -13; }
+        }
+      `}</style>
       <defs>
         <marker
           id="floating-arrow"

@@ -1,28 +1,36 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# 确保 node/corepack 可定位（沙箱环境 PATH 可能被裁剪）
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
 # ============================================================
-# BobAgent Release 打包脚本
-#   - 用于生成可分发的 macOS 安装包（.app + .dmg + .zip）
+# BobWork Release 打包脚本
+#   - 用于生成可分发的 macOS 安装包（.app + .zip + .dmg）
 #   - 确保所有依赖（包括 electron-updater）完整打包
-#   - 使用系统 hdiutil 生成 DMG（无需安装 create-dmg）
+#   - 默认同时生成 ZIP + DMG + latest-mac.yml（自动更新优先 DMG 更新包）
+#   - DMG 优先走完整版（Finder 布局），若 hdiutil attach 被沙箱拦截
+#     则自动降级为一步式 DMG（无需挂载 /dev）；SKIP_DMG=1 可跳过 DMG
 #
 # 用法:
-#   bash ./scripts/package-release.sh        # 默认 build for 当前架构
+#   bash ./scripts/package-release.sh        # 默认构建 arm64（ZIP + DMG）
 #   bash ./scripts/package-release.sh arm64  # 仅打包 Apple Silicon (M1/M2/M3)
-#   bash ./scripts/package-release.sh x64    # 仅打包 Intel
+#   SKIP_DMG=1 bash ./scripts/package-release.sh  # 仅 ZIP（跳过 DMG）
+#
+# ⚠️ 发布规则（2026-08 起）：仅生成 ARM 架构（Apple Silicon）。
+#    传入 both / x64 会被忽略并自动降级为 arm64。
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-unset BOBAGENT_HOME
+unset BOBWORK_HOME
 
-APP_NAME="BobAgent"
+APP_NAME="BobWork"
 VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
-APP_ID="com.bobagent.app"
-ARCH="${1:-arm64}"
+APP_ID="com.bobwork.app"
+ARCH="arm64"
 OUTPUT_DIR="$PROJECT_DIR/release-dist"
 LOG_FILE="$OUTPUT_DIR/build.log"
 GITHUB_OWNER="baolei0227-glitch"
@@ -37,6 +45,11 @@ log()  { echo "==> $*"; }
 ok()   { echo "${C_GREEN}✅ $*${C_RESET}"; }
 warn() { echo "${C_YELLOW}⚠️  $*${C_RESET}"; }
 err()  { echo "${C_RED}❌ $*${C_RESET}"; }
+
+# 发布规则（2026-08 起）：仅生成 ARM 架构，both / x64 一律降级为 arm64
+if [ "${1:-}" != "" ] && [ "$1" != "arm64" ]; then
+  warn "发布规则：仅支持 arm64，忽略参数 '$1'，按 arm64 构建"
+fi
 
 # ---------- 0. 版本号冲突检查 ----------
 check_version_conflict() {
@@ -80,25 +93,38 @@ check_version_conflict
 # ---------- 1. 清理并准备 ----------
 rm -rf "$OUTPUT_DIR" >/dev/null 2>&1 || true
 mkdir -p "$OUTPUT_DIR"
-exec > >(tee "$LOG_FILE") 2>&1
+# 注意：不使用 exec > >(tee ...) 进程替换（部分沙箱环境不允许 /dev/fd/）
+# 改为直接重定向到日志文件，同时在 stderr 输出关键进度
+exec > "$LOG_FILE" 2>&1
 
 log "============================================"
-log "BobAgent v$VERSION Release Build"
+log "BobWork v$VERSION Release Build"
 log "Arch: $ARCH"
 log "============================================"
 
 # ---------- 2. 构建 Next.js standalone ----------
 if [ "${SKIP_NEXT_BUILD:-0}" != "1" ]; then
+  # 清空上次构建的 standalone 残留（避免项目根目录/旧产物被污染进打包）
+  rm -rf "$PROJECT_DIR/.next/standalone" "$PROJECT_DIR/.next/standalone 2" 2>/dev/null || true
   log "Step 1/6: 构建 Next.js (standalone mode) ..."
-  NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=4096" pnpm next build
+  NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=4096" corepack pnpm next build
   ok "Next.js 构建完成"
+  # 校验客户端静态资源已生成：standalone 模式不会自动把 .next/static 并入 standalone，
+  # 若此处为空，最终 zip 将缺失全部客户端 JS chunk → 应用打开后卡 Loading / 客户端异常。
+  # 历史教训：v1.2.58/1.2.59 因 .next 缓存损坏（多次构建失败残留）导致 static 缺失，线上用户全部打不开。
+  if [ ! -d "$PROJECT_DIR/.next/static" ] || [ -z "$(ls -A "$PROJECT_DIR/.next/static/chunks" 2>/dev/null)" ]; then
+    err "❌ 严重错误：next build 未生成客户端静态资源 (.next/static/chunks 为空)！"
+    err "   请先清理 .next 缓存后重新构建：rm -rf .next && $0"
+    exit 1
+  fi
+  ok "客户端静态资源校验通过（chunks: $(ls "$PROJECT_DIR/.next/static/chunks" | wc -l | tr -d ' ')）"
 else
   log "Step 1/6: 跳过 Next.js 构建 (SKIP_NEXT_BUILD=1)"
 fi
 
 # ---------- 3. 编译 Electron 主进程 ----------
 log "Step 2/6: 编译 Electron main + preload ..."
-pnpm tsup electron/main.ts electron/preload.ts \
+corepack pnpm tsup electron/main.ts electron/preload.ts \
   --format cjs --platform node --target node20 \
   --outDir electron/dist --no-splitting --external electron
 ok "主进程编译完成"
@@ -123,9 +149,15 @@ mkdir -p "$STAGING"
 mkdir -p "$STAGING/app"
 cp "$PROJECT_DIR/electron/dist/main.js"    "$STAGING/app/main.js"
 cp "$PROJECT_DIR/electron/dist/preload.js" "$STAGING/app/preload.js"
+# 全局截图 OCR（Cmd+Shift+O）本地 Swift Vision 兜底脚本：与主进程 __dirname 对齐（app/pdf/core/）
+mkdir -p "$STAGING/app/pdf/core"
+cp "$PROJECT_DIR/src/lib/pdf/core/ocr_vision.swift" "$STAGING/app/pdf/core/ocr_vision.swift"
+# 屏幕录制权限预检脚本（SCShareableContent，与 screencapture 同一责任链）
+mkdir -p "$STAGING/app/swift"
+cp "$PROJECT_DIR/src/lib/screen-ocr/screen_permission.swift" "$STAGING/app/swift/screen_permission.swift"
 cat > "$STAGING/app/package.json" <<'EOF'
 {
-  "name": "bob-agent-desktop",
+  "name": "bob-work-desktop",
   "version": "1.0.0",
   "main": "main.js"
 }
@@ -148,15 +180,14 @@ npm --prefix "$STAGING/app" install --omit=dev --no-optional 2>&1 | tail -3
 ok "Electron 主进程依赖安装完成 ($(du -sh "$STAGING/app/node_modules" | awk '{print $1}'))"
 
 # 5c. 生成 app-update.yml
-# GH_TOKEN 从环境变量读取；构建时需设置
-: "${GH_TOKEN:? 构建前请设置 GH_TOKEN 环境变量}"
+# 自动更新源：GitCode（国内 CDN 加速，检查更新 + 下载安装包全走 GitCode）
+# electron-updater generic provider 会在 url 下查找 latest-mac.yml
+GITCODE_OWNER="${GITCODE_OWNER:-baolei89}"
+GITCODE_REPO="${GITCODE_REPO:-BobWork}"
 cat > "$STAGING/app-update.yml" <<EOF
-provider: github
-owner: $GITHUB_OWNER
-repo: $GITHUB_REPO
-private: true
-token: $GH_TOKEN
-publishAutoUpdate: true
+provider: generic
+url: https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}/releases/download/latest
+channel: latest
 updaterCacheDirName: bob-updater
 EOF
 
@@ -164,14 +195,162 @@ EOF
 log "组装 Next.js standalone build ..."
 mkdir -p "$STAGING/next-standalone"
 cp -R "$PROJECT_DIR/.next/standalone/." "$STAGING/next-standalone/"
+# Next.js 16 standalone 输出到 <项目目录名>/ 子目录（如 projects/），检测并提升一层
+if [ ! -f "$STAGING/next-standalone/server.js" ] && [ -f "$STAGING/next-standalone/projects/server.js" ]; then
+  cp -R "$STAGING/next-standalone/projects/." "$STAGING/next-standalone/"
+  rm -rf "$STAGING/next-standalone/projects"
+  # 修复提升后失效的相对符号链接（Next 16 原生模块 external）：
+  # standalone 在 projects/.next/node_modules/ 下生成指向
+  #   ../../../projects/node_modules/.pnpm/<pkg>/node_modules/<pkg>
+  # 的相对符号链接（better-sqlite3 / pg 等 serverExternalPackages）。
+  # 提升后 projects/ 已删除，原相对路径解析失败 → 运行时 require('better-sqlite3-<hash>')
+  # 报 "Cannot find module 'better-sqlite3-<hash>'"（日历/DB 功能直接崩）。
+  # 此处把前缀 ../../../projects/node_modules/ 改写为 ../../node_modules/（提升后 node_modules 已上移一层）。
+  _symlink_dir="$STAGING/next-standalone/.next/node_modules"
+  if [ -d "$_symlink_dir" ]; then
+    # 递归处理所有符号链接（含 scope 子目录如 @modelcontextprotocol/）：
+    # 顶层 better-sqlite3/pg 形如 ../../../projects/node_modules/...，
+    # scope 子目录形如 ../../../../projects/node_modules/...，统一规则：
+    # 去掉 "projects/" 段并减少一层 "../"（即把 "../projects/" 替换为空）。
+    while IFS= read -r -d '' _symlink; do
+      _symlink_target="$(readlink "$_symlink")"
+      case "$_symlink_target" in
+        */projects/node_modules/*)
+          _symlink_new="$(printf '%s' "$_symlink_target" | sed 's#\.\./projects/##')"
+          rm -f "$_symlink"
+          ln -s "$_symlink_new" "$_symlink"
+          log "  修复符号链接 $(basename "$_symlink") -> $_symlink_new"
+          ;;
+      esac
+    done < <(find "$_symlink_dir" -type l -print0)
+  fi
+fi
 rm -rf "$STAGING/next-standalone/release" 2>/dev/null || true
 rm -rf "$STAGING/next-standalone/.next/standalone" 2>/dev/null || true
-rm -rf "$STAGING/next-standalone/release-dist" 2>/dev/null || true
-# 保留 standalone 自带的 node_modules（Next.js 已做 tree-shaking，~211MB）
+# 清理 release-dist 构建产物目录及其并发冲突副本（防止被循环打包）
+rm -rf "$STAGING/next-standalone/release-dist" "$STAGING/next-standalone/release-dist 2" 2>/dev/null || true
+rm -rf "$STAGING/next-standalone"/*" 2" 2>/dev/null || true
+# 保留 standalone 自带的 node_modules（Next.js 已做 tree-shaking）
 # 只删除明显不需要的目录
 rm -rf "$STAGING/next-standalone/node_modules/.cache" 2>/dev/null || true
+
+# --- standalone 运行时非必需文件清理（体积优化）---
+# e2e 测试代码与产物：运行时完全不需要
+rm -rf "$STAGING/next-standalone/e2e" "$STAGING/next-standalone/test-results" 2>/dev/null || true
+# 源码目录：.next 已包含编译产物，src 不参与运行
+rm -rf "$STAGING/next-standalone/src" "$STAGING/next-standalone/nodes" 2>/dev/null || true
+# 开发配置文件：运行时不读取
+rm -f "$STAGING/next-standalone/tsconfig.json" \
+      "$STAGING/next-standalone/tsconfig.tsbuildinfo" \
+      "$STAGING/next-standalone/pnpm-lock.yaml" \
+      "$STAGING/next-standalone/eslint.config.mjs" \
+      "$STAGING/next-standalone/stylelint.config.mjs" \
+      "$STAGING/next-standalone/tailwind.config.js" \
+      "$STAGING/next-standalone/postcss.config.js" \
+      "$STAGING/next-standalone/components.json" \
+      "$STAGING/next-standalone/.babelrc" \
+      "$STAGING/next-standalone/.npmrc" \
+      "$STAGING/next-standalone/.gitignore" \
+      "$STAGING/next-standalone/playwright.config.ts" \
+      "$STAGING/next-standalone/playwright-mcp-config.json" \
+      2>/dev/null || true
+# 文档与设计文档：运行时不读取
+rm -f "$STAGING/next-standalone/README.md" \
+      "$STAGING/next-standalone/LICENSE" \
+      "$STAGING/next-standalone/FORMAT.md" \
+      "$STAGING/next-standalone/DESIGN.md" \
+      "$STAGING/next-standalone/AGENTS.md" \
+      "$STAGING/next-standalone/RELEASES.md" \
+      "$STAGING/next-standalone/BobWork-实习律师使用说明书.md" \
+      "$STAGING/next-standalone/install-skill-方案-20260730.md" \
+      "$STAGING/next-standalone/workflow-template-方案-20260730.md" \
+      "$STAGING/next-standalone/next.config.ts" \
+      2>/dev/null || true
+
 cp -R "$PROJECT_DIR/.next/static" "$STAGING/next-standalone/.next/"
 cp -R "$PROJECT_DIR/public" "$STAGING/next-standalone/"
+# 内置技能（assets/skills）随包分发：打包版 cwd 为 next-standalone，loader 读取 ./assets/skills
+cp -R "$PROJECT_DIR/assets/skills" "$STAGING/next-standalone/assets/skills"
+# PDF 提取脚本（pypdf/pdfplumber/渲染 + 本地 Vision OCR）复制到 standalone scripts/
+mkdir -p "$STAGING/next-standalone/scripts"
+cp "$PROJECT_DIR/src/lib/pdf/pdf_extractor.py" "$STAGING/next-standalone/scripts/pdf_extractor.py"
+cp "$PROJECT_DIR/src/lib/pdf/pdf_to_images.py" "$STAGING/next-standalone/scripts/pdf_to_images.py"
+cp "$PROJECT_DIR/src/lib/pdf/ocr_vision.swift" "$STAGING/next-standalone/scripts/ocr_vision.swift" 2>/dev/null || true
+cp "$PROJECT_DIR/src/lib/pdf/crop_regions.swift" "$STAGING/next-standalone/scripts/crop_regions.swift" 2>/dev/null || true
+# OOXML 修订引擎脚本（docx track changes）复制到 standalone scripts/
+cp "$PROJECT_DIR/src/lib/docx/ooxml-revise.py" "$STAGING/next-standalone/scripts/ooxml-revise.py"
+# Python 包生命周期清理脚本（AI 安装包超过30天未使用自动卸载）
+cp "$PROJECT_DIR/src/lib/python/py-pkg-lifecycle.py" "$STAGING/next-standalone/scripts/py-pkg-lifecycle.py"
+# 独立 docx-template-mcp 包脚本（scan_placeholders / fill_template）随包分发：
+# 复制到 next-standalone/docx-template-mcp/assets/scripts/（匹配 resolveDocxTemplateScript 的 cwd 候选，
+# 否则安装版字段识别会因脚本缺失而静默失败）
+if [ -d "$PROJECT_DIR/../docx-template-mcp/assets/scripts" ]; then
+  mkdir -p "$STAGING/next-standalone/docx-template-mcp/assets/scripts"
+  cp "$PROJECT_DIR/../docx-template-mcp/assets/scripts/scan_placeholders.py" "$STAGING/next-standalone/docx-template-mcp/assets/scripts/"
+  cp "$PROJECT_DIR/../docx-template-mcp/assets/scripts/fill_template.py" "$STAGING/next-standalone/docx-template-mcp/assets/scripts/"
+  ok "docx-template-mcp 脚本已随包分发"
+else
+  warn "docx-template-mcp/assets/scripts 不存在，字段识别将不可用"
+fi
+# 内置 bob-team-mcp（Agent Teams 多成员编排 MCP）：
+#   构建插件 → 复制 dist + package.json 到 next-standalone/bob-team-mcp/ → 安装运行时依赖。
+#   standalone 的 node_modules 不含 @modelcontextprotocol/sdk（Next tree-shaking 未收录），
+#   插件必须自带 node_modules；预置配置里 {BUNDLED}:bob-team-mcp/dist/cli.js 在 server
+#   读取 settings 时按 cwd（=next-standalone）解析成绝对路径（见 settings-server.ts）。
+TEAM_MCP_DIR="$PROJECT_DIR/../bob-team-mcp"
+if [ -d "$TEAM_MCP_DIR" ]; then
+  log "内置 bob-team-mcp（Agent Teams）..."
+  # 直接用插件本地 tsc 编译（绕过 corepack/pnpm 包装层，历史教训见构建脚本注释）
+  if ! (cd "$TEAM_MCP_DIR" && "$TEAM_MCP_DIR/node_modules/.bin/tsc" -p tsconfig.json >/dev/null 2>&1); then
+    warn "bob-team-mcp 构建失败，Agent Teams 功能将不可用"
+  else
+    mkdir -p "$STAGING/next-standalone/bob-team-mcp"
+    cp -R "$TEAM_MCP_DIR/dist" "$STAGING/next-standalone/bob-team-mcp/dist"
+    cp "$TEAM_MCP_DIR/package.json" "$STAGING/next-standalone/bob-team-mcp/package.json"
+    npm --prefix "$STAGING/next-standalone/bob-team-mcp" install --omit=dev --no-optional --silent 2>&1 | tail -1 || true
+    ok "bob-team-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bob-team-mcp" | awk '{print $1}'))"
+  fi
+else
+  warn "bob-team-mcp 目录不存在，Agent Teams 功能不可用"
+fi
+# 内置 bob-preview-mcp（网页/小程序预览渲染 CDP 插件）：
+#   构建插件 → 复制 dist + package.json 到 next-standalone/bob-preview-mcp/ → 安装运行时依赖。
+#   与 bob-team-mcp 同理，必须自带 node_modules（standalone 不含 @modelcontextprotocol/sdk）。
+#   预置配置里 {BUNDLED}:bob-preview-mcp/dist/cli.js 在 server 读取 settings 时按 cwd 解析。
+PREVIEW_MCP_DIR="$PROJECT_DIR/../bob-preview-mcp"
+if [ -d "$PREVIEW_MCP_DIR" ]; then
+  log "内置 bob-preview-mcp（Preview CDP）..."
+  if ! (cd "$PREVIEW_MCP_DIR" && npm run build >/dev/null 2>&1); then
+    warn "bob-preview-mcp 构建失败，Preview CDP 功能将不可用"
+  else
+    mkdir -p "$STAGING/next-standalone/bob-preview-mcp"
+    cp -R "$PREVIEW_MCP_DIR/dist" "$STAGING/next-standalone/bob-preview-mcp/dist"
+    cp "$PREVIEW_MCP_DIR/package.json" "$STAGING/next-standalone/bob-preview-mcp/package.json"
+    npm --prefix "$STAGING/next-standalone/bob-preview-mcp" install --omit=dev --no-optional --silent 2>&1 | tail -1 || true
+    ok "bob-preview-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bob-preview-mcp" | awk '{print $1}'))"
+  fi
+else
+  warn "bob-preview-mcp 目录不存在，Preview CDP 功能不可用"
+fi
+# 内置 bob-notes-mcp（个人知识库 · Karpathy LLM Wiki 笔记插件）：
+#   构建插件 → 复制 dist + package.json 到 next-standalone/bob-notes-mcp/。
+#   bob-notes-mcp 的 cli.js 为 esbuild 单文件 bundle（已内联 @modelcontextprotocol/sdk 与 web 面板），
+#   无需再安装运行时依赖；预置配置里 {BUNDLED}:bob-notes-mcp/dist/cli.js 在 server 读取
+#   settings 时按 cwd（=next-standalone）解析成绝对路径（见 settings-server.ts）。
+NOTES_MCP_DIR="$PROJECT_DIR/../bob-notes-mcp"
+if [ -d "$NOTES_MCP_DIR" ]; then
+  log "内置 bob-notes-mcp（Notes · Karpathy LLM Wiki）..."
+  if ! (cd "$NOTES_MCP_DIR" && npm run build >/dev/null 2>&1); then
+    warn "bob-notes-mcp 构建失败，Notes 功能将不可用"
+  else
+    mkdir -p "$STAGING/next-standalone/bob-notes-mcp"
+    cp -R "$NOTES_MCP_DIR/dist" "$STAGING/next-standalone/bob-notes-mcp/dist"
+    cp "$NOTES_MCP_DIR/package.json" "$STAGING/next-standalone/bob-notes-mcp/package.json"
+    ok "bob-notes-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bob-notes-mcp" | awk '{print $1}'))"
+  fi
+else
+  warn "bob-notes-mcp 目录不存在，Notes 功能不可用"
+fi
 ok "Next.js standalone 准备完成（node_modules: $(du -sh "$STAGING/next-standalone/node_modules" 2>/dev/null | awk '{print $1}')）"
 
 # ---------- 6. 生成 icon ----------
@@ -195,6 +374,40 @@ fi
 
 # ---------- 7. 组装 .app ----------
 log "组装应用包 ..."
+
+# 内置 ffmpeg 二进制到 Resources/bin/（视频识别用）
+#   - 本机 node_modules 已有对应架构二进制 → 直接复制
+#   - 缺失（如 Intel 机器构建 x64 时）→ 从 npmmirror 按需安装 @ffmpeg-installer/darwin-<arch>
+copy_ffmpeg() {
+  local ARCH=$1
+  local DEST_DIR="$APP_DIR/Contents/Resources/bin"
+  mkdir -p "$DEST_DIR"
+
+  local SRC="$PROJECT_DIR/node_modules/@ffmpeg-installer/darwin-$ARCH/ffmpeg"
+  if [ -f "$SRC" ]; then
+    cp -fL "$SRC" "$DEST_DIR/ffmpeg"
+    chmod +x "$DEST_DIR/ffmpeg"
+    ok "  ffmpeg ($ARCH) 已内置 ($(du -sh "$DEST_DIR/ffmpeg" | awk '{print $1}'))"
+    return 0
+  fi
+
+  warn "  本机无 $ARCH 架构 ffmpeg 二进制，尝试从 npmmirror 按需安装 ..."
+  local TMP_INSTALL="$OUTPUT_DIR/ffmpeg-install-$ARCH"
+  rm -rf "$TMP_INSTALL"; mkdir -p "$TMP_INSTALL"
+  if npm --prefix "$TMP_INSTALL" install "@ffmpeg-installer/darwin-$ARCH" --registry=https://registry.npmmirror.com --no-optional --no-save --silent >/dev/null 2>&1; then
+    local INSTALLED_BIN
+    INSTALLED_BIN=$(find "$TMP_INSTALL" -path "*/@ffmpeg-installer/darwin-$ARCH/ffmpeg" -type f 2>/dev/null | head -1)
+    if [ -n "$INSTALLED_BIN" ]; then
+      cp -fL "$INSTALLED_BIN" "$DEST_DIR/ffmpeg"
+      chmod +x "$DEST_DIR/ffmpeg"
+      ok "  ffmpeg ($ARCH) 按需安装并内置成功 ($(du -sh "$DEST_DIR/ffmpeg" | awk '{print $1}'))"
+      rm -rf "$TMP_INSTALL"
+      return 0
+    fi
+  fi
+  rm -rf "$TMP_INSTALL"
+  warn "  ffmpeg ($ARCH) 内置失败，视频识别功能将不可用"
+}
 
 build_arch() {
   local ARCH=$1
@@ -227,13 +440,13 @@ build_arch() {
     <key>NSAppTransportSecurity</key>
     <dict><key>NSAllowsLocalNetworking</key><true/></dict>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>BobAgent 需要访问文稿文件夹来保存您的项目与节点文档。</string>
+    <string>BobWork 需要访问文稿文件夹来保存您的项目与节点文档。</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>BobAgent 需要访问桌面文件夹来读取或保存项目。</string>
+    <string>BobWork 需要访问桌面文件夹来读取或保存项目。</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>BobAgent 需要访问下载文件夹来读取您上传的材料。</string>
+    <string>BobWork 需要访问下载文件夹来读取您上传的材料。</string>
     <key>NSRemovableVolumesUsageDescription</key>
-    <string>BobAgent 需要访问外接磁盘来读取您的项目或导出资料。</string>
+    <string>BobWork 需要访问外接磁盘来读取您的项目或导出资料。</string>
 </dict>
 </plist>
 PLIST
@@ -245,7 +458,48 @@ PLIST
   log "  复制依赖与资源 ..."
   cp -R "$STAGING/app/"         "$APP_DIR/Contents/Resources/app/"
   cp -R "$STAGING/next-standalone/" "$APP_DIR/Contents/Resources/next-standalone/"
+  # BobWorkCapture 截图插件助手（独立 TCC 身份）：随包分发到 Resources
+  if [ -d "$PROJECT_DIR/../screenshot-plugin/dist/BobWorkCapture.app" ]; then
+    cp -R "$PROJECT_DIR/../screenshot-plugin/dist/BobWorkCapture.app" "$APP_DIR/Contents/Resources/BobWorkCapture.app"
+    log "  ✅ BobWorkCapture 截图助手已随包分发"
+  else
+    log "  ⚠️ 未找到 BobWorkCapture.app（先运行 screenshot-plugin/build-helper.sh）；Cmd+Shift+O 将回退内置链路"
+  fi
+  # 启动欢迎窗口南瓜表情包 logo（每次启动随机更换）
+  # 体积优化：720×720 透明 PNG（约 3.8M）转 WebP（约 0.3M），
+  # 仅用于 splash/头像显示，WebP 质量足够且保留透明通道。
+  if [ -d "$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新" ]; then
+    mkdir -p "$APP_DIR/Contents/Resources/splash-logos"
+    if python3 -c "import PIL" >/dev/null 2>&1; then
+      # Pillow 可用：转 WebP 减小体积（约 3.8M → 0.3M）
+      SPLASH_SRC="$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新" \
+      SPLASH_DST="$APP_DIR/Contents/Resources/splash-logos" \
+      python3 -c '
+import os, glob
+from PIL import Image
+src_dir = os.environ["SPLASH_SRC"]
+dst_dir = os.environ["SPLASH_DST"]
+n = 0
+for p in sorted(glob.glob(os.path.join(src_dir, "*.png"))):
+    name = os.path.splitext(os.path.basename(p))[0] + ".webp"
+    Image.open(p).save(os.path.join(dst_dir, name), "WEBP", quality=82, method=6)
+    n += 1
+print(f"converted {n} splash logos to webp")
+'
+      ok "启动欢迎窗口南瓜 logo 已转为 WebP"
+    else
+      # 无 Pillow：回退复制 PNG（体积不优化，但功能不受影响）
+      cp "$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新/"*.png "$APP_DIR/Contents/Resources/splash-logos/" 2>/dev/null || true
+      warn "未检测到 Pillow，南瓜 logo 以 PNG 原样复制"
+    fi
+  fi
+  # 防御性清理：确保 release-dist 构建产物目录及其冲突副本绝不被循环打包进 .app
+  rm -rf "$APP_DIR/Contents/Resources/next-standalone/release-dist" \
+         "$APP_DIR/Contents/Resources/next-standalone/release-dist 2" 2>/dev/null || true
   [ -f "$STAGING/app-update.yml" ] && cp "$STAGING/app-update.yml" "$APP_DIR/Contents/Resources/app-update.yml"
+
+  # 内置 ffmpeg 二进制（视频识别用）：目标架构二进制缺失时从 npmmirror 按需安装
+  copy_ffmpeg "$ARCH"
 
   # 处理 better-sqlite3 原生模块（在 standalone 的 node_modules 中）
   log "  处理原生模块 ..."
@@ -261,10 +515,39 @@ PLIST
     fi
   fi
 
-  # 签名
+  # 签名：固定本地证书（签名恒定 → 屏幕录制授权跨版本保留）；证书缺失回退 ad-hoc 保证构建
   log "  签名 ..."
-  xattr -cr "$APP_DIR" 2>/dev/null || true
-  codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || warn "签名失败"
+  # 将 app 复制到非同步目录（/tmp）再签名：
+  # 根因：release-dist 位于 iCloud 同步目录（Desktop），fileprovider 会给新建文件打上受保护属性
+  # （com.apple.fileprovider.fpfs#P / FinderInfo），codesign 遇到即拒绝，且无法被 xattr 清除；
+  # 在同步目录内 ditto 重建也无法避免文件系统自身回写属性。搬到 /tmp 后彻底无此干扰。
+  local SIGN_STAGE="/tmp/bobwork-sign-stage"
+  rm -rf "$SIGN_STAGE"
+  mkdir -p "$SIGN_STAGE"
+  ditto --noextattr --norsrc "$APP_DIR" "$SIGN_STAGE/$APP_NAME.app" 2>/dev/null
+  if codesign --force --deep --sign "BobWork Local Signing" "$SIGN_STAGE/$APP_NAME.app" >/tmp/bobwork-sign.log 2>&1; then
+    ok "  固定证书签名成功"
+    # 签名成功后替换回同步目录产物
+    rm -rf "$APP_DIR"
+    mv "$SIGN_STAGE/$APP_NAME.app" "$APP_DIR"
+  else
+    warn "固定签名证书 BobWork Local Signing 签名失败（详见 /tmp/bobwork-sign.log），回退 ad-hoc（授权将随重打包失效）"
+    codesign --force --deep --sign - "$SIGN_STAGE/$APP_NAME.app" >>/tmp/bobwork-sign.log 2>&1
+    rm -rf "$APP_DIR"
+    mv "$SIGN_STAGE/$APP_NAME.app" "$APP_DIR"
+    warn "ad-hoc 签名完成（如见 /tmp/bobwork-sign.log 报错请检查）"
+  fi
+  rm -rf "$SIGN_STAGE"
+
+  # 自检：Info.plist 声明的 CFBundleExecutable 必须与实际可执行文件一致（macOS 更新后 LaunchServices 严格校验，不一致会报"已损坏或不完整"）
+  local DECLARED_EXEC
+  DECLARED_EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_DIR/Contents/Info.plist" 2>/dev/null)
+  if [ -n "$DECLARED_EXEC" ] && [ -f "$APP_DIR/Contents/MacOS/$DECLARED_EXEC" ]; then
+    ok "  自检通过：CFBundleExecutable=$DECLARED_EXEC 与可执行文件一致"
+  else
+    echo "❌ 构建失败：CFBundleExecutable=$DECLARED_EXEC 与实际可执行文件不一致"
+    exit 1
+  fi
 
   ok "  $ARCH 应用构建完成"
 }
@@ -306,6 +589,14 @@ create_dmg() {
   cp -R "$APP_PATH" "$DMG_STAGING/"
   ln -s /Applications "$DMG_STAGING/Applications"
 
+  # 复制安装引导文件（Gatekeeper 绕过提示）
+  # 注意：.command / .sh 文件同样会被 Gatekeeper 拦截，所以不再使用脚本
+  # 改为：背景图文字 + 安装说明 HTML，告诉用户直接右键打开或终端命令
+  local DMG_EXTRAS="$PROJECT_DIR/assets/dmg-extras"
+  if [ -d "$DMG_EXTRAS" ]; then
+    cp "$DMG_EXTRAS/安装说明.html" "$DMG_STAGING/" 2>/dev/null
+  fi
+
   # 复制背景图
   mkdir -p "$DMG_STAGING/.background"
   if [ -f "$BG_PATH" ]; then
@@ -315,33 +606,32 @@ create_dmg() {
   fi
 
   local SIZE_MB="$(du -sm "$DMG_STAGING" | awk '{print int($1*1.3+50)}')"
-  local VOLNAME="BobAgent $VERSION"
+  local VOLNAME="BobWork $VERSION"
+  local DMG_OK=0
 
-  # 创建临时 DMG（未压缩，用于布局）
+  # 方案一：完整版（UDRW 镜像 + attach 布局 + convert）
+  # attach 依赖挂载 /dev 块设备，部分沙箱环境会拦截，失败则降级
   local TMP_DMG="$ARCH_DIR/_tmp.dmg"
   rm -f "$TMP_DMG"
-  hdiutil create -volname "$VOLNAME" -srcfolder "$DMG_STAGING" -ov -format UDRW -size "${SIZE_MB}m" "$TMP_DMG" >/dev/null 2>&1
-
-  # 挂载并布局
-  local MOUNT_POINT="/Volumes/$VOLNAME"
-  hdiutil attach -readwrite -noverify -noautoopen "$TMP_DMG" >/dev/null 2>&1
-  sleep 1
-
-  # AppleScript 设置窗口布局
-  osascript <<APPLESCRIPT
+  if hdiutil create -volname "$VOLNAME" -srcfolder "$DMG_STAGING" -ov -format UDRW -size "${SIZE_MB}m" "$TMP_DMG" >/dev/null 2>&1; then
+    local MOUNT_POINT="/Volumes/$VOLNAME"
+    if hdiutil attach -readwrite -noverify -noautoopen "$TMP_DMG" >/dev/null 2>&1; then
+      # AppleScript 设置窗口布局（Finder 自动化权限缺失时失败，不致命）
+      osascript >/dev/null 2>&1 <<APPLESCRIPT || warn "Finder 布局失败，使用默认布局"
     tell application "Finder"
       tell disk "$VOLNAME"
         open
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set the bounds of container window to {200, 200, 860, 600}
+        set the bounds of container window to {200, 200, 860, 620}
         set viewOptions to the icon view options of container window
         set arrangement of viewOptions to not arranged
         set icon size of viewOptions to 68
         set background picture of viewOptions to file ".background:background.png"
-        set position of item "$APP_NAME.app" of container window to {170, 290}
-        set position of item "Applications" of container window to {490, 290}
+        set position of item "$APP_NAME.app" of container window to {250, 150}
+        set position of item "Applications" of container window to {410, 150}
+        set position of item "安装说明.html" of container window to {330, 340}
         close
         open
         update without registering applications
@@ -349,64 +639,103 @@ create_dmg() {
       end tell
     end tell
 APPLESCRIPT
+      hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true
+      sleep 1
+      rm -f "$DMG_PATH"
+      if hdiutil convert "$TMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/dev/null 2>&1; then
+        DMG_OK=1
+      fi
+    else
+      warn "hdiutil attach 被沙箱拦截（/dev 受限），降级为一步式 DMG（无 Finder 布局）"
+    fi
+    rm -f "$TMP_DMG"
+  fi
 
-  # 卸载
-  hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1
-  sleep 1
+  # 方案二：一步式创建（无需挂载块设备，沙箱下可用）
+  if [ "$DMG_OK" != "1" ]; then
+    rm -f "$DMG_PATH"
+    if hdiutil create -volname "$VOLNAME" -srcfolder "$DMG_STAGING" -ov -format UDZO -imagekey zlib-level=9 "$DMG_PATH" >/dev/null 2>&1; then
+      DMG_OK=1
+    fi
+  fi
 
-  # 转换为压缩 DMG
-  rm -f "$DMG_PATH"
-  hdiutil convert "$TMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/dev/null 2>&1
-  rm -f "$TMP_DMG"
   rm -rf "$DMG_STAGING"
-  ok "DMG: $(du -sh "$DMG_PATH" | awk '{print $1}')"
+  if [ "$DMG_OK" = "1" ]; then
+    ok "DMG: $(du -sh "$DMG_PATH" | awk '{print $1}')"
+  else
+    err "DMG 生成失败（完整版与一步式均失败）"
+  fi
 }
 
 case "$ARCH" in
   both)
-    create_dmg arm64; create_dmg x64 ;;
+    # 仅 ARM 规则下不会走到这里；保留兼容
+    create_zip arm64; create_zip x64
+    if [ "${SKIP_DMG:-0}" != "1" ]; then create_dmg arm64; create_dmg x64; fi
+    ;;
   arm64|x64)
-    create_dmg "$ARCH" ;;
+    create_zip "$ARCH"
+    if [ "${SKIP_DMG:-0}" = "1" ]; then
+      log "跳过 DMG 生成（SKIP_DMG=1，仅 ZIP）"
+    else
+      create_dmg "$ARCH"
+    fi
+    ;;
 esac
 
-# 清理 .app 目录（只保留 DMG 用于分发）
+# 清理 .app 目录（ZIP 已包含完整 .app，只保留发布产物）
 log "清理 .app 构建产物 ..."
 rm -rf "$OUTPUT_DIR"/arm64 2>/dev/null || true
 rm -rf "$OUTPUT_DIR"/x64 2>/dev/null || true
-ok ".app 已清理，仅保留 DMG"
+ok ".app 已清理，仅保留发布产物"
 
 # ---------- 8. 生成 latest-mac.yml（electron-updater 必需）----------
 log "生成 latest-mac.yml ..."
 generate_yml() {
   local ARCH=$1
-  local DMG_FILE="${APP_NAME}-${VERSION}-macos-${ARCH}.dmg"
-  local DMG_PATH="$OUTPUT_DIR/$DMG_FILE"
+  # electron-updater 自动更新必须使用 ZIP（不是 DMG）
+  local FILE="${APP_NAME}-${VERSION}-macos-${ARCH}.zip"
+  local PATH_ABS="$OUTPUT_DIR/$FILE"
   local YML_PATH="$OUTPUT_DIR/latest-mac-${ARCH}.yml"
+  local SIZE="0"
+  local SHA512=""
+  local RELEASE_DATE=""
+  SIZE=$(stat -f%z "$PATH_ABS" 2>/dev/null || echo 0)
+  SHA512=$(shasum -a 512 "$PATH_ABS" | awk '{print $1}' 2>/dev/null || echo "")
+  RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
-  local DMG_SIZE=$(stat -f%z "$DMG_PATH" 2>/dev/null || echo 0)
-  local DMG_SHA512=$(shasum -a 512 "$DMG_PATH" | awk '{print $1}' 2>/dev/null || echo "")
-  local RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-
+  # url 必须是相对文件名（不能是绝对 URL）
+  # provider:github 会自动拼接为 https://github.com/<owner>/<repo>/releases/download/<tag>/<filename>
   cat > "$YML_PATH" <<EOF
 version: $VERSION
 files:
-  - url: $DMG_FILE
-    sha512: $DMG_SHA512
-    size: $DMG_SIZE
-path: $DMG_FILE
-sha512: $DMG_SHA512
+  - url: $FILE
+    sha512: $SHA512
+    size: $SIZE
+path: $FILE
+sha512: $SHA512
 releaseDate: $RELEASE_DATE
 EOF
   # 同时创建不带架构后缀的 latest-mac.yml（electron-updater 查找此文件）
-  ln -sf "latest-mac-${ARCH}.yml" "$OUTPUT_DIR/latest-mac.yml"
-  ok "latest-mac-${ARCH}.yml / latest-mac.yml 已生成"
+  cp "$YML_PATH" "$OUTPUT_DIR/latest-mac.yml"
+  ok "latest-mac-${ARCH}.yml / latest-mac.yml 已生成（${FILE}）"
 }
 case "$ARCH" in
   both) generate_yml arm64; generate_yml x64 ;;
   arm64|x64) generate_yml "$ARCH" ;;
 esac
 
-# ---------- 上传到 GitHub Release ----------
+# ---------- 上传到 GitCode Release（国内 CDN，优先上传）----------
+upload_to_gitcode() {
+  if [ -z "${GITCODE_TOKEN:-}" ]; then
+    warn "GITCODE_TOKEN 未设置，跳过 GitCode 上传"
+    return 0
+  fi
+  log "上传到 GitCode Release（国内 CDN）..."
+  bash "$PROJECT_DIR/scripts/upload-to-gitcode.sh" || warn "GitCode 上传失败（不影响主流程）"
+}
+
+# ---------- 上传到 GitHub Release（备用发布源）----------
 upload_to_github() {
   if [ -z "${GH_TOKEN:-}" ]; then
     warn "GH_TOKEN 未设置，跳过 GitHub Release 上传"
@@ -417,6 +746,17 @@ upload_to_github() {
   log "创建 GitHub Release $tag ..."
 
   local release_resp
+  # 从 RELEASES.md 提取当前版本的 Release Notes（用 python3，兼容 macOS/BSD sed）
+  local release_notes
+  release_notes=$(python3 - "$PROJECT_DIR/RELEASES.md" "$tag" <<'PYEOF'
+import json, re, sys
+path, tag = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+m = re.search(r"^## " + re.escape(tag) + r"[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+notes = m.group(1).strip() if m else ""
+print(json.dumps(notes))
+PYEOF
+)
   release_resp=$(curl -s -w "\n%{http_code}" \
     -X POST \
     -H "Authorization: token $GH_TOKEN" \
@@ -425,7 +765,7 @@ upload_to_github() {
     -d "{
       \"tag_name\": \"$tag\",
       \"name\": \"$tag\",
-      \"body\": \"$(cat "$PROJECT_DIR/RELEASES.md" | sed -n "/^## $tag/,/^---/p" | sed '1d;$d' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g' | tr -d '\n')\",
+      \"body\": $release_notes,
       \"draft\": false,
       \"prerelease\": false
     }")
@@ -454,7 +794,7 @@ upload_to_github() {
   fi
 
   # 上传所有产物
-  for file in "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.yml "$OUTPUT_DIR"/latest-mac-arm64.yml "$OUTPUT_DIR"/latest-mac-x64.yml; do
+  for file in "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.zip "$OUTPUT_DIR"/*.yml; do
     if [ ! -f "$file" ]; then continue; fi
     local fname
     fname=$(basename "$file")
@@ -477,6 +817,8 @@ upload_to_github() {
   done
 }
 
+# GitCode 优先上传，GitHub 作为备用
+upload_to_gitcode
 upload_to_github
 
 # ---------- 收尾 ----------
@@ -487,8 +829,9 @@ echo "============================================"
 ok "  Release 构建完成！"
 echo "  输出目录: $OUTPUT_DIR"
 echo ""
-ls -lh "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.yml 2>/dev/null || true
+ls -lh "$OUTPUT_DIR"/*.dmg "$OUTPUT_DIR"/*.zip "$OUTPUT_DIR"/*.yml 2>/dev/null || true
 echo ""
 echo "📦 安装包下载地址:"
-echo "   https://github.com/baolei0227-glitch/BobAgent/releases/tag/v$VERSION"
+echo "   国内（推荐）: https://gitcode.com/${GITCODE_OWNER:-baolei89}/${GITCODE_REPO:-BobWork}/releases/v$VERSION"
+echo "   备用（GitHub）: https://github.com/${GITHUB_OWNER:-baolei0227-glitch}/${GITHUB_REPO:-BobAgent}/releases/tag/v$VERSION"
 echo "============================================"

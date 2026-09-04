@@ -1,4 +1,5 @@
-import type { AvailableModel, ModelCapability, ModelSpec } from './types';
+import type { AvailableModel, ModelCapability, ModelSpec, ThinkingLevel } from './types';
+import { VISION_MODEL_PATTERN, isOcrModel } from './model-tags';
 
 export type TaskType = 'reasoning' | 'conversation' | 'coding' | 'creative' | 'analysis' | 'translation' | 'long-context' | 'general';
 
@@ -58,7 +59,7 @@ export function analyzeTask(input: string): TaskAnalysis {
   const trimmed = input.trim().toLowerCase();
   const length = trimmed.length;
 
-  let scores: Record<TaskType, number> = {
+  const scores: Record<TaskType, number> = {
     reasoning: 0,
     conversation: 0,
     coding: 0,
@@ -211,6 +212,14 @@ export function selectBestModel(
     // 三级排序：价格偏好（contextWindow 更大的模型通常更强/更贵，conversation 任务偏好上下文小的快模型）
     const contextBonus = (model.spec?.contextWindow || 8192) > 100000 ? 0 : 1;
 
+    // 复杂度分层（score 相等时的决胜）：复杂任务（推理/分析/创作/长文）偏好更强模型（输入单价更高=旗舰），
+    // 日常任务（对话/翻译/通用/编码）偏好更快更便宜的模型。
+    // 背景：deepseek-v4-flash 与 v4-pro 的能力标注高度重叠 → 多数任务 score 全等，
+    //   若无此分层，稳定排序会永远选中数组中的第一个模型（v4-flash），Auto 形同虚设。
+    const price = model.spec?.pricePerMillionTokens?.input ?? 1;
+    const complex = ['reasoning', 'analysis', 'creative', 'long-context'].includes(taskAnalysis.type);
+    tiebreaker += complex ? price * 0.01 : -price * 0.01;
+
     return { model, score, tiebreaker: tiebreaker + contextBonus * 0.1 };
   });
 
@@ -223,6 +232,21 @@ export function selectBestModel(
   return scoredModels[0].model;
 }
 
+/**
+ * 根据选定模型的思考能力推断思考强度（auto 联动）。
+ * 设计：模型已由 auto 按任务类型选出（复杂任务 → 思考模型，闲聊 → 快模型），
+ * 因此思考强度直接由模型能力决定，无需再重复判断任务复杂度/输入长度：
+ *   - 推理型模型（capabilities 含 reasoning，如 R1/Z1/K 系列）→ high
+ *   - 支持思考的普通模型 → medium
+ *   - 不支持思考 → low（即使能力表标了 reasoning 也按不支持处理）
+ */
+export function inferThinkingLevel(model: AvailableModel): ThinkingLevel {
+  const caps = model.spec?.capabilities ?? [];
+  const reasoningCapable = model.thinking || caps.includes('reasoning');
+  if (!reasoningCapable) return 'low';
+  return caps.includes('reasoning') ? 'high' : 'medium';
+}
+
 export function inferModelSpec(modelId: string, thinking: boolean): ModelSpec {
   const lower = modelId.toLowerCase();
   const capabilities: ModelCapability[] = [];
@@ -230,10 +254,16 @@ export function inferModelSpec(modelId: string, thinking: boolean): ModelSpec {
   const weaknesses: string[] = [];
   const useCases: string[] = [];
 
-  if (thinking || /reason|think|r1|z1|k2[.\-]5|k2[.\-]6|k3|logical/.test(lower)) {
+  if (thinking || /reason|think|r1|z1|k2[.\-]5|k2[.\-]6|k3|logical|v4/.test(lower)) {
     capabilities.push('reasoning', 'analysis');
     strengths.push('逻辑推理能力强');
     useCases.push('复杂问题分析', '逻辑推理', '决策辅助');
+  }
+
+  if (VISION_MODEL_PATTERN.test(lower) && !isOcrModel(lower)) {
+    capabilities.push('vision');
+    strengths.push('图像理解能力强');
+    useCases.push('图片理解', '截图分析', 'OCR 识别');
   }
 
   if (/code|coder|dev|programming|python|javascript|typescript/.test(lower)) {
@@ -260,7 +290,7 @@ export function inferModelSpec(modelId: string, thinking: boolean): ModelSpec {
     useCases.push('翻译', '跨语言交流');
   }
 
-  if (/long|8k|128k|256k|context|window/.test(lower)) {
+  if (/long|8k|128k|256k|1m|1000k|context|window/.test(lower)) {
     capabilities.push('long-context');
     strengths.push('长上下文处理');
     useCases.push('长文档分析', '文献综述');
@@ -278,9 +308,13 @@ export function inferModelSpec(modelId: string, thinking: boolean): ModelSpec {
     weaknesses.push('复杂推理能力有限');
   }
 
-  let contextWindow = 8192;
-  if (/128k/.test(lower)) contextWindow = 128000;
+  // 默认按 1M 假设（与 context-limits 的 DEFAULT_CONTEXT_WINDOW 一致）：
+  // 当前环境所有模型均为 1M 上下文（doubao-seed 等），模型 id 无窗口标记时不再回退到 8192，
+  // 避免压缩/成果块/上下文闸等阈值被错误地按 8k 小窗口压低。显式 8k/128k/256k/1m 标记仍精确匹配。
+  let contextWindow = 1000000;
+  if (/1m|1000k/.test(lower)) contextWindow = 1000000;
   else if (/256k/.test(lower)) contextWindow = 256000;
+  else if (/128k/.test(lower)) contextWindow = 128000;
   else if (/8k/.test(lower)) contextWindow = 8192;
 
   return {
@@ -315,7 +349,7 @@ export async function generateModelSpec(
           {
             role: 'user',
             content: `请分析模型 "${modelId}" 的能力特征。该模型${thinking ? '支持思考模式' : '不支持思考模式'}。请返回JSON格式，包含以下字段：
-- capabilities: 能力列表，从 ["reasoning", "conversation", "coding", "creative", "analysis", "multilingual", "long-context"] 中选择
+- capabilities: 能力列表，从 ["reasoning", "conversation", "coding", "creative", "analysis", "multilingual", "long-context", "vision"] 中选择
 - strengths: 优势列表（2-4项）
 - weaknesses: 劣势列表（1-2项）
 - useCases: 适用场景列表（3-5项）

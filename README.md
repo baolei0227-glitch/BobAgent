@@ -1,14 +1,14 @@
-# BobAgent
+# BobWork
 
 AI 知识画布桌面应用。基于 [Next.js 16](https://nextjs.org) + [React Flow](https://reactflow.dev) + [shadcn/ui](https://ui.shadcn.com) 构建。
 
 ## 核心概念
 
-BobAgent 是一个**无限画布 + AI 对话节点**系统：
+BobWork 是一个**无限画布 + AI 对话节点**系统：
 - 在可无限缩放、平移的画布上创建 AI 对话节点
 - 节点之间用连线建立知识网络，上游节点的摘要自动注入下游上下文
 - 每个节点独立配置 AI 模型、思考深度、技能
-- 所有数据本地存储（`~/BobAgent/`），支持多项目管理
+- 所有数据本地存储（`~/BobWork/`），支持多项目管理
 
 ## 快速开始
 
@@ -129,9 +129,22 @@ src/
 - HtmlRenderer 安全渲染（DOMPurify）
 
 ### MCP 集成
-- 7 个预置 MCP 服务器：Filesystem / Brave Search / Context7 / Sequential Thinking / Playwright / GitHub / Notion
-- 自定义 MCP 服务器管理
+- 预置 MCP 服务器：Filesystem / Brave Search / Context7 / Sequential Thinking / GitHub / Notion
+- 自定义 MCP 服务器管理（Streamable HTTP / stdio，含 Bearer token 鉴权）
 - 响应式流式 MCP 通信
+- 浏览器控制走独立 MCP server（bob-browser-mcp）：见下
+
+#### 浏览器控制（bob-browser-mcp 独立 MCP Server）
+浏览器控制能力不再内嵌在 BobWork，而是由独立包 [bob-browser-mcp](../browser-mcp) 以标准 MCP Server（Streamable HTTP）形式提供，任意 MCP 客户端（Trae / Claude Code / Cursor 等）均可接入并控制真实浏览器：
+
+```
+http://127.0.0.1:<bridge-port>/mcp?token=<bridge-token>
+```
+
+- 在 设置 → MCP Servers 面板把 bob-browser-mcp 配成普通 Streamable HTTP 服务器（URL + Bearer token）即可
+- 对外暴露 53 个 `browser.*` 工具（tools/list 与 tools/call 走标准 MCP 协议）
+- 安装浏览器扩展：启动 bob-browser-mcp 后打开其 `http://127.0.0.1:<port>/setup` 引导页（下载 zip → 加载扩展 → 复制 token → 连接）
+- 体验层（Net 白名单、登录凭证弹窗、反幻觉校验）已迁移到独立包：扩展设置页 Net tab + `net.json` 配置
 
 ### 其他
 - 日历面板 + WANTED 任务总结
@@ -152,9 +165,9 @@ src/
 
 ## 数据存储
 
-所有数据在 `~/BobAgent/` 目录下，每个项目独立子文件夹：
+所有数据在 `~/BobWork/` 目录下，每个项目独立子文件夹：
 - `nodes/` — .md 文件（frontmatter + 固定四段结构）
-- `project.db` — SQLite（边、日历、会话）
+- `.project.db` — SQLite（边、日历、会话，隐藏文件）
 - `materials/` — 项目素材
 - `assets/` — 节点附件
 

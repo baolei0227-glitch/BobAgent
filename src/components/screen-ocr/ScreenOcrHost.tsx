@@ -1,0 +1,73 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { desktop } from '@/lib/desktop-adapter';
+import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
+import { ScreenOcrEditor } from '@/components/screen-ocr/ScreenOcrEditor';
+
+/**
+ * 全局截图 OCR 宿主（Cmd+Shift+O）
+ *
+ * 订阅 Electron 主进程下发的截图事件并渲染编辑面板，挂在应用根部（layout.tsx），
+ * 与页面/画布挂载状态彻底解耦——任何时刻按快捷键都能弹出编辑面板。
+ *
+ * 历史教训：订阅与渲染曾写在 CanvasFlow（画布页）内，非画布页或挂载间隙按快捷键时，
+ * 主进程整屏截图成功但 `screen-ocr:captured` 无人接收，表现为「弹窗无法使用」，
+ * 截图文件残留在 ~/Library/Caches/bobwork-capture/。
+ *
+ * 注意：OCR 结果直插输入框（screen-ocr:result）链路已废弃（主进程不再发送），
+ * 仅保留 start/captured/canceled/error 四类事件。
+ */
+export function ScreenOcrHost() {
+  /** 待编辑截图 dataUrl（主进程 screen-ocr:captured 下发） */
+  const [editImage, setEditImage] = useState<string | null>(null);
+  /** 初始选区模式：region（原生 -i 已选区）→ 整图全选区直接标注；full（整屏待选）→ 用户自行拖选 */
+  const [initialSelection, setInitialSelection] = useState<'full' | 'none'>('none');
+
+  useEffect(() => {
+    const offStart = desktop.screenOcr.onStart(() => {
+      /* 系统选区截图已开始，无需额外 UI */
+    });
+    const offError = desktop.screenOcr.onError(({ message }) => {
+      showImageAiEditToast(message || '截图 OCR 失败', 'error');
+    });
+    const offCanceled = desktop.screenOcr.onCanceled(() => {
+      /* 用户按 Esc 取消选区：静默 */
+    });
+    const offCaptured = desktop.screenOcr.onCaptured(({ dataUrl, mode }) => {
+      setEditImage(dataUrl);
+      setInitialSelection(mode === 'region' ? 'full' : 'none');
+    });
+    return () => {
+      offStart();
+      offError();
+      offCanceled();
+      offCaptured();
+    };
+  }, []);
+
+  if (!editImage) return null;
+
+  return (
+    <ScreenOcrEditor
+      dataUrl={editImage}
+      initialSelection={initialSelection}
+      onDone={async (editedDataUrl) => {
+        setEditImage(null);
+        // 编辑完成（✓）：清理主进程暂存截图，避免 shot.png/result.json 残留
+        desktop.screenOcr.finishEdit();
+        const r = await desktop.screenOcr.copyImage(editedDataUrl);
+        if (r.ok) {
+          showImageAiEditToast('截图已复制到剪贴板', 'success');
+        } else {
+          showImageAiEditToast(`复制图片失败：${r.error ?? '未知错误'}`, 'error');
+        }
+      }}
+      onOcr={(dataUrl) => desktop.screenOcr.ocrRegion(dataUrl)}
+      onCancel={() => {
+        setEditImage(null);
+        desktop.screenOcr.cancelEdit();
+      }}
+    />
+  );
+}

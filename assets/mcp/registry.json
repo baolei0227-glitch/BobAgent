@@ -1,0 +1,125 @@
+[
+  {
+    "id": "team",
+    "name": "Agent Teams",
+    "description": "Multi-member AI orchestration. Create teams, plan, approve, assign tasks, exchange messages and review quality across several AI workers.",
+    "group": "bundled",
+    "category": "Workflow",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "kind": "plugin"
+  },
+  {
+    "id": "bob-preview-mcp",
+    "name": "Bob Preview",
+    "description": "Render and interactively test web pages / mini programs on a real headless Chrome (CDP). Capture pixel screenshots that previously relied on DOM-to-SVG.",
+    "group": "bundled",
+    "category": "Preview",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "kind": "plugin"
+  },
+  {
+    "id": "bob-notes-mcp",
+    "name": "Bob Notes",
+    "description": "Personal knowledge base (Karpathy-style LLM Wiki). Raw Inbox capture, AI compile, retrieval, review and backfill; backs the Kar node and notes panel.",
+    "group": "bundled",
+    "category": "Knowledge",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "kind": "plugin"
+  },
+  {
+    "id": "bob-ocr-mcp",
+    "name": "Bob OCR",
+    "description": "Scanned-document and image recognition service (local Vision + GLM-OCR / Online OCR). Model & vendor settings live in the plugin itself — open Configure to manage them.",
+    "group": "bundled",
+    "category": "OCR",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "config": true,
+    "kind": "plugin"
+  },
+  {
+    "id": "bob-browser-mcp",
+    "name": "Bob Browser",
+    "description": "Control your real, logged-in browser (53 browser.* tools) through a Chrome extension. Requires installing the standalone bob-browser-mcp daemon (port 9473) plus its extension.",
+    "group": "download",
+    "category": "Browser",
+    "risk": "high",
+    "vetted": true,
+    "auth": false,
+    "setup": true,
+    "kind": "plugin"
+  },
+  {
+    "id": "bobby",
+    "name": "Bobby node",
+    "description": "Local desktop automation and grant-based app control (run commands, UI actions). Every action requires your authorization. Requires a local bobby-mcp build / global install.",
+    "group": "download",
+    "category": "Automation",
+    "risk": "high",
+    "vetted": true,
+    "auth": false,
+    "kind": "plugin"
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "description": "Manage GitHub repositories: issues, pull requests, code pushes and settings. Server package is pulled automatically via npx; requires a Personal Access Token.",
+    "group": "download",
+    "category": "Coding",
+    "risk": "high",
+    "vetted": true,
+    "auth": true,
+    "kind": "mcp"
+  },
+  {
+    "id": "notion",
+    "name": "Notion",
+    "description": "Read and write Notion pages and databases you authorized. Server package is pulled automatically via npx; requires an Integration API Key.",
+    "group": "download",
+    "category": "Productivity",
+    "risk": "high",
+    "vetted": true,
+    "auth": true,
+    "kind": "mcp"
+  },
+  {
+    "id": "context7",
+    "name": "Context7",
+    "description": "Up-to-date documentation lookup for frameworks and libraries. Coding-only server; kept off for general chat to avoid schema noise. No API key needed.",
+    "group": "download",
+    "category": "Coding",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "kind": "mcp"
+  },
+  {
+    "id": "pkulaw",
+    "name": "Pkulaw · Legal Search",
+    "description": "Semantic and keyword search over Chinese laws, regulations and cases with pkulaw.com source links. Requires a pkulaw API Key (guided on install).",
+    "group": "download",
+    "category": "Legal",
+    "risk": "normal",
+    "vetted": true,
+    "auth": true,
+    "kind": "mcp"
+  },
+  {
+    "id": "tianyancha",
+    "name": "Tianyancha · Business Data",
+    "description": "Query Chinese company registry, risks, IP and filings. Requires a Tianyancha API Key (guided on install).",
+    "group": "download",
+    "category": "Legal",
+    "risk": "normal",
+    "vetted": true,
+    "auth": true,
+    "kind": "mcp"
+  }
+]

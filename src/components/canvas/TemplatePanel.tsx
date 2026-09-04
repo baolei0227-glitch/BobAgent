@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, FileStack, Pencil, Trash2, Play, Loader2, ChevronDown } from 'lucide-react';
+import { Plus, Pencil, Trash2, Play, Loader2 } from 'lucide-react';
 
 interface WorkflowStep {
   order: number;
@@ -25,8 +25,10 @@ interface WorkflowTemplate {
 }
 
 interface TemplatePanelProps {
-  onCreateNew: () => void;
-  onEditTemplate: (templateId: string) => void;
+  /** 可选：新建模板入口（新版 Sidebar 已不在工作流面板提供，未传时隐藏） */
+  onCreateNew?: () => void;
+  /** 可选：编辑模板入口（新版 Sidebar 未传时隐藏） */
+  onEditTemplate?: (templateId: string) => void;
   onApplyTemplate: (templateId: string) => void;
   refreshTrigger?: number;
 }
@@ -34,7 +36,7 @@ interface TemplatePanelProps {
 export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, refreshTrigger }: TemplatePanelProps) {
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
   const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const loadTemplates = useCallback(async () => {
@@ -65,28 +67,27 @@ export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, re
   };
 
   return (
-    <div className="px-2 py-1">
-      {/* 标题栏 */}
-      <button
-        type="button"
+    <div className="px-2 py-1" style={{ borderTop: '1px solid var(--line-soft)', marginTop: 10, paddingTop: 10 }}>
+      {/* 标题栏（与 Bob Sandbox 同级：无展开按钮，整行点击折叠/展开） */}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-1.5 px-1 py-1 text-left"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setExpanded(!expanded);
+          }
+        }}
+        className="flex w-full cursor-pointer items-center gap-1.5 px-1 py-1 text-left select-none"
       >
-        <ChevronDown
-          className="h-3 w-3 transition-transform"
-          style={{
-            color: 'oklch(0.55 0.02 50)',
-            transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-          }}
-        />
-        <FileStack className="h-3.5 w-3.5" style={{ color: 'oklch(0.62 0.17 45)' }} />
-        <span className="text-[11px] font-semibold" style={{ color: 'oklch(0.35 0.015 50)' }}>
-          Templates
+        <span className="text-base font-semibold" style={{ color: 'var(--ink)' }}>
+          Bob Items
         </span>
-        <span className="text-[10px] ml-auto" style={{ color: 'oklch(0.50 0.02 50 / 0.6)' }}>
+        <span className="text-xs ml-auto" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}>
           {templates.length}
         </span>
-      </button>
+      </div>
 
       {/* 模板列表 */}
       {expanded && (
@@ -96,7 +97,7 @@ export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, re
               <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />
             </div>
           ) : templates.length === 0 ? (
-            <p className="px-2 py-2 text-[10px]" style={{ color: 'oklch(0.55 0.02 50)' }}>
+            <p className="px-2 py-2 text-10" style={{ color: 'oklch(0.55 0.02 50)' }}>
               暂无模板
             </p>
           ) : (
@@ -113,16 +114,16 @@ export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, re
                     className="flex-1 min-w-0 text-left"
                   >
                     <div className="flex items-center gap-1">
-                      <span className="text-[11px] font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
+                      <span className="text-11 font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
                         {tpl.name}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className="text-[9px]" style={{ color: 'oklch(0.50 0.02 50 / 0.7)' }}>
+                      <span className="text-9" style={{ color: 'oklch(0.50 0.02 50 / 0.7)' }}>
                         {tpl.steps.length} 步
                       </span>
                       {tpl.category && (
-                        <span className="text-[9px]" style={{ color: 'oklch(0.50 0.02 50 / 0.5)' }}>
+                        <span className="text-9" style={{ color: 'oklch(0.50 0.02 50 / 0.5)' }}>
                           · {tpl.category}
                         </span>
                       )}
@@ -141,7 +142,7 @@ export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, re
                     </button>
                     <button
                       type="button"
-                      onClick={() => onEditTemplate(tpl.template_id)}
+                      onClick={() => onEditTemplate?.(tpl.template_id)}
                       className="rounded p-1 transition-colors hover:bg-[oklch(0.92_0.015_75)]"
                       title="编辑"
                     >
@@ -151,7 +152,7 @@ export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, re
                       <button
                         type="button"
                         onClick={() => handleDelete(tpl.template_id)}
-                        className="text-[9px] rounded px-1 py-0.5"
+                        className="text-9 rounded px-1 py-0.5"
                         style={{ color: '#fff', backgroundColor: 'oklch(0.55 0.18 35)' }}
                       >
                         确认
@@ -172,16 +173,18 @@ export function TemplatePanel({ onCreateNew, onEditTemplate, onApplyTemplate, re
             ))
           )}
 
-          {/* 新建按钮 */}
-          <button
-            type="button"
-            onClick={onCreateNew}
-            className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed py-1.5 text-[10px] transition-colors hover:bg-[oklch(0.95_0.008_80)]"
-            style={{ borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.55 0.02 50)' }}
-          >
-            <Plus className="h-3 w-3" />
-            新建模板
-          </button>
+          {/* 新建按钮（未提供 onCreateNew 时隐藏） */}
+          {onCreateNew && (
+            <button
+              type="button"
+              onClick={onCreateNew}
+              className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed py-1.5 text-10 transition-colors hover:bg-[oklch(0.95_0.008_80)]"
+              style={{ borderColor: 'oklch(0.85 0.01 70)', color: 'oklch(0.55 0.02 50)' }}
+            >
+              <Plus className="h-3 w-3" />
+              新建模板
+            </button>
+          )}
         </div>
       )}
     </div>

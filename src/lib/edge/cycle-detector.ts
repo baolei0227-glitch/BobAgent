@@ -50,53 +50,6 @@ export function wouldCreateCycle(
 }
 
 /**
- * 拓扑排序：返回从上游到下游的节点顺序。
- * 用于上下文注入时确定注入顺序。
- */
-export function topologicalSort(edges: EdgeInfo[]): string[] {
-  // 构建邻接表和入度表
-  const adj = new Map<string, string[]>();
-  const inDegree = new Map<string, number>();
-  const allNodes = new Set<string>();
-
-  for (const edge of edges) {
-    allNodes.add(edge.from);
-    allNodes.add(edge.to);
-
-    if (!adj.has(edge.from)) adj.set(edge.from, []);
-    adj.get(edge.from)!.push(edge.to);
-
-    inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
-    if (!inDegree.has(edge.from)) inDegree.set(edge.from, 0);
-  }
-
-  // Kahn 算法
-  const queue: string[] = [];
-  for (const node of allNodes) {
-    if ((inDegree.get(node) ?? 0) === 0) {
-      queue.push(node);
-    }
-  }
-
-  const result: string[] = [];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    result.push(current);
-
-    const downstream = adj.get(current) ?? [];
-    for (const next of downstream) {
-      const newDegree = (inDegree.get(next) ?? 1) - 1;
-      inDegree.set(next, newDegree);
-      if (newDegree === 0) {
-        queue.push(next);
-      }
-    }
-  }
-
-  return result;
-}
-
-/**
  * 获取某个节点的所有上游节点（递归），按拓扑顺序排列。
  * 用于上下文注入。
  */

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BobWork 安装说明</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: #f8f9fa;
+    color: #333;
+    line-height: 1.7;
+    padding: 40px 20px;
+  }
+  .container { max-width: 560px; margin: 0 auto; }
+  h1 {
+    font-size: 22px;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: #888;
+    font-size: 14px;
+    margin-bottom: 28px;
+  }
+  .method {
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+    border: 1px solid #e8e8e8;
+    position: relative;
+  }
+  .method.recommended {
+    border: 2px solid #3b82f6;
+    background: #f0f7ff;
+  }
+  .method.recommended::after {
+    content: "推荐";
+    position: absolute;
+    top: -10px;
+    right: 16px;
+    background: #3b82f6;
+    color: #fff;
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+  .method h2 {
+    font-size: 16px;
+    color: #333;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: #3b82f6;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .method p { font-size: 14px; color: #555; margin-bottom: 8px; }
+  .method ol { padding-left: 20px; }
+  .method li { font-size: 14px; color: #555; margin-bottom: 6px; }
+  .method code {
+    background: #f0f0f0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: #d6336c;
+  }
+  .terminal-wrap {
+    position: relative;
+    margin: 8px 0;
+  }
+  .terminal {
+    background: #1a1a1a;
+    color: #e0e0e0;
+    padding: 12px 88px 12px 16px;
+    border-radius: 8px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    user-select: all;
+    cursor: text;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .terminal::before {
+    content: "$ ";
+    color: #666;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: #3b82f6;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    cursor: pointer;
+    transition: background .15s ease, transform .1s ease;
+    white-space: nowrap;
+  }
+  .copy-btn:hover { background: #2563eb; }
+  .copy-btn:active { transform: translateY(-50%) scale(.95); }
+  .copy-btn.copied { background: #16a34a; cursor: default; }
+  .copy-btn.failed { background: #cf1322; cursor: default; }
+  .copy-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+  .copy-hint {
+    font-size: 12px;
+    color: #888;
+    margin-top: -4px;
+    margin-bottom: 8px;
+  }
+  .tip {
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-top: 20px;
+    font-size: 13px;
+    color: #795548;
+  }
+  .warn {
+    background: #fff1f0;
+    border: 1px solid #ffa39e;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-top: 16px;
+    font-size: 13px;
+    color: #cf1322;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>BobWork 安装说明</h1>
+  <p class="subtitle">BobWork 使用 ad-hoc 签名（未经 Apple 公证），首次打开时 macOS 会提示安全警告。请选择以下任一方法解决：</p>
+
+  <div class="method recommended">
+    <h2><span class="badge">1</span> 终端命令（最可靠，推荐）</h2>
+    <p>先打开「终端」(Terminal)，点击下方按钮一键复制命令，粘贴到终端并回车：</p>
+    <div class="terminal-wrap">
+      <div class="terminal" id="installCmd">xattr -dr com.apple.quarantine /Applications/BobWork.app</div>
+      <button type="button" class="copy-btn" id="copyBtn" aria-label="复制命令">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>
+        <span>复制</span>
+      </button>
+    </div>
+    <p class="copy-hint">点击「复制」按钮一键复制命令；也可点击命令区域全选手动复制</p>
+    <p>执行完后，直接双击打开 BobWork 即可。</p>
+    <p style="color:#888; font-size:13px;">前提：先将 BobWork 拖到「Applications」文件夹。使用 <code>-dr</code>（递归删除）可一次清除所有相关文件的隔离标记。</p>
+  </div>
+
+  <div class="method">
+    <h2><span class="badge">2</span> 系统设置放行</h2>
+    <ol>
+      <li>双击打开 BobWork，等待出现"无法验证"警告</li>
+      <li>打开「系统设置」→「隐私与安全性」</li>
+      <li>向下滚动到「安全性」部分</li>
+      <li>找到关于 BobWork 的提示，点击「仍要打开」</li>
+      <li>弹出对话框后，点击「打开」</li>
+    </ol>
+  </div>
+
+  <div class="method">
+    <h2><span class="badge">3</span> 右键打开（仅旧系统有效）</h2>
+    <ol>
+      <li>先将 BobWork 拖到「Applications」（应用程序）文件夹</li>
+      <li>打开「应用程序」，找到 BobWork</li>
+      <li><strong>右键点击</strong>（或按住 Control 点击）BobWork 图标</li>
+      <li>从菜单中选择「打开」</li>
+      <li>弹出对话框后，再次点击「打开」按钮</li>
+    </ol>
+    <p style="color:#888; font-size:13px;">⚠️ macOS 15（Sequoia）及以上系统已移除该选项，右键打开对未签名应用无效，请改用方法 1。</p>
+  </div>
+
+  <div class="warn">
+    <strong>⚠️ 注意</strong>：不要双击 DMG 内的任何脚本或命令文件（如 <code>.command</code>），它们同样会被 Gatekeeper 拦截。请使用以上三种方法之一。
+  </div>
+
+  <div class="tip">
+    <strong>为什么会出现这个警告？</strong><br>
+    BobWork 是免费开源软件，尚未购买 Apple 开发者证书（¥688/年）。应用使用 ad-hoc 签名（`codesign --sign -`），macOS Gatekeeper 会对未经 Apple 公证的应用显示安全警告。BobWork 是开源项目，代码完全透明，不包含任何恶意代码，请放心使用。<br><br>
+    如果您希望消除此警告，可以考虑为项目捐赠以支持购买 Apple 开发者证书。
+  </div>
+</div>
+<script>
+  (function () {
+    var btn = document.getElementById('copyBtn');
+    var cmd = (document.getElementById('installCmd').textContent || '').trim();
+
+    function fallbackCopy(text) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      return ok;
+    }
+
+    function showState(cls, label) {
+      btn.classList.add(cls);
+      btn.querySelector('span').textContent = label;
+      btn.setAttribute('disabled', 'disabled');
+      setTimeout(function () {
+        btn.classList.remove('copied', 'failed');
+        btn.querySelector('span').textContent = '复制';
+        btn.removeAttribute('disabled');
+      }, 1600);
+    }
+
+    btn.addEventListener('click', function () {
+      var done = false;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(function () { done = true; })
+          .catch(function () { done = fallbackCopy(cmd); })
+          .finally(function () {
+            showState(done ? 'copied' : 'failed', done ? '已复制' : '复制失败');
+          });
+      } else {
+        done = fallbackCopy(cmd);
+        showState(done ? 'copied' : 'failed', done ? '已复制' : '复制失败');
+      }
+    });
+  })();
+</script>
+</body>
+</html>

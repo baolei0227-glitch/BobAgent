@@ -7,8 +7,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllSkills } from '@/lib/skills/loader-server';
-import { installSkill, uninstallSkill } from '@/lib/skills/installer-server';
+import { getAllSkills, getDownloadableSkills, hasUserSkill, invalidateSkillsCache } from '@/lib/skills/loader-server';
+import { installSkill, installBuiltinSkill, uninstallSkill } from '@/lib/skills/installer-server';
 import {
   enableSkillForAgent,
   disableSkillForAgent,
@@ -19,44 +19,44 @@ import {
 
 const AGENT_ID = 'default';
 
-/** 系统默认启用的技能 */
-const DEFAULT_ENABLED_SKILLS = new Set([
-  'character-creator',
-  'bob-plugin-creator',
-  'skill-creator',
-  'user-guide',
-  'intern-lawyer',
-  'legal-drafter',
-  'quiet-musing',
-]);
-
 export async function GET() {
   try {
     const skills = getAllSkills();
     const hasConfig = hasAgentConfig(AGENT_ID);
-    const enabled = hasConfig ? getEnabledSkillsForAgent(AGENT_ID) : DEFAULT_ENABLED_SKILLS;
+    const enabled = getEnabledSkillsForAgent(AGENT_ID);
 
     const list = skills.map((s) => ({
       name: s.meta.name,
       description: s.meta.description,
       source: s.meta.source,
       version: s.meta.version,
-      // 无显式配置时：系统默认技能启用，其余关闭
-      enabled: hasConfig ? enabled!.has(s.meta.name) : DEFAULT_ENABLED_SKILLS.has(s.meta.name),
+      scenes: s.meta.scenes,
+      // 无显式配置时：所有已发现技能默认启用
+      enabled: hasConfig ? enabled.has(s.meta.name) : true,
     }));
 
-    return NextResponse.json({ skills: list });
+    // 下载制技能（随包源，未下载不可用）：附 installed 状态供客户端列表展示
+    const downloadable = getDownloadableSkills().map((s) => ({
+      name: s.meta.name,
+      description: s.meta.description,
+      source: s.meta.source,
+      version: s.meta.version,
+      scenes: s.meta.scenes,
+      installed: hasUserSkill(s.meta.name),
+    }));
+
+    return NextResponse.json({ skills: list, downloadable });
   } catch (e) {
     console.error('GET /api/skills error:', e);
     return NextResponse.json({ error: 'Failed to load skills' }, { status: 500 });
   }
 }
 
-/** 确保 Agent 有初始配置（系统默认技能） */
+/** 确保 Agent 有初始配置（首次操作时把所有已发现技能写入持久化） */
 function ensureAgentDefaults() {
   if (!hasAgentConfig(AGENT_ID)) {
-    for (const name of DEFAULT_ENABLED_SKILLS) {
-      enableSkillForAgent(AGENT_ID, name);
+    for (const s of getAllSkills()) {
+      enableSkillForAgent(AGENT_ID, s.meta.name);
     }
   }
 }
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { action, skillName } = body as {
-      action: 'enable' | 'disable' | 'enableAll' | 'install' | 'uninstall';
+      action: 'enable' | 'disable' | 'enableAll' | 'install' | 'installBuiltin' | 'uninstall';
       skillName?: string;
     };
 
@@ -107,6 +107,25 @@ export async function POST(request: NextRequest) {
         if (result.skill && (autoEnable !== false)) {
           enableSkillForAgent(AGENT_ID, result.skill.name);
         }
+        invalidateSkillsCache(); // 磁盘技能集合已变，失效快照缓存
+        return NextResponse.json(result);
+      }
+      case 'installBuiltin': {
+        // 下载制技能物化：从随包源复制到用户本地，下载即启用；
+        // force=true 仅在用户确认覆盖本地自定义副本时由 UI 发起
+        if (!skillName) {
+          return NextResponse.json({ success: false, error: 'skillName required' }, { status: 400 });
+        }
+        const force = (body as any).force === true;
+        const result = await installBuiltinSkill(skillName, { force });
+        if (!result.success) {
+          const status = result.detail?.includes('already installed') ? 409 : 400;
+          return NextResponse.json(result, { status });
+        }
+        if (result.skill) {
+          enableSkillForAgent(AGENT_ID, result.skill.name); // 下载即启用
+        }
+        invalidateSkillsCache();
         return NextResponse.json(result);
       }
       case 'uninstall': {
@@ -119,6 +138,7 @@ export async function POST(request: NextRequest) {
         }
         // 卸载后从注册表中移除
         disableSkillForAgent(AGENT_ID, skillName);
+        invalidateSkillsCache(); // 磁盘技能集合已变，失效快照缓存
         return NextResponse.json(result);
       }
       default:

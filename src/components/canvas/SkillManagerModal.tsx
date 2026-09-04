@@ -1,33 +1,43 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, ChevronDown, Download, Trash2, Link, FolderSearch, Globe, AlertCircle, X } from 'lucide-react';
+import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, Download, Trash, Link, FolderSearch, Globe, AlertCircle, X, Upload, FolderUp, Search, Plug, Sparkles } from 'lucide-react';
+import { skillEntryIcon } from './ext-icons';
+import { ToggleSwitch } from './ToggleSwitch';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
 } from '@/components/ui/dialog';
+import { McpStorePanel } from './McpStorePanel';
 
-interface SkillItem {
+export interface SkillItem {
   name: string;
   description: string;
   source: 'builtin' | 'user' | 'external';
   version: string;
   enabled: boolean;
+  /** 场景/领域类别标注（来自技能 frontmatter 或名称映射表） */
+  scenes: string[];
 }
 
-interface SkillCategory {
-  key: string;
-  label: string;
-  icon?: string;
-  skills: SkillItem[];
+/** 下载制技能（随包源，未下载不可用） */
+export interface DownloadableSkill {
+  name: string;
+  description: string;
+  source: 'builtin' | 'user' | 'external';
+  version: string;
+  scenes: string[];
+  /** 是否已下载到本地（下载后可自由编辑，且已进入可用技能库） */
+  installed: boolean;
 }
 
 interface SkillManagerModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** 打开时的初始视图：market（默认，Skill Store）| installed | import */
+  initialView?: 'installed' | 'market' | 'import';
 }
 
 interface InstallResult {
@@ -37,53 +47,31 @@ interface InstallResult {
   detail?: string;
 }
 
-/** 技能分类 */
-function categorizeSkills(skills: SkillItem[]): SkillCategory[] {
-  const builtin: SkillItem[] = [];
-  const lark: SkillItem[] = [];
-  const docs: SkillItem[] = [];
-  const design: SkillItem[] = [];
-  const dev: SkillItem[] = [];
-  const other: SkillItem[] = [];
+/** 场景筛选项（Market 视图场景徽标与 chips 用；Installed 已平铺不分类） */
+const SCENE_FILTERS: { key: string; label: string }[] = [
+  { key: 'all', label: 'All Scenes' },
+  { key: 'legal', label: 'Legal' },
+  { key: 'bob-work', label: 'Bob Work' },
+  { key: 'office', label: 'Office' },
+  { key: 'design', label: 'Design' },
+  { key: 'lark', label: 'Feishu / Lark' },
+  { key: 'docs', label: 'Document Processing' },
+  { key: 'dev', label: 'Development Tools' },
+  { key: 'general', label: 'General' },
+];
 
-  const docNames = new Set(['docx', 'pdf', 'pdf-splitter', 'pptx', 'xlsx']);
-  const designNames = new Set(['algorithmic-art', 'brand-guidelines', 'canvas-design', 'frontend-design', 'theme-factory', 'slack-gif-creator']);
-  const devNames = new Set(['mcp-builder', 'web-artifacts-builder', 'webapp-testing', 'using-coze-cli', 'template']);
-
-  for (const skill of skills) {
-    if (skill.source === 'builtin') {
-      builtin.push(skill);
-    } else if (skill.name.startsWith('lark-')) {
-      lark.push(skill);
-    } else if (docNames.has(skill.name)) {
-      docs.push(skill);
-    } else if (designNames.has(skill.name)) {
-      design.push(skill);
-    } else if (devNames.has(skill.name)) {
-      dev.push(skill);
-    } else {
-      other.push(skill);
-    }
-  }
-
-  const all: SkillCategory[] = [
-    { key: 'builtin', label: '内置技能', skills: builtin },
-    { key: 'lark', label: '飞书 / Lark', skills: lark },
-    { key: 'docs', label: '文档处理', skills: docs },
-    { key: 'design', label: '设计', skills: design },
-    { key: 'dev', label: '开发工具', skills: dev },
-    { key: 'other', label: '其他', skills: other },
-  ];
-
-  return all.filter(c => c.skills.length > 0);
-}
-
-function SkillCard({ skill, onToggle, onUninstall }: {
+function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, official = true }: {
   skill: SkillItem;
   onToggle: (name: string) => void;
   onUninstall?: (name: string) => void;
+  /** 该技能存在随包官方源：可重装官方版（会覆盖本地自定义副本） */
+  reinstallable?: boolean;
+  onReinstall?: (name: string) => void;
+  /** 是否官方来源（内置 / 随包下载）；false = 第三方导入（自定义），显示第三方图标 */
+  official?: boolean;
 }) {
-  const [confirmUninstall, setConfirmUninstall] = useState(false);
+  // 两态确认互斥：uninstall / reinstall 任一激活即重置另一个
+  const [confirmAction, setConfirmAction] = useState<'uninstall' | 'reinstall' | null>(null);
   const [descExpanded, setDescExpanded] = useState(false);
   const descRef = useRef<HTMLParagraphElement>(null);
   const [needsExpand, setNeedsExpand] = useState(false);
@@ -95,174 +83,201 @@ function SkillCard({ skill, onToggle, onUninstall }: {
     }
   }, [skill.description]);
 
+  const enabled = skill.enabled;
+  const isUserSkill = skill.source !== 'builtin';
+  const SkillIcon = skillEntryIcon(skill.name, skill.scenes || [], !!official);
+
   return (
     <div
-      className="rounded-md border px-3 py-2 transition-colors hover:bg-[oklch(0.95_0.008_80)]"
+      className="rounded-md border px-3 py-2 transition-colors"
       style={{
-        borderColor: skill.enabled ? 'oklch(0.62 0.17 45 / 0.25)' : 'oklch(0.85 0.01 70)',
-        backgroundColor: skill.enabled ? 'oklch(0.62 0.17 45 / 0.03)' : 'transparent',
+        borderColor: enabled ? 'color-mix(in oklab, var(--primary) 25%, transparent)' : 'var(--line)',
+        backgroundColor: enabled ? 'color-mix(in oklab, var(--primary) 3%, transparent)' : 'var(--input-bg)',
       }}
     >
-      <div className="flex items-start gap-2">
+      {/* 头行：图标 + 名称 + 来源徽标 + 版本（与 Market 卡片同构，便于平铺后视觉对齐） */}
+      <div className="flex items-center gap-1.5">
+        <span
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+          style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)', color: 'var(--primary)' }}
+        >
+          <SkillIcon className="h-3.5 w-3.5" />
+        </span>
+        <span className="flex-1 truncate text-xs font-medium" style={{ color: 'var(--ink-strong)' }}>
+          {skill.name}
+        </span>
+        {skill.source === 'builtin' && (
+          <span
+            className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-px text-xs leading-tight"
+            style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)', color: 'var(--primary)' }}
+          >
+            <Package className="h-2.5 w-2.5" />System
+          </span>
+        )}
+        {skill.source === 'user' && (
+          <span
+            className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-px text-xs leading-tight"
+            style={{ backgroundColor: 'color-mix(in oklab, var(--success) 12%, transparent)', color: 'var(--success)' }}
+          >
+            <FolderOpen className="h-2.5 w-2.5" />User
+          </span>
+        )}
+        <span className="shrink-0 text-xs leading-tight" style={{ color: 'var(--ink-faint)' }}>
+          v{skill.version || '1.0.0'}
+        </span>
+      </div>
+
+      <p
+        ref={descRef}
+        className={descExpanded ? 'mt-0.5 text-xs leading-relaxed' : 'mt-0.5 text-xs leading-relaxed line-clamp-2'}
+        style={{ color: 'var(--ink-muted)' }}
+      >
+        {skill.description}
+      </p>
+      {needsExpand && (
         <button
           type="button"
-          onClick={() => onToggle(skill.name)}
-          className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors"
-          style={{
-            backgroundColor: skill.enabled ? 'oklch(0.62 0.17 45)' : 'transparent',
-            borderColor: skill.enabled ? 'oklch(0.62 0.17 45)' : 'oklch(0.75 0.02 60)',
-          }}
+          onClick={() => setDescExpanded(!descExpanded)}
+          className="mt-0.5 text-xs transition-colors hover:underline"
+          style={{ color: 'var(--primary)' }}
         >
-          {skill.enabled && <Check className="h-3 w-3 text-white" />}
+          {descExpanded ? 'Collapse' : 'Expand'}
         </button>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-medium truncate" style={{ color: 'oklch(0.30 0.015 50)' }}>
-              {skill.name}
-            </span>
-            {skill.source === 'builtin' && (
-              <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-px text-[9px] leading-tight"
-                style={{ backgroundColor: 'oklch(0.62 0.17 45 / 0.12)', color: 'oklch(0.50 0.12 45)' }}>
-                <Package className="h-2.5 w-2.5" />内置
-              </span>
-            )}
-            {skill.source === 'user' && (
-              <span className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-px text-[9px] leading-tight"
-                style={{ backgroundColor: 'oklch(0.55 0.15 145 / 0.12)', color: 'oklch(0.45 0.12 145)' }}>
-                <FolderOpen className="h-2.5 w-2.5" />用户
-              </span>
-            )}
-          </div>
-          <p
-            ref={descRef}
-            className={descExpanded ? 'mt-0.5 text-[10px] leading-relaxed' : 'mt-0.5 text-[10px] leading-relaxed line-clamp-2'}
-            style={{ color: 'oklch(0.55 0.02 50)' }}
-          >
-            {skill.description}
-          </p>
-          {needsExpand && (
+      )}
+
+      {confirmAction ? (
+        /* 确认条：卸载 / 重装二次确认（替代整条底栏，避免窄卡片内挤压） */
+        <div
+          className="mt-2 flex items-center justify-between gap-1.5 rounded-md px-1.5 py-1"
+          style={{ backgroundColor: 'color-mix(in oklab, var(--danger) 6%, transparent)' }}
+        >
+          <span className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--danger)' }}>
+            {confirmAction === 'reinstall' ? 'Restore official version?' : 'Uninstall this skill?'}
+          </span>
+          <span className="flex shrink-0 items-center gap-1">
             <button
               type="button"
-              onClick={() => setDescExpanded(!descExpanded)}
-              className="mt-0.5 text-[9px] transition-colors hover:underline"
-              style={{ color: 'oklch(0.50 0.12 45)' }}
+              onClick={() => {
+                if (confirmAction === 'reinstall') {
+                  if (onReinstall) onReinstall(skill.name);
+                } else {
+                  if (onUninstall) onUninstall(skill.name);
+                }
+                setConfirmAction(null);
+              }}
+              className="rounded px-1.5 py-0.5 text-xs font-medium"
+              style={{ color: '#fff', backgroundColor: 'var(--danger)' }}
+            >Confirm</button>
+            <button
+              type="button"
+              onClick={() => setConfirmAction(null)}
+              className="rounded p-0.5 transition-colors hover:bg-[var(--paper-soft)]"
+              style={{ color: 'var(--ink-muted)' }}
+              title="Cancel"
+            ><X className="h-3 w-3" /></button>
+          </span>
+        </div>
+      ) : (
+        /* 底栏：启用开关（ToggleSwitch）+ 用户技能附加操作（重装官方版 / 卸载） */
+        <div className="mt-2 flex items-center gap-1.5">
+          <div
+            className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md px-2"
+            style={{
+              backgroundColor: enabled ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+            }}
+            title={enabled ? 'Disable this skill' : 'Enable this skill'}
+          >
+            <ToggleSwitch
+              checked={enabled}
+              onChange={() => onToggle(skill.name)}
+              title={enabled ? 'Disable this skill' : 'Enable this skill'}
+            />
+            <span className="truncate text-xs font-medium" style={{ color: enabled ? 'var(--primary)' : 'var(--ink-muted)' }}>
+              {enabled ? 'Enabled' : 'Enable'}
+            </span>
+          </div>
+          {isUserSkill && reinstallable && onReinstall && (
+            <button
+              type="button"
+              onClick={() => setConfirmAction('reinstall')}
+              className="shrink-0 rounded-md border p-1 transition-colors hover:bg-[var(--paper-soft)]"
+              style={{ borderColor: 'var(--line)', color: 'var(--primary)' }}
+              title="Reinstall the bundled official version (overwrites your local edits)"
             >
-              {descExpanded ? '收起' : '展开全部'}
+              <RefreshCw className="h-3 w-3" />
             </button>
           )}
-        </div>
-        {skill.source === 'user' && onUninstall && (
-          <div className="shrink-0">
-            {confirmUninstall ? (
-              <span className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => { onUninstall(skill.name); setConfirmUninstall(false); }}
-                  className="text-[10px] rounded px-1.5 py-0.5"
-                  style={{ color: '#fff', backgroundColor: 'oklch(0.55 0.18 35)' }}
-                >确认</button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmUninstall(false)}
-                  className="text-[10px] rounded px-1 py-0.5"
-                  style={{ color: 'oklch(0.50 0.02 50)' }}
-                ><X className="h-3 w-3" /></button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmUninstall(true)}
-                className="rounded p-0.5 transition-colors hover:bg-[oklch(0.90_0.02_50)]"
-                title="卸载技能"
-              >
-                <Trash2 className="h-3 w-3" style={{ color: 'oklch(0.55 0.02 50)' }} />
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CategorySection({ category, expanded, onToggleExpand, onToggleSkill, onToggleCategory, onUninstall }: {
-  category: SkillCategory;
-  expanded: boolean;
-  onToggleExpand: () => void;
-  onToggleSkill: (name: string) => void;
-  onToggleCategory: (names: string[], enable: boolean) => void;
-  onUninstall?: (name: string) => void;
-}) {
-  const enabledCount = category.skills.filter(s => s.enabled).length;
-  const total = category.skills.length;
-  const allEnabled = enabledCount === total;
-
-  return (
-    <div>
-      {/* 分类标题栏 */}
-      <button
-        type="button"
-        onClick={onToggleExpand}
-        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[oklch(0.95_0.008_80)] sticky top-0 z-10"
-        style={{ backgroundColor: 'oklch(0.98 0.005 80)' }}
-      >
-        <ChevronDown
-          className="h-3 w-3 shrink-0 transition-transform"
-          style={{
-            color: 'oklch(0.55 0.02 50)',
-            transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-          }}
-        />
-        <span className="text-[11px] font-semibold flex-1" style={{ color: 'oklch(0.35 0.015 50)' }}>
-          {category.label}
-        </span>
-        <span className="text-[10px] mr-1" style={{ color: 'oklch(0.50 0.015 50 / 0.6)' }}>
-          {enabledCount}/{total}
-        </span>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleCategory(category.skills.map(s => s.name), !allEnabled);
-          }}
-          className="text-[10px] transition-colors hover:underline shrink-0"
-          style={{ color: 'oklch(0.55 0.02 50)' }}
-        >
-          {allEnabled ? '全部禁用' : '全部启用'}
-        </button>
-      </button>
-
-      {/* 技能列表 */}
-      {expanded && (
-        <div className="space-y-1.5 mt-1 ml-4">
-          {category.skills.map((skill) => (
-            <SkillCard
-              key={skill.name}
-              skill={skill}
-              onToggle={onToggleSkill}
-              onUninstall={onUninstall}
-            />
-          ))}
+          {isUserSkill && onUninstall && (
+            <button
+              type="button"
+              onClick={() => setConfirmAction('uninstall')}
+              className="shrink-0 rounded-md border p-1 transition-colors hover:bg-[var(--paper-soft)]"
+              style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+              title="Uninstall skill"
+            >
+              <Trash className="h-3 w-3" />
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps) {
+export function SkillManagerModal({ open, onOpenChange, initialView }: SkillManagerModalProps) {
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [downloadables, setDownloadables] = useState<DownloadableSkill[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(['builtin']));
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 安装表单状态
-  const [showInstall, setShowInstall] = useState(false);
+  // 扩展类型：skills = 技能市场（原 Skill Store）/ mcp = MCP & Plugins 市场
+  const [extTab, setExtTab] = useState<'skills' | 'mcp'>('skills');
+  // 视图切换：market=市场（全部随包技能；未装右侧 Install，已装显示 Installed 态不移除）/ installed=已安装(系统+已下载) / import=自定义上传(GitHub/本地)
+  const [view, setView] = useState<'installed' | 'market' | 'import'>('market');
   const [installSource, setInstallSource] = useState<'github' | 'local'>('github');
   const [installUrl, setInstallUrl] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState('');
   const [installSuccess, setInstallSuccess] = useState('');
+  // 技能搜索（Installed 平铺列表）
+  const [skillSearch, setSkillSearch] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  // 市场视图状态（搜索/场景筛选/安装中）
+  const [marketSearch, setMarketSearch] = useState('');
+  const [marketScene, setMarketScene] = useState('all');
+  const [downloadingName, setDownloadingName] = useState<string | null>(null);
+
+  // 拖拽处理
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+
+    const items = e.dataTransfer.items;
+    if (items && items.length > 0) {
+      const file = e.dataTransfer.files?.[0];
+      if (file) {
+        // Electron/Tauri 桌面端有 .path 属性；浏览器端用 webkitRelativePath
+        const path = (file as any).path || file.webkitRelativePath || file.name;
+        setInstallUrl(path);
+        setInstallError('');
+      }
+    }
+  };
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -275,13 +290,17 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
         return;
       }
       const sourceOrder: Record<string, number> = { builtin: 0, user: 1, external: 2 };
-      const sorted = [...(data.skills || [])].sort((a: SkillItem, b: SkillItem) => {
+      // 仅显示系统内置（builtin）与用户已下载（user）技能；隐藏外部兼容源（~/.claude、~/.cursor）技能
+      const visible = [...(data.skills || [])].filter((s: SkillItem) => s.source !== 'external');
+      const sorted = visible.sort((a: SkillItem, b: SkillItem) => {
         const aOrder = sourceOrder[a.source] ?? 2;
         const bOrder = sourceOrder[b.source] ?? 2;
         if (aOrder !== bOrder) return aOrder - bOrder;
         return a.name.localeCompare(b.name);
       });
       setSkills(sorted);
+      // 下载制技能清单（随包源）
+      setDownloadables((data.downloadable || []) as DownloadableSkill[]);
     } catch (e) {
       setError('Network error');
       console.error('Load skills error:', e);
@@ -293,11 +312,11 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
   useEffect(() => {
     if (open) {
       loadSkills();
-      setShowInstall(false);
+      setView(initialView ?? 'market');
       setInstallError('');
       setInstallSuccess('');
     }
-  }, [open, loadSkills]);
+  }, [open, loadSkills, initialView]);
 
   const toggleSkill = async (name: string) => {
     const oldSkills = [...skills];
@@ -318,35 +337,6 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
       console.error('Toggle skill error:', e);
       setSkills(oldSkills);
     }
-  };
-
-  const toggleCategory = async (skillNames: string[], enable: boolean) => {
-    const oldSkills = [...skills];
-    setSkills((prev) =>
-      prev.map((s) => (skillNames.includes(s.name) ? { ...s, enabled: enable } : s))
-    );
-    try {
-      for (const name of skillNames) {
-        await fetch('/api/skills', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: enable ? 'enable' : 'disable', skillName: name }),
-        });
-      }
-      window.dispatchEvent(new Event('skills-changed'));
-    } catch (e) {
-      console.error('Toggle category error:', e);
-      setSkills(oldSkills);
-    }
-  };
-
-  const toggleCategoryExpand = (key: string) => {
-    setExpandedCategories((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
   };
 
   const handleToggleAll = async () => {
@@ -375,12 +365,61 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
     }
   };
 
+  // 市场技能安装：从随包源物化到本地（~/BobWork/skills/<name>/），安装即启用；
+  // 已装卡片保留在 Market 并切换为 Installed 态（不移除），编辑/卸载在 Installed 管理
+  const handleDownload = async (skillName: string) => {
+    if (downloadingName) return;
+    setDownloadingName(skillName);
+    setInstallError('');
+    setInstallSuccess('');
+    try {
+      const resp = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'installBuiltin', skillName, force: false }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        setInstallError(data.error || data.detail || 'Install failed');
+        return;
+      }
+      setInstallSuccess(`Installed: ${data.skill!.name} — toggle & edit it in Installed`);
+      loadSkills();
+    } catch (e: any) {
+      setInstallError(e?.message || 'Network error');
+    } finally {
+      setDownloadingName(null);
+    }
+  };
+
+  // 重装官方版：Installed 中随包源技能恢复为随包官方版本（覆盖本地自定义前需二次确认，A 方案）
+  const handleReinstall = async (skillName: string) => {
+    setInstallError('');
+    setInstallSuccess('');
+    try {
+      const resp = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'installBuiltin', skillName, force: true }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        setInstallError(data.error || data.detail || 'Reinstall failed');
+        return;
+      }
+      setInstallSuccess(`Reinstalled official version: ${data.skill?.name ?? skillName}`);
+      loadSkills();
+    } catch (e: any) {
+      setInstallError(e?.message || 'Network error');
+    }
+  };
+
   // 安装技能
   const handleInstall = async () => {
     setInstallError('');
     setInstallSuccess('');
     if (!installUrl.trim()) {
-      setInstallError('请输入 GitHub URL 或选择本地路径');
+      setInstallError('Please enter a GitHub URL or select a local path');
       return;
     }
     setInstalling(true);
@@ -397,14 +436,14 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
       });
       const data: InstallResult = await resp.json();
       if (!resp.ok || !data.success) {
-        setInstallError(data.error || data.detail || '安装失败');
+        setInstallError(data.error || data.detail || 'Installation failed');
         return;
       }
-      setInstallSuccess(`已安装: ${data.skill!.name}`);
+      setInstallSuccess(`Installed: ${data.skill!.name}`);
       setInstallUrl('');
       loadSkills();
     } catch (e: any) {
-      setInstallError(e?.message || '网络错误');
+      setInstallError(e?.message || 'Network error');
     } finally {
       setInstalling(false);
     }
@@ -420,7 +459,7 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
       });
       const data = await resp.json();
       if (!resp.ok || !data.success) {
-        setError(data.error || '卸载失败');
+        setError(data.error || 'Uninstall failed');
         return;
       }
       loadSkills();
@@ -441,88 +480,380 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
     }
   };
 
-  const categories = categorizeSkills(skills);
+  // Installed 平铺：不再按场景分类，仅按搜索词过滤（2026-09-03）
+  const query = skillSearch.trim().toLowerCase();
+  const filteredSkills = skills.filter(
+    (s) => !query || s.name.toLowerCase().includes(query) || s.description.toLowerCase().includes(query),
+  );
   const allEnabled = skills.length > 0 && skills.every((s) => s.enabled);
   const enabledCount = skills.filter(s => s.enabled).length;
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="max-w-md gap-0 p-0"
-        style={{ fontFamily: "'Noto Serif SC', serif" }}
-      >
-        <DialogHeader className="px-6 pt-6 pb-3">
-          <DialogTitle
-            className="flex items-center gap-2 text-base"
-            style={{ color: 'oklch(0.30 0.015 50)' }}
-          >
-            <Lightbulb className="h-4 w-4" style={{ color: 'oklch(0.62 0.17 45)' }} />
-            Skills
-          </DialogTitle>
-          <DialogDescription
-            className="text-xs"
-            style={{ color: 'oklch(0.55 0.02 50)' }}
-          >
-            Skills are automatically triggered when your message matches their keywords.
-            Install new skills from GitHub or local folder.
-          </DialogDescription>
-        </DialogHeader>
+  // 市场派生数据：全部随包技能（含已装 → 右侧显示 Installed 态，卡片不移除）+ 场景筛选项（用于 Market 视图）
+  const marketSkills = downloadables;
+  const availableCount = downloadables.filter((d) => !d.installed).length;
+  const marketSceneLabel = (s: string) => SCENE_FILTERS.find((f) => f.key === s)?.label ?? s;
+  const marketScenes = Array.from(
+    new Set(
+      downloadables
+        .map((d) => d.scenes?.[0])
+        .filter((s): s is string => !!s && SCENE_FILTERS.some((f) => f.key === s)),
+    ),
+  );
 
-        <div className="max-h-[55vh] overflow-y-auto px-6 pb-2">
-          {/* 视图切换 + 操作栏 */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'oklch(0.85 0.01 70)' }}>
-              <button
-                type="button"
-                onClick={() => setShowInstall(false)}
-                className="rounded px-2.5 py-1 text-[11px] font-medium transition-colors"
-                style={{
-                  color: !showInstall ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
-                  backgroundColor: !showInstall ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
-                }}
-              >
-                已安装
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowInstall(true)}
-                className="rounded px-2.5 py-1 text-[11px] font-medium transition-colors flex items-center gap-1"
-                style={{
-                  color: showInstall ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
-                  backgroundColor: showInstall ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
-                }}
-              >
-                <Download className="h-3 w-3" />
-                安装
-              </button>
+  // 随包官方源技能名集合：Installed 中这类 user 技能可「重装官方版」（覆盖本地副本）
+  const officialNames = new Set(downloadables.map((d) => d.name));
+
+  const inner = (
+    <>
+      <DialogHeader className="px-6 pt-6 pb-3">
+        <DialogTitle
+          className="flex items-center gap-2 text-base"
+          style={{ color: 'var(--ink-strong)' }}
+        >
+          <Sparkles className="h-4 w-4" style={{ color: 'var(--primary)' }} />
+          Extensions Store
+        </DialogTitle>
+      </DialogHeader>
+
+      {/* 扩展类型切换：Skills / MCP & Plugins */}
+      <div className="flex items-center gap-1 border-b px-6 py-2 sm:px-8" style={{ borderColor: 'var(--line-soft)' }}>
+        <button
+          type="button"
+          onClick={() => setExtTab('skills')}
+          className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+          style={{
+            color: extTab === 'skills' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+            backgroundColor: extTab === 'skills' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+          }}
+        >
+          <Lightbulb className="h-3 w-3" />
+          Skills
+        </button>
+        <button
+          type="button"
+          onClick={() => setExtTab('mcp')}
+          className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+          style={{
+            color: extTab === 'mcp' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+            backgroundColor: extTab === 'mcp' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+          }}
+        >
+          <Plug className="h-3 w-3" />
+          MCP & Plugins
+        </button>
+      </div>
+
+        <div ref={scrollRef} className="nowheel min-h-0 overflow-y-auto px-6 pb-4 sm:px-8">
+          {extTab === 'skills' ? (
+          <>
+          {/* 吸顶头部：视图切换 + 计数 + 各视图搜索/筛选（不随内容滚动） */}
+          <div
+            className="sticky top-0 z-20 -mx-6 mb-3 border-b bg-[var(--paper)] px-6 pb-2 sm:-mx-8 sm:px-8"
+            style={{ borderColor: 'var(--line-soft)' }}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'var(--line)' }}>
+                <button
+                  type="button"
+                  onClick={() => setView('market')}
+                  className="rounded px-2.5 py-1 text-xs font-medium transition-colors flex items-center gap-1"
+                  style={{
+                    color: view === 'market' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+                    backgroundColor: view === 'market' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+                  }}
+                >
+                  <Download className="h-3 w-3" />
+                  Market
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView('installed')}
+                  className="rounded px-2.5 py-1 text-xs font-medium transition-colors"
+                  style={{
+                    color: view === 'installed' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+                    backgroundColor: view === 'installed' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+                  }}
+                >
+                  Installed
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView('import')}
+                  className="rounded px-2.5 py-1 text-xs font-medium transition-colors flex items-center gap-1"
+                  style={{
+                    color: view === 'import' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+                    backgroundColor: view === 'import' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+                  }}
+                >
+                  <Globe className="h-3 w-3" />
+                  Import
+                </button>
+              </div>
+              {view === 'market' && (
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  {`${availableCount} available`}
+                </span>
+              )}
+              {view === 'installed' && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                    {skills.length === 0
+                      ? 'No skills found'
+                      : `${enabledCount} / ${skills.length} enabled`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleToggleAll}
+                    className="text-xs transition-colors hover:underline"
+                    style={{ color: 'var(--ink-muted)' }}
+                  >
+                    {allEnabled ? 'Disable All' : 'Enable All'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={loadSkills}
+                    disabled={loading}
+                    className="flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors hover:bg-[var(--paper-soft)]"
+                    style={{ color: 'var(--ink-muted)' }}
+                  >
+                    <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+              )}
             </div>
-            {!showInstall && (
-              <span className="text-[11px]" style={{ color: 'oklch(0.50 0.015 50)' }}>
-                {skills.length === 0
-                  ? 'No skills found'
-                  : `${enabledCount} / ${skills.length} enabled`}
-              </span>
+
+            {/* Market：搜索 + 场景筛选 */}
+            {view === 'market' && (
+              <div className="mt-2 space-y-2">
+                <div className="relative">
+                  <Search
+                    className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2"
+                    style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                  />
+                  <input
+                    type="text"
+                    value={marketSearch}
+                    onChange={(e) => setMarketSearch(e.target.value)}
+                    placeholder="Search skills…"
+                    className="w-full rounded-md border py-1.5 pl-7 pr-2 text-xs outline-none transition-colors"
+                    style={{
+                      borderColor: 'var(--line)',
+                      backgroundColor: 'var(--input-bg)',
+                      color: 'var(--ink-strong)',
+                    }}
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setMarketScene('all')}
+                    className="rounded-full px-2 py-0.5 text-xs transition-colors"
+                    style={{
+                      backgroundColor: marketScene === 'all' ? 'var(--primary)' : 'transparent',
+                      color: marketScene === 'all' ? '#fff' : 'var(--ink-muted)',
+                      border: marketScene === 'all' ? '1px solid var(--primary)' : '1px solid var(--line)',
+                    }}
+                  >
+                    All
+                  </button>
+                  {marketScenes.map((sc) => (
+                    <button
+                      key={sc}
+                      type="button"
+                      onClick={() => setMarketScene(sc)}
+                      className="rounded-full px-2 py-0.5 text-xs transition-colors"
+                      style={{
+                        backgroundColor: marketScene === sc ? 'var(--primary)' : 'transparent',
+                        color: marketScene === sc ? '#fff' : 'var(--ink-muted)',
+                        border: marketScene === sc ? '1px solid var(--primary)' : '1px solid var(--line)',
+                      }}
+                    >
+                      {marketSceneLabel(sc)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Installed：搜索 */}
+            {view === 'installed' && (
+              <>
+                <div className="relative mt-2">
+                  <Search
+                    className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2"
+                    style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                  />
+                  <input
+                    type="text"
+                    value={skillSearch}
+                    onChange={(e) => setSkillSearch(e.target.value)}
+                    placeholder="搜索技能名称或描述..."
+                    className="w-full rounded-md border py-1.5 pl-7 pr-7 text-xs outline-none transition-colors"
+                    style={{
+                      borderColor: 'var(--line)',
+                      backgroundColor: 'var(--input-bg)',
+                      color: 'var(--ink-strong)',
+                    }}
+                  />
+                  {skillSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setSkillSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 transition-colors hover:bg-[var(--paper-soft)]"
+                    >
+                      <X className="h-3 w-3" style={{ color: 'var(--ink-muted)' }} />
+                    </button>
+                  )}
+                </div>
+              </>
             )}
           </div>
 
           {error && (
-            <p className="mb-3 text-[11px]" style={{ color: 'oklch(0.55 0.18 35)' }}>{error}</p>
+            <p className="mb-3 text-xs" style={{ color: 'var(--danger)' }}>{error}</p>
           )}
 
-          {/* ===== 安装视图 ===== */}
-          {showInstall ? (
+          {/* ===== 市场视图（搜索/筛选已吸顶；全部随包技能卡片保留并显示 Installed 态） ===== */}
+          {view === 'market' ? (
+            <div className="space-y-3">
+              {/* 状态提示（安装成功 / 错误） */}
+              {installError && (
+                <div className="flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--danger) 6%, transparent)', color: 'var(--danger)' }}>
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                  <span className="leading-relaxed">{installError}</span>
+                </div>
+              )}
+              {installSuccess && (
+                <div className="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-xs"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--success) 6%, transparent)', color: 'var(--success)' }}>
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                  <span>{installSuccess}</span>
+                </div>
+              )}
+
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--primary)' }} />
+                </div>
+              ) : marketSkills.length === 0 ? (
+                <div
+                  className="rounded-md border px-4 py-6 text-center"
+                  style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)' }}
+                >
+                  <Package className="mx-auto mb-2 h-5 w-5" style={{ color: 'var(--ink-faint)' }} />
+                  <p className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                    No bundled skills available right now.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-3">
+                  {(() => {
+                    const q = marketSearch.trim().toLowerCase();
+                    const items = marketSkills.filter((d) => {
+                      const sc = d.scenes?.[0];
+                      const okScene = marketScene === 'all' || sc === marketScene;
+                      const okQuery = !q
+                        || d.name.toLowerCase().includes(q)
+                        || d.description.toLowerCase().includes(q);
+                      return okScene && okQuery;
+                    });
+                    if (items.length === 0) {
+                      return (
+                        <p className="col-span-full px-2 py-6 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
+                          No skills match your search / filter.
+                        </p>
+                      );
+                    }
+                    return items.map((d) => {
+                      const busy = downloadingName === d.name;
+                      const sc = d.scenes?.[0];
+                      const Icon = skillEntryIcon(d.name, d.scenes || [], true);
+                      return (
+                        <div
+                          key={d.name}
+                          className="flex items-center gap-2.5 rounded-md border px-3 py-2.5"
+                          style={{
+                            borderColor: d.installed ? 'color-mix(in oklab, var(--primary) 22%, transparent)' : 'var(--line)',
+                            backgroundColor: d.installed ? 'color-mix(in oklab, var(--primary) 3%, transparent)' : 'var(--input-bg)',
+                          }}
+                        >
+                          {/* 图标 */}
+                          <span
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+                            style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)', color: 'var(--primary)' }}
+                          >
+                            <Icon className="h-[18px] w-[18px]" />
+                          </span>
+
+                          {/* 名称 + 描述 */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate text-xs font-medium" style={{ color: 'var(--ink-strong)' }}>
+                                {d.name}
+                              </span>
+                              {sc && marketScenes.includes(sc) && (
+                                <span
+                                  className="hidden shrink-0 rounded px-1 py-px text-xs leading-tight md:inline"
+                                  style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)', color: 'var(--primary)' }}
+                                >
+                                  {marketSceneLabel(sc)}
+                                </span>
+                              )}
+                              <span className="shrink-0 text-xs leading-tight" style={{ color: 'var(--ink-faint)' }}>
+                                v{d.version || '1.0.0'}
+                              </span>
+                            </div>
+                            <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+                              {d.description}
+                            </p>
+                          </div>
+
+                          {/* 右侧：Install / Installed */}
+                          {d.installed ? (
+                            <span
+                              className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium"
+                              style={{
+                                color: 'var(--success)',
+                                border: '1px solid color-mix(in oklab, var(--success) 30%, transparent)',
+                                backgroundColor: 'color-mix(in oklab, var(--success) 6%, transparent)',
+                              }}
+                            >
+                              Installed
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleDownload(d.name)}
+                              className="flex shrink-0 items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition-opacity disabled:opacity-50"
+                              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                            >
+                              {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                              {busy ? 'Installing…' : 'Install'}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              )}
+            </div>
+          ) : view === 'import' ? (
             <div className="space-y-4">
               {/* 来源选择 */}
               <div className="flex items-center gap-2">
-                <span className="text-[11px] shrink-0" style={{ color: 'oklch(0.45 0.015 50)' }}>来源:</span>
-                <div className="flex items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'oklch(0.85 0.01 70)' }}>
+                <span className="text-xs shrink-0" style={{ color: 'var(--ink-muted)' }}>Source:</span>
+                <div className="flex items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'var(--line)' }}>
                   <button
                     type="button"
                     onClick={() => { setInstallSource('github'); setInstallUrl(''); setInstallError(''); }}
-                    className="rounded px-2.5 py-1 text-[11px] transition-colors flex items-center gap-1"
+                    className="rounded px-2.5 py-1 text-xs transition-colors flex items-center gap-1"
                     style={{
-                      color: installSource === 'github' ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
-                      backgroundColor: installSource === 'github' ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
+                      color: installSource === 'github' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+                      backgroundColor: installSource === 'github' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
                     }}
                   >
                     <Globe className="h-3 w-3" />
@@ -531,14 +862,14 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
                   <button
                     type="button"
                     onClick={() => { setInstallSource('local'); setInstallUrl(''); setInstallError(''); }}
-                    className="rounded px-2.5 py-1 text-[11px] transition-colors flex items-center gap-1"
+                    className="rounded px-2.5 py-1 text-xs transition-colors flex items-center gap-1"
                     style={{
-                      color: installSource === 'local' ? 'oklch(0.30 0.015 50)' : 'oklch(0.55 0.02 50)',
-                      backgroundColor: installSource === 'local' ? 'oklch(0.62 0.17 45 / 0.08)' : 'transparent',
+                      color: installSource === 'local' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+                      backgroundColor: installSource === 'local' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
                     }}
                   >
                     <FolderSearch className="h-3 w-3" />
-                    本地
+                    Local
                   </button>
                 </div>
               </div>
@@ -546,19 +877,19 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
               {/* 输入区域 */}
               {installSource === 'github' ? (
                 <div>
-                  <label className="text-[10px] font-medium" style={{ color: 'oklch(0.45 0.015 50)' }}>
-                    GitHub 仓库 URL
+                  <label className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                    GitHub Repository URL
                   </label>
                   <div className="mt-1 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5"
-                    style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.99 0.003 80)' }}>
-                    <Link className="h-3.5 w-3.5 shrink-0" style={{ color: 'oklch(0.55 0.02 50)' }} />
+                    style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)' }}>
+                    <Link className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
                     <input
                       type="text"
                       value={installUrl}
                       onChange={(e) => setInstallUrl(e.target.value)}
                       placeholder="https://github.com/user/repo"
                       className="flex-1 bg-transparent text-xs outline-none"
-                      style={{ color: 'oklch(0.30 0.015 50)' }}
+                      style={{ color: 'var(--ink-strong)' }}
                       disabled={installing}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleInstall(); }}
                     />
@@ -566,19 +897,59 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
                 </div>
               ) : (
                 <div>
-                  <label className="text-[10px] font-medium" style={{ color: 'oklch(0.45 0.015 50)' }}>
-                    本地技能包路径
+                  <label className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                    Local skill folder
                   </label>
-                  <div className="mt-1 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5"
-                    style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.99 0.003 80)' }}>
-                    <FolderSearch className="h-3.5 w-3.5 shrink-0" style={{ color: 'oklch(0.55 0.02 50)' }} />
+
+                  {/* 拖拽上传区域 */}
+                  <div
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="mt-1 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-5 transition-colors"
+                    style={{
+                      borderColor: dragOver ? 'var(--primary)' : installUrl ? 'color-mix(in oklab, var(--primary) 30%, transparent)' : 'var(--line)',
+                      backgroundColor: dragOver ? 'color-mix(in oklab, var(--primary) 6%, transparent)' : installUrl ? 'color-mix(in oklab, var(--primary) 3%, transparent)' : 'var(--input-bg)',
+                    }}
+                  >
+                    {installUrl ? (
+                      <div className="flex flex-col items-center gap-1">
+                        <FolderUp className="h-6 w-6" style={{ color: 'var(--primary)' }} />
+                        <span className="text-xs font-medium max-w-[260px] truncate" style={{ color: 'var(--ink)' }}>
+                          {installUrl.split('/').pop() || installUrl}
+                        </span>
+                        <span className="text-xs max-w-[260px] truncate" style={{ color: 'var(--ink-muted)' }}>
+                          {installUrl}
+                        </span>
+                      </div>
+                    ) : (
+                      <Upload className="h-6 w-6" style={{ color: 'var(--ink-muted)' }} />
+                    )}
+                  </div>
+
+                  {/* 隐藏文件选择器（webkitdirectory 选择文件夹） */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    // @ts-expect-error webkitdirectory is not in React types
+                    webkitdirectory=""
+                    directory=""
+                    className="hidden"
+                    onChange={handleFileChange}
+                  />
+
+                  {/* 手动输入路径（回退） */}
+                  <div className="mt-2 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5"
+                    style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)' }}>
+                    <FolderSearch className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
                     <input
                       type="text"
                       value={installUrl}
-                      onChange={(e) => setInstallUrl(e.target.value)}
-                      placeholder="/path/to/skill/folder"
+                      onChange={(e) => { setInstallUrl(e.target.value); setInstallError(''); }}
+                      placeholder="Or type /path/to/skill/folder"
                       className="flex-1 bg-transparent text-xs outline-none"
-                      style={{ color: 'oklch(0.30 0.015 50)' }}
+                      style={{ color: 'var(--ink-strong)' }}
                       disabled={installing}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleInstall(); }}
                     />
@@ -588,15 +959,15 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
 
               {/* 状态提示 */}
               {installError && (
-                <div className="flex items-start gap-1.5 rounded-md px-2.5 py-2 text-[11px]"
-                  style={{ backgroundColor: 'oklch(0.55 0.18 35 / 0.06)', color: 'oklch(0.50 0.18 35)' }}>
+                <div className="flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--danger) 6%, transparent)', color: 'var(--danger)' }}>
                   <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-px" />
                   <span className="leading-relaxed">{installError}</span>
                 </div>
               )}
               {installSuccess && (
-                <div className="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-[11px]"
-                  style={{ backgroundColor: 'oklch(0.55 0.15 145 / 0.06)', color: 'oklch(0.45 0.12 145)' }}>
+                <div className="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-xs"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--success) 6%, transparent)', color: 'var(--success)' }}>
                   <Check className="h-3.5 w-3.5 shrink-0" />
                   <span>{installSuccess}</span>
                 </div>
@@ -609,106 +980,111 @@ export function SkillManagerModal({ open, onOpenChange }: SkillManagerModalProps
                 disabled={installing || !installUrl.trim()}
                 className="flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-medium transition-colors disabled:opacity-50"
                 style={{
-                  backgroundColor: 'oklch(0.62 0.17 45)',
+                  backgroundColor: 'var(--primary)',
                   color: '#fff',
                 }}
               >
                 {installing ? (
                   <>
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    安装中...
+                    Installing...
                   </>
                 ) : (
                   <>
                     <Download className="h-3.5 w-3.5" />
-                    安装技能
+                     Install Skill
                   </>
                 )}
               </button>
-
-              {/* 技能包规范说明 */}
-              <div className="rounded-md border px-3 py-2.5"
-                style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.98 0.005 80)' }}>
-                <p className="text-[10px] font-medium mb-1" style={{ color: 'oklch(0.45 0.015 50)' }}>技能包规范</p>
-                <p className="text-[10px] leading-relaxed" style={{ color: 'oklch(0.55 0.02 50)' }}>
-                  技能包需包含 <code className="rounded px-1 py-0.5 text-[9px]" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>SKILL.md</code> 文件，
-                  其中 frontmatter 声明 <code className="rounded px-1 py-0.5 text-[9px]" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>name</code> 和
-                  <code className="rounded px-1 py-0.5 text-[9px]" style={{ backgroundColor: 'oklch(0.92 0.01 60)' }}>description</code> 字段。
-                  GitHub 仓库将从默认分支下载。
-                </p>
-              </div>
             </div>
           ) : (
-            /* ===== 已安装视图 ===== */
+            /* ===== 已安装视图（操作栏/搜索已吸顶） ===== */
             <>
-              {/* 操作栏 */}
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleToggleAll}
-                    className="text-[11px] transition-colors hover:underline"
-                    style={{ color: 'oklch(0.55 0.02 50)' }}
-                  >
-                    {allEnabled ? 'Disable All' : 'Enable All'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={loadSkills}
-                    disabled={loading}
-                    className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors hover:bg-[oklch(0.92_0.015_75)]"
-                    style={{ color: 'oklch(0.55 0.02 50)' }}
-                  >
-                    <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-                    Refresh
-                  </button>
+              {/* 操作状态提示（重装/卸载成功或失败） */}
+              {installError && (
+                <div className="mb-3 flex items-start gap-1.5 rounded-md px-2.5 py-2 text-xs"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--danger) 6%, transparent)', color: 'var(--danger)' }}>
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                  <span className="leading-relaxed">{installError}</span>
                 </div>
-              </div>
+              )}
+              {installSuccess && (
+                <div className="mb-3 flex items-center gap-1.5 rounded-md px-2.5 py-2 text-xs"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--success) 6%, transparent)', color: 'var(--success)' }}>
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                  <span>{installSuccess}</span>
+                </div>
+              )}
 
               {loading ? (
                 <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'oklch(0.62 0.17 45)' }} />
+                  <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--primary)' }} />
                 </div>
-              ) : skills.length === 0 ? (
+              ) : filteredSkills.length === 0 ? (
                 <div
                   className="rounded-md border px-4 py-6 text-center"
-                  style={{ borderColor: 'oklch(0.85 0.01 70)', backgroundColor: 'oklch(0.97 0.008 80)' }}
+                  style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)' }}
                 >
-                  <Lightbulb className="mx-auto mb-2 h-5 w-5" style={{ color: 'oklch(0.65 0.02 50)' }} />
-                  <p className="text-xs" style={{ color: 'oklch(0.55 0.02 50)' }}>No skills installed yet.</p>
+                  <Lightbulb className="mx-auto mb-2 h-5 w-5" style={{ color: 'var(--ink-faint)' }} />
+                  <p className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                    {skills.length === 0 ? 'No skills installed yet.' : 'No skills match your search.'}
+                  </p>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {categories.map((cat) => {
-                    const expanded = expandedCategories.has(cat.key);
-                    return (
-                      <CategorySection
-                        key={cat.key}
-                        category={cat}
-                        expanded={expanded}
-                        onToggleExpand={() => toggleCategoryExpand(cat.key)}
-                        onToggleSkill={toggleSkill}
-                        onToggleCategory={toggleCategory}
-                        onUninstall={handleUninstall}
-                      />
-                    );
-                  })}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {filteredSkills.map((s) => (
+                    <SkillCard
+                      key={s.name}
+                      skill={s}
+                      onToggle={toggleSkill}
+                      onUninstall={handleUninstall}
+                      reinstallable={officialNames.has(s.name)}
+                      official={s.source === 'builtin' || officialNames.has(s.name)}
+                      onReinstall={handleReinstall}
+                    />
+                  ))}
                 </div>
               )}
             </>
           )}
+          </>
+          ) : (
+            <McpStorePanel />
+          )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-6 py-4">
+        <div className="flex items-center justify-end gap-2 border-t px-6 py-3 sm:px-8" style={{ borderColor: 'var(--line-soft)' }}>
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="rounded-md px-4 py-1.5 text-xs transition-colors hover:bg-gray-100"
-            style={{ color: 'oklch(0.55 0.02 50)' }}
+            className="rounded-md px-4 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
+            style={{ color: 'var(--ink-muted)' }}
           >
             Close
           </button>
         </div>
+    </>
+  );
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="gap-0"
+        style={{
+          fontFamily: 'var(--font-sans)',
+          // 全屏展示：覆盖 shadcn DialogContent 的居中/圆角/边距，内容按
+          // 顶栏(DialogHeader) / 副标题(扩展类型 tabs) / 滚动内容 / 底栏 四行排布
+          inset: 0,
+          transform: 'none',
+          width: '100vw',
+          height: '100vh',
+          maxWidth: 'none',
+          borderRadius: 0,
+          border: 'none',
+          padding: 0,
+          gridTemplateRows: 'auto auto minmax(0, 1fr) auto',
+        }}
+      >
+        {inner}
       </DialogContent>
     </Dialog>
   );

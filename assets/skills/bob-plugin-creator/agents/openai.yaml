@@ -1,4 +1,0 @@
-interface:
-  display_name: "Bob Plugin Creator"
-  short_description: "Plan Bob plugins with UI, Session, Agent, model, and media APIs"
-  default_prompt: "Help me create a Bob plugin. Start with the right beginner or developer flow, then choose the needed plugin capabilities."

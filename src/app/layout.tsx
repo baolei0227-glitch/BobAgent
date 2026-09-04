@@ -1,10 +1,11 @@
 import type { Metadata } from 'next';
 import { Inspector } from 'react-dev-inspector';
 import * as ReactDOM from 'react-dom';
+import { ScreenOcrHost } from '@/components/screen-ocr/ScreenOcrHost';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'BobAgent - AI Canvas',
+  title: 'BobWork - AI Canvas',
   description:
     'Create and manage AI conversation nodes on an infinite canvas',
   keywords: ['AI Canvas', 'AI Chat', 'Infinite Canvas', 'Knowledge Graph', 'Node Management'],
@@ -34,6 +35,8 @@ export default function RootLayout({
       <body className="antialiased" suppressHydrationWarning>
         {isDev && <Inspector />}
         {children}
+        {/* 全局截图 OCR 宿主：任意页面按 Cmd+Shift+O 都能弹编辑面板（与画布挂载状态解耦） */}
+        <ScreenOcrHost />
       </body>
     </html>
   );

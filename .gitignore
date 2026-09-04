@@ -166,3 +166,7 @@ Desktop.ini
 # electron-builder output
 release/
 release-dist/
+
+# Finder 副本 / 历史构建备份
+*.bak-*
+.next.bak-*

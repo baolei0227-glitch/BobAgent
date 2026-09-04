@@ -1,5 +1,5 @@
 /**
- * /api/workflows/[template_id] — 单个模板操作
+ * /api/workflows/[template_id] — 单个模板操作（全局）
  *
  * GET    — 获取模板详情
  * PUT    — 更新模板
@@ -7,20 +7,11 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { join } from 'path';
 import {
-  initDb,
   getWorkflowTemplate,
   updateWorkflowTemplate,
   deleteWorkflowTemplate,
 } from '@/lib/db';
-import { getCurrentProject } from '@/lib/project/project-manager';
-
-async function getDb() {
-  const project = await getCurrentProject();
-  const dbPath = join(project.path, 'project.db');
-  return await initDb(dbPath);
-}
 
 export async function GET(
   _request: NextRequest,
@@ -28,8 +19,7 @@ export async function GET(
 ) {
   try {
     const { template_id } = await params;
-    const db = await getDb();
-    const template = await getWorkflowTemplate(db, template_id);
+    const template = await getWorkflowTemplate(template_id);
     if (!template) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 });
     }
@@ -48,14 +38,13 @@ export async function PUT(
     const { template_id } = await params;
     const body = await request.json();
     const { name, description, category, steps } = body;
-    const db = await getDb();
 
-    const existing = await getWorkflowTemplate(db, template_id);
+    const existing = await getWorkflowTemplate(template_id);
     if (!existing) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 });
     }
 
-    await updateWorkflowTemplate(db, template_id, {
+    await updateWorkflowTemplate(template_id, {
       ...(name !== undefined ? { name } : {}),
       ...(description !== undefined ? { description } : {}),
       ...(category !== undefined ? { category } : {}),
@@ -75,12 +64,11 @@ export async function DELETE(
 ) {
   try {
     const { template_id } = await params;
-    const db = await getDb();
-    const existing = await getWorkflowTemplate(db, template_id);
+    const existing = await getWorkflowTemplate(template_id);
     if (!existing) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 });
     }
-    await deleteWorkflowTemplate(db, template_id);
+    await deleteWorkflowTemplate(template_id);
     return NextResponse.json({ success: true });
   } catch (e) {
     console.error('DELETE /api/workflows/[id] error:', e);

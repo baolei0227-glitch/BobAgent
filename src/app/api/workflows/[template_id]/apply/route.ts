@@ -1,7 +1,7 @@
 /**
- * /api/workflows/[template_id]/apply — 应用模板到画布
+ * /api/workflows/[template_id]/apply — 应用模板：创建新项目并部署节点
  *
- * POST — 创建节点(.md 文件) + 连线(edges)，返回节点 ID 列表和建议位置
+ * POST — 创建新项目 + 节点(.md 文件) + 连线(edges)，返回新项目信息
  *
  * 变量替换规则：
  *   - {{date}}, {{project}} 等内置变量：apply 时替换
@@ -11,12 +11,13 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { join } from 'path';
+import { PROJECT_DB_FILENAME } from '@/lib/app-root';
 import {
   initDb,
   getWorkflowTemplate,
   createEdge,
 } from '@/lib/db';
-import { getCurrentProject } from '@/lib/project/project-manager';
+import { createProject } from '@/lib/project/project-manager';
 import {
   createNodeMarkdown,
   writeNodeFile,
@@ -25,17 +26,6 @@ import {
   setCurrentProjectPath,
   clearCurrentProjectPath,
 } from '@/lib/node-markdown';
-
-async function getDb() {
-  const project = await getCurrentProject();
-  const dbPath = join(project.path, 'project.db');
-  return await initDb(dbPath);
-}
-
-async function getCurrentProjectId(): Promise<string> {
-  const project = await getCurrentProject();
-  return project.id;
-}
 
 /** 变量替换：apply 时只替换内置变量和用户自定义变量，{{upstream}} 保留 */
 function replaceVariables(prompt: string, variables: Record<string, string>): string {
@@ -53,19 +43,6 @@ function replaceVariables(prompt: string, variables: Record<string, string>): st
   return result;
 }
 
-/** 从 prompt 中提取所有 {{变量名}} */
-export function extractVariables(text: string): string[] {
-  const matches = text.match(/\{\{(\w+)\}\}/g) || [];
-  const vars = new Set<string>();
-  for (const m of matches) {
-    const name = m.slice(2, -2);
-    if (name !== 'upstream' && name !== 'date' && name !== 'project') {
-      vars.add(name);
-    }
-  }
-  return [...vars];
-}
-
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ template_id: string }> },
@@ -73,30 +50,34 @@ export async function POST(
   try {
     const { template_id: templateId } = await params;
     const body = await request.json();
-    const { variables = {}, basePosition = { x: 400, y: 200 } } = body;
+    const { variables = {}, project_name } = body;
 
-    const project = await getCurrentProject();
+    // 从全局 .templates.db 读取模板
+    const template = await getWorkflowTemplate(templateId);
+
+    if (!template) {
+      return NextResponse.json({ error: 'Template not found' }, { status: 404 });
+    }
+
+    // 1. 创建新项目
+    const projectName = project_name || template.name || 'New Project';
+    const project = await createProject(projectName);
+
     setCurrentProjectPath(project.path);
 
     try {
-      const db = await getDb();
-      const projectId = await getCurrentProjectId();
-      const template = await getWorkflowTemplate(db, templateId);
-
-      if (!template) {
-        return NextResponse.json({ error: 'Template not found' }, { status: 404 });
-      }
+      const dbPath = join(project.path, PROJECT_DB_FILENAME);
+      const db = await initDb(dbPath);
 
       const nodeIds: string[] = [];
       const nodes: Array<{ node_id: string; title: string; position: { x: number; y: number } }> = [];
-      const warnings: Array<{ type: string; step: number; detail: string }> = [];
       const verticalSpacing = 350;
 
-      // 1. 按顺序创建节点
+      // 2. 创建节点
       for (let i = 0; i < template.steps.length; i++) {
         const step = template.steps[i];
         const resolvedPrompt = replaceVariables(step.prompt, variables);
-        const cleanedTitle = cleanTitleText(step.title) || `步骤 ${i + 1}`;
+        const cleanedTitle = cleanTitleText(step.title) || `Step ${i + 1}`;
         const nodeId = generateNodeId();
 
         const mdContent = createNodeMarkdown(nodeId, cleanedTitle, {
@@ -107,18 +88,18 @@ export async function POST(
           skills: step.skills,
         });
 
-        await writeNodeFile(nodeId, cleanedTitle, mdContent);
+        await writeNodeFile(cleanedTitle, mdContent);
 
         const position = {
-          x: basePosition.x,
-          y: basePosition.y + i * verticalSpacing,
+          x: 400,
+          y: 200 + i * verticalSpacing,
         };
 
         nodeIds.push(nodeId);
         nodes.push({ node_id: nodeId, title: cleanedTitle, position });
       }
 
-      // 2. 创建连线（支持分支：默认顺序，或按 nextSteps 指定）
+      // 3. 创建连线
       const edges: Array<{ edge_id: string; from: string; to: string }> = [];
       for (let i = 0; i < template.steps.length; i++) {
         const step = template.steps[i];
@@ -126,7 +107,7 @@ export async function POST(
         for (const nextOrder of nextOrders) {
           if (nextOrder >= 0 && nextOrder < nodeIds.length) {
             const edgeId = await createEdge(db, {
-              project_id: projectId,
+              project_id: project.id,
               from_node_id: nodeIds[i],
               to_node_id: nodeIds[nextOrder],
               edge_type: 'vertical',
@@ -138,9 +119,12 @@ export async function POST(
 
       return NextResponse.json({
         success: true,
+        project: {
+          id: project.id,
+          name: project.name,
+        },
         nodes,
         edges,
-        warnings,
       });
     } finally {
       clearCurrentProjectPath();

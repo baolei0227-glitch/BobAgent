@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import { join, extname, basename } from 'path';
 import { getCurrentProject } from '@/lib/project/project-manager';
+import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 
 const MAX_SIZE = 500 * 1024 * 1024;
 
@@ -130,11 +131,15 @@ export async function POST(request: NextRequest) {
         if (!folderPath.trim()) {
           return NextResponse.json({ error: 'folderPath is required' }, { status: 400 });
         }
-        const safeName = folderPath.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim();
-        if (!safeName) {
+        const safeSegments = folderPath
+          .split('/')
+          .map((s: string) => s.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim())
+          .filter((s: string) => s.length > 0);
+        if (safeSegments.length === 0) {
           return NextResponse.json({ error: 'Invalid folder name' }, { status: 400 });
         }
-        const targetPath = join(materialsPath, safeName);
+        const safeName = safeSegments.join('/');
+        const targetPath = join(materialsPath, ...safeSegments);
         await fs.mkdir(targetPath, { recursive: true });
         return NextResponse.json({ success: true, path: safeName });
       }
@@ -156,8 +161,11 @@ export async function POST(request: NextRequest) {
     const folder = (formData.get('folder') as string) || '';
     let targetDir = materialsPath;
     if (folder) {
-      const safeFolder = folder.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim();
-      targetDir = join(materialsPath, safeFolder);
+      const safeSegments = folder
+        .split('/')
+        .map((s: string) => s.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim())
+        .filter((s: string) => s.length > 0);
+      targetDir = join(materialsPath, ...safeSegments);
       await fs.mkdir(targetDir, { recursive: true });
     }
 
@@ -170,7 +178,12 @@ export async function POST(request: NextRequest) {
     const ext = extname(file.name).toLowerCase();
     const stat = await fs.stat(filePath);
 
-    const relPath = folder ? folder + '/' + fileName : fileName;
+    const relFolder = folder
+      .split('/')
+      .map((s: string) => s.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim())
+      .filter((s: string) => s.length > 0)
+      .join('/');
+    const relPath = relFolder ? relFolder + '/' + fileName : fileName;
 
     return NextResponse.json({
       success: true,
@@ -210,6 +223,8 @@ export async function DELETE(request: NextRequest) {
     } else {
       await fs.unlink(fullPath);
     }
+    // 联动清理：删除 materials 文档/目录时同步清理 md-annotations 中对应的 sidecar
+    await cleanupMdAnnotationSidecars({ targets: [{ abs: fullPath, isDir: stat.isDirectory() }] }).catch(() => {});
     return NextResponse.json({ success: true });
   } catch (e) {
     return NextResponse.json({ error: 'Delete failed' }, { status: 500 });
