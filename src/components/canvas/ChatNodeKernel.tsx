@@ -3305,9 +3305,6 @@ ${rows.join('\n')}
     let assistantContent = '';
     let reasoningContent = '';
     const toolCallRecords: ToolCallRecord[] = [];
-    // P1 轨迹：按模型调用轮切分的思考文本（服务端 model_turn/thinking_span 对齐）
-    let currentTurn = 0;
-    const turnReasoningList: string[] = [];
     const outputFileItems: OutputFileItem[] = [];
     // ① 流中已提前识别到完整 QUESTIONS 块（触发提前收尾弹窗），防止后续 chunk 重复触发
     let questionsEarly = false;
@@ -3425,18 +3422,8 @@ ${rows.join('\n')}
                   });
                 }
               }
-              if (parsed.model_turn) {
-                // P1 轨迹：新模型调用轮开始（该轮思考/工具归入其下；同时记录到消息正文流式段落）
-                const t = (parsed.model_turn as { turn?: number })?.turn ?? 0;
-                if (t > 0) currentTurn = t;
-              }
               if (parsed.reasoning) {
                 reasoningContent += parsed.reasoning;
-                // 按轮累积：当前轮索引 = currentTurn - 1（model_turn 先于 reasoning 到达）
-                if (currentTurn > 0) {
-                  const idx = currentTurn - 1;
-                  turnReasoningList[idx] = (turnReasoningList[idx] ?? '') + parsed.reasoning;
-                }
                 if (mountedRef.current) {
                   setStageWithProgress('thinking');
                   setMessages((prev) =>
@@ -3486,7 +3473,6 @@ ${rows.join('\n')}
                   phase: tc.phase ?? 'pending',
                   spanId: tc.spanId,
                   startAt: tc.startAt,
-                  turn: currentTurn > 0 ? currentTurn : undefined,
                 });
                 if (mountedRef.current) {
                   setStageWithProgress({ kind: 'tool', name: tc.name });
@@ -3905,10 +3891,6 @@ ${rows.join('\n')}
             modelId: currentModelId,
             thinkingLevel: actualThinkingLevel,
             taskId: taskIdForTurn ?? undefined,
-            // P1 轨迹：按模型调用轮切分的思考文本（供 TraceTimeline 按 Turn 分组渲染）
-            traceTurns: turnReasoningList.length > 0
-              ? turnReasoningList.map((reasoning, i) => ({ turn: i + 1, reasoning }))
-              : undefined,
           },
         ];
         setMessages(finalMessages);
@@ -4839,12 +4821,11 @@ ${rows.join('\n')}
           const msgStats = statsByMsg[msg.id];
           const msgPrefixHash = prefixHashByMsg[msg.id];
           const msgPrefixChanged = !!prefixChangedByMsg[msg.id];
-          // 内联执行轨迹是否可见（思考阶段/工具步骤/技能加载/过程叙述）——由 dsh Trajectory 视图统一展示
+          // 内联执行轨迹是否可见（思考阶段/工具步骤/技能加载）——由 dsh Trajectory 视图统一展示
           const hasInlineTrace = msg.role === 'assistant'
             && ((msg.toolCalls?.length ?? 0) > 0
               || msgMatchedSkills.length > 0
-              || !!thinkText
-              || (msg.processNarration && msg.processNarration.trim().length > 0));
+              || !!thinkText);
           // 是否存在执行步骤数据（工具调用或历史过程叙述）——StepCards 与 Final Answer 分隔线共用，
           // 避免两处条件各写一遍将来改判定时漏改一处
           const hasStepData = (msg.toolCalls && msg.toolCalls.length > 0)
@@ -5004,9 +4985,8 @@ ${rows.join('\n')}
             {msg.role === 'assistant' && hasInlineTrace && (
               <div className="mb-1 w-full min-w-0">
                 <TraceTimeline
-                  thinkText={thinkText || msg.processNarration || undefined}
+                  thinkText={thinkText}
                   toolCalls={msg.toolCalls ?? []}
-                  traceTurns={msg.traceTurns}
                   skillDetails={msgSkillDetails.length > 0 ? msgSkillDetails : msgMatchedSkills}
                   matchedSkillNames={msgMatchedSkills}
                   isStreaming={isStreaming}
@@ -5039,9 +5019,11 @@ ${rows.join('\n')}
               </div>
             )}
 
-            {/* 执行轨迹已由上方 TraceTimeline 统一承担（含工具步骤/思考/过程叙述）。
-                StepCards / "Execution steps" 双轨视图已退役（2026-09，Trajectory 清理），
-                同一 toolCall 不再出现两次；无工具时的过程叙述并入 thinkText 以思考行呈现。 */}
+            {/* 执行过程步骤卡片：从 toolCalls（带真实执行状态）派生，与轨迹共享同一事实源；
+                 无工具时回退到过程叙述拆分。流式期间实时展开，任务完成后自动折叠。 */}
+            {msg.role === 'assistant' && (msg.id === streamingMsgId || hasStepData) && (
+              <StepCards toolCalls={msg.toolCalls} narration={msg.processNarration} isStreaming={isStreaming} />
+            )}
 
             {/* 阶段提示文字：Execution steps 下方；随步骤新增被文档流自然下推，流式中随当前阶段动态变化。
                 外层 div 保占位，内层 span 收缩为文字宽度承载掠光动画；文字常态不透明（--ink-muted 全强度） */}

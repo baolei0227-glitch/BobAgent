@@ -3212,13 +3212,6 @@ export async function POST(request: NextRequest) {
               totalRounds++;
               if (thinkingDowngraded) thinkingDowngradedRounds++;
 
-              // P1 轨迹：模型调用轮边界（TraceTimeline Turn 分组键；round 0 起 → turn 从 1 起）。
-              // 打点在请求发出前 = 该轮开始时刻，后续该轮的 thinking_span / tool_span 据此归属。
-              const turnNo = round + 1;
-              eventLog.mark('model_turn', genSpanId(), { turn: turnNo }, Date.now());
-              // 同步 SSE 下行：前端实时累积收到此事件后开启新 Turn 缓冲（此后 reasoning 块 / tool 归入本轮）
-              send({ model_turn: { turn: turnNo }, nodeId });
-
               if (isDeepseekV4 && roundThinkingMode) {
                 requestBody.thinking_mode = roundThinkingMode;
               } else if (roundReasoningEffort && modelSupportsThinking) {
@@ -3325,8 +3318,6 @@ export async function POST(request: NextRequest) {
               // 收集流式内容（C5：list + join 聚合，避免逐块字符串拼接 O(n²) —— DeepSeek SSE 块粒度 1-3 字符，一轮可达数千块）
               const contentParts: string[] = [];
               const reasoningParts: string[] = [];
-              // P1 轨迹：本轮思考锚点（首个 reasoning 块到达时刻，轮结束 join 时用于 thinking_span 的 startAt）
-              let thinkingStartAt: number | null = null;
               const toolCallBuf: Map<number, { id: string; name: string; arguments: string }> = new Map();
 
               for await (const chunk of completion) {
@@ -3360,7 +3351,6 @@ export async function POST(request: NextRequest) {
                 // 思考过程
                 const reasoning = delta.reasoning_content ?? undefined;
                 if (reasoning) {
-                  if (thinkingStartAt === null) thinkingStartAt = Date.now();
                   reasoningParts.push(reasoning);
                   send({ reasoning, nodeId });
                 }
@@ -3389,32 +3379,6 @@ export async function POST(request: NextRequest) {
               // C5：流式内容一次性 join（每轮只 join 一次，后续统一使用聚合后的文本）
               const reasoningText = reasoningParts.join('');
               const contentText = contentParts.join('');
-
-              // P1 轨迹：本轮思考段归档（每轮一条，区别于 record 的逐块跳过）。
-              // 全文入日志使思考真正进入时间线且按轮归属；preview 供列表首屏，展开取 thinking 全文。
-              // 体积权衡：一轮一条（非逐块），单任务 JSONL 增量 ≈ 思考总量，与 /api/nodes 的
-              // reasoning 持久化同量级，可接受。
-              if (reasoningText.trim()) {
-                const thinkSpanId = genSpanId();
-                const thinkEndAt = Date.now();
-                eventLog.mark(
-                  'thinking_span',
-                  thinkSpanId,
-                  {
-                    turn: round + 1,
-                    chars: reasoningText.length,
-                    preview: reasoningText.slice(0, 500),
-                    thinking: reasoningText,
-                  },
-                  thinkingStartAt ?? undefined,
-                  thinkEndAt,
-                );
-                // 同步 SSE 下行（精简版，不带全文：思考文本已逐块 reasoning 下发，前端按 turn 累积）
-                send({
-                  thinking_span: { turn: round + 1, chars: reasoningText.length, preview: reasoningText.slice(0, 300) },
-                  nodeId,
-                });
-              }
 
               // ===== 工具调用回收（deepseek-harness / pi-reasonix scavenge）=====
               // DeepSeek 系模型偶发把工具调用写进 reasoning_content 而非结构化 tool_calls。

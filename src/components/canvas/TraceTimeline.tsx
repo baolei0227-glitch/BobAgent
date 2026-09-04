@@ -83,8 +83,6 @@ const THINKING_STAGE_ICON: Record<ThinkingStage, string> = {
 
 export function assembleTraceSpans(opts: {
   thinkText?: string;
-  /** P1 轨迹：按模型调用轮切分的思考文本（每轮一段）；提供时按轮生成思考 spans，优先于 thinkText 整段 */
-  traceTurns?: Array<{ turn: number; reasoning: string }>;
   toolCalls: ToolCallRecord[];
   skillDetails: (SkillDetail | string)[];
   matchedSkillNames: string[];
@@ -94,16 +92,9 @@ export function assembleTraceSpans(opts: {
   const spans: TraceSpan[] = [];
   const now = Date.now();
 
-  // 1. 思考阶段：优先按模型轮（traceTurns）逐轮切分（每轮一至多个 stage span，标注 turn）；
-  //    否则退化为整段 thinkText（旧消息/无轮数据），不标 turn。
-  const thinkSegments: Array<{ turn?: number; text: string }> =
-    opts.traceTurns && opts.traceTurns.length > 0
-      ? opts.traceTurns.map((t) => ({ turn: t.turn, text: t.reasoning }))
-      : opts.thinkText && opts.thinkText.trim().length > 0
-        ? [{ text: opts.thinkText }]
-        : [];
-  for (const seg of thinkSegments) {
-    const parsed = parseThinkingToSpans(seg.text, { streaming: opts.streaming });
+  // 1. 思考阶段（若存在 thinkText）
+  if (opts.thinkText && opts.thinkText.trim().length > 0) {
+    const parsed = parseThinkingToSpans(opts.thinkText, { streaming: opts.streaming });
     for (const s of parsed.spans) {
       spans.push({
         id: nid(),
@@ -114,7 +105,6 @@ export function assembleTraceSpans(opts: {
         endAt: now,
         durationMs: 0,
         success: true,
-        turn: seg.turn,
         meta: {
           stage: s.stage,
           stageTitle: s.stageTitle,
@@ -133,7 +123,6 @@ export function assembleTraceSpans(opts: {
         endAt: now,
         durationMs: 0,
         success: true,
-        turn: seg.turn,
         meta: {
           stage: 'other',
           stageTitle: 'Free thinking',
@@ -220,7 +209,6 @@ export function assembleTraceSpans(opts: {
         endAt: spEnd,
         durationMs: spDuration,
         success: tc.success !== false,
-        turn: tc.turn,
         meta: {
           changeType: systemChange.type,
           changeSummary: systemChange.summary,
@@ -239,7 +227,6 @@ export function assembleTraceSpans(opts: {
       endAt: spEnd,
       durationMs: spDuration,
       success: tc.success !== false,
-      turn: tc.turn,
       meta: {
         toolName: tc.toolName,
         arguments: tc.arguments,
@@ -647,8 +634,6 @@ export interface TraceTimelineProps {
   toolCalls?: ToolCallRecord[];
   skillDetails?: (SkillDetail | string)[];
   matchedSkillNames?: string[];
-  /** P1 轨迹：按模型调用轮切分的思考文本（每轮一段），供 assemble 按轮生成 thinking spans */
-  traceTurns?: Array<{ turn: number; reasoning: string }>;
   isStreaming: boolean;
   /** 外层驱动：版本号递增时，自动折叠整轮 Turn 并强制收起 Thinking 组（"思考完成"时机）。undefined 时不生效。 */
   thinkingGroupFoldVersion?: number;
@@ -662,7 +647,6 @@ export function TraceTimeline({
   toolCalls = [],
   skillDetails = [],
   matchedSkillNames = [],
-  traceTurns,
   isStreaming,
   thinkingGroupFoldVersion,
   onFork,
@@ -670,7 +654,7 @@ export function TraceTimeline({
   const spans = useMemo(() => {
     const raw = propSpans && propSpans.length > 0
       ? propSpans
-      : assembleTraceSpans({ thinkText, traceTurns, toolCalls, skillDetails, matchedSkillNames, streaming: isStreaming });
+      : assembleTraceSpans({ thinkText, toolCalls, skillDetails, matchedSkillNames, streaming: isStreaming });
 
     // 流式中：把最后一个 thinking_phase 强制标记为 running，用于"思考进行中"指示
     if (!isStreaming) return raw;
@@ -685,7 +669,7 @@ export function TraceTimeline({
       return clone;
     }
     return raw;
-  }, [propSpans, thinkText, traceTurns, toolCalls, skillDetails, matchedSkillNames, isStreaming]);
+  }, [propSpans, thinkText, toolCalls, skillDetails, matchedSkillNames, isStreaming]);
 
   // dsh 视图状态
   const [durationMode, setDurationMode] = useState<'equal' | 'actual'>('actual');
@@ -694,26 +678,9 @@ export function TraceTimeline({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // 弹窗详情：显式点击事件行（或"点击事件查看详情"提示）时打开，给出明确反馈
   const [detailId, setDetailId] = useState<string | null>(null);
-  // Turn 折叠状态：expandedTurns 记录已展开的 turn（默认空 = 全折叠：完成态/历史消息不抢占视觉）。
-  // 流式期间点击 Turn 头展开后思考全文仍实时渲染；foldVersion 递增时折叠全部。
-  const [expandedTurns, setExpandedTurns] = useState<ReadonlySet<number>>(new Set());
-  const toggleTurn = (t: number) => {
-    setExpandedTurns((prev) => {
-      const next = new Set(prev);
-      if (next.has(t)) next.delete(t);
-      else next.add(t);
-      return next;
-    });
-  };
-  const expandAllTurns = () => {
-    const all = new Set<number>();
-    let anyTurn = false;
-    for (const s of spans) {
-      if (typeof s.turn === 'number') { all.add(s.turn); anyTurn = true; }
-    }
-    if (!anyTurn) all.add(1); // 无 turn 数据（旧消息）视为单 Turn 1
-    setExpandedTurns(all);
-  };
+  // Turn 1 默认折叠：点击 Turn 头展开整轮；流式期间展开后思考全文仍实时渲染，
+  // 完成态与历史消息一律默认收起，避免轨迹抢占正文视觉重心
+  const [turnCollapsed, setTurnCollapsed] = useState(true);
 
   // P3 replay：逐事件回放（spans 从 0 逐步显示，模拟"当时怎么一步步执行"）
   const [replaying, setReplaying] = useState(false);
@@ -730,7 +697,7 @@ export function TraceTimeline({
       return;
     }
     // 展开 Turn 以便看到回放过程
-    expandAllTurns();
+    setTurnCollapsed(false);
     setReplayCount(0);
     setReplaying(true);
     replayTimerRef.current = setInterval(() => {
@@ -758,7 +725,7 @@ export function TraceTimeline({
   useEffect(() => {
     if (thinkingGroupFoldVersion !== undefined && thinkingGroupFoldVersion !== prevFoldVersionRef.current) {
       const foldTimer = setTimeout(() => {
-        setExpandedTurns(new Set());
+        setTurnCollapsed(true);
         setSelectedId((cur) => {
           if (!cur) return cur;
           const curSpan = spans.find((s) => s.id === cur);
@@ -831,28 +798,14 @@ export function TraceTimeline({
 
   if (spans.length === 0) return null;
 
-  // P1 轨迹：按模型轮分组。有 turn 标记的 spans 按 turn 归组（无 turn 的早期事件如技能加载归入首个真实轮）；
-  // 无任何 turn 标记（旧消息/历史数据）整体归为单组 Turn 1，保持旧交互不变。
-  const turnGroups = useMemo(() => {
-    const hasTurn = spans.some((s) => typeof s.turn === 'number');
-    const map = new Map<number, TraceSpan[]>();
-    let firstRealTurn: number | null = null;
-    if (hasTurn) {
-      for (const s of spans) {
-        if (typeof s.turn === 'number') {
-          if (firstRealTurn === null) firstRealTurn = s.turn;
-          if (!map.has(s.turn)) map.set(s.turn, []);
-        }
-      }
-      for (const s of spans) {
-        const t = typeof s.turn === 'number' ? s.turn : (firstRealTurn ?? 1);
-        map.get(t)!.push(s);
-      }
-    } else {
-      map.set(1, [...spans]);
-    }
-    return [...map.keys()].sort((a, b) => a - b).map((turn) => ({ turn, rows: map.get(turn)! }));
-  }, [spans]);
+  // Calls 折叠时：工具行替换为单行摘要，其余行（思考/技能/回答/变更）照常
+  let displayRows = callsCollapsed
+    ? spans.filter((s) => !isToolKind(s.kind))
+    : spans;
+  // P3 replay：回放中只显示前 replayCount 个 span（逐步长出）
+  if (replaying) {
+    displayRows = displayRows.slice(0, replayCount);
+  }
 
   return (
     <>
@@ -911,8 +864,8 @@ export function TraceTimeline({
           {callsCollapsed ? `${toolSpans.length} tools` : '折叠调用'}
         </button>
 
-        {/* P3 replay：逐事件回放（仅非流式 + 单 Turn 时可用；回放中点击停止） */}
-        {!isStreaming && spans.length > 0 && turnGroups.length <= 1 && (
+        {/* P3 replay：逐事件回放（仅非流式时可用；回放中点击停止） */}
+        {!isStreaming && spans.length > 0 && (
           <button
             type="button"
             className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium transition-colors', replaying && 'ring-1 ring-inset')}
@@ -971,73 +924,55 @@ export function TraceTimeline({
       <div className="flex w-full min-w-0 items-start gap-2">
         {/* 事件表 */}
         <div className="min-w-0 flex-1">
-          {/* P1 轨迹：Turn 分组（按模型调用轮渲染 Turn 头；单组=旧消息数据，交互与旧版一致） */}
-          {turnGroups.map(({ turn, rows }) => {
-            const expanded = expandedTurns.has(turn);
-            const groupToolSpans = rows.filter((s) => isToolKind(s.kind));
-            let groupRows = callsCollapsed ? rows.filter((s) => !isToolKind(s.kind)) : rows;
-            // P3 replay：回放中只显示前 replayCount 个 span（逐步长出）；回放仅在单 Turn 下可用
-            if (replaying) groupRows = groupRows.slice(0, replayCount);
-            return (
-              <div key={turn} className="flex flex-col gap-0.5">
-                <button
-                  type="button"
-                  className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-left"
-                  style={{ backgroundColor: 'color-mix(in oklab, var(--paper-soft) 55%, transparent)' }}
-                  onClick={() => toggleTurn(turn)}
+          {/* Turn 头（当前请求=Turn 1；可点击折叠整轮） */}
+          <button
+            type="button"
+            className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-left"
+            style={{ backgroundColor: 'color-mix(in oklab, var(--paper-soft) 55%, transparent)' }}
+            onClick={() => setTurnCollapsed((v) => !v)}
+          >
+            <ChevronDown
+              className={cn('h-3 w-3 shrink-0 transition-transform', turnCollapsed && '-rotate-90')}
+              style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}
+            />
+            <span className="text-11 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 75%, transparent)' }}>
+              Turn 1
+            </span>
+          </button>
+
+          {/* 事件行列表 */}
+          {!turnCollapsed && (
+            <div className="mt-0.5 flex flex-col gap-0.5">
+              {callsCollapsed && toolSpans.length > 0 && (
+                <div
+                  className="flex w-full min-w-0 cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5"
+                  style={{ backgroundColor: 'color-mix(in oklab, var(--info) 10%, transparent)' }}
+                  onClick={() => setCallsCollapsed(false)}
+                  title="点击展开所有工具调用"
                 >
-                  <ChevronDown
-                    className={cn('h-3 w-3 shrink-0 transition-transform', !expanded && '-rotate-90')}
-                    style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}
-                  />
-                  <span className="text-11 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 75%, transparent)' }}>
-                    Turn {turn}
+                  <div className="h-4 w-[3px] shrink-0 rounded-full" style={{ backgroundColor: 'var(--info)' }} />
+                  <Wrench className="h-3.5 w-3.5" style={{ color: 'var(--info)' }} />
+                  <span className="flex-1 truncate text-13" style={{ color: 'var(--ink)' }}>
+                    {toolSpans.length} 次工具调用
                   </span>
-                  {rows.length > 0 && (
-                    <span
-                      className="rounded-full px-1.5 py-px text-10 font-semibold leading-none"
-                      style={{ backgroundColor: 'color-mix(in oklab, var(--line) 30%, transparent)', color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}
-                    >
-                      {rows.length}
-                    </span>
-                  )}
-                </button>
+                  <span className="text-11" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
+                    展开
+                  </span>
+                  <ChevronRight className="h-3 w-3" style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)' }} />
+                </div>
+              )}
 
-                {expanded && (
-                  <div className="mt-0.5 flex flex-col gap-0.5">
-                    {callsCollapsed && groupToolSpans.length > 0 && (
-                      <div
-                        className="flex w-full min-w-0 cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5"
-                        style={{ backgroundColor: 'color-mix(in oklab, var(--info) 10%, transparent)' }}
-                        onClick={() => setCallsCollapsed(false)}
-                        title="点击展开所有工具调用"
-                      >
-                        <div className="h-4 w-[3px] shrink-0 rounded-full" style={{ backgroundColor: 'var(--info)' }} />
-                        <Wrench className="h-3.5 w-3.5" style={{ color: 'var(--info)' }} />
-                        <span className="flex-1 truncate text-13" style={{ color: 'var(--ink)' }}>
-                          {groupToolSpans.length} 次工具调用
-                        </span>
-                        <span className="text-11" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
-                          展开
-                        </span>
-                        <ChevronRight className="h-3 w-3" style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)' }} />
-                      </div>
-                    )}
-
-                    {groupRows.map((span) => (
-                      <EventRow
-                        key={span.id}
-                        span={span}
-                        selected={span.id === selectedId}
-                        highlighted={highlightedIds.has(span.id)}
-                        onSelect={handleInspect}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              {displayRows.map((span) => (
+                <EventRow
+                  key={span.id}
+                  span={span}
+                  selected={span.id === selectedId}
+                  highlighted={highlightedIds.has(span.id)}
+                  onSelect={handleInspect}
+                />
+              ))}
+            </div>
+          )}
 
           {/* 内联事件检查器已移除：事件详情统一走弹窗（点击事件行 → 事件详情弹窗） */}
         </div>

@@ -1246,7 +1246,7 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
               onClick={handleAcceptAllToOriginal}
               disabled={revising || saving}
               title="接受全部修订并立即写回原稿（会话首次写回前自动备份；检测到 WPS/Word 打开或原稿被外部修改时会阻止）"
-              className="flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-opacity disabled:opacity-50"
+              className="flex items-center gap-1 rounded px-2 py-1 text-11 font-medium transition-opacity disabled:opacity-50"
               style={{ color: 'var(--popover)', backgroundColor: 'var(--primary)' }}
             >
               {revising ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} 更新原稿

@@ -30,8 +30,6 @@ export interface ToolCallRecord {
   startAt?: number;
   /** P1 轨迹：服务端生成的真实结束时间戳 ms（tool_result 时填充） */
   endAt?: number;
-  /** P1 轨迹：该工具调用归属的模型调用轮（model_turn 序号，从 1 起；旧消息缺省） */
-  turn?: number;
 }
 
 export interface MessageAttachment {
@@ -66,8 +64,6 @@ export interface ChatMessage {
   thinkingLevel?: ThinkingLevel;
   /** P2 轨迹：本轮任务的轨迹事件日志 id（对应 .trajectory/<nodeId>/<taskId>.jsonl） */
   taskId?: string;
-  /** P1 轨迹：按模型调用轮切分的思考文本（每轮一段；服务端 thinking_span 对齐，供 Turn 分组渲染） */
-  traceTurns?: Array<{ turn: number; reasoning: string }>;
 }
 
 export interface OutputFileItem {
@@ -511,8 +507,6 @@ export interface TraceSpan {
   meta: TraceSpanMetadata;
   /** 子 Span 列表（仅非流式场景下直接嵌套；流式靠 parentId 扁平推送后前端组装树） */
   children?: TraceSpan[];
-  /** P1 轨迹：归属的模型调用轮（model_turn 序号，从 1 起；旧消息/无轮数据缺省归 Turn 1） */
-  turn?: number;
 }
 
 /** 思考结构化解析结果 */
