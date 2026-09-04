@@ -48,9 +48,6 @@ export function genTaskId(): string {
 /** 流式内容事件类型：不逐块记录（避免 token 级日志爆炸），由 /api/nodes 持久化完整文本 */
 const STREAM_CONTENT_TYPES = new Set(['reasoning', 'content']);
 
-/** mark 单源事件：已有结构化 mark（含真实时间戳/全文），send 的 record 版本纯冗余 → 跳过避免双写 */
-const MARK_SOURCED_TYPES = new Set(['model_turn', 'thinking_span']);
-
 /** append-only 事件日志：内存累积 + finalize 导出 */
 export class EventLog {
   private events: TrajectoryEvent[] = [];
@@ -63,7 +60,6 @@ export class EventLog {
   record(data: Record<string, unknown>): void {
     const type = Object.keys(data)[0] ?? 'unknown';
     if (STREAM_CONTENT_TYPES.has(type)) return;
-    if (MARK_SOURCED_TYPES.has(type)) return;
     this.events.push({ seq: this.seq++, type, ts: Date.now(), payload: data });
   }
 
