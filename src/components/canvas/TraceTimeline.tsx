@@ -528,6 +528,21 @@ function liveThinkingTitle(content: string | undefined): string {
   return flattened.length > 64 ? `… ${flattened.slice(-64)}` : flattened;
 }
 
+/** 单轮思考摘要（Turn 折叠态预览）：拼接该轮全部思考阶段文本，压缩为单行前 140 字。
+ *  无思考（纯工具/纯回答轮）返回 null，不显示摘要行。 */
+function turnPreview(rows: TraceSpan[]): string | null {
+  const texts: string[] = [];
+  for (const s of rows) {
+    if (s.kind === 'thinking_phase') {
+      const c = s.meta?.content;
+      if (c && c.trim()) texts.push(c.trim());
+    }
+  }
+  if (texts.length === 0) return null;
+  const joined = texts.join(' ').replace(/\s+/g, ' ');
+  return joined.length > 140 ? joined.slice(0, 140) + '…' : joined;
+}
+
 /* ==================== 事件行 ==================== */
 
 function EventRow({
@@ -851,7 +866,7 @@ export function TraceTimeline({
     } else {
       map.set(1, [...spans]);
     }
-    return [...map.keys()].sort((a, b) => a - b).map((turn) => ({ turn, rows: map.get(turn)! }));
+    return [...map.keys()].sort((a, b) => a - b).map((turn) => ({ turn, rows: map.get(turn)!, preview: turnPreview(map.get(turn)!) }));
   }, [spans]);
 
   return (
@@ -972,7 +987,7 @@ export function TraceTimeline({
         {/* 事件表 */}
         <div className="min-w-0 flex-1">
           {/* P1 轨迹：Turn 分组（按模型调用轮渲染 Turn 头；单组=旧消息数据，交互与旧版一致） */}
-          {turnGroups.map(({ turn, rows }) => {
+          {turnGroups.map(({ turn, rows, preview }) => {
             const expanded = expandedTurns.has(turn);
             const groupToolSpans = rows.filter((s) => isToolKind(s.kind));
             let groupRows = callsCollapsed ? rows.filter((s) => !isToolKind(s.kind)) : rows;
@@ -1002,6 +1017,21 @@ export function TraceTimeline({
                     </span>
                   )}
                 </button>
+
+                {/* Turn 折叠态思考摘要：不展开也能知道这一轮在想什么（无思考轮不显示） */}
+                {!expanded && preview && (
+                  <button
+                    type="button"
+                    className="-mt-0.5 mb-0.5 flex w-full min-w-0 cursor-pointer items-start gap-1.5 rounded-md py-0.5 pl-8 pr-2 text-left transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-soft)_60%,transparent)]"
+                    onClick={() => toggleTurn(turn)}
+                    title="点击展开本轮思考"
+                  >
+                    <Brain className="mt-0.5 h-2.5 w-2.5 shrink-0" style={{ color: 'color-mix(in oklab, var(--primary-strong) 55%, transparent)' }} />
+                    <span className="line-clamp-2 text-11 leading-relaxed" style={{ color: 'color-mix(in oklab, var(--ink-muted) 75%, transparent)' }}>
+                      {preview}
+                    </span>
+                  </button>
+                )}
 
                 {expanded && (
                   <div className="mt-0.5 flex flex-col gap-0.5">
