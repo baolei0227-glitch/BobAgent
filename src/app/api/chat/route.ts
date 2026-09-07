@@ -16,6 +16,8 @@ import { TOOL_DEFINITIONS, executeTool, getToolSummary, getLocalAuthorizedRoots,
 import type { ToolScene } from './tools';
 // K2-S1 工具面 runtime service 抽取，行为不变：注册/组装/排序/CacheGuard 收敛进 ToolRuntime
 import { ToolRuntime } from '@/lib/runtime/tools';
+// K2-S2 会话态 runtime service 抽取，行为不变：chatStickyScenes 收敛进 SessionRuntime 单例
+import { sessionRuntime } from '@/lib/runtime/session';
 import type { AgentId } from '@/lib/agents/profiles';
 import { codingPhaseForTool } from '@/lib/agents/profiles';
 import { resolveAgentProfile } from '@/lib/agents/store';
@@ -219,7 +221,7 @@ interface ChatMessage {
 }
 
 // （DEFAULT_CHAT_SCENES 已移除 2026-08-30：普通对话改为「核心常驻 + 动态场景激活」，
-//  见 detectSceneHints / chatStickyScenes，工具集按意图 + 会话 sticky 决定，省上下文固定税）
+//  见 detectSceneHints / 会话 sticky（K2-S2 收敛进 SessionRuntime），工具集按意图 + 会话 sticky 决定，省上下文固定税）
 // （K2-S1 工具面 service 抽取，行为不变：SANDBOX_BLOCKED_TOOLS 沙盒禁写名单随迁 src/lib/runtime/tools.ts）
 
 // classifyOutputKind 由 @/lib/homework/kind 提供（侧边栏按文件类别标签分组展示；
@@ -720,8 +722,9 @@ function extractLastUserContent(messages: ChatMessage[]): string {
 
 /** 普通对话已激活场景的会话内 sticky（key=nodeId；无 nodeId 不持久化，仅当轮生效）。
  *  目的：场景一旦激活即在该会话内保持，避免"每轮按意图变化"导致工具集在轮次间抖动——
- *  工具前缀只在首次激活时变化一次，之后逐轮字节稳定 → 前缀缓存命中率最大化。 */
-const chatStickyScenes = new Map<string, Set<ToolScene>>();
+ *  工具前缀只在首次激活时变化一次，之后逐轮字节稳定 → 前缀缓存命中率最大化。
+ *  K2-S2 会话态 service，行为不变：本 module 级 Map 已收敛为 SessionRuntime 单例
+ *  （src/lib/runtime/session.ts，保留跨请求全局态），读写点改走 sessionRuntime。 */
 
 /**
  * L2 动态意图检测：从最后一条用户消息提取场景关键词（含附件类型），返回命中场景集合（不含 general）。
@@ -2640,8 +2643,10 @@ function toolDisplaySiteName(url?: string): string {
  * 收编范围：仅在 start() 闭包内声明、且被工具循环跨轮读写/共享的状态；
  * 收敛只移动声明与读写点，不改任何执行逻辑 / SSE 载荷 / 事件 mark / 退出语义。
  *
- * 明确不在此接口内（保持原地，K1 未收敛）：
- *  - module 级可变状态：chatStickyScenes / CacheGuard guard / pending 各容器（K2 LoopSession 迁移）；
+ * 明确不在此接口内（保持原地）：
+ *  - module 级可变状态：会话 sticky 已随 K2-S2 收敛进 SessionRuntime（src/lib/runtime/session.ts）、
+ *    CacheGuard guard 已随 K2-S1 收敛进 ToolRuntime（src/lib/runtime/tools.ts）、
+ *    pending 各容器（挂起型接管，保留原地）；
  *  - 请求通道对象：ReadableStream / controller / send / eventLog / taskId；
  *  - 请求级只读配置：level / reasoningEffort / thinkingPolicyConfig / deepseekThinkingMode /
  *    isDeepseekV4 / modelSupportsThinking（声明于 POST 作用域 2976-3013，跨 start() 只读引用，最小 diff）；
@@ -3219,13 +3224,9 @@ export async function POST(request: NextRequest) {
       if (!sandbox && profile.scenes === 'dynamic') {
         const stickyKey = nodeId;
         if (stickyKey) {
-          const sticky = chatStickyScenes.get(stickyKey);
-          if (sticky) for (const s of sticky) activeScenes.add(s);
-          const merged = new Set<ToolScene>();
-          for (const s of activeScenes) {
-            if (s !== 'general' && s !== 'coding') merged.add(s);
-          }
-          chatStickyScenes.set(stickyKey, merged);
+          // K2-S2 会话态 service，行为不变：sticky 读回合并 + 过滤写回
+          // （同 nodeId 跨请求聚合）收敛进 SessionRuntime.mergeStickyScenes
+          sessionRuntime.mergeStickyScenes(stickyKey, activeScenes);
         }
       }
 
@@ -3467,16 +3468,12 @@ export async function POST(request: NextRequest) {
 
             // P4a 三段化骨架：宿主注入给接管管线的最小服务面（tool-pipeline.ts）——
             // 场景激活副作用（activeScenes.add / sticky / kctx.needRebuildTools）统一经此执行。
-            // addStickyScene 与原分支语义一致：仅 nodeId 存在时落 chatStickyScenes（跨请求保持），
-            // 无 nodeId 的会话不持久化、仅当轮生效。
+            // K2-S2 会话态 service，行为不变：addStickyScene 与原分支语义一致——
+            // 仅 nodeId 存在时落 SessionRuntime（跨请求保持），无 nodeId 的会话不持久化、仅当轮生效。
             const takeoverServices: TakeoverServices = {
               activeScenes,
               addStickyScene: (scene) => {
-                if (nodeId) {
-                  const cur = chatStickyScenes.get(nodeId) ?? new Set<ToolScene>();
-                  cur.add(scene);
-                  chatStickyScenes.set(nodeId, cur);
-                }
+                if (nodeId) sessionRuntime.addStickyScene(nodeId, scene);
               },
               requestToolRebuild: () => {
                 kctx.needRebuildTools = true;
