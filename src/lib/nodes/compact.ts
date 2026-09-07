@@ -264,6 +264,26 @@ export function renderCompressedMemory(memory: CompressedMemory): string {
   return lines.join('\n').trim() + '\n';
 }
 
+// ==================== 压缩降级 fallback（R-14-C 与 nodes append 双轨共享） ====================
+
+/**
+ * 无可调用压缩模型（无 Key / 冷却期）时的降级摘要：仅把硬事实直写成 settled，
+ * 推理/争议/偏好留空，游标照常推进（避免同一段反复触发）。
+ *
+ * P4c-1 fallback 收敛：route（R-14-C 缓存压缩）与 nodes append 增量压缩的原内联实现
+ * 均等价于 `renderCompressedMemory({ goal, settled: hardFacts, disputes: [], excluded: [], preferences: [] })`，
+ * 统一收敛到此共享函数，保证双轨降级行为完全一致。默认行为不变。
+ */
+export function compactionFallbackSummary(input: CompressInput): string {
+  return renderCompressedMemory({
+    goal: input.goal,
+    settled: input.hardFacts,
+    disputes: [],
+    excluded: [],
+    preferences: [],
+  });
+}
+
 // ==================== 模型调用（runCompaction） ====================
 
 /** 调用自定义 OpenAI-compatible endpoint 做压缩（流式不行必须拿完整文本） */

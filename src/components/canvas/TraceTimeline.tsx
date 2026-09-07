@@ -20,6 +20,7 @@ import {
   Brain, Sparkles, Wrench, Plug, Eye, RefreshCw, HardDrive,
   CheckCircle2, XCircle, Loader2, ChevronDown, ChevronRight, FilePen, Hammer,
   Copy, Search, Clock3, PanelRight, ListCollapse, X, Play, Square, GitFork, Settings2,
+  History,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TraceSpan, ToolCallRecord, SkillDetail, ThinkingStage } from '@/lib/types';
@@ -1362,6 +1363,8 @@ export interface ConversationTrajectoryItem {
   matchedSkills: string[];
   isStreaming: boolean;
   durationMs?: number;
+  /** P5b-1 历史 replay：本轮任务的事件日志 taskId（存在才显示「原始轨迹」入口） */
+  taskId?: string;
 }
 
 interface TurnModel {
@@ -1373,6 +1376,8 @@ interface TurnModel {
   toolCount: number;
   thinkCount: number;
   rows: TraceSpan[];
+  /** P5b-1 历史 replay：透传 taskId（供 Turn 头「查看原始轨迹」入口） */
+  taskId?: string;
 }
 
 /** span 检索文本（对齐 TrajectorySearchIndex 的 sources 聚合） */
@@ -1392,12 +1397,15 @@ export function ConversationTrajectory({
   onClose,
   items,
   embedded,
+  onReplayTask,
 }: {
   open?: boolean;
   onClose?: () => void;
   items: ConversationTrajectoryItem[];
   /** 嵌入模式（节点内「Trace」分栏）：不套全屏遮罩、无关闭按钮，交给宿主滚动容器 */
   embedded?: boolean;
+  /** P5b-1 历史 replay：点击 Turn 头「查看原始轨迹」（taskId + turn 号）→ 宿主 fetch 事件回放 */
+  onReplayTask?: (taskId: string, turnNumber: number) => void;
 }) {
   const [callsCollapsed, setCallsCollapsed] = useState(false);
   const [query, setQuery] = useState('');
@@ -1457,6 +1465,7 @@ export function ConversationTrajectory({
         toolCount: rows.filter((s) => isToolKind(s.kind)).length,
         thinkCount: thinkRows.length,
         rows,
+        taskId: it.taskId,
       });
     }
     return out;
@@ -1549,11 +1558,12 @@ export function ConversationTrajectory({
 
             return (
               <section key={tm.number} data-turn={tm.number} style={{ borderRadius: 10, border: '1px solid color-mix(in oklab, var(--line) 22%, transparent)' }}>
-                {/* Turn 头 */}
+                {/* Turn 头：左侧展开/折叠切换 + P5b-1「查看原始轨迹」入口（仅该轮带 taskId 时显示） */}
+                <div className="flex w-full min-w-0 items-stretch" style={{ backgroundColor: 'var(--paper)' }}>
                 <button
                   type="button"
                   onClick={() => { if (!q) setOpenTurns((v) => ({ ...v, [tm.number]: !v[tm.number] })); }}
-                  className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-t-lg px-3 py-2 text-left"
+                  className={cn('flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 py-2 text-left', tm.taskId ? 'rounded-tl-lg' : 'rounded-t-lg')}
                   style={{ backgroundColor: 'var(--paper)' }}
                 >
                   <ChevronDown className={cn('h-3 w-3 shrink-0 transition-transform', !expanded && '-rotate-90')} style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }} />
@@ -1577,6 +1587,18 @@ export function ConversationTrajectory({
                     {tm.durationMs && tm.durationMs > 0 ? `${(tm.durationMs / 1000).toFixed(1)}s` : ''}
                   </span>
                 </button>
+                {tm.taskId && (
+                  <button
+                    type="button"
+                    title="查看原始轨迹（事件日志回放）"
+                    onClick={(e) => { e.stopPropagation(); onReplayTask?.(tm.taskId!, tm.number); }}
+                    className="flex shrink-0 cursor-pointer items-center rounded-tr-lg border-l px-2.5 transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-soft)_70%,transparent)]"
+                    style={{ backgroundColor: 'var(--paper)', color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                  >
+                    <History className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                </div>
 
                 {expanded && (
                   <div className="flex flex-col gap-0.5 px-1.5 pb-2 pt-1">

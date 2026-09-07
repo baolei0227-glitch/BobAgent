@@ -1,6 +1,10 @@
 /**
  * skills/matcher.ts — 技能匹配器（DSH 模式重构后：仅用于「主动搜索」）
  *
+ * @deprecated P4d（2026-09-07 标记）：legacy 意图分类/匹配链已退出对话链路多年，
+ *   仅剩 sandbox searchSkills 一个保留调用方（bridge.ts:1241）。新功能禁止 import 本模块；
+ *   若 searchSkills 迁移，本文件与 intent-classifier.ts 一并删除（先删本注释再删文件，勿留半引用）。
+ *
  * 注意：2026-08 起技能加载改为 DSH 模式（L1 目录常驻 + 模型 load_skill 按需加载），
  * 对话链路不再调用本匹配器做自动加载。本文件仅保留给「主动搜索技能」场景：
  *   - sandbox bridge 的 searchSkills IPC（小程序在已安装技能库中按关键词搜索）

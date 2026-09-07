@@ -22,7 +22,15 @@ import { getCurrentProject, getProjectById, listProjects, type ProjectConfig } f
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { pluginDataHome } from '@/lib/extensions/data-home';
 import { DEFAULT_CONFIRM_TOOLS } from '@/lib/settings';
-import { createPendingConfirm, CONFIRM_TIMEOUT_MS } from '@/lib/chat/confirm-pending';
+// P4b-1 审批策略层：tool_confirm 名单判定后走 decideToolApproval（纯函数裁决，见 approval.ts）
+import { decideToolApproval } from '@/lib/chat/approval';
+import { createPendingConfirm, CONFIRM_TIMEOUT_MS, type ConfirmResult } from '@/lib/chat/confirm-pending';
+// P4a 三段化骨架：工具轮宿主接管注册表 + 场景激活统一执行（纯类型 + 编排，见 tool-pipeline.ts 文件头注释）
+// P4a-3-1：挂起型（host-pending）接管注册/查询（registerHostTakeover / hostTakeoverFor）
+import { registerTakeover, takeoverFor, takeoverOfKind, applyScenarioActivation, registerHostTakeover, hostTakeoverFor } from '@/lib/chat/tool-pipeline';
+import type { TakeoverServices, HostTakeoverContext, HostTakeoverVerdict } from '@/lib/chat/tool-pipeline';
+// Phase 2 策略层抽取：思考档位决策收敛到纯函数模块（默认行为与现网一致）
+import { v4ThinkingModeForLevel, executionDowngrade, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
 
 // ── Planner 结构化确认卡片（排程创建/修改/删除走可编辑确认，而非直接执行）──
 const PLANNER_CARD_TOOLS = new Set(['create_scheduled_todo', 'todo_update', 'todo_delete']);
@@ -177,7 +185,7 @@ import {
   runCompaction,
   extractHardFacts,
   extractGoalFromExistingMemory,
-  renderCompressedMemory,
+  compactionFallbackSummary,
   COMPACT_COOLDOWN_MS,
   type CompactModelConfig,
 } from '@/lib/nodes/compact';
@@ -194,8 +202,8 @@ import { matchTerms } from '@/lib/legal/synonyms';
 import { SANDBOX_DIRNAME, resolveAppRoot } from '@/lib/app-root';
 import { readAppEntry, hasAppImplementation } from '@/lib/sandbox/apps';
 import { getBridgeActionsText } from '@/lib/sandbox/bridge';
-import { resolveProviderModel, resolveTaskModel } from '@/lib/wanted/task-model';
-import { EventLog, genSpanId, genTaskId, persistEventLog } from '@/lib/trajectory/event-log';
+import { resolveProviderModel, resolveTaskModel, resolveAgentRoleModel, resolveAutoTaskModel } from '@/lib/wanted/task-model';
+import { EventLog, genSpanId, genTaskId, persistEventLog, CORE_EVENT } from '@/lib/trajectory/event-log';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -1079,43 +1087,522 @@ function buildCapabilityResultText(query: string, matched: CapabilityEntry[], ne
     `请结束本轮工具调用，等待工具就绪后直接调用对应工具完成查询。`;
 }
 
-/**
- * C1（deepseek-harness）：琐碎对话判定 —— 直接关 thinking，避免琐碎轮次白烧 30-300 reasoning tokens。
- * 保守策略，宁可少省不可误关：
- * 1. 历史复杂度守卫：任一条 assistant 带 tool_calls/思考痕迹，或全文超 3000 字符 → 视为复杂任务延续（如"继续"），不判琐碎；
- * 2. 工具迹象守卫：当前消息含附件/路径/文件/图片/代码/分析类指令，或超 60 字符 / 含换行 → 不判琐碎；
- * 3. 命中问候/致谢/简短确认/简单运算/简单日期时间等模式 → 琐碎。
- */
-function isTrivialPromptMessages(messages: ChatMessage[]): boolean {
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-  if (!lastUser) return false;
-  const text = (typeof lastUser.content === 'string' ? lastUser.content : '').trim();
-  if (!text) return false;
-
-  // 1) 历史复杂度守卫
-  let totalLen = 0;
-  for (const m of messages) {
-    const c = m.content;
-    if (typeof c === 'string') totalLen += c.length;
-    if (m.role === 'assistant' && (m as unknown as { tool_calls?: unknown[]; reasoning_content?: unknown }).tool_calls?.length) return false;
-  }
-  if (totalLen > 3000) return false;
-
-  // 2) 工具迹象守卫
-  if (text.length > 60 || text.includes('\n')) return false;
-  if (/attachments?\/|assets\/|\.(?:png|jpe?g|gif|webp|pdf|docx?|xlsx?|pptx?|md|txt|py|js|ts|html|css|json)\b|路径|图片|扫描|ocr|文件|代码|分析|审查|生成|写(?:一|个|份)?|帮我|总结|整理|比较|对比/i.test(text)) return false;
-
-  // 3) 琐碎模式
-  return (
-    /^(?:你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|早安|午安|晚安|谢谢|感谢|多谢|再见|拜拜|好的|好|嗯|是的|对的|可以|没问题|继续|接着|然后呢|说说|讲讲|等等|稍等|ok|okay|thanks|thx|thank|bye|goodbye|sure|again|more|yes|no)/i.test(text) ||
-    /^[\d\s+\-*/×÷.=？?]+$/i.test(text) ||
-    /^(?:今天|明天|昨天|现在|当前)\s*(?:是)?\s*(?:几号|几点|星期几|日期|时间|天气|温度)/i.test(text) ||
-    /^\d+\s*[+\-*/×÷]\s*\d+\s*[=＝]?\s*$/.test(text)
-  );
-}
-
 /** 法律技能名称集合 */
 const LEGAL_SKILL_NAMES = new Set(['intern-lawyer', 'legal-drafter', 'legal-statute-search']);
+
+// ── P4a 三段化骨架：首批宿主接管注册（scenario_activate，行为与迁移前的 if-else 判定一致）──
+// 判定顺序 = 注册顺序（takeoverFor 同 priority 保持注册序）：
+//   · search_capabilities：pre-execute 全接管（执行前咨询、命中即替代 executeTool），先判定；
+//   · load_skill 法律联动：post-execute 联动（工具执行成功后咨询），后判定。
+// 场景激活 / sticky / needRebuildTools 由 pipeline 统一执行（applyScenarioActivation）。
+registerTakeover({
+  kind: 'scenario_activate',
+  phase: 'pre',
+  name: 'search_capabilities',
+  // 能力目录检索：命中的场景交 pipeline 去重激活 + sticky + 触发重建；
+  // meta 携带匹配条目（含已激活的）供宿主编排能力清单文本（buildCapabilityResultText）。
+  handleScenario(name, args) {
+    const query = String(args?.query ?? '');
+    const matched = matchCapabilities(query);
+    return { scenes: matched.map((c) => c.scene), sticky: true, meta: { matched } };
+  },
+});
+registerTakeover({
+  kind: 'scenario_activate',
+  phase: 'post',
+  name: 'load_skill',
+  // 法律技能加载成功 → 激活 legal 场景（pkulaw 工具随工具集重建注入可见）；
+  // 技能名不在法律名单返回 null（不接管）。"成功"由宿主在 post 咨询点保证（仅 execResult.success 时咨询）。
+  handleScenario(name, args) {
+    let skillName = '';
+    try {
+      skillName = String(args?.skill_name ?? '').trim();
+    } catch {
+      /* 参数异常则不激活（与原 if 分支同语义） */
+    }
+    if (!skillName || !LEGAL_SKILL_NAMES.has(skillName)) return null;
+    return {
+      scenes: ['legal'],
+      sticky: true,
+      hint: '[宿主提示] 已自动激活法律场景(legal)：北大法宝 pkulaw MCP 法条/案例检索工具已加入可用工具集，法条原文、时效性、裁判规则核对请优先使用 mcp__pkulaw__* 工具（结果自带 pkulaw.com 原文链接），仅在 pkulaw 不可用时才用 web_search/web_fetch 降级。',
+    };
+  },
+});
+
+// ── P4a-2a 迁移：节点参数注入 + 执行结果压缩 收敛为注册式接管（tool-pipeline.ts，行为不变）──
+//   · args_transform（phase: pre，match 文件/沙箱工具名单）：exec 前把 current_node_id /
+//     node_sandbox_app_id 注入执行参数字符串 —— 名单判定与注入规则在本注册内，请求作用域值
+//     （nodeId / toolLoopSandboxAppId）由宿主在咨询点经 ctx 传入；JSON 解析/回写失败返回
+//     null = 原样执行（与原 if 内联 try/catch 同语义）。
+//   · result_compact（phase: post，通用变换，match 全量工具）：结果写入对话历史前压缩 —— 仅
+//     文本超阈值时保头保尾压缩（阈值/文案沿用 compactToolResult，含 LIST_LIKE_TOOLS 区分）；
+//     compacted 由宿主发 SSE tool_compact 帧 + 压缩日志。
+//     注册序须保持在 load_skill 之后：load_skill 亦为 post 场景激活条目，route 的 post 咨询点
+//     用 takeoverFor（按 name+phase、不分 kind，首个命中即返回），对 load_skill 须仍先命中
+//     场景激活条目，故本条目不得排在其前（其余工具无 post 场景激活条目，无影响）。
+/** 节点参数自动注入名单：intern_search 需 current_node_id 做祖先链校验；read_file/write_file/
+ *  rename_file/delete_file 需 current_node_id 做 homework/ 文件归属隔离与 .ownership.json 清册
+ *  维护；execute_script/run_command 需 current_node_id 注入 BOB_NODE_HOMEWORK 产出目录。 */
+const NODE_PARAM_INJECT_TOOLS = new Set([
+  'intern_search',
+  'read_file',
+  'write_file',
+  'rename_file',
+  'delete_file',
+  'list_directory',
+  'execute_script',
+  'run_command',
+  'ocr_document',
+  'crop_image',
+]);
+registerTakeover({
+  kind: 'args_transform',
+  phase: 'pre',
+  name: '__node_param_inject__',
+  match: (name) => NODE_PARAM_INJECT_TOOLS.has(name),
+  transformArgs(name, args, ctx) {
+    try {
+      const parsed = JSON.parse(args) as Record<string, unknown>;
+      parsed.current_node_id = ctx.currentNodeId;
+      // Coding 节点标识：工具据此强制所有写操作落 bob-sandbox/apps/<appId>/（不落 homework）
+      if (ctx.sandboxAppId) parsed.node_sandbox_app_id = ctx.sandboxAppId;
+      return JSON.stringify(parsed);
+    } catch {
+      // 参数解析/回写失败时原样传递（与原 if 内联 try/catch 一致）
+      return null;
+    }
+  },
+});
+registerTakeover({
+  kind: 'result_compact',
+  phase: 'post',
+  name: '__result_compact__', // 通用变换：命中全部工具；仅超阈值结果才实际压缩（compactToolResult 判定）
+  match: () => true,
+  compactResult(name, result) {
+    return compactToolResult(result, name);
+  },
+});
+
+// ── P4a-3-1 迁移 ask_user_questions，行为不变 ──
+// 挂起型（host-pending）接管首类：模型调用 ask_user_questions → 立即推 questions_request 弹窗挂起
+// 等待用户 answers 回传（POST /api/chat/questions 独立恢复端点，跨请求内存挂起），再把 answers 作为
+// tool_result 回灌模型继续生成。与 scenario_activate 等模块级纯函数接管不同：需要 send(SSE) /
+// pending 容器 / 心跳 / 回灌 / 循环 continue → handler 经 ctx（HostTakeoverContext，宿主在 handle()
+// 调用点注入最小服务面）完成全部副作用；本注册为模块级单次、不持 route 闭包（多请求并发安全）。
+// 行为等价：questions_request 载荷字段 / 20s tool_call_update(running) 心跳时序 / answers 回灌文本 /
+// eventLog·tool_result·遥测 / 循环 continue 语义逐位一致（原 if 分支体见 git 历史 3812-3878）。
+// planner_confirm / tool_confirm / login / grant 后续复用同一 host-pending 形态（各自注册新 kind）。
+async function handleAskUserQuestions(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // ① 归一化 questions（与原 if 内联同语义：结构异常元素兜底为自增 id / 空问题 / 空选项 / allowCustom 默认开）
+  const pendingQuestions: PendingQuestionItem[] = (
+    Array.isArray(ctx.args.questions) ? ctx.args.questions : []
+  ).map((q, i) => {
+    const item = (q ?? {}) as Record<string, unknown>;
+    return {
+      id: String(item.id ?? `q${i + 1}`),
+      question: String(item.question ?? ''),
+      options: Array.isArray(item.options) ? item.options.map(String) : [],
+      allowCustom: item.allowCustom !== false,
+    };
+  });
+  // ② 登记挂起项 + SSE questions_request（载荷字段与原分支一致：requestId / questions / timeoutSec）
+  const { requestId, promise, getSupplement } = createPendingQuestions(pendingQuestions, ctx.nodeId);
+  ctx.send({
+    questions_request: {
+      requestId,
+      questions: pendingQuestions,
+      timeoutSec: Math.ceil(QUESTIONS_TIMEOUT_MS / 1000),
+    },
+    nodeId: ctx.nodeId,
+  });
+  // ③ 等待用户提交期间 SSE 无数据，会被前端 90s 空闲超时误杀；每 20s 发一条
+  //    tool_call_update(running) 心跳保持连接（前端对重复 running 幂等）。
+  const qKeepalive = setInterval(() => {
+    ctx.send({ tool_call_update: { name: ctx.name, phase: 'running', spanId: ctx.spanId, startAt: ctx.startAt }, nodeId: ctx.nodeId });
+  }, 20000);
+  let answers: PendingAnswerEntry[] | null;
+  try {
+    answers = await promise; // 前端弹窗提交回传；超时/关闭为 null
+  } finally {
+    clearInterval(qKeepalive);
+  }
+  // ④ 组织回灌文本（answers + 补充说明；未回答走降级文案，与原分支逐字一致）
+  const supplement = getSupplement();
+  const answersText = answers && answers.length > 0
+    ? `用户对你提出的问题逐一答复如下（problem/question 为其原问题，answer 为用户选择或填写的答复）：\n${JSON.stringify(answers, null, 2)}${supplement ? `\n\n用户补充说明：${supplement}` : ''}`
+    : '用户未回答你的提问（弹窗被跳过或超时）。请基于已有信息继续，必要时简要说明缺失的信息。';
+  // ⑤ SSE tool_result（done 成功回灌，span 轨迹字段与原分支一致）+ 结果落账（顺序与原分支一致）
+  ctx.send({
+    tool_result: {
+      name: ctx.name,
+      result: answersText,
+      durationMs: 0,
+      success: true,
+      phase: 'done',
+      spanId: ctx.spanId,
+      startAt: ctx.startAt,
+      endAt: Date.now(),
+    },
+    nodeId: ctx.nodeId,
+  });
+  ctx.commitToolResult(answersText);
+  // ⑥ 该工具已由宿主处理 → 宿主据此 continue（跳过下方通用执行逻辑）
+  return 'handled_continue';
+}
+registerHostTakeover({
+  kind: 'ask_user',
+  phase: 'pre',
+  name: 'ask_user_questions',
+  handle: handleAskUserQuestions,
+});
+
+// ── P4a-3-2 迁移 tool_confirm（需手动确认名单通用确认），行为不变 ──
+// P4b-1 追加：本 handler 名单判定后接入审批策略层（decideToolApproval，approval.ts）——默认
+// allow_scope 档与迁移前逐位一致（名单内 request、名单外 noop 放行）；ask/never 为新档位（默认
+// 不启用，经 settings.approval.defaultStrategy 开启、route 咨询点注入 ctx.approvalStrategy）。
+// 挂起型第二类：模型调用「需手动确认名单」内工具 → 立即推 tool_confirm 弹窗挂起，等待用户确认
+// （POST /api/chat/confirm 恢复端点，跨请求内存挂起；超时 = timeout ≠ 用户拒绝）。与 ask_user 同
+// host-pending 形态：send / 挂起容器 / 20s 心跳 / 回灌 / 循环 continue 均经 ctx 服务面完成；本注册
+// 模块级单条、不持 route 闭包。与 ask_user 的差异：判定名单（confirmTools）是运行期配置、无法绑定
+// 固定工具名 → 注册条目 match 恒 true（工具名恒咨询），名单与身份由宿主在咨询点经 ctx 注入，handler
+// 内判定：名单外 / planner 结构化卡片已覆盖（identity==='planner' 且属 PLANNER_CARD_TOOLS）→ 'noop'
+// 照常通用执行。咨询点物理位置保持在 planner 卡片段之后（route 工具轮 ①.4 之后原 if 位置，见
+// handleAskUserQuestions 上方同轮咨询点），planner 先判的顺序约束由宿主保证。
+// 行为等价：tool_confirm 载荷字段（confirmId/name/arguments/timeoutSec）/ 心跳时序 / denied·timeout
+// 区分措辞 / tool_result(error)·落账三连 / 循环 continue 语义逐位一致（原 if 分支体见 git 历史
+// 4045-4106）；approved 不回灌编辑参数 → 'handled_fallback' 回落本轮通用执行（与迁移前一致：前端
+// 通用确认只回传 approved，服务端原样忽略 edited，args 不覆盖）。
+async function handleToolConfirm(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // ① P4b-1 名单判定 + 审批策略裁决（默认档与迁移前 if 条件逐位一致：名单内 且 未被 planner
+  //    结构化卡片覆盖才弹通用确认、名单外一律 'noop' 放行）。顺序约束：
+  //      a) planner 结构化卡覆盖最先判定并 'noop' 保留 —— planner 卡（用户可见可编辑确认 UI）视为
+  //         强于 confirm 的人工审批，任何 strategy 均不拦截（见 approval.ts 文件头边界说明）；
+  //      b) 其余工具走 decideToolApproval（纯函数，approval.ts）：'request' → 原挂起确认流程
+  //         （② 起不变）；'allow' → 'noop' 通用执行（同现状名单外，allow_scope 下不 consult 写类）；
+  //         'deny'（仅 never 档，名单内或写类）→ SSE tool_result(error) + 落账 + 'handled_continue'。
+  //    ctx.approvalStrategy 未注入（undefined）= 兜底 'allow_scope'（向后兼容，行为同现网）。
+  const confirmTools = ctx.confirmTools ?? [];
+  const usesPlannerCard = ctx.identity === 'planner' && PLANNER_CARD_TOOLS.has(ctx.name);
+  if (usesPlannerCard) return 'noop';
+  const approvalStrategy = ctx.approvalStrategy ?? 'allow_scope';
+  const approval = decideToolApproval({
+    name: ctx.name,
+    inConfirmList: confirmTools.includes(ctx.name),
+    strategy: approvalStrategy,
+  });
+  if (approval === 'allow') return 'noop';
+  if (approval === 'deny') {
+    // never 档：名单内或写类工具一律拒绝执行（读类已在 decideToolApproval 判 'allow'，不会到达此处）
+    const deniedResult =
+      `该工具调用被当前审批策略（never）拦截：写类工具及「需手动确认名单」内工具在 never 策略下` +
+      `默认不允许执行，本次调用未执行。请停止涉及该工具的操作，如实向用户说明该工具尚未执行，` +
+      `并征询其意见（如确认需要，可在设置中将审批策略切回 allow_scope/ask 后重试）。`;
+    ctx.send({
+      tool_result: {
+        name: ctx.name,
+        result: deniedResult,
+        durationMs: 0,
+        success: false,
+        phase: 'error',
+        spanId: ctx.spanId,
+        startAt: ctx.startAt,
+        endAt: Date.now(),
+      },
+      nodeId: ctx.nodeId,
+    });
+    ctx.commitToolError?.(deniedResult);
+    return 'handled_continue';
+  }
+  // approval === 'request' → 原挂起确认流程（与迁移前逐位一致）：
+  // ② 登记挂起项 + SSE tool_confirm（载荷字段与原分支一致：confirmId/name/arguments/timeoutSec；
+  //    arguments 用已解析参数对象，挂起登记用原始参数字符串 ctx.execArgs）
+  const { confirmId, promise } = createPendingConfirm(ctx.name, ctx.execArgs ?? '', ctx.nodeId);
+  ctx.send({
+    tool_confirm: {
+      confirmId,
+      name: ctx.name,
+      arguments: ctx.args,
+      timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
+    },
+    nodeId: ctx.nodeId,
+  });
+  // ③ 等待确认期间 SSE 无数据，会被前端 90s 空闲超时误杀；每 20s 发一条
+  //    tool_call_update(running) 心跳保持连接（前端对重复 running 幂等）。
+  const confirmKeepalive = setInterval(() => {
+    ctx.send({ tool_call_update: { name: ctx.name, phase: 'running', spanId: ctx.spanId, startAt: ctx.startAt }, nodeId: ctx.nodeId });
+  }, 20000);
+  let confirmRes: ConfirmResult;
+  try {
+    confirmRes = await promise; // 前端弹窗确认回传；超时记为 timeout（≠ 用户拒绝）
+  } finally {
+    clearInterval(confirmKeepalive);
+  }
+  // ④ verdict 三分：approved → 'handled_fallback' 回落本轮通用执行路径（args 原样，executeTool
+  //    真正执行 + 成功落账在通用路径完成，与迁移前一致）；denied/timeout → SSE tool_result(error、
+  //    措辞区分「明确拒绝」与「超时未操作」) + 落账三连 + 'handled_continue'（宿主 continue 跳过通用执行）。
+  if (confirmRes.verdict === 'approved') return 'handled_fallback';
+  const deniedResult =
+    confirmRes.verdict === 'timeout'
+      ? `该工具调用因等待确认超时（${Math.ceil(CONFIRM_TIMEOUT_MS / 60_000)} 分钟内未收到你的确认）而自动跳过，并非用户拒绝执行。请如实向用户说明该工具尚未执行，并询问是否继续执行。`
+      : '用户拒绝了该工具的调用（该工具在「需手动确认名单」中，未获用户确认即不执行）。请停止涉及该工具的操作，向用户说明情况并征询其意见。';
+  ctx.send({
+    tool_result: {
+      name: ctx.name,
+      result: deniedResult,
+      durationMs: 0,
+      success: false,
+      phase: 'error',
+      spanId: ctx.spanId,
+      startAt: ctx.startAt,
+      endAt: Date.now(),
+    },
+    nodeId: ctx.nodeId,
+  });
+  ctx.commitToolError?.(deniedResult);
+  return 'handled_continue';
+}
+registerHostTakeover({
+  kind: 'tool_confirm',
+  phase: 'pre',
+  name: '*', // 名单是运行期配置（不绑定固定工具名）→ 恒咨询，名单判定在 handler 内（ctx.confirmTools）
+  match: () => true,
+  handle: handleToolConfirm,
+});
+
+// ── P4a-3-3 迁移 planner 卡片，行为不变 ──
+// 挂起型第三类：planner 专属节点（identity==='planner'）的排程 创建/改/删（PLANNER_CARD_TOOLS =
+// create_scheduled_todo / todo_update / todo_delete）→ 先弹结构化可编辑确认卡片（buildPlannerCard
+// 预填字段 + 冲突提示），用户可改字段后确认才真正执行；拒绝/超时按未执行处理。与 tool_confirm 同
+// host-pending 形态（send / createPendingConfirm 挂起容器 / 20s 心跳 / 回灌 / 循环 continue 均经
+// ctx 服务面完成）；本注册模块级单条、不持 route 闭包。与 tool_confirm 的差异：approved 后用户
+// 编辑过的参数（edited.toolArgs）要覆盖本轮执行参数 —— ctx.setExecArgs 写回通道由宿主注入
+// （route 闭包内 let parsedArgs/execArgs），handler 据此把新参数交给宿主回落通用执行时生效。
+// 判定：非 planner 身份 / 工具不在 PLANNER_CARD_TOOLS / 卡片构建失败（无 event 等）→ 'noop' 交还
+// 宿主走 tool_confirm/通用执行（与迁移前 if(card) 不进入同语义）。咨询点物理位置保持在 tool_confirm
+// 之前（route 工具轮 ①.4 原 if 位置），planner 先判的顺序约束由宿主保证。
+// 行为等价：planner_confirm 载荷字段（confirmId/name/card/timeoutSec，card 即 buildPlannerCard 产出）
+// / 心跳时序 / denied·timeout 区分措辞 / tool_result(error)·落账三连 / 循环 continue 语义 /
+// approved+edited.toolArgs 覆盖路径逐位一致（原 if 分支体见 git 历史 4049-4116）。
+async function handlePlannerCard(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // ① 身份 + 工具名单判定（与迁移前 if 条件逐位一致：planner 专属节点的排程 创建/改/删 才走卡片）
+  if (ctx.identity !== 'planner' || !PLANNER_CARD_TOOLS.has(ctx.name)) return 'noop';
+  // ② 卡片构建（buildPlannerCard：create 由参数预填；update/delete 拉库内事件行 + 冲突提示）；
+  //    构建失败（缺 event_id / 库内无此事件 / 异常）→ 不弹卡，交还宿主（noop）走下方 tool_confirm
+  //    consult —— 与迁移前 if(card) 不进入、随后 tool_confirm 的 usesPlannerCard 覆盖判定等价。
+  const card = await buildPlannerCard(ctx.name, ctx.args);
+  if (!card) return 'noop';
+  // ③ 登记挂起项 + SSE planner_confirm（载荷字段与原分支一致：confirmId/name/card/timeoutSec）
+  const { confirmId, promise } = createPendingConfirm(ctx.name, ctx.execArgs ?? '', ctx.nodeId);
+  ctx.send({
+    planner_confirm: {
+      confirmId,
+      name: ctx.name,
+      card,
+      timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
+    },
+    nodeId: ctx.nodeId,
+  });
+  // ④ 等待确认期间 SSE 无数据，会被前端 90s 空闲超时误杀；每 20s 发一条
+  //    tool_call_update(running) 心跳保持连接（前端对重复 running 幂等）。
+  const cardKeepalive = setInterval(() => {
+    ctx.send({ tool_call_update: { name: ctx.name, phase: 'running', spanId: ctx.spanId, startAt: ctx.startAt }, nodeId: ctx.nodeId });
+  }, 20000);
+  let cardRes: ConfirmResult;
+  try {
+    cardRes = await promise; // 前端卡片确认/拒绝回传；超时记为 timeout（≠ 用户拒绝）
+  } finally {
+    clearInterval(cardKeepalive);
+  }
+  // ⑤ verdict 三分：
+  //    - denied/timeout → SSE tool_result(error、措辞区分「明确拒绝」与「超时未操作」) + 落账三连
+  //      + 'handled_continue'（宿主 continue 跳过通用执行，与迁移前分支 continue 一致）；
+  //    - approved → 用户可能编辑过卡片 → 经 setExecArgs 用 edited.toolArgs 覆盖执行参数（对象判
+  //      定与迁移前 4110-4114 逐位一致：toolArgs truthy 且 typeof object 才覆盖），随后
+  //      'handled_fallback' 回落宿主通用执行（宿主用覆盖后 args 真正执行 + 成功落账在通用路径完成）。
+  if (cardRes.verdict !== 'approved') {
+    const deniedResult =
+      cardRes.verdict === 'timeout'
+        ? `该排程操作因等待确认超时（${Math.ceil(CONFIRM_TIMEOUT_MS / 60_000)} 分钟内未收到你的确认）而自动跳过，并未执行。请如实告知用户并询问是否继续。`
+        : '你拒绝了该排程操作（未获确认即不执行）。请停止该操作，向用户说明并征询意见。';
+    ctx.send({
+      tool_result: {
+        name: ctx.name,
+        result: deniedResult,
+        durationMs: 0,
+        success: false,
+        phase: 'error',
+        spanId: ctx.spanId,
+        startAt: ctx.startAt,
+        endAt: Date.now(),
+      },
+      nodeId: ctx.nodeId,
+    });
+    ctx.commitToolError?.(deniedResult);
+    return 'handled_continue';
+  }
+  // approved：用户可能编辑过卡片 → 用编辑后的参数覆盖执行
+  const editedArgs = cardRes.edited?.toolArgs;
+  if (editedArgs && typeof editedArgs === 'object') {
+    ctx.setExecArgs?.(JSON.stringify(editedArgs as Record<string, unknown>));
+  }
+  return 'handled_fallback';
+}
+registerHostTakeover({
+  kind: 'planner_confirm',
+  phase: 'pre',
+  name: '*', // 名单是固定集（PLANNER_CARD_TOOLS）+ 身份（planner）判定 → 恒咨询，判定在 handler 内
+  match: () => true,
+  handle: handlePlannerCard,
+});
+
+// ── P4a-3-4 迁移 login/grant，行为不变 ──
+// 收官两件：browser.login 挂起型接管 与 bobby grant 接管从 route 工具轮内联 if 分支收敛为注册式
+// host-pending 分发（tool-pipeline.ts，各自注册新 kind 'login' / 'grant'，phase post）。
+//   · login：exec 前 mode 注入（强制 BobWork 弹窗模式，属 pre 改写）+ exec 后 loginRequired 判定 →
+//     createPendingLogin 挂起 + SSE login_required（requestId/siteName/url/timeoutSec）→ 20s 心跳 →
+//     前端登录窗回传凭据（POST /api/chat/login 独立恢复端点，跨请求内存挂起）→ 服务端直调
+//     browser.login_fill（findBrowserLoginFillFullName 定位 + mcpManager.callTool redactArgs 脱敏；
+//     login_fill 不注册给模型）→ 三分支新 execResult 经 ctx.setExecResult 写回宿主、'handled_fallback'
+//     回落通用落账路径（login 不自产 tool_result/落账 —— 与原分支体结束继续向下逐位一致）。
+//   · grant：mcp__bobby__* 工具返回 grantRequired → SSE grant_required（带 target）旁路；不覆盖
+//     execResult、不 continue（原分支 send 后无 continue，grantRequired 原文照常回灌模型）。
+//     恢复链路在宿主侧之外：前端 ChatNodeKernel 记"等待授权"，BobbyNode 授权成功广播匹配后自动
+//     补发"已授权，继续"消息触发模型重试，route 无独立恢复端点。
+// mode 注入为 exec 前 pre 改写、browser.login 不在 P4a-2a args_transform 节点参数注入名单
+// （NODE_PARAM_INJECT_TOOLS）内 → 以 args_transform 形态注册第二条目（按名匹配，互不重叠），
+// 咨询点复用既有 takeoverOfKind(toolName,'args_transform') 位置 —— 不触碰既有名单条目逻辑；
+// 与原内联 if 的等价性：browser.login 的 execArgs 无其它 pre 改写叠加（不在 planner 卡名单 /
+// node 注入名单），注入输入恒为 tc.function.arguments、位置仍在 executeTool 前，行为逐位一致。
+registerTakeover({
+  kind: 'args_transform',
+  phase: 'pre',
+  name: '__browser_login_mode__',
+  match: (name) => isBrowserLoginTool(name),
+  transformArgs(_name, _args, _ctx) {
+    // browser.login：强制注入 BobWork 弹窗模式 → 扩展不弹独立登录窗，返回 loginRequired，
+    // 由本节点弹登录窗（凭据经 前端→服务端内存→MCP→扩展 直传，不过模型）。与原 if 内联同语义：
+    // 参数 JSON 解析/回写失败 → null（原样传递）。
+    try {
+      const parsed = JSON.parse(_args) as Record<string, unknown>;
+      parsed.mode = 'bobwork';
+      return JSON.stringify(parsed);
+    } catch {
+      return null;
+    }
+  },
+});
+// browser.login 挂起型接管 handler（复刻迁移前工具轮内联分支 4378-4448，行为不变；判定条件
+// execResult.success + isBrowserLoginTool 分别由宿主 post 咨询点与注册 match 保证）。
+async function handleBrowserLogin(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // ① loginRequired 判定（结果 JSON 解析失败 / 非 loginRequired → 'noop' 交还通用路径原样落账）
+  let loginReq: { loginRequired?: boolean; siteName?: string; url?: string } | null = null;
+  try {
+    loginReq = JSON.parse(ctx.result ?? '');
+  } catch {
+    loginReq = null;
+  }
+  if (!(loginReq && loginReq.loginRequired)) return 'noop';
+  // ② 登记挂起项 + SSE login_required（载荷字段与原分支一致：requestId / siteName / url /
+  //    timeoutSec；siteName/url 兜底用 ctx.pageUrl —— 宿主注入的 lastPageUrl 请求态）
+  const { requestId, promise } = createPendingLogin(ctx.nodeId);
+  ctx.send({
+    login_required: {
+      requestId,
+      siteName: loginReq.siteName || toolDisplaySiteName(ctx.pageUrl ?? undefined),
+      url: loginReq.url || ctx.pageUrl || '',
+      timeoutSec: Math.ceil(LOGIN_TIMEOUT_MS / 1000),
+    },
+    nodeId: ctx.nodeId,
+  });
+  // ③ 等待用户输入期间 SSE 无数据会被前端 90s 空闲超时误杀；每 20s 发心跳保持连接
+  const loginKeepalive = setInterval(() => {
+    ctx.send({ tool_call_update: { name: ctx.name, phase: 'running', spanId: ctx.spanId, startAt: ctx.startAt }, nodeId: ctx.nodeId });
+  }, 20000);
+  let creds: { username: string; password: string } | null;
+  try {
+    creds = await promise; // 前端弹窗提交回传；超时/关闭为 null
+  } finally {
+    clearInterval(loginKeepalive);
+  }
+  // ④ 三分支构造新 execResult 并经 setExecResult 写回宿主（回落通用落账路径，与原分支体对
+  //    execResult 的直接改写等价）：
+  //    - 有凭据 + login_fill 成功 → 代填摘要（凭据不进结果文本、redactArgs 不打印日志）；
+  //    - 有凭据 + login_fill 抛错 → success:false 失败文案；
+  //    - 无凭据（超时/关闭）→ "用户未在…输入凭据"成功文案。
+  if (creds) {
+    try {
+      const fillFullName = await findBrowserLoginFillFullName();
+      if (!fillFullName) {
+        throw new Error('browser.login_fill 未找到（Bob WebBridge MCP 未连接或版本过旧）');
+      }
+      const { mcpManager } = await import('@/lib/mcp/manager');
+      const fillRaw = await mcpManager.callTool(
+        fillFullName,
+        { username: creds.username, password: creds.password },
+        { redactArgs: true }, // 凭据不打印到日志
+      );
+      const fillSummary = String(fillRaw).trim().replace(/\s+/g, ' ').slice(0, 300);
+      ctx.setExecResult?.({
+        result:
+          `你已在 BobWork 登录弹窗中提交账号密码，WebBridge 已代填并提交登录表单。` +
+          (fillSummary ? ` 结果：${fillSummary}` : ''),
+        durationMs: 0,
+        success: true,
+      });
+    } catch (e) {
+      ctx.setExecResult?.({
+        result:
+          `收到登录凭据，但自动填写登录表单失败：${e instanceof Error ? e.message : String(e)}。` +
+          '请如实告知用户该站点仍处于未登录状态，建议其在浏览器中手动登录。',
+        durationMs: 0,
+        success: false,
+      });
+    }
+  } else {
+    ctx.setExecResult?.({
+      result:
+        '用户未在 BobWork 登录弹窗中输入凭据（弹窗被关闭或超时）。' +
+        '请如实告知用户该站点仍处于未登录状态，必要时引导其手动登录。',
+      durationMs: 0,
+      success: true,
+    });
+  }
+  // 已构造并写回新 execResult → 'handled_fallback' 回落宿主通用落账路径（与原分支体结束继续向下等价）
+  return 'handled_fallback';
+}
+registerHostTakeover({
+  kind: 'login',
+  phase: 'post',
+  name: 'browser.login', // 匹配 browser.login / mcp__*__browser_login（与 mode 注入条目同一判定）
+  match: (name) => isBrowserLoginTool(name),
+  handle: handleBrowserLogin,
+});
+// bobby grant 旁路 handler（复刻迁移前工具轮内联分支 4366-4376，行为不变；判定 execResult.success
+// 由宿主 post 咨询点保证、工具名 mcp__bobby__* 由注册 match 保证）。
+async function handleBobbyGrant(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // ① grantRequired 判定：结果不含 'grantRequired' / JSON 解析失败 / 非 grantRequired → 'noop'
+  const raw = ctx.result ?? '';
+  if (!raw.includes('grantRequired')) return 'noop';
+  try {
+    const j = JSON.parse(raw) as { grantRequired?: boolean; target?: string };
+    if (j.grantRequired && typeof j.target === 'string') {
+      // ② 命中：SSE grant_required 旁路下发（前端 ChatNodeKernel 记"等待授权"，BobbyNode 授权
+      //    成功广播匹配后自动补发"已授权，继续"消息触发模型重试 —— 用户无需手动回复）。
+      //    不覆盖 execResult、不 continue → 'handled_fallback' 回落通用路径（grantRequired 原文
+      //    照常作为工具结果回灌模型，与原分支 send 后无 continue 逐位一致）。
+      ctx.send({ grant_required: { target: j.target }, nodeId: ctx.nodeId });
+      return 'handled_fallback';
+    }
+  } catch { /* 非 JSON 忽略 */ }
+  return 'noop';
+}
+registerHostTakeover({
+  kind: 'grant',
+  phase: 'post',
+  name: 'mcp__bobby__*',
+  match: (name) => name.startsWith('mcp__bobby__'),
+  handle: handleBobbyGrant,
+});
 
 /** 法律场景防幻觉最强约束 —— 当匹配到任何法律技能时，注入到技能上下文最顶部（随技能上下文进入当前轮 user 消息） */
 const LEGAL_GUARD_PROMPT = `⚠️ 你正在处理法律问题，以下规则优先级最高，违反将导致严重法律风险：
@@ -1837,6 +2324,8 @@ async function compactTrimmedHistoryForCache(
   nodeId: string,
   project: Awaited<ReturnType<typeof getCurrentProject>> | null,
   trimmedTurns: ConversationTurn[],
+  taskId: string,
+  eventLog: EventLog,
 ): Promise<string | null> {
   if (!nodeId || !project || trimmedTurns.length === 0) return null;
 
@@ -1862,21 +2351,24 @@ async function compactTrimmedHistoryForCache(
     return Number.isFinite(last) && Date.now() - last < COMPACT_COOLDOWN_MS;
   })();
 
+  // P4c-1 fallback 收敛：无模型/冷却期 均走 compact.ts 共享 compactionFallbackSummary（与 nodes append 同款）
+  const compressInput = { goal, existingMemory: existing, uncompressedTurns: trimmedTurns, hardFacts };
   let rendered: string;
+  let fallbackKind: 'none' | 'no-model' | 'cooldown' = 'none';
   if (!inCooldown) {
     const modelCfg = await resolveCompactModelConfig();
     if (modelCfg) {
-      const result = await runCompaction(
-        { goal, existingMemory: existing, uncompressedTurns: trimmedTurns, hardFacts },
-        modelCfg,
-      );
+      const result = await runCompaction(compressInput, modelCfg);
       rendered = result.rendered;
     } else {
       // 无可用模型 → 硬事实直写（与 /api/nodes 降级逻辑一致）
-      rendered = renderCompressedMemory({ goal, settled: hardFacts, disputes: [], excluded: [], preferences: [] });
+      fallbackKind = 'no-model';
+      rendered = compactionFallbackSummary(compressInput);
     }
   } else {
-    rendered = renderCompressedMemory({ goal, settled: hardFacts, disputes: [], excluded: [], preferences: [] });
+    // 冷却期内 → 降级硬事实直写，不调模型，避免长文档逐轮触发压缩风暴
+    fallbackKind = 'cooldown';
+    rendered = compactionFallbackSummary(compressInput);
   }
 
   // 持久化：压缩记忆 + 游标推进（前端下轮按 ×2 跳过这些轮次 → 前缀稳定）
@@ -1894,6 +2386,17 @@ async function compactTrimmedHistoryForCache(
     console.warn('[R-14-压缩] 节点写回失败（压缩记忆仅本轮生效）:', e instanceof Error ? e.message : String(e));
   }
   console.log(`[R-14-压缩] 被裁 ${trimmedTurns.length} 轮已压缩进节点记忆（游标 ${compactedUntil} → ${newUntil}，冷却内=${inCooldown}）`);
+  // P4c-1 压缩事件化：压缩实际发生（游标推进 + 写回 .md 成功）后记一条 compaction 事件；
+  // 仅追加事件记录，不改变任何压缩触发/游标/写回语义。
+  eventLog.mark(CORE_EVENT.COMPACTION, `compaction:${taskId}`, {
+    reason: 'R-14-C 缓存感知压缩',
+    shadowedTurns: { from: compactedUntil, to: newUntil },
+    hardFactsCount: hardFacts.length,
+    hardFactsSample: hardFacts.slice(0, 5),
+    summaryGoal: goal,
+    compactedUntil: newUntil,
+    fallbackKind,
+  });
   return rendered;
 }
 
@@ -1910,6 +2413,8 @@ async function applyUpstreamNodeBridge(
   project: Awaited<ReturnType<typeof getCurrentProject>> | null,
   isManagedModel: boolean,
   contextWindow: number,
+  taskId: string,
+  eventLog: EventLog,
 ): Promise<ChatMessage[]> {
   if (!nodeId || !project) return messages;
 
@@ -2018,7 +2523,7 @@ async function applyUpstreamNodeBridge(
     let compactedMemoryInjection = '';
     if (trimmedTurns.length > 0) {
       try {
-        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, trimmedTurns);
+        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, trimmedTurns, taskId, eventLog);
         if (newMemory) {
           compactedMemoryInjection = '\n\n## 本节点压缩记忆（本轮裁剪后更新）\n\n' + newMemory.trim();
         }
@@ -2165,23 +2670,9 @@ const COMPLETION_RETRY_BASE_MS = 1000;
 const COMPLETION_RETRY_CAP_MS = 8000;
 
 /**
- * 工具循环思考降级（item 4）：首轮用用户选择深度定调（理解需求 + 规划），
- * 第 2 轮起的「执行轮」降一级——工具执行阶段模型只需基于工具结果决定下一步动作，
- * 深度推理已在首轮完成，继续 thinking_max/thinking 只会白烧 reasoning tokens、
- * 拖慢 TTFT 并抬高成本。强制收尾轮（输出最终正文）恢复用户选择深度，保证答案质量。
- * 注意：thinking_mode / reasoning_effort 是请求 body 参数，不参与 DeepSeek 前缀缓存键
- * （缓存按 messages + tools 前缀计算），降级不影响命中率——可对照 done 日志 hitRate 遥测验证。
+ * 工具循环思考降级（item 4）的降级表已收敛到 src/lib/thinking/policy.ts
+ * （executionDowngrade），策略层说明见该文件。
  */
-const DEEPSEEK_EXECUTION_THINKING_MODE: Record<string, string> = {
-  thinking_max: 'thinking',
-  thinking: 'non-thinking',
-  'non-thinking': 'non-thinking',
-};
-const REASONING_EFFORT_EXECUTION_DOWNGRADE: Record<string, string> = {
-  high: 'medium',
-  medium: 'low',
-  low: 'low',
-};
 
 function isRetryableCompletionError(e: unknown): boolean {
   if (typeof e === 'object' && e !== null) {
@@ -2378,6 +2869,70 @@ function toolDisplaySiteName(url?: string): string {
   }
 }
 
+/**
+ * K1 会话上下文（会话上下文收敛，K 系列第一步，零行为变化 refactor）：
+ * 把「每轮工具循环（r0-r19）及其子流程共享的请求级状态」从 ReadableStream.start()
+ * 内散落声明归组为一个局部对象字面量 kctx（见 start() 内 `const kctx: KernelContext`）。
+ *
+ * 收编范围：仅在 start() 闭包内声明、且被工具循环跨轮读写/共享的状态；
+ * 收敛只移动声明与读写点，不改任何执行逻辑 / SSE 载荷 / 事件 mark / 退出语义。
+ *
+ * 明确不在此接口内（保持原地，K1 未收敛）：
+ *  - module 级可变状态：chatStickyScenes / CacheGuard guard / pending 各容器（K2 LoopSession 迁移）；
+ *  - 请求通道对象：ReadableStream / controller / send / eventLog / taskId；
+ *  - 请求级只读配置：level / reasoningEffort / thinkingPolicyConfig / deepseekThinkingMode /
+ *    isDeepseekV4 / modelSupportsThinking（声明于 POST 作用域 2976-3013，跨 start() 只读引用，最小 diff）；
+ *  - 单轮派生 const：for 自增 round、roundThinkingMode / roundReasoningEffort / thinkingDowngraded /
+ *    downgradeDecision / isFinalRound / finalRoundInjection（每轮重新计算，非跨轮共享）；
+ *  - 结算期派生：hitRatio / hitTotal / ttftMs / taskDurationMs / tokensPerSec / finalCtx / outputFiles；
+ *  - 只读一次计算遥测：prefixSegments / prefixHash（首帧 context_meter 与 done 帧共用，值不变）。
+ */
+interface KernelContext {
+  /** 对话历史落账（结算语义：allToolCalls → conversationMessages → eventLog 三连顺序不变） */
+  conversationMessages: ChatMessage[];
+  /** 工具调用落账（含执行元数据，供去重 / 声明校验 / tool_summary / output_files 使用） */
+  allToolCalls: Array<{
+    toolName: string;
+    arguments: Record<string, unknown>;
+    result: string;
+    durationMs: number;
+    success: boolean;
+    phase?: 'pending' | 'running' | 'done' | 'error';
+    kind?: 'tool' | 'mcp' | 'skill';
+    systemChange?: boolean;
+    changeSummary?: string;
+    summary?: string;
+    /** 该工具执行时刻的页面 URL 指纹（浏览器工具去重感知页面变化用；非浏览器工具为 null） */
+    pageUrl?: string | null;
+  }>;
+  /** 浏览器工具去重用的「页面 URL 指纹」：browser_active_tab 刷新；页面跳转后变化 → 不误判重复调用 */
+  lastPageUrl: string | null;
+  /** search_capabilities / load_skill 中途激活场景后置 true → 下一轮请求前重建 loopToolDefs */
+  needRebuildTools: boolean;
+  /** 完成确认轮只允许一次：已追加过「任务是否真正完成」确认即置 true（防假完成） */
+  completionConfirmUsed: boolean;
+  /** 声明真实性校验纠偏次数计数（D-B：保持现状仅记录，不引行为变化） */
+  claimMismatchCorrections: number;
+  /** 停滞保护：连续无实质进展轮数（≥ STALL_LIMIT → 强制收尾轮） */
+  stallCount: number;
+  /** 强制收尾轮：置 true 后下一轮不带 tools，模型基于注入的收尾说明直接输出最终回答；lite 首轮即收尾 */
+  forceFinalRound: boolean;
+  /** OCR 重试预算门控：已触发后不再重复注入「停止重试」指令 */
+  ocrBudgetExceeded: boolean;
+  /** 工具循环思考降级遥测：执行轮降级计数（对照 done hitRate 判断 thinking 降级是否影响缓存命中） */
+  thinkingDowngradedRounds: number;
+  /** 模型调用总轮数（done 结算 rounds 字段 / TURN_END） */
+  totalRounds: number;
+  /** 跨轮累计本次任务真实 token 消耗（cacheHit/cacheMiss：DeepSeek 前缀缓存遥测 §4.4） */
+  taskUsage: { promptTokens: number; completionTokens: number; cacheHitTokens: number; cacheMissTokens: number; calls: number };
+  /** 整轮任务开始时刻（首轮模型调用之前；TTFT = firstTokenMs - taskStartMs） */
+  taskStartMs: number;
+  /** 首个 content/reasoning 块到达时刻 */
+  firstTokenMs: number | null;
+  /** 本轮开始前的 homework/ 目录快照（结束时比对出新产出，兜底输出卡片） */
+  homeworkSnapshot: Map<string, number> | null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as {
@@ -2419,6 +2974,7 @@ export async function POST(request: NextRequest) {
       lite,
       initialOutputFiles,
     } = body;
+    const initialUserInput = extractLastUserContent(messages);
     // Agent 配置（AGENT_PROFILES + 覆盖项）：决定工具画像、场景策略与专属 prompt（chat 通用 / coding 专项）。
     // 专项 agent 被禁用 → 回退 chat；自定义 prompt → 覆盖 baseSystemPrompt
     const profile = await resolveAgentProfile(identity);
@@ -2427,12 +2983,15 @@ export async function POST(request: NextRequest) {
 
     // 兜底解析：
     //  - providerModelId 形如 "provider:modelId" → 从已配置 providers 按供应商解析 apiKey/baseUrl
-    //  - 未显式指定 → 与前端 Auto/默认选路一致，用默认聊天模型（resolveTaskModel）
+    //  - 未显式指定 → P3-3b：先按请求 identity 查 agentModels 专属池（resolveAgentRoleModel），
+    //    再回退默认聊天模型（resolveTaskModel）——与前端 Auto/默认选路一致
     //  - 显式指定但供应商未配置 → 明确 400（不悄悄降级默认模型，避免用户以为选模型已生效）
     if (!apiKey || !baseUrl || !providerModelId) {
       const resolved = providerModelId
         ? await resolveProviderModel(String(providerModelId))
-        : await resolveTaskModel();
+        : ((await resolveAgentRoleModel(profile?.id ?? identity))
+            ?? (await resolveAutoTaskModel(messages))
+            ?? (await resolveTaskModel()));
       if (resolved) {
         apiKey = resolved.apiKey;
         baseUrl = resolved.baseUrl;
@@ -2445,6 +3004,14 @@ export async function POST(request: NextRequest) {
         );
       }
     }
+
+    // P3-3b2：SSE model 通知用的 `provider:modelId` 标签（供外部客户端与消息落盘用）。
+    // provider 类型按 apiKey 在已配置 providers 中反查；查不到（自定义 baseUrl 直配）则用裸 providerModelId。
+    const providersForModelTag = (await readSettingsFromFile().catch(() => null))?.providers ?? [];
+    const modelTagProvider = providersForModelTag.find((p) => p.apiKey === apiKey)?.type ?? '';
+    const modelTag = providerModelId
+      ? (modelTagProvider ? `${modelTagProvider}:${providerModelId}` : providerModelId)
+      : undefined;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return new Response(
@@ -2475,8 +3042,17 @@ export async function POST(request: NextRequest) {
 
     const thinkingEnabled = thinking ?? 'enabled';
 
+    // Phase 2 策略层抽取（默认行为一致）：思考档位决策开关读 settings.thinking，缺省两开关均开。
+    // 读取发生在思考决策前（settingsForTools 于 isCustom 分支内才加载，此处无法复用其作用域）
+    const thinkingSettings = await readSettingsFromFile();
+    const thinkingPolicyConfig: ThinkingPolicyConfig = {
+      downgradeOnExecution: thinkingSettings.thinking?.downgradeOnExecution !== false,
+      trivialPromptOff: thinkingSettings.thinking?.trivialPromptOff !== false,
+      injectThinkGuide: thinkingSettings.thinking?.injectThinkGuide !== false,
+    };
+
     // C1（deepseek-harness）：琐碎对话直接关 thinking，避免琐碎轮次白烧 30-300 reasoning tokens
-    const trivialPrompt = isTrivialPromptMessages(messages);
+    const trivialPrompt = isTrivialPrompt(messages);
 
     // 判断当前模型是否支持推理（用于决定是否传 reasoning_effort 参数）
     const isCustom = !!(apiKey && baseUrl && providerModelId);
@@ -2496,18 +3072,11 @@ export async function POST(request: NextRequest) {
       return !!providerModelId && /reason|r1|z1|think|k2/i.test(providerModelId);
     })();
 
-    // DeepSeek V4 使用 thinking_mode 参数（non-thinking/thinking/thinking_max），而非 reasoning_effort
-    const deepseekThinkingMode: string | null = (() => {
-      if (!isDeepseekV4) return null;
-      // C1：琐碎对话直接关 thinking（用户显式选择高思考深度时尊重用户，不降级）
-      if (trivialPrompt && level !== 'high') return 'non-thinking';
-      switch (level) {
-        case 'low':
-        case 'medium': return 'thinking';
-        case 'high': return 'thinking_max';
-        default: return 'thinking';
-      }
-    })();
+    // DeepSeek V4 使用 thinking_mode 参数（non-thinking/thinking/thinking_max），而非 reasoning_effort。
+    // Phase 2 策略层抽取：档位映射收敛到 policy.v4ThinkingModeForLevel（C1 琐碎关思考 + low/medium→thinking、high→thinking_max）
+    const deepseekThinkingMode: string | null = isDeepseekV4
+      ? v4ThinkingModeForLevel(level, thinkingPolicyConfig, trivialPrompt)
+      : null;
 
     // 上游节点上下文已在前端注入到系统提示中，后端直接使用
     const messagesWithContext = messages;
@@ -2533,12 +3102,17 @@ export async function POST(request: NextRequest) {
       console.warn('PDF Bridge 执行失败:', e);
     }
 
+    // P4c-1 压缩事件化：eventLog/taskId 提前创建，使 R-14-C 压缩事件（Node Bridge 内发生）与
+    // SSE 事件写入同一任务日志（默认行为不变：无压缩时日志仍以 TURN_START 开头）。
+    const taskId = genTaskId();
+    const eventLog = new EventLog();
+
     // Node Bridge（v3）：注入上游成果块 + 祖先存在性声明 + 托管模型自动派发实习生
     let messagesWithNodeBridge = messagesWithPdf;
     try {
       const project = await resolveNodeProject(nodeId, projectId);
       if (project) {
-        messagesWithNodeBridge = await applyUpstreamNodeBridge(messagesWithPdf, nodeId, project, !isCustom, requestContextWindow);
+        messagesWithNodeBridge = await applyUpstreamNodeBridge(messagesWithPdf, nodeId, project, !isCustom, requestContextWindow, taskId, eventLog);
       }
     } catch (e) {
       // R-14: 注入超长 → 拒绝执行并提示拆分，不静默截断
@@ -2579,7 +3153,12 @@ export async function POST(request: NextRequest) {
     const { messages: messagesWithSkill, matchedSkillNames, skillDetails } = injectSkillContext(messagesWithNodeBridge, mergedForcedSkills, profile.id);
     // 基础系统提示按 Agent 隔离：专项 Agent（coding）用自己的专属 base，不背通用 chat 向内容
     const agentBasePrompt = profile.baseSystemPrompt ?? BASE_SYSTEM_PROMPT;
-    let finalMessages = injectThinkingPrompt(messagesWithSkill, effectiveLevel, modelSupportsThinking, agentBasePrompt);
+    // Phase 2b（全面 DSH 化）：DeepSeek V4 不再注入思考引导（纯 API thinking_mode 驱动，原生 reasoning），
+    // 非 V4 推理模型按 settings.thinking.injectThinkGuide 决定是否注入 <think> 标签引导（默认注入）
+    const shouldInjectThink = shouldInjectThinkPrompt(isDeepseekV4, modelSupportsThinking, thinkingPolicyConfig);
+    let finalMessages = shouldInjectThink
+      ? injectThinkingPrompt(messagesWithSkill, effectiveLevel, modelSupportsThinking, agentBasePrompt)
+      : messagesWithSkill;
 
     // 将项目路径 + 授权目录注入 prepend 到当前轮 user 消息（缓存前缀稳定化 C8）：
     // 属「低频变化」动态内容，不进 system（缓存头），system 只含字节稳定的 BASE_SYSTEM_PROMPT
@@ -2744,7 +3323,7 @@ export async function POST(request: NextRequest) {
               `graph* 系列动作用于小程序对接主程序画布（如"节点地图"、"画布操控面板"、"节点导航器"等需求）。规则：\n` +
               `  1. 小程序核心功能涉及画布操作/浏览时，主动申请授权，不要等用户反复要求；\n` +
               `  2. 使用前调用 BobWork.request('graphRequestPermission', { level: 'read'|'control' }) 申请授权：\n` +
-              `     - read = 只读（graphGetSnapshot / graphGetViewport）；control = 可读可操作（展开收起、移动、缩放、选中节点）；\n` +
+              `     - read = 只读（graphGetSnapshot）；control = 可读可操作（展开、移动、选中节点）；\n` +
               `     - 宿主会弹出确认框由用户授予，用户拒绝或未授权时返回 level: 'none'；\n` +
               `  3. 未获授权就调用其他 graph* 动作会失败（Promise reject），代码应 catch 并给出友好提示（如"未获得画布访问权限，请先授权"），不得用 alert；\n` +
               `  4. 可先用 BobWork.request('graphGetPermission', {}) 查询当前授权级别，避免无谓申请。\n` +
@@ -2962,11 +3541,9 @@ export async function POST(request: NextRequest) {
 
       let loopToolDefs = toolDefs;
 
-      // search_capabilities 中途激活场景后置 true → 下一轮请求前重建 loopToolDefs（注入新工具）
-      let needRebuildTools = false;
-
       // 缓存前缀稳定化（P4 + 来源分组）：排序逻辑见 buildAndSortToolDefs（模块级函数，
       // search_capabilities 中途激活场景后重建 loopToolDefs 时复用同一确定性排序）。
+      // （K1：场景中途激活标志 needRebuildTools 已收敛进 kctx，见 start() 内 const kctx.needRebuildTools）
       loopToolDefs = buildAndSortToolDefs(toolDefs, settingsForTools.mcpServers || []);
 
       const isMoonshotThinking = !!baseUrl && baseUrl.includes('moonshot') && !!providerModelId && /kimi-k\d/i.test(providerModelId);
@@ -2974,14 +3551,20 @@ export async function POST(request: NextRequest) {
 
       const readableStream = new ReadableStream({
         async start(controller) {
-          // P0 轨迹事件日志：本次任务唯一 taskId（用于日志文件命名）
-          const taskId = genTaskId();
-          const eventLog = new EventLog();
+          // P4c-1 压缩事件化：taskId/eventLog 已提前创建（Node Bridge 压缩事件需同日志），此处直接复用
           const send = (data: Record<string, unknown>) => {
             // 同步记录事件（append-only 日志，流式 reasoning/content 块被 EventLog 跳过）
             eventLog.record(data);
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+            // abort/断开后 controller 已关闭：任何迟到的帧（挂起心跳/超时 resolve）不得再 enqueue，
+            // 否则抛 ERR_INVALID_STATE → uncaughtException（P4a 挂起心跳回归点，已实测复现）
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+            } catch {
+              /* stream closed —— 静默忽略迟到帧 */
+            }
           };
+          eventLog.mark(CORE_EVENT.TURN_START, taskId, { nodeId, identity, model: providerModelId || modelId || '', userInput: initialUserInput ?? '' });
+          eventLog.mark(CORE_EVENT.USER_MESSAGE, taskId, { role: 'user', content: initialUserInput ?? '' });
 
           try {
             // === ② Skills / MCP 概览提前推送：SSE 第 1 条就发，不让用户等到整轮结束 ===
@@ -3048,25 +3631,48 @@ export async function POST(request: NextRequest) {
             }
 
             // 工具调用循环
-            const conversationMessages: ChatMessage[] = [...effectiveMessages];
-            const allToolCalls: Array<{
-              toolName: string;
-              arguments: Record<string, unknown>;
-              result: string;
-              durationMs: number;
-              success: boolean;
-              phase?: 'pending' | 'running' | 'done' | 'error';
-              kind?: 'tool' | 'mcp' | 'skill';
-              systemChange?: boolean;
-              changeSummary?: string;
-              summary?: string;
-              /** 该工具执行时刻的页面 URL 指纹（浏览器工具去重感知页面变化用；非浏览器工具为 null） */
-              pageUrl?: string | null;
-            }> = [];
+            // ---- K1 会话上下文收敛：把「每轮循环及其子流程共享的请求级状态」归组为 kctx ----
+            // interface KernelContext 见模块级定义（POST 之前）；收编范围与未收编项见该 interface 注释。
+            const kctx: KernelContext = {
+              conversationMessages: [...effectiveMessages],
+              allToolCalls: [],
+              // 浏览器工具去重页面指纹：browser_active_tab 刷新；页面跳转后变化 → 不误判重复调用
+              lastPageUrl: null,
+              // search_capabilities / load_skill 中途激活场景后置 true → 下一轮请求前重建 loopToolDefs
+              // （takeoverServices.requestToolRebuild 触发；重建后场景已 sticky，后续轮次字节稳定）
+              needRebuildTools: false,
+              // 完成确认轮只允许一次：模型本轮未调用任何工具时，追加一轮「任务是否真正完成」确认，
+              // 防止模型过早自我判定完成（假完成）导致任务不完整；再次无工具调用才接受收尾
+              completionConfirmUsed: false,
+              // 声明真实性校验纠偏次数计数（防无限纠偏循环；D-B：保持现状仅记录）
+              claimMismatchCorrections: 0,
+              // 停滞保护：连续 STALL_LIMIT 轮无实质进展 → 判定死循环，进入强制收尾轮（检测在循环末尾）
+              stallCount: 0,
+              // 强制收尾轮：置 true 后下一轮不带 tools，让模型基于注入的收尾说明输出最终回答；
+              // lite 模式（侧边栏等外部轻量问答）：首轮即收尾、不带工具，模型直接回答，
+              // 避免工具循环反复调用 browser_* 等多轮生成重复内容
+              forceFinalRound: !!lite,
+              // OCR 重试预算门控标志：已触发后不再重复注入「停止重试」指令
+              ocrBudgetExceeded: false,
+              // 工具循环思考降级遥测（item 4 验证）：执行轮降级轮数（对照 done 日志 hitRate）
+              thinkingDowngradedRounds: 0,
+              // 模型调用总轮数（dsh 完成轮次统计条 / done rounds 字段）
+              totalRounds: 0,
+              // 跨轮累计本次任务真实 token 消耗（所有模型调用轮次之和）。
+              // cacheHitTokens / cacheMissTokens：DeepSeek 前缀缓存遥测（§4.4 —— 命中部分按缓存价计费）
+              taskUsage: { promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0, calls: 0 },
+              // ---- 轮次统计（dsh 完成轮次统计条）：TTFT / 总耗时 / 吞吐 ----
+              // taskStartMs：整轮任务开始（首轮模型调用之前）；firstTokenMs：首个 content/reasoning 块到达时刻
+              taskStartMs: Date.now(),
+              firstTokenMs: null,
+              // 快照本轮开始前的 homework/ 目录，结束时比对出新产出（兜底输出卡片，
+              // 覆盖 run_command / execute_script 等未在结果中带路径标记的写入方式）
+              homeworkSnapshot: projectRoot ? listHomeworkFiles(projectRoot) : null,
+            };
 
-            // 浏览器工具去重用的「页面 URL 指纹」：每次 browser 工具成功执行后经 active_tab 刷新，
-            // 页面跳转后 lastPageUrl 变化 → 相同参数的调用不再被误判为「重复调用」
-            let lastPageUrl: string | null = null;
+            // 浏览器工具去重用的「页面 URL 指纹」（状态本体见 kctx.lastPageUrl）：
+            // 每次 browser 工具成功执行后经 active_tab 刷新；页面跳转后 kctx.lastPageUrl 变化
+            // → 相同参数的调用不再被误判为「重复调用」
             const fetchCurrentPageUrl = async (): Promise<string | null> => {
               try {
                 const raw = await mcpManager.callTool('mcp__bob-browser-mcp__browser_active_tab', {});
@@ -3077,38 +3683,10 @@ export async function POST(request: NextRequest) {
               }
             };
 
-            // 快照本轮开始前的 homework/ 目录，结束时比对出新产出（兜底输出卡片，
-            // 覆盖 run_command / execute_script 等未在结果中带路径标记的写入方式）
-            const homeworkSnapshot = projectRoot ? listHomeworkFiles(projectRoot) : null;
-
-            // 工具循环不设轮数上限：任务在推进就继续，直到完成或停滞判定收尾。
-            // 完成确认轮只允许一次：模型本轮未调用任何工具时，追加一轮「任务是否真正完成」确认，
-            // 防止模型过早自我判定完成（假完成）导致任务不完整；再次无工具调用才接受收尾
-            let completionConfirmUsed = false;
-            // 计划状态追踪：是否已调用 todo_write 建立执行轨
-            let hasPlannedTask = false;
-            // 声明真实性校验纠偏次数计数（防无限纠偏循环）
-            let claimMismatchCorrections = 0;
-            // 停滞保护：连续 STALL_LIMIT 轮无实质进展 → 判定死循环，进入强制收尾轮（检测逻辑在循环末尾）
-            let stallCount = 0;
-            // 强制收尾轮：置 true 后，下一轮不带 tools，让模型基于注入的收尾说明输出最终回答
-            // lite 模式（侧边栏等外部轻量问答）：首轮即收尾、不带工具，模型直接回答，
-            // 避免工具循环反复调用 browser_* 等多轮生成重复内容
-            let forceFinalRound = !!lite;
-            // 跨轮累计本次任务真实 token 消耗（所有模型调用轮次之和）。
-            // cacheHitTokens / cacheMissTokens：DeepSeek 前缀缓存遥测（§4.4 —— 命中部分按缓存价计费，命中率是成本核心指标）
-            const taskUsage = { promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0, calls: 0 };
-            // 工具循环思考降级遥测（item 4 验证）：记录执行轮降级轮数与总轮数，
-            // 对照 done 日志 hitRate 判断 thinking_mode 降级是否影响前缀缓存命中
-            let thinkingDowngradedRounds = 0;
-            let totalRounds = 0;
-            // OCR 重试预算门控标志：已触发后不再重复注入提示
-            let ocrBudgetExceeded = false;
-
-            // ---- 轮次统计（dsh 完成轮次统计条）：TTFT / 总耗时 / 吞吐 ----
-            // taskStartMs：整轮任务开始（首轮模型调用之前）；firstTokenMs：首个 content/reasoning 块到达时刻
-            const taskStartMs = Date.now();
-            let firstTokenMs: number | null = null;
+            //（K1：完成确认 kctx.completionConfirmUsed / 纠偏计数 kctx.claimMismatchCorrections / 停滞 kctx.stallCount /
+            //  强制收尾 kctx.forceFinalRound / OCR 门控 kctx.ocrBudgetExceeded / 降级遥测 kctx.thinkingDowngradedRounds /
+            //  轮计数 kctx.totalRounds / 用量 kctx.taskUsage / kctx.taskStartMs / kctx.firstTokenMs —— 均已收敛进上方 kctx，
+            //  原散落声明与注释随迁至 kctx 字面量内，见 interface KernelContext）
 
             // ---- 上下文占用 Meter（dsh ContextMeter）----
             // 按 系统/工具/对话 分组估算 + 模型 contextWindow 容量，SSE 推送给前端 composer 圆环。
@@ -3154,7 +3732,7 @@ export async function POST(request: NextRequest) {
             const prefixHash = prefixSegments.all;
 
             const sendContextMeter = () => {
-              const ctx = estimateContextBreakdown(conversationMessages, loopToolDefs);
+              const ctx = estimateContextBreakdown(kctx.conversationMessages, loopToolDefs);
               send({
                 context_meter: {
                   system: ctx.systemTokens,
@@ -3172,17 +3750,35 @@ export async function POST(request: NextRequest) {
             };
             sendContextMeter(); // 首轮前下发（显示当前上下文占用，供 composer 圆环预览）
 
+            // P4a 三段化骨架：宿主注入给接管管线的最小服务面（tool-pipeline.ts）——
+            // 场景激活副作用（activeScenes.add / sticky / kctx.needRebuildTools）统一经此执行。
+            // addStickyScene 与原分支语义一致：仅 nodeId 存在时落 chatStickyScenes（跨请求保持），
+            // 无 nodeId 的会话不持久化、仅当轮生效。
+            const takeoverServices: TakeoverServices = {
+              activeScenes,
+              addStickyScene: (scene) => {
+                if (nodeId) {
+                  const cur = chatStickyScenes.get(nodeId) ?? new Set<ToolScene>();
+                  cur.add(scene);
+                  chatStickyScenes.set(nodeId, cur);
+                }
+              },
+              requestToolRebuild: () => {
+                kctx.needRebuildTools = true;
+              },
+            };
+
             for (let round = 0; ; round++) {
               // 场景中途激活（search_capabilities / load_skill 法律技能）→ 用最新 activeScenes
               // 重算 toolDefs 再重建 loopToolDefs，下一轮模型请求携带新工具集；
               // 重建后本会话场景已 sticky，后续轮次字节稳定。
-              if (needRebuildTools) {
+              if (kctx.needRebuildTools) {
                 toolDefs = computeActiveToolDefs();
                 loopToolDefs = buildAndSortToolDefs(toolDefs, settingsForTools.mcpServers || []);
-                needRebuildTools = false;
+                kctx.needRebuildTools = false;
                 console.log(`[chat] 场景中途激活后重建工具集: n=${loopToolDefs.length}`);
               }
-              const isFinalRound = forceFinalRound;
+              const isFinalRound = kctx.forceFinalRound;
               // lite 模式不注入「基于以上结果」的收尾指令（首轮即是最终回答，无前置工具结果）
               const finalRoundInjection = isFinalRound && !lite;
               // item 6：max_tokens 分级——high/thinking_max 深度放宽到 32k（高思考深度下
@@ -3199,13 +3795,13 @@ export async function POST(request: NextRequest) {
                 model: providerModelId,
                 messages: finalRoundInjection
                   ? [
-                      ...conversationMessages,
+                      ...kctx.conversationMessages,
                       {
                         role: 'user' as const,
                         content: '请基于以上结果给出最终回答，不要再调用任何工具。如果仍有未完成的步骤，请在回答末尾用【未完成项】明确列出，供用户决定是否继续。',
                       },
                     ]
-                  : conversationMessages,
+                  : kctx.conversationMessages,
                 stream: true,
                 temperature: finalTemp,
                 // 请求流式响应随附 usage 汇总块，末 chunk.usage 即本轮真实 token 计数
@@ -3219,7 +3815,7 @@ export async function POST(request: NextRequest) {
               // 每轮都携带 tools（缓存前缀稳定化）：tools 数组属于请求前缀的一部分，
               // 若中途轮次去掉 tools（如原收尾轮逻辑），该轮前缀与循环内其余轮不同 →
               // 整个任务历史（可能数十万 token）在该轮全部按缓存未命中全价重算。
-              // 带上 tools 后模型若仍调用工具会继续执行循环（见下 forceFinalRound 解除），
+              // 带上 tools 后模型若仍调用工具会继续执行循环（见下 kctx.forceFinalRound 解除），
               // 无工具调用即正常收尾，行为与原先一致。
               // 例外：lite 模式（侧边栏等外部轻量问答）保持首轮不带 tools（本来就是
               // 一次性独立问答、无工具循环，携带 tools 反而诱导模型反复调用生成重复内容）。
@@ -3229,21 +3825,20 @@ export async function POST(request: NextRequest) {
 
               // 工具循环思考降级（item 4）：执行轮（round>0 且非收尾轮）降一级，
               // 收尾轮/首轮保持用户选择深度——深度推理放在规划轮，执行轮只做决策，省 reasoning tokens
+              // Phase 2 策略层抽取：降级决策收敛到 policy.executionDowngrade（默认开，行为与现网一致）
+              const downgradeDecision = executionDowngrade(round, isFinalRound, level, isDeepseekV4, thinkingPolicyConfig);
               const roundThinkingMode = isDeepseekV4 && deepseekThinkingMode
-                ? (!isFinalRound && round > 0
-                    ? DEEPSEEK_EXECUTION_THINKING_MODE[deepseekThinkingMode] ?? deepseekThinkingMode
-                    : deepseekThinkingMode)
+                ? (downgradeDecision?.thinkingMode ?? deepseekThinkingMode)
                 : null;
               const roundReasoningEffort = !isDeepseekV4 && reasoningEffort && modelSupportsThinking
-                ? (!isFinalRound && round > 0
-                    ? REASONING_EFFORT_EXECUTION_DOWNGRADE[reasoningEffort] ?? reasoningEffort
-                    : reasoningEffort)
+                ? (downgradeDecision?.reasoningEffort ?? reasoningEffort)
                 : reasoningEffort;
               const thinkingDowngraded = round > 0 && !isFinalRound &&
                 ((isDeepseekV4 && roundThinkingMode !== deepseekThinkingMode) ||
                  (!isDeepseekV4 && roundReasoningEffort !== reasoningEffort));
-              totalRounds++;
-              if (thinkingDowngraded) thinkingDowngradedRounds++;
+              eventLog.mark(CORE_EVENT.STEP_START, `${taskId}:r${round}`, { round });
+              kctx.totalRounds++;
+              if (thinkingDowngraded) kctx.thinkingDowngradedRounds++;
 
               if (isDeepseekV4 && roundThinkingMode) {
                 requestBody.thinking_mode = roundThinkingMode;
@@ -3356,24 +3951,24 @@ export async function POST(request: NextRequest) {
               for await (const chunk of completion) {
                 // usage 汇总块（include_usage 时，末 chunk 无 choices 仅带 usage）需在 delta 判空之前采集
                 if (chunk.usage) {
-                  if (typeof chunk.usage.prompt_tokens === 'number') taskUsage.promptTokens += chunk.usage.prompt_tokens;
-                  if (typeof chunk.usage.completion_tokens === 'number') taskUsage.completionTokens += chunk.usage.completion_tokens;
+                  if (typeof chunk.usage.prompt_tokens === 'number') kctx.taskUsage.promptTokens += chunk.usage.prompt_tokens;
+                  if (typeof chunk.usage.completion_tokens === 'number') kctx.taskUsage.completionTokens += chunk.usage.completion_tokens;
                   // 缓存遥测：DeepSeek 与 OpenAI 两种字段命名都可能出现（§4.3 字段名桥），
                   // 取两者较大值并互相兜底；命中部分按缓存价（约 1/50）计费，miss 部分按原价。
                   const hit = Math.max(
                     typeof chunk.usage.prompt_cache_hit_tokens === 'number' ? chunk.usage.prompt_cache_hit_tokens : 0,
                     typeof chunk.usage.prompt_tokens_details?.cached_tokens === 'number' ? chunk.usage.prompt_tokens_details.cached_tokens : 0,
                   );
-                  if (hit > 0) taskUsage.cacheHitTokens += hit;
-                  if (typeof chunk.usage.prompt_cache_miss_tokens === 'number') taskUsage.cacheMissTokens += chunk.usage.prompt_cache_miss_tokens;
-                  taskUsage.calls += 1;
+                  if (hit > 0) kctx.taskUsage.cacheHitTokens += hit;
+                  if (typeof chunk.usage.prompt_cache_miss_tokens === 'number') kctx.taskUsage.cacheMissTokens += chunk.usage.prompt_cache_miss_tokens;
+                  kctx.taskUsage.calls += 1;
                 }
                 const delta = chunk.choices?.[0]?.delta;
                 if (!delta) continue;
 
                 // TTFT（dsh 完成轮次统计）：首个 content/reasoning 块到达时刻（首轮模型响应延迟）
-                if (firstTokenMs === null && (delta.content || delta.reasoning_content)) {
-                  firstTokenMs = Date.now();
+                if (kctx.firstTokenMs === null && (delta.content || delta.reasoning_content)) {
+                  kctx.firstTokenMs = Date.now();
                 }
 
                 // 输出触顶检测：finish_reason=length 说明本次生成被 max_tokens 截断（内容不完整）
@@ -3431,23 +4026,24 @@ export async function POST(request: NextRequest) {
               // 检查是否有工具调用
               if (toolCallBuf.size === 0) {
                 // 强制收尾轮（带 tools 但模型无工具调用，仅输出文本）已完成 → 结束循环
-                if (forceFinalRound) break;
+                if (kctx.forceFinalRound) eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
+                if (kctx.forceFinalRound) break;
 
                 // ── 声明真实性校验（Claim Verification）──
-                // 模型本轮无工具调用但正文声称"已写入/已生成"某文件 → 反查 allToolCalls 确认是否真正执行。
+                // 模型本轮无工具调用但正文声称"已写入/已生成"某文件 → 反查 kctx.allToolCalls 确认是否真正执行。
                 // 仅做告警（send claim_mismatch），不再 push user 消息强制重跑——
                 //   强制重跑必然触发第二轮生成（用户看到"AI 回答两遍"），
                 //   改为只把告警透传给前端，由用户决定是否继续追问，彻底消除双重回答 bug。
                 if (
-                  allToolCalls.length > 0 &&
+                  kctx.allToolCalls.length > 0 &&
                   contentText.trim()
                 ) {
                   const thinkPrefix = reasoningText ? `<think>${reasoningText}</think>\n` : '';
                   const fullAssistantText = thinkPrefix + contentText;
-                  const { mismatches } = verifyClaimsAgainstToolRecords(fullAssistantText, allToolCalls);
-                  const pdfCheck = verifyPdfReadCompleteness(fullAssistantText, allToolCalls);
+                  const { mismatches } = verifyClaimsAgainstToolRecords(fullAssistantText, kctx.allToolCalls);
+                  const pdfCheck = verifyPdfReadCompleteness(fullAssistantText, kctx.allToolCalls);
                   // 第二类死角：调了工具但没读笔记就"声称引用笔记"——在调过工具(本分支前提)的收尾回答里检测
-                  const noteCheck = profile.id === 'note' ? verifyNoteReadClaims(fullAssistantText, allToolCalls) : { mismatches: [] as string[], correction: null };
+                  const noteCheck = profile.id === 'note' ? verifyNoteReadClaims(fullAssistantText, kctx.allToolCalls) : { mismatches: [] as string[], correction: null };
                   const allMismatches =
                     mismatches.length > 0
                       ? mismatches
@@ -3458,7 +4054,7 @@ export async function POST(request: NextRequest) {
                     send({
                       claim_mismatch: {
                         mismatches: allMismatches,
-                        correctionCount: claimMismatchCorrections,
+                        correctionCount: kctx.claimMismatchCorrections,
                         suppressed: true, // 明确告知前端：已识别但未强制重跑
                       },
                       nodeId,
@@ -3467,70 +4063,30 @@ export async function POST(request: NextRequest) {
                 }
 
                 // 续写流识别：末尾 user 消息是「补充信息继续原任务」（前端续写模式注入）。
-                // 续写请求的 allToolCalls 从空开始，模型收到补充信息后可能直接给结论不再调工具，
+                // 续写请求的 kctx.allToolCalls 从空开始，模型收到补充信息后可能直接给结论不再调工具，
                 // 若不识别会被当作「纯问答」直接收尾 → 任务未完成也停止（补充信息后任务被自动终止的根因）。
-                const lastUserMsg = [...conversationMessages].reverse().find((m) => m.role === 'user');
+                const lastUserMsg = [...kctx.conversationMessages].reverse().find((m) => m.role === 'user');
                 const isContinuationFlow =
                   typeof lastUserMsg?.content === 'string' &&
                   lastUserMsg.content.startsWith('用户已根据你的提问补充了以下信息');
-                // 强制 finish_task & todo_write 模式：
-                // 1. 检查本轮是否调用了 finish_task 工具
-                const hasFinishTaskCall = Array.from(toolCallBuf.values()).some(
-                  (buf) => buf.name === 'finish_task',
-                );
-
-                if (hasFinishTaskCall) {
-                  // 模型主动宣告完成，立即结束任务
-                  break;
-                }
-
-                // 2. 检查本轮是否调用了 todo_write 工具
-                const hasTodoWriteCall = Array.from(toolCallBuf.values()).some(
-                  (buf) => buf.name === 'todo_write',
-                );
-
-                if (hasTodoWriteCall) {
-                  // 模型已提交执行轨，标记状态，继续执行后续步骤
-                  hasPlannedTask = true;
-                }
-
-                // 3. 检查是否需要强制建轨（首轮多步任务未建 todo 轨）
-                // 触发条件：模型在首次尝试执行时调用了工具（表明是多步任务），但未先建轨
-                // 仅当模型真正调用了工具时才触发，避免误伤简单问答（纯文本回答）
-                const hasAnyToolCallsThisRound = toolCallBuf.size > 0;
-                const isFirstRoundWithoutPlan =
-                  allToolCalls.length === 0 && // 从未执行过任何工具
-                  !isContinuationFlow &&       // 不是续写流
-                  !hasPlannedTask &&           // 尚未建轨
-                  hasAnyToolCallsThisRound;    // 模型本轮调用了工具（表明是多步任务）
-
-                if (isFirstRoundWithoutPlan) {
-                  // 强制要求建轨：注入追问，要求模型先调用 todo_write
-                  conversationMessages.push({
-                    role: 'user',
-                    content:
-                      '检测到这是一个可能需要多步操作的任务。为了确保任务有序执行并向你展示实时进度，请你先调用 todo_write 工具建立步骤轨（goal + 全部步骤，status=pending），然后在每个步骤边界（开始/完成/失败）用 todo_write 提交最新状态。\n' +
-                      '如果这是一个简单的、单步即可完成的问答任务，请直接回答（无需调用 todo_write）。',
-                  });
-                  send({ completion_check: true, nodeId });
-                  continue;
-                }
-
+                //（P4 盘点清理：原 finish_task / todo_write / isFirstRoundWithoutPlan 死分支——
+                //  恒位于 toolCallBuf.size===0 内不可达，见 DSH 内核接口面盘点 §1.3；行为不变）
                 // 4. 模型本轮已输出正文（最终答案）且无工具调用 → 直接视为完成
                 // 正文本身是交付物，不需要再通过 finish_task 确认；防止在最终答案后追加
                 // "⏳ Completion check" 提示并诱导模型生成第二遍答案
                 // （去双轨：不再剥离 process_narration，正文全文直出，交付物不再被误吞）
                 if (contentText.trim()) {
+                  eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
                   break;
                 }
 
                 // 5. 检查是否处于"假完成"状态（未调用 finish_task 且无其他工具调用）
-                // 如果之前执行过工具（allToolCalls > 0）或是续写流，但本轮没有产生新的工具调用（且不是 finish_task）
-                if ((allToolCalls.length > 0 || isContinuationFlow) && !hasAnyToolCallsThisRound) {
-                  if (!completionConfirmUsed) {
+                // 如果之前执行过工具（kctx.allToolCalls > 0）或是续写流，但本轮没有产生新的工具调用（且不是 finish_task）
+                if (kctx.allToolCalls.length > 0 || isContinuationFlow) {
+                  if (!kctx.completionConfirmUsed) {
                     // 第一次追问：强制要求模型要么继续调用工具，要么调用 finish_task
-                    completionConfirmUsed = true;
-                    conversationMessages.push({
+                    kctx.completionConfirmUsed = true;
+                    kctx.conversationMessages.push({
                       role: 'user',
                       content:
                         '本轮你没有调用任何工具，也没有调用 finish_task 来结束任务。请检查：\n' +
@@ -3542,19 +4098,20 @@ export async function POST(request: NextRequest) {
                   } else {
                     // 第二次仍无工具调用，视为真正的完成（或者模型放弃了），强制收尾
                     console.warn('[chat] 模型连续两次未调用工具或 finish_task，强制结束任务');
+                    eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
                     break;
                   }
                 }
 
                 // 6. 纯问答（从未调用工具且非续写流，且本轮也无工具调用）→ 接受完成，收尾
-                if (!hasAnyToolCallsThisRound && allToolCalls.length === 0 && !isContinuationFlow) {
+                if (kctx.allToolCalls.length === 0 && !isContinuationFlow) {
                   // ── 笔记节点防幻觉兜底（死角修复）：Kar(note) 全程未读任何笔记就给出断言性回答 ──
                   // 触发条件：note 身份 + 本会话从未调用 read_notebook/read_note + 正文非空且非寒暄。
                   // 仅告警（复用 claim_mismatch 通道透传前端），不强制重跑，避免"回答两遍"。
                   if (
                     profile.id === 'note' &&
                     contentText.trim().length > 20 &&
-                    !allToolCalls.some(
+                    !kctx.allToolCalls.some(
                       (t) => t.toolName === 'read_notebook' || t.toolName === 'read_note' || t.toolName === 'read_raw_inbox',
                     )
                   ) {
@@ -3564,12 +4121,13 @@ export async function POST(request: NextRequest) {
                         mismatches: [
                           '⚠️ 本轮回答未读取任何笔记（read_notebook / read_note）即给出较长结论。若内容涉及个人知识库，请先检索确认；若确无相关笔记或基于常识作答，请在回答中说明依据。',
                         ],
-                        correctionCount: claimMismatchCorrections,
+                        correctionCount: kctx.claimMismatchCorrections,
                         suppressed: true,
                       },
                       nodeId,
                     });
                   }
+                  eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
                   break;
                 }
                 
@@ -3580,7 +4138,7 @@ export async function POST(request: NextRequest) {
               // 本轮产生了工具调用 → 强制收尾轮解除：模型仍在执行任务（任务未完成），
               // 下一轮回到正常循环，避免重复注入「请基于以上结果给出最终回答」的收尾指令
               // （该指令只应出现一次；收尾轮已带 tools，前缀保持稳定）。
-              if (forceFinalRound) forceFinalRound = false;
+              if (kctx.forceFinalRound) kctx.forceFinalRound = false;
 
               // 构建 assistant 消息（含 tool_calls）
               const parsedToolCalls = Array.from(toolCallBuf.entries())
@@ -3600,7 +4158,7 @@ export async function POST(request: NextRequest) {
               // "assistant message must not be empty" 校验错误（OpenAI 兼容格式允许省略 content）
               const thinkPrefix = reasoningText ? `<think>${reasoningText}</think>\n` : '';
               const finalContent = thinkPrefix + contentText;
-              conversationMessages.push({
+              kctx.conversationMessages.push({
                 role: 'assistant',
                 ...(finalContent ? { content: finalContent } : {}),
                 tool_calls: parsedToolCalls,
@@ -3610,13 +4168,14 @@ export async function POST(request: NextRequest) {
                 // 其他厂商模型忽略此字段，行为不变。
                 ...(isDeepseekV4 && reasoningText ? { reasoning_content: reasoningText } : {}),
               });
+              eventLog.mark(CORE_EVENT.ASSISTANT_ATTEMPT, `${taskId}:r${round}`, { round, role: 'assistant', content: finalContent || '', reasoning: isDeepseekV4 && reasoningText ? reasoningText : undefined, toolCalls: parsedToolCalls.map((tc: { id?: string; function?: { name?: string; arguments?: string } }) => ({ id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments })) });
               if (isDeepseekV4 && reasoningText) {
                 // 前缀缓存可观测性：记录本轮 reasoning 回传长度，便于排查 history 前缀漂移
                 console.debug(`[前缀缓存] 第${round + 1}轮 reasoning_content 回传 ${reasoningText.length} 字符（字节直传，禁止改写）`);
               }
 
               // 执行每个工具调用（跳过重复调用）
-              const roundStartToolCount = allToolCalls.length;
+              const roundStartToolCount = kctx.allToolCalls.length;
               for (const tc of parsedToolCalls) {
                 const toolName = tc.function.name;
                 // P0 轨迹：为本次工具调用生成稳定 spanId + 真实开始时间戳，
@@ -3645,7 +4204,8 @@ export async function POST(request: NextRequest) {
                 if (parsedArgs === null) {
                   // 参数既无法解析也无法修复 → 跳过执行（避免空参误执行），注入修复指令让模型重试
                   const errMsg = `工具调用参数 JSON 解析失败（可能被输出截断），已跳过执行。原始参数: ${tc.function.arguments.slice(0, 200)}。请重新调用该工具，确保 arguments 为完整合法的 JSON。`;
-                  conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
+                  kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
+                  eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: errMsg, name: toolName });
                   send({ tool_call: { name: toolName, arguments: {}, phase: 'error', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose }, nodeId });
                   send({ tool_result: { name: toolName, result: errMsg, durationMs: 0, success: false, phase: 'error', spanId: toolSpanId, startAt: toolStartAt, endAt: Date.now() }, nodeId });
                   continue;
@@ -3656,15 +4216,15 @@ export async function POST(request: NextRequest) {
                 }
 
                 // 检查是否重复调用同一工具+相同参数
-                // 浏览器工具额外感知页面状态：页面已跳转（lastPageUrl 变化）→ 参数相同但结果不同，不视为重复
-                let skipDuplicate = isDuplicateCall(toolName, parsedArgs, allToolCalls);
-                if (skipDuplicate && isPageStateTool(toolName) && lastPageUrl) {
+                // 浏览器工具额外感知页面状态：页面已跳转（kctx.lastPageUrl 变化）→ 参数相同但结果不同，不视为重复
+                let skipDuplicate = isDuplicateCall(toolName, parsedArgs, kctx.allToolCalls);
+                if (skipDuplicate && isPageStateTool(toolName) && kctx.lastPageUrl) {
                   const argKey = JSON.stringify(parsedArgs);
-                  for (let i = allToolCalls.length - 1; i >= 0; i--) {
-                    const h = allToolCalls[i];
+                  for (let i = kctx.allToolCalls.length - 1; i >= 0; i--) {
+                    const h = kctx.allToolCalls[i];
                     if (h.toolName === toolName && JSON.stringify(h.arguments) === argKey) {
                       // 该工具上次执行时的页面 URL 与当前不同 → 页面已变化，上次结果已失效，允许重新执行
-                      if (h.pageUrl && h.pageUrl !== lastPageUrl) skipDuplicate = false;
+                      if (h.pageUrl && h.pageUrl !== kctx.lastPageUrl) skipDuplicate = false;
                       break;
                     }
                   }
@@ -3672,11 +4232,12 @@ export async function POST(request: NextRequest) {
                 if (skipDuplicate) {
                   // 跳过重复调用，直接返回提示
                   const dupResult = '跳过重复调用：已执行过相同参数的此工具，请基于已有结果回答。';
-                  conversationMessages.push({
+                  kctx.conversationMessages.push({
                     role: 'tool',
                     tool_call_id: tc.id,
                     content: dupResult,
                   });
+                  eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: dupResult, name: toolName });
                   send({
                     tool_call: { name: toolName, arguments: parsedArgs, phase: 'pending', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose },
                     nodeId,
@@ -3710,98 +4271,60 @@ export async function POST(request: NextRequest) {
                   nodeId,
                 });
 
-                // ② 提问工具：模型通过 ask_user_questions 向用户发起结构化提问。
-                //    立即把 questions 推给前端（SSE questions_request），挂起等待用户 answers 回传，
-                //    再把 answers 作为 tool_result 返回给模型继续生成。
-                //    模型决定提问的那一刻即触发弹窗，快且稳定（结构化、无格式容错）。
-                if (toolName === 'ask_user_questions') {
-                  const pendingQuestions: PendingQuestionItem[] = (
-                    Array.isArray(parsedArgs.questions) ? parsedArgs.questions : []
-                  ).map((q, i) => {
-                    const item = (q ?? {}) as Record<string, unknown>;
-                    return {
-                      id: String(item.id ?? `q${i + 1}`),
-                      question: String(item.question ?? ''),
-                      options: Array.isArray(item.options) ? item.options.map(String) : [],
-                      allowCustom: item.allowCustom !== false,
-                    };
-                  });
-                  const { requestId, promise, getSupplement } = createPendingQuestions(pendingQuestions, nodeId);
-                  send({
-                    questions_request: {
-                      requestId,
-                      questions: pendingQuestions,
-                      timeoutSec: Math.ceil(QUESTIONS_TIMEOUT_MS / 1000),
-                    },
+                // ② P4a-3-1 迁移：ask_user_questions 挂起型接管已从 route if 分支收敛为注册式
+                //    host-pending 分发（tool-pipeline.ts，行为不变）——模型决定提问的那一刻即触发
+                //    弹窗，快且稳定（结构化、无格式容错）。questions_request 载荷字段 / 20s 心跳
+                //    时序 / answers 回传文本 / eventLog·tool_result·遥测 / 循环 continue 语义均由
+                //    注册 handler（handleAskUserQuestions，见模块级注册）经 ctx 服务面逐位复刻；
+                //    'handled_continue' = 已由宿主接管完成 → 跳过下方通用执行逻辑（等价原 if 分支
+                //    continue；'handled_fallback'/'noop' 保留给 P4a-3 后续 confirm/login/grant 类）。
+                const askUserTakeover = hostTakeoverFor(toolName, 'ask_user', 'pre');
+                if (askUserTakeover) {
+                  const askUserArgs = parsedArgs;
+                  const askUserVerdict = await askUserTakeover.handle({
+                    name: toolName,
+                    args: askUserArgs,
                     nodeId,
-                  });
-                  // 等待用户提交期间 SSE 无数据，会被前端 90s 空闲超时误杀；每 20s 发一条
-                  // tool_call_update(running) 心跳保持连接（前端对重复 running 幂等）。
-                  const qKeepalive = setInterval(() => {
-                    send({ tool_call_update: { name: toolName, phase: 'running', spanId: toolSpanId, startAt: toolStartAt }, nodeId });
-                  }, 20000);
-                  let answers: PendingAnswerEntry[] | null;
-                  try {
-                    answers = await promise; // 前端弹窗提交回传；超时/关闭为 null
-                  } finally {
-                    clearInterval(qKeepalive);
-                  }
-                  const supplement = getSupplement();
-                  const answersText = answers && answers.length > 0
-                    ? `用户对你提出的问题逐一答复如下（problem/question 为其原问题，answer 为用户选择或填写的答复）：\n${JSON.stringify(answers, null, 2)}${supplement ? `\n\n用户补充说明：${supplement}` : ''}`
-                    : '用户未回答你的提问（弹窗被跳过或超时）。请基于已有信息继续，必要时简要说明缺失的信息。';
-                  send({
-                    tool_result: {
-                      name: toolName,
-                      result: answersText,
-                      durationMs: 0,
-                      success: true,
-                      phase: 'done',
-                      spanId: toolSpanId,
-                      startAt: toolStartAt,
-                      endAt: Date.now(),
+                    send,
+                    spanId: toolSpanId,
+                    startAt: toolStartAt,
+                    // 结果落账三连（顺序与原分支一致：kctx.allToolCalls → 对话历史 → eventLog.TOOL_RESULT）；
+                    // round / taskId / tool_call_id / pageUrl 等请求态在闭包内绑定当前值。
+                    commitToolResult: (resultText) => {
+                      kctx.allToolCalls.push({
+                        toolName,
+                        arguments: askUserArgs,
+                        result: resultText,
+                        durationMs: 0,
+                        success: true,
+                        phase: 'done',
+                        pageUrl: kctx.lastPageUrl,
+                      });
+                      kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
+                      eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: resultText, name: toolName });
                     },
-                    nodeId,
-                  });
-                  allToolCalls.push({
-                    toolName,
-                    arguments: parsedArgs,
-                    result: answersText,
-                    durationMs: 0,
-                    success: true,
-                    phase: 'done',
-                    pageUrl: lastPageUrl,
-                  });
-                  conversationMessages.push({
-                    role: 'tool',
-                    tool_call_id: tc.id,
-                    content: answersText,
                   });
                   // 该工具已由宿主处理，跳过下方通用执行逻辑
-                  continue;
+                  if (askUserVerdict === 'handled_continue') continue;
                 }
 
-                // ②.0 search_capabilities：宿主处理——匹配按需能力目录并激活对应场景，
-                //     激活的工具在后续轮次注入（needRebuildTools 触发重建 loopToolDefs）。
+                // ②.0 P4a 三段化骨架：search_capabilities 收敛为注册式 pre-execute 接管
+                //     （tool-pipeline.ts 注册表，行为不变）。能力检索/场景去重激活/sticky/
+                //     kctx.needRebuildTools 由 pipeline 统一执行；本工具为全接管——未匹配到能力时
+                //     decision 仍非 null（scenes 空），照常返回"未找到"文案。decision.meta 携带
+                //     匹配条目（含已激活场景）供 buildCapabilityResultText 生成能力清单。
                 //     与 ask_user_questions 同为"宿主接管、不落 executeTool"的模式。
-                if (toolName === 'search_capabilities') {
+                const searchCapabilityTakeover = takeoverFor(toolName, 'pre');
+                if (searchCapabilityTakeover && searchCapabilityTakeover.kind === 'scenario_activate') {
+                  const scenarioDecision =
+                    searchCapabilityTakeover.handleScenario?.(toolName, parsedArgs) ?? null;
                   const query = String((parsedArgs as Record<string, unknown>)?.query ?? '');
-                  const matched = matchCapabilities(query);
-                  const newlyActivated: ToolScene[] = [];
-                  for (const c of matched) {
-                    if (!activeScenes.has(c.scene)) {
-                      activeScenes.add(c.scene);
-                      newlyActivated.push(c.scene);
-                    }
-                  }
-                  // sticky 持久化（nodeId 存在时跨请求保持，与 detectSceneHints 激活同机制）
-                  if (nodeId) {
-                    const stickyKey = nodeId;
-                    const cur = chatStickyScenes.get(stickyKey) ?? new Set<ToolScene>();
-                    for (const c of matched) cur.add(c.scene);
-                    chatStickyScenes.set(stickyKey, cur);
-                  }
-                  if (newlyActivated.length > 0) needRebuildTools = true;
+                  const matched: CapabilityEntry[] =
+                    ((scenarioDecision?.meta as { matched?: CapabilityEntry[] } | undefined)?.matched) ?? [];
+                  const { newlyActivated } = applyScenarioActivation(
+                    scenarioDecision ?? { scenes: [], sticky: false },
+                    takeoverServices,
+                  );
                   const resultText = buildCapabilityResultText(query, matched, newlyActivated);
                   send({
                     tool_call: { name: toolName, arguments: parsedArgs, phase: 'done', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose },
@@ -3820,20 +4343,21 @@ export async function POST(request: NextRequest) {
                     },
                     nodeId,
                   });
-                  allToolCalls.push({
+                  kctx.allToolCalls.push({
                     toolName,
                     arguments: parsedArgs,
                     result: resultText,
                     durationMs: 0,
                     success: true,
                     phase: 'done',
-                    pageUrl: lastPageUrl,
+                    pageUrl: kctx.lastPageUrl,
                   });
-                  conversationMessages.push({
+                  kctx.conversationMessages.push({
                     role: 'tool',
                     tool_call_id: tc.id,
                     content: resultText,
                   });
+                  eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: resultText, name: toolName });
                   // 该工具已由宿主处理，跳过下方通用执行逻辑
                   continue;
                 }
@@ -3841,114 +4365,156 @@ export async function POST(request: NextRequest) {
                 // 执行参数（intern_search 需注入 current_node_id，见下）
                 let execArgs = tc.function.arguments;
 
-                // ①.4 Planner 结构化确认卡片：planner 专属节点的排程 创建/改/删 先弹可编辑卡片，
-                //     用户可改字段后确认；确认（带编辑参数）才真正执行；拒绝/超时按未执行处理。
-                if (identity === 'planner' && PLANNER_CARD_TOOLS.has(toolName)) {
-                  const card = await buildPlannerCard(toolName, parsedArgs);
-                  if (card) {
-                    const { confirmId, promise } = createPendingConfirm(toolName, execArgs, nodeId);
-                    send({
-                      planner_confirm: {
-                        confirmId,
-                        name: toolName,
-                        card,
-                        timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
-                      },
-                      nodeId,
-                    });
-                    const cardRes = await promise;
-                    if (cardRes.verdict !== 'approved') {
-                      const deniedResult =
-                        cardRes.verdict === 'timeout'
-                          ? '该排程操作因等待确认超时（120 秒内未收到你的确认）而自动跳过，并未执行。请如实告知用户并询问是否继续。'
-                          : '你拒绝了该排程操作（未获确认即不执行）。请停止该操作，向用户说明并征询意见。';
-                      send({
-                        tool_result: {
-                          name: toolName,
-                          result: deniedResult,
-                          durationMs: 0,
-                          success: false,
-                          phase: 'error',
-                          spanId: toolSpanId,
-                          startAt: toolStartAt,
-                          endAt: Date.now(),
-                        },
-                        nodeId,
-                      });
-                      allToolCalls.push({
+                // ①.4 P4a-3-3 迁移 planner 卡片，行为不变：planner 结构化确认卡片已从 route if 分支
+                //     收敛为注册式 host-pending 分发（tool-pipeline.ts）。判定（identity==='planner' &&
+                //     PLANNER_CARD_TOOLS）+ 卡片构建（buildPlannerCard）+ planner_confirm SSE 载荷 /
+                //     20s 心跳 / denied·timeout 措辞 / 落账三连 / continue 语义均在注册 handler
+                //     （handlePlannerCard，见模块级注册）内逐位复刻。本咨询点特有职责：
+                //       a) 把身份（identity）+ 挂起登记用原始参数串（execArgs）+ 结果落账
+                //          commitToolError 注入 ctx；setExecArgs 写回通道绑定本轮 let parsedArgs /
+                //          execArgs —— approved + edited.toolArgs 覆盖后回落通用执行即用新参数
+                //          （等价迁移前「parsedArgs = editedArgs; execArgs = JSON.stringify」覆盖路径）；
+                //       b) verdict 流控：'handled_continue'（denied/timeout）→ continue；
+                //          'handled_fallback'（approved）→ planner 卡已接管确认 → 跳过下方 tool_confirm
+                //          consult（等价迁移前 consult 后 usesPlannerCard → noop 的照常执行，且避免
+                //          重复弹窗）；'noop'（非 planner 身份/名单外/卡片构建失败）→ 照常进入
+                //          tool_confirm consult。
+                //     咨询点物理位置保持在 tool_confirm（①.5）之前 —— planner 先判的顺序约束不因迁移改变。
+                const plannerTakeover = hostTakeoverFor(toolName, 'planner_confirm', 'pre');
+                // 编辑覆盖中间通道：approved + edited.toolArgs 时 handler 经 ctx.setExecArgs 写入，
+                // handle() 返回后再同步应用到本轮 parsedArgs / execArgs（避免在异步闭包内改写捕获
+                // 变量导致后续类型收窄失效）
+                let plannerEditedExecArgs: string | null = null;
+                let plannerCardCovered = false;
+                if (plannerTakeover) {
+                  // 本轮参数快照（denied/timeout 时与 parsedArgs 同引用；落账/ctx.args 均用快照，
+                  // 与 tool_confirm 咨询点 confirmToolArgs 同构 —— 嵌套闭包内读取捕获 let 会退回
+                  // 声明类型，快照 const 保持收窄）
+                  const plannerCardArgs = parsedArgs;
+                  const plannerVerdict = await plannerTakeover.handle({
+                    name: toolName,
+                    args: plannerCardArgs,
+                    nodeId,
+                    send,
+                    spanId: toolSpanId,
+                    startAt: toolStartAt,
+                    // 请求作用域注入：身份（planner 专属判定）+ 挂起登记用原始参数串 + 编辑覆盖写回通道
+                    identity,
+                    execArgs,
+                    setExecArgs: (raw) => {
+                      plannerEditedExecArgs = raw;
+                    },
+                    // 结果落账：approved 走 handled_fallback 落回下方通用执行（executeTool 成功落账在
+                    // 通用路径完成，commitToolResult 仅为 ctx 接口必填、本 handler 不调用）；
+                    // denied/timeout 的 error 三连由 commitToolError 复刻原分支（success:false /
+                    // phase:'error' / 无 pageUrl 字段，arguments 用本轮快照）。
+                    commitToolResult: (resultText) => {
+                      kctx.allToolCalls.push({
                         toolName,
-                        arguments: parsedArgs,
-                        result: deniedResult,
+                        arguments: plannerCardArgs,
+                        result: resultText,
+                        durationMs: 0,
+                        success: true,
+                        phase: 'done',
+                        pageUrl: kctx.lastPageUrl,
+                      });
+                      kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
+                      eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: resultText, name: toolName });
+                    },
+                    commitToolError: (resultText) => {
+                      kctx.allToolCalls.push({
+                        toolName,
+                        arguments: plannerCardArgs,
+                        result: resultText,
                         durationMs: 0,
                         success: false,
                         phase: 'error',
                       });
-                      conversationMessages.push({
-                        role: 'tool',
-                        tool_call_id: tc.id,
-                        content: deniedResult,
-                      });
-                      continue;
+                      kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
+                      eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: resultText, name: toolName });
+                    },
+                  });
+                  // denied/timeout 已由宿主处理（error 回灌 + 落账）→ 跳过下方通用执行逻辑
+                  if (plannerVerdict === 'handled_continue') continue;
+                  // approved（handled_fallback）：先用用户编辑后的参数覆盖本轮执行参数（等价迁移前
+                  // 「parsedArgs = editedArgs; execArgs = JSON.stringify(parsedArgs)」路径），再标记卡已
+                  // 接管确认 → 跳过 tool_confirm consult、回落通用执行
+                  if (plannerVerdict === 'handled_fallback') {
+                    if (plannerEditedExecArgs !== null) {
+                      parsedArgs = JSON.parse(plannerEditedExecArgs) as Record<string, unknown>;
+                      execArgs = plannerEditedExecArgs;
                     }
-                    // 用户可能编辑过卡片 → 用编辑后的参数覆盖执行
-                    const editedArgs = cardRes.edited?.toolArgs;
-                    if (editedArgs && typeof editedArgs === 'object') {
-                      parsedArgs = editedArgs as Record<string, unknown>;
-                      execArgs = JSON.stringify(parsedArgs);
-                    }
+                    plannerCardCovered = true;
                   }
                 }
 
-                // ①.5 需手动确认名单：发送 tool_confirm 事件并挂起，等用户确认后才执行。
-                const confirmTools = settingsForTools.confirmTools ?? DEFAULT_CONFIRM_TOOLS;
-                // planner 结构化卡片已覆盖的排程工具不重复走通用 JSON 确认
-                const usesPlannerCard = identity === 'planner' && PLANNER_CARD_TOOLS.has(toolName);
-                if (confirmTools.includes(toolName) && !usesPlannerCard) {
-                  const { confirmId, promise } = createPendingConfirm(toolName, execArgs, nodeId);
-                  send({
-                    tool_confirm: {
-                      confirmId,
-                      name: toolName,
-                      arguments: parsedArgs,
-                      timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
-                    },
+                // ①.5 P4a-3-2 迁移：tool_confirm（需手动确认名单通用确认）已从 route if 分支收敛为
+                //     注册式 host-pending 分发（tool-pipeline.ts，行为不变）。咨询点物理位置保持
+                //     在 planner 结构化卡片段（①.4）之后 —— planner 先判的顺序约束不因迁移改变：
+                //     planner 卡已覆盖的排程工具（identity==='planner' 且属 PLANNER_CARD_TOOLS）不重复
+                //     弹通用确认、名单外工具不接管，均由注册 handler（handleToolConfirm，见模块级注册）
+                //     依据 ctx 注入的 identity + confirmTools（settingsForTools.confirmTools ??
+                //     DEFAULT_CONFIRM_TOOLS，运行期配置不可由模块级 handler 持有）判定后返回 'noop'；
+                //     denied/timeout 的 SSE tool_result(error)·措辞区分·落账三连·循环 continue 亦在
+                //     handler 内逐位复刻（'handled_continue'）；approved → 'handled_fallback' 回落下方
+                //     通用执行（args 原样，通用确认不回灌编辑参数，与迁移前一致）。
+                //     衔接（P4a-3-3）：planner consult（①.4）verdict === 'handled_fallback'（approved，
+                //     args 可能已经 setExecArgs 覆盖）→ 卡已接管确认，直接跳过本 consult（等价迁移前
+                //     consult 后 usesPlannerCard → noop 的照常执行，无任何副作用差异）；仅 planner
+                //     verdict === 'noop'（含卡片构建失败 → usesPlannerCard 冗余判定在 handleToolConfirm
+                //     内保留，保证仍不弹通用确认）或 planner 未命中时本 consult 才执行。
+                const confirmTakeover = hostTakeoverFor(toolName, 'tool_confirm', 'pre');
+                if (confirmTakeover && !plannerCardCovered) {
+                  const confirmToolArgs = parsedArgs;
+                  const confirmVerdict = await confirmTakeover.handle({
+                    name: toolName,
+                    args: confirmToolArgs,
                     nodeId,
-                  });
-                  const confirmRes = await promise; // 前端弹窗确认回传；超时记为 timeout（≠ 用户拒绝）
-                  const verdict = confirmRes.verdict;
-                  if (verdict !== 'approved') {
-                    // 区分「用户明确拒绝」与「超时未操作」：前者停止，后者只是未执行，应询问是否继续
-                    const deniedResult = verdict === 'timeout'
-                      ? '该工具调用因等待确认超时（120 秒内未收到你的确认）而自动跳过，并非用户拒绝执行。请如实向用户说明该工具尚未执行，并询问是否继续执行。'
-                      : '用户拒绝了该工具的调用（该工具在「需手动确认名单」中，未获用户确认即不执行）。请停止涉及该工具的操作，向用户说明情况并征询其意见。';
-                    send({
-                      tool_result: {
-                        name: toolName,
-                        result: deniedResult,
+                    send,
+                    spanId: toolSpanId,
+                    startAt: toolStartAt,
+                    // 请求作用域注入：身份（planner 卡覆盖判定）+ 当前生效手动确认名单 + 审批策略
+                    // （P4b-1：settings.approval?.defaultStrategy ?? 'allow_scope'，默认档与现网
+                    // 逐位一致）+ 挂起登记用原始参数串
+                    identity,
+                    confirmTools: settingsForTools.confirmTools ?? DEFAULT_CONFIRM_TOOLS,
+                    approvalStrategy:
+                      (identity ? settingsForTools.approval?.perAgent?.[identity] : undefined)
+                      ?? settingsForTools.approval?.defaultStrategy
+                      ?? 'allow_scope',
+                    execArgs,
+                    // 结果落账：approved 走 handled_fallback 落回下方通用执行（executeTool 成功落账在
+                    // 通用路径完成，此处不产成功落账）；denied/timeout 的 error 三连由 commitToolError
+                    // 复刻原分支（success:false / phase:'error' / 无 pageUrl 字段，arguments 用本轮快照）。
+                    commitToolResult: (resultText) => {
+                      kctx.allToolCalls.push({
+                        toolName,
+                        arguments: confirmToolArgs,
+                        result: resultText,
+                        durationMs: 0,
+                        success: true,
+                        phase: 'done',
+                        pageUrl: kctx.lastPageUrl,
+                      });
+                      kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
+                      eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: resultText, name: toolName });
+                    },
+                    commitToolError: (resultText) => {
+                      kctx.allToolCalls.push({
+                        toolName,
+                        arguments: confirmToolArgs,
+                        result: resultText,
                         durationMs: 0,
                         success: false,
                         phase: 'error',
-                        spanId: toolSpanId,
-                        startAt: toolStartAt,
-                        endAt: Date.now(),
-                      },
-                      nodeId,
-                    });
-                    allToolCalls.push({
-                      toolName,
-                      arguments: parsedArgs,
-                      result: deniedResult,
-                      durationMs: 0,
-                      success: false,
-                      phase: 'error',
-                    });
-                    conversationMessages.push({
-                      role: 'tool',
-                      tool_call_id: tc.id,
-                      content: deniedResult,
-                    });
-                    continue;
-                  }
+                      });
+                      kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
+                      eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: resultText, name: toolName });
+                    },
+                  });
+                  // denied/timeout 已由宿主处理（error 回灌 + 落账）→ 跳过下方通用执行逻辑
+                  if (confirmVerdict === 'handled_continue') continue;
+                  // approved（handled_fallback）→ 继续本轮通用执行；noop（名单外/planner 卡覆盖）→ 照常执行
                 }
 
                 // ② 执行前：phase=running（单独发一条"更新"事件，前端接收到替换 pending）
@@ -3971,29 +4537,20 @@ export async function POST(request: NextRequest) {
                   }
                 }
 
-                // browser.login：强制注入 BobWork 弹窗模式 → 扩展不弹独立登录窗，
-                // 返回 loginRequired，由本节点弹登录窗（凭据经 前端→服务端内存→MCP→扩展 直传，不过模型）
-                if (isBrowserLoginTool(toolName)) {
-                  try {
-                    const parsed = JSON.parse(execArgs);
-                    parsed.mode = 'bobwork';
-                    execArgs = JSON.stringify(parsed);
-                  } catch {
-                    // 参数解析失败时原样传递
-                  }
-                }
-
-                // 执行工具（intern_search 需要 current_node_id 做祖先链校验；read_file/write_file/rename_file/delete_file 需要 current_node_id 做 homework/ 文件归属隔离与 .ownership.json 清册维护；execute_script/run_command 需要 current_node_id 注入 BOB_NODE_HOMEWORK 产出目录，均自动注入当前节点 id）
-                if (toolName === 'intern_search' || toolName === 'read_file' || toolName === 'write_file' || toolName === 'rename_file' || toolName === 'delete_file' || toolName === 'list_directory' || toolName === 'execute_script' || toolName === 'run_command' || toolName === 'ocr_document' || toolName === 'crop_image') {
-                  try {
-                    const parsed = JSON.parse(execArgs);
-                    parsed.current_node_id = nodeId;
-                    // Coding 节点标识：工具据此强制所有写操作落 bob-sandbox/apps/<appId>/（不落 homework）
-                    if (toolLoopSandboxAppId) parsed.node_sandbox_app_id = toolLoopSandboxAppId;
-                    execArgs = JSON.stringify(parsed);
-                  } catch {
-                    // 参数解析失败时原样传递
-                  }
+                // 执行工具前 args 注入：intern_search 需要 current_node_id 做祖先链校验；read_file/
+                // write_file/rename_file/delete_file 需要 current_node_id 做 homework/ 文件归属隔离与
+                // .ownership.json 清册维护；execute_script/run_command 需要 current_node_id 注入
+                // BOB_NODE_HOMEWORK 产出目录；Coding 节点另需 node_sandbox_app_id 强制写操作落
+                // bob-sandbox/apps/<appId>/（不落 homework）。P4a-2a 迁移：名单与注入规则收敛为
+                // 注册式 args_transform 接管（tool-pipeline.ts，行为不变）——命中返回注入后的参数
+                // 字符串、未命中/解析失败返回 null 原样执行。
+                const nodeParamTakeover = takeoverOfKind(toolName, 'args_transform');
+                const injectedExecArgs = nodeParamTakeover?.transformArgs?.(toolName, execArgs, {
+                  currentNodeId: nodeId,
+                  sandboxAppId: toolLoopSandboxAppId,
+                });
+                if (injectedExecArgs !== null && injectedExecArgs !== undefined) {
+                  execArgs = injectedExecArgs;
                 }
                 // 工具输出上限按请求模型动态计算（1M→50000，小模型自动收缩），替代固定 maxOutput
                 // 长耗时工具 keepalive：read_attachment 等工具内部做 OCR/视觉识别可达 60-120s，
@@ -4033,119 +4590,75 @@ export async function POST(request: NextRequest) {
                   clearInterval(keepalive);
                 }
 
-                // Bobby 授权拦截事件：工具返回 grantRequired → SSE 推送 grant_required（带 target）。
-                // 前端 ChatNodeKernel 记录"等待授权"，BobbyNode 弹窗授权成功后广播授权完成事件，
-                // 匹配的节点自动补发"已授权，继续"消息触发模型重试 —— 用户无需手动回复。
-                if (toolName.startsWith('mcp__bobby__') && execResult.success && execResult.result.includes('grantRequired')) {
-                  try {
-                    const j = JSON.parse(execResult.result) as { grantRequired?: boolean; target?: string };
-                    if (j.grantRequired && typeof j.target === 'string') {
-                      send({ grant_required: { target: j.target }, nodeId });
-                    }
-                  } catch { /* 非 JSON 忽略 */ }
+                // P4a-3-4 迁移 grant/login（bobby grant SSE 旁路 + browser.login 挂起型接管），行为不变：
+                // 两段已从 route if 分支收敛为注册式 host-pending 分发（tool-pipeline.ts，kind 'grant' /
+                // 'login'，phase post；handler 见模块级注册 handleBobbyGrant / handleBrowserLogin）。
+                // 咨询点物理位置保持在 executeTool 之后、load_skill 场景激活（post）之前 —— 与迁移前
+                // 分支所在窗口一致；execResult.success 是两分支原 if 的第一条件，咨询点据此门控，
+                // 工具名/内容判定由注册 match + handler 内完成：
+                //   · grant（mcp__bobby__*）：命中 grantRequired → handler 发 SSE grant_required 旁路并
+                //     'handled_fallback'（原 send 后无 continue，回落通用路径原文落账）；未命中 'noop'。
+                //   · login（browser.login）：loginRequired 挂起 → 20s 心跳 → 前端回传凭据（POST
+                //     /api/chat/login）→ login_fill 代填（redactArgs 脱敏）→ handler 经 ctx.setExecResult
+                //     把三分支新 execResult 写回 loginExecOverride，handle() 返回后宿主覆盖 execResult ——
+                //     随后照常落入通用落账（send tool_result / tool_span / kctx.allToolCalls / 对话历史 /
+                //     eventLog），与迁移前分支体直接改写 execResult 后继续向下逐位等价；loginRequired
+                //     未命中 → 'noop'（execResult 原样）。
+                const grantTakeover = hostTakeoverFor(toolName, 'grant', 'post');
+                if (execResult.success && grantTakeover) {
+                  await grantTakeover.handle({
+                    name: toolName,
+                    args: parsedArgs,
+                    result: execResult.result,
+                    nodeId,
+                    send,
+                    spanId: toolSpanId,
+                    startAt: toolStartAt,
+                    // grant 为 SSE 旁路、不自产落账（新 execResult 不覆盖、通用路径完成），接口占位
+                    commitToolResult: () => { /* 占位：grant handler 不调用，落账走通用路径 */ },
+                  });
                 }
-
-                // browser.login（BobWork 模式）：扩展返回 loginRequired → 发 SSE login_required 事件，
-                // 挂起等用户在节点登录弹窗输入账号密码；回传后服务端调 browser.login_fill（日志脱敏）
-                // 代填提交，结果摘要（不含凭据）作为 tool_result 返回给模型。
-                if (execResult.success && isBrowserLoginTool(toolName)) {
-                  let loginReq: { loginRequired?: boolean; siteName?: string; url?: string } | null = null;
-                  try {
-                    loginReq = JSON.parse(execResult.result);
-                  } catch {
-                    loginReq = null;
-                  }
-                  if (loginReq && loginReq.loginRequired) {
-                    const { requestId, promise } = createPendingLogin(nodeId);
-                    send({
-                      login_required: {
-                        requestId,
-                        siteName: loginReq.siteName || toolDisplaySiteName(lastPageUrl ?? undefined),
-                        url: loginReq.url || lastPageUrl || '',
-                        timeoutSec: Math.ceil(LOGIN_TIMEOUT_MS / 1000),
-                      },
-                      nodeId,
-                    });
-                    // 等待用户输入期间 SSE 无数据会被前端 90s 空闲超时误杀；每 20s 发心跳保持连接
-                    const loginKeepalive = setInterval(() => {
-                      send({ tool_call_update: { name: toolName, phase: 'running', spanId: toolSpanId, startAt: toolStartAt }, nodeId });
-                    }, 20000);
-                    let creds: { username: string; password: string } | null;
-                    try {
-                      creds = await promise; // 前端弹窗提交回传；超时/关闭为 null
-                    } finally {
-                      clearInterval(loginKeepalive);
-                    }
-                    if (creds) {
-                      try {
-                        const fillFullName = await findBrowserLoginFillFullName();
-                        if (!fillFullName) {
-                          throw new Error('browser.login_fill 未找到（Bob WebBridge MCP 未连接或版本过旧）');
-                        }
-                        const { mcpManager } = await import('@/lib/mcp/manager');
-                        const fillRaw = await mcpManager.callTool(
-                          fillFullName,
-                          { username: creds.username, password: creds.password },
-                          { redactArgs: true }, // 凭据不打印到日志
-                        );
-                        const fillSummary = String(fillRaw).trim().replace(/\s+/g, ' ').slice(0, 300);
-                        execResult = {
-                          result:
-                            `你已在 BobWork 登录弹窗中提交账号密码，WebBridge 已代填并提交登录表单。` +
-                            (fillSummary ? ` 结果：${fillSummary}` : ''),
-                          durationMs: 0,
-                          success: true,
-                        };
-                      } catch (e) {
-                        execResult = {
-                          result:
-                            `收到登录凭据，但自动填写登录表单失败：${e instanceof Error ? e.message : String(e)}。` +
-                            '请如实告知用户该站点仍处于未登录状态，建议其在浏览器中手动登录。',
-                          durationMs: 0,
-                          success: false,
-                        };
-                      }
-                    } else {
-                      execResult = {
-                        result:
-                          '用户未在 BobWork 登录弹窗中输入凭据（弹窗被关闭或超时）。' +
-                          '请如实告知用户该站点仍处于未登录状态，必要时引导其手动登录。',
-                        durationMs: 0,
-                        success: true,
-                      };
-                    }
-                  }
+                const loginTakeover = hostTakeoverFor(toolName, 'login', 'post');
+                if (execResult.success && loginTakeover) {
+                  // 登录代填结果写回通道：handler 在 loginRequired 命中后经 setExecResult 写入，
+                  // handle() 返回后再应用到 execResult（避免在异步闭包内改写捕获变量，与 ①.4
+                  // setExecArgs 同构）；未命中（'noop'）时保持 null → execResult 原样走通用路径。
+                  let loginExecOverride: { result: string; durationMs: number; success: boolean; cardHtml?: string } | null = null;
+                  const loginVerdict = await loginTakeover.handle({
+                    name: toolName,
+                    args: parsedArgs,
+                    result: execResult.result,
+                    pageUrl: kctx.lastPageUrl ?? undefined,
+                    nodeId,
+                    send,
+                    spanId: toolSpanId,
+                    startAt: toolStartAt,
+                    setExecResult: (r) => { loginExecOverride = r; },
+                    // login 不自产落账（新 execResult 回落通用路径完成），接口占位
+                    commitToolResult: () => { /* 占位：login handler 不调用，落账走通用路径 */ },
+                  });
+                  // 挂起型 handler 本不产 continue（原分支体无 continue）；防御性保留流控
+                  if (loginVerdict === 'handled_continue') continue;
+                  if (loginExecOverride) execResult = loginExecOverride;
                 }
 
                 // load_skill 加载法律技能 → 联动激活 legal 场景并重建工具集：
                 // 技能正文要求法条核对必须走北大法宝(pkulaw)，但 pkulaw 工具仅当 legal 场景激活才可见；
                 // 而首轮用户消息未必命中 detectSceneHints 法律关键词（如"执行款清偿顺序"类提问），
                 // 若不在此兜底激活，模型加载技能后依然看不到 pkulaw 工具，只能退化到 web_search/web_fetch。
-                if (toolName === 'load_skill' && execResult.success) {
-                  let skillName = '';
-                  try {
-                    skillName = String(((JSON.parse(execArgs) as Record<string, unknown>)?.skill_name) ?? '').trim();
-                  } catch {
-                    /* 参数解析失败则跳过 */
-                  }
-                  if (skillName && LEGAL_SKILL_NAMES.has(skillName)) {
-                    const justActivated = !activeScenes.has('legal');
-                    if (justActivated) {
-                      activeScenes.add('legal');
-                      needRebuildTools = true;
-                    }
-                    // sticky 持久化（nodeId 存在时跨请求保持，与 detectSceneHints 激活同机制）
-                    if (nodeId) {
-                      const cur = chatStickyScenes.get(nodeId) ?? new Set<ToolScene>();
-                      cur.add('legal');
-                      chatStickyScenes.set(nodeId, cur);
-                    }
-                    if (justActivated) {
+                // P4a 三段化骨架：本段已收敛为注册式 post-execute 接管（tool-pipeline.ts，行为不变）——
+                // 仅当工具执行成功（execResult.success）且工具在注册表中被 scenario_activate 命中才咨询；
+                // 激活/sticky/kctx.needRebuildTools 由 applyScenarioActivation 统一执行。
+                const legalSkillTakeover = takeoverFor(toolName, 'post');
+                if (execResult.success && legalSkillTakeover && legalSkillTakeover.kind === 'scenario_activate') {
+                  const scenarioDecision = legalSkillTakeover.handleScenario?.(toolName, parsedArgs) ?? null;
+                  if (scenarioDecision) {
+                    const { newlyActivated, hint } = applyScenarioActivation(scenarioDecision, takeoverServices);
+                    // 激活提示仅首次激活（legal 之前未激活）时追加到工具结果尾部（与原 if 分支一致）
+                    if (newlyActivated.includes('legal') && hint) {
                       execResult = {
                         ...execResult,
-                        result:
-                          execResult.result +
-                          '\n\n[宿主提示] 已自动激活法律场景(legal)：北大法宝 pkulaw MCP 法条/案例检索工具已加入可用工具集，法条原文、时效性、裁判规则核对请优先使用 mcp__pkulaw__* 工具（结果自带 pkulaw.com 原文链接），仅在 pkulaw 不可用时才用 web_search/web_fetch 降级。',
+                        result: execResult.result + '\n\n' + hint,
                       };
                     }
                   }
@@ -4200,11 +4713,11 @@ export async function POST(request: NextRequest) {
                 // 浏览器工具执行成功 → 刷新页面 URL 指纹（供去重判断感知页面跳转）
                 if (execResult.success && isPageStateTool(toolName)) {
                   const u = await fetchCurrentPageUrl();
-                  if (u) lastPageUrl = u;
+                  if (u) kctx.lastPageUrl = u;
                 }
 
                 // 记录工具调用
-                allToolCalls.push({
+                kctx.allToolCalls.push({
                   toolName,
                   arguments: parsedArgs,
                   result: execResult.result,
@@ -4215,16 +4728,24 @@ export async function POST(request: NextRequest) {
                   systemChange: change.change,
                   changeSummary: change.summary,
                   summary: traceSummary,
-                  pageUrl: lastPageUrl,
+                  pageUrl: kctx.lastPageUrl,
                 });
 
-                // 工具结果加入对话历史（成本控制：超长结果按工具类型压缩后再进模型上下文）
-                const { text: toolMsgContent, compacted: toolResultCompacted } = compactToolResult(execResult.result, toolName);
-                conversationMessages.push({
+                // 工具结果加入对话历史（成本控制：超长结果按工具类型压缩后再进模型上下文。
+                // P4a-2a 迁移：压缩判定收敛为注册式 post result_compact 通用接管（tool-pipeline.ts，
+                // 行为不变 —— 阈值 / 保头保尾 / LIST_LIKE 提示文案均由 compactToolResult 原样产出，
+                // 全工具命中、仅超阈值结果才实际压缩）；SSE tool_compact 帧与压缩日志仍由宿主按
+                // compacted 标志发送（pipeline 不产 SSE）。
+                const compactTakeover = takeoverOfKind(toolName, 'result_compact', 'post');
+                const compactOut = compactTakeover?.compactResult?.(toolName, execResult.result) ?? null;
+                const toolMsgContent = compactOut ? compactOut.text : execResult.result;
+                const toolResultCompacted = compactOut ? compactOut.compacted : false;
+                kctx.conversationMessages.push({
                   role: 'tool',
                   tool_call_id: tc.id,
                   content: toolMsgContent,
                 });
+                eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: toolMsgContent, name: toolName });
                 if (toolResultCompacted) {
                   console.warn(`[工具结果压缩] ${toolName} 结果超长，已保头保尾压缩（原文约 ${Math.ceil(execResult.result.length / 2.5).toLocaleString()} tokens）`);
                   send({ tool_compact: { name: toolName }, nodeId });
@@ -4234,21 +4755,21 @@ export async function POST(request: NextRequest) {
               // ===== 停滞保护检测（不是轮数限制，只防死循环烧钱）=====
               // 任务在推进（本轮有成功且非重复、结果非空的工具调用）→ 清零停滞计数，循环继续；
               // 连续 STALL_LIMIT 轮无任何实质进展 → 判定模型陷入死循环，强制收尾
-              const roundHasProgress = allToolCalls
+              const roundHasProgress = kctx.allToolCalls
                 .slice(roundStartToolCount)
                 .some((t) => t.success && !t.result.startsWith('跳过重复调用') && t.result.trim().length > 0);
               if (roundHasProgress) {
-                stallCount = 0;
+                kctx.stallCount = 0;
               } else {
-                stallCount++;
-                if (stallCount >= STALL_LIMIT) {
+                kctx.stallCount++;
+                if (kctx.stallCount >= STALL_LIMIT) {
                   // 连续多轮无进展 → 判定死循环：注入收尾说明，下一轮进入强制收尾轮（不带 tools）
-                  conversationMessages.push({
+                  kctx.conversationMessages.push({
                     role: 'user',
                     content: '连续多轮工具执行未取得实质进展（工具失败或未产生新结果），疑似陷入循环。请停止重试，基于现有结果给出最终回答，并在回答末尾用【未完成项】列出未能完成的部分。',
                   });
-                  send({ stall_detected: true, rounds: stallCount, nodeId });
-                  forceFinalRound = true;
+                  send({ stall_detected: true, rounds: kctx.stallCount, nodeId });
+                  kctx.forceFinalRound = true;
                   continue;
                 }
               }
@@ -4256,8 +4777,8 @@ export async function POST(request: NextRequest) {
               // ===== OCR 重试预算门控：同一文件反复识别不收敛 → 停止空转，报 NEED_REVIEW =====
               // 手写字段（姓名/身份证/日期）VLM 每次可能给出不同候选，推进但不收敛，停滞保护抓不住。
               // 这里对 ocr_document/crop_image 针对同一文件的累计调用计数，超预算即注入"停止重试"指令。
-              if (!ocrBudgetExceeded) {
-                const ocrCalls = allToolCalls.filter(
+              if (!kctx.ocrBudgetExceeded) {
+                const ocrCalls = kctx.allToolCalls.filter(
                   (t) =>
                     (t.toolName === 'ocr_document' || t.toolName === 'crop_image') &&
                     t.arguments &&
@@ -4271,8 +4792,8 @@ export async function POST(request: NextRequest) {
                 }
                 const worst = [...perFile.entries()].sort((a, b) => b[1] - a[1])[0];
                 if (worst && worst[1] >= OCR_REOCR_BUDGET) {
-                  ocrBudgetExceeded = true;
-                  conversationMessages.push({
+                  kctx.ocrBudgetExceeded = true;
+                  kctx.conversationMessages.push({
                     role: 'user',
                     content: `你已对文件「${worst[0]}」尝试识别 ${worst[1]} 次仍未得到稳定结果（手写识别多次给出不同候选，属正常波动）。请停止继续重试该文件，基于已有候选给出你最有把握的答案，并在答案末尾用【需人工复核】列出置信度低/版本不一致的字段（如姓名、身份证号、日期），交给人工核对原件。不要再次调用 ocr_document / crop_image 识别该文件。`,
                   });
@@ -4284,11 +4805,11 @@ export async function POST(request: NextRequest) {
             }
 
             // 如果达到最大轮次，发送工具摘要
-            if (allToolCalls.length > 0) {
+            if (kctx.allToolCalls.length > 0) {
               send({
                 tool_summary: {
-                  total: allToolCalls.length,
-                  names: [...new Set(allToolCalls.map((t) => t.toolName))],
+                  total: kctx.allToolCalls.length,
+                  names: [...new Set(kctx.allToolCalls.map((t) => t.toolName))],
                 },
                 nodeId,
               });
@@ -4300,7 +4821,7 @@ export async function POST(request: NextRequest) {
                 ? join(projectRoot, 'homework', '.ai-workspace')
                 : join(homedir(), 'BobWork', SANDBOX_DIRNAME);
               const _pr = projectRoot || join(homedir(), 'BobWork', SANDBOX_DIRNAME);
-              const outputFiles = extractOutputFiles(allToolCalls, _pr, workspacePath);
+              const outputFiles = extractOutputFiles(kctx.allToolCalls, _pr, workspacePath);
               // 合并续写请求携带的初始产物（如模板填充面板生成的文件）：
               // 仅接受项目内 homework/、attachments/ 相对路径，拒绝路径穿越
               if (Array.isArray(initialOutputFiles)) {
@@ -4323,8 +4844,8 @@ export async function POST(request: NextRequest) {
               }
               // 兜底：比对 homework/ 目录快照，把本轮任何新写入的成果文件（含脚本产物）补进输出卡片
               // （按 .ownership.json 归属过滤，并行节点的产物不入本卡片）
-              if (projectRoot && homeworkSnapshot) {
-                for (const f of await diffHomeworkFiles(homeworkSnapshot, projectRoot, nodeId)) {
+              if (projectRoot && kctx.homeworkSnapshot) {
+                for (const f of await diffHomeworkFiles(kctx.homeworkSnapshot, projectRoot, nodeId)) {
                   if (!outputFiles.some((o) => o.path === f.path)) outputFiles.push(f);
                 }
               }
@@ -4339,25 +4860,25 @@ export async function POST(request: NextRequest) {
 
 
             // ark/部分 DeepSeek 网关不返回 prompt_cache_miss_tokens：miss 按 prompt - hit 派生，保证命中率口径正确
-            if (taskUsage.cacheMissTokens === 0 && taskUsage.promptTokens > taskUsage.cacheHitTokens) {
-              taskUsage.cacheMissTokens = taskUsage.promptTokens - taskUsage.cacheHitTokens;
+            if (kctx.taskUsage.cacheMissTokens === 0 && kctx.taskUsage.promptTokens > kctx.taskUsage.cacheHitTokens) {
+              kctx.taskUsage.cacheMissTokens = kctx.taskUsage.promptTokens - kctx.taskUsage.cacheHitTokens;
             }
-            const hitTotal = taskUsage.cacheHitTokens + taskUsage.cacheMissTokens;
-            const hitRatio = hitTotal > 0 ? (taskUsage.cacheHitTokens / hitTotal) * 100 : 0;
+            const hitTotal = kctx.taskUsage.cacheHitTokens + kctx.taskUsage.cacheMissTokens;
+            const hitRatio = hitTotal > 0 ? (kctx.taskUsage.cacheHitTokens / hitTotal) * 100 : 0;
             // 完成轮次统计（dsh）：TTFT（首 token 延迟）/ 总耗时 / 输出吞吐
-            const taskDurationMs = Date.now() - taskStartMs;
-            const ttftMs = firstTokenMs !== null ? firstTokenMs - taskStartMs : null;
+            const taskDurationMs = Date.now() - kctx.taskStartMs;
+            const ttftMs = kctx.firstTokenMs !== null ? kctx.firstTokenMs - kctx.taskStartMs : null;
             const tokensPerSec = taskDurationMs > 0
-              ? Math.round((taskUsage.completionTokens / taskDurationMs) * 1000)
+              ? Math.round((kctx.taskUsage.completionTokens / taskDurationMs) * 1000)
               : 0;
             console.log(
-              `[chat] done | model: ${providerModelId} | prompt: ${taskUsage.promptTokens} | out: ${taskUsage.completionTokens} | cacheHit: ${taskUsage.cacheHitTokens} | cacheMiss: ${taskUsage.cacheMissTokens} | hitRate: ${hitRatio.toFixed(1)}% | calls: ${taskUsage.calls}` +
-              ` | rounds: ${totalRounds} (thinkingDowngraded: ${thinkingDowngradedRounds})` +
+              `[chat] done | model: ${providerModelId} | prompt: ${kctx.taskUsage.promptTokens} | out: ${kctx.taskUsage.completionTokens} | cacheHit: ${kctx.taskUsage.cacheHitTokens} | cacheMiss: ${kctx.taskUsage.cacheMissTokens} | hitRate: ${hitRatio.toFixed(1)}% | calls: ${kctx.taskUsage.calls}` +
+              ` | rounds: ${kctx.totalRounds} (thinkingDowngraded: ${kctx.thinkingDowngradedRounds})` +
               ` | duration: ${taskDurationMs}ms | ttft: ${ttftMs ?? 'n/a'}ms | tok/s: ${tokensPerSec}`,
             );
 
             // 最终上下文占用（含工具结果回灌）：done 事件内附带，前端更新 composer 圆环
-            const finalCtx = estimateContextBreakdown(conversationMessages, loopToolDefs);
+            const finalCtx = estimateContextBreakdown(kctx.conversationMessages, loopToolDefs);
 
             // AI Coding 专项任务循环：整轮结束（含工具循环）→ 推送 done，前端循环状态条回到"完成"
             if (profile.id === 'coding') {
@@ -4368,15 +4889,17 @@ export async function POST(request: NextRequest) {
               done: true,
               nodeId,
               taskId,
+              // P3-3b2：本轮实际使用模型（provider:modelId），供外部客户端与后续消息落盘
+              model: modelTag,
               matchedSkills: matchedSkillNames,
               skillDetails,
-              usage: taskUsage,
+              usage: kctx.taskUsage,
               stats: { ttftMs, durationMs: taskDurationMs, tokensPerSec },
               // 缓存命中率遥测（P1）：显式下发 hitRate，随事件日志落盘供离线复盘
               cache: {
                 hitRate: hitTotal > 0 ? Math.round(hitRatio * 10) / 10 : 0,
-                cacheHitTokens: taskUsage.cacheHitTokens,
-                cacheMissTokens: taskUsage.cacheMissTokens,
+                cacheHitTokens: kctx.taskUsage.cacheHitTokens,
+                cacheMissTokens: kctx.taskUsage.cacheMissTokens,
               },
               contextMeter: {
                 system: finalCtx.systemTokens,
@@ -4400,8 +4923,8 @@ export async function POST(request: NextRequest) {
                   nodeId,
                   agent: profile.id,
                   model: providerModelId || modelId || 'unknown',
-                  usage: taskUsage,
-                  rounds: totalRounds,
+                  usage: kctx.taskUsage,
+                  rounds: kctx.totalRounds,
                   durationMs: taskDurationMs,
                   ttftMs,
                 });
@@ -4409,6 +4932,7 @@ export async function POST(request: NextRequest) {
                 console.warn('[usage] 用量落库失败（不影响本轮结果）:', usageErr);
               }
             }
+            eventLog.mark(CORE_EVENT.TURN_END, taskId, { rounds: kctx.totalRounds });
             // P0 轨迹：任务正常结束时持久化事件日志（为 P2 历史恢复铺路）
             if (projectRoot) {
               persistEventLog(`${projectRoot}/.trajectory/${nodeId}/${taskId}.jsonl`, eventLog.finalize());

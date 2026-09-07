@@ -25,6 +25,7 @@ import {
   extractHardFacts,
   runCompaction,
   extractGoalFromExistingMemory,
+  compactionFallbackSummary,
   type CompactModelConfig,
 } from '@/lib/nodes/compact';
 import { inferContextWindow, modelOutputTokenMaxForModel } from '@/lib/context-limits';
@@ -35,6 +36,8 @@ import { join, resolve, sep, basename } from 'path';
 import OpenAI from 'openai';
 import { PROJECT_DB_FILENAME } from '@/lib/app-root';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
+import { readEventLog } from '@/lib/trajectory/event-log';
+import { appendPayloadFromEvents, type AppendDerivedPayload } from '@/lib/trajectory/export';
 
 /** 在请求处理前设置当前项目路径 */
 async function withProjectContext<T>(handler: () => Promise<T>): Promise<T> {
@@ -367,9 +370,9 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'append') {
-      const { node_id, question, answer, questionTime, answerTime, summary, question_attachments, title, compact_model_config, model_id, thinking_level, reasoning, process_narration, tool_calls, task_id, output_files } = body;
-      if (!node_id || !question || !answer) {
-        return NextResponse.json({ error: 'node_id, question, answer are required' }, { status: 400 });
+      const { node_id, question, answer, questionTime, answerTime, summary, question_attachments, title, compact_model_config, model_id, thinking_level, reasoning, process_narration, tool_calls, task_id, output_files, derive } = body;
+      if (!node_id) {
+        return NextResponse.json({ error: 'node_id is required' }, { status: 400 });
       }
       const filePath = await findNodeFileById(node_id, project.path);
       // 节点文件不存在时直接拒绝（而非自动重建）：正常流程总是先 create 再 append，
@@ -377,21 +380,66 @@ export async function POST(request: NextRequest) {
       if (!filePath) {
         return NextResponse.json({ error: '节点文件不存在: ' + node_id }, { status: 404 });
       }
+      // —— 方案 A（derive 模式）：从本轮事件日志派生 append 摘要（.md 与事件日志同源）——
+      // question/answer/reasoning/tool_calls/output_files 由日志派生值补缺；
+      // 日志尚未落盘（persist 与前端 append 的时序竞态）→ 短重试，仍缺失则回退前端直传字段。
+      let derivedPayload: AppendDerivedPayload | null = null;
+      if (derive === true && typeof task_id === 'string' && task_id && /^[A-Za-z0-9._:-]{1,96}$/.test(task_id)) {
+        const trajPath = join(project.path, '.trajectory', node_id, `${task_id}.jsonl`);
+        for (const waitMs of [0, 250, 700]) {
+          if (waitMs) await new Promise((r) => setTimeout(r, waitMs));
+          const events = readEventLog(trajPath);
+          if (events.length > 0) {
+            derivedPayload = appendPayloadFromEvents(events);
+            break;
+          }
+        }
+      }
+      const questionText = (typeof question === 'string' && question.trim())
+        ? question
+        : (derivedPayload?.question || '');
+      const answerRaw = derivedPayload?.answer || (typeof answer === 'string' ? answer : '');
+      if (!questionText || !answerRaw) {
+        return NextResponse.json({ error: 'node_id, question, answer are required' }, { status: 400 });
+      }
       // 后端兜底：移除 think 标签
-      const cleanAnswer = stripThink(answer);
-      console.log('[nodes:append] 接收 answer 长度:', (answer as string).length, '前200字:', (answer as string).slice(0, 200));
-      console.log('[nodes:append] strip 后 cleanAnswer 长度:', cleanAnswer.length, '前200字:', cleanAnswer.slice(0, 200));
+      const cleanAnswer = stripThink(answerRaw);
+      const reasoningText = (typeof reasoning === 'string' && reasoning.trim())
+        ? reasoning
+        : (derivedPayload?.reasoning || undefined);
+      // 派生步骤/文件映射到 ConversationTurn 结构（durationMs/source 等必填字段补齐）
+      const derivedToolCalls = derivedPayload?.toolCalls?.map((t) => ({
+        toolName: t.toolName,
+        arguments: t.arguments,
+        result: t.result,
+        durationMs: t.durationMs ?? 0,
+        success: t.success,
+        phase: t.phase,
+      }));
+      const derivedOutputFiles = derivedPayload?.outputFiles?.map((f) => ({
+        path: f.path,
+        name: f.name,
+        size: f.size,
+        kind: f.kind,
+        source: f.source ?? '',
+      }));
+      const toolCallsFinal = (Array.isArray(tool_calls) && tool_calls.length > 0)
+        ? tool_calls
+        : (derivedToolCalls && derivedToolCalls.length > 0 ? derivedToolCalls : undefined);
+      const outputFilesFinal = (Array.isArray(output_files) && output_files.length > 0)
+        ? output_files
+        : (derivedOutputFiles && derivedOutputFiles.length > 0 ? derivedOutputFiles : undefined);
       const content = await fs.readFile(filePath, 'utf-8');
-      const updatedContent = appendConversation(content, question, cleanAnswer, {
+      const updatedContent = appendConversation(content, questionText, cleanAnswer, {
         questionTime, answerTime, summary,
         questionAttachments: question_attachments,
         modelId: typeof model_id === 'string' ? model_id : undefined,
         thinkingLevel: typeof thinking_level === 'string' ? thinking_level as 'off' | 'low' | 'medium' | 'high' : undefined,
-        reasoning: typeof reasoning === 'string' && reasoning.trim() ? reasoning : undefined,
+        reasoning: reasoningText && reasoningText.trim() ? reasoningText : undefined,
         processNarration: typeof process_narration === 'string' && process_narration.trim() ? process_narration : undefined,
         taskId: typeof task_id === 'string' && task_id.trim() ? task_id : undefined,
-        toolCalls: Array.isArray(tool_calls) && tool_calls.length > 0 ? tool_calls : undefined,
-        outputFiles: Array.isArray(output_files) && output_files.length > 0 ? output_files : undefined,
+        toolCalls: toolCallsFinal && toolCallsFinal.length > 0 ? toolCallsFinal : undefined,
+        outputFiles: outputFilesFinal && outputFilesFinal.length > 0 ? outputFilesFinal : undefined,
       });
       await updateNodeFile(filePath, updatedContent);
       const parsedAfterAppend = parseNodeMarkdown(updatedContent);
@@ -476,17 +524,14 @@ export async function POST(request: NextRequest) {
               `[compact] 完成（${decision.reason}）：轮次 ${start}..${end} 入参≈${result.tokenApprox.input} tokens，输出≈${result.tokenApprox.output} tokens，硬事实漏写${result.hardFactsAppended.length}条已强制补回。`,
             );
           } else {
-            // 无模型可用 → 只把硬事实直写成 settled，推理/争议/偏好留空。游标照推，避免下次同一段反复触发。
-            const fallbackMem = {
+            // 无模型可用 → 与 route R-14-C 共用 compactionFallbackSummary：只把硬事实直写成 settled，
+            // 推理/争议/偏好留空。游标照推，避免下次同一段反复触发。
+            existingParsed.compressedMemory = compactionFallbackSummary({
               goal: extractGoalFromExistingMemory(existing),
-              settled: finalHardFacts,
-              disputes: [] as string[],
-              excluded: [] as string[],
-              preferences: [] as string[],
-            };
-            // 顶层已导入 renderCompressedMemory 的兄弟函数，这里也用顶层导入
-            const { renderCompressedMemory } = await import('@/lib/nodes/compact');
-            existingParsed.compressedMemory = renderCompressedMemory(fallbackMem);
+              existingMemory: existing,
+              uncompressedTurns: turnsToCompact,
+              hardFacts: finalHardFacts,
+            });
             existingParsed.frontmatter.memory_compacted_at = new Date().toISOString();
             existingParsed.frontmatter.memory_compacted_until = end;
             existingParsed.frontmatter.memory_turn_count = 0;

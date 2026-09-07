@@ -14,6 +14,8 @@
 import type { ProviderConfig, SearchConfig } from './types';
 import type { McpServerConfig } from './mcp/types';
 import { DEFAULT_MCP_SERVERS } from './mcp/types';
+// P4b-1 审批策略层：type-only import（approval.ts 为纯函数模块、不 import settings → 无循环依赖）
+import type { ApprovalStrategy } from './chat/approval';
 
 // ============================================================
 // 接口定义 — 所有全局设置集中于此
@@ -25,6 +27,8 @@ export interface TaskModelSettings {
   defaultModel?: string;
   apiKey?: string;
   baseUrl?: string;
+  /** Auto 模式任务类型智能选模开关（默认开；关 = 静态首选池首项，等同服务端 resolveMainChat 语义） */
+  auto?: boolean;
   /** 候选池：该角色可用模型（多选，默认取候选池首个 defaultModel 为首选）；运行时首选不可用时按序回退 */
   pool?: Array<{ provider: string; modelId: string }>;
 }
@@ -195,6 +199,17 @@ export interface QuickLauncher {
   prompt: string;
 }
 
+/** 思考档位策略开关（Phase 2 策略层抽取，chat 后端 thinking 决策；默认两开关均开 → 与抽取前行为一致）。
+ *  存 settings.thinking；undefined = 走默认（downgradeOnExecution / trivialPromptOff 均视为 true）。
+ *  - downgradeOnExecution：工具循环执行轮（round>0 且非收尾轮）思考降一级；
+ *  - trivialPromptOff：琐碎对话（问候/致谢等）直接关思考（C1）。 */
+export interface ThinkingSettings {
+  downgradeOnExecution?: boolean;
+  trivialPromptOff?: boolean;
+  /** 非 V4 推理模型的 <think> 标签引导注入开关（DeepSeek V4 恒不注入） */
+  injectThinkGuide?: boolean;
+}
+
 export interface AppSettings {
   version: number;
   providers: ProviderConfig[];
@@ -207,6 +222,9 @@ export interface AppSettings {
   chatModel?: TaskModelSettings & {
     pool?: Array<{ provider: string; modelId: string }>;
   };
+  /** Agent 专属默认模型（P3-3b）：key = AGENT_PROFILES id（chat/coding/planner/…）；
+   *  服务端兜底解析时按请求 identity 优先于此配置的 pool，其次 chatModel。UI 暂无编辑入口。 */
+  agentModels?: Record<string, TaskModelSettings>;
   /** 笔记编译/回看模型配置：笔记系统已拆分为 bob-notes-mcp 插件（插件域 config.json 自持大脑模型），
    *  本字段仅供旧版本配置文件读取兼容，宿主不再读写。 */
   notesModel?: TaskModelSettings;
@@ -272,6 +290,16 @@ export interface AppSettings {
    *   - 'permanent'  永久授权（等同于旧版 granted:true）
    *  key = appId。由用户在授权弹窗 / Sandbox 面板授予或撤销。 */
   sandboxChatPermissions?: Record<string, SandboxChatPermission>;
+  /** 思考档位策略开关（Phase 2-2a 新增）；undefined = 两开关默认开（与策略抽取前行为一致）。不改设置 UI */
+  thinking?: ThinkingSettings;
+  /** 工具审批策略（P4b-1 新增）；undefined = 走默认（approval.defaultStrategy = 'allow_scope'，
+   *  与现网逐位一致：仅 confirmTools 名单内需确认、其余工具自动放行）。ask / never 为新档位，
+   *  默认不启用（默认档零变化）；UI 暂无编辑入口，改 settings.json 即可生效。 */
+  approval?: {
+    defaultStrategy?: ApprovalStrategy;
+    /** P4b 扩展：per-agent 覆盖（key = AGENT_PROFILES id），命中优先于 defaultStrategy */
+    perAgent?: Record<string, ApprovalStrategy>;
+  };
 }
 
 /** 图像生成/编辑模型名的通用判定正则（从 Model Pool 绑定模型中兜底识别图像模型）。
@@ -462,6 +490,10 @@ export function defaultSettings(): AppSettings {
     quickLaunchers: [],
     theme: 'warm',
     fontScale: 'l',
+    // Phase 2-2a：思考档位策略开关默认开（与策略抽取前行为一致）
+    thinking: { downgradeOnExecution: true, trivialPromptOff: true, injectThinkGuide: true },
+    // P4b-1：审批策略默认 allow_scope —— 与现网行为逐位一致（仅 confirmTools 名单内需确认）
+    approval: { defaultStrategy: 'allow_scope' },
   };
 }
 

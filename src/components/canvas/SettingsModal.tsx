@@ -400,6 +400,12 @@ export function SettingsModal({
   const [theme, setTheme] = useState<string>('warm');
   // 全局字号档位（'m' | 'l' | 'xl'，undefined = 'l' 默认）
   const [fontScale, setFontScale] = useState<'m' | 'l' | 'xl'>('l');
+  // 思考档位策略开关（settings.thinking）：缺省均 true，与后端/默认设置语义一致（draft 加载时合并初始化）
+  const [thinkingPolicy, setThinkingPolicy] = useState<{ downgradeOnExecution: boolean; trivialPromptOff: boolean; injectThinkGuide: boolean }>({
+    downgradeOnExecution: true,
+    trivialPromptOff: true,
+    injectThinkGuide: true,
+  });
   // 左栏导航搜索词（P3）
   const [navQuery, setNavQuery] = useState<string>('');
   // 快捷指令全局库（Quick Prompts 页签：集中管理，节点按 id 选用）
@@ -478,6 +484,13 @@ export function SettingsModal({
           setSelectedChatModel(settings.chatModel.defaultModel || '');
           setChatModelPool(settings.chatModel.pool || []);
         }
+        // 思考档位策略：settings.thinking 字段缺省均视为 true（与后端消费语义一致）
+        const thinkingCfg = settings.thinking ?? {};
+        setThinkingPolicy({
+          downgradeOnExecution: thinkingCfg.downgradeOnExecution !== false,
+          trivialPromptOff: thinkingCfg.trivialPromptOff !== false,
+          injectThinkGuide: thinkingCfg.injectThinkGuide !== false,
+        });
         // 笔记专属模型已随笔记系统拆分到 bob-notes-mcp 插件域（插件大脑自持模型配置），宿主不再维护
         if (settings.stt) {
           setSttProvider((settings.stt.provider as typeof sttProvider) || 'doubao-stream');
@@ -542,6 +555,7 @@ export function SettingsModal({
     // App Icons（欢迎窗口头像 / 侧边栏品牌 Logo；头像池增删走 Electron API 直接落盘，不需保存设置）
     avatarMode, avatarSelected, brandLogo,
     theme,
+    thinkingPolicy,
   ]);
 
   // 组件卸载时清理定时器
@@ -943,6 +957,12 @@ export function SettingsModal({
         avatar: { mode: avatarMode, selected: avatarMode === 'fixed' ? avatarSelected : undefined },
         brandLogo: brandLogo || undefined,
         theme: 'warm',
+        // 思考档位策略：显式写三值（缺省 true 语义已由初始化时归一，确保开关与后端一致）
+        thinking: {
+          downgradeOnExecution: thinkingPolicy.downgradeOnExecution,
+          trivialPromptOff: thinkingPolicy.trivialPromptOff,
+          injectThinkGuide: thinkingPolicy.injectThinkGuide,
+        },
       });
 
       // 立即应用主题（data-theme 写入 document.documentElement），无需重启
@@ -2186,6 +2206,62 @@ export function SettingsModal({
                             });
                           })()}
                         </select>
+                      </div>
+
+                      {/* ── Thinking Policy（思考档位策略，高级；随主表单 Save 统一落盘，缺省全开=策略抽取前行为）── */}
+                      <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--line-soft)' }}>
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Thinking Policy</div>
+                        <div className="flex items-center justify-between gap-3 py-1.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Downgrade thinking during tool execution</div>
+                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — savings of reasoning tokens.</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setThinkingPolicy((p) => ({ ...p, downgradeOnExecution: !p.downgradeOnExecution }))}
+                            className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors"
+                            style={{
+                              backgroundColor: thinkingPolicy.downgradeOnExecution ? 'var(--primary-soft)' : 'var(--paper-hover)',
+                              color: thinkingPolicy.downgradeOnExecution ? 'var(--primary-strong)' : 'var(--ink-muted)',
+                            }}
+                          >
+                            {thinkingPolicy.downgradeOnExecution ? 'On' : 'Off'}
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-between gap-3 py-1.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Skip thinking on trivial prompts</div>
+                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>No reasoning for greetings, acknowledgements and similar trivial turns.</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setThinkingPolicy((p) => ({ ...p, trivialPromptOff: !p.trivialPromptOff }))}
+                            className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors"
+                            style={{
+                              backgroundColor: thinkingPolicy.trivialPromptOff ? 'var(--primary-soft)' : 'var(--paper-hover)',
+                              color: thinkingPolicy.trivialPromptOff ? 'var(--primary-strong)' : 'var(--ink-muted)',
+                            }}
+                          >
+                            {thinkingPolicy.trivialPromptOff ? 'On' : 'Off'}
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-between gap-3 py-1.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>{'Inject <think> guide for non-V4 reasoning models'}</div>
+                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>DeepSeek V4 never receives the guide; this switch only affects non-V4 reasoning models.</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setThinkingPolicy((p) => ({ ...p, injectThinkGuide: !p.injectThinkGuide }))}
+                            className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors"
+                            style={{
+                              backgroundColor: thinkingPolicy.injectThinkGuide ? 'var(--primary-soft)' : 'var(--paper-hover)',
+                              color: thinkingPolicy.injectThinkGuide ? 'var(--primary-strong)' : 'var(--ink-muted)',
+                            }}
+                          >
+                            {thinkingPolicy.injectThinkGuide ? 'On' : 'Off'}
+                          </button>
+                        </div>
                       </div>
                       </>
                       )}

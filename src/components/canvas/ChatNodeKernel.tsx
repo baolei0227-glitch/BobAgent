@@ -1,15 +1,9 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useContext, useMemo, memo } from 'react';
+import { useState, useRef, useEffect, useCallback, useContext, useMemo, memo, useSyncExternalStore } from 'react';
 import React from 'react';
 import { createPortal } from 'react-dom';
-import {
-  useReactFlow,
-  useStore,
-  type NodeProps,
-  type Node,
-  type Viewport,
-} from '@xyflow/react';
+import { useNodeHost, type HostNode, type HostEdge } from './node-host';
 import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Check, Zap, Wrench, CheckCircle2, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Lightbulb, AlertTriangle, AlertCircle, AtSign, Trash, Plug, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, Play, SlidersHorizontal, Clock, Loader2, Bot, Search, Globe, Terminal, Pencil } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, ToolCallPhase, MessageAttachment, OutputFileItem, SkillDetail } from '@/lib/types';
@@ -48,6 +42,10 @@ import NodeCardHeader from './NodeCardHeader';
 import StickyTodoDock from './StickyTodoDock';
 import { ConversationTrajectory, type ConversationTrajectoryItem } from './TraceTimeline';
 import { ContextMeter, type CtxMeterInfo } from './ContextMeter';
+// P5a-1/P5a-2 事件窗口 schema：纯函数状态机（createTraceWindow/normalizeSseFrame/pushWindowFrame/finishWindow）
+import { createTraceWindow, normalizeSseFrame, pushWindowFrame, finishWindow, eventsToTraceWindow, type TraceWindowState } from '@/lib/trajectory/present';
+// P5a-2 Trace 面板窗口派生（可回退），行为不变：窗口 → ConversationTrajectoryItem 同形素材
+import { windowToTrajectoryItems, type TraceWindowTurnItem } from '@/lib/trajectory/render';
 
 
 /**
@@ -280,7 +278,8 @@ function extractTitleSuggestion(content: string): { title: string | null; cleanC
 }
 
 
-type ChatNodeKernelType = Node<AiChatNodeData, 'aiChat'>;
+/** 本组件视图的宿主节点形态（替代旧 React Flow Node 泛型） */
+type KernelNode = HostNode<AiChatNodeData>;
 
 /** 节点身份：由身份薄壳（ChatNode/CodingNode）注入，统一为 AGENT_PROFILES 注册表里的 AgentId */
 export type ChatNodeIdentity = AgentId;
@@ -294,7 +293,11 @@ const CODING_PHASE_UI: Record<CodingPhase, { label: string; color: string } | nu
   done: { label: 'Round complete', color: '#2FBF71' },
 };
 
-export interface ChatNodeKernelProps extends NodeProps<ChatNodeKernelType> {
+/** 宿主自绘画布节点 props（单焦点宿主 2026-09：显式声明 id/data/selected/identity） */
+export interface ChatNodeKernelProps {
+  id: string;
+  data: AiChatNodeData;
+  selected?: boolean;
   identity: ChatNodeIdentity;
 }
 
@@ -787,10 +790,31 @@ function TaskStepsPanel({
 }
 
 export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelProps) {
-  const { setNodes, getNode, getEdges, getNodes } = useReactFlow();
+  // 宿主注入通道（单焦点宿主 2026-09）：替代 useReactFlow()/useStore(s=>s.edges)
+  const nodeHost = useNodeHost();
+  /** 等价旧 useReactFlow().setNodes（函数式语义；本文件 15 处 setNodes 全为"只改本节点 data"的 map） */
+  const setNodes = useCallback(
+    (updater: (nds: KernelNode[]) => KernelNode[]) => {
+      nodeHost.updateNodes(updater as unknown as (prev: HostNode[]) => HostNode[]);
+    },
+    [nodeHost],
+  );
+  /** 读单个节点（position 等；data 按 AiChatNodeData 断言） */
+  const getNode = useCallback(
+    (nodeId: string): KernelNode | undefined => nodeHost.readNode(nodeId) as KernelNode | undefined,
+    [nodeHost],
+  );
+  const getNodes = useCallback(
+    (): KernelNode[] => nodeHost.readNodes() as KernelNode[],
+    [nodeHost],
+  );
+  const getEdges = useCallback(
+    (): HostEdge[] => nodeHost.readEdges(),
+    [nodeHost],
+  );
 
-  /** 监听上游边断开状态 */
-  const allEdges = useStore((s) => s.edges);
+  /** 监听上游边断开状态（边表经外部 store 订阅：边变化触发本组件重渲染，不依赖 memo 数据比较） */
+  const allEdges = useSyncExternalStore(nodeHost.subscribe, nodeHost.readEdges);
   // 标题栏"连线关系"计数：与我有活跃（未断开）child 边的关联数。
   // 画布已物理移除连线（2026-09），关系用标题链接图标表达，点击跳 NodeMap 高亮。
   const linkCount = useMemo(() => {
@@ -859,6 +883,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // Kar（note 身份）
   const isNote = identity === 'note';
   // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Planner→ClipboardList / 其余→Bot
+  // 尺寸：chat 的 Bot 16px；coding/kar/planner 专属图标 15px（2026-09 视觉校准）
   const TitleIdentityIcon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> =
     identity === 'coding'
       ? Terminal
@@ -867,8 +892,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
         : identity === 'planner'
           ? ClipboardList
           : Bot;
-  // Bot 字形较实（头部填充面积大），同 16px 下视觉偏重 → 光学收半档到 15px；
-  // coding/note/planner 专属图标笔画纤细，维持 16px 即可视觉等大。
   const isBotTitleIcon = identity !== 'coding' && identity !== 'note' && identity !== 'planner';
 
   // AI Coding 专项任务循环状态（改码→预览自检→测试→完成）：由服务端 coding_phase SSE 驱动
@@ -1045,6 +1068,14 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   // 节点内内容分栏（dsh 对话 / 轨迹）：默认对话视图；轨迹承载完整执行明细
   const [pane, setPane] = useState<'chat' | 'trace'>('chat');
+  /** P5b-1 历史 replay：点 Turn「查看原始轨迹」→ fetch /api/trajectory events → 窗口 → Trace 分栏渲染 */
+  const [replay, setReplay] = useState<null | {
+    taskId: string;
+    turnNumber: number;
+    status: 'loading' | 'ready' | 'error';
+    items?: ConversationTrajectoryItem[];
+    error?: string;
+  }>(null);
   // 右侧「DOS 执行步骤」面板：手动关闭标记（新任务开始时自动重置）
   const [planPanelClosed, setPlanPanelClosed] = useState(false);
   // 面板收尾停留：流式结束后保留 3 秒全绿/失败状态再淡出，避免骤然消失
@@ -1146,6 +1177,50 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   /** 最近一次见到的缓存头指纹（跨任务对比基准） */
   const lastPrefixHashRef = useRef<string>('');
 
+  // P5a-1 事件窗口 schema（P5a-2 起 Trace 渲染消费，可回退）：旁路窗口 ref —— 每轮 doSend 开始 reset，
+  // SSE 解析入口把每个已解析对象经 normalizeSseFrame + pushWindowFrame 喂入；
+  // Trace 渲染优先读本窗口（见 conversationTrajectoryItems 尾部替换逻辑），窗口缺失/异常回退消息快照。
+  const traceWindowRef = useRef<TraceWindowState | null>(null);
+  /** P5a-2 渲染切换：窗口派生异常/类型不符回退时，console.warn 仅标注一次 */
+  const windowFallbackWarnedRef = useRef(false);
+
+  /**
+   * P5b-1 历史 replay：给定 taskId fetch /api/trajectory 事件日志 → eventsToTraceWindow →
+   * windowToTrajectoryItems → Trace 分栏回放（不触碰 live 旁路窗口 traceWindowRef）。
+   * 接口失败 / 无可回放 → 置 error 态（Trace 分栏提示，入口保持隐藏由「无 taskId」天然覆盖）。
+   */
+  const openTaskReplay = async (taskId: string, turnNumber: number): Promise<void> => {
+    setReplay({ taskId, turnNumber, status: 'loading' });
+    try {
+      const qs = new URLSearchParams({ node_id: id, task_id: taskId });
+      if (typeof data.projectId === 'string' && data.projectId) qs.set('project_id', data.projectId);
+      const res = await fetch(`/api/trajectory?${qs.toString()}`);
+      const json = (await res.json().catch(() => null)) as { success?: boolean; events?: unknown[]; error?: string } | null;
+      if (!res.ok || !json || json.success !== true || !Array.isArray(json.events)) {
+        setReplay({ taskId, turnNumber, status: 'error', error: json?.error ?? `HTTP ${res.status}` });
+        return;
+      }
+      const win = eventsToTraceWindow(json.events);
+      const winItems = windowToTrajectoryItems(win) ?? [];
+      const items: ConversationTrajectoryItem[] = winItems.map((w, i) => ({
+        number: i === 0 ? turnNumber : turnNumber + i,
+        userText: w.userText,
+        thinkText: w.thinkText,
+        toolCalls: w.toolCalls ?? [],
+        skillDetails: w.skillDetails ?? [],
+        matchedSkills: w.matchedSkills ?? [],
+        isStreaming: false,
+      }));
+      if (items.length === 0) {
+        setReplay({ taskId, turnNumber, status: 'error', error: '该任务无可回放轨迹（无工具 / 无思考 / 无技能记录）' });
+        return;
+      }
+      setReplay({ taskId, turnNumber, status: 'ready', items });
+    } catch (err) {
+      setReplay({ taskId, turnNumber, status: 'error', error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
   // 会话级 Trajectory overlay 素材：把 messages 派生为「Turn 列表」（用户提问 + 该轮思考/工具/技能）
   const conversationTrajectoryItems = useMemo<ConversationTrajectoryItem[]>(() => {
     const out: ConversationTrajectoryItem[] = [];
@@ -1176,7 +1251,51 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
         matchedSkills: skills,
         isStreaming: m.id === streamingMsgId && isStreaming,
         durationMs: statsByMsg[m.id]?.durationMs,
+        // P5b-1 历史 replay：携带本轮任务日志 taskId（Trace Turn 头显示「原始轨迹」入口）
+        taskId: typeof m.taskId === 'string' && m.taskId ? m.taskId : undefined,
       });
+    }
+    // P5a-2 Trace 面板窗口派生（可回退），行为不变：当前轮旁路事件窗口存在且可展示时，
+    // 用它替换「该轮消息快照派生项」；窗口为空/异常/类型不符 → 现状路径，其余轮次仍走消息快照。
+    const winState = traceWindowRef.current;
+    if (winState) {
+      let winItems: TraceWindowTurnItem[] | null = null;
+      try {
+        winItems = windowToTrajectoryItems(winState);
+      } catch { /* 窗口派生异常 → 回退现状路径 */ }
+      const shapeOk = !!winItems && winItems.length > 0 && winItems.every(
+        (w) => Array.isArray(w.toolCalls) && Array.isArray(w.skillDetails) && Array.isArray(w.matchedSkills),
+      );
+      if (shapeOk) {
+        // 窗口恒对应最近一轮：仅替换最后一条消息派生项（保留其 number/userText/isStreaming/durationMs）
+        const winItem = winItems![winItems!.length - 1];
+        if (out.length > 0) {
+          out[out.length - 1] = {
+            ...out[out.length - 1],
+            thinkText: winItem.thinkText,
+            toolCalls: winItem.toolCalls,
+            skillDetails: winItem.skillDetails,
+            matchedSkills: winItem.matchedSkills,
+          };
+        } else if (winItem.toolCalls.length > 0 || (winItem.thinkText && winItem.thinkText.trim().length > 0)
+          || winItem.skillDetails.length > 0 || winItem.matchedSkills.length > 0) {
+          out.push({
+            number: userCount > 0 ? userCount : 1,
+            userText: lastUser || undefined,
+            thinkText: winItem.thinkText,
+            toolCalls: winItem.toolCalls,
+            skillDetails: winItem.skillDetails,
+            matchedSkills: winItem.matchedSkills,
+            isStreaming,
+          });
+        }
+      } else if (winItems) {
+        // 类型护栏：窗口项缺失/类型不符 → 现状路径（dev 期 console.warn 一次标注）
+        if (!windowFallbackWarnedRef.current) {
+          windowFallbackWarnedRef.current = true;
+          console.warn('[P5a-2 trace] 窗口派生类型不符 → window fallback（沿用消息快照派生）');
+        }
+      }
     }
     return out;
   }, [messages, matchedSkillsByMsg, skillDetailsByMsg, statsByMsg, streamingMsgId, isStreaming]);
@@ -2397,8 +2516,8 @@ ${rows.join('\n')}
         return;
       }
       // 点击操作窗自身（复制/附件等按钮或空白）时忽略，避免按新坐标重定位导致弹窗漂移。
-      // 注意：不能用 e.target instanceof Node —— 本文件顶部导入了 @xyflow/react 的 type Node，
-      // 编译产物中若该类型导入未擦除，Node 会解析为 undefined 直接抛错，导致划词检测失效。
+      // 注意：不能用 e.target instanceof Node —— 使用 globalThis.Node 规避与 DOM 全局的歧义，
+      // 编译产物中若以值方式引用未定义名称会直接抛错，导致划词检测失效。
       const target = e.target as Element | null;
       if (target && selectionMenuRef.current?.contains(target)) return;
       // 等 selection 稳定再读取
@@ -3123,6 +3242,10 @@ ${rows.join('\n')}
     if ((!userInput && !isContinuation) || streamingRef.current || persistingRef.current) return;
     // 新一轮消息发送：清空"等待授权"状态（授权自动继续的事件处理器会在授权完成时重新判断）
     pendingGrantTargetRef.current = null;
+    // P5a-1 事件窗口 schema（旁路，行为不变）：每轮 doSend 开始时重置窗口
+    traceWindowRef.current = createTraceWindow();
+    // P5b-1 历史 replay：新一轮发送时退出回放态，回到 live 轨迹
+    setReplay(null);
 
     // 已锁定则自动解锁，允许用户继续追问
     if (data.nodeMdId && outcomeStatus === 'locked') {
@@ -3153,7 +3276,14 @@ ${rows.join('\n')}
     // 本轮实际思考等级：auto 模式推断值优先，否则当前用户设置
     let actualThinkingLevel: ThinkingLevel = thinkingLevel;
 
-    if (!isContinuation && (!currentModelId || currentModelId === DEFAULT_MODEL_ID)) {
+    if (isContinuation && (!currentModelId || currentModelId === DEFAULT_MODEL_ID)) {
+      // P3-3b：追问（continuation）延续上一轮实际模型 —— 修正历史"跳过 Auto 决策后
+      // 静默回退 availableModels[0]"的模型跳变（docs §11.2）；无可用记录则落入下方 Auto 决策
+      const lastActualModel = [...messages].reverse().find((m) => m.role === 'assistant' && m.modelId)?.modelId;
+      if (lastActualModel) currentModelId = lastActualModel;
+    }
+
+    if (!currentModelId || currentModelId === DEFAULT_MODEL_ID) {
       const taskAnalysis = analyzeTask(userInput);
       // Auto 模式选模型：直接在主对话候选池（settings.chatModel.pool）内按任务类型智能匹配。
       // 历史"星标模型"优先级（chatModel.defaultModel 排最前并直接使用）已移除，
@@ -3162,6 +3292,9 @@ ${rows.join('\n')}
       try {
         const settings = await loadSettings();
         const pool = settings.chatModel?.pool ?? [];
+        // P3-3a：Auto 任务类型智能匹配开关（settings.chatModel.auto，默认开）——
+        // 关 → 静态首选（候选池首项，等同服务端 resolveMainChat 语义）；开 → 按任务类型 selectBestModel 打分
+        const autoModelRouting = settings.chatModel?.auto !== false;
         // availableModels 的 modelId 是 `provider:modelId` 格式，配置存的是裸 modelId
         const findInAvailable = (modelId: string, provider?: string) =>
           availableModels.find((m) => {
@@ -3177,9 +3310,9 @@ ${rows.join('\n')}
           if (m && !seen.has(m.modelId)) { poolModels.push(m); seen.add(m.modelId); }
         }
         if (poolModels.length > 0) {
-          bestModel = selectBestModel(poolModels, taskAnalysis);
+          bestModel = autoModelRouting ? selectBestModel(poolModels, taskAnalysis) : poolModels[0];
         }
-        if (!bestModel) bestModel = selectBestModel(availableModels, taskAnalysis);
+        if (!bestModel) bestModel = autoModelRouting ? selectBestModel(availableModels, taskAnalysis) : (availableModels[0] ?? null);
       } catch { /* 读取失败则回退自动选择 */ }
       bestModel = bestModel ?? selectBestModel(availableModels, taskAnalysis);
 
@@ -3529,6 +3662,14 @@ ${rows.join('\n')}
           if (line.startsWith('data: ')) {
             try {
               const parsed = JSON.parse(line.slice(6));
+              // P5a-1 事件窗口 schema（渲染未切换，行为不变）：SSE 帧归一后喂旁路窗口。
+              // 旁路只写不读；任何异常静默忽略，绝不阻断主流程 / 影响现有渲染
+              if (traceWindowRef.current) {
+                try {
+                  const winEv = normalizeSseFrame(parsed);
+                  if (winEv) traceWindowRef.current = pushWindowFrame(traceWindowRef.current, winEv);
+                } catch { /* P5a-1 旁路异常：安全忽略 */ }
+              }
               // ② SSE 首条：skills / MCP 概览（含 forcedSkills 区分强制 vs 自动）——写入当前 assistantId 桶
               if (parsed.matchedSkills) {
                 if (mountedRef.current) {
@@ -3621,10 +3762,10 @@ ${rows.join('\n')}
                   const paramText = raw.length > 600 ? `${raw.slice(0, 600)}\n…(已截断)` : raw;
                   // 提醒用户：桌面通知（Electron IPC / web 浏览器 Notification）+ 本节点呼吸灯
                   setConfirmPending(true);
-                  notifyToolConfirm(cf.name);
+                  notifyToolConfirm(cf.name, cf.timeoutSec);
                   const approved = await confirmAsk({
                     title: `工具「${cf.name}」需要确认`,
-                    message: `该工具在「需手动确认名单」中，经你确认后才会真正执行（${cf.timeoutSec ?? 120}s 内未操作将自动跳过，不会执行）。\n\n参数：\n${paramText}`,
+                    message: `该工具在「需手动确认名单」中，经你确认后才会真正执行（${Math.ceil((cf.timeoutSec ?? 600) / 60)} 分钟内未操作将自动跳过，不会执行）。\n\n参数：\n${paramText}`,
                     confirmLabel: '允许执行',
                     cancelLabel: '拒绝',
                     anchor: inputAnchor(),
@@ -3980,6 +4121,10 @@ ${rows.join('\n')}
           toolCallRecords[i] = { ...t, phase: finalPhase };
         }
       }
+      // P5a-1 事件窗口 schema（渲染未切换，行为不变）：流末收口旁路窗口（等价上方 toolCallRecords 收口）
+      if (traceWindowRef.current) {
+        traceWindowRef.current = finishWindow(traceWindowRef.current);
+      }
       if (mountedRef.current) {
         setIsStreaming(false);
         setStreamingMsgId(null);
@@ -4174,6 +4319,9 @@ ${rows.join('\n')}
                 // 持久化输出文件卡片：重启/切换节点后仍可显示（homework/、attachments/ 产物）
                 output_files: outputFileItems.length > 0 ? outputFileItems : undefined,
                 compact_model_config: compactModelCfg,
+                // P1 事件溯源（方案 A）：优先由服务端从本轮 .trajectory 事件日志派生摘要；
+                // question/answer 等字段仍随请求直传，服务端仅在日志可用时用派生值补缺/校正（回退安全）
+                derive: true,
               };
               // 投影窗口（临时节点）显式传 project_id，写入 temporary 项目而非当前项目
               if (data.projectId) appendBody.project_id = data.projectId;
@@ -6548,7 +6696,7 @@ ${rows.join('\n')}
               style={{ color: 'var(--ink)' }}
               title="将选中文字保存为当前节点的附件材料"
             >
-              <Bot className="h-4 w-4" style={{ color: 'var(--primary-strong)' }} />
+              <Bot className="h-4 w-4" style={{ color: 'var(--ink-muted)' }} />
             </button>
           </div>,
           document.body,
@@ -6624,7 +6772,7 @@ ${rows.join('\n')}
         title={
           <span className="flex min-w-0 items-center gap-1.5">
             <TitleIdentityIcon
-              className={cn('shrink-0', isBotTitleIcon ? 'h-[15px] w-[15px]' : 'h-4 w-4')}
+              className={cn('shrink-0', isBotTitleIcon ? 'h-4 w-4' : 'h-[15px] w-[15px]')}
               style={{ color: 'var(--ink-muted)' }}
             />
             {titleEditing ? (
@@ -6935,7 +7083,49 @@ ${rows.join('\n')}
             </div>
           )
         ) : (
-          <ConversationTrajectory embedded items={conversationTrajectoryItems} />
+          <>
+            {/* P5b-1 历史 replay：回放态顶部条（事件日志回放 → 本 Trace 分栏），带返回 live 关闭按钮；
+                非回放态不渲染，不影响既有 live 路径 */}
+            {replay && (
+              <div
+                className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5"
+                style={{
+                  borderBottom: '1px solid color-mix(in oklab, var(--primary-strong) 22%, transparent)',
+                  backgroundColor: 'color-mix(in oklab, var(--primary) 5%, transparent)',
+                }}
+              >
+                <span
+                  className="inline-flex shrink-0 items-center rounded-full px-1.5 py-px text-10 font-semibold leading-4"
+                  style={{ color: 'var(--primary-strong)', backgroundColor: 'color-mix(in oklab, var(--primary-strong) 12%, transparent)' }}
+                >
+                  {replay.status === 'loading' ? '历史回放加载中' : replay.status === 'error' ? '回放失败' : '历史回放'}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-11" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }} title={replay.taskId}>
+                  task: {replay.taskId} · turn {replay.turnNumber}
+                </span>
+                {replay.status === 'loading' && (
+                  <span className="shrink-0 animate-pulse text-11" style={{ color: 'var(--ink-muted)' }}>加载事件日志…</span>
+                )}
+                {replay.status === 'error' && replay.error && (
+                  <span className="shrink-0 truncate text-11" style={{ color: 'var(--danger)' }} title={replay.error}>{replay.error}</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setReplay(null)}
+                  className="shrink-0 cursor-pointer rounded-md px-2 py-0.5 text-11 font-medium transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_12%,transparent)]"
+                  style={{ color: 'var(--primary-strong)' }}
+                  title="关闭历史回放，返回实时轨迹"
+                >
+                  返回实时
+                </button>
+              </div>
+            )}
+            <ConversationTrajectory
+              embedded
+              items={replay && replay.status === 'ready' && replay.items ? replay.items : conversationTrajectoryItems}
+              onReplayTask={openTaskReplay}
+            />
+          </>
         )}
 
 
@@ -7042,10 +7232,10 @@ function sendDesktopNotification(title: string, body: string, tag?: string) {
 }
 
 /** 工具确认桌面通知 */
-function notifyToolConfirm(toolName: string) {
+function notifyToolConfirm(toolName: string, timeoutSec?: number) {
   sendDesktopNotification(
     'BobWork：需要你的确认',
-    `工具「${toolName}」在需手动确认名单中，请在应用内选择「允许执行」或「拒绝」（120s 未操作将自动跳过）。`,
+    `工具「${toolName}」在需手动确认名单中，请在应用内选择「允许执行」或「拒绝」（${Math.ceil((timeoutSec ?? 600) / 60)} 分钟内未操作将自动跳过）。`,
     'bob-tool-confirm',
   );
 }
@@ -7661,8 +7851,3 @@ export function areNodePropsEqual<T extends { id: string; data: AiChatNodeData; 
   }
   return true;
 }
-
-export const ChatNodeKernelMemo = memo(ChatNodeKernel, (prev, next) => {
-  if (prev.identity !== next.identity) return false;
-  return areNodePropsEqual(prev, next);
-});

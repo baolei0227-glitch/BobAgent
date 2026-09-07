@@ -1,6 +1,9 @@
 /**
  * skills/intent-classifier.ts — 用户意图粗分类器（技能匹配 Stage 1 门控）
  *
+ * @deprecated P4d（2026-09-07 标记）：仅被同被废弃的 matcher.ts 引用（sandbox searchSkills 链路）。
+ *   新功能禁止 import；随 matcher.ts 一起删除。
+ *
  * 在精细关键词匹配前，先快速判断用户本次请求属于哪个「场景大类」，
  * 只让场景匹配的技能进入 Stage 2 精细匹配。
  * 解决："识别图片"（image场景）误命中 "video-split"（video场景）等跨场景误加载。
