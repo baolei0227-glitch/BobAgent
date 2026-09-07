@@ -3726,7 +3726,7 @@ export async function POST(request: NextRequest) {
                       allowCustom: item.allowCustom !== false,
                     };
                   });
-                  const { requestId, promise } = createPendingQuestions(pendingQuestions, nodeId);
+                  const { requestId, promise, getSupplement } = createPendingQuestions(pendingQuestions, nodeId);
                   send({
                     questions_request: {
                       requestId,
@@ -3746,9 +3746,10 @@ export async function POST(request: NextRequest) {
                   } finally {
                     clearInterval(qKeepalive);
                   }
+                  const supplement = getSupplement();
                   const answersText = answers && answers.length > 0
-                    ? `用户对你提出的问题逐一答复如下（problem/question 为其原问题，answer 为用户选择或填写的答复）：\n${JSON.stringify(answers, null, 2)}`
-                    : '用户未回答你的提问（弹窗被关闭或超时）。请基于已有信息继续，必要时简要说明缺失的信息。';
+                    ? `用户对你提出的问题逐一答复如下（problem/question 为其原问题，answer 为用户选择或填写的答复）：\n${JSON.stringify(answers, null, 2)}${supplement ? `\n\n用户补充说明：${supplement}` : ''}`
+                    : '用户未回答你的提问（弹窗被跳过或超时）。请基于已有信息继续，必要时简要说明缺失的信息。';
                   send({
                     tool_result: {
                       name: toolName,

@@ -120,19 +120,11 @@ function openPreview(app: SandboxApp) {
 }
 
 /**
- * Bob Sandbox 边栏面板：小程序清单 / 新建（模板）/ 删除 / 打开预览。
+ * Bob Sandbox 全屏管理页（小程序商城）：小程序清单 / 新建（模板）/ 导入 / 权限 / 删除 / 打开预览。
  * 服务端数据源：GET /api/sandbox（apps + templates）。
- *
- * fullscreen 模式：全屏管理页（商城化布局，无预览 iframe），供 CanvasFlow 以全屏覆盖层打开。
- * 两种模式共享同一份 state / 数据加载 / 操作 handlers，避免逻辑重复。
+ * 供 CanvasFlow 以全屏覆盖层打开；边栏入口形态已随 rail 移除。
  */
-export function SandboxPanel({
-  fullscreen = false,
-  onClose,
-}: {
-  fullscreen?: boolean;
-  onClose?: () => void;
-}) {
+export function SandboxPanel({ onClose }: { onClose?: () => void }) {
   const [apps, setApps] = useState<SandboxApp[]>([]);
   const [templates, setTemplates] = useState<SandboxTemplate[]>([]);
   const [loading, setLoading] = useState(false);
@@ -403,15 +395,14 @@ export function SandboxPanel({
     } catch { /* ignore */ }
   };
 
-  // 全屏模式：Esc 关闭
+  // Esc 关闭
   useEffect(() => {
-    if (!fullscreen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [fullscreen, onClose]);
+  }, [onClose]);
 
   // ---- 共享弹窗（fullscreen 市场与边栏入口共用）----
   const sharedModals = (
@@ -636,24 +627,23 @@ const actions = await BobWork.listActions();`}
   );
 
   // ---- 全屏管理页（商城化布局，无预览 iframe；为小程序商城做准备）----
-  if (fullscreen) {
-    const fmt = (iso: string) => {
-      if (!iso) return '—';
-      try {
-        return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-      } catch { return iso; }
-    };
-    return (
-      <>
+  const fmt = (iso: string) => {
+    if (!iso) return '—';
+    try {
+      return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    } catch { return iso; }
+  };
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-[120] flex flex-col"
+        style={{ backgroundColor: 'var(--paper)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        {/* 顶栏 */}
         <div
-          className="fixed inset-0 z-[120] flex flex-col"
-          style={{ backgroundColor: 'var(--paper)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          className="flex shrink-0 items-center gap-3 px-6 py-3"
+          style={{ borderBottom: '1px solid var(--line)', backgroundColor: 'var(--paper-soft)' }}
         >
-          {/* 顶栏 */}
-          <div
-            className="flex shrink-0 items-center gap-3 px-6 py-3"
-            style={{ borderBottom: '1px solid var(--line)', backgroundColor: 'var(--paper-soft)' }}
-          >
             <Boxes className="h-5 w-5 shrink-0" style={{ color: 'var(--primary)' }} />
             <span className="text-base font-bold tracking-tight" style={{ color: 'var(--ink)' }}>Bob Sandbox</span>
             <span className="rounded-full px-2 py-0.5 text-11 font-semibold" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary)' }}>
@@ -902,39 +892,5 @@ const actions = await BobWork.listActions();`}
         {sharedModals}
       </>
     );
-  }
-
-  // ---- 边栏模式：统一入口，点击直接打开全屏小程序市场 ----
-  // （小程序清单 / 新建 / 导入 / 权限等管理功能已全部收进全屏市场，边栏不再展开列表）
-  return (
-    <div className="px-2 py-1" style={{ borderTop: '1px solid var(--line-soft)', marginTop: 10, paddingTop: 10 }}>
-      <button
-        type="button"
-        onClick={() => window.dispatchEvent(new CustomEvent('sandbox-store-open'))}
-        className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
-        title="Open Mini Program Store"
-      >
-        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md" style={{ backgroundColor: 'var(--primary-soft)' }}>
-          <Boxes className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm font-semibold leading-tight" style={{ color: 'var(--ink)' }}>
-            Bob Sandbox
-          </span>
-          <span className="block text-10 leading-tight" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}>
-            Mini Program Store
-          </span>
-        </span>
-        <span className="shrink-0 rounded-full px-1.5 py-0.5 text-10 font-semibold" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary)' }}>
-          {apps.length}
-        </span>
-      </button>
-
-      {/* 列表区已移除：小程序清单/新建/导入/权限等管理功能收进全屏市场，见 fullscreen 分支 */}
-
-      {/* Bridge API Docs Modal / 标星弹窗 / confirm 已并入 sharedModals（fullscreen 与边栏共用） */}
-      {sharedModals}
-    </div>
-  );
 }
 

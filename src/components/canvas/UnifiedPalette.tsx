@@ -12,12 +12,10 @@ import {
   Briefcase,
   Zap,
   Mic,
-  LayoutGrid,
   Plus,
   Boxes,
   Users,
   Gauge,
-  CalendarDays,
   Settings,
   Sparkles,
   NotebookText,
@@ -96,12 +94,8 @@ interface SearchHit {
 interface UnifiedPaletteProps {
   open: boolean;
   onClose: () => void;
-  /** 项目看板（原 rail Project board 按钮） */
-  onOpenProjectBoard?: () => void;
   /** 笔记库面板 */
   onOpenNotes?: () => void;
-  /** 日历面板 */
-  onOpenCalendar?: () => void;
   /** 设置面板 */
   onOpenSettings?: () => void;
   /** 当前打开的研究会话节点（画布主焦点）；MD 按钮归属兜底来源 */
@@ -166,7 +160,7 @@ function IconBarBtn({ title, onClick, children }: {
   );
 }
 
-export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes, onOpenCalendar, onOpenSettings, focusedNodeId, projectId }: UnifiedPaletteProps) {
+export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, focusedNodeId, projectId }: UnifiedPaletteProps) {
   // ===== NodeMap 最近聚焦节点（供「MD」为该节点创建 homework Markdown 文档） =====
   const [focusedNode, setFocusedNode] = useState<{ nodeId: string | null; projectId?: string | null }>({ nodeId: null });
   const [mdCreating, setMdCreating] = useState(false);
@@ -848,15 +842,10 @@ export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes,
           className="flex shrink-0 flex-wrap items-center gap-1.5 border-t px-4 py-3"
           style={{ borderColor: 'var(--line-soft)' }}
         >
-          {/* ── 组1 Actions：设置 / 项目看板 / Extensions Store ── */}
+          {/* ── 组1 Actions：设置 / Extensions Store ── */}
           {onOpenSettings && (
             <IconBarBtn title="Settings" onClick={() => { onOpenSettings(); onClose(); }}>
               <Settings className="h-4 w-4" />
-            </IconBarBtn>
-          )}
-          {onOpenProjectBoard && (
-            <IconBarBtn title="Project board" onClick={() => { onOpenProjectBoard(); onClose(); }}>
-              <LayoutGrid className="h-4 w-4" />
             </IconBarBtn>
           )}
           <IconBarBtn title="Extensions Store" onClick={() => { window.dispatchEvent(new CustomEvent('skill-store-open')); onClose(); }}>
@@ -927,7 +916,7 @@ export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes,
             </>
           )}
 
-          {/* ── 组4 Tools：New project / T（模板面板）/ MD / Calendar ── */}
+          {/* ── 组4 Tools：New project / T（模板面板）/ MD ── */}
           <div className="mx-1 h-5 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
           <IconBarBtn title="New project" onClick={() => { window.dispatchEvent(new Event('create-project-open')); onClose(); }}>
             <Plus className="h-4 w-4" />
@@ -938,11 +927,6 @@ export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes,
           <IconBarBtn title="Markdown" onClick={() => void handleCreateFocusedMd()}>
             {mdCreating ? <Loader2 className="h-3 w-3 animate-spin" /> : <span className="text-10 font-bold leading-none">MD</span>}
           </IconBarBtn>
-          {onOpenCalendar && (
-            <IconBarBtn title="Calendar" onClick={() => { onOpenCalendar(); onClose(); }}>
-              <CalendarDays className="h-4 w-4" />
-            </IconBarBtn>
-          )}
 
           {/* ── 组5 Starred：标星小程序（点击直接打开预览） ── */}
           {starredApps.length > 0 && (

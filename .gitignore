@@ -167,6 +167,9 @@ Desktop.ini
 release/
 release-dist/
 
+# Playwright 测试输出
+test-results/
+
 # Finder 副本 / 历史构建备份
 *.bak-*
 .next.bak-*

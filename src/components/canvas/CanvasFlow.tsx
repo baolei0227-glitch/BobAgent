@@ -4896,9 +4896,7 @@ function CanvasFlowInner() {
         <UnifiedPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}
-          onOpenProjectBoard={() => setProjectBoardOpen(true)}
           onOpenNotes={() => setNotesOpen(true)}
-          onOpenCalendar={() => setCalendarOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
           focusedNodeId={focusedNodeId}
           projectId={currentProjectId || undefined}
@@ -4930,12 +4928,12 @@ function CanvasFlowInner() {
 
         {/* Bob Sandbox 全屏管理页（小程序商城）：全屏覆盖层，Esc / 关闭按钮退出 */}
         {storeOpen && (
-          <SandboxPanel fullscreen onClose={() => setStoreOpen(false)} />
+          <SandboxPanel onClose={() => setStoreOpen(false)} />
         )}
 
         {/* Agent Teams 全屏面板：侧边栏入口打开，Esc / 关闭按钮退出 */}
         {teamsFullscreenOpen && (
-          <AgentTeamsPanel fullscreen onClose={() => setTeamsFullscreenOpen(false)} />
+          <AgentTeamsPanel onClose={() => setTeamsFullscreenOpen(false)} />
         )}
 
         {/* 模型用量统计面板：图标栏/⌘F 入口打开，Esc / 关闭按钮退出 */}

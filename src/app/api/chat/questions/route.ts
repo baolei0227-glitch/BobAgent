@@ -14,7 +14,9 @@ export async function POST(req: NextRequest) {
       return Response.json({ success: false, error: 'requestId 缺失' });
     }
     const answers = Array.isArray(body?.answers) ? (body.answers as PendingAnswerEntry[]) : [];
-    const ok = resolvePendingQuestions(requestId, answers);
+    // 弹窗末页「补充信息」自由文本（可选），随答案透传给挂起项，最终并入 tool_result
+    const supplement = typeof body?.supplement === 'string' ? body.supplement.slice(0, 4000) : undefined;
+    const ok = resolvePendingQuestions(requestId, answers, supplement);
     if (!ok) {
       return Response.json({ success: false, error: '提问请求已超时或不存在' });
     }

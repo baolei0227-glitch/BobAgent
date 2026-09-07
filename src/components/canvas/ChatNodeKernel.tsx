@@ -1280,7 +1280,47 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     questions: QuestionItem[];
     /** ask_user_questions 工具模式：提交后 POST /api/chat/questions 回传，由服务端把答案并入对话继续生成 */
     requestId: string;
+    /** 服务端回答窗口（秒）：倒计时归零后服务端按未回答继续生成 */
+    timeoutSec?: number;
+    /** 最小化为悬浮胶囊：关闭弹窗≠放弃，可随时点开继续作答 */
+    minimized?: boolean;
   } | null>(null);
+  // 标题闪烁提醒：等待用户回答且窗口不在前台时，document.title 交替闪烁；回到前台自动还原
+  const [questionTitleFlash, setQuestionTitleFlash] = useState(false);
+  useEffect(() => {
+    if (!questionTitleFlash) return;
+    const original = document.title;
+    let on = false;
+    const t = setInterval(() => {
+      on = !on;
+      document.title = on ? '❗ 等待你的回答 — BobWork' : original;
+    }, 1000);
+    const onVisibility = () => {
+      if (!document.hidden) setQuestionTitleFlash(false);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onVisibility);
+      document.title = original;
+    };
+  }, [questionTitleFlash]);
+  // pagehide 兜底：页面关闭/刷新时若提问仍挂起，用 sendBeacon 立即按「未回答」回传，
+  // 服务端随即继续生成，不必干等 10 分钟超时（提交/跳过后 requestId 清空，监听自动移除）。
+  const questionRequestId = questionPopup?.requestId;
+  useEffect(() => {
+    if (!questionRequestId) return;
+    const onPageHide = () => {
+      try {
+        const payload = JSON.stringify({ requestId: questionRequestId, answers: [] });
+        if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+          navigator.sendBeacon('/api/chat/questions', new Blob([payload], { type: 'application/json' }));
+        }
+      } catch { /* ignore */ }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, [questionRequestId]);
   // browser.login（BobWork 模式）登录弹窗：模型调用 browser.login 后扩展返回 loginRequired，
   // 服务端发 login_required SSE 事件，此处弹窗让用户输入账号密码；凭据仅经 前端→服务端内存→MCP→扩展 直传，不过模型
   const [loginPopup, setLoginPopup] = useState<{
@@ -3622,8 +3662,9 @@ ${rows.join('\n')}
                   questions: QuestionItem[];
                   timeoutSec?: number;
                 };
-                setQuestionPopup({ questions: qr.questions, requestId: qr.requestId });
-                notifyUserInput('BobWork：需要你的回答', `AI 提出了 ${qr.questions.length} 个问题，请填写后继续。`);
+                setQuestionPopup({ questions: qr.questions, requestId: qr.requestId, timeoutSec: qr.timeoutSec });
+                setQuestionTitleFlash(true);
+                notifyUserInput('BobWork：需要你的回答', `AI 提出了 ${qr.questions.length} 个问题，请在 ${Math.ceil((qr.timeoutSec ?? 600) / 60)} 分钟内作答，超时将按未回答继续。`);
               }
               if (parsed.login_required) {
                 // browser.login（BobWork 模式）：弹出登录窗输入账号密码。
@@ -4362,11 +4403,12 @@ ${rows.join('\n')}
     }).catch(() => {});
   };
 
-  const handleQuestionSubmit = (answers: AnswerEntry[]) => {
-    // 把答案回传服务端，服务端作为 tool_result 返回给模型继续生成。
+  const handleQuestionSubmit = (answers: AnswerEntry[], supplement: string) => {
+    // 把答案（含末页补充说明）回传服务端，服务端作为 tool_result 返回给模型继续生成。
     // 此时 SSE 流仍在服务端挂起等待，本地无需插入消息或触发续写。
     const requestId = questionPopup?.requestId;
     setQuestionPopup(null);
+    setQuestionTitleFlash(false);
     if (!requestId) return;
     fetch('/api/chat/questions', {
       method: 'POST',
@@ -4374,26 +4416,42 @@ ${rows.join('\n')}
       body: JSON.stringify({
         requestId,
         answers: answers.map((a) => ({ questionId: a.questionId, selected: a.selected, custom: a.custom })),
+        supplement: supplement.trim() || undefined,
       }),
     }).catch((e) => {
       console.error('[AiChatNode] 提交提问答案失败', e);
     });
   };
 
-  // 关闭提问弹窗：ask_user_questions 工具模式下立即回传「关闭=未回答」，
-  // 让服务端马上按未回答继续生成，不必等 120s 超时。
-  const handleQuestionClose = () => {
+  // 关闭提问弹窗 = 最小化为悬浮胶囊（不放弃）：服务端继续挂起等待，用户可随时点开胶囊继续作答。
+  const handleQuestionMinimize = () => {
+    setQuestionPopup((p) => (p ? { ...p, minimized: true } : p));
+  };
+
+  // 点击悬浮胶囊 = 恢复弹窗继续作答。
+  const handleQuestionRestore = () => {
+    setQuestionPopup((p) => (p ? { ...p, minimized: false } : p));
+  };
+
+  // 显式跳过 = 放弃回答：立即回传「未回答」，让服务端马上继续生成，不必等 10 分钟超时兜底。
+  const handleQuestionSkip = () => {
     const requestId = questionPopup?.requestId;
     setQuestionPopup(null);
-    if (requestId) {
-      fetch('/api/chat/questions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requestId, answers: [] }),
-      }).catch((e) => {
-        console.error('[AiChatNode] 回传关闭状态失败', e);
-      });
-    }
+    setQuestionTitleFlash(false);
+    if (!requestId) return;
+    fetch('/api/chat/questions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, answers: [] }),
+    }).catch((e) => {
+      console.error('[AiChatNode] 回传跳过状态失败', e);
+    });
+  };
+
+  // 回答窗口倒计时归零：服务端已按未回答继续生成，清理本地弹窗（无需再回传）。
+  const handleQuestionExpire = () => {
+    setQuestionPopup(null);
+    setQuestionTitleFlash(false);
   };
 
   const handleSelectModel = useCallback((newModelId: string) => {
@@ -6922,12 +6980,17 @@ ${rows.join('\n')}
         </div>
       )}
 
-      {/* 提问弹窗 */}
+      {/* 提问弹窗（翻页式；关闭=最小化为悬浮胶囊，显式跳过才放弃） */}
       {questionPopup && (
         <QuestionPopup
           questions={questionPopup.questions}
+          timeoutSec={questionPopup.timeoutSec}
+          minimized={questionPopup.minimized}
           onSubmit={handleQuestionSubmit}
-          onClose={handleQuestionClose}
+          onClose={handleQuestionMinimize}
+          onSkip={handleQuestionSkip}
+          onRestore={handleQuestionRestore}
+          onExpire={handleQuestionExpire}
         />
       )}
 

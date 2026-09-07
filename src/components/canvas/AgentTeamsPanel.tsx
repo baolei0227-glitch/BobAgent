@@ -1,12 +1,9 @@
 /**
- * AgentTeamsPanel — Agent Teams 团队管理与协作面板
+ * AgentTeamsPanel — Agent Teams 团队管理与协作面板（独立全屏覆盖层，与 Bob Sandbox 全屏市场同构）
  *
- * 两种形态（与 Bob Sandbox 全屏市场同构）：
- *   · 侧边栏（默认）：入口按钮，点击派发 team-panel-open 事件 → CanvasFlow 打开全屏页。
- *     轻量轮询（15s）团队未读数，显示红点角标。
- *   · 全屏（fullscreen）：独立页面覆盖层，顶栏 + 两栏内容；既是监控台也是管理台——
- *     创建团队 / 添加·移除成员（role/modelRef/effort）/ 添加任务（assignee/dependencies）/
- *     发送消息 / Approve & Run·Discard·Archive 门禁，2s 轮询详情，Esc 或关闭按钮退出。
+ * 顶栏 + 两栏内容；既是监控台也是管理台——
+ * 创建团队 / 添加·移除成员（role/modelRef/effort）/ 添加任务（assignee/dependencies）/
+ * 发送消息 / Approve & Run·Discard·Archive 门禁，2s 轮询详情，Esc 或关闭按钮退出。
  * 数据源：/api/team（GET 状态 + 团队列表；POST 转调 team_* 工具）。
  */
 
@@ -78,13 +75,11 @@ async function post(action: string, extra: Record<string, unknown> = {}) {
 }
 
 interface AgentTeamsPanelProps {
-  /** 全屏独立页面模式（顶栏 + 两栏内容） */
-  fullscreen?: boolean;
-  /** 全屏模式关闭回调 */
+  /** 关闭回调（Esc 或顶栏 X） */
   onClose?: () => void;
 }
 
-export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanelProps) {
+export function AgentTeamsPanel({ onClose }: AgentTeamsPanelProps) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [teams, setTeams] = useState<string[]>([]);
   const [selected, setSelected] = useState('');
@@ -171,24 +166,23 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
     return () => clearInterval(t);
   }, [loadTeams]);
 
-  // 选中团队详情轮询：全屏 2s（实时进度），侧边栏入口 15s（仅未读红点）
+  // 选中团队详情轮询（2s 实时进度）
   useEffect(() => {
     selectedRef.current = selected;
     if (!selected) return;
     loadStatus(selected);
-    const t = setInterval(() => loadStatus(selectedRef.current), fullscreen ? 2000 : 15_000);
+    const t = setInterval(() => loadStatus(selectedRef.current), 2000);
     return () => clearInterval(t);
-  }, [selected, loadStatus, fullscreen]);
+  }, [selected, loadStatus]);
 
-  // 全屏：Esc 关闭
+  // Esc 关闭
   useEffect(() => {
-    if (!fullscreen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [fullscreen, onClose]);
+  }, [onClose]);
 
   const unread = status?.unreadForCaptain ?? 0;
   // 后端 panelStatus 不保证返回 members/tasks/messages（如旧团队数据缺失），一律兜底空数组
@@ -267,45 +261,6 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
     if (!msgText.trim()) return;
     void runManage('send', { to: msgTo, text: msgText.trim() }).then(() => setMsgText(''));
   };
-
-  // ---- 侧边栏入口按钮（点击打开全屏页）----
-  if (!fullscreen) {
-    return (
-      <div className="px-2 py-1" style={{ borderTop: '1px solid var(--line-soft)', marginTop: 10, paddingTop: 10 }}>
-        <button
-          type="button"
-          onClick={() => window.dispatchEvent(new CustomEvent('team-panel-open'))}
-          className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
-          title="Open Agent Teams"
-        >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md" style={{ backgroundColor: 'var(--primary-soft)' }}>
-            <Users className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold leading-tight" style={{ color: 'var(--ink)' }}>
-              Agent Teams
-            </span>
-            <span className="block text-10 leading-tight" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}>
-              Multi-Agent Collaboration
-            </span>
-          </span>
-          {enabled === false ? (
-            <span className="shrink-0 rounded-full px-1.5 py-0.5 text-10" style={{ backgroundColor: 'var(--paper-hover)', color: 'var(--ink-faint)' }}>
-              Off
-            </span>
-          ) : unread > 0 ? (
-            <span className="shrink-0 rounded-full px-1.5 py-0.5 text-10 font-semibold" style={{ backgroundColor: 'var(--red, #dc2626)', color: '#fff' }}>
-              {unread}
-            </span>
-          ) : (
-            <span className="shrink-0 rounded-full px-1.5 py-0.5 text-10 font-semibold" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary)' }}>
-              {teams.length}
-            </span>
-          )}
-        </button>
-      </div>
-    );
-  }
 
   // ---- 全屏独立页面（与 Bob Sandbox 全屏市场同构）----
   return (
