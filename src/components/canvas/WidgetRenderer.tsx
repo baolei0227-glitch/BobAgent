@@ -3,6 +3,7 @@
 import { Component, useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X, ZoomIn } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import DOMPurify from 'dompurify';
 import { renderMermaidSVG } from '@ktrysmt/beautiful-mermaid';
 import * as echarts from 'echarts';
@@ -1192,13 +1193,16 @@ function WidgetModal({
               {title || (widget.type === 'svg' ? 'SVG Visualization' : widget.type === 'mermaid' ? 'Mermaid Diagram' : widget.type === 'chart' ? 'Data Chart' : widget.type === 'antv' ? 'AntV Chart' : 'HTML Component')}
             </span>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
             onClick={onClose}
-            className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[rgba(0,0,0,0.06)]"
+            aria-label="关闭"
             style={{ color: t.textMuted }}
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
         {/* 内容 */}
         <div className="flex-1 overflow-auto ai-canvas-scroll">

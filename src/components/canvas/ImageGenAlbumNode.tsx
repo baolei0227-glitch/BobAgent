@@ -9,7 +9,6 @@
  * 节点随画布缩放/拖动，删除连线或节点即关闭相册。
  */
 import { memo } from 'react';
-import { Handle, Position } from '@xyflow/react';
 import { ImageGenHistoryModal } from './ImageGenHistoryModal';
 import type { ImageGenVersion, TriplotGroup } from '@/lib/types';
 import type { ImageGenApiRef, AttachmentImage } from './viewers/ImageAiEditor';
@@ -44,8 +43,7 @@ const ALBUM_NODE_H = 560;
 function ImageGenAlbumNodeInner({ data }: { data: ImageGenAlbumNodeData }) {
   return (
     <>
-      {/* 左侧 target handle：接收 ImageGen 右侧 source handle 的连线 */}
-      <Handle type="target" position={Position.Left} id="left-target" style={{ opacity: 0, width: 8, height: 8 }} />
+      {/* 画布连线已物理移除（2026-09）：ImageGen 的 source handle 已删，Album 不再需要接收 handle */}
       <div style={{ width: ALBUM_NODE_W, height: ALBUM_NODE_H, maxWidth: '80vw', maxHeight: '72vh' }}>
         <ImageGenHistoryModal embedded {...data} />
       </div>

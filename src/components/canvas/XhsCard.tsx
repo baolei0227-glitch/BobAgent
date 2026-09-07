@@ -10,6 +10,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 import { loadSettings, saveSettings, getImageModelCandidates, findProviderForModel } from '@/lib/settings';
 
 /**
@@ -1829,35 +1830,42 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
                 </div>
               )}
               {/* 单页保存：单页文档 + 下载 */}
-              <button
+              <Button
                 type="button"
                 onClick={() => handleDownload(pageIdx)}
                 disabled={!!busy}
+                variant="ghost"
+                tone="neutral"
+                size="icon"
                 title="Save this page"
-                className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-black/5 disabled:opacity-50"
-                style={{ color: 'var(--ink-muted)' }}
+                aria-label="Save this page"
               >
-                {busy === 'download' ? <Loader2 className="h-4 w-4 animate-spin" /> : flash === 'download' ? <Check className="h-4 w-4" style={{ color: 'var(--primary)' }} /> : <FileDown className="h-4 w-4" />}
-              </button>
+                {busy === 'download' ? <Loader2 className="h-4 w-4 animate-spin" /> : flash === 'download' ? <Check className="h-4 w-4" /> : <FileDown className="h-4 w-4" />}
+              </Button>
               {/* 复制当前页：主色强调 */}
-              <button
+              <Button
                 type="button"
                 onClick={() => handleCopy(pageIdx)}
                 disabled={!!busy}
+                variant="solid"
+                tone="brand"
+                size="icon"
                 title="Copy this page"
-                className="flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                aria-label="Copy this page"
               >
                 {busy === 'copy' ? <Loader2 className="h-4 w-4 animate-spin" /> : flash === 'copy' ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 onClick={onClose}
-                className="flex-shrink-0 rounded-md p-1.5 transition-colors hover:bg-black/5"
-                style={{ color: 'var(--ink-muted)' }}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
+                className="flex-shrink-0"
+                aria-label="Close"
               >
                 <X className="h-4 w-4" />
-              </button>
+              </Button>
             </div>
           </DialogHeader>
           <DialogDescription className="sr-only">3:4 vertical post card preview and export</DialogDescription>
@@ -1973,15 +1981,16 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
             {activeTab === 'content' && (
               <div>
               <div className="mb-2 flex items-center justify-end">
-                <button
+                <Button
                   type="button"
                   onClick={handleReset}
-                  className="rounded-md px-2 py-1 text-xs font-medium transition-colors hover:bg-black/5"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="sm"
                   title="Restore auto content"
                 >
                   Reset
-                </button>
+                </Button>
               </div>
               <div className="flex flex-col gap-3">
                 <input
@@ -2188,17 +2197,20 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
                     )}
                   </div>
                   <div className="mt-2 flex items-center gap-2">
-                    <button
+                    <Button
                       type="button"
                       onClick={handleAutoPrompt}
                       disabled={promptLoading}
+                      loading={promptLoading}
+                      variant="outline"
+                      tone="brand"
+                      size="sm"
+                      className="shrink-0"
                       title="Auto-generate a structured illustration prompt from the card content"
-                      className="flex shrink-0 items-center gap-1 rounded-md px-2 py-2 text-xs font-medium transition-colors hover:opacity-90 disabled:opacity-50"
-                      style={{ border: '1px solid color-mix(in oklab, var(--primary) 45%, transparent)', color: 'var(--ink-strong)' }}
                     >
                       {promptLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
                       <span>Auto</span>
-                    </button>
+                    </Button>
                     <input
                       value={illustPrompt}
                       onChange={(e) => setIllustPrompt(e.target.value)}
@@ -2211,27 +2223,32 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
                          }
                        }}
                     />
-                    <button
+                    <Button
                       type="button"
                       onClick={illust ? handleModify : genIllust}
                       disabled={illustState === 'loading'}
-                      className="flex shrink-0 items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:opacity-90 disabled:opacity-50"
-                      style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                      loading={illustState === 'loading'}
+                      variant="solid"
+                      tone="brand"
+                      size="sm"
+                      className="shrink-0"
                     >
                       {illustState === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                       <span>{illustState === 'loading' ? 'Working…' : illust ? 'Modify' : 'Generate'}</span>
-                    </button>
+                    </Button>
                     {illust && (
-                      <button
+                      <Button
                         type="button"
                         onClick={genIllust}
                         disabled={illustState === 'loading'}
+                        variant="outline"
+                        tone="brand"
+                        size="sm"
+                        className="shrink-0"
                         title="Generate a brand new image"
-                        className="flex shrink-0 items-center rounded-md px-2.5 py-2 text-sm font-medium transition-colors hover:opacity-90 disabled:opacity-50"
-                        style={{ border: '1px solid color-mix(in oklab, var(--primary) 45%, transparent)', color: 'var(--ink-strong)' }}
                       >
                         New
-                      </button>
+                      </Button>
                     )}
                   </div>
                   {promptError && (
@@ -2268,29 +2285,33 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
               {/* 翻页（多页时） */}
               {total > 1 && (
                 <div className="mt-3 flex items-center justify-center gap-3">
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setPageIdx((v) => Math.max(0, v - 1))}
                     disabled={pageIdx === 0}
-                    className="rounded-md p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
-                    style={{ color: 'var(--ink-muted)' }}
+                    variant="ghost"
+                    tone="neutral"
+                    size="icon-sm"
                     title="Previous page"
+                    aria-label="Previous page"
                   >
                     <ChevronLeft className="h-4 w-4" />
-                  </button>
+                  </Button>
                   <span className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
                     {pageIdx + 1} / {total}
                   </span>
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setPageIdx((v) => Math.min(total - 1, v + 1))}
                     disabled={pageIdx >= total - 1}
-                    className="rounded-md p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
-                    style={{ color: 'var(--ink-muted)' }}
+                    variant="ghost"
+                    tone="neutral"
+                    size="icon-sm"
                     title="Next page"
+                    aria-label="Next page"
                   >
                     <ChevronRight className="h-4 w-4" />
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>

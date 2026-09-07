@@ -60,6 +60,7 @@ export async function migrateLegacyAudit(): Promise<void> {
 function standalonePlugins(): { id: string; dataHome: string; feature: string; exists: boolean }[] {
   const candidates = [
     { id: 'bob-notes-mcp', dataHome: path.join(extensionsRoot(), 'bob-notes-mcp'), feature: 'Notes knowledge base (Kar)' },
+    { id: 'bob-mind-mcp', dataHome: path.join(extensionsRoot(), 'bob-mind-mcp'), feature: 'Bob-Mind mind-sticky library' },
     { id: 'bob-ocr-mcp', dataHome: path.join(extensionsRoot(), 'bob-ocr-mcp'), feature: 'OCR / scanned-doc recognition' },
   ];
   return candidates.map((c) => ({ ...c, exists: fs.existsSync(c.dataHome) }));

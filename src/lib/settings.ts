@@ -249,8 +249,12 @@ export interface AppSettings {
   screenOcr?: { enabled?: boolean };
   /** ⌘F 自定义快捷入口（用户自建插件/工作流一键入口） */
   quickLaunchers?: QuickLauncher[];
-  /** 已启用的技能名集合（Agent 级）；undefined = 从未配置，走系统默认技能 */
+  /** 已启用的技能名集合（Agent 级，key='default' 的全局默认池）；undefined = 从未配置，走系统默认技能 */
   enabledSkills?: string[];
+  /** 按 Agent 画像配置的技能池（2026-09-06 多 agent 分发）：key = agentId，value = 该画像启用的技能名；
+   *  某 agent 有独立配置时按它出 L1 技能目录，否则回退 enabledSkills（全局默认池）。
+   *  与 enabledSkills 双写保持一致（enabledSkills 恒为该记录的 'default' 池）。 */
+  agentSkills?: Record<string, string[]>;
   /** 首次运行向导已完成（用户已选择保存地址）；undefined = 未完成，首次启动弹引导 */
   setupCompleted?: boolean;
   /** 技能自动获取配置；undefined = 走默认（见 DEFAULT_AUTO_FETCH） */

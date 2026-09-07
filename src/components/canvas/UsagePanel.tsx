@@ -13,6 +13,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Gauge, DollarSign, Clock, Activity, Layers, Cpu } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 // ---- 与 src/lib/usage.ts 返回结构对齐的轻量类型 ----
 interface Bucket {
@@ -251,16 +252,18 @@ export function UsagePanel({
             </button>
           ))}
         </div>
-        <button
+        <Button
           type="button"
           onClick={handleReset}
           disabled={resetting}
-          className="rounded-md px-2.5 py-1 text-11 font-medium transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--danger)] disabled:opacity-50"
-          style={{ color: 'var(--ink-muted)' }}
+          loading={resetting}
+          variant="ghost"
+          tone="danger"
+          size="sm"
           title="Clear all recorded usage across all projects"
         >
           {resetting ? 'Clearing…' : 'Reset'}
-        </button>
+        </Button>
       </div>
     </div>
   );

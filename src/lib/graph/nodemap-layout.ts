@@ -1,56 +1,18 @@
 /**
- * NodeMap 自动排版算法（纯函数模块）。
- *  - 按有效边（child/parallel/vertical 父子语义）构建树：根（无父）在首层，子逐层向右展开
- *  - 同一父节点的多个子节点垂直并排（子树垂直居中于父节点右侧），层间距固定
- *  - fan-in 多父共享节点独立放置：从普通树剥离，水平居中于所有父之间（x=父层最右缘下一层，
- *    y=父们中心，均按节点实际高度计算并做碰撞避让，兼容放大/缩小不同状态）
- *  - 未覆盖节点兜底追加到最底部一行
- *  - 多连通分量（互不相连的子图）按首节点原始 (y, x) 纵向堆叠
- *  - 整体以「当前视口中心」为锚点偏移：排版后所有节点整齐排列在用户当前看到的画布中间
+ * 图排版/连通性工具（纯函数模块）。
+ * - groupComponentsByConnectivity：按有效边（忽略 disconnected）构建无向邻接表，
+ *   划分连通分量与孤立节点，供链分组/上游上下文等消费。
+ * - computeForceLayout：稳定落定式力导向排版（Obsidian 知识图谱观感）。NodeMap 用它在
+ *   单焦点画布下表达"节点间关系"，而非反射画布坐标（画布节点随聚焦收起而跳动，反射无意义）。
+ *   （2026-09-06：NodeMap 的 relayoutTree 整树排版已随"画布无平移/单焦点"交互下线；
+ *   groupComponentsByConnectivity 仍被 chain-utils 使用，computeForceLayout 供 NodeMap 消费。）
  *
  * 纯函数约束：
- *  - 不读 DOM、不读 gateway store、不写任何副作用
- *  - 所有外部信息（节点/边/视口/画布尺寸）都通过参数注入
- *  - 返回 positions + bounds，调用方决定如何应用（写回 state、fitBounds 等）
+ * - 不读 DOM、不读 gateway store、不写任何副作用
+ * - 所有外部信息（节点/边）都通过参数注入
+ * - 确定性：同输入必同输出（排序节点 + 确定性初始化 + 收敛遍历），供 useMemo 缓存防抖动
  */
 import type { GraphNodeInfo, GraphEdgeInfo } from './graph-gateway';
-
-export interface NodemapLayoutResult {
-  /** nodeId → 新的世界坐标 {x, y}（左上角） */
-  positions: Record<string, { x: number; y: number }>;
-  /** 整图包围盒（世界坐标，含 400×400 占位尺寸），可直接用于 fitBounds */
-  bounds: { x: number; y: number; width: number; height: number };
-}
-
-export interface NodemapLayoutOpts {
-  /** 视口 transform：x/y=画布平移到屏幕左上，zoom=当前缩放 */
-  viewport: { x: number; y: number; zoom: number };
-  /** ReactFlow pane 可视区像素尺寸（不缩放的原始像素）。调用方取 wrapperRef.clientWidth/Height */
-  paneW: number;
-  /** ReactFlow pane 可视区像素高度 */
-  paneH: number;
-  /** 整体水平对齐：'center' = 居中到可视区中心（默认）；'left' = 节点链贴可视区左缘（右侧留白） */
-  horizontalAlign?: 'center' | 'left';
-  /** horizontalAlign='left' 时，节点链左边缘距可视区左缘的屏幕像素边距（默认 48） */
-  leftPadding?: number;
-  /** 可选间距覆写：锁定（100% zoom）下传更紧凑的数值让一屏显示更多链 */
-  gaps?: {
-    /** 连通分量之间的纵向堆叠间距（默认 240） */
-    componentGap?: number;
-    /** 主/子节点层间纵向间距（默认 120） */
-    verticalGap?: number;
-    /** 同层节点横向间距（默认 60） */
-    horizontalGap?: number;
-  };
-}
-
-const NODE_W = 400;
-/** 节点槽位高度占位：优先用 GraphNodeInfo.measuredHeight（节点实际收起高度），未测量回退本值。
- *  兄弟子节点垂直并排间距 = 各节点实际高度 + horizontalGap，避免固定 400 把 Fit 结果撑太稀。 */
-const NODE_H = 400;
-const DEFAULT_H_GAP = 20;        // 同层节点横向间距（水平树：兄弟/子节点垂直并排间距）
-const DEFAULT_V_GAP = 40;       // 父子层纵向间距（水平树：父子层水平间距）
-const DEFAULT_COMPONENT_GAP = 64; // 连通分量之间的纵向堆叠间距
 
 /** 建立双向邻接表（activeEdges 无向），返回 components（每个分量是 nodeId[]）+ 没进入任何分量的孤立 nodeId[] */
 export function groupComponentsByConnectivity(
@@ -86,340 +48,453 @@ export function groupComponentsByConnectivity(
   return { components, isolated };
 }
 
-export function relayoutTree(
+/** computeForceLayout 结果：节点中心坐标 + 整体包围盒（供 NodeMap 缩放适配） */
+export interface ForceLayoutResult {
+  positions: Record<string, { cx: number; cy: number }>;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+}
+
+export interface ForceLayoutOptions {
+  /** 边弹簧静止长度（世界单位）；同时作为两两最小间距基准，保证圆点不重叠 */
+  spacing?: number;
+  /** 力导向收敛迭代上限（大图自动降档以保流畅） */
+  iterations?: number;
+  /** 包围盒四周留白（世界单位） */
+  padding?: number;
+  /**
+   * 上次落定位置（锚点增量）。传入后进入"锚定模式"：
+   *  - 仍存在的节点保持上次位置不动（纯边增删不改布局，只有节点增删才调整）；
+   *  - 新增节点依据其连接邻居的锚点位置做初始落位 + 局部松弛，
+   *    即"拉线后位置不变化"；只对新增节点做局部增量调整。
+   *  （首次/空时缺省 → 全量力导向排版。）
+   */
+  previousPositions?: Record<string, { cx: number; cy: number }>;
+}
+
+/**
+ * 稳定落定式力导向排版（Obsidian 知识图谱观感）：
+ *  - 力模型：全对斥力（kRep/d²）+ 连边弹簧（kSpr·(d-rest)）+ 组件质心重力（防发散）；
+ *  - 确定性：节点按 id 排序后圆环初始化，收敛遍历，杜绝 Math.random/时间戳，同输入必同输出；
+ *  - 跨分量：复用 groupComponentsByConnectivity 把不连通子图分簇排版，再纵向堆叠隔离，
+ *    孤立节点作为单节点簇处理，保证互不重叠；
+ *  - 兜底：排版后做一轮最小间距推挤（minSep=spacing），彻底杜绝同点重叠。
+ *
+ * 返回的 positions 键为节点 id，值即圆点中心（世界单位，后续由调用方缩放适配）。
+ */
+export function computeForceLayout(
   nodes: GraphNodeInfo[],
   edges: GraphEdgeInfo[],
-  opts: NodemapLayoutOpts,
-): NodemapLayoutResult | null {
-  if (nodes.length === 0) return null;
+  opts: ForceLayoutOptions = {},
+): ForceLayoutResult {
+  const { spacing = 44, iterations = 200, padding = 20, previousPositions } = opts;
+  // 批注框（annotation）不参与排版（与 NodeMap 圆点口径一致）
+  const layoutNodes = nodes.filter((n) => n.type !== 'annotation');
+  if (layoutNodes.length === 0) {
+    return { positions: {}, bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 } };
+  }
 
-  const { viewport: vp, paneW, paneH } = opts;
-  // 实际使用的间距：允许调用方（锁定状态）传紧凑覆写，默认走 DEFAULT_*
-  const H_GAP = opts.gaps?.horizontalGap ?? DEFAULT_H_GAP;
-  const V_GAP = opts.gaps?.verticalGap ?? DEFAULT_V_GAP;
-  const COMPONENT_GAP = opts.gaps?.componentGap ?? DEFAULT_COMPONENT_GAP;
-  // 排版锚点 = 当前画布可视区域中心（世界坐标）：重排后的节点整体居中到这里
-  // RF 视口变换：screenX = worldX * zoom + vp.x → worldCenterX = (paneW/2 - vp.x) / zoom
-  const anchorCx = (paneW / 2 - vp.x) / vp.zoom;
-  const anchorCy = (paneH / 2 - vp.y) / vp.zoom;
+  const idSet = new Set(layoutNodes.map((n) => n.id));
+  const activeEdges = edges.filter((e) => !e.disconnected && idSet.has(e.source) && idSet.has(e.target));
 
-  const nodesById = new Map(nodes.map((n) => [n.id, n]));
-  const activeEdges = edges.filter((e) => !e.disconnected);
-  /** 节点槽位高度：优先用实际收起高度（避免固定 400 把兄弟间距撑太大），未测量回退占位 */
-  const nodeH = (id: string): number => {
-    const n = nodesById.get(id);
-    const h = n?.measuredHeight;
-    return Number.isFinite(h) && (h ?? 0) > 0 ? (h as number) : NODE_H;
-  };
-
-  // 连通分量只算一次：分量排版 + 孤立节点 rest 共用结果，避免对同一 nodes/edges 跑两遍 BFS
-  const connectivity = groupComponentsByConnectivity(nodes, edges);
-  const { components } = connectivity;
-
-  // ————— 工具：对一组连通的节点做局部树排版（placeTree + 分量内 rest） —————
-  type LocalLayout = {
-    localPos: Map<string, { x: number; y: number }>;
-    headId: string;
-    minLocalX: number; maxLocalX: number; minLocalY: number; maxLocalY: number;
-  };
-  const applyComponentLayout = (compIds: string[]): LocalLayout => {
-    const idSet = new Set(compIds);
-    const compNodes = compIds.map((id) => nodesById.get(id)!).filter(Boolean);
-    const compEdges = activeEdges.filter((e) => idSet.has(e.source) && idSet.has(e.target));
-
-    const childMap = new Map<string, string[]>();
-    for (const e of compEdges) {
-      if (!childMap.has(e.source)) childMap.set(e.source, []);
-      childMap.get(e.source)!.push(e.target);
+  // 锚定模式：上次已有部分节点落定 → 保持这些位置不动，仅对新增节点做局部增量布局。
+  // 纯边增删（拉线/断边）不改动已落定位置，解决"拉线后位置会发生变化"。
+  const prevKeys = previousPositions ? Object.keys(previousPositions) : [];
+  const hasAnchor = prevKeys.some((id) => idSet.has(id));
+  if (hasAnchor) {
+    const arranged = anchoredLayout(
+      layoutNodes,
+      activeEdges,
+      previousPositions as Record<string, { cx: number; cy: number }>,
+      spacing,
+      iterations,
+    );
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of layoutNodes) {
+      const p = arranged[n.id];
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
     }
-    // 同一父节点的子节点按原始位置（y 上→下，再 x 左→右）排序——
-    // 纵向并排顺序必须与画布直觉一致，而不是依赖边数组的随机遍历顺序
-    for (const [p, kids] of childMap) {
-      childMap.set(p, [...new Set(kids)].sort((a, b) => {
-        const na = nodesById.get(a);
-        const nb = nodesById.get(b);
-        if (!na || !nb) return 0;
-        return (na.y - nb.y) || (na.x - nb.x);
-      }));
-    }
-    const normalIds = new Set(compNodes.map((n) => n.id));
-    const hasParent = new Set(compEdges.map((e) => e.target));
-    const roots = compNodes
-      .filter((n) => normalIds.has(n.id) && !hasParent.has(n.id))
-      .sort((a, b) => (a.y - b.y) || (a.x - b.x))
-      .map((n) => n.id);
+    const positions: Record<string, { cx: number; cy: number }> = {};
+    for (const n of layoutNodes) nodesToPositions(positions, arranged, n.id);
+    return { positions, bounds: { minX: minX - padding, minY: minY - padding, maxX: maxX + padding, maxY: maxY + padding } };
+  }
 
-    // ————— fan-in（多父共享节点）识别：被 ≥2 个分量内普通父引用的目标节点 —————
-    // 普通树无法正确放置它们（placeTreeH 只随首个父、其他父连线拉空），
-    // 因此从父侧移除、由下方 fan-in 块独立"水平居中于所有父之间"放置。
-    const fanInParents = new Map<string, string[]>();
-    for (const e of compEdges) {
-      if (!normalIds.has(e.source) || !normalIds.has(e.target)) continue;
-      if (!fanInParents.has(e.target)) fanInParents.set(e.target, []);
-      fanInParents.get(e.target)!.push(e.source);
-    }
-    const fanInIds = new Set<string>();
-    for (const [t, ps] of fanInParents) if (ps.length >= 2) fanInIds.add(t);
-    if (fanInIds.size > 0) {
-      for (const [p, kids] of childMap) {
-        const filtered = kids.filter((k) => !fanInIds.has(k));
-        if (filtered.length !== kids.length) childMap.set(p, filtered);
-      }
-    }
+  const { components, isolated } = groupComponentsByConnectivity(layoutNodes, edges);
 
-    // ————— 水平树排版：父在左、子向右逐层展开；同父多子垂直并排，父垂直居中于其子树 —————
-    // 层间距（x 方向）用 V_GAP（原"层间纵向"），同层/兄弟并排（y 方向）用 H_GAP（原"同层横向"），
-    // 保持视觉密度语义不变。子树高度 = max(子节点总高, 本体 NODE_H)。
-    const subtreeH = new Map<string, number>();
-    const computingH = new Set<string>();
-    const calcH = (id: string): number => {
-      if (subtreeH.has(id)) return subtreeH.get(id)!;
-      if (computingH.has(id)) return nodeH(id);
-      computingH.add(id);
-      const kids = childMap.get(id) ?? [];
-      const total = kids.length > 0
-        ? kids.reduce((s, k) => s + calcH(k), 0) + (kids.length - 1) * H_GAP
-        : 0;
-      const h = Math.max(total, nodeH(id));
-      subtreeH.set(id, h);
-      computingH.delete(id);
-      return h;
-    };
-    for (const id of normalIds) if (!subtreeH.has(id)) calcH(id);
-    for (const id of normalIds) if (!subtreeH.has(id)) subtreeH.set(id, nodeH(id));
+  // 簇集合：连通分量 + 孤立节点（各自成簇）；按最小 id 排序保证跨运行确定性
+  const clusters: string[][] = [
+    ...components.map((c) => [...c].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))),
+    ...isolated.map((id) => [id]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+  ];
 
-    const localPos = new Map<string, { x: number; y: number }>();
-    /** 水平放置子树：节点本体 x = depth*(NODE_W+V_GAP)，子节点在其右侧垂直并排；返回子树槽底 y */
-    const placeTreeH = (id: string, depth: number, offsetY: number): number => {
-      if (localPos.has(id)) return offsetY + (subtreeH.get(id) ?? nodeH(id));
-      const x = depth * (NODE_W + V_GAP); // 层深 → 水平向右
-      const kids = childMap.get(id) ?? [];
-      if (kids.length === 0) {
-        localPos.set(id, { x, y: offsetY });
-        return offsetY + nodeH(id);
-      }
-      const heights = kids.map((k) => subtreeH.get(k) ?? nodeH(k));
-      const totalH = heights.reduce((s, h) => s + h, 0) + (kids.length - 1) * H_GAP;
-      // 本体垂直居中于子节点范围
-      const bodyTop = offsetY + Math.max(0, (totalH - nodeH(id)) / 2);
-      localPos.set(id, { x, y: bodyTop });
-      let cy = offsetY;
-      for (let i = 0; i < kids.length; i++) {
-        placeTreeH(kids[i], depth + 1, cy);
-        cy += heights[i] + H_GAP;
-      }
-      return offsetY + Math.max(totalH, nodeH(id));
-    };
-    let gy = 0;
-    for (const r of roots) gy = placeTreeH(r, 0, gy) + H_GAP;
-
-    // ————— fan-in 共享节点放置：水平居中于所有父之间 —————
-    // 普通树已给出各父位置；共享节点（被 ≥2 个父引用）连同其子树整体放在父层最右缘
-    // 的下一层（x），垂直居中于父们中心（y）。节点放大/缩小的不同状态经 nodeH()（实际
-    // 高度）计入：父中心、子树总高、碰撞避让均按各节点真实高度计算，展开/收起不会重叠。
-    if (fanInIds.size > 0) {
-      // 子树整体向下避让已放置节点（纯 AABB，最多 40 轮）
-      const avoidDown = (
-        rect: { x: number; y: number; w: number; h: number },
-        obstacles: Array<{ x: number; y: number; w: number; h: number }>,
-      ): number => {
-        let dy = 0;
-        for (let i = 0; i < 40; i++) {
-          const m = { x: rect.x, y: rect.y + dy, w: rect.w, h: rect.h };
-          let need = 0;
-          for (const o of obstacles) {
-            if (m.x < o.x + o.w && m.x + m.w > o.x && m.y < o.y + o.h && m.y + m.h > o.y) {
-              need = Math.max(need, o.y + o.h + V_GAP - m.y);
-            }
-          }
-          if (need <= 0) return dy;
-          dy += need;
-        }
-        return dy;
-      };
-      // 处理顺序：父们已就位的先放（父可能是另一 fan-in 节点，需等它先放）；死锁时强制放第一个
-      let pendingFanIn = [...fanInIds].sort(
-        (a, b) => ((nodesById.get(a)?.y ?? 0) - (nodesById.get(b)?.y ?? 0)) || ((nodesById.get(a)?.x ?? 0) - (nodesById.get(b)?.x ?? 0)),
-      );
-      let guard = 0;
-      while (pendingFanIn.length > 0 && guard < fanInIds.size * 2 + 2) {
-        const ready = pendingFanIn.filter((s) =>
-          (fanInParents.get(s) ?? []).every((p) => localPos.has(p)),
-        );
-        const batch = ready.length > 0 ? ready : [pendingFanIn[0]];
-        for (const s of batch) {
-          const parents = (fanInParents.get(s) ?? [])
-            .filter((p) => localPos.has(p))
-            .map((p) => ({ id: p, pos: localPos.get(p)! }));
-          if (parents.length === 0) {
-            localPos.set(s, { x: 0, y: 0 });
-            continue;
-          }
-          const maxParentRight = Math.max(...parents.map(({ pos }) => pos.x)) + NODE_W;
-          // 水平位置取"父层右缘"与"父们直接子列右缘"的较大者再 +V_GAP：
-          // 父们若已有私有子列占据父层右侧（childMap 已过滤 fan-in 目标，此处只含私有子），
-          // 共享节点放到子列之后，避免与私有子列碰撞触发向下避让、破坏"垂直居中于父们"
-          let maxRight = maxParentRight;
-          for (const { id } of parents) {
-            for (const k of childMap.get(id) ?? []) {
-              const kp = localPos.get(k);
-              if (kp) maxRight = Math.max(maxRight, kp.x + NODE_W);
-            }
-          }
-          const sX = maxRight + V_GAP;
-          const parentCy = parents.reduce((sum, { id, pos }) => sum + (pos.y + nodeH(id) / 2), 0) / parents.length;
-          const subTotalH = subtreeH.get(s) ?? nodeH(s);
-          const sY = parentCy - subTotalH / 2;
-          const before = new Set(localPos.keys());
-          placeTreeH(s, 0, sY); // 以 s 为根排子树（s.x=0，子树向右展开）
-          // 平移：s.x → sX（父层右侧下一层，即"水平居中于所有父之间"）
-          const dx = sX - localPos.get(s)!.x;
-          const moved: Array<{ id: string; x: number; y: number; h: number }> = [];
-          for (const [id, c] of localPos) {
-            if (before.has(id)) continue;
-            c.x += dx;
-            moved.push({ id, x: c.x, y: c.y, h: nodeH(id) });
-          }
-          // 碰撞避让：s 子树整体向下避开已放置节点（障碍含普通树与已排分身）
-          if (moved.length > 0) {
-            const rect = {
-              x: Math.min(...moved.map((m) => m.x)),
-              y: Math.min(...moved.map((m) => m.y)),
-              w: Math.max(...moved.map((m) => m.x + NODE_W)) - Math.min(...moved.map((m) => m.x)),
-              h: Math.max(...moved.map((m) => m.y + m.h)) - Math.min(...moved.map((m) => m.y)),
-            };
-            const obstacles: Array<{ x: number; y: number; w: number; h: number }> = [];
-            for (const [id, c] of localPos) {
-              if (before.has(id)) obstacles.push({ x: c.x, y: c.y, w: NODE_W, h: nodeH(id) });
-            }
-            const dy = avoidDown(rect, obstacles);
-            if (dy > 0) {
-              for (const m of moved) {
-                localPos.get(m.id)!.y += dy;
-              }
-            }
-          }
-        }
-        pendingFanIn = pendingFanIn.filter((s) => !batch.includes(s));
-        guard++;
-      }
+  // 逐簇排版（局部、以质心为原点），收集簇内包围盒
+  const clusterResults = clusters.map((ids) => {
+    const localEdges = activeEdges.filter((e) => ids.includes(e.source) && ids.includes(e.target));
+    const localPos = layoutCluster(ids, localEdges, spacing, iterations);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of ids) {
+      const p = localPos[id];
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
     }
-
-    // 分量内 rest：placeTreeH 没排到的节点（如边不是父子结构导致）
-    const compRest = compNodes
-      .filter((n) => !localPos.has(n.id))
-      .sort((a, b) => (a.y - b.y) || (a.x - b.x));
-    if (compRest.length > 0) {
-      let maxY = 0, mnX = Infinity, mxX = -Infinity;
-      for (const c of localPos.values()) {
-        maxY = Math.max(maxY, c.y);
-        mnX = Math.min(mnX, c.x);
-        mxX = Math.max(mxX, c.x + NODE_W);
-      }
-      const bottomY = localPos.size === 0 ? 0 : maxY + NODE_H + V_GAP;
-      const colCx = localPos.size === 0 ? NODE_W / 2 : (mnX + mxX) / 2;
-      const colX = colCx - NODE_W / 2;
-      let restY = bottomY;
-      for (const rn of compRest) {
-        localPos.set(rn.id, { x: colX, y: restY });
-        restY += nodeH(rn.id) + V_GAP;
-      }
-    }
-
-    // bounds + headId
-    let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
-    for (const [id, c] of localPos) {
-      mnX = Math.min(mnX, c.x);
-      mnY = Math.min(mnY, c.y);
-      mxX = Math.max(mxX, c.x + NODE_W);
-      mxY = Math.max(mxY, c.y + nodeH(id));
-    }
-    let headId = roots[0];
-    if (!headId) {
-      let bestId = compIds[0]; let bestY = Infinity;
-      for (const [id, c] of localPos) if (c.y < bestY) { bestY = c.y; bestId = id; }
-      headId = bestId;
-    }
-    return { localPos, headId, minLocalX: mnX, maxLocalX: mxX, minLocalY: mnY, maxLocalY: mxY };
-  };
-
-  // ————— 分量级排序：按首节点原始 (y, x) —————
-  const laidComponents = components.map((ids): { layout: LocalLayout; headOriginalY: number; headOriginalX: number } => {
-    const layout = applyComponentLayout(ids);
-    const hn = nodesById.get(layout.headId);
-    return { layout, headOriginalY: hn?.y ?? 0, headOriginalX: hn?.x ?? 0 };
+    return { ids, localPos, bbox: { minX, minY, maxX, maxY } };
   });
-  laidComponents.sort((a, b) => (a.headOriginalY - b.headOriginalY) || (a.headOriginalX - b.headOriginalX));
 
-  // ————— 分量纵向堆叠：每分量首节点水平中心对齐 anchorCx —————
-  const globalPos = new Map<string, { x: number; y: number }>();
+  // 合成：每簇横向居中对齐（x=0），纵向堆叠集群，簇间留 gap，保证跨分量不重叠
+  const clusterGap = spacing * 1.5;
+  const arranged: Record<string, { x: number; y: number }> = {};
   let cursorY = 0;
-  for (const item of laidComponents) {
-    const { layout } = item;
-    const headLocal = layout.localPos.get(layout.headId)!;
-    const headLocalCx = headLocal.x + NODE_W / 2;
-    const dx = anchorCx - headLocalCx;
-    const dy = cursorY - layout.minLocalY;
-    for (const [id, c] of layout.localPos) {
-      globalPos.set(id, { x: c.x + dx, y: c.y + dy });
+  for (const cr of clusterResults) {
+    const h = cr.bbox.maxY - cr.bbox.minY;
+    const offsetX = -(cr.bbox.minX + cr.bbox.maxX) / 2;
+    const offsetY = cursorY - cr.bbox.minY;
+    for (const id of cr.ids) {
+      const p = cr.localPos[id];
+      arranged[id] = { x: p.x + offsetX, y: p.y + offsetY };
     }
-    const compMaxY = cursorY + (layout.maxLocalY - layout.minLocalY);
-    cursorY = compMaxY + COMPONENT_GAP;
+    cursorY += h + clusterGap;
   }
 
-  // ————— 全局 rest：孤立节点纵向一列，列中心同 anchorCx —————
-  const { isolated } = connectivity;
-  if (isolated.length > 0) {
-    const isolatedNodes = isolated.map((id) => nodesById.get(id)!).filter(Boolean)
-      .sort((a, b) => (a.y - b.y) || (a.x - b.x));
-    const colX = anchorCx - NODE_W / 2;
-    const bottomY = cursorY === 0 ? 0 : cursorY;
-    let isoY = bottomY;
-    for (const n of isolatedNodes) {
-      globalPos.set(n.id, { x: colX, y: isoY });
-      isoY += nodeH(n.id) + V_GAP;
-    }
-  }
+  // 兜底最小间距推挤：保证任意两圆点世界间距 ≥ spacing（含跨簇）
+  separate(arranged, layoutNodes.map((n) => n.id), spacing);
 
-  // ————— 整体居中（水平 + 垂直）到锚点 —————
+  // 汇总包围盒 + 留白
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [id, c] of globalPos) {
-    minX = Math.min(minX, c.x);
-    minY = Math.min(minY, c.y);
-    maxX = Math.max(maxX, c.x + NODE_W);
-    maxY = Math.max(maxY, c.y + nodeH(id));
-  }
-  if (isFinite(minX)) {
-    const dy = anchorCy - (minY + maxY) / 2;
-    // 水平对齐策略：'left' 时整图左边缘贴可视区左缘 + leftPadding（屏幕像素/zoom 转世界坐标），
-    // 右侧留白便于查看后续展开内容；默认水平居中到锚点
-    let dx: number;
-    if (opts.horizontalAlign === 'left') {
-      const leftPadWorld = (opts.leftPadding ?? 48) / vp.zoom;
-      dx = (0 - vp.x) / vp.zoom + leftPadWorld - minX;
-    } else {
-      dx = anchorCx - (minX + maxX) / 2;
-    }
-    for (const c of globalPos.values()) { c.x += dx; c.y += dy; }
-    // 重新计算包围盒（整体平移后数值不变，但防御性再算一次）
-    minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
-    for (const [id, c] of globalPos) {
-      minX = Math.min(minX, c.x);
-      minY = Math.min(minY, c.y);
-      maxX = Math.max(maxX, c.x + NODE_W);
-      maxY = Math.max(maxY, c.y + nodeH(id));
-    }
+  for (const id of layoutNodes.map((n) => n.id)) {
+    const p = arranged[id];
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
   }
 
-  const positions: Record<string, { x: number; y: number }> = {};
-  for (const [id, c] of globalPos) {
-    // 取整：避免排版产生半像素坐标，节点文字在子像素位置上会持续发虚（GPU 光栅化糊）
-    positions[id] = { x: Math.round(c.x), y: Math.round(c.y) };
+  const positions: Record<string, { cx: number; cy: number }> = {};
+  for (const n of layoutNodes) nodesToPositions(positions, arranged, n.id);
+  return { positions, bounds: { minX: minX - padding, minY: minY - padding, maxX: maxX + padding, maxY: maxY + padding } };
+}
+
+/** 单簇力导向求解：全对斥力 + 连边弹簧 + 质心重力，速度阻尼收敛，返回簇内局部坐标（质心为原点） */
+function layoutCluster(
+  nodeIds: string[],
+  localEdges: { source: string; target: string }[],
+  spacing: number,
+  iterations: number,
+): Record<string, { x: number; y: number }> {
+  const ids = [...nodeIds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const n = ids.length;
+  const out: Record<string, { x: number; y: number }> = {};
+  if (n === 1) {
+    out[ids[0]] = { x: 0, y: 0 };
+    return out;
   }
-  return {
-    positions,
-    bounds: isFinite(minX)
-      ? { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
-      : { x: 0, y: 0, width: 0, height: 0 },
-  };
+
+  const idx = new Map<string, number>();
+  ids.forEach((id, i) => idx.set(id, i));
+  const px = new Float64Array(n);
+  const py = new Float64Array(n);
+  const vx = new Float64Array(n);
+  const vy = new Float64Array(n);
+  // 确定性圆环初始化：按序均布圆周，半径随规模增长（保证稠密但稳定）
+  const initR = (spacing * Math.sqrt(n)) / 2;
+  ids.forEach((id, i) => {
+    const angle = (i / n) * Math.PI * 2;
+    px[i] = Math.cos(angle) * initR;
+    py[i] = Math.sin(angle) * initR;
+  });
+
+  const fx = new Float64Array(n);
+  const fy = new Float64Array(n);
+  const kRep = spacing * spacing;
+  const kSpr = 0.06;
+  const kGrav = 0.004;
+  // 大图降档保流畅：n 越大迭代越少
+  const iters = n > 120 ? 80 : iterations;
+  let alpha = 1;
+  const alphaDecay = 0.96;
+
+  for (let iter = 0; iter < iters; iter++) {
+    fx.fill(0);
+    fy.fill(0);
+    // 全对斥力
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = px[i] - px[j];
+        let dy = py[i] - py[j];
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1e-6) {
+          dx = 0.01 * (i - j) || 0.01;
+          dy = 0.01;
+          d2 = dx * dx + dy * dy;
+        }
+        const d = Math.sqrt(d2);
+        const f = (kRep / d2) * alpha;
+        const ux = dx / d;
+        const uy = dy / d;
+        fx[i] += ux * f; fy[i] += uy * f;
+        fx[j] -= ux * f; fy[j] -= uy * f;
+      }
+    }
+    // 连边弹簧（斥力向 rest 收敛）
+    for (const e of localEdges) {
+      const a = idx.get(e.source);
+      const b = idx.get(e.target);
+      if (a === undefined || b === undefined) continue;
+      const dx = px[b] - px[a];
+      const dy = py[b] - py[a];
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const f = kSpr * (d - spacing) * alpha;
+      const ux = dx / d;
+      const uy = dy / d;
+      fx[a] += ux * f; fy[a] += uy * f;
+      fx[b] -= ux * f; fy[b] -= uy * f;
+    }
+    // 质心重力（防止分量整体漂移/发散）
+    let cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) { cx += px[i]; cy += py[i]; }
+    cx /= n; cy /= n;
+    for (let i = 0; i < n; i++) {
+      fx[i] += (cx - px[i]) * kGrav * alpha;
+      fy[i] += (cy - py[i]) * kGrav * alpha;
+    }
+    // 积分 + 速度阻尼
+    for (let i = 0; i < n; i++) {
+      vx[i] = (vx[i] + fx[i]) * 0.85;
+      vy[i] = (vy[i] + fy[i]) * 0.85;
+      px[i] += vx[i];
+      py[i] += vy[i];
+    }
+    alpha *= alphaDecay;
+    if (alpha < 0.015) break;
+  }
+
+  ids.forEach((id, i) => { out[id] = { x: px[i], y: py[i] }; });
+  return out;
+}
+
+/**
+ * 锚定增量布局：上次已落定的节点保持位置不动，仅为新增节点依据其连接邻居落位并局部松弛。
+ *  - 锚点（prev 中仍存在的节点）视为不可移动的固定点，只对新节点施力；
+ *  - 新节点初始位置：取其已连接邻居锚点的质心 + 确定性偏移；无邻居则围绕整体质心环形落位；
+ *  - 松弛迭代只更新新节点（全对斥力 + 连边弹簧 + 轻质心重力），锚点不受影响；
+ *  - 兜底：只把新节点推离过近的任何节点（锚点不动），保证不重叠。
+ * 返回世界坐标 {x,y}，键覆盖全部 layoutNodes。
+ */
+function anchoredLayout(
+  layoutNodes: GraphNodeInfo[],
+  edges: { source: string; target: string }[],
+  prev: Record<string, { cx: number; cy: number }>,
+  spacing: number,
+  iterations: number,
+): Record<string, { x: number; y: number }> {
+  const idSet = new Set(layoutNodes.map((n) => n.id));
+  const adj = new Map<string, Set<string>>();
+  for (const e of edges) {
+    if (!idSet.has(e.source) || !idSet.has(e.target)) continue;
+    if (!adj.has(e.source)) adj.set(e.source, new Set());
+    if (!adj.has(e.target)) adj.set(e.target, new Set());
+    adj.get(e.source)!.add(e.target);
+    adj.get(e.target)!.add(e.source);
+  }
+
+  const pos = new Map<string, { x: number; y: number }>();
+  const fixed = new Set<string>();
+  const newIds: string[] = [];
+  for (const n of layoutNodes) {
+    const a = prev[n.id];
+    if (a) { pos.set(n.id, { x: a.cx, y: a.cy }); fixed.add(n.id); }
+    else newIds.push(n.id);
+  }
+  newIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+  // 整体质心（锚点质心，用于孤立新节点与轻度重力）
+  let gx = 0, gy = 0, fc = 0;
+  for (const id of fixed) { const p = pos.get(id)!; gx += p.x; gy += p.y; fc++; }
+  if (fc > 0) { gx /= fc; gy /= fc; }
+
+  // 新节点初始落位：依连接邻居质心 + 确定性偏移；无邻居则围绕整体质心环形落位
+  for (const id of newIds) {
+    const neigh = adj.get(id);
+    let baseX = gx, baseY = gy;
+    if (neigh && neigh.size > 0) {
+      let sx = 0, sy = 0, cnt = 0;
+      for (const nb of neigh) {
+        const np = pos.get(nb);
+        if (np) { sx += np.x; sy += np.y; cnt++; }
+      }
+      if (cnt > 0) { baseX = sx / cnt; baseY = sy / cnt; }
+    }
+    const ang = (hashString(id) / 0xffffffff) * Math.PI * 2;
+    pos.set(id, { x: baseX + Math.cos(ang) * spacing, y: baseY + Math.sin(ang) * spacing });
+  }
+
+  // 若无新增节点，直接返回锚点位置（纯边增删场景）
+  if (newIds.length === 0) {
+    const out: Record<string, { x: number; y: number }> = {};
+    for (const n of layoutNodes) out[n.id] = { x: pos.get(n.id)!.x, y: pos.get(n.id)!.y };
+    return out;
+  }
+
+  // 松弛：只更新新节点位移，锚点保持固定
+  const vx = new Float64Array(newIds.length);
+  const vy = new Float64Array(newIds.length);
+  const kRep = spacing * spacing;
+  const kSpr = 0.06;
+  const kGrav = 0.004;
+  const iters = Math.min(iterations, newIds.length > 60 ? 60 : 80);
+  let alpha = 1;
+  const alphaDecay = 0.9;
+  for (let iter = 0; iter < iters; iter++) {
+    const fx = new Float64Array(newIds.length);
+    const fy = new Float64Array(newIds.length);
+    for (let i = 0; i < newIds.length; i++) {
+      const id = newIds[i];
+      const p = pos.get(id)!;
+      // 全对斥力（对所有节点，包括固定节点——固定节点受力但不移动）
+      for (const n of layoutNodes) {
+        if (n.id === id) continue;
+        const q = pos.get(n.id)!;
+        let dx = p.x - q.x;
+        let dy = p.y - q.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1e-6) { dx = 0.01; dy = 0.01; d2 = 2e-4; }
+        const d = Math.sqrt(d2);
+        const f = (kRep / d2) * alpha;
+        fx[i] += (dx / d) * f;
+        fy[i] += (dy / d) * f;
+      }
+      // 连边弹簧（把新节点拉向邻居）
+      const neigh = adj.get(id);
+      if (neigh) {
+        for (const nb of neigh) {
+          const q = pos.get(nb);
+          if (!q) continue;
+          const dx = q.x - p.x;
+          const dy = q.y - p.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          const f = kSpr * (d - spacing) * alpha;
+          fx[i] += (dx / d) * f;
+          fy[i] += (dy / d) * f;
+        }
+      }
+      // 轻度质心重力：防新节点整体漂移发散
+      fx[i] += (gx - p.x) * kGrav * alpha;
+      fy[i] += (gy - p.y) * kGrav * alpha;
+    }
+    for (let i = 0; i < newIds.length; i++) {
+      vx[i] = (vx[i] + fx[i]) * 0.85;
+      vy[i] = (vy[i] + fy[i]) * 0.85;
+      const p = pos.get(newIds[i])!;
+      p.x += vx[i];
+      p.y += vy[i];
+    }
+    alpha *= alphaDecay;
+    if (alpha < 0.015) break;
+  }
+
+  // 兜底：仅推挤新节点保证与任意节点不重叠（固定节点不动）
+  separateAnchored(pos, fixed, newIds, spacing);
+
+  const out: Record<string, { x: number; y: number }> = {};
+  for (const n of layoutNodes) out[n.id] = { x: pos.get(n.id)!.x, y: pos.get(n.id)!.y };
+  return out;
+}
+
+/** 锚定推挤：只移动非锚点（新增）节点，把过近（< minSep）的点推开；锚点保持不动 */
+function separateAnchored(
+  pos: Map<string, { x: number; y: number }>,
+  fixed: Set<string>,
+  movableIds: string[],
+  minSep: number,
+): void {
+  const minSepSq = minSep * minSep;
+  const allIds = [...fixed, ...movableIds];
+  for (let pass = 0; pass < 12; pass++) {
+    let moved = false;
+    for (const a of movableIds) {
+      const pa = pos.get(a)!;
+      for (const b of allIds) {
+        if (a === b) continue;
+        const pb = pos.get(b)!;
+        const dx = pa.x - pb.x;
+        const dy = pa.y - pb.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= minSepSq) continue;
+        let d = Math.sqrt(d2);
+        if (d < 1e-4) {
+          const hash = hashString(a + '|' + b);
+          const ang = (hash / 0xffffffff) * Math.PI * 2;
+          d = 1;
+          pa.x += Math.cos(ang);
+          pa.y += Math.sin(ang);
+          moved = true;
+          continue;
+        }
+        const push = minSep - d;
+        const ux = dx / d;
+        const uy = dy / d;
+        pa.x += ux * push;
+        pa.y += uy * push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+}
+
+/** 最小间距推挤：迭代把彼此过近（< minSep）的点对称推开，直到不再靠近或轮次上限 */
+function separate(
+  positions: Record<string, { x: number; y: number }>,
+  ids: string[],
+  minSep: number,
+): void {
+  const minSepSq = minSep * minSep;
+  for (let pass = 0; pass < 12; pass++) {
+    let moved = false;
+    for (let i = 0; i < ids.length; i++) {
+      const a = positions[ids[i]];
+      for (let j = i + 1; j < ids.length; j++) {
+        const b = positions[ids[j]];
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= minSepSq) continue;
+        let d = Math.sqrt(d2);
+        if (d < 1e-4) {
+          // 完全重合：用节点 id 哈希衍生一个确定性的分离方向
+          const hash = hashString(ids[i] + '|' + ids[j]);
+          const ang = (hash / 0xffffffff) * Math.PI * 2;
+          d = 1;
+          a.x += Math.cos(ang); a.y += Math.sin(ang);
+          b.x -= Math.cos(ang); b.y -= Math.sin(ang);
+          moved = true;
+          continue;
+        }
+        const push = (minSep - d) / 2;
+        const ux = dx / d;
+        const uy = dy / d;
+        a.x += ux * push; a.y += uy * push;
+        b.x -= ux * push; b.y -= uy * push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+}
+
+/** 写入 positions（fmt 为 cx/cy 布局坐标） */
+function nodesToPositions(
+  positions: Record<string, { cx: number; cy: number }>,
+  arranged: Record<string, { x: number; y: number }>,
+  id: string,
+): void {
+  const p = arranged[id];
+  if (p) positions[id] = { cx: p.x, cy: p.y };
+}
+
+/** 确定性字符串哈希（FNV-1a 变体），用于稳定方位派生，避免 Math.random */
+function hashString(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
 }

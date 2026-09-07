@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, Download, Trash, Link, FolderSearch, Globe, AlertCircle, X, Upload, FolderUp, Search, Plug, Sparkles } from 'lucide-react';
+import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, Download, Trash, Link, FolderSearch, Globe, AlertCircle, X, Upload, FolderUp, Search, Plug, Sparkles, Bot } from 'lucide-react';
 import { skillEntryIcon } from './ext-icons';
+import { Button } from '@/components/ui/button';
 import { ToggleSwitch } from './ToggleSwitch';
 import {
   Dialog,
@@ -11,6 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { McpStorePanel } from './McpStorePanel';
+import { AgentStorePanel } from './AgentStorePanel';
 
 export interface SkillItem {
   name: string;
@@ -155,7 +157,7 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
             {confirmAction === 'reinstall' ? 'Restore official version?' : 'Uninstall this skill?'}
           </span>
           <span className="flex shrink-0 items-center gap-1">
-            <button
+            <Button
               type="button"
               onClick={() => {
                 if (confirmAction === 'reinstall') {
@@ -165,16 +167,19 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
                 }
                 setConfirmAction(null);
               }}
-              className="rounded px-1.5 py-0.5 text-xs font-medium"
-              style={{ color: '#fff', backgroundColor: 'var(--danger)' }}
-            >Confirm</button>
-            <button
+              variant="solid"
+              tone="danger"
+              size="micro"
+            >Confirm</Button>
+            <Button
               type="button"
               onClick={() => setConfirmAction(null)}
-              className="rounded p-0.5 transition-colors hover:bg-[var(--paper-soft)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="icon-xs"
               title="Cancel"
-            ><X className="h-3 w-3" /></button>
+              aria-label="Cancel"
+            ><X className="h-3 w-3" /></Button>
           </span>
         </div>
       ) : (
@@ -197,26 +202,32 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
             </span>
           </div>
           {isUserSkill && reinstallable && onReinstall && (
-            <button
+            <Button
               type="button"
               onClick={() => setConfirmAction('reinstall')}
-              className="shrink-0 rounded-md border p-1 transition-colors hover:bg-[var(--paper-soft)]"
-              style={{ borderColor: 'var(--line)', color: 'var(--primary)' }}
+              variant="outline"
+              tone="brand"
+              size="icon-sm"
+              className="shrink-0"
               title="Reinstall the bundled official version (overwrites your local edits)"
+              aria-label="Reinstall official version"
             >
               <RefreshCw className="h-3 w-3" />
-            </button>
+            </Button>
           )}
           {isUserSkill && onUninstall && (
-            <button
+            <Button
               type="button"
               onClick={() => setConfirmAction('uninstall')}
-              className="shrink-0 rounded-md border p-1 transition-colors hover:bg-[var(--paper-soft)]"
-              style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+              variant="outline"
+              tone="neutral"
+              size="icon-sm"
+              className="shrink-0"
               title="Uninstall skill"
+              aria-label="Uninstall skill"
             >
               <Trash className="h-3 w-3" />
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -231,8 +242,8 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
   const [error, setError] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 扩展类型：skills = 技能市场（原 Skill Store）/ mcp = MCP & Plugins 市场
-  const [extTab, setExtTab] = useState<'skills' | 'mcp'>('skills');
+  // 扩展类型：skills = 技能市场 / agents = Agent 市场 / mcp = MCP & Plugins 市场
+  const [extTab, setExtTab] = useState<'skills' | 'agents' | 'mcp'>('skills');
   // 视图切换：market=市场（全部随包技能；未装右侧 Install，已装显示 Installed 态不移除）/ installed=已安装(系统+已下载) / import=自定义上传(GitHub/本地)
   const [view, setView] = useState<'installed' | 'market' | 'import'>('market');
   const [installSource, setInstallSource] = useState<'github' | 'local'>('github');
@@ -531,6 +542,18 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
         </button>
         <button
           type="button"
+          onClick={() => setExtTab('agents')}
+          className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+          style={{
+            color: extTab === 'agents' ? 'var(--ink-strong)' : 'var(--ink-muted)',
+            backgroundColor: extTab === 'agents' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
+          }}
+        >
+          <Bot className="h-3 w-3" />
+          Agents
+        </button>
+        <button
+          type="button"
           onClick={() => setExtTab('mcp')}
           className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
           style={{
@@ -609,16 +632,17 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
                   >
                     {allEnabled ? 'Disable All' : 'Enable All'}
                   </button>
-                  <button
+                  <Button
                     type="button"
                     onClick={loadSkills}
                     disabled={loading}
-                    className="flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-                    style={{ color: 'var(--ink-muted)' }}
+                    variant="ghost"
+                    tone="neutral"
+                    size="sm"
                   >
                     <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
                     Refresh
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
@@ -823,16 +847,18 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
                               Installed
                             </span>
                           ) : (
-                            <button
+                            <Button
                               type="button"
                               disabled={busy}
+                              loading={busy}
                               onClick={() => handleDownload(d.name)}
-                              className="flex shrink-0 items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition-opacity disabled:opacity-50"
-                              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                              variant="solid"
+                              tone="brand"
+                              size="sm"
                             >
                               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                               {busy ? 'Installing…' : 'Install'}
-                            </button>
+                            </Button>
                           )}
                         </div>
                       );
@@ -974,15 +1000,15 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
               )}
 
               {/* 安装按钮 */}
-              <button
+              <Button
                 type="button"
                 onClick={handleInstall}
                 disabled={installing || !installUrl.trim()}
-                className="flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-medium transition-colors disabled:opacity-50"
-                style={{
-                  backgroundColor: 'var(--primary)',
-                  color: '#fff',
-                }}
+                loading={installing}
+                variant="solid"
+                tone="brand"
+                size="sm"
+                className="w-full"
               >
                 {installing ? (
                   <>
@@ -995,7 +1021,7 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
                      Install Skill
                   </>
                 )}
-              </button>
+              </Button>
             </div>
           ) : (
             /* ===== 已安装视图（操作栏/搜索已吸顶） ===== */
@@ -1048,20 +1074,23 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
             </>
           )}
           </>
+          ) : extTab === 'agents' ? (
+            <AgentStorePanel />
           ) : (
             <McpStorePanel />
           )}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t px-6 py-3 sm:px-8" style={{ borderColor: 'var(--line-soft)' }}>
-          <button
+          <Button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="rounded-md px-4 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="md"
           >
             Close
-          </button>
+          </Button>
         </div>
     </>
   );

@@ -18,7 +18,7 @@ import { defaultSettings, normalizeCustomThemes, type AppSettings } from './sett
 import { resolveAppRoot } from './app-root';
 import { encryptSettings, decryptSettings, hasPlainSecrets } from './secrets';
 import { sanitizeBaseUrl } from './types';
-import { MCP_PRESETS, type McpServerConfig } from './mcp/types';
+import { MCP_PRESETS, DEFAULT_MCP_SERVERS, type McpServerConfig } from './mcp/types';
 
 /** 清理所有 provider 的 baseUrl：去掉误存的端点后缀（如 .../images/generations），
  * 避免运行时/连接测试拼接端点后得到 .../images/generations/chat/completions → 404 */
@@ -196,6 +196,16 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
     const raw = await fs.readFile(filePath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
     const merged: AppSettings = { ...defaultSettings(), ...parsed, version: (typeof parsed.version === 'number' && parsed.version > 0) ? parsed.version : 1 };
+
+    // 系统随包插件自动装配（出厂升级）：既有配置缺失的新增 System MCP（如 bob-mind-mcp）
+    // 自动补全为默认启用，不覆盖用户已保存的旧条目
+    if (Array.isArray(merged.mcpServers)) {
+      const existing = new Set(merged.mcpServers.map((s) => s.id));
+      const missing = DEFAULT_MCP_SERVERS.filter((p) => !existing.has(p.id));
+      if (missing.length > 0) {
+        merged.mcpServers = [...merged.mcpServers, ...missing];
+      }
+    }
 
     // 解密敏感字段；如果有明文，顺便回写成加密版（透明迁移）
     const decrypted = decryptSettings(merged);

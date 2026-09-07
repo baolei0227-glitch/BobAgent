@@ -14,6 +14,7 @@ import { getSource } from '@/lib/files/registry';
 import { matchRenderer } from './viewers/registry';
 import { desktop } from '@/lib/desktop-adapter';
 import { OutcomeEditor } from './OutcomeEditor';
+import { Button } from '@/components/ui/button';
 import { bus, BusEvents } from '@/lib/bus';
 import type { TraceInspectPayload } from '@/lib/bus';
 import type { TraceSpan } from '@/lib/types';
@@ -449,16 +450,16 @@ export function UnifiedViewer({
         style={{ borderBottom: '1px solid var(--line-soft)', backgroundColor: 'var(--paper)' }}
       >
         {mode === 'tabbed' && onToggleCollapse && (
-          <button onClick={(e) => { e.stopPropagation(); onToggleCollapse(); }}
-            className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }} title="Collapse">
+          <Button onClick={(e) => { e.stopPropagation(); onToggleCollapse(); }}
+            variant="ghost" tone="neutral" size="icon-sm" title="Collapse" aria-label="Collapse">
             <ChevronsRight className="h-4 w-4" />
-          </button>
+          </Button>
         )}
         {!onToggleCollapse && mode === 'standalone' && (
-          <button onClick={(e) => { e.stopPropagation(); setCollapsed(true); }}
-            className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }} title="Collapse to right">
+          <Button onClick={(e) => { e.stopPropagation(); setCollapsed(true); }}
+            variant="ghost" tone="neutral" size="icon-sm" title="Collapse to right" aria-label="Collapse to right">
             <ChevronsRight className="h-4 w-4" />
-          </button>
+          </Button>
         )}
         {!isNodeMode && (imageActiveInfo?.type === 'image' || fileInfo?.type === 'image') ? (
           <ImageIcon className="h-4 w-4 shrink-0" style={{ color: 'var(--info)' }} />
@@ -469,30 +470,34 @@ export function UnifiedViewer({
           {displayName}
         </span>
         {!isNodeMode && effectiveFileInfo?.full_path && (
-          <button
+          <Button
             onClick={(e) => {
               e.stopPropagation();
               if (effectiveFileInfo.full_path) desktop.openFile(effectiveFileInfo.full_path);
             }}
-            className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
             title="用默认应用打开"
+            aria-label="用默认应用打开"
           >
             <ExternalLink className="h-4 w-4" />
-          </button>
+          </Button>
         )}
         {/* 缩放控制（非成果块编辑模式下显示） */}
         {!(isNodeMode && outcomeViewActive) && (
           <div className="flex items-center gap-0.5 rounded-md px-0.5" style={{ backgroundColor: 'var(--paper-hover)' }}>
-            <button
+            <Button
               onClick={(e) => { e.stopPropagation(); zoomOut(); }}
-              className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               title="缩小"
+              aria-label="缩小"
               disabled={zoom <= ZOOM_MIN}
             >
               <ZoomOut className="h-3.5 w-3.5" style={{ opacity: zoom <= ZOOM_MIN ? 0.35 : 1 }} />
-            </button>
+            </Button>
             <button
               onClick={(e) => { e.stopPropagation(); zoomReset(); }}
               className="min-w-[32px] rounded px-1 py-0.5 text-center text-xs font-medium tabular-nums transition-colors hover:bg-[var(--paper-hover)]"
@@ -501,15 +506,17 @@ export function UnifiedViewer({
             >
               {Math.round(zoom * 100)}%
             </button>
-            <button
+            <Button
               onClick={(e) => { e.stopPropagation(); zoomIn(); }}
-              className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               title="放大"
+              aria-label="放大"
               disabled={zoom >= ZOOM_MAX}
             >
               <ZoomIn className="h-3.5 w-3.5" style={{ opacity: zoom >= ZOOM_MAX ? 0.35 : 1 }} />
-            </button>
+            </Button>
           </div>
         )}
         {/* 成果块视图切换（仅节点模式）：查看成果块 → 编辑 → 预览 三态 */}
@@ -533,10 +540,10 @@ export function UnifiedViewer({
             {!outcomeViewActive ? '成果块' : outcomeEditMode ? '预览' : '编辑'}
           </button>
         )}
-        <button onClick={() => onClose(displayId)}
-          className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }}>
+        <Button onClick={() => onClose(displayId)}
+          variant="ghost" tone="neutral" size="icon-sm" aria-label="Close">
           <X className="h-4 w-4" />
-        </button>
+        </Button>
       </div>
       )}
 
@@ -553,19 +560,23 @@ export function UnifiedViewer({
           <AlertCircle className="h-8 w-8" style={{ color: 'var(--danger)' }} />
           <p className="text-center text-sm" style={{ color: 'var(--ink-muted)' }}>{error}</p>
           <div className="flex items-center gap-2">
-            <button
+            <Button
               onClick={() => isNodeMode ? loadNodeDocument() : window.location.reload()}
-              className="flex items-center gap-1.5 rounded-md px-4 py-2 text-xs font-medium transition-colors"
-              style={{ backgroundColor: 'var(--info)', color: '#fff' }}>
+              variant="solid"
+              tone="info"
+              size="sm"
+            >
               <RefreshCw className="h-3.5 w-3.5" />Retry
-            </button>
+            </Button>
             {!isNodeMode && (effectiveFileInfo?.full_path || (effectiveSource === 'local' ? filePath : undefined)) && (
-              <button
+              <Button
                 onClick={() => desktop.openFile(effectiveFileInfo?.full_path || filePath!)}
-                className="flex items-center gap-1.5 rounded-md px-4 py-2 text-xs font-medium transition-colors"
-                style={{ backgroundColor: 'var(--paper)', color: 'var(--info)', border: '1px solid color-mix(in oklab, var(--info) 35%, transparent)' }}>
+                variant="outline"
+                tone="info"
+                size="sm"
+              >
                 <ExternalLink className="h-3.5 w-3.5" />用默认应用打开
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -615,9 +626,9 @@ export function UnifiedViewer({
         <div className="flex w-[260px] shrink-0 flex-col border-l" style={{ borderColor: 'var(--line-soft)' }}>
           <div className="flex shrink-0 items-center justify-between border-b px-2.5 py-1.5" style={{ borderColor: 'var(--line-soft)' }}>
             <span className="text-11 font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>事件检查器</span>
-            <button onClick={() => setInspectorSpan(null)} className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }} title="关闭检查器">
+            <Button onClick={() => setInspectorSpan(null)} variant="ghost" tone="neutral" size="icon-xs" title="关闭检查器" aria-label="关闭检查器">
               <X className="h-3 w-3" />
-            </button>
+            </Button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
             <EventInspector span={inspectorSpan} isStreaming={false} />

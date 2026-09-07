@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { mcpEntryIcon } from './ext-icons';
 import { ToggleSwitch } from './ToggleSwitch';
+import { Button } from '@/components/ui/button';
 import { loadSettings, updateSettingsFields } from '@/lib/settings';
 import { desktop } from '@/lib/desktop-adapter';
 
@@ -161,25 +162,28 @@ function ScreenshotOcrCard() {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {enabled && perm === 'denied' && (
-            <button
+            <Button
               type="button"
               onClick={() => { void desktop.screenOcr.openPermissions(); }}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors hover:opacity-90"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              variant="solid"
+              tone="brand"
+              size="sm"
               title="Open System Settings → Screen Recording to grant permission"
             >
               Authorize
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             type="button"
             onClick={() => void refreshStatus()}
-            className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-soft)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
             title="Re-check screen-recording permission"
+            aria-label="Re-check permission"
           >
             {perm === 'checking' ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-          </button>
+          </Button>
           <ToggleSwitch
             checked={enabled}
             onChange={() => void toggleEnabled()}
@@ -546,20 +550,23 @@ export function McpStorePanel() {
               Installed
             </span>
           ) : (
-            <button
+            <Button
               type="button"
               disabled={busyId === e.id}
+              loading={busyId === e.id}
               onClick={() => {
                 if (e.risk === 'high') setConfirmId(e.id);
                 else if (e.auth) { setKeyRowId(keyOpen ? null : e.id); setApiKey(''); }
                 else void handleDownload(e);
               }}
-              className="flex shrink-0 items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition-opacity disabled:opacity-50"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              variant="solid"
+              tone="brand"
+              size="sm"
+              className="shrink-0"
             >
               {busyId === e.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
               {busyId === e.id ? 'Installing…' : 'Install'}
-            </button>
+            </Button>
           )}
         </div>
 
@@ -570,12 +577,12 @@ export function McpStorePanel() {
             <span className="flex-1 leading-relaxed" style={{ color: 'var(--ink)' }}>
               {e.name} can {e.id === 'bob-browser-mcp' ? 'control your real browser' : e.id === 'bobby' ? 'run local commands and control apps' : e.id === 'github' ? 'modify your GitHub repositories' : 'read and write your connected workspace'} on your behalf. Confirm install?
             </span>
-            <button type="button" onClick={() => { setConfirmId(null); setApiKey(''); if (e.auth) setKeyRowId(e.id); else void handleDownload(e); }} className="rounded px-2 py-1 font-medium transition-colors" style={{ backgroundColor: 'var(--danger)', color: '#fff' }}>
+            <Button type="button" onClick={() => { setConfirmId(null); setApiKey(''); if (e.auth) setKeyRowId(e.id); else void handleDownload(e); }} variant="solid" tone="danger" size="sm">
               Confirm
-            </button>
-            <button type="button" onClick={() => setConfirmId(null)} className="rounded px-2 py-1 transition-colors hover:bg-[var(--paper-soft)]" style={{ color: 'var(--ink-muted)' }}>
+            </Button>
+            <Button type="button" onClick={() => setConfirmId(null)} variant="ghost" tone="neutral" size="sm">
               Cancel
-            </button>
+            </Button>
           </div>
         )}
 
@@ -603,19 +610,21 @@ export function McpStorePanel() {
                 className="h-7 flex-1 rounded-md border bg-transparent px-2 text-xs outline-none"
                 style={{ borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
               />
-              <button
+              <Button
                 type="button"
                 disabled={busyId === e.id || !apiKey.trim()}
+                loading={busyId === e.id}
                 onClick={() => void handleDownload(e, apiKey.trim())}
-                className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                variant="solid"
+                tone="brand"
+                size="sm"
               >
                 {busyId === e.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                 Install
-              </button>
-              <button type="button" onClick={() => { setKeyRowId(null); setApiKey(''); }} className="rounded px-2 py-1 text-xs transition-colors hover:bg-[var(--paper-soft)]" style={{ color: 'var(--ink-muted)' }}>
+              </Button>
+              <Button type="button" onClick={() => { setKeyRowId(null); setApiKey(''); }} variant="ghost" tone="neutral" size="sm">
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -669,17 +678,18 @@ export function McpStorePanel() {
               </button>
             )}
             {e.config && (
-              <button
+              <Button
                 type="button"
                 disabled={busyId === e.id}
                 onClick={() => void handleOpenConfig(e)}
-                className="flex items-center gap-1 text-xs font-medium transition-colors hover:underline disabled:opacity-50"
-                style={{ color: 'var(--ink-muted)' }}
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 title="Open this plugin's configuration page (vision / GLM-OCR / Online OCR)"
               >
                 <Settings2 className="h-3 w-3" />
                 Configure
-              </button>
+              </Button>
             )}
             {e.auth && (
               <button
@@ -695,24 +705,27 @@ export function McpStorePanel() {
             {e.group !== 'bundled' && (
               <>
                 {confirmDelId === e.id ? (
-                  <button
+                  <Button
                     type="button"
                     onClick={() => void handleUninstall(e)}
-                    className="rounded px-1.5 py-0.5 text-xs font-medium transition-colors"
-                    style={{ backgroundColor: 'var(--danger)', color: '#fff' }}
+                    variant="solid"
+                    tone="danger"
+                    size="micro"
                   >
                     Confirm?
-                  </button>
+                  </Button>
                 ) : (
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setConfirmDelId(e.id)}
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-                    style={{ color: 'var(--ink-muted)' }}
+                    variant="ghost"
+                    tone="danger"
+                    size="icon-sm"
                     title="Uninstall"
+                    aria-label="Uninstall"
                   >
                     <Trash className="h-3 w-3" />
-                  </button>
+                  </Button>
                 )}
               </>
             )}
@@ -737,23 +750,26 @@ export function McpStorePanel() {
               className="h-7 flex-1 rounded-md border bg-transparent px-2 text-xs outline-none"
               style={{ borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
             />
-            <button
+            <Button
               type="button"
               disabled={busyId === e.id || !editKey.trim()}
+              loading={busyId === e.id}
               onClick={() => void handleUpdateKey(e)}
-              className="rounded-md px-2.5 py-1 text-xs font-medium transition-opacity disabled:opacity-50"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              variant="solid"
+              tone="brand"
+              size="sm"
             >
               {busyId === e.id ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={() => { setEditKeyId(null); setEditKey(''); }}
-              className="rounded px-2 py-1 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="sm"
             >
               Cancel
-            </button>
+            </Button>
           </div>
         )}
         {/* Bob Browser 扩展装配（下载扩展 + 复制绑定链接/Token） */}
@@ -763,35 +779,39 @@ export function McpStorePanel() {
               Load the extension at <b style={{ color: 'var(--ink)' }}>chrome://extensions → Load unpacked</b>, then paste the binding link into its popup (⚙ Settings → Binding) to connect your real browser.
             </p>
             <div className="flex items-center gap-2">
-              <button
+              <Button
                 type="button"
                 disabled={busyId === e.id}
+                loading={busyId === e.id}
                 onClick={() => void handleDownloadExtension(e)}
-                className="flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition-opacity disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                variant="solid"
+                tone="brand"
+                size="sm"
               >
                 {busyId === e.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                 Download Extension
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 disabled={busyId === e.id}
                 onClick={() => void handleCopyBindingLink(e)}
-                className="flex items-center gap-1 rounded-md border px-2.5 py-1 font-medium transition-opacity disabled:opacity-50"
-                style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+                variant="outline"
+                tone="neutral"
+                size="sm"
               >
                 Copy Binding Link
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 disabled={busyId === e.id}
                 onClick={() => void handleCopyToken(e)}
-                className="flex items-center gap-1 rounded-md border px-2.5 py-1 font-medium transition-opacity disabled:opacity-50"
-                style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+                variant="outline"
+                tone="neutral"
+                size="sm"
                 title="Copy just the token — always available, persists at ~/.bob-browser-mcp/token.json"
               >
                 Copy Token
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -978,23 +998,26 @@ export function McpStorePanel() {
               </p>
             </div>
             <div className="flex items-center justify-end gap-2">
-              <button
+              <Button
                 type="button"
                 onClick={() => { setCustomName(''); setCustomEndpoint(''); }}
-                className="rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-                style={{ color: 'var(--ink-muted)' }}
+                variant="ghost"
+                tone="neutral"
+                size="sm"
               >
                 Clear
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 disabled={addingCustom || !customName.trim() || !customEndpoint.trim()}
+                loading={addingCustom}
                 onClick={() => void handleAddCustom()}
-                className="rounded-md px-3 py-1.5 text-xs font-medium transition-opacity disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                variant="solid"
+                tone="brand"
+                size="sm"
               >
                 {addingCustom ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Add'}
-              </button>
+              </Button>
             </div>
           </div>
         </>

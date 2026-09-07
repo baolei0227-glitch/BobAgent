@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek Harness 桌面布局</title>
+    <style id="theme-vars">
+/* DeepSeek Harness — Desktop App Shell Tokens */
+
+:root {
+  /* Primary hue: DeepSeek cyan-blue */
+  --dh-brand-50: #ecfdff;
+  --dh-brand-100: #cff7fe;
+  --dh-brand-200: #a0edfd;
+  --dh-brand-300: #60dafa;
+  --dh-brand-400: #1cbbf2;
+  --dh-brand-500: #00a0d2;
+  --dh-brand-600: #0080af;
+  --dh-brand-700: #00678d;
+  --dh-brand-800: #005274;
+  --dh-brand-900: #06455f;
+
+  /* Neutral surface scale */
+  --dh-neutral-0: #ffffff;
+  --dh-neutral-50: #f8f9fb;
+  --dh-neutral-100: #f1f3f6;
+  --dh-neutral-200: #e3e7ec;
+  --dh-neutral-300: #c9d0d8;
+  --dh-neutral-400: #9aa5b1;
+  --dh-neutral-500: #69727d;
+  --dh-neutral-600: #4b535c;
+  --dh-neutral-700: #3a4047;
+  --dh-neutral-800: #24282d;
+  --dh-neutral-900: #15181b;
+
+  /* Semantic aliases */
+  --dh-background: var(--dh-neutral-0);
+  --dh-foreground: var(--dh-neutral-900);
+  --dh-card: var(--dh-neutral-50);
+  --dh-card-foreground: var(--dh-neutral-900);
+  --dh-popover: var(--dh-neutral-0);
+  --dh-popover-foreground: var(--dh-neutral-900);
+  --dh-primary: var(--dh-brand-600);
+  --dh-primary-foreground: var(--dh-neutral-0);
+  --dh-muted: var(--dh-neutral-100);
+  --dh-muted-foreground: var(--dh-neutral-500);
+  --dh-border: var(--dh-neutral-200);
+  --dh-input: var(--dh-neutral-200);
+  --dh-ring: var(--dh-brand-500);
+
+  /* State colors */
+  --dh-state-success: #16a34a;
+  --dh-state-warning: #d97706;
+  --dh-state-error: #dc2626;
+  --dh-state-info: var(--dh-brand-500);
+
+  /* Radius */
+  --dh-radius-xs: 2px;
+  --dh-radius-sm: 4px;
+  --dh-radius-md: 8px;
+  --dh-radius-lg: 16px;
+  --dh-radius-pill: 999px;
+
+  /* Shadows */
+  --dh-shadow-1: 0 1px 2px rgba(21, 24, 27, 0.05), 0 1px 1px rgba(21, 24, 27, 0.03);
+  --dh-shadow-2: 0 8px 24px -8px rgba(21, 24, 27, 0.18);
+  --dh-shadow-3: 0 24px 60px -20px rgba(21, 24, 27, 0.30);
+
+  /* Typography */
+  --dh-font-sans: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --dh-font-mono: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+
+  /* Spacing scale reference */
+  --dh-space-1: 4px;
+  --dh-space-2: 8px;
+  --dh-space-3: 12px;
+  --dh-space-4: 16px;
+  --dh-space-5: 24px;
+  --dh-space-6: 32px;
+  --dh-space-7: 48px;
+  --dh-space-8: 64px;
+}
+
+/* Dark mode overrides */
+html.dark {
+  --dh-background: #0d0f12;
+  --dh-foreground: #f1f3f6;
+  --dh-card: #14171b;
+  --dh-card-foreground: #f1f3f6;
+  --dh-popover: #14171b;
+  --dh-popover-foreground: #f1f3f6;
+  --dh-muted: #1c2026;
+  --dh-muted-foreground: #9aa5b1;
+  --dh-border: #2a2f36;
+  --dh-input: #2a2f36;
+  --dh-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 1px rgba(0, 0, 0, 0.15);
+  --dh-shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.45);
+  --dh-shadow-3: 0 24px 60px -20px rgba(0, 0, 0, 0.60);
+}
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--dh-background);
+    --color-foreground: var(--dh-foreground);
+    --color-card: var(--dh-card);
+    --color-card-foreground: var(--dh-card-foreground);
+    --color-popover: var(--dh-popover);
+    --color-popover-foreground: var(--dh-popover-foreground);
+    --color-primary: var(--dh-primary);
+    --color-primary-foreground: var(--dh-primary-foreground);
+    --color-muted: var(--dh-muted);
+    --color-muted-foreground: var(--dh-muted-foreground);
+    --color-border: var(--dh-border);
+    --color-input: var(--dh-input);
+    --color-ring: var(--dh-ring);
+    --radius-sm: var(--dh-radius-sm);
+    --radius-md: var(--dh-radius-md);
+    --radius-lg: var(--dh-radius-lg);
+  }
+  @layer base {
+    body { background: var(--dh-background); color: var(--dh-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--dh-background); }
+      .text-background { color: var(--dh-background); }
+      .border-background { border-color: var(--dh-background); }
+      .ring-background { --tw-ring-color: var(--dh-background); }
+      .bg-foreground { background-color: var(--dh-foreground); }
+      .text-foreground { color: var(--dh-foreground); }
+      .border-foreground { border-color: var(--dh-foreground); }
+      .ring-foreground { --tw-ring-color: var(--dh-foreground); }
+      .bg-card { background-color: var(--dh-card); }
+      .text-card { color: var(--dh-card); }
+      .border-card { border-color: var(--dh-card); }
+      .ring-card { --tw-ring-color: var(--dh-card); }
+      .bg-card-foreground { background-color: var(--dh-card-foreground); }
+      .text-card-foreground { color: var(--dh-card-foreground); }
+      .border-card-foreground { border-color: var(--dh-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--dh-card-foreground); }
+      .bg-popover { background-color: var(--dh-popover); }
+      .text-popover { color: var(--dh-popover); }
+      .border-popover { border-color: var(--dh-popover); }
+      .ring-popover { --tw-ring-color: var(--dh-popover); }
+      .bg-popover-foreground { background-color: var(--dh-popover-foreground); }
+      .text-popover-foreground { color: var(--dh-popover-foreground); }
+      .border-popover-foreground { border-color: var(--dh-popover-foreground); }
+      .ring-popover-foreground { --tw-ring-color: var(--dh-popover-foreground); }
+      .bg-primary { background-color: var(--dh-primary); }
+      .text-primary { color: var(--dh-primary); }
+      .border-primary { border-color: var(--dh-primary); }
+      .ring-primary { --tw-ring-color: var(--dh-primary); }
+      .bg-primary-foreground { background-color: var(--dh-primary-foreground); }
+      .text-primary-foreground { color: var(--dh-primary-foreground); }
+      .border-primary-foreground { border-color: var(--dh-primary-foreground); }
+      .ring-primary-foreground { --tw-ring-color: var(--dh-primary-foreground); }
+      .bg-muted { background-color: var(--dh-muted); }
+      .text-muted { color: var(--dh-muted); }
+      .border-muted { border-color: var(--dh-muted); }
+      .ring-muted { --tw-ring-color: var(--dh-muted); }
+      .bg-muted-foreground { background-color: var(--dh-muted-foreground); }
+      .text-muted-foreground { color: var(--dh-muted-foreground); }
+      .border-muted-foreground { border-color: var(--dh-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--dh-muted-foreground); }
+      .bg-border { background-color: var(--dh-border); }
+      .text-border { color: var(--dh-border); }
+      .border-border { border-color: var(--dh-border); }
+      .ring-border { --tw-ring-color: var(--dh-border); }
+      .bg-input { background-color: var(--dh-input); }
+      .text-input { color: var(--dh-input); }
+      .border-input { border-color: var(--dh-input); }
+      .ring-input { --tw-ring-color: var(--dh-input); }
+      .bg-ring { background-color: var(--dh-ring); }
+      .text-ring { color: var(--dh-ring); }
+      .border-ring { border-color: var(--dh-ring); }
+      .ring-ring { --tw-ring-color: var(--dh-ring); }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+    <style id="critical-layout">
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+      html, body { height: 100%; }
+      body { display: flex; font-family: var(--dh-font-sans); }
+      [data-viewport-mode="app-shell"] { display: flex; width: 100%; min-height: 100vh; }
+      [data-region="sidebar"] { width: 220px; flex-shrink: 0; }
+      [data-region="header"] { height: 64px; flex-shrink: 0; }
+      [data-scroll-region="primary"] { flex: 1 1 auto; min-width: 0; overflow: auto; }
+      [data-region="runs-table"] table { min-width: 640px; width: 100%; }
+      .dh-shadow-1 { box-shadow: var(--dh-shadow-1); }
+      .dh-nav-active { background-color: var(--dh-brand-50); color: var(--dh-primary); }
+      .dh-row-selected { background-color: var(--dh-brand-50); }
+      .dh-row-selected td { border-color: var(--dh-brand-100); }
+      .font-mono { font-family: var(--dh-font-mono); }
+      .dh-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 1.5; }
+      .dh-badge-success { background-color: color-mix(in srgb, var(--dh-state-success) 12%, transparent); color: var(--dh-state-success); }
+      .dh-badge-warning { background-color: color-mix(in srgb, var(--dh-state-warning) 12%, transparent); color: var(--dh-state-warning); }
+      .dh-badge-error { background-color: color-mix(in srgb, var(--dh-state-error) 12%, transparent); color: var(--dh-state-error); }
+      .dh-badge-info { background-color: color-mix(in srgb, var(--dh-state-info) 12%, transparent); color: var(--dh-state-info); }
+    </style>
+</head>
+<body class="min-h-screen font-sans antialiased">
+    <main>
+      <div data-viewport-mode="app-shell" class="w-full bg-background text-foreground">
+        <aside data-region="sidebar" class="sticky top-0 h-screen border-r border-border bg-card flex flex-col justify-between">
+          <div>
+            <div class="h-16 flex items-center gap-3 px-5 border-b border-border">
+              <i data-lucide="cpu" class="w-6 h-6 text-primary"></i>
+              <span class="text-base font-semibold tracking-tight">DeepSeek Harness</span>
+            </div>
+            <nav class="p-3 space-y-1">
+              <a href="#" class="dh-nav-active flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium">
+                <i data-lucide="layout-dashboard" class="w-4 h-4"></i> 评测概览
+              </a>
+              <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+                <i data-lucide="list" class="w-4 h-4"></i> 任务队列
+              </a>
+              <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+                <i data-lucide="bar-chart-3" class="w-4 h-4"></i> 模型对比
+              </a>
+              <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+                <i data-lucide="database" class="w-4 h-4"></i> 数据集
+              </a>
+              <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+                <i data-lucide="file-text" class="w-4 h-4"></i> 报告中心
+              </a>
+              <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground">
+                <i data-lucide="settings" class="w-4 h-4"></i> 设置
+              </a>
+            </nav>
+          </div>
+          <div class="p-4 border-t border-border">
+            <div class="flex items-center gap-3">
+              <div class="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                <i data-lucide="user" class="w-4 h-4"></i>
+              </div>
+              <div class="min-w-0">
+                <p class="text-sm font-medium truncate">Alpha Team</p>
+                <p class="text-xs text-muted-foreground truncate">admin@deepseek.dev</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <div class="flex-1 flex flex-col min-w-0">
+          <header data-region="header" class="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border flex items-center justify-between px-6">
+            <div class="flex items-center gap-4">
+              <div>
+                <h1 class="text-lg font-semibold">评测概览</h1>
+                <p class="text-xs text-muted-foreground">工作空间 / 默认项目</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-6">
+              <button class="flex items-center gap-2 px-3 py-1.5 rounded-md border border-border bg-card text-sm hover:bg-muted">
+                <span>DeepSeek-V3</span>
+                <i data-lucide="chevron-down" class="w-4 h-4 text-muted-foreground"></i>
+              </button>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="relative">
+                <i data-lucide="search" class="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"></i>
+                <input type="text" placeholder="搜索任务..." class="h-9 w-56 rounded-md border border-border bg-card pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground">
+              </div>
+              <button class="relative h-9 w-9 rounded-md border border-border bg-card flex items-center justify-center hover:bg-muted">
+                <i data-lucide="bell" class="w-4 h-4"></i>
+                <span class="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--dh-state-error)]"></span>
+              </button>
+              <button class="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm font-medium flex items-center gap-2 hover:bg-[var(--dh-brand-700)]">
+                <i data-lucide="plus" class="w-4 h-4"></i> 新建评测
+              </button>
+            </div>
+          </header>
+          <div data-scroll-region="primary" class="flex-1 overflow-auto p-6 min-w-0">
+            <div class="flex flex-col gap-6">
+              <div data-region="kpis" class="grid grid-cols-4 gap-4">
+                <div class="bg-card border border-border rounded-lg dh-shadow-1 p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm text-muted-foreground">总运行次数</span>
+                    <i data-lucide="activity" class="w-4 h-4 text-primary"></i>
+                  </div>
+                  <div class="text-2xl font-semibold font-mono">1,284</div>
+                  <div class="mt-1 text-xs text-[var(--dh-state-success)]">+12% 较上周</div>
+                </div>
+                <div class="bg-card border border-border rounded-lg dh-shadow-1 p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm text-muted-foreground">通过率</span>
+                    <i data-lucide="check-circle" class="w-4 h-4 text-primary"></i>
+                  </div>
+                  <div class="text-2xl font-semibold font-mono">94.2%</div>
+                  <div class="mt-1 text-xs text-[var(--dh-state-success)]">+1.5% 较上周</div>
+                </div>
+                <div class="bg-card border border-border rounded-lg dh-shadow-1 p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm text-muted-foreground">平均延迟</span>
+                    <i data-lucide="timer" class="w-4 h-4 text-primary"></i>
+                  </div>
+                  <div class="text-2xl font-semibold font-mono">312 ms</div>
+                  <div class="mt-1 text-xs text-[var(--dh-state-success)]">-18 ms 较上周</div>
+                </div>
+                <div class="bg-card border border-border rounded-lg dh-shadow-1 p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm text-muted-foreground">已接入模型</span>
+                    <i data-lucide="layers" class="w-4 h-4 text-primary"></i>
+                  </div>
+                  <div class="text-2xl font-semibold font-mono">8</div>
+                  <div class="mt-1 text-xs text-[var(--dh-state-success)]">+2 较上周</div>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div class="flex items-center gap-1 p-1 bg-muted rounded-md">
+                  <button class="px-3 py-1.5 text-sm font-medium rounded bg-card text-foreground dh-shadow-1">全部</button>
+                  <button class="px-3 py-1.5 text-sm font-medium rounded text-muted-foreground hover:text-foreground hover:bg-card">运行中</button>
+                  <button class="px-3 py-1.5 text-sm font-medium rounded text-muted-foreground hover:text-foreground hover:bg-card">已完成</button>
+                  <button class="px-3 py-1.5 text-sm font-medium rounded text-muted-foreground hover:text-foreground hover:bg-card">失败</button>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button class="h-9 px-3 rounded-md border border-border bg-card text-sm text-muted-foreground flex items-center gap-2 hover:bg-muted">
+                    <i data-lucide="calendar" class="w-4 h-4"></i> 2026-09-01 ~ 2026-09-05
+                  </button>
+                  <button class="h-9 w-9 rounded-md border border-border bg-card flex items-center justify-center hover:bg-muted">
+                    <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="flex gap-6 min-h-0">
+                <div data-region="runs-table" class="flex-1 min-w-0 bg-card border border-border rounded-lg dh-shadow-1 overflow-hidden flex flex-col">
+                  <div class="px-4 py-3 border-b border-border">
+                    <h2 class="text-sm font-semibold">评测任务</h2>
+                  </div>
+                  <div class="overflow-x-auto flex-1">
+                    <table class="text-sm text-left">
+                      <thead class="bg-muted text-xs uppercase text-muted-foreground sticky top-0">
+                        <tr>
+                          <th class="px-4 py-3 font-medium">任务名称</th>
+                          <th class="px-4 py-3 font-medium">模型</th>
+                          <th class="px-4 py-3 font-medium">数据集</th>
+                          <th class="px-4 py-3 font-medium">状态</th>
+                          <th class="px-4 py-3 font-medium text-right">分数</th>
+                          <th class="px-4 py-3 font-medium text-right">耗时</th>
+                          <th class="px-4 py-3 font-medium text-center">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody class="divide-y divide-border">
+                        <tr class="dh-row-selected">
+                          <td class="px-4 py-3 font-medium">MMLU-Pro 综合评测</td>
+                          <td class="px-4 py-3 text-muted-foreground">DeepSeek-V3</td>
+                          <td class="px-4 py-3 text-muted-foreground">mmlu-pro</td>
+                          <td class="px-4 py-3"><span class="dh-badge dh-badge-success"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>已完成</span></td>
+                          <td class="px-4 py-3 text-right font-mono font-medium">87.4</td>
+                          <td class="px-4 py-3 text-right font-mono text-muted-foreground">4m 12s</td>
+                          <td class="px-4 py-3 text-center">
+                            <div class="flex items-center justify-center gap-2">
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="eye" class="w-4 h-4"></i></button>
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="play-circle" class="w-4 h-4"></i></button>
+                            </div>
+                          </td>
+                        </tr>
+                        <tr class="hover:bg-muted">
+                          <td class="px-4 py-3 font-medium">GSM8K 数学推理</td>
+                          <td class="px-4 py-3 text-muted-foreground">DeepSeek-V2.5</td>
+                          <td class="px-4 py-3 text-muted-foreground">gsm8k</td>
+                          <td class="px-4 py-3"><span class="dh-badge dh-badge-success"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>已完成</span></td>
+                          <td class="px-4 py-3 text-right font-mono font-medium">92.1</td>
+                          <td class="px-4 py-3 text-right font-mono text-muted-foreground">3m 55s</td>
+                          <td class="px-4 py-3 text-center">
+                            <div class="flex items-center justify-center gap-2">
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="eye" class="w-4 h-4"></i></button>
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="play-circle" class="w-4 h-4"></i></button>
+                            </div>
+                          </td>
+                        </tr>
+                        <tr class="hover:bg-muted">
+                          <td class="px-4 py-3 font-medium">HumanEval 代码生成</td>
+                          <td class="px-4 py-3 text-muted-foreground">DeepSeek-Coder-V2</td>
+                          <td class="px-4 py-3 text-muted-foreground">humaneval</td>
+                          <td class="px-4 py-3"><span class="dh-badge dh-badge-info"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>运行中</span></td>
+                          <td class="px-4 py-3 text-right font-mono font-medium">—</td>
+                          <td class="px-4 py-3 text-right font-mono text-muted-foreground">2m 08s</td>
+                          <td class="px-4 py-3 text-center">
+                            <div class="flex items-center justify-center gap-2">
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="eye" class="w-4 h-4"></i></button>
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="play-circle" class="w-4 h-4"></i></button>
+                            </div>
+                          </td>
+                        </tr>
+                        <tr class="hover:bg-muted">
+                          <td class="px-4 py-3 font-medium">C-Eval 中文知识</td>
+                          <td class="px-4 py-3 text-muted-foreground">Qwen2-72B</td>
+                          <td class="px-4 py-3 text-muted-foreground">c-eval</td>
+                          <td class="px-4 py-3"><span class="dh-badge dh-badge-success"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>已完成</span></td>
+                          <td class="px-4 py-3 text-right font-mono font-medium">81.6</td>
+                          <td class="px-4 py-3 text-right font-mono text-muted-foreground">5m 33s</td>
+                          <td class="px-4 py-3 text-center">
+                            <div class="flex items-center justify-center gap-2">
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="eye" class="w-4 h-4"></i></button>
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="play-circle" class="w-4 h-4"></i></button>
+                            </div>
+                          </td>
+                        </tr>
+                        <tr class="hover:bg-muted">
+                          <td class="px-4 py-3 font-medium">MBPP Plus</td>
+                          <td class="px-4 py-3 text-muted-foreground">DeepSeek-Coder-V2</td>
+                          <td class="px-4 py-3 text-muted-foreground">mbpp-plus</td>
+                          <td class="px-4 py-3"><span class="dh-badge dh-badge-error"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>失败</span></td>
+                          <td class="px-4 py-3 text-right font-mono font-medium">—</td>
+                          <td class="px-4 py-3 text-right font-mono text-muted-foreground">1m 47s</td>
+                          <td class="px-4 py-3 text-center">
+                            <div class="flex items-center justify-center gap-2">
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="eye" class="w-4 h-4"></i></button>
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="play-circle" class="w-4 h-4"></i></button>
+                            </div>
+                          </td>
+                        </tr>
+                        <tr class="hover:bg-muted">
+                          <td class="px-4 py-3 font-medium">IFEval 指令遵循</td>
+                          <td class="px-4 py-3 text-muted-foreground">DeepSeek-V3</td>
+                          <td class="px-4 py-3 text-muted-foreground">ifeval</td>
+                          <td class="px-4 py-3"><span class="dh-badge dh-badge-success"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>已完成</span></td>
+                          <td class="px-4 py-3 text-right font-mono font-medium">78.9</td>
+                          <td class="px-4 py-3 text-right font-mono text-muted-foreground">6m 19s</td>
+                          <td class="px-4 py-3 text-center">
+                            <div class="flex items-center justify-center gap-2">
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="eye" class="w-4 h-4"></i></button>
+                              <button class="h-8 w-8 rounded-md border border-border bg-background flex items-center justify-center hover:bg-muted"><i data-lucide="play-circle" class="w-4 h-4"></i></button>
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <aside data-region="detail-panel" class="w-[320px] shrink-0 bg-card border border-border rounded-lg dh-shadow-1 p-4 flex flex-col gap-4">
+                  <div>
+                    <h2 class="text-sm font-semibold mb-1">任务详情</h2>
+                    <p class="text-xs text-muted-foreground">MMLU-Pro 综合评测</p>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="dh-badge dh-badge-success">已完成</span>
+                    <span class="text-xs text-muted-foreground">2026-09-05 14:32</span>
+                  </div>
+                  <div class="border-t border-border pt-3">
+                    <h3 class="text-xs font-semibold text-muted-foreground uppercase mb-2">参数配置</h3>
+                    <dl class="grid grid-cols-2 gap-y-2 text-sm">
+                      <dt class="text-muted-foreground">温度</dt>
+                      <dd class="font-mono text-right">0.70</dd>
+                      <dt class="text-muted-foreground">Top P</dt>
+                      <dd class="font-mono text-right">0.90</dd>
+                      <dt class="text-muted-foreground">Max tokens</dt>
+                      <dd class="font-mono text-right">2048</dd>
+                      <dt class="text-muted-foreground">Few-shot</dt>
+                      <dd class="font-mono text-right">5</dd>
+                    </dl>
+                  </div>
+                  <div class="border-t border-border pt-3">
+                    <h3 class="text-xs font-semibold text-muted-foreground uppercase mb-2">评分细分</h3>
+                    <div class="space-y-3">
+                      <div>
+                        <div class="flex justify-between text-xs mb-1"><span>MMLU-Pro 综合</span><span class="font-mono font-medium">87.4</span></div>
+                        <div class="h-1.5 rounded-full bg-muted overflow-hidden"><div class="h-full rounded-full bg-primary" style="width: 87.4%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-xs mb-1"><span>STEM</span><span class="font-mono font-medium">84.1</span></div>
+                        <div class="h-1.5 rounded-full bg-muted overflow-hidden"><div class="h-full rounded-full bg-primary" style="width: 84.1%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-xs mb-1"><span>Humanities</span><span class="font-mono font-medium">89.2</span></div>
+                        <div class="h-1.5 rounded-full bg-muted overflow-hidden"><div class="h-full rounded-full bg-primary" style="width: 89.2%"></div></div>
+                      </div>
+                      <div>
+                        <div class="flex justify-between text-xs mb-1"><span>Social Sciences</span><span class="font-mono font-medium">86.5</span></div>
+                        <div class="h-1.5 rounded-full bg-muted overflow-hidden"><div class="h-full rounded-full bg-primary" style="width: 86.5%"></div></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="border-t border-border pt-3 flex-1 min-h-0 flex flex-col">
+                    <h3 class="text-xs font-semibold text-muted-foreground uppercase mb-2">日志片段</h3>
+                    <pre class="flex-1 overflow-auto rounded-md bg-muted p-3 text-xs font-mono text-muted-foreground leading-relaxed">[14:31:02] 加载数据集 mmlu-pro (12,341 题)
+[14:31:18] 模型 DeepSeek-V3 初始化完成
+[14:32:05] 推理进度 100% (12,341/12,341)
+[14:32:11] 评分完成，综合得分 87.4</pre>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+    <script>lucide.createIcons();</script>
+</body>
+</html>

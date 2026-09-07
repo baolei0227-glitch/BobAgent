@@ -15,7 +15,7 @@
  */
 import React, { useCallback, useMemo, useRef, useState, useEffect, useLayoutEffect, memo } from 'react';
 import { createPortal } from 'react-dom';
-import { useReactFlow, Handle, Position } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { X, Album, Maximize2, Minimize2 } from 'lucide-react';
 import type { ImageGenNodeData, ImageGenVersion, RegionRef, TriplotGroup } from '@/lib/types';
 import { ImageAiEditor, type ImageGenApiRef, type AttachmentImage, type TriplotResult } from './viewers/ImageAiEditor';
@@ -745,57 +745,7 @@ function ImageGenNodeInner({ id, data, selected }: {
         <X className="h-3.5 w-3.5" />
       </button>
 
-      {/* 连接点（Handle）：与普通 AI 节点一致，左右两对 target+source，供连线/拖拽生成节点 */}
-      <Handle
-        type="target"
-        position={Position.Left}
-        id="left-target"
-        isConnectable
-        className="!h-3 !w-3 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-60"
-        style={{
-          backgroundColor: 'var(--paper)',
-          borderColor: 'color-mix(in oklab, var(--success) 70%, transparent)',
-          left: 0,
-        }}
-      />
-      <Handle
-        type="target"
-        position={Position.Right}
-        id="right-target"
-        isConnectable
-        className="!h-3 !w-3 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-60"
-        style={{
-          backgroundColor: 'var(--paper)',
-          borderColor: 'color-mix(in oklab, var(--success) 70%, transparent)',
-          right: 0,
-        }}
-      />
-      <Handle
-        type="source"
-        position={Position.Left}
-        id="left"
-        isConnectable
-        className="!h-3.5 !w-3.5 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-80"
-        style={{
-          backgroundColor: 'color-mix(in oklab, var(--primary) 80%, transparent)',
-          borderColor: 'var(--paper)',
-          left: '-2px',
-          boxShadow: '0 2px 8px color-mix(in oklab, var(--primary) 30%, transparent)',
-        }}
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="right"
-        isConnectable
-        className="!h-3.5 !w-3.5 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-80"
-        style={{
-          backgroundColor: 'color-mix(in oklab, var(--primary) 80%, transparent)',
-          borderColor: 'var(--paper)',
-          right: '-2px',
-          boxShadow: '0 2px 8px color-mix(in oklab, var(--primary) 30%, transparent)',
-        }}
-      />
+      {/* 画布连线已物理移除（2026-09）：不再渲染 Handle 拖线；连线经标题链接/NodeMap 管理 */}
 
       <div className="flex min-h-0 flex-1 flex-col">
         {/* 三视图视角 Tab 行：仅 triplot 模式且存在 triplotGroups 时显示 */}

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Callout } from '@/components/ui/callout';
+import { Button } from '@/components/ui/button';
 import NodeCardHeader from './NodeCardHeader';
 
 /** 前端事件结构 */
@@ -759,14 +760,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         }
         title={<span className="text-sm font-semibold">Calendar</span>}
         rightActions={
-          <button
+          <Button
             onClick={onClose}
-            className="btn btn-ghost btn-sm !p-0 !h-6 !w-6"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
             aria-label="close calendar"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         }
         dividerColor="var(--line-soft)"
         style={{ backgroundColor: 'var(--paper-soft)' }}
@@ -791,16 +793,18 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
           <span className="flex-1 truncate text-11" style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}>
             {syncMsg || (syncAccounts.length ? '' : 'Not configured')}
           </span>
-          <button
+          <Button
             onClick={runSync}
             disabled={syncing}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-11 transition-colors disabled:opacity-50"
-            style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary)' }}
+            loading={syncing}
+            variant="soft"
+            tone="brand"
+            size="xs"
             title="Sync now"
           >
             {syncing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
             Sync now
-          </button>
+          </Button>
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           {/* 账户连接方式徽章：右侧固定为 Mac，箭头反映实际数据流向（双向 ⇄ / 单向 ←） */}
@@ -821,49 +825,54 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               </span>
             );
           })}
-          <button
+          <Button
             onClick={() => fileInputRef.current?.click()}
-            className="rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[var(--paper-hover)]"
-            style={{ borderColor: 'var(--line-soft)', color: 'var(--ink-muted)' }}
+            variant="outline"
+            tone="neutral"
+            size="xs"
             title="Import .ics from system calendar"
           >
             Import .ics
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleExport}
             disabled={syncing}
-            className="rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-50"
-            style={{ borderColor: 'var(--line-soft)', color: 'var(--ink-muted)' }}
+            variant="outline"
+            tone="neutral"
+            size="xs"
             title="Export events as .ics"
           >
             Export .ics
-          </button>
+          </Button>
           {feedUrl && (
-            <button
+            <Button
               onClick={() => setShowSubscribeModal(true)}
-              className="rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ borderColor: 'var(--line-soft)', color: 'var(--primary)' }}
+              variant="outline"
+              tone="brand"
+              size="xs"
               title="Apple Calendar subscription link"
             >
               Subscribe
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             onClick={() => setShowAccountModal(true)}
-            className="rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[var(--paper-hover)]"
-            style={{ borderColor: 'var(--line-soft)', color: 'var(--ink-muted)' }}
+            variant="outline"
+            tone="neutral"
+            size="xs"
             title="Configure iCloud / WebCal sync accounts"
           >
             Accounts
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={() => setShowSyncLogs((v) => !v)}
-            className="rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[var(--paper-hover)]"
-            style={{ borderColor: 'var(--line-soft)', color: 'var(--ink-muted)' }}
+            variant="outline"
+            tone="neutral"
+            size="xs"
             title="View sync logs"
           >
             Logs
-          </button>
+          </Button>
         </div>
         {showSyncLogs && (
           <div className="mt-1.5 max-h-32 overflow-y-auto rounded-md border p-1.5" style={{ borderColor: 'var(--line-soft)' }}>
@@ -913,13 +922,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
 
           {/* 导航 + 标题跳转 + Today */}
           <div className="flex items-center gap-1.5">
-            <button
+            <Button
               onClick={goPrev}
-              className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              aria-label="Previous"
             >
               <ChevronLeft className="h-4 w-4" />
-            </button>
+            </Button>
             {showMonthPicker ? (
               <input
                 type="month"
@@ -947,20 +958,23 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                 {view === 'week' ? weekLabel : `${date.toLocaleString('default', { month: 'long' })} ${year}`}
               </button>
             )}
-            <button
+            <Button
               onClick={goToday}
-              className="rounded px-2 py-0.5 text-xs transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--primary)', border: '1px solid currentColor' }}
+              variant="outline"
+              tone="brand"
+              size="xs"
             >
               Today
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={goNext}
-              className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              aria-label="Next"
             >
               <ChevronRight className="h-4 w-4" />
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -1596,36 +1610,40 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             <div className="flex items-center justify-between">
               <div>
                 {'event_id' in editMode && (
-                  <button
+                  <Button
                     onClick={() => {
                       setEditMode(null);
                       requestDelete(editMode.event_id);
                     }}
-                    className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors hover:bg-[var(--danger-soft)]"
-                    style={{ color: 'var(--danger)' }}
+                    variant="ghost"
+                    tone="danger"
+                    size="sm"
                   >
                     <Trash className="h-3.5 w-3.5" />
                     Delete
-                  </button>
+                  </Button>
                 )}
               </div>
               <div className="flex gap-2">
-                <button
+                <Button
                   onClick={() => setEditMode(null)}
-                  className="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="md"
                 >
                   Cancel
-                </button>
-                <button
+                </Button>
+                <Button
                   onClick={handleSubmit}
                   disabled={saving || !formTitle.trim()}
-                  className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors disabled:opacity-50"
-                  style={{ backgroundColor: 'var(--primary)', color: 'white' }}
+                  loading={saving}
+                  variant="solid"
+                  tone="brand"
+                  size="md"
                 >
                   {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                   {'event_id' in editMode ? 'Save' : 'Create'}
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -1653,20 +1671,22 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               will be marked as cancelled and synced to your Mac calendar.
             </p>
             <div className="flex justify-end gap-2">
-              <button
+              <Button
                 onClick={() => setConfirmDelete(null)}
-                className="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
+                variant="ghost"
+                tone="neutral"
+                size="md"
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={performDelete}
-                className="rounded-md px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80"
-                style={{ backgroundColor: 'var(--danger)', color: 'white' }}
+                variant="solid"
+                tone="danger"
+                size="md"
               >
                 Cancel Event
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -1689,22 +1709,23 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                 <h3 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Apple Calendar Subscription</h3>
                 <span className="rounded px-1 text-10" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary)' }}>read-only</span>
               </div>
-              <button onClick={() => setShowSubscribeModal(false)} className="rounded p-0.5 hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }}>
+              <Button onClick={() => setShowSubscribeModal(false)} variant="ghost" tone="neutral" size="icon-sm" aria-label="close subscription">
                 <X className="h-4 w-4" />
-              </button>
+              </Button>
             </div>
 
             <div className="mb-3 rounded-md border p-3" style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper-soft)' }}>
               <div className="mb-2 flex items-center justify-between">
                 <div className="text-11 font-medium" style={{ color: 'var(--ink-muted)' }}>Subscription URL</div>
-                <button
+                <Button
                   onClick={rotateFeedUrl}
-                  className="rounded-md px-2 py-1 text-11 hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="sm"
                   title="Rotate token (invalidate old link)"
                 >
                   ↻ Rotate token
-                </button>
+                </Button>
               </div>
               <div className="mb-2 space-y-2">
                 <div>
@@ -1751,14 +1772,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                       className="min-w-0 flex-1 rounded-md border px-2 py-1.5 text-11 outline-none"
                       style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--input-bg)', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}
                     />
-                    <button
+                    <Button
                       onClick={() => copyFeedUrl('webcal')}
-                      className="flex items-center gap-1 rounded-md px-3 py-1.5 text-xs"
-                      style={{ backgroundColor: 'var(--paper-hover)', color: 'var(--ink-muted)' }}
+                      variant="soft"
+                      tone="neutral"
+                      size="sm"
                       title="Copy webcal URL"
                     >
                       Copy
-                    </button>
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -1797,13 +1819,14 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             </div>
 
             <div className="mt-4 flex justify-end">
-              <button
+              <Button
                 onClick={() => setShowSubscribeModal(false)}
-                className="rounded-md px-4 py-1.5 text-xs"
-                style={{ backgroundColor: 'var(--primary)', color: 'white' }}
+                variant="solid"
+                tone="brand"
+                size="sm"
               >
                 Done
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -1823,9 +1846,9 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
           >
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Calendar Sync Accounts</h3>
-              <button onClick={() => setShowAccountModal(false)} className="rounded p-0.5 hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }}>
+              <Button onClick={() => setShowAccountModal(false)} variant="ghost" tone="neutral" size="icon-sm" aria-label="close accounts">
                 <X className="h-4 w-4" />
-              </button>
+              </Button>
             </div>
 
             {/* 已配置账户 */}
@@ -1865,9 +1888,9 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                       {a.read_only ? 'Read-only' : 'Two-way'}
                     </button>
                   )}
-                  <button onClick={() => removeAccount(a.account_id)} className="rounded p-1 hover:bg-[var(--danger-soft)]" style={{ color: 'var(--danger)' }} title="Remove account">
+                  <Button onClick={() => removeAccount(a.account_id)} variant="ghost" tone="danger" size="icon-sm" title="Remove account" aria-label="Remove account">
                     <Trash className="h-3.5 w-3.5" />
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
@@ -1937,15 +1960,17 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                     style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
                   />
                   <div className="mb-2 flex items-center gap-2">
-                    <button
+                    <Button
                       onClick={discoverCalendars}
                       disabled={addBusy || !accForm.username || !accForm.password}
-                      className="flex items-center gap-1 rounded-md px-3 py-1.5 text-xs enabled:hover:opacity-80 disabled:opacity-40"
-                      style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary)' }}
+                      loading={addBusy}
+                      variant="soft"
+                      tone="brand"
+                      size="sm"
                     >
                       {addBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                       Discover calendars
-                    </button>
+                    </Button>
                   </div>
                   {discovered.length > 0 && (
                     <div className="mb-2 max-h-40 overflow-y-auto rounded-md border p-1.5" style={{ borderColor: 'var(--line-soft)' }}>
@@ -2002,14 +2027,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               )}
 
               <div className="flex justify-end gap-2">
-                <button
+                <Button
                   onClick={() => setShowAccountModal(false)}
-                  className="rounded-md px-3 py-1.5 text-xs hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="sm"
                 >
                   Cancel
-                </button>
-                <button
+                </Button>
+                <Button
                   onClick={addAccount}
                   disabled={
                     addBusy ||
@@ -2017,12 +2043,14 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                       ? !accForm.username || !accForm.password || !accForm.calendar_url
                       : !accForm.server_url)
                   }
-                  className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs disabled:opacity-40"
-                  style={{ backgroundColor: 'var(--primary)', color: 'white' }}
+                  loading={addBusy}
+                  variant="solid"
+                  tone="brand"
+                  size="sm"
                 >
                   {addBusy && <Loader2 className="h-3 w-3 animate-spin" />}
                   Add &amp; Sync
-                </button>
+                </Button>
               </div>
             </div>
           </div>

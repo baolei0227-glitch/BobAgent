@@ -32,8 +32,146 @@ import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 import { writeAppFileAtomic } from '@/lib/sandbox/apps';
 import { recordPipInstall } from '@/lib/python/pkg-usage';
 import { resolveDocxTemplateScript } from '@/lib/docx-template-mcp';
+import {
+  USER_AGENTS_DIR,
+  ALLOWED_AGENT_SCENES,
+  listInstalledPackages,
+  listMarketSource,
+  manifestToProfile,
+  type AgentPackageManifest,
+} from '@/lib/agents/market-server';
+import { AGENT_PROFILES } from '@/lib/agents/profiles';
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+
+/**
+ * describeToolCall — 服务端在工具「开始执行」时生成一句该步在做什么的中文动作描述，
+ * 随 tool_call SSE 事件下发（方案 B：不进模型上下文、不耗 token，仅供 UI 展示）。
+ * 内置/常用工具按语义映射生成；未收录的工具回退为“执行 {工具名}”。
+ */
+export function describeToolCall(name: string, args: Record<string, unknown>): string {
+  const n = name.toLowerCase();
+  const displayName = (() => {
+    const parts = name.replace(/^mcp__[^_]+__/, '').split(/[._]/);
+    const tail = parts[parts.length - 1] || name;
+    return tail.replace(/_/g, ' ');
+  })();
+  const take = (keys: string[]): string | null => {
+    for (const k of keys) {
+      const v = (args ?? {})[k];
+      if (v === undefined || v === null) continue;
+      const s = typeof v === 'string' ? v : (() => { try { return JSON.stringify(v); } catch { return String(v); } })();
+      const t = s.trim();
+      if (t && t !== 'undefined') return t.length > 40 ? `${t.slice(0, 40)}…` : t;
+    }
+    return null;
+  };
+  const path = () => take(['path', 'file_path', 'filepath', 'filename', 'file', 'output', 'output_path', 'source', 'src', 'image_path', 'pdf_path', 'folder', 'dir']);
+  const query = () => take(['query', 'keywords', 'keyword', 'question']);
+  const text = () => take(['text', 'content', 'title', 'name', 'prompt', 'input']);
+  const url = () => take(['url', 'link', 'href', 'target_url', 'destination']);
+  const selector = () => take(['selector', 'css_selector', 'element', 'target']);
+  const keyVal = () => take(['key', 'key_name']);
+  const has = (...subs: string[]) => subs.some((s) => n.includes(s));
+
+  // 文件 / 编辑
+  if (has('write_file', 'create_file', 'create_code')) return `写入 ${path() ?? name}`;
+  if (has('edit_code')) return `修改 ${path() ?? ''}${(() => { const b = take(['begin_line', 'line_start']); return b ? `（第${b}行起）` : ''; })()}`;
+  if (has('read_file', 'read_attachment', 'read_material')) return `读取 ${path() ?? text() ?? '内容'}`;
+  if (has('delete_file')) return `删除 ${path() ?? ''}`;
+  if (has('rename_file', 'move_file')) {
+    const oldP = path();
+    const newP = take(['new_path', 'new_name', 'dest', 'destination']);
+    return newP ? `重命名 ${oldP ?? ''} → ${newP}` : `重命名文件`;
+  }
+  if (has('list_directory', 'list_dir', 'list_files')) return `浏览目录 ${path() ?? '工作区'}`;
+  if (has('search_files', 'grep', 'find_file')) return `搜索文件 ${query() ?? path() ?? ''}`;
+
+  // OCR / 图像
+  if (has('ocr_document', 'ocr')) return `OCR 识别 ${path() ?? text() ?? '文件'}`;
+  if (has('crop_image')) return `裁剪图片 ${path() ?? ''}`;
+
+  // 命令 / 脚本 / 安装
+  if (has('run_command', 'execute_script', 'bash', 'shell')) return `执行命令 ${text() ?? ''}`;
+  if (has('install_')) return `安装 ${text() ?? '软件包'}`;
+
+  // 网页搜索 / 抓取（不用裸 'search' 匹配，避免误伤 intern_search / search_capabilities 等专项工具）
+  if (has('web_search', 'search_web', 'search_internet', 'search_documents')) return `搜索网页 ${query() ?? text() ?? ''}`;
+  if (has('web_fetch', 'fetch_url', 'fetch_page', 'fetch')) return `读取网页 ${url() ?? ''}`;
+
+  // 浏览器操作
+  if (has('navigate')) return `打开网页 ${url() ?? ''}`;
+  if (has('click')) return `点击 ${selector() ?? text() ?? '目标'}`;
+  if (has('type', 'insert_text', 'input')) return `输入 ${text() ?? ''}`;
+  if (has('fill_form', 'fill')) return `填写表单 ${selector() ?? ''}`;
+  if (has('select_option', 'select')) return `选择 ${selector() ?? text() ?? '选项'}`;
+  if (has('press_key', 'press')) return `按键 ${keyVal() ?? ''}`;
+  if (has('scroll')) return `滚动页面${selector() ? `到 ${selector()}` : ''}`;
+  if (has('screenshot', 'capture_sandbox_preview', 'capture_preview', 'capture')) return '渲染预览截图';
+  if (has('extract_text', 'get_text', 'read_page')) return '提取页面文本';
+  if (has('get_html')) return '获取页面 HTML';
+  if (has('wait_for_text')) return `等待文本 ${text() ?? ''}`;
+  if (has('upload_file')) return `上传文件 ${path() ?? ''}`;
+  if (has('export_pdf')) return '导出 PDF';
+  if (has('login')) return `登录 ${take(['site_name', 'site', 'url']) ?? '站点'}`;
+  if (has('handle_dialog')) return '处理页面弹窗';
+  if (has('resize_viewport')) return '调整浏览器视口';
+  if (has('interact_preview')) return '浏览器交互测试';
+
+  // 待办 / 日程 / 计划（planner）
+  if (has('create_sticky_note')) return `创建待办：${text() ?? ''}`;
+  if (has('create_scheduled_todo', 'create_todo')) return `排程：${text() ?? ''}`;
+  if (has('todo_update')) return `更新待办/日程：${text() ?? ''}`;
+  if (has('todo_delete')) return `删除待办/日程`;
+  if (has('query_schedule')) return '查询日程';
+  if (has('query_todos', 'read_todo')) return '查询待办';
+  if (has('project_plan_start')) return `创建计划：${text() ?? ''}`;
+  if (has('project_plan_add_steps')) return '追加计划步骤';
+  if (has('project_plan_step_status')) return '更新计划步骤状态';
+  if (has('project_plan_view')) return '查看计划';
+
+  // 技能 / 上下文 / 系统
+  if (has('load_skill')) return `加载技能 ${take(['skill_name', 'skill', 'name', 'id']) ?? ''}`;
+  if (has('read_skill_resource')) {
+    const skillN = take(['skill_name', 'skill', 'name']);
+    const res = take(['resource', 'path', 'file']);
+    return `读取技能资源 ${skillN ?? ''}${res ? `：${res}` : ''}`;
+  }
+  if (has('ask_user_questions')) {
+    // 描述直接呈现本次要问的实质内容（不再带「向用户提问」前缀，避免与工具名重复翻译）
+    const qs = Array.isArray((args ?? {}).questions) ? (args as { questions: unknown[] }).questions : null;
+    if (qs && qs.length > 0) {
+      const texts = qs
+        .map((q) => (q && typeof q === 'object' ? String((q as Record<string, unknown>).question ?? '').trim() : ''))
+        .filter(Boolean);
+      if (texts.length > 0) {
+        const head = texts[0].length > 40 ? `${texts[0].slice(0, 40)}…` : texts[0];
+        return texts.length > 1 ? `${head}（共 ${texts.length} 项）` : head;
+      }
+    }
+    return '向用户提问';
+  }
+  if (has('search_capabilities')) return `激活能力：${query() ?? text() ?? ''}`;
+  if (has('todo_write')) return '更新任务步骤';
+  if (has('finish_task')) return '任务收尾';
+  if (has('read_upstream_node')) return `读取上游节点 ${text() ?? ''}`;
+  if (has('intern_search')) return `检索上游内容：${query() ?? text() ?? ''}`;
+
+  // 兜底
+  const firstArg = (() => {
+    const a = (args ?? {}) as Record<string, unknown>;
+    for (const k of Object.keys(a)) {
+      const v = a[k];
+      if (v === null || v === undefined) continue;
+      const s = typeof v === 'string' ? v : (() => { try { return JSON.stringify(v); } catch { return ''; } })();
+      const t = s.trim();
+      if (t && t !== '{}') return t.length > 24 ? `${t.slice(0, 24)}…` : t;
+    }
+    return null;
+  })();
+  return firstArg ? `执行 ${displayName}：${firstArg}` : `执行 ${displayName}`;
+}
+
 
 /** 技能目录（用户级，支持 BOBWORK_HOME 覆盖） */
 const SKILLS_DIR = join(resolveAppRoot(), 'skills');
@@ -381,15 +519,22 @@ export interface ToolExecResult {
 const SCENED_TOOLS: Record<string, ToolScene[]> = {
   // ---- wanted 连通（记忆/待办/偏好/工作报告/日历）----
   read_todo: ['wanted'],
-  read_notebook: ['wanted'],
-  read_note: ['wanted'],
-  read_note_history: ['wanted'],
-  restore_note: ['wanted'],
-  update_notebook: ['wanted'],
-  delete_notebook: ['wanted'],
-  write_notebook_answer: ['wanted'],
-  create_note: ['wanted'],
   remember_preference: ['wanted'],
+  // ---- notebook（bob-notes 插件域 = Kar 专职子 agent 独有）----
+  // 2026-09-06 试点收归：笔记能力不再随 wanted 注入普通对话（chat/sandbox/planner 均不含 notebook 场景），
+  // 笔记诉求引导到 Kar（知识库）节点或 /note 指令——主 agent 不背负插件能力，子 agent 按业务方向专职。
+  // 注：维护回路（read_raw_inbox / ingest_notes / review_notes / lint_notes / read_note_rules / set_note_rules）本就在 notebook 场景。
+  read_notebook: ['notebook'],
+  read_note: ['notebook'],
+  read_note_history: ['notebook'],
+  restore_note: ['notebook'],
+  update_notebook: ['notebook'],
+  delete_notebook: ['notebook'],
+  create_note: ['notebook'],
+  // 2026-09-06 追加收归：write_notebook_answer（答案/决策回填知识库）同样只归 notebook 场景——
+  // 写读笔记相关工具在普通对话（General Chat / sandbox / planner 等不含 notebook 场景者）一律不再注入，
+  // 沉淀知识库的入口统一为 Kar（知识库）节点或 /note 指令。
+  write_notebook_answer: ['notebook'],
   // 注意：read_preferences 保持通用——系统提示条件式指示「任务涉及输出格式/引用规范等偏好时调用」，
   //   触发由模型自主判断（如用户说"用表格输出"无偏好字样），门控会阻断偏好遵循链路
   delete_preference: ['wanted'],
@@ -467,6 +612,8 @@ const MCP_SERVER_SCENES: Record<string, ToolScene[]> = {
   'team': ['team'],
   // ---- Bob Preview（真实 Chromium 预览渲染/交互测试）：前端/网页意图（design）与 coding 节点注入 ----
   'bob-preview-mcp': ['design', 'coding'],
+  // ---- Bob-Mind（独立思维便签库）：通用捕获/回忆，随 general 常驻注入 ----
+  'bob-mind-mcp': ['general'],
 };
 
 /** 按 MCP serverId/工具名推断适用场景（兜底：无法识别 → general） */
@@ -2026,7 +2173,8 @@ async function toolWebSearch(args: Record<string, unknown>): Promise<string | En
 
   for (const { name, search } of providers) {
     try {
-      const results = await search(query, 5);
+      // 字典/攻略类无关站直接过滤；若该 provider 过滤后无结果则尝试下一个（避免把无关垃圾当有效结果返回）
+      const results = filterJunkSearchResults(await search(query, 5));
       if (results.length > 0) {
         const items: CardItem[] = results.map((r) => ({
           title: r.title || 'Untitled',
@@ -2083,7 +2231,33 @@ async function toolWebFetch(args: Record<string, unknown>): Promise<string> {
       return `URL: ${url}\nContent-Type: ${ctype || '未知'}\n（非文本内容，无法直接读取网页正文）`;
     }
 
-    const text = await resp.text();
+    // charset 感知解码：GBK/GB2312 等中文旧站（法院/政府官网常见）直接 utf-8 解码会乱码。
+    // 探测顺序：BOM → Content-Type charset → <meta charset>；不可用回退 utf-8。
+    const raw = await resp.arrayBuffer();
+    const bytes = new Uint8Array(raw);
+    let charset = '';
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) charset = 'utf-8';
+    else if (bytes[0] === 0xff && bytes[1] === 0xfe) charset = 'utf-16le';
+    else if (bytes[0] === 0xfe && bytes[1] === 0xff) charset = 'utf-16be';
+    const headerCharset = ctype.match(/charset=["']?([\w-]+)/i);
+    if (!charset && headerCharset) charset = headerCharset[1];
+    if (!charset) {
+      try {
+        const head = new TextDecoder('utf-8').decode(bytes.slice(0, 2048));
+        const metaCharset = head.match(/<meta[^>]+charset=["']?([\w-]+)/i);
+        if (metaCharset) charset = metaCharset[1];
+      } catch {
+        /* 头部探测失败按默认处理 */
+      }
+    }
+    let text: string;
+    try {
+      // gb2312/gb18030 与 gbk 同族，统一映射到 TextDecoder 的 gbk；不支持时回退 utf-8
+      const norm = /^gb2312$|^gb18030$/i.test(charset) ? 'gbk' : (charset || 'utf-8');
+      text = new TextDecoder(norm).decode(bytes);
+    } catch {
+      text = new TextDecoder('utf-8').decode(bytes);
+    }
     // 二进制/乱码防护：仅保留可见字符比例高的内容
     let visible = 0;
     for (let i = 0; i < Math.min(text.length, 2000); i++) {
@@ -2169,6 +2343,19 @@ async function searchBingHttp(query: string, maxResults: number): Promise<LocalS
   return results;
 }
 
+/** 无关结果过滤：纯字词典/攻略站对检索无权威价值，剔除避免污染（百科类正常引用不误杀） */
+function filterJunkSearchResults(results: LocalSearchResult[]): LocalSearchResult[] {
+  const junkHost = /(^|\.)(gxdq|hgcha|chagushici|hanyuguoxue)\.com$|^jingyan\.baidu\.com$/i;
+  return results.filter((r) => {
+    try {
+      const host = new URL(r.url).hostname.replace(/^www\./i, '');
+      return !junkHost.test(host);
+    } catch {
+      return true; // 无法解析的 URL 保留（可能是跳转链）
+    }
+  });
+}
+
 /** 百度搜索 HTTP 抓取 */
 async function searchBaiduHttp(query: string, maxResults: number): Promise<LocalSearchResult[]> {
   const url = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}&rn=${maxResults}`;
@@ -2183,35 +2370,49 @@ async function searchBaiduHttp(query: string, maxResults: number): Promise<Local
   const html = await resp.text();
 
   const results: LocalSearchResult[] = [];
-  // 百度结果标题在 <h3> > <a> 中，链接是百度跳转链接
-  const h3Regex = /<h3[^>]*>\s*<a[^>]+href="(http[^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const links: Array<[string, string]> = [];
+  // 百度结果标题在 <h3> > <a> 中，href 为跳转链；h3 的 data-tools JSON / mu 属性携带真实目标 URL。
+  // 解析成功则用真实 URL 替代跳转链 → 模型可直接据域名判断权威性，web_fetch 也免二次跳转。
+  const h3Regex = /<h3([^>]*)>[\s\S]*?<a[^>]+href="(http[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let match: RegExpExecArray | null;
-  while ((match = h3Regex.exec(html))) {
-    links.push([match[1], match[2]]);
-  }
+  while ((match = h3Regex.exec(html)) && results.length < maxResults) {
+    const attrs = match[1] || '';
+    const rawUrl = match[2];
+    const title = decodeHtmlEntities(stripHtml(match[3])).trim();
+    if (!title) continue;
 
-  // 摘要在 result 块内的 <span class="content-right_..."> 或 c-abstract 中
-  const blockRegex = /<div[^>]*class="result c-container[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]*class="result |$)/g;
-  const snippets: string[] = [];
-  while ((match = blockRegex.exec(html))) {
-    const block = match[1];
-    const snippetMatch =
-      block.match(/<span[^>]*class="content-right_[^"]*"[^>]*>([\s\S]*?)<\/span>/) ||
-      block.match(/class="c-abstract[^"]*"[^>]*>([\s\S]*?)</);
-    const snippet = snippetMatch ? decodeHtmlEntities(stripHtml(snippetMatch[1])).trim() : '';
-    snippets.push(snippet);
-  }
-
-  for (let i = 0; i < Math.min(links.length, maxResults); i++) {
-    const [rawUrl, rawTitle] = links[i];
-    const title = decodeHtmlEntities(stripHtml(rawTitle)).trim();
-    // 百度链接是跳转链接，保留原样（用户可点击）
-    const finalUrl = rawUrl;
-    const snippet = i < snippets.length ? snippets[i] : '';
-    if (title) {
-      results.push({ title, url: finalUrl, snippet });
+    // 真实目标 URL：优先 h3 上 data-tools JSON 的 url（当前百度），其次 mu 属性（历史版式）
+    let realUrl = rawUrl;
+    const dt = attrs.match(/data-tools='([^']+)'/) || attrs.match(/data-tools="([^"]+)"/);
+    if (dt) {
+      try {
+        const j = JSON.parse(decodeHtmlEntities(dt[1]));
+        if (j && typeof j.url === 'string' && /^https?:\/\//i.test(j.url)) realUrl = j.url;
+      } catch {
+        /* 解析失败保留跳转链 */
+      }
     }
+    if (realUrl === rawUrl) {
+      const mu = attrs.match(/\bmu="(https?:\/\/[^"]+)"/);
+      if (mu) realUrl = mu[1];
+    }
+
+    // 摘要：取本结果标题到下一个 <h3> 之间的正文区，依次尝试常见摘要容器 class
+    const tail = html.slice(h3Regex.lastIndex).replace(/<script[\s\S]*?<\/script>/gi, ' ');
+    const nextH3 = tail.search(/<h3[^>]*>/i);
+    const win = (nextH3 > -1 ? tail.slice(0, nextH3) : tail).slice(0, 2000);
+    let snippet = '';
+    for (const sm of [
+      win.match(/<span[^>]*class="content-right_[^"]*"[^>]*>([\s\S]*?)<\/span>/i),
+      win.match(/class="c-abstract[^"]*"[^>]*>([\s\S]*?)<\//i),
+      win.match(/<div[^>]*class="c-span-last[^"]*"[^>]*>([\s\S]*?)<\/div>/i),
+    ]) {
+      if (sm && sm[1]) {
+        snippet = decodeHtmlEntities(stripHtml(sm[1])).trim().replace(/\s+/g, ' ');
+        if (snippet) break;
+      }
+    }
+
+    results.push({ title, url: realUrl, snippet });
   }
 
   return results;
@@ -3612,31 +3813,45 @@ const toolDefs: Tool[] = [
     maxOutput: 100,
   },
   {
-    name: 'plan_task',
-    description: 'Create a step-by-step plan before executing a multi-step task. This tool is MANDATORY for any task requiring more than one action (e.g., searching then analyzing, reading then writing, or any task with multiple tool calls). It helps you stay organized and ensures the user understands your approach.',
+    name: 'todo_write',
+    description: 'Publish the full task step list with current statuses (replacement semantics). This is the ONLY planning + execution-tracking tool for multi-step tasks: the FIRST call creates the track (supply goal + all steps as status=pending), and EVERY step boundary call (a step becomes in_progress, or transitions to completed/failed) resends the FULL latest snapshot. Each call REPLACES the entire list — do NOT diff, do NOT patch. MANDATORY for any multi-step task (multiple tool calls, search→analyze→write flows); do NOT call for single-step or trivial conversational tasks (panel would be noise). Status transitions: pending → in_progress → completed (or failed on error). activeForm is shown ONLY while status=in_progress and gives the user a one-line "currently doing X" signal — keep it concrete and verb-led. Never estimate progress yourself by counting tool calls: the real progress is exactly what you report here.',
     parameters: {
       type: 'object',
       properties: {
-        goal: {
-          type: 'string',
-          description: 'The ultimate goal or deliverable of the entire task. (e.g., "Find the user ID for Selenasaid", "Write a Python script to analyze logs")',
-        },
-        steps: {
+        todos: {
           type: 'array',
           items: {
-            type: 'string',
+            type: 'object',
+            properties: {
+              content: { type: 'string', description: 'Static description of the step, shown at all times. Imperative or noun-phrase, e.g. "Extract user ID from profile page".' },
+              activeForm: { type: 'string', description: 'Dynamic copy shown ONLY when this step is in_progress. Verb-led, present-continuous, e.g. "Extracting user ID from profile page". Leave empty if same as content.' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'failed'], description: 'Lifecycle state of this step.' },
+            },
+            required: ['content', 'status'],
           },
-          description: 'An ordered list of concrete steps you will take to achieve the goal. Each step should be a single, actionable task. (e.g., ["Step 1: Open search page", "Step 2: Extract user ID", "Step 3: Verify on profile page"])',
+          description: 'Full todo list snapshot. Each item: { content, activeForm?, status }. Replaces the previous list entirely on every call.',
+        },
+        goal: {
+          type: 'string',
+          description: 'The ultimate goal or deliverable of the entire task, shown at the top of the steps panel. Only needs to be set on the FIRST (track-creating) call; may be omitted on subsequent status-heartbeat calls. (e.g., "Find the user ID for Selenasaid")',
         },
       },
-      required: ['goal', 'steps'],
+      required: ['todos'],
     },
     category: '系统',
     execute: async (args: Record<string, unknown>): Promise<string> => {
-      const goal = typeof args.goal === 'string' ? args.goal : 'Task';
-      const steps = Array.isArray(args.steps) ? args.steps : [];
-      const planStr = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
-      return `Plan accepted. Goal: ${goal}\nSteps:\n${planStr}\n\nPlease proceed with the plan step by step.`;
+      const todos = Array.isArray(args.todos) ? args.todos : [];
+      if (todos.length === 0) return 'Todo list cleared.';
+      const goal = typeof args.goal === 'string' && args.goal.trim() ? args.goal : '';
+      const lines = todos.map((t, i) => {
+        const content = (t as { content?: unknown }).content;
+        const status = (t as { status?: unknown }).status;
+        const c = typeof content === 'string' ? content : '(no content)';
+        const s = typeof status === 'string' ? status : 'pending';
+        return `${i + 1}. [${s}] ${c}`;
+      });
+      const done = todos.filter((t) => (t as { status?: unknown }).status === 'completed').length;
+      return `${goal ? `Goal: ${goal}\n` : ''}Todo snapshot: ${done}/${todos.length} done\n${lines.join('\n')}`;
     },
     maxOutput: 500,
   },
@@ -4980,7 +5195,399 @@ const toolDefs: Tool[] = [
     execute: toolCreateStickyNote,
     maxOutput: 1000,
   },
+  {
+    name: 'create_agent_package',
+    description: 'Create a new specialized sub-agent package and install it instantly. Call when the user asks to build a dedicated agent (e.g. "帮我创建一个合同审核 agent"). Inputs: id, name, description (what the agent does), optional scenes (fixed scene list), optional coreExclusions (built-in kernel tools this agent must NOT see), optional skillPool (skills enabled for this agent), optional version. The tool validates the id, resolves scenes, auto-generates a complete base system prompt (persona + standing rules + todo_write/ask_user_questions/finish_task/OutputFile mechanics), writes agent.json to the installed agents directory, and verifies the result. The agent immediately appears in Extensions Store → Agents and the sidebar ＋ Add session menu (dispatch agents-changed to refresh UI).',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Unique lowercase agent id, [a-z0-9-], starts with a letter, max 48 chars. Must not collide with built-ins (chat/coding/note/planner).',
+        },
+        name: {
+          type: 'string',
+          description: 'Display name, e.g. "Contract Review".',
+        },
+        description: {
+          type: 'string',
+          description: 'One-sentence description of the specialized job this agent does; shown in market cards and used to write the persona.',
+        },
+        role: {
+          type: 'string',
+          description: 'Optional richer role/persona text the user described (responsibilities, boundaries, style). Appended into the system prompt.',
+        },
+        scenes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional fixed scenes that decide which scened tools/MCP this agent can call. Allowed: general, coding, wanted, legal, node, audio, skill, design, ocr, admin, office, browser, company, team, local, notebook, planner. Defaults to ["general"]. Scene "notebook" grants the full note domain (Kar-like); "legal" grants pkulaw.',
+        },
+        coreExclusions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional names of always-on kernel tools to remove for this agent (e.g. read_file, write_file, run_command, execute_script, web_search, web_fetch). Use to make a pure-specialist agent that never roams files/network.',
+        },
+        skillPool: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional skill names to enable for this agent only (its own skill pool).',
+        },
+        version: {
+          type: 'string',
+          description: 'Optional package version, defaults "1.0.0".',
+        },
+      },
+      required: ['id', 'name', 'description'],
+    },
+    category: '系统',
+    scenes: ['coding'],
+    execute: toolCreateAgentPackage,
+    maxOutput: 2000,
+  },
+  {
+    name: 'validate_agent_package',
+    description: 'Validate an existing agent package (installed in the user agents directory or the bundled market source) before/after editing its agent.json. Reports resolved scenes, active core exclusions, skill pool, prompt length, and id conflicts. Call to diagnose why an agent misbehaves or to check a hand-written manifest.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Agent id to inspect.',
+        },
+      },
+      required: ['id'],
+    },
+    category: '系统',
+    scenes: ['coding'],
+    execute: toolValidateAgentPackage,
+    maxOutput: 1500,
+  },
+  {
+    name: 'update_agent_package',
+    description: 'Update an already-installed sub-agent package (created via create_agent_package or installed from the Agent Market, e.g. Kar / Planner). Call when the user asks to change a running agent, e.g. add/remove scenes, change persona instructions, replace core exclusions, or adjust its skill pool. Only the fields you pass are changed; anything omitted is preserved. The installed agent.json is rewritten and takes effect on the agent\'s next conversation (Settings → Agents → Edit Prompt edits the override, not the package).',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Agent id of an installed package to update (must exist under the user agents directory).',
+        },
+        name: {
+          type: 'string',
+          description: 'Optional new display name.',
+        },
+        description: {
+          type: 'string',
+          description: 'Optional new one-line description (market card text).',
+        },
+        version: {
+          type: 'string',
+          description: 'Optional new version string.',
+        },
+        addScenes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional scenes to ADD to the current fixedScenes (whitelisted). e.g. add "notebook" to grant the full note domain, or "legal" for pkulaw.',
+        },
+        removeScenes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional scenes to REMOVE from the current fixedScenes. Keep at least one scene.',
+        },
+        coreExclusions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional FULL replacement list of kernel tool names to exclude for this agent. Pass [] to clear all exclusions. Unknown names are kept but reported.',
+        },
+        skillPool: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional FULL replacement skill pool for this agent. Pass [] to clear (agent falls back to global default). Omit to leave unchanged.',
+        },
+        prompt: {
+          type: 'string',
+          description: 'Optional FULL replacement of the base system prompt. Use only when regenerating; prefer instructions for small tweaks.',
+        },
+        instructions: {
+          type: 'string',
+          description: 'Optional additional persona/standing-rule text APPENDED to the current prompt as a new section (keeps the existing prompt intact).',
+        },
+      },
+      required: ['id'],
+    },
+    category: '系统',
+    scenes: ['coding'],
+    execute: toolUpdateAgentPackage,
+    maxOutput: 2000,
+  },
 ];
+
+// ==================== Agent 包 创建 / 校验（coding 造包工具，2026-09-06） ====================
+// 架构：由 AI Coding（coding 场景）统一生产新子 agent 包。create 校验 id/场景，
+// 自动生成自含机制的 base prompt，落盘 <APP_ROOT>/agents/<id>/agent.json → 立即成为已装市场 agent
+// （Extensions Store → Agents + 左侧 ＋ Add session 菜单，无需重启）。
+const AGENT_ID_RE = /^[a-z][a-z0-9-]{0,47}$/;
+
+/** 常驻内核工具名集合：无场景标注且未在 SCENED_TOOLS 表 = core 层（coreExclusions 只对这类工具生效） */
+const agentCoreToolNames = new Set(
+  toolDefs
+    .filter((d) => !(d.scenes && d.scenes.length > 0) && !SCENED_TOOLS[d.name])
+    .map((d) => d.name),
+);
+
+function strArg(v: unknown, fallback: string): string {
+  return typeof v === 'string' ? v.trim() : fallback;
+}
+
+/** 生成自含机制的专属 base system prompt（与既有市场包同一套约定） */
+function buildAgentBasePrompt(name: string, description: string, role: string): string {
+  const roleLines = role
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => `- ${l}`)
+    .join('\n');
+  return [
+    `You are ${name} — a dedicated sub-agent of BobWork (BobAgent), specialized in: ${description}.`,
+    roleLines ? `\n## Role\n${roleLines}` : '',
+    `\n## Standing rules`,
+    `- Keep every reply precise, professional, and auditable; state assumptions and cite sources where relevant.`,
+    `- If the user's intent is ambiguous or inputs are missing, ask targeted questions first (ask_user_questions) instead of guessing.`,
+    `- Stay in your lane: only do the specialized job above; do not wander into unrelated domains.`,
+    `\n## Workflow`,
+    `- For any multi-step task, first call todo_write to publish the full todo list (goal + all steps as status=pending), then call todo_write again at every step boundary (pending→in_progress→completed/failed) so the side panel reflects real progress.`,
+    `- Use your available tools only when needed; never call a tool "just in case".`,
+    `- Always end the turn by calling finish_task(summary) with a short summary of what was accomplished.`,
+    `\n## Deliverables & output`,
+    `- To save a deliverable file, write it under the homework/ directory (path "homework/<filename>") and end your reply with the marker line \`OutputFile: homework/<filename>\` so it is shown to the user as an output card.`,
+    `- When quoting law articles, judgments or other materials, give the source and version date.`,
+    `\n## Communication`,
+    `- Reply in the same language the user writes in.`,
+    ``,
+  ]
+    .filter((s) => s.trim())
+    .join('\n')
+    .trim();
+}
+
+async function toolCreateAgentPackage(args: Record<string, unknown>): Promise<string> {
+  try {
+    const rawId = strArg(args.id, '');
+    const id = rawId.toLowerCase();
+    if (!AGENT_ID_RE.test(id)) {
+      return 'Error: invalid id. Use lowercase [a-z][a-z0-9-]*, start with a letter, max 48 chars (e.g. "contract-review").';
+    }
+    if (id in AGENT_PROFILES) {
+      return `Error: id "${id}" conflicts with a built-in agent (${Object.keys(AGENT_PROFILES).join(', ')}). Pick another id.`;
+    }
+    const name = strArg(args.name, '');
+    const description = strArg(args.description, '');
+    const role = strArg(args.role, '');
+    if (!name) return 'Error: name is required.';
+    if (!description) return 'Error: description is required (what this agent does).';
+
+    // 场景解析：白名单过滤；提供但全非法 → 报错提示
+    const allowed = new Set(ALLOWED_AGENT_SCENES);
+    const requested = Array.isArray(args.scenes)
+      ? args.scenes.map((s) => String(s).toLowerCase()).filter((s) => allowed.has(s))
+      : [];
+    if (Array.isArray(args.scenes) && requested.length === 0) {
+      return `Error: none of the requested scenes is valid. Allowed: ${ALLOWED_AGENT_SCENES.join(', ')}.`;
+    }
+    const fixedScenes = requested.length > 0 ? requested : ['general'];
+
+    // 内核剔除：未知项保留但提示（可能为后续新增工具）
+    const requestedExclusions = Array.isArray(args.coreExclusions)
+      ? Array.from(new Set(args.coreExclusions.map((s) => String(s).trim()).filter((s) => !!s)))
+      : [];
+    const unknownExclusions = requestedExclusions.filter((s) => !agentCoreToolNames.has(s));
+
+    const skillPool = Array.isArray(args.skillPool)
+      ? Array.from(new Set(args.skillPool.map((s) => String(s).trim()).filter((s) => !!s)))
+      : [];
+    const version = strArg(args.version, '1.0.0');
+
+    const prompt = buildAgentBasePrompt(name, description, role);
+    const dir = join(USER_AGENTS_DIR, id);
+    await mkdir(dir, { recursive: true });
+    const target = join(dir, 'agent.json');
+    const exists = await (async () => {
+      try { await access(target); return true; } catch { return false; }
+    })();
+    if (exists) {
+      return `Error: agent "${id}" already installed at ${dir}. Edit agent.json directly or pick another id.`;
+    }
+
+    const manifest: AgentPackageManifest = {
+      id,
+      name,
+      description,
+      version,
+      fixedScenes,
+      coreExclusions: requestedExclusions.length > 0 ? requestedExclusions : undefined,
+      skillPool: skillPool.length > 0 ? skillPool : undefined,
+      prompt,
+    };
+    await writeFile(target, JSON.stringify(manifest, null, 2), 'utf-8');
+
+    // round-trip：写盘后从已装目录回读解析（readManifest 校验），失败即删除并报错
+    const back = listInstalledPackages().find((m) => m.id === id);
+    if (!back) {
+      try { await mkdir(USER_AGENTS_DIR, { recursive: true }); } catch { /* ignore */ }
+      await writeFile(target, JSON.stringify(manifest, null, 2), 'utf-8');
+      const again = listInstalledPackages().find((m) => m.id === id);
+      if (!again) {
+        await (async () => { try { await (await import('fs/promises')).rm(dir, { recursive: true, force: true }); } catch { /* ignore */ } })();
+        return 'Error: written manifest failed validation (check required fields).';
+      }
+    }
+    const profile = manifestToProfile(back ?? manifest);
+
+    // 独立技能池
+    if (skillPool.length > 0) {
+      const { enableSkillForAgent } = await import('@/lib/skills/registry-server');
+      for (const s of skillPool) enableSkillForAgent(id, s);
+    }
+
+    const exclusionsKept = (profile.coreExclusions ?? []);
+    const resolvedScenes = profile.fixedScenes ?? fixedScenes;
+    const summary = [
+      `Agent "${name}" (${id}) created and installed at ${dir}/agent.json.`,
+      `- Scenes (fixed): ${resolvedScenes.join(', ')}`,
+      exclusionsKept.length > 0 ? `- Kernel tools removed: ${exclusionsKept.join(', ')}` : '- Kernel tools removed: none',
+      skillPool.length > 0 ? `- Skill pool: ${skillPool.join(', ')}` : '- Skill pool: none (falls back to global default)',
+      unknownExclusions.length > 0 ? `- Note: unknown coreExclusions entries kept but not verified: ${unknownExclusions.join(', ')}` : '',
+      `- System prompt: ${prompt.length} chars (auto-generated with todo_write / ask_user_questions / finish_task / OutputFile mechanics).`,
+      '',
+      'The agent is live now — it appears in Extensions Store → Agents and the sidebar ＋ Add session menu. Have the user dispatch an agents-changed event (or reopen) to refresh open UIs.',
+    ].filter((l) => !!l).join('\n');
+    return summary;
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function toolValidateAgentPackage(args: Record<string, unknown>): Promise<string> {
+  try {
+    const id = strArg(args.id, '').toLowerCase();
+    if (!AGENT_ID_RE.test(id)) return 'Error: invalid agent id.';
+    const installed = listInstalledPackages().find((m) => m.id === id);
+    const bundled = installed ? undefined : listMarketSource().find((m) => m.id === id);
+    const m = installed ?? bundled;
+    if (!m) return `Error: no agent package found for "${id}" (checked installed dir and bundled market source).`;
+    const profile = manifestToProfile(m);
+    const exclusions = profile.coreExclusions ?? [];
+    const unknown = exclusions.filter((s) => !agentCoreToolNames.has(s));
+    const resolvedScenes = profile.fixedScenes ?? ['general'];
+    const where = installed ? `installed (${join(USER_AGENTS_DIR, id)})` : 'bundled market source';
+    return [
+      `Agent "${m.name}" (${m.id}) — ${where}`,
+      `- Version: ${m.version || '1.0.0'}`,
+      `- Scenes (fixed, resolved): ${resolvedScenes.join(', ')}`,
+      `- Core exclusions: ${exclusions.length > 0 ? exclusions.join(', ') : 'none'}`,
+      unknown.length > 0 ? `  (unknown/unverified: ${unknown.join(', ')})` : '',
+      `- Skill pool: ${m.skillPool?.length ? m.skillPool.join(', ') : 'none (global default)'}`,
+      `- Prompt: ${m.prompt.length} chars`,
+      id in AGENT_PROFILES ? `- Note: conflicts with a built-in id (should never happen for market packages).` : '',
+    ].filter((l) => !!l).join('\n');
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function toolUpdateAgentPackage(args: Record<string, unknown>): Promise<string> {
+  try {
+    const id = strArg(args.id, '').toLowerCase();
+    if (!AGENT_ID_RE.test(id)) return 'Error: invalid agent id.';
+    if (id in AGENT_PROFILES) return `Error: "${id}" is a system built-in (chat/coding) and cannot be edited via packages.`;
+    const target = join(USER_AGENTS_DIR, id, 'agent.json');
+    let raw: Partial<AgentPackageManifest>;
+    try {
+      raw = JSON.parse(await readFile(target, 'utf-8')) as Partial<AgentPackageManifest>;
+    } catch {
+      return `Error: no installed agent package "${id}" found at ${USER_AGENTS_DIR}/${id}/agent.json — install it first (Market → Agents), then update.`;
+    }
+
+    const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : (raw.name ?? id);
+    const description = typeof args.description === 'string' ? args.description.trim() : (raw.description ?? '');
+    const version = typeof args.version === 'string' && args.version.trim() ? args.version.trim() : (raw.version ?? '1.0.0');
+
+    // scenes：以已装包当前 fixedScenes 为基准做差集/并集（白名单过滤）
+    const allowed = new Set(ALLOWED_AGENT_SCENES);
+    const currentScenes = Array.isArray(raw.fixedScenes) && raw.fixedScenes.length > 0
+      ? raw.fixedScenes.map(String)
+      : ['general'];
+    const addScenes = Array.isArray(args.addScenes)
+      ? Array.from(new Set(args.addScenes.map((s) => String(s).toLowerCase()).filter((s) => allowed.has(s))))
+      : [];
+    const unknownAdd = Array.isArray(args.addScenes)
+      ? Array.from(new Set(args.addScenes.map((s) => String(s).toLowerCase()).filter((s) => !allowed.has(s))))
+      : [];
+    const removeScenes = Array.isArray(args.removeScenes)
+      ? new Set(args.removeScenes.map((s) => String(s).toLowerCase()))
+      : new Set<string>();
+    const nextScenes = [...new Set([...currentScenes, ...addScenes])].filter((s) => !removeScenes.has(s));
+    if (nextScenes.length === 0) return 'Error: scene update would leave the agent with no scenes (keep at least one).';
+
+    // prompt：全量替换 or 追加 instructions 段（未指定则保持原文）
+    const promptArg = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+    const instructions = typeof args.instructions === 'string' ? args.instructions.trim() : '';
+    let prompt = (raw.prompt ?? '').trim();
+    if (promptArg) prompt = promptArg;
+    else if (instructions) prompt = `${prompt}\n\n## Update requested by user\n${instructions}`;
+    if (!prompt) return 'Error: resulting system prompt is empty (provide prompt or instructions).';
+
+    // coreExclusions：数组即全量替换（空数组 = 清空）
+    const exclusionWarnings: string[] = [];
+    let coreExclusions: string[] | undefined;
+    if (Array.isArray(args.coreExclusions)) {
+      coreExclusions = Array.from(new Set(args.coreExclusions.map((s) => String(s).trim()).filter((s) => !!s)));
+      exclusionWarnings.push(...coreExclusions.filter((s) => !agentCoreToolNames.has(s)));
+      if (coreExclusions.length === 0) coreExclusions = undefined;
+    }
+
+    const manifest: AgentPackageManifest = {
+      id,
+      name,
+      description,
+      version,
+      fixedScenes: nextScenes,
+      ...(coreExclusions ? { coreExclusions } : {}),
+      ...(raw.skillPool ? { skillPool: raw.skillPool } : {}), // 未指定时保持原清单记录
+      prompt,
+    };
+
+    // skillPool：显式传入即全量替换（含技能池副作用：清旧 + 启新）
+    if (Array.isArray(args.skillPool)) {
+      const skillPool = Array.from(new Set(args.skillPool.map((s) => String(s).trim()).filter((s) => !!s)));
+      if (skillPool.length > 0) manifest.skillPool = skillPool;
+      else delete manifest.skillPool;
+      const reg = await import('@/lib/skills/registry-server');
+      reg.clearAgentSkills(id);
+      for (const s of skillPool) reg.enableSkillForAgent(id, s);
+    }
+
+    await writeFile(target, JSON.stringify(manifest, null, 2), 'utf-8');
+    const back = listInstalledPackages().find((m) => m.id === id);
+    if (!back) return `Error: updated agent.json failed validation (${id}).`;
+    const profile = manifestToProfile(back);
+    const resolvedScenes = profile.fixedScenes ?? nextScenes;
+    const kept = profile.coreExclusions ?? [];
+
+    return [
+      `Agent "${back.name}" (${back.id}) updated.`,
+      `- Scenes (fixed): ${resolvedScenes.join(', ')}`,
+      kept.length > 0 ? `- Core exclusions: ${kept.join(', ')}` : '- Core exclusions: none',
+      `- Skill pool: ${(back.skillPool ?? []).length > 0 ? back.skillPool!.join(', ') : 'none (global default)'}`,
+      `- Prompt: ${back.prompt.length} chars${instructions ? ' (appended instructions)' : ''}${promptArg ? ' (full replace)' : ''}`,
+      unknownAdd.length > 0 ? `- Note: ignored unknown scenes: ${unknownAdd.join(', ')} (allowed: ${ALLOWED_AGENT_SCENES.join(', ')})` : '',
+      exclusionWarnings.length > 0 ? `- Note: unknown coreExclusions kept unverified: ${exclusionWarnings.join(', ')}` : '',
+      'Takes effect on the agent\'s next conversation (loaded from agent.json each request).',
+    ].filter((l) => !!l).join('\n');
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
 
 /**
  * query_todos 工具执行器：复用 /todo check 的查询管线
@@ -5500,6 +6107,9 @@ async function toolCreateScheduledTodo(args: Record<string, unknown>): Promise<s
         updatedAt: new Date().toISOString(),
       };
       notes[noteIdx] = updated;
+      // 落盘前统一剔除空行并重排行级日历锚点（空行不是待办）
+      const { normalizeStickyNote } = await import('@/lib/sticky-todo');
+      notes[noteIdx] = normalizeStickyNote(notes[noteIdx] as unknown as Record<string, unknown>) as typeof notes[number];
       await cal.writeStickyNotesFile(projectRoot, notes);
     }
 
@@ -5550,7 +6160,7 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
       projectName = project.name || 'Untitled';
     } catch { /* 兜底 */ }
     const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : projectName;
-    const { MAX_TODO_NOTES, pickTodoNoteColor } = await import('@/lib/sticky-todo');
+    const { MAX_TODO_NOTES, pickTodoNoteColor, normalizeStickyNote } = await import('@/lib/sticky-todo');
     // 每项目最多三张待办便签：已满三张时不新建，返回已有便签
     if (notes.length >= MAX_TODO_NOTES) {
       const existing = notes[0];
@@ -5609,7 +6219,9 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
     } catch (e) {
       console.error('[create_sticky_note] 自动入日历失败（不阻断）:', e);
     }
-    const arrToWrite = saved;
+    const arrToWrite = saved.map((n) =>
+      normalizeStickyNote(n as unknown as Record<string, unknown>),
+    );
 
     // 原子写入：先写临时文件再 rename，避免半写状态。
     // 临时名唯一：与 /api/sticky-notes、迁移脚本并发写时不共用固定 tmp 名，避免互相踩踏（rename ENOENT）

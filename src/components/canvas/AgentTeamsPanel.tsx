@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type * as React from 'react';
 import { Plus, RefreshCw, Users, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 interface TeamTask {
   id: string;
@@ -336,15 +337,16 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <button
+          <Button
             type="button"
             onClick={() => setShowNewTeam((v) => !v)}
-            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90"
-            style={{ background: 'var(--primary)' }}
+            variant="solid"
+            tone="brand"
+            size="sm"
             title="Create a new agent team"
           >
             <Plus className="h-3.5 w-3.5" /> New Team
-          </button>
+          </Button>
           {teams.length > 0 && (
             <select
               value={selected}
@@ -359,24 +361,28 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
               ))}
             </select>
           )}
-          <button
+          <Button
             type="button"
             onClick={refresh}
-            className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon"
             title="Refresh"
+            aria-label="Refresh"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             onClick={onClose}
-            className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--danger-soft)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="danger"
+            size="icon"
             title="Close (Esc)"
+            aria-label="Close (Esc)"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -404,23 +410,26 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                 style={{ borderColor: 'var(--line)', background: '#fff' }}
                 onKeyDown={(e) => { if (e.key === 'Enter') submitCreateTeam(); }}
               />
-              <button
+              <Button
                 type="button"
                 onClick={submitCreateTeam}
                 disabled={busy || !newTeamName.trim() || !newTeamGoal.trim()}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-40"
-                style={{ background: 'var(--primary)' }}
+                loading={busy}
+                variant="solid"
+                tone="brand"
+                size="sm"
               >
                 {busy ? 'Creating…' : 'Create'}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 onClick={() => setShowNewTeam(false)}
-                className="rounded-md border px-3 py-1.5 text-xs"
-                style={{ borderColor: 'var(--line)' }}
+                variant="outline"
+                tone="neutral"
+                size="sm"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -445,14 +454,16 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                   <h3 className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-muted)' }}>
                     Roster ({members.length})
                   </h3>
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setShowAddMember((v) => !v)}
-                    className="ml-auto flex items-center gap-0.5 rounded px-1.5 py-0.5 text-11 font-medium transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{ color: 'var(--primary)' }}
+                    variant="ghost"
+                    tone="brand"
+                    size="micro"
+                    className="ml-auto"
                   >
                     <Plus className="h-3 w-3" /> Add
-                  </button>
+                  </Button>
                 </div>
                 {showAddMember && (
                   <div className="mb-2 space-y-1.5 rounded-md border p-2.5" style={{ borderColor: 'var(--line)', background: 'var(--paper-soft)' }}>
@@ -488,15 +499,18 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                         <option value="medium">effort: medium</option>
                         <option value="high">effort: high</option>
                       </select>
-                      <button
+                      <Button
                         type="button"
                         onClick={submitAddMember}
                         disabled={busy || !memberName.trim()}
-                        className="ml-auto rounded-md px-2.5 py-1 text-xs font-medium text-white transition-opacity disabled:opacity-40"
-                        style={{ background: 'var(--primary)' }}
+                        loading={busy}
+                        variant="solid"
+                        tone="brand"
+                        size="sm"
+                        className="ml-auto"
                       >
                         {busy ? 'Adding…' : 'Add member'}
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -514,16 +528,17 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                         {m.status}
                       </span>
                       {m.status !== 'busy' && (
-                        <button
+                        <Button
                           type="button"
                           onClick={() => void runManage('remove_member', { member_id: m.id })}
                           disabled={busy}
-                          className="shrink-0 rounded px-1 text-11 transition-colors hover:bg-[var(--danger-soft)] disabled:opacity-40"
-                          style={{ color: 'var(--red, #dc2626)' }}
+                          variant="ghost"
+                          tone="danger"
+                          size="micro"
                           title={`Remove ${m.name}`}
                         >
                           Remove
-                        </button>
+                        </Button>
                       )}
                     </div>
                   ))}
@@ -535,33 +550,37 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                 <section className="flex flex-wrap gap-2">
                   {status.status === 'planning' && (
                     <>
-                      <button
+                      {/* Approve = 门禁主操作：brand 实底（与 AgentTeamsNode 一致），原 info 蓝并入 */}
+                      <Button
                         type="button"
                         onClick={() => doAction('approve', 'Approve & Run this team?')}
-                        className="rounded-md px-3 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90"
-                        style={{ background: 'var(--info, #3b82f6)' }}
+                        variant="solid"
+                        tone="brand"
+                        size="sm"
                       >
                         Approve & Run
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
                         onClick={() => doAction('discard', 'Discard the staged plan?')}
-                        className="rounded-md border px-3 py-1 text-xs"
-                        style={{ borderColor: 'var(--line, #e6e4de)' }}
+                        variant="outline"
+                        tone="neutral"
+                        size="sm"
                       >
                         Discard
-                      </button>
+                      </Button>
                     </>
                   )}
                   {status.status !== 'planning' && (
-                    <button
+                    <Button
                       type="button"
                       onClick={() => doAction('archive', 'Archive this team?')}
-                      className="rounded-md border px-3 py-1 text-xs"
-                      style={{ borderColor: 'var(--red, #dc2626)', color: 'var(--red, #dc2626)' }}
+                      variant="outline"
+                      tone="danger"
+                      size="sm"
                     >
                       Archive
-                    </button>
+                    </Button>
                   )}
                 </section>
               )}
@@ -575,14 +594,16 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                   <h3 className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-muted)' }}>
                     Tasks ({tasks.length})
                   </h3>
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setShowAddTask((v) => !v)}
-                    className="ml-auto flex items-center gap-0.5 rounded px-1.5 py-0.5 text-11 font-medium transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{ color: 'var(--primary)' }}
+                    variant="ghost"
+                    tone="brand"
+                    size="micro"
+                    className="ml-auto"
                   >
                     <Plus className="h-3 w-3" /> Add
-                  </button>
+                  </Button>
                 </div>
                 {showAddTask && (
                   <div className="mb-2 space-y-1.5 rounded-md border p-2.5" style={{ borderColor: 'var(--line)', background: 'var(--paper-soft)' }}>
@@ -615,15 +636,17 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                         className="flex-[1.5] rounded-md border px-2 py-1 text-xs"
                         style={{ borderColor: 'var(--line)', background: '#fff' }}
                       />
-                      <button
+                      <Button
                         type="button"
                         onClick={submitAddTask}
                         disabled={busy || !taskSubject.trim()}
-                        className="rounded-md px-2.5 py-1 text-xs font-medium text-white transition-opacity disabled:opacity-40"
-                        style={{ background: 'var(--primary)' }}
+                        loading={busy}
+                        variant="solid"
+                        tone="brand"
+                        size="sm"
                       >
                         {busy ? 'Adding…' : 'Add task'}
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -706,15 +729,18 @@ export function AgentTeamsPanel({ fullscreen = false, onClose }: AgentTeamsPanel
                     style={{ borderColor: 'var(--line, #e6e4de)', background: '#fff' }}
                     onKeyDown={(e) => { if (e.key === 'Enter') submitSendMsg(); }}
                   />
-                  <button
+                  <Button
                     type="button"
                     onClick={submitSendMsg}
                     disabled={busy || !msgText.trim()}
-                    className="shrink-0 rounded-md px-2.5 py-1 text-xs font-medium text-white transition-opacity disabled:opacity-40"
-                    style={{ background: 'var(--primary)' }}
+                    loading={busy}
+                    variant="solid"
+                    tone="brand"
+                    size="sm"
+                    className="shrink-0"
                   >
                     Send
-                  </button>
+                  </Button>
                 </div>
               </section>
             </div>

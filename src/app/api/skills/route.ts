@@ -19,11 +19,17 @@ import {
 
 const AGENT_ID = 'default';
 
-export async function GET() {
+function resolveAgentId(raw: string | null | undefined): string {
+  const id = (raw ?? '').trim();
+  return id && id !== 'default' ? id : 'default';
+}
+
+export async function GET(request: NextRequest) {
   try {
+    const agentId = resolveAgentId(new URL(request.url).searchParams.get('agentId'));
     const skills = getAllSkills();
-    const hasConfig = hasAgentConfig(AGENT_ID);
-    const enabled = getEnabledSkillsForAgent(AGENT_ID);
+    const hasConfig = hasAgentConfig(agentId);
+    const enabled = getEnabledSkillsForAgent(agentId);
 
     const list = skills.map((s) => ({
       name: s.meta.name,
@@ -45,7 +51,7 @@ export async function GET() {
       installed: hasUserSkill(s.meta.name),
     }));
 
-    return NextResponse.json({ skills: list, downloadable });
+    return NextResponse.json({ agentId, skills: list, downloadable });
   } catch (e) {
     console.error('GET /api/skills error:', e);
     return NextResponse.json({ error: 'Failed to load skills' }, { status: 500 });
@@ -68,6 +74,8 @@ export async function POST(request: NextRequest) {
       action: 'enable' | 'disable' | 'enableAll' | 'install' | 'installBuiltin' | 'uninstall';
       skillName?: string;
     };
+    // 2026-09-06：支持按 agentId 操作技能池（省略 → 'default' 全局池，旧行为不变）
+    const agentId = resolveAgentId((body as { agentId?: string }).agentId);
 
     // 首次配置时先初始化默认技能，避免默认技能丢失
     ensureAgentDefaults();
@@ -77,20 +85,20 @@ export async function POST(request: NextRequest) {
         if (!skillName) {
           return NextResponse.json({ error: 'skillName required' }, { status: 400 });
         }
-        enableSkillForAgent(AGENT_ID, skillName);
+        enableSkillForAgent(agentId, skillName);
         break;
       case 'disable':
         if (!skillName) {
           return NextResponse.json({ error: 'skillName required' }, { status: 400 });
         }
-        disableSkillForAgent(AGENT_ID, skillName);
+        disableSkillForAgent(agentId, skillName);
         break;
       case 'enableAll':
         // 启用所有已发现的技能
         const allSkills = getAllSkills();
-        enableAllSkillsForAgent(AGENT_ID);
+        enableAllSkillsForAgent(agentId);
         for (const s of allSkills) {
-          enableSkillForAgent(AGENT_ID, s.meta.name);
+          enableSkillForAgent(agentId, s.meta.name);
         }
         break;
       case 'install': {

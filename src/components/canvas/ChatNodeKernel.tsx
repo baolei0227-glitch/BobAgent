@@ -4,21 +4,19 @@ import { useState, useRef, useEffect, useCallback, useContext, useMemo, memo } f
 import React from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Handle,
-  Position,
   useReactFlow,
   useStore,
   type NodeProps,
   type Node,
   type Viewport,
 } from '@xyflow/react';
-import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Check, Zap, Wrench, CheckCircle2, XCircle, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Upload, Lightbulb, AlertTriangle, AlertCircle, Archive, AtSign, Pin, Trash, Plug, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, Maximize2, Minimize2, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, Play, SlidersHorizontal, Clock, Loader2, PackageOpen, Square, Target, Bot } from 'lucide-react';
+import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Check, Zap, Wrench, CheckCircle2, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Lightbulb, AlertTriangle, AlertCircle, AtSign, Trash, Plug, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, Play, SlidersHorizontal, Clock, Loader2, Bot, Search, Globe, Terminal, Pencil } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, ToolCallPhase, MessageAttachment, OutputFileItem, SkillDetail } from '@/lib/types';
-import QuestionPopup, { extractQuestions, type QuestionItem, type AnswerEntry } from './QuestionPopup';
+import QuestionPopup, { stripQuestionsBlock, type QuestionItem, type AnswerEntry } from './QuestionPopup';
 import { PlannerConfirmModal, type PlannerConfirmState } from './PlannerConfirmModal';
 import LoginDialog from './LoginDialog';
-import { HtmlRenderer, StreamingMarkdown } from './HtmlRenderer';
+import { StreamingMarkdown } from './HtmlRenderer';
 import { bus, BusEvents } from '@/lib/bus';
 import {
   DEFAULT_MODEL_ID,
@@ -35,7 +33,7 @@ import {
   type ProviderType,
   type AvailableModel,
 } from '@/lib/types';
-import { loadSettings, updateMcpServers, applyTheme, getQuickPrompts, updateQuickPrompts, type QuickPrompt } from '@/lib/settings';
+import { loadSettings, getQuickPrompts, updateQuickPrompts, type QuickPrompt } from '@/lib/settings';
 import type { McpServerConfig } from '@/lib/mcp/types';
 import { analyzeTask, selectBestModel } from '@/lib/model-matcher';
 import { outcomeMaxLengthForModel, inferContextWindow, compactTriggerTokensForContext } from '@/lib/context-limits';
@@ -46,12 +44,10 @@ import { registerScreenOcrTarget, unregisterScreenOcrTarget, setScreenOcrFocus }
 import { parseCitations, CitationsPanel } from './CitationsPanel';
 import { useConfirm } from './ConfirmDialog';
 import { ShareButton, ShareCard } from './ShareCard';
-import { Badge } from '@/components/ui/badge';
 import NodeCardHeader from './NodeCardHeader';
-import { TraceTimeline } from './TraceTimeline';
+import StickyTodoDock from './StickyTodoDock';
+import { ConversationTrajectory, type ConversationTrajectoryItem } from './TraceTimeline';
 import { ContextMeter, type CtxMeterInfo } from './ContextMeter';
-import Lightbox from 'yet-another-react-lightbox';
-import 'yet-another-react-lightbox/styles.css';
 
 
 /**
@@ -180,62 +176,6 @@ function parseThink(content: string): { think: string; content: string } {
   return { think: think.trim(), content: result };
 }
 
-/** 工具 → 目的（purpose）说明：执行轨迹展示"这一步在解决什么问题"。
- *  只覆盖已知内置工具；未知工具/MCP 由调用方回退为「调用 {displayName}」（不编造）。 */
-const TOOL_PURPOSE: Record<string, string> = {
-  read_file: 'Read project file',
-  list_directory: 'List directory structure',
-  search_files: 'Search project files by keyword',
-  write_file: 'Write / save file to project',
-  run_command: 'Run terminal command',
-  read_attachment: 'Read attachment (PDF/image/doc)',
-  ocr_document: 'OCR text recognition on document/image',
-  crop_image: 'Crop image region for review',
-  parse_image: 'Recognize image content',
-  read_upstream_node: 'Read upstream node output',
-  read_material: 'Read material file',
-  intern_search: 'Search project nodes / sources',
-  web_search: 'Search the web for public info',
-  web_fetch: 'Fetch web page content',
-  browser_control: 'Control real browser for web actions',
-  manage_mcp_server: 'Manage MCP server connections',
-  intern_statute_search: 'Search statutes & regulations',
-  intern_case_search: 'Search case precedents',
-  plan_task: 'Create execution plan',
-};
-
-/** 返回工具目的说明；未知工具返回空（调用方自行回退） */
-function resolveToolPurpose(toolName: string, args: Record<string, unknown>): string {
-  const direct = TOOL_PURPOSE[toolName];
-  if (direct) return direct;
-  // MCP 工具：从工具名还原"调用 {server} 的 {tool}"
-  const m = toolName.match(/^mcp__(.+?)__(.+)$/);
-  if (m) return `Call MCP ${m[1]} → ${m[2]}`;
-  return '';
-}
-
-/** 关键参数摘要：提取工具 arguments 里的主要参数（path/query/command 等），
- *  压成一行短文本作为标题辅助信息；无参数返回空串。 */
-function summarizeToolArgs(args: Record<string, unknown>): string {
-  if (!args || Object.keys(args).length === 0) return '';
-  const keys = ['path', 'filePath', 'command', 'query', 'url', 'pattern', 'title', 'name', 'goal', 'skill_name'];
-  const parts: string[] = [];
-  for (const k of keys) {
-    const v = args[k];
-    if (v === undefined || v === null || v === '') continue;
-    const str = typeof v === 'string' ? v : JSON.stringify(v);
-    parts.push(`${k}="${str.length > 32 ? str.slice(0, 32) + '…' : str}"`);
-  }
-  if (parts.length === 0) {
-    const first = Object.entries(args)[0];
-    if (first) {
-      const str = typeof first[1] === 'string' ? first[1] : JSON.stringify(first[1]);
-      parts.push(`${first[0]}="${str.length > 32 ? str.slice(0, 32) + '…' : str}"`);
-    }
-  }
-  return parts.join(' · ');
-}
-
 /** 消息渲染区错误边界：正文/StreamingMarkdown 等渲染异常时降级为可恢复提示，避免整节点空白。
  *  仅 widget 有自身兜底，正文区没有——渲染崩溃会直接清空整个节点，这里补上。 */
 class MessagesErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
@@ -325,269 +265,6 @@ function AttachmentChips({ attachments, role }: { attachments: MessageAttachment
         </span>
       ))}
     </div>
-  );
-}
-
-/** 将执行过程叙述拆分为步骤列表：
- *  列表行（"- x"、"* x"、圆点 x、数字编号行）各自成条；其余段落按句子
- *  （句号/感叹号/问号/分号）切分，过滤空句。避免"项目符号流水账"被并成一条超长卡。
- *  仅用于历史消息的 processNarration 兜底展示（新消息已去双轨，不再产生该字段）。 */
-function splitNarrationSteps(text: string): string[] {
-  const out: string[] = [];
-  let buffer = '';
-  const flushBuffer = () => {
-    if (!buffer) return;
-    for (const s of buffer.split(/(?<=[。！？!?；;])\s+/)) {
-      const t = s.trim();
-      if (t) out.push(t);
-    }
-    buffer = '';
-  };
-  for (const rawLine of text.split(/\n+/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    // 列表行判定："- x"、"* x"、"• x"、数字编号后跟"空格/中文"（排除"3.5版本"这类小数/版本号）
-    if (/^[-*•]\s+\S/.test(line) || /^\d+[.、)．](?!\d)\s*\S/.test(line)) {
-      flushBuffer();
-      out.push(line);
-    } else {
-      buffer += (buffer ? '\n' : '') + line;
-    }
-  }
-  flushBuffer();
-  return out;
-}
-
-/** 执行过程步骤卡片：工具调用轮剥离出的过程叙述，按句子拆成卡片串成轨迹，
- *  正文只保留交付物（与 dsh Trajectory 同属执行轨迹区，展示层不删除内容）。
- *  流式期间自动展开；任务完成（isStreaming 变 false）后自动折叠，可手动点开回看。 */
-/** 从工具结果文本中提取截图 dataUrl（browser.screenshot 等返回 base64 图片）。
- * 兼容 JSON 序列化后的 \/ 转义；最多取 3 张避免超大 base64 撑爆渲染。 */
-function extractImagesFromDetail(detail: string): string[] {
-  if (!detail) return [];
-  const out: string[] = [];
-  // data:image/png;base64,xxx —— 兼容 JSON 里反斜杠转义的 data:image\/png;base64,xxx
-  const re = /data:image\/(?:png|jpeg|webp|gif)(\\?\/);base64,([A-Za-z0-9+/=]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(detail)) !== null) {
-    if (out.length >= 3) break;
-    // 还原反斜杠转义：data:image\/png → data:image/png
-    const src = m[0].replace(/\\\//g, '/');
-    out.push(src);
-  }
-  return out;
-}
-
-function StepCards({
-  toolCalls,
-  narration,
-  isStreaming = false,
-}: {
-  toolCalls?: ToolCallRecord[];
-  narration?: string;
-  isStreaming?: boolean;
-}) {
-  // 优先从 toolCalls 派生步骤（带真实执行状态 pending/running/done/error），
-  // 与 TraceTimeline 共享同一事实源，消除「步骤卡 vs 轨迹」的数据割裂；
-  // 无工具调用时回退到叙述拆分（历史消息 / 纯文本任务）。
-  // 标题用「工具目的」短标签，参数压成一行辅助信息，完整结果折叠进详情区（点击展开）。
-  const steps = useMemo(() => {
-    if (toolCalls && toolCalls.length > 0) {
-      return toolCalls.map((tc, i) => {
-        const args = tc.arguments ?? {};
-        const title = resolveToolPurpose(tc.toolName, args) || tc.toolName;
-        const argsHint = summarizeToolArgs(args);
-        const detail = tc.result && tc.result.trim() ? tc.result : (tc.summary ?? '');
-        const images = extractImagesFromDetail(detail);
-        return {
-          id: tc.spanId ?? `${tc.toolName}-${i}`,
-          title,
-          argsHint,
-          detail,
-          images,
-          hasDetail: detail.length > 0 || images.length > 0,
-          phase: (tc.phase ?? (tc.success ? 'done' : 'pending')) as ToolCallPhase,
-        };
-      });
-    }
-    return splitNarrationSteps(narration ?? '').map((s, i) => ({
-      id: `narration-${i}`,
-      title: s,
-      argsHint: '',
-      detail: '',
-      images: [],
-      hasDetail: false,
-      phase: 'done' as ToolCallPhase,
-    }));
-  }, [toolCalls, narration]);
-  const [collapsed, setCollapsed] = useState(!isStreaming);
-  // 单步详情展开集合：点击卡片标题展开该步的完整结果（tool result）
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-  // 截图预览（Lightbox）：步骤卡片内点击缩略图打开全屏预览
-  const [lightbox, setLightbox] = useState<{ open: boolean; index: number; slides: { src: string }[] }>({ open: false, index: 0, slides: [] });
-  const toggleExpand = useCallback((id: string) => {
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-  const prevStreamingRef = useRef<boolean>(isStreaming);
-  useEffect(() => {
-    if (prevStreamingRef.current !== isStreaming) {
-      setCollapsed(!isStreaming);
-      prevStreamingRef.current = isStreaming;
-    }
-  }, [isStreaming]);
-  // 流式期间即使还没有任何步骤也保留区块（标题显示"…"、内容区显示"正在分析任务…"），
-  // 让步骤在执行中实时"长出来"；任务结束后无步骤则整块隐藏
-  if (steps.length === 0 && !isStreaming) return null;
-  return (
-    <>
-    <div className="mb-1 w-full min-w-0">
-      <button
-        type="button"
-        className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left"
-        onClick={() => setCollapsed((v) => !v)}
-      >
-        <ChevronDown
-          className={cn('h-3 w-3 shrink-0 transition-transform', collapsed && '-rotate-90')}
-          style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}
-        />
-        <span className="text-xs font-medium" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}>
-          Execution steps
-        </span>
-        <span className="rounded-full px-1.5 py-px text-10 font-semibold leading-none" style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 8%, transparent)', color: 'var(--primary)' }}>
-          {isStreaming && steps.length === 0 ? '…' : steps.length}
-        </span>
-      </button>
-      {!collapsed && (
-        <div className="mt-1 flex flex-col gap-1">
-          {steps.length === 0 ? (
-            <div
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs"
-              style={{
-                backgroundColor: 'var(--paper)',
-                border: '1px dashed color-mix(in oklab, var(--line) 35%, transparent)',
-                color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)',
-              }}
-            >
-              <span className="think-dot" />
-              <span className="think-dot" />
-              <span className="think-dot" />
-              <span>正在分析任务…</span>
-            </div>
-          ) : (
-            steps.map((step) => {
-              const expanded = expandedIds.has(step.id);
-              return (
-                <div key={step.id} className="flex items-start gap-2" style={{ animation: 'step-card-in 180ms ease-out' }}>
-                  <StepPhaseIcon phase={step.phase} />
-                  <div className="min-w-0 flex-1">
-                    <button
-                      type="button"
-                      onClick={() => step.hasDetail && toggleExpand(step.id)}
-                      disabled={!step.hasDetail}
-                      className={cn('w-full min-w-0 rounded-lg px-2.5 py-1.5 text-left', step.hasDetail && 'cursor-pointer')}
-                      style={{
-                        backgroundColor: 'var(--paper)',
-                        border: '1px solid color-mix(in oklab, var(--line) 25%, transparent)',
-                      }}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className="min-w-0 flex-1 text-xs leading-relaxed break-words" style={{ color: 'var(--ink)' }}>
-                          {step.title}
-                        </span>
-                        {step.hasDetail && (
-                          <ChevronDown
-                            className={cn('h-3.5 w-3.5 shrink-0 transition-transform', expanded && 'rotate-180')}
-                            style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}
-                          />
-                        )}
-                      </div>
-                      {step.argsHint && (
-                        <div
-                          className="mt-0.5 truncate text-10"
-                          style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
-                          title={step.argsHint}
-                        >
-                          {step.argsHint}
-                        </div>
-                      )}
-                    </button>
-                    {expanded && step.hasDetail && (
-                      <div
-                        className="ai-canvas-scroll mt-1 max-h-[180px] overflow-y-auto whitespace-pre-wrap rounded-lg px-2.5 py-1.5 text-11 leading-relaxed break-words"
-                        style={{
-                          backgroundColor: 'var(--paper)',
-                          border: '1px solid color-mix(in oklab, var(--line) 25%, transparent)',
-                          color: 'color-mix(in oklab, var(--ink) 82%, transparent)',
-                        }}
-                      >
-                        {step.images.length > 0 && (
-                          <div className="mb-1.5 flex flex-wrap gap-1.5">
-                            {step.images.map((src, idx) => (
-                              <button
-                                key={idx}
-                                type="button"
-                                className="group relative cursor-pointer overflow-hidden rounded border"
-                                style={{ borderColor: 'color-mix(in oklab, var(--line) 35%, transparent)' }}
-                                title="点击预览截图"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setLightbox({ open: true, index: idx, slides: step.images.map((s) => ({ src: s })) });
-                                }}
-                              >
-                                <img src={src} alt={`截图 ${idx + 1}`} className="block max-h-[120px] w-auto transition-opacity group-hover:opacity-85" loading="lazy" />
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        {step.detail}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-    </div>
-    <Lightbox
-      open={lightbox.open}
-      close={() => setLightbox((s) => ({ ...s, open: false }))}
-      index={lightbox.index}
-      slides={lightbox.slides}
-      on={{
-        click: () => setLightbox((s) => ({ ...s, open: false })),
-      }}
-    />
-    </>
-  );
-}
-
-/** 步骤卡状态图标：按执行阶段渲染（排队/执行中/完成/失败）。
- *  外层固定 16×16 容器以 key=phase 驱动，phase 切换时重挂载触发 step-icon-in
- *  淡入缩放过渡；running 的转圈动画由内层 Loader2 承载，不与过渡动画冲突。 */
-function StepPhaseIcon({ phase }: { phase: ToolCallPhase }) {
-  return (
-    <span
-      key={phase}
-      className="mt-1.5 flex h-4 w-4 shrink-0 items-center justify-center"
-      style={{ animation: 'step-icon-in 140ms ease-out' }}
-    >
-      {phase === 'running' && <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--primary)' }} />}
-      {phase === 'done' && <CheckCircle2 className="h-4 w-4" style={{ color: 'var(--success)' }} />}
-      {phase === 'error' && <XCircle className="h-4 w-4" style={{ color: 'var(--danger)' }} />}
-      {phase === 'pending' && (
-        <span
-          className="h-3.5 w-3.5 rounded-full border"
-          style={{ borderColor: 'color-mix(in oklab, var(--ink-muted) 45%, transparent)' }}
-        />
-      )}
-    </span>
   );
 }
 
@@ -702,11 +379,428 @@ function finalizeMessagesPhase(items: ChatMessage[]): ChatMessage[] {
   return changed ? result : items;
 }
 
+/**
+ * StepTypeIcon — 每步的「类型图标」：按工具名映射为固定语义图标。
+ * 原则：图标与颜色执行中/完成/失败都不变；完成与否改由行尾文字后的 ✓ / ✕ / 呼吸点表达。
+ */
+function StepTypeIcon({ name, size = 14 }: { name: string; size?: number }) {
+  const n = name.toLowerCase();
+  const color = 'color-mix(in oklab, var(--ink-muted) 72%, transparent)';
+  const cls = { width: size, height: size, flexShrink: 0, color } as const;
+  const file = n.includes('write_file') || n.includes('read_file') || n.includes('delete_file') || n.includes('rename_file')
+    || n.includes('edit_code') || n.includes('create_file') || n.includes('list_directory') || n.includes('list_files') || n.includes('search_files')
+    || n.includes('attachment') || n.includes('material') || n.includes('upload_file') || n.includes('export_pdf') || n.includes('read_attachment') || n.includes('read_material');
+  const search = n.includes('web_search') || n.includes('search_web') || n.includes('intern_search') || n.includes('search_capabilities') || n.includes('search');
+  const web = n.includes('navigate') || n.includes('web_fetch') || n.includes('fetch') || n.includes('browser') || n.includes('get_html') || n.includes('click') || n.includes('type') || n.includes('fill') || n.includes('select_') || n.includes('press_key') || n.includes('scroll') || n.includes('wait_for') || n.includes('login') || n.includes('handle_dialog') || n.includes('resize_viewport') || n.includes('screenshot') || n.includes('extract_text') || n.includes('interact_preview') || n.includes('capture_preview') || n.includes('get_storage') || n.includes('reload') || n.includes('back') || n.includes('forward');
+  const ocr = n.includes('ocr') || n.includes('crop_image') || n.includes('vision') || n.includes('recognize');
+  const cmd = n.includes('run_command') || n.includes('execute_script') || n.includes('bash') || n.includes('shell') || n.includes('install_') || n.includes('python') || n.includes('pip');
+  const skill = n.includes('skill') || n.includes('load_skill') || n.includes('read_skill');
+  const todo = n.includes('sticky_note') || n.includes('scheduled_todo') || n.includes('todo_') || n.includes('query_schedule') || n.includes('query_todos') || n.includes('project_plan') || n.includes('calendar') || n.includes('event');
+  const note = n.includes('read_raw_inbox') || n.includes('inbox') || n.includes('kar') || n.includes('note');
+  const upstream = n.includes('upstream') || n.includes('intern') || n.includes('read_node') || n.includes('materials') || n.includes('root');
+  const mcp = n.startsWith('mcp_') || n.includes('__');
+  if (file) return <Pencil style={cls} />;
+  if (ocr) return <ImageIcon style={cls} />;
+  if (search) return <Search style={cls} />;
+  if (web) return <Globe style={cls} />;
+  if (cmd) return <Terminal style={cls} />;
+  if (skill) return <Sparkles style={cls} />;
+  if (todo) return <ClipboardList style={cls} />;
+  if (note) return <Paperclip style={cls} />;
+  if (upstream) return <Link2 style={cls} />;
+  if (mcp) return <Plug style={cls} />;
+  return <Wrench style={cls} />;
+}
+
+/**
+ * TraceProcessSummary — 对话视图「执行过程」紧凑摘要（对齐 dsh 对话页签）。
+ * 只给过程感：思考收成小条、每个工具一行摘要、技能小药丸；
+ * 点击 Think / 工具行就地展开明细（思考原文 / 参数 / 结果），不切换到 Trace 视图。
+ */
+function TraceProcessSummary({
+  thinkText,
+  toolCalls,
+  skillNames,
+  isStreaming,
+  thinkingActive,
+  hideStructuralTools,
+}: {
+  thinkText?: string;
+  toolCalls: ToolCallRecord[];
+  skillNames: string[];
+  isStreaming: boolean;
+  /** 当前是否正处于思考阶段（仅该消息流式 + thinking 阶段为 true，用于 Think 行末尾呼吸点） */
+  thinkingActive?: boolean;
+  /** 流式中隐藏结构性工具行（todo_write / finish_task / 存量 plan_task）——它们由右侧 DOS 步骤面板结构化呈现 */
+  hideStructuralTools?: boolean;
+}) {
+  const [thinkOpen, setThinkOpen] = useState(false);
+  const [toolOpen, setToolOpen] = useState<number | null>(null);
+  const hasThink = !!thinkText && thinkText.trim().length > 0;
+  const calls = toolCalls ?? [];
+  const visibleCalls = hideStructuralTools
+    ? calls.filter((tc) => tc.toolName !== 'todo_write' && tc.toolName !== 'plan_task' && tc.toolName !== 'finish_task')
+    : calls;
+  const skills = skillNames ?? [];
+  if (!hasThink && calls.length === 0 && skills.length === 0) return null;
+  const human = (name: string) => name.replace(/^browser[._]/, '').replace(/_/g, ' ');
+  const phaseLabel = (phase: ToolCallPhase): string =>
+    phase === 'running' ? 'Running…' : phase === 'pending' ? 'Pending…' : phase === 'error' ? 'Failed' : 'Success';
+  const pretty = (v: unknown): string => {
+    if (v === undefined || v === null) return '';
+    try {
+      const s = JSON.stringify(v, null, 2);
+      return s === undefined ? String(v) : s;
+    } catch {
+      return String(v);
+    }
+  };
+  return (
+    <div className="mb-1 flex w-full min-w-0 flex-col items-start gap-0.5">
+      {/* Think 小条：默认收起，点击就地展开思考原文 */}
+      {hasThink && (
+        <>
+          <button
+            type="button"
+            onClick={() => setThinkOpen((v) => !v)}
+            title={thinkOpen ? 'Collapse thinking' : 'Expand thinking'}
+            className="inline-flex max-w-full cursor-pointer items-center gap-1 py-0.5 transition-opacity hover:opacity-70"
+          >
+            <Brain className="h-2.5 w-2.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+            <span className="text-10 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-muted)' }}>
+              Think
+            </span>
+            {thinkingActive && (
+              <span className="flex shrink-0 items-center gap-0.5">
+                <span className="think-dot" />
+                <span className="think-dot" />
+                <span className="think-dot" />
+              </span>
+            )}
+          </button>
+          {thinkOpen && (
+            <div
+              className="ai-canvas-scroll max-h-[300px] w-full self-start overflow-y-auto whitespace-pre-wrap rounded-md border px-2 py-1.5 text-11 leading-relaxed"
+              style={{
+                borderColor: 'color-mix(in oklab, var(--primary) 18%, transparent)',
+                backgroundColor: 'color-mix(in oklab, var(--primary) 4%, var(--paper))',
+                color: 'var(--ink)',
+              }}
+            >
+              {thinkText?.trim()}
+            </div>
+          )}
+        </>
+      )}
+      {/* 工具调用：默认一行摘要，点击就地展开参数与结果 */}
+      {visibleCalls.map((tc, i) => {
+        const phase: ToolCallPhase = tc.phase ?? (tc.success === false ? 'error' : tc.success ? 'done' : 'running');
+        const busy = isStreaming && (phase === 'running' || phase === 'pending');
+        const open = toolOpen === i;
+        const argsText = pretty(tc.arguments);
+        const hasResult = !!tc.result && tc.result !== '...';
+        return (
+          <div key={tc.spanId ?? `${tc.toolName}-${i}`} className="flex w-full min-w-0 flex-col items-start">
+            <button
+              type="button"
+              onClick={() => setToolOpen(open ? null : i)}
+              title={open ? 'Collapse step details' : 'Show step details'}
+              className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 px-1 py-0.5 text-left transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_5%,transparent)]"
+            >
+              <StepTypeIcon name={tc.toolName} />
+              <span className="truncate text-11 font-medium" style={{ color: 'var(--ink)' }}>{human(tc.toolName)}</span>
+              {(tc.purpose || tc.changeSummary) && (
+                <span className="min-w-0 flex-1 truncate text-10" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}>
+                  {tc.changeSummary || tc.purpose}
+                </span>
+              )}
+              {/* 状态标识不换图标颜色：进行中 = 文字后呼吸点；失败 = 文字后 ✕（成功不额外标记） */}
+              {busy ? (
+                <span className="flex shrink-0 items-center gap-0.5" style={{ color: 'var(--primary-strong)' }}>
+                  <span className="think-dot" />
+                  <span className="think-dot" />
+                  <span className="think-dot" />
+                </span>
+              ) : phase === 'error' ? (
+                <span className="shrink-0 text-[10px] font-bold leading-none" style={{ color: 'var(--danger)' }}>
+                  ✕
+                </span>
+              ) : null}
+              {tc.durationMs > 0 && (phase === 'done' || phase === 'error') && (
+                <span className="shrink-0 text-10" style={{ color: 'color-mix(in oklab, var(--ink-muted) 45%, transparent)' }}>
+                  {formatDuration(tc.durationMs)}
+                </span>
+              )}
+            </button>
+            {open && (
+              <div
+                className="mb-0.5 flex w-full min-w-0 flex-col gap-1 rounded-md border px-2 py-1.5"
+                style={{
+                  borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
+                  backgroundColor: 'color-mix(in oklab, var(--paper-soft) 60%, transparent)',
+                }}
+              >
+                {/* 状态 + 完整工具名 + 耗时 */}
+                <div className="flex min-w-0 items-center gap-1.5 text-10">
+                  <span className="shrink-0 font-semibold" style={{ color: phase === 'error' ? 'var(--danger)' : phase === 'done' ? 'var(--success)' : 'var(--primary-strong)' }}>
+                    {phaseLabel(phase)}
+                  </span>
+                  <span className="truncate font-medium" style={{ color: 'var(--ink)' }}>{tc.toolName}</span>
+                  {tc.durationMs > 0 && (
+                    <span className="shrink-0" style={{ color: 'color-mix(in oklab, var(--ink-muted) 45%, transparent)' }}>{formatDuration(tc.durationMs)}</span>
+                  )}
+                </div>
+                {/* 目的 / 系统变更摘要 */}
+                {(tc.purpose || tc.changeSummary) && (
+                  <div className="flex min-w-0 gap-1.5 text-10 leading-relaxed" style={{ color: 'var(--ink)' }}>
+                    <span className="shrink-0 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
+                      Purpose
+                    </span>
+                    <span className="min-w-0">{tc.changeSummary || tc.purpose}</span>
+                  </div>
+                )}
+                {/* 参数 */}
+                {argsText && (
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-10 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
+                      Args
+                    </span>
+                    <pre
+                      className="ai-canvas-scroll max-h-[220px] w-full overflow-auto whitespace-pre-wrap break-all rounded px-2 py-1 font-mono text-10 leading-relaxed"
+                      style={{
+                        backgroundColor: 'var(--paper)',
+                        border: '1px solid color-mix(in oklab, var(--line) 25%, transparent)',
+                        color: 'color-mix(in oklab, var(--ink) 85%, transparent)',
+                      }}
+                    >
+                      {argsText}
+                    </pre>
+                  </div>
+                )}
+                {/* 结果 */}
+                {hasResult && (
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-10 font-semibold uppercase tracking-wide" style={{ color: phase === 'error' ? 'var(--danger)' : 'var(--success)' }}>
+                      Result
+                    </span>
+                    <pre
+                      className="ai-canvas-scroll max-h-[260px] w-full overflow-auto whitespace-pre-wrap break-all rounded px-2 py-1 font-mono text-10 leading-relaxed"
+                      style={{
+                        backgroundColor: 'var(--paper)',
+                        border: '1px solid color-mix(in oklab, var(--line) 25%, transparent)',
+                        color: 'color-mix(in oklab, var(--ink) 85%, transparent)',
+                      }}
+                    >
+                      {tc.result}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {/* 命中的技能：小药丸提示 */}
+      {skills.length > 0 && (
+        <div className="flex w-full flex-wrap items-center gap-0.5">
+          {skills.map((s) => (
+            <span
+              key={s}
+              title="Skill load details live in the Trace view"
+              className="inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-10"
+              style={{
+                color: 'color-mix(in oklab, var(--info) 75%, transparent)',
+                borderColor: 'color-mix(in oklab, var(--info) 25%, transparent)',
+                backgroundColor: 'color-mix(in oklab, var(--info) 6%, transparent)',
+              }}
+            >
+              <Sparkles className="h-2.5 w-2.5" />
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * TaskStepsPanel — 节点右侧悬浮「DOS 执行步骤」面板。
+ * 数据源：agent 通过 todo_write 提交的三态真状态（content + activeForm + status）。
+ * 状态映射：completed ✓ / in_progress 旋转箭头+activeForm / pending 置灰序号 / failed ✗；
+ * 面板底部附「Now」高亮条展示当前步动态文案。fixed 定位跟随节点右缘（rAF 跟踪 rect），portal 到 body。
+ */
+type StepStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+interface PanelStep {
+  content: string;
+  activeForm: string;
+  status: StepStatus;
+}
+function TaskStepsPanel({
+  anchor,
+  goal,
+  steps,
+  completed,
+  running,
+  onClose,
+}: {
+  anchor: HTMLElement | null;
+  goal: string;
+  steps: PanelStep[];
+  completed: number;
+  running: boolean;
+  onClose: () => void;
+}) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useEffect(() => {
+    if (!anchor) return;
+    let raf = 0;
+    const PANEL_W = 300;
+    const update = () => {
+      const r = anchor.getBoundingClientRect();
+      const estH = 120 + steps.length * 26;
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+      const left = Math.max(8, Math.min(r.right + 10, vw - PANEL_W - 8));
+      const top = Math.max(8, Math.min(r.top + 8, vh - estH - 8));
+      setPos({ left, top });
+      raf = requestAnimationFrame(update);
+    };
+    raf = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(raf);
+  }, [anchor, steps.length]);
+  if (!pos) return null;
+
+  const total = steps.length;
+  const allDone = completed >= total && !running;
+  const failedCount = steps.filter((s) => s.status === 'failed').length;
+  const currentIdx = steps.findIndex((s) => s.status === 'in_progress');
+  const displayCount = Math.min(completed, total);
+  const mono = "'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace";
+  return createPortal(
+    <div
+      data-canvas-ui="overlay"
+      className="overflow-hidden rounded-xl shadow-2xl"
+      style={{
+        position: 'fixed',
+        left: pos.left,
+        top: pos.top,
+        width: 300,
+        zIndex: 640,
+        fontFamily: mono,
+        backgroundColor: '#0a0e14',
+        border: '1px solid rgba(34,197,94,0.45)',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.5), 0 0 24px rgba(34,197,94,0.12)',
+      }}
+    >
+      {/* 顶栏 */}
+      <div
+        className="flex items-center gap-1.5 px-2.5 py-1.5"
+        style={{ backgroundColor: '#10161f', borderBottom: '1px solid rgba(34,197,94,0.25)' }}
+      >
+        <span
+          className="inline-block h-1.5 w-1.5 rounded-full"
+          style={{
+            backgroundColor: failedCount > 0 ? '#f87171' : '#34d399',
+            boxShadow: running ? `0 0 6px ${failedCount > 0 ? '#f87171' : '#34d399'}` : 'none',
+            animation: running ? 'pulse 1.2s ease-in-out infinite' : 'none',
+          }}
+        />
+        <span className="text-10 font-bold tracking-[0.14em]" style={{ color: failedCount > 0 ? '#f87171' : '#34d399' }}>
+          {allDone ? (failedCount > 0 ? 'DONE w/ ERRORS' : 'COMPLETE') : 'EXECUTING'}
+        </span>
+        <span className="text-10" style={{ color: 'rgba(148,163,184,0.55)' }}>
+          {displayCount}/{total}{failedCount > 0 ? ` · ${failedCount} failed` : ''}
+        </span>
+        <span className="flex-1" />
+        <button
+          type="button"
+          onClick={onClose}
+          title="Close steps panel"
+          className="cursor-pointer rounded px-1 text-[11px] transition-colors hover:bg-white/10"
+          style={{ color: 'rgba(148,163,184,0.9)' }}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+      {/* Goal */}
+      {goal && (
+        <div className="border-b px-2.5 py-1.5" style={{ borderColor: 'rgba(34,197,94,0.15)', backgroundColor: '#0d131c' }}>
+          <div className="text-[9px] font-semibold uppercase tracking-widest" style={{ color: 'rgba(148,163,184,0.6)' }}>
+            Goal
+          </div>
+          <div className="mt-0.5 text-[11px] leading-snug" style={{ color: '#e2e8f0', wordBreak: 'break-word' }}>
+            {goal}
+          </div>
+        </div>
+      )}
+      {/* 步骤清单 */}
+      <div className="flex max-h-[340px] flex-col gap-px overflow-y-auto px-2 py-2">
+        {steps.map((s, i) => {
+          const text = s.content.replace(/^Step\s*\d+\s*[:.]\s*/i, '');
+          const isDone = s.status === 'completed';
+          const isCurrent = s.status === 'in_progress';
+          const isFailed = s.status === 'failed';
+          // 当前步优先展示 activeForm 动态文案，否则展示静态 content
+          const label = isCurrent && s.activeForm ? s.activeForm : text;
+          const color = isDone ? '#86efac' : isCurrent ? '#a5f3fc' : isFailed ? '#fca5a5' : 'rgba(148,163,184,0.45)';
+          const bg = isCurrent ? 'rgba(34,211,238,0.06)' : isFailed ? 'rgba(248,113,113,0.06)' : 'transparent';
+          return (
+            <div
+              key={i}
+              className="flex min-w-0 items-start gap-1.5 rounded px-1 py-0.5"
+              style={{ color, backgroundColor: bg }}
+            >
+              <span className="mt-[1px] flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[10px] leading-none">
+                {isDone ? (
+                  <span style={{ color: '#34d399' }}>✓</span>
+                ) : isFailed ? (
+                  <span style={{ color: '#f87171' }}>✗</span>
+                ) : isCurrent ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" style={{ color: '#22d3ee' }} />
+                ) : (
+                  <span style={{ color: 'rgba(148,163,184,0.4)' }}>{String(i + 1).padStart(2, '0')}</span>
+                )}
+              </span>
+              <span className={cn('min-w-0 text-[11px] leading-snug', isCurrent && 'animate-pulse')} style={{ wordBreak: 'break-word' }}>
+                {isCurrent && '▸ '}
+                {label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {/* 当前步高亮条（独立于清单，便于一眼定位正在做什么） */}
+      {currentIdx >= 0 && (
+        <div className="border-t px-2.5 py-1" style={{ borderColor: 'rgba(34,197,94,0.2)', backgroundColor: '#0d131c' }}>
+          <div className="text-[9px] font-semibold uppercase tracking-widest" style={{ color: 'rgba(34,211,238,0.7)' }}>
+            Now
+          </div>
+          <div className="mt-0.5 text-[11px] leading-snug animate-pulse" style={{ color: '#a5f3fc', wordBreak: 'break-word' }}>
+            {steps[currentIdx].activeForm || steps[currentIdx].content}
+          </div>
+        </div>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
 export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelProps) {
-  const { setNodes, setEdges, getNode, getEdges, getNodes, getViewport, setViewport } = useReactFlow();
+  const { setNodes, getNode, getEdges, getNodes } = useReactFlow();
 
   /** 监听上游边断开状态 */
   const allEdges = useStore((s) => s.edges);
+  // 标题栏"连线关系"计数：与我有活跃（未断开）child 边的关联数。
+  // 画布已物理移除连线（2026-09），关系用标题链接图标表达，点击跳 NodeMap 高亮。
+  const linkCount = useMemo(() => {
+    let n = 0;
+    for (const e of allEdges) {
+      if (e.data?.disconnected) continue;
+      if (e.source === id || e.target === id) n += 1;
+    }
+    return n;
+  }, [allEdges, id]);
   useEffect(() => {
     const hasDisconnected = allEdges.some(
       (e) => e.target === id && e.data?.disconnected,
@@ -721,14 +815,21 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [plannerConfirm, setPlannerConfirm] = useState<PlannerConfirmState | null>(null);
 
   // 展开态尺寸常量（壳列分离阅读宽度方案）：
-  // 高度 min(90vh, 1200px)；外壳宽度 min(72vw, 880px)，正文消息列再限宽 720px（READING_COL_W）
-  // 居中保证行长舒适（中文约 45 字）；宽代码块经 .wide breakout 越出到壳全宽，兼顾可读性。
-  // 外壳宽度额外受画布可视区（扣除侧边栏/右侧预览面板）约束，避免展开节点被面板遮挡；
-  // 高度以 vh 兜底，canvas pane 为全窗口区域，90vh 不会超出画布高度
-  const EXPANDED_HEIGHT_MAX = 1200;
-  const EXPANDED_HEIGHT_VH = 0.9;
-  const EXPANDED_WIDTH_MAX = 880;
-  const EXPANDED_WIDTH_VW = 0.72;
+  // 高度 = calc(100vh - 20px)，与右侧悬浮面板（预览/本地文件）同高（容器 top/bottom 各 10px）；
+  // 展开节点垂直居中后上下边缘各留 10px，与面板视觉对齐，长内容由节点内部滚动承接，不设高度封顶。
+  // 外壳宽度较旧版收窄 10%（880→792px / 72vw→64.8vw）；正文消息列仍限宽 720px（READING_COL_W），
+  // 滚动区内边距相应收紧（px-10→px-7），保证正文宽度不变而左右边距变小。
+  // 居中保证行长舒适（中文约 45 字）；宽代码块经 .wide breakout 越出到正文列宽，兼顾可读性。
+  // 外壳宽度额外受画布可视区（扣除侧边栏/右侧预览面板）约束，避免展开节点被面板遮挡。
+  const EXPANDED_HEIGHT_CSS = 'calc(100vh - 6px)';
+  /** 展开高度像素值（居中/重叠解析事件用）：与面板同高对齐 = 视口高度 − 上下边距 6px */
+  const expandedHeightPx = () => Math.max(window.innerHeight - 6, 200);
+  // 2026-09 布局重构：对话区自由拉伸填满容器（TraeWork 式），不再设 792px 外壳上限。
+  // 外壳宽 = 画布可视宽（wrapper，已扣除左栏/右 dock），窄窗口随容器自动收缩
+  const expandedShellW = (visible: number | null): number => {
+    if (visible !== null && visible > 0) return Math.max(Math.round(visible), 320);
+    return Math.min(Math.round(window.innerWidth * 0.94), 1180);
+  };
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => finalizeMessagesPhase(data.messages ?? []));
 
@@ -753,22 +854,22 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
       }),
     );
   }, []);
-  // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）：边框光晕用蓝色系，与普通 chat 节点的暖棕区分
+  // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）
   const isCoding = identity === 'coding';
-  // Kar（note 身份）节点：黄色高亮外框（--warn 黄系），选中/常驻边框与光晕均走黄
+  // Kar（note 身份）
   const isNote = identity === 'note';
-  // Planner（planner 身份）节点：绿色高亮外框（--success 绿系），与其他节点区分
-  const isPlanner = identity === 'planner';
-  // 身份强调色：coding 蓝（--info）/ Kar 黄（--warn）/ Planner 绿（--success）/ chat 暖红（--danger）
-  const accentVar = isCoding
-    ? 'var(--info)'
-    : isNote
-      ? 'var(--warn)'
-      : isPlanner
-        ? 'var(--success)'
-        : 'var(--danger)';
-  // 是否带"专属身份强调"的外框光晕/头部分隔：coding/Kar/Planner 走强调色，普通 chat 走默认
-  const hasAccentIdentity = isCoding || isNote || isPlanner;
+  // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Planner→ClipboardList / 其余→Bot
+  const TitleIdentityIcon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> =
+    identity === 'coding'
+      ? Terminal
+      : identity === 'note'
+        ? FileText
+        : identity === 'planner'
+          ? ClipboardList
+          : Bot;
+  // Bot 字形较实（头部填充面积大），同 16px 下视觉偏重 → 光学收半档到 15px；
+  // coding/note/planner 专属图标笔画纤细，维持 16px 即可视觉等大。
+  const isBotTitleIcon = identity !== 'coding' && identity !== 'note' && identity !== 'planner';
 
   // AI Coding 专项任务循环状态（改码→预览自检→测试→完成）：由服务端 coding_phase SSE 驱动
   const [codingPhase, setCodingPhase] = useState<CodingPhase>('idle');
@@ -801,116 +902,50 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     );
     return () => {
       window.dispatchEvent(
-        new CustomEvent('node-executing', { detail: { node_id: id, executing: false } }),
+        // unmount:true 标识"组件卸载清理"而非真实任务结束，供 CanvasFlow 判断不点亮未读绿点
+        new CustomEvent('node-executing', { detail: { node_id: id, executing: false, unmount: true } }),
       );
     };
   }, [id, isStreaming]);
 
-  const [isExpanded, setIsExpanded] = useState(data.initialExpanded === true);
-  // 普通节点展开：固定阅读宽度方案 — 高度 min(90vh, 1200px)，宽度 min(72vw, 880px)，
+  // 无卡片态状态模型（2026-09 产品口径）：
+  //  - 节点一律处于大面板形态：有内容 = 大阅读面板，无内容 = 空态欢迎区（品牌行 + 输入框）；
+  //  - 已移除「空节点小卡片（400px 紧凑输入条）」形态：新建会话固定为同一套欢迎区 UI，
+  //    节点不再互斥收起，彻底消除「偶尔变成可展开/缩小节点」的类竞态问题。
+  // 大阅读面板：固定阅读宽度方案 — 高度 calc(100vh - 20px)（与右侧面板同高），宽度 min(64.8vw, 792px)，
+  // 较旧版（72vw / 880px）收窄 10%；正文列保持 720px，边距随之变小，
   // 且不超过画布可视区宽度（visibleCanvasW，扣除侧边栏/右侧面板），避免与宽屏预览面板重叠。
   // 宽度必须显式给固定值，不能用 width:auto + aspect-ratio 推导：
   // width:auto 会被内容 min-content（宽表格/长代码行）撑宽，导致节点宽度随内容抖动、
   // 300ms transition 持续跟随 → "整个节点在闪"。固定宽度后节点尺寸完全稳定。
-  const nodeWidth = isExpanded
-    ? `min(${Math.round(EXPANDED_WIDTH_VW * 100)}vw, ${EXPANDED_WIDTH_MAX}px${visibleCanvasW !== null ? `, ${visibleCanvasW}px` : ''})`
-    : '400px';
-  const nodeHeight = isExpanded
-    ? `min(${Math.round(EXPANDED_HEIGHT_VH * 100)}vh, ${EXPANDED_HEIGHT_MAX}px)`
-    : '400px';
-  // 展开态：宽高均已显式固定（互不推导），不再需要 aspect-ratio 约束
+  const nodeWidth = `${expandedShellW(visibleCanvasW)}px`;
+  const nodeHeight = EXPANDED_HEIGHT_CSS;
 
-  // 展开时记录展开前视口（收起时恢复）；展开后把节点中心定位到画布正中间
-  const expandViewportMemoryRef = useRef<Viewport | null>(null);
-
-  // 展开后的节点中心（预测：普通节点按固定阅读宽度方案算宽高）
-  // 用预测值在展开的同时平移视口，与节点放大动画（300ms）并行 →
-  // 视觉上是"平滑过渡到屏幕中间"，而非先放大再移动。
+  // 会话面板中心的预测（节点恒为大面板形态，宽高固定；供聚焦时把视图中心平移到该节点）
   const getExpandedCenter = useCallback((): { x: number; y: number } | null => {
     const node = getNode(id);
     if (!node) return null;
-    // 与 nodeWidth/nodeHeight 实际展开尺寸严格对齐，避免中心偏差
-    const h = Math.min(window.innerHeight * EXPANDED_HEIGHT_VH, EXPANDED_HEIGHT_MAX);
-    const w = Math.min(
-      window.innerWidth * EXPANDED_WIDTH_VW,
-      EXPANDED_WIDTH_MAX,
-      visibleCanvasW ?? Infinity,
-    );
+    // 与 nodeWidth/nodeHeight 实际尺寸严格对齐，避免中心偏差
+    const h = expandedHeightPx();
+    const w = expandedShellW(visibleCanvasW);
     return { x: node.position.x + w / 2, y: node.position.y + h / 2 };
   }, [getNode, id, visibleCanvasW]);
 
-  const handleToggleExpand = useCallback(() => {
-    const willExpand = !isExpanded;
-    if (willExpand) {
-      // 记住放大前的画布状态（缩放 + 位置），收起时恢复
-      expandViewportMemoryRef.current = getViewport();
-      const center = getExpandedCenter();
-      if (center) {
-        // 放大：画布同步调整为 100% 缩放，并平移到节点中心。
-        // 必须用瞬时视口（无 duration）：带 duration 的 setViewport 动画会被紧随其后的
-        // setIsExpanded 重渲染中断，导致节点原地展开、下半部分被遮挡（与 NodeMap 圆点聚焦同因）
-        recenterCanvas(center.x, center.y, { zoom: 1 });
-      }
-    } else {
-      // 缩小：恢复到放大之前的画布状态（zoom + position）
-      const prev = expandViewportMemoryRef.current;
-      expandViewportMemoryRef.current = null;
-      if (prev) setViewport(prev, { duration: 300 });
-    }
-    // 居中只在展开动作发生时执行一次；之后节点尺寸再变化（消息追加、
-    // 图片加载等）不再触发 setCenter，用户可自由拖拽画布不被拉回中间
-    setIsExpanded(willExpand);
-  }, [isExpanded, getViewport, setViewport, recenterCanvas, getExpandedCenter]);
-
-  // 可视区变化（预览面板开合/宽窄切换/侧边栏折叠/窗口 resize）时，宽度已自适应收窄，
-  // 但画布平移不会自动跟随——节点停在旧中心会右缘压进面板。故在可视宽变化时
-  // 同步把对话框向左移动（重新居中到新可视区中央，即面板左侧区域）。
-  // 基准 ref：展开后首次（null）跳过（展开动作本身已居中），收起时重置
+  // 可视区变化（预览面板开合/宽窄切换/侧边栏折叠/窗口 resize/单焦点切换后首收）时，
+  // 宽度已自适应收窄，但画布平移不会自动跟随——节点停在旧中心会右缘压进面板。故可视宽
+  // 变化时同步向左重居中（重新居中到新可视区中央，即面板左侧区域）。
+  // 首次收到（prev===null）也执行：单焦点切换后新挂载节点以 null 起步，须在拿到面板当前
+  // 宽度后立即让位，否则不按已打开的面板收窄/左移。值不变或抖动（<8px）跳过。
   const prevVisibleCanvasWRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!isExpanded || visibleCanvasW === null) return;
+    if (visibleCanvasW === null) return;
     const prev = prevVisibleCanvasWRef.current;
     prevVisibleCanvasWRef.current = visibleCanvasW;
-    if (prev === null || prev === visibleCanvasW) return;
-    if (Math.abs((prev as number) - visibleCanvasW) < 8) return; // 抖动过滤
+    if (prev !== null && prev === visibleCanvasW) return;
+    if (prev !== null && Math.abs(prev - visibleCanvasW) < 8) return; // 抖动过滤
     const center = getExpandedCenter();
     if (center) recenterCanvas(center.x, center.y, { zoom: 1 });
-    // 节点宽高变化（面板开合/宽窄/侧边栏/窗口）→ 通知画布以原始位置为基准重新解析重叠，
-    // 避免变宽后重新盖住此前未重叠的邻居
-    const w = Math.min(window.innerWidth * EXPANDED_WIDTH_VW, EXPANDED_WIDTH_MAX, visibleCanvasW);
-    const h = Math.min(window.innerHeight * EXPANDED_HEIGHT_VH, EXPANDED_HEIGHT_MAX);
-    window.dispatchEvent(new CustomEvent('node-expand-resize', { detail: { node_id: id, w, h } }));
-  }, [isExpanded, visibleCanvasW, getExpandedCenter, recenterCanvas, id]);
-  useEffect(() => {
-    if (!isExpanded) prevVisibleCanvasWRef.current = null;
-  }, [isExpanded]);
-
-  // NodeMap 点击节点圆点：仅被选中的节点展开 + 画布缩放 100%（事件驱动，由各节点自行处理）
-  const isExpandedRef = useRef(isExpanded);
-  useEffect(() => {
-    isExpandedRef.current = isExpanded;
-  }, [isExpanded]);
-
-  // 节点展开/收起时广播给画布层（覆盖所有路径：放大按钮 / NodeMap 聚焦 / 事件驱动收起）：
-  // node-expanded  → CanvasFlow 将该节点 z 置顶 + 以实际宽高为锚解析"节点间不重叠"（推开被覆盖邻居）
-  // node-collapsed → 清除 NodeMap 聚焦态（红色圆点）并还原默认 z 层级 + 还原被推开的邻居
-  // 用 ref 读取 visibleCanvasW：避免宽变时重复触发 node-expanded（宽变走 node-expand-resize 单独事件）
-  const visibleCanvasWRef = useRef(visibleCanvasW);
-  visibleCanvasWRef.current = visibleCanvasW;
-  useEffect(() => {
-    // 与 getExpandedCenter/nodeWidth 严格对齐：把实际展开宽高带给画布层（重叠解析的锚）
-    const w = Math.min(
-      window.innerWidth * EXPANDED_WIDTH_VW,
-      EXPANDED_WIDTH_MAX,
-      visibleCanvasWRef.current ?? Infinity,
-    );
-    const h = Math.min(window.innerHeight * EXPANDED_HEIGHT_VH, EXPANDED_HEIGHT_MAX);
-    window.dispatchEvent(
-      new CustomEvent(isExpanded ? 'node-expanded' : 'node-collapsed', {
-        detail: { node_id: id, ...(isExpanded ? { w, h } : {}) },
-      }),
-    );
-  }, [isExpanded, id]);
+  }, [visibleCanvasW, getExpandedCenter, recenterCanvas, id]);
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { node_id?: string; recenter?: boolean };
@@ -922,33 +957,25 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
           if (center) recenterCanvas(center.x, center.y, { duration: 300 });
           return;
         }
-        // 放大聚焦 = 展开节点容器（与节点放大按钮一致）：400px→EXPANDED_NODE_WIDTH，画布同步调整为 100% 缩放并居中
-        if (!isExpandedRef.current) {
-          expandViewportMemoryRef.current = getViewport();
-        }
+        // 聚焦切换：节点恒为大面板，把画布视图中心移到该节点（100% 缩放，与聚焦一致）
         const center = getExpandedCenter();
-        // 瞬时居中（无 duration）：与放大按钮一致，避免动画被展开重渲染中断导致原地展开
+        // 瞬时居中（无 duration）：与放大按钮一致，避免动画被聚焦重渲染中断导致原地跳动
         if (center) recenterCanvas(center.x, center.y, { zoom: 1 });
-        setIsExpanded(true);
-      } else if (isExpandedRef.current) {
-        // 其他节点：收起，确保只有被选中的节点放大（不恢复视口，避免干扰目标节点的居中）
-        setIsExpanded(false);
       }
     };
     window.addEventListener('node-expand-request', handler);
     return () => window.removeEventListener('node-expand-request', handler);
-  }, [id, getExpandedCenter, getViewport, recenterCanvas]);
+  }, [id, getExpandedCenter, recenterCanvas]);
 
-  // NodeMap 取消聚焦（再次点击已聚焦节点）：收起本节点容器，恢复展开前状态
+  // 新建节点后自动聚焦输入框（CanvasFlow 创建流程广播）：ChatGPT 式「点新建即打字」
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { node_id?: string };
-      if (detail?.node_id === id && isExpandedRef.current) {
-        setIsExpanded(false);
-      }
+      const detail = (e as CustomEvent<{ node_id?: string }>).detail;
+      if (detail?.node_id && detail.node_id !== id) return;
+      requestAnimationFrame(() => textareaRef.current?.focus());
     };
-    window.addEventListener('node-collapse-request', handler);
-    return () => window.removeEventListener('node-collapse-request', handler);
+    window.addEventListener('chat-composer-focus', handler);
+    return () => window.removeEventListener('chat-composer-focus', handler);
   }, [id]);
 
   // 划词追问：DocEditor 选中段落发送到本节点 → 挂为引用标签并聚焦输入框，等用户补写问题后随消息发送
@@ -978,8 +1005,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [expandedMetaId, setExpandedMetaId] = useState<string | null>(null);
   // Share 卡片：当前展开的消息 id（同一时间只展开一条消息的分享面板）
   const [shareMsgId, setShareMsgId] = useState<string | null>(null);
-  // 节点图标（Sparkles）悬停弹窗：快捷键操作指引
-  const [shortcutTipOpen, setShortcutTipOpen] = useState(false);
   /** 图片识别进度（vision_progress SSE 事件）：识别在流内执行，期间显示"正在识别图片 N/M"；
    *  phase='ocr' 时带 engine/model（bob-ocr-mcp 过程级进度：本地 Vision / GLM-OCR / Online OCR / VLM） */
   const [visionProgress, setVisionProgress] = useState<{
@@ -989,11 +1014,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     engine?: string;
     model?: string;
   } | null>(null);
-
-  /** msgId → Thinking process 折叠版本号（cleanContent 从 0→非 0 时递增，用于通知 TraceTimeline 在"思考完成→开始生成正文"那一刻立即收起思考组） */
-  const [thinkGroupFoldTickByMsg, setThinkGroupFoldTickByMsg] = useState<Record<string, number>>({});
-  /** 记录上一次 cleanContent.length（用于检测 0→非 0 的跳变） */
-  const prevCleanContentLenByMsg = useRef<Record<string, number>>({});
   /** 等待授权的目标（Bobby grant_required SSE 事件写入；BobbyNode 授权完成事件匹配后自动继续） */
   const pendingGrantTargetRef = useRef<string | null>(null);
   /** 程序化发送消息的引用（由 handleSendWithText 同步；供早先声明的 useEffect 调用） */
@@ -1019,29 +1039,85 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Thinking process 折叠时机：
-  //   当 streaming 消息的 cleanContent.length 从 0 跳变到 > 0 时（即 "思考完成 → 开始生成正文" 切换点），
-  //   递增 thinkGroupFoldTickByMsg[msgId]，TraceTimeline 收到新版本号后立即收起 Thinking process 组。
-  useEffect(() => {
-    if (!streamingMsgId || !isStreaming) return;
-    const msg = messages.find((m) => m.id === streamingMsgId);
-    if (!msg || msg.role !== 'assistant' || !msg.content) return;
-    const parsed = parseThink(msg.content);
-    const cleanLen = (parsed ? parsed.content : msg.content).length;
-    const prev = prevCleanContentLenByMsg.current[streamingMsgId] ?? 0;
-    if (prev === 0 && cleanLen > 0) {
-      setThinkGroupFoldTickByMsg((p) => ({
-        ...p,
-        [streamingMsgId]: (p[streamingMsgId] ?? 0) + 1,
-      }));
-    }
-    prevCleanContentLenByMsg.current[streamingMsgId] = cleanLen;
-  }, [messages, streamingMsgId, isStreaming]);
-
   const [modelId, setModelId] = useState(data.modelId ?? DEFAULT_MODEL_ID);
   // 模型为 Auto 时思考强度默认 High，且允许用户手动调整（不再由模型推断覆盖）
   const thinkingAutoMode = modelId === DEFAULT_MODEL_ID;
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  // 节点内内容分栏（dsh 对话 / 轨迹）：默认对话视图；轨迹承载完整执行明细
+  const [pane, setPane] = useState<'chat' | 'trace'>('chat');
+  // 右侧「DOS 执行步骤」面板：手动关闭标记（新任务开始时自动重置）
+  const [planPanelClosed, setPlanPanelClosed] = useState(false);
+  // 面板收尾停留：流式结束后保留 3 秒全绿/失败状态再淡出，避免骤然消失
+  const [planPanelLingering, setPlanPanelLingering] = useState(false);
+  const prevStreamingRef = useRef(false);
+  useEffect(() => {
+    if (isStreaming && !prevStreamingRef.current) setPlanPanelClosed(false);
+    // 流式从 true→false → 进入收尾停留
+    if (!isStreaming && prevStreamingRef.current) {
+      setPlanPanelLingering(true);
+      const t = window.setTimeout(() => setPlanPanelLingering(false), 3000);
+      prevStreamingRef.current = isStreaming;
+      return () => window.clearTimeout(t);
+    }
+    prevStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+  // 右侧「DOS 执行步骤」面板数据源：最近一次 todo_write 快照（三态真状态轨）。
+  // goal 单独向前回溯：语义上只在首次建轨调用携带，后续心跳省略——取最近一次带 goal 的调用即可常驻显示。
+  // 回退：旧 plan_task 消息（存量持久化历史，plan_task 工具已移除）仍按计数推断展示，保证历史可回看。
+  const planInfo = useMemo(() => {
+    if (!streamingMsgId) return null;
+    const sm = messages.find((m) => m.id === streamingMsgId && m.role === 'assistant');
+    if (!sm) return null;
+    const calls = sm.toolCalls ?? [];
+
+    // ① 优先：最近一次 todo_write 快照（真状态轨）
+    let lastTodoIdx = -1;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].toolName === 'todo_write') { lastTodoIdx = i; break; }
+    }
+    if (lastTodoIdx >= 0) {
+      const a = (calls[lastTodoIdx].arguments ?? {}) as Record<string, unknown>;
+      const todos = Array.isArray(a.todos) ? a.todos : [];
+      const items: PanelStep[] = todos.map((t) => {
+        const o = (t ?? {}) as Record<string, unknown>;
+        return {
+          content: typeof o.content === 'string' ? o.content : '',
+          activeForm: typeof o.activeForm === 'string' ? o.activeForm : '',
+          status: (typeof o.status === 'string' ? o.status : 'pending') as StepStatus,
+        };
+      });
+      if (items.length > 0) {
+        // goal 回溯：向前找最近一次 todo_write 携带的 goal（仅在首次建轨调用携带，后续心跳省略）
+        let goal = '';
+        for (let i = lastTodoIdx; i >= 0; i--) {
+          const c = calls[i];
+          if (c.toolName !== 'todo_write') continue;
+          const g = (c.arguments ?? {}).goal;
+          if (typeof g === 'string' && g.trim()) { goal = g; break; }
+        }
+        const completed = items.filter((t) => t.status === 'completed').length;
+        const running = items.some((t) => t.status === 'in_progress');
+        return { goal, steps: items, completed, running, source: 'todo_write' as const };
+      }
+    }
+
+    // ② 回退：存量 plan_task 消息（工具已移除，仅兼容历史回看）
+    let goal = '';
+    let steps: string[] = [];
+    let planIdx = -1;
+    calls.forEach((tc, idx) => {
+      if (tc.toolName !== 'plan_task') return;
+      planIdx = idx;
+      const a = (tc.arguments ?? {}) as Record<string, unknown>;
+      goal = typeof a.goal === 'string' ? a.goal : '';
+      steps = Array.isArray(a.steps) ? a.steps.filter((s): s is string => typeof s === 'string') : [];
+    });
+    if (planIdx < 0 || steps.length === 0) return null;
+    const execs = calls.slice(planIdx + 1).filter((tc) => tc.toolName !== 'plan_task' && tc.toolName !== 'finish_task' && tc.toolName !== 'todo_write');
+    const completed = execs.filter((tc) => tc.phase === 'done' || tc.phase === 'error').length;
+    const running = execs.some((tc) => tc.phase === 'running' || tc.phase === 'pending');
+    return { goal, steps: steps.map((s) => ({ content: s, activeForm: '', status: 'pending' as const })), completed, running, source: 'plan_task' as const };
+  }, [messages, streamingMsgId]);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
     data.thinkingLevel ?? (thinkingAutoMode ? 'high' : DEFAULT_THINKING_LEVEL),
   );
@@ -1055,8 +1131,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   );
   /** msgId → 该回答命中的 skills 名字数组 */
   const [matchedSkillsByMsg, setMatchedSkillsByMsg] = useState<Record<string, string[]>>({});
-  /** 本次请求用户勾选的强制注入 skills（每次请求被 SSE 首条覆盖一次；单例即可） */
-  const [forcedSkills, setForcedSkills] = useState<string[]>([]);
   /** msgId → skills 详情数组（score、matchedKeywords、bodyLength 等） */
   const [skillDetailsByMsg, setSkillDetailsByMsg] = useState<Record<string, SkillDetail[]>>({});
   /** msgId → 本轮任务累计 token 消耗 { promptTokens, completionTokens, cacheHitTokens, cacheMissTokens, calls } */
@@ -1071,8 +1145,41 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [prefixChangedByMsg, setPrefixChangedByMsg] = useState<Record<string, boolean>>({});
   /** 最近一次见到的缓存头指纹（跨任务对比基准） */
   const lastPrefixHashRef = useRef<string>('');
-  /** 本会话实时产生的消息 id 集合（context_meter 事件到达即标记）——历史加载消息不算，避免注入折叠项误显示 */
-  const [liveMsgIds, setLiveMsgIds] = useState<Set<string>>(new Set());
+
+  // 会话级 Trajectory overlay 素材：把 messages 派生为「Turn 列表」（用户提问 + 该轮思考/工具/技能）
+  const conversationTrajectoryItems = useMemo<ConversationTrajectoryItem[]>(() => {
+    const out: ConversationTrajectoryItem[] = [];
+    let userCount = 0;
+    let lastUser = '';
+    for (const m of messages) {
+      if (m.role === 'user' && !m.system) {
+        userCount += 1;
+        lastUser = m.content ?? '';
+        continue;
+      }
+      if (m.role !== 'assistant' || m.system) continue;
+      const parsed = m.content ? parseThink(m.content) : null;
+      const think = m.reasoning && m.reasoning.trim().length > 0 ? m.reasoning : (parsed ? parsed.think : '');
+      const skills = matchedSkillsByMsg[m.id] ?? [];
+      const details = skillDetailsByMsg[m.id] ?? [];
+      const hasTrace = (m.toolCalls?.length ?? 0) > 0
+        || think.trim().length > 0
+        || details.length > 0
+        || skills.length > 0;
+      if (!hasTrace) continue;
+      out.push({
+        number: userCount,
+        userText: lastUser,
+        thinkText: think || undefined,
+        toolCalls: m.toolCalls ?? [],
+        skillDetails: details,
+        matchedSkills: skills,
+        isStreaming: m.id === streamingMsgId && isStreaming,
+        durationMs: statsByMsg[m.id]?.durationMs,
+      });
+    }
+    return out;
+  }, [messages, matchedSkillsByMsg, skillDetailsByMsg, statsByMsg, streamingMsgId, isStreaming]);
   type StageKind = 'thinking' | { kind: 'tool'; name: string } | 'writing' | null;
   /** 将阶段值归一化为 kind 字符串，避免 TS 对联合类型收窄歧义 */
   const stageKindOf = (s: StageKind): 'thinking' | 'tool' | 'writing' | null => {
@@ -1104,8 +1211,22 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     setCurrentStage(next);
   }, []);
   const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
-  // 输入框容器聚焦态（胶囊标签 + contentEditable 共用外框高亮）
-  const [composerFocused, setComposerFocused] = useState(false);
+  // 空态欢迎区 BobWork 打字机效果：新建会话时逐字从左到右显示
+  const [typedBrand, setTypedBrand] = useState('');
+  const brandTypingDone = typedBrand.length >= 'BobWork'.length;
+  useEffect(() => {
+    // 仅空态（新建会话/清空后）展示打字机；一旦有内容就不再播
+    if (messages.length !== 0) return;
+    setTypedBrand('');
+    const brand = 'BobWork';
+    let i = 0;
+    const timer = window.setInterval(() => {
+      i += 1;
+      setTypedBrand(brand.slice(0, i));
+      if (i >= brand.length) window.clearInterval(timer);
+    }, 90);
+    return () => window.clearInterval(timer);
+  }, [messages.length]);
   const [availableMcpServers, setAvailableMcpServers] = useState<McpServerConfig[]>([]);
   // 节点 MCP 下拉真实来源：/api/mcp/store（kind=mcp 且已安装且全局打开；不依赖本地 settings 快照）
   const [nodeMcpOptions, setNodeMcpOptions] = useState<Array<{ id: string; name: string }>>([]);
@@ -1122,7 +1243,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // Role Assignment 主对话模型配置（决定节点 chat 下拉菜单的模型范围：优先模型 + 候选池）
   const [chatRoleModel, setChatRoleModel] = useState<{ defaultModel?: string; pool?: Array<{ provider: string; modelId: string }> } | undefined>(undefined);
   const [pendingAttachments, setPendingAttachments] = useState<MessageAttachment[]>([]);
-  // 划词操作窗：在消息内容中选中文字 → 显示"作为附件 / 创建 note"浮层
+  // 划词操作窗：在消息内容中选中文字 → 显示"作为附件"浮层
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const selectionMenuRef = useRef<HTMLDivElement>(null);
   // 吞掉下一次 window mouseup：点击操作窗按钮时，若按钮 onClick 同步关窗，React 在离散事件内
@@ -1132,7 +1253,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // mousedown 瞬间的选区快照：mouseup 时若选区与快照完全一致 = 不是新划出来的文字，
   // 而是“点击其它地方时残留的旧选区”→ 操作窗收起而非重定位（点击弹窗外任意处即消失）
   const preMouseSelRef = useRef('');
-  // 清除文档选区：操作窗因动作（复制/附件/note）关闭后调用，避免高亮残留导致之后任意 click 的
+  // 清除文档选区：操作窗因动作（复制/附件）关闭后调用，避免高亮残留导致之后任意 click 的
   // mouseup 又触发弹窗（复制关闭后 1.2s 再点一下就会二次弹窗的根因）
   const clearDocSelection = useCallback(() => {
     try {
@@ -1157,9 +1278,8 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [authorizedRoots, setAuthorizedRoots] = useState<string[]>([]);
   const [questionPopup, setQuestionPopup] = useState<{
     questions: QuestionItem[];
-    assistantContent: string;
-    /** ask_user_questions 工具模式：存在时提交后 POST /api/chat/questions 回传，由服务端把答案并入对话继续生成 */
-    requestId?: string;
+    /** ask_user_questions 工具模式：提交后 POST /api/chat/questions 回传，由服务端把答案并入对话继续生成 */
+    requestId: string;
   } | null>(null);
   // browser.login（BobWork 模式）登录弹窗：模型调用 browser.login 后扩展返回 loginRequired，
   // 服务端发 login_required SSE 事件，此处弹窗让用户输入账号密码；凭据仅经 前端→服务端内存→MCP→扩展 直传，不过模型
@@ -1177,7 +1297,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // 强制锁定标记：成果块校验未通过但用户自主决定锁定
   const [forceLocked, setForceLocked] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const autoSendRef = useRef<string | null>(null);
   // 补充内容续写模式：用户回答 AI 提问后，将答案合并到原始用户消息中重新发起一轮完整对话
   // 存储原始 Q&A 上下文供 doSend 构建 API 消息时使用（UI 不显示中间 AI 回复，但 API 需要完整上下文）
   const continuationContextRef = useRef<{ originalUserContent: string; originalAssistantContent: string; supplementText: string; attachments?: ChatMessage['attachments']; initialOutputFiles?: OutputFileItem[] } | null>(null);
@@ -1253,29 +1372,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     [commitTitleEdit, cancelTitleEdit],
   );
 
-  // 归档：节点已完成使命，从画布隐藏（仅保留导航圆点外圈标识；点击圆点可恢复）
-  const [archived, setArchived] = useState<boolean>(() => Boolean(data.archived));
-  const handleToggleArchive = useCallback(async () => {
-    if (!currentMdId || persisting) return;
-    const next = !archived;
-    setArchived(next);
-    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, hidden: next, data: { ...n.data, archived: next } } : n)));
-    try {
-      const resp = await fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(withProjectId({ action: 'update_archive', node_id: currentMdId, archived: next })),
-      });
-      const res = await resp.json();
-      if (!res.success) {
-        setArchived(!next);
-        setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, hidden: !next, data: { ...n.data, archived: !next } } : n)));
-      }
-    } catch {
-      setArchived(!next);
-      setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, hidden: !next, data: { ...n.data, archived: !next } } : n)));
-    }
-  }, [archived, currentMdId, id, setNodes, withProjectId, persisting]);
+  // 归档功能已移除（2026-09）：会话只保留删除，不再支持归档/恢复
 
   // 引用标签（从 HtmlReader 选中文字后插入）
   const [referenceTag, setReferenceTag] = useState<{ text: string } | null>(null);
@@ -1943,7 +2040,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
       e.stopPropagation();
       // === 优化1：用户上滚时暂停自动滚动 ===
       // deltaY > 0: 向下滚动（滚到底部方向）；deltaY < 0: 向上滚动（远离底部）
-      if (e.deltaY < 0 && isStreaming) {
+      if (e.deltaY < 0 && isStreaming && pane === 'chat') {
         setAutoScrollPaused(true);
       }
     };
@@ -1951,13 +2048,11 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     return () => {
       el.removeEventListener('wheel', handleWheel);
     };
-  }, [isStreaming]);
+  }, [isStreaming, pane]);
 
-  // 展开态（isExpanded）：节点放大后，在整个节点 wrapper 捕获阶段拦截所有 wheel 事件，
+  // 大面板形态：在整个节点 wrapper 捕获阶段拦截所有 wheel 事件，
   // 避免滚动节点内容到顶/底后穿透到 ReactFlow 的 panOnScroll → 画布平移 → 节点"闪一下"。
-  // 普通缩小态不拦截，允许画布正常滚轮平移。
   useEffect(() => {
-    if (!isExpanded) return;
     const wrap = nodeWrapperRef.current;
     if (!wrap) return;
     const onWheelCapture = (e: WheelEvent) => {
@@ -1967,7 +2062,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     };
     wrap.addEventListener('wheel', onWheelCapture, { capture: true, passive: true });
     return () => wrap.removeEventListener('wheel', onWheelCapture, { capture: true });
-  }, [isExpanded]);
+  }, []);
 
   // ===== 左侧导航圆点：滚动联动高亮当前可视区域的 user 消息 =====
   const userMessages = useMemo(() => messages.filter((m) => m.role === 'user' && !m.system), [messages]);
@@ -2039,6 +2134,8 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // rAF 节流：流式期间 setMessages 高频触发，合并为每帧最多滚动一次
   const autoScrollRafRef = useRef<number | null>(null);
   useEffect(() => {
+    // 轨迹视图不自动跟随对话消息（避免 streaming 每次滚动把 Trace 列表拽到底）
+    if (pane !== 'chat') return;
     const el = scrollRef.current;
     if (!el) return;
 
@@ -2077,7 +2174,20 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
       if (autoScrollRafRef.current !== null) cancelAnimationFrame(autoScrollRafRef.current);
       autoScrollRafRef.current = null;
     };
-  }, [messages, autoScrollPaused]);
+  }, [messages, autoScrollPaused, pane]);
+
+  // 切回对话视图时立即滚到底部（重置上次高度记录，强制 autoscroll 生效一次）
+  useEffect(() => {
+    if (pane !== 'chat') return;
+    const el = scrollRef.current;
+    if (!el) return;
+    lastAutoScrollHeightRef.current = 0;
+    el.scrollTop = el.scrollHeight;
+    lastReadCountRef.current = messages.length;
+    setUnreadMsgCount(0);
+    setAutoScrollPaused(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pane]);
 
   // 持久化开始：自动滚到底部，让保存提示出现在回复结尾处
   useEffect(() => {
@@ -2246,7 +2356,7 @@ ${rows.join('\n')}
         suppressNextMenuMouseUpRef.current = false;
         return;
       }
-      // 点击操作窗自身（复制/附件/note 等按钮或空白）时忽略，避免按新坐标重定位导致弹窗漂移。
+      // 点击操作窗自身（复制/附件等按钮或空白）时忽略，避免按新坐标重定位导致弹窗漂移。
       // 注意：不能用 e.target instanceof Node —— 本文件顶部导入了 @xyflow/react 的 type Node，
       // 编译产物中若该类型导入未擦除，Node 会解析为 undefined 直接抛错，导致划词检测失效。
       const target = e.target as Element | null;
@@ -2324,16 +2434,6 @@ ${rows.join('\n')}
       console.warn('[划词] 附件保存失败:', String(err));
     }
   }, [currentMdId, data.title, clearDocSelection]);
-
-  // 按钮 2：选中文字 → 创建画布 note 卡片（通知 CanvasFlow 在源节点旁生成）
-  const handleCreateNote = useCallback((text: string) => {
-    setSelectionMenu(null);
-    clearDocSelection();
-    if (!text) return;
-    window.dispatchEvent(new CustomEvent('node-note-create-request', {
-      detail: { text, sourceNodeId: currentMdId || undefined },
-    }));
-  }, [currentMdId, clearDocSelection]);
 
   /** 获取 contentEditable 内光标偏移（字符数） */
   const getCursorOffset = useCallback((el: HTMLElement): number => {
@@ -2693,7 +2793,7 @@ ${rows.join('\n')}
     if (!data.nodeMdId) return;
     // 持久化/成果块提取进行中：此时锁定会锁到旧成果块，阻止并提示等待
     if (persistingRef.current) {
-      alert('Outcome is still being generated for the latest turn. Please wait a moment before locking.');
+      alert('The node file is being written. Please wait a moment before locking.');
       return;
     }
     setOutcomeLoading(true);
@@ -2733,6 +2833,10 @@ ${rows.join('\n')}
       if (d.success) {
         setOutcomeStatus(action === 'lock' ? 'locked' : 'draft');
         setForceLocked(action === 'lock' ? !!d.force_locked : false);
+        // 锁定时后端会懒生成成果块内容，通知打开的成果块面板刷新
+        if (action === 'lock') {
+          window.dispatchEvent(new CustomEvent('node-document-updated', { detail: { node_id: data.nodeMdId } }));
+        }
       } else {
         alert(d.error || '操作失败');
         await syncStatus();
@@ -2761,13 +2865,15 @@ ${rows.join('\n')}
         .catch(() => {});
     };
     refresh();
-    const handler = (e: Event) => {
+    const onRefresh = (e: Event) => {
       const detail = (e as CustomEvent).detail as { node_id?: string };
       if (!detail?.node_id || detail.node_id !== currentMdId) return;
       refresh();
     };
-    window.addEventListener('node-outcome-refresh', handler);
-    return () => window.removeEventListener('node-outcome-refresh', handler);
+    window.addEventListener('node-outcome-refresh', onRefresh);
+    return () => {
+      window.removeEventListener('node-outcome-refresh', onRefresh);
+    };
   }, [currentMdId, nodeProjectQuery]);
 
   /** 选择 @ 引用的文件（materials 材料或授权目录中的文件），目录项则进入浏览 */
@@ -2991,7 +3097,6 @@ ${rows.join('\n')}
 
     // 新一轮：清掉"当前流式全局"的阶段/确认/MCP等瞬态信息
     // （注意：Skills 已按 msgId 分桶，不能在这里粗暴清空！要等 assistantId 生成后，只清对应 msgId 桶）
-    setForcedSkills([]);
     setCurrentStage(null);
     setCompletedStages(new Set());
     prevStageRef.current = null;
@@ -3306,8 +3411,6 @@ ${rows.join('\n')}
     let reasoningContent = '';
     const toolCallRecords: ToolCallRecord[] = [];
     const outputFileItems: OutputFileItem[] = [];
-    // ① 流中已提前识别到完整 QUESTIONS 块（触发提前收尾弹窗），防止后续 chunk 重复触发
-    let questionsEarly = false;
 
     const requestBody: Record<string, unknown> = {
       messages: apiMessages,
@@ -3373,10 +3476,6 @@ ${rows.join('\n')}
       const decoder = new TextDecoder();
       let buffer = '';
 
-      // ① QUESTIONS 块完整判定：标准闭合注释或模型偶发的错误闭合变体都算
-      const questionsBlockComplete = (text: string): boolean =>
-        /<!--\s*QUESTIONS\s*-->[\s\S]*?(?:<!--\s*\/QUESTIONS\s*-->|<--\s*\/QUESTIONS\s*-->)/.test(text);
-
       mainLoop: for (;;) {
         const { done, value } = await reader.read();
         armTimeout(); // 空闲超时：只要有数据到达就重置 90s 计时器（reader.read() 阻塞期间若流中断，超时正常触发）
@@ -3394,9 +3493,6 @@ ${rows.join('\n')}
               if (parsed.matchedSkills) {
                 if (mountedRef.current) {
                   setMatchedSkillsByMsg((prev) => ({ ...prev, [assistantId]: parsed.matchedSkills as string[] }));
-                  if (Array.isArray(parsed.forcedSkills) && parsed.forcedSkills.length > 0) {
-                    setForcedSkills(parsed.forcedSkills as string[]);
-                  }
                   if (Array.isArray(parsed.skillDetails)) {
                     setSkillDetailsByMsg((prev) => ({ ...prev, [assistantId]: parsed.skillDetails as SkillDetail[] }));
                   }
@@ -3413,13 +3509,6 @@ ${rows.join('\n')}
                     lastPrefixHashRef.current = parsed.prefixHash;
                     setPrefixHashByMsg((p) => ({ ...p, [assistantId]: parsed.prefixHash }));
                   }
-                  // 标记实时消息：context_meter 只对实时任务下发，历史加载消息不显示注入折叠项
-                  setLiveMsgIds((prev) => {
-                    if (prev.has(assistantId)) return prev;
-                    const next = new Set(prev);
-                    next.add(assistantId);
-                    return next;
-                  });
                 }
               }
               if (parsed.reasoning) {
@@ -3451,16 +3540,9 @@ ${rows.join('\n')}
                     ),
                   );
                 }
-                // ① 流中提前识别完整 QUESTIONS 块 → 立即收尾弹窗（不必等整轮生成完，消除"弹窗慢"）；
-                //   提前中断：块是模型"提问后停笔"的信号，块后内容（若有）丢弃，finally 收尾照常弹出
-                if (!questionsEarly && questionsBlockComplete(assistantContent)) {
-                  questionsEarly = true;
-                  controller.abort(); // 让服务端停止继续生成，节省流量
-                  break mainLoop;
-                }
               }
               if (parsed.tool_call) {
-                const tc = parsed.tool_call as { name: string; arguments: Record<string, unknown>; phase?: 'pending' | 'running' | 'done' | 'error'; spanId?: string; startAt?: number };
+                const tc = parsed.tool_call as { name: string; arguments: Record<string, unknown>; phase?: 'pending' | 'running' | 'done' | 'error'; spanId?: string; startAt?: number; purpose?: string };
                 // 去双轨（Trae 式）：正文 = 全部流式文本直出，不再把 tool_call 前的文字剥离进
                 // processNarration（该机制曾导致"模型先写结论再落盘"时交付物被吞、节点只剩 OutputFile 行）。
                 // 步骤卡片只从真实 toolCalls 派生，不参与正文文本。
@@ -3473,6 +3555,7 @@ ${rows.join('\n')}
                   phase: tc.phase ?? 'pending',
                   spanId: tc.spanId,
                   startAt: tc.startAt,
+                  purpose: tc.purpose,
                 });
                 if (mountedRef.current) {
                   setStageWithProgress({ kind: 'tool', name: tc.name });
@@ -3539,7 +3622,7 @@ ${rows.join('\n')}
                   questions: QuestionItem[];
                   timeoutSec?: number;
                 };
-                setQuestionPopup({ questions: qr.questions, assistantContent: '', requestId: qr.requestId });
+                setQuestionPopup({ questions: qr.questions, requestId: qr.requestId });
                 notifyUserInput('BobWork：需要你的回答', `AI 提出了 ${qr.questions.length} 个问题，请填写后继续。`);
               }
               if (parsed.login_required) {
@@ -3909,13 +3992,14 @@ ${rows.join('\n')}
           ),
         );
 
-        // 检查 AI 回复中是否包含提问（流式一结束立即弹出，不等 .md 持久化）
+        // 漂移清洗兜底：模型若无视工具约定在正文输出旧版 QUESTIONS 注释块，
+        // 仅剥块防 JSON 裸露（同步更新内存与落盘内容），不再弹窗——结构化提问统一走 ask_user_questions 工具
         if (assistantContent && !assistantContent.startsWith('Error:')) {
-          const { questions, cleanContent } = extractQuestions(assistantContent);
-          if (questions.length > 0) {
-            // 更新消息内容为去除提问块后的纯文本
+          const stripped = stripQuestionsBlock(assistantContent);
+          if (stripped !== assistantContent) {
+            assistantContent = stripped;
             const cleanedMessages = finalMessages.map((m) =>
-              m.id === assistantId ? { ...m, content: cleanContent } : m,
+              m.id === assistantId ? { ...m, content: stripped } : m,
             );
             setMessages(cleanedMessages);
             setNodes((nds) =>
@@ -3925,10 +4009,6 @@ ${rows.join('\n')}
                   : n,
               ),
             );
-            // 显示提问弹窗
-            setQuestionPopup({ questions, assistantContent: cleanContent });
-            // 需要用户回答：窗口不在前台时发桌面通知提醒
-            notifyUserInput('BobWork：需要你的回答', `AI 提出了 ${questions.length} 个问题，请填写后继续。`);
           }
         }
 
@@ -4046,7 +4126,7 @@ ${rows.join('\n')}
                 // 记录本轮真实调用的模型与推理强度：auto 模式每轮可能不同，持久化后历史消息可追溯
                 model_id: currentModelId,
                 thinking_level: actualThinkingLevel,
-                // 持久化思考内容 + 工具调用记录：think 标签与 executing steps 在重新加载后可回看
+                // 持久化思考内容 + 工具调用记录：think 标签与 Trajectory 在重新加载后可回看
                 reasoning: reasoningContent || undefined,
                 tool_calls: toolCallRecords.length > 0 ? toolCallRecords : undefined,
                 task_id: taskIdForTurn ?? undefined,
@@ -4283,85 +4363,21 @@ ${rows.join('\n')}
   };
 
   const handleQuestionSubmit = (answers: AnswerEntry[]) => {
-    const answerText = answers
-      .map((a, i) => {
-        const q = questionPopup?.questions[i];
-        const qText = q?.question || `问题${i + 1}`;
-        let ans = a.selected || '';
-        if (a.custom.trim()) {
-          ans = ans ? `${ans}（补充：${a.custom.trim()}）` : a.custom.trim();
-        }
-        return `关于"${qText}"：${ans}`;
-      })
-      .join('\n');
-
-    // ask_user_questions 工具模式：把答案回传服务端，服务端作为 tool_result 返回给模型继续生成。
+    // 把答案回传服务端，服务端作为 tool_result 返回给模型继续生成。
     // 此时 SSE 流仍在服务端挂起等待，本地无需插入消息或触发续写。
-    if (questionPopup?.requestId) {
-      const requestId = questionPopup.requestId;
-      setQuestionPopup(null);
-      fetch('/api/chat/questions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requestId,
-          answers: answers.map((a) => ({ questionId: a.questionId, selected: a.selected, custom: a.custom })),
-        }),
-      }).catch((e) => {
-        console.error('[AiChatNode] 提交提问答案失败', e);
-      });
-      return;
-    }
-
+    const requestId = questionPopup?.requestId;
     setQuestionPopup(null);
-
-    // 续写模式：将补充答案合并到原始用户消息中，移除含提问的 AI 回复
-    // API 上下文保留完整 Q&A 交换（用户→AI提问→用户补充），UI 只展示合并后的用户消息 + 新 AI 回复
-    const lastUserIdx = (() => {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') return i;
-      }
-      return -1;
-    })();
-
-    if (lastUserIdx >= 0) {
-      const lastUserMsg = messages[lastUserIdx];
-      const lastAssistantMsg = messages[lastUserIdx + 1];
-
-      // 保存 UI 快照：续写模式 API 失败时回滚，避免上一轮 AI 回复丢失后 UI 只剩用户问题
-      continuationSnapshotRef.current = [...messages];
-
-      // 存储 API 上下文（原始用户消息 + AI 回复 + 补充答案）
-      continuationContextRef.current = {
-        originalUserContent: lastUserMsg.content,
-        originalAssistantContent: lastAssistantMsg?.content || '',
-        supplementText: answerText,
-        attachments: lastUserMsg.attachments,
-      };
-
-      // UI：补充信息作为独立用户消息插入（不合并到原始问题，避免格式混乱）
-      // 保留原始用户消息 + AI 提问消息，在其后追加补充消息
-      const supplementMsg: ChatMessage = {
-        id: `msg-${Date.now()}`,
-        role: 'user',
-        content: answerText,
-        timestamp: new Date().toISOString(),
-      };
-      const newMessages = [...messages, supplementMsg];
-      setMessages(newMessages);
-      setNodes((nds) =>
-        nds.map((n) =>
-          n.id === id
-            ? { ...n, data: { ...n.data, messages: newMessages } }
-            : n,
-        ),
-      );
-
-      // 触发续写发送
-      autoSendRef.current = '__continuation__';
-    } else {
-      autoSendRef.current = answerText;
-    }
+    if (!requestId) return;
+    fetch('/api/chat/questions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestId,
+        answers: answers.map((a) => ({ questionId: a.questionId, selected: a.selected, custom: a.custom })),
+      }),
+    }).catch((e) => {
+      console.error('[AiChatNode] 提交提问答案失败', e);
+    });
   };
 
   // 关闭提问弹窗：ask_user_questions 工具模式下立即回传「关闭=未回答」，
@@ -4379,24 +4395,6 @@ ${rows.join('\n')}
       });
     }
   };
-
-  // autoSendRef 变化时自动触发发送
-  useEffect(() => {
-    if (autoSendRef.current && !isStreaming) {
-      const text = autoSendRef.current;
-      autoSendRef.current = null;
-      if (text === '__continuation__') {
-        // 续写模式：跳过创建新用户消息，直接发起 API 请求
-        doSend('', { continuation: true });
-      } else {
-        setLocalInput(text);
-        // 下一帧触发 handleSend
-        requestAnimationFrame(() => {
-          handleSendWithText(text);
-        });
-      }
-    }
-  }, [autoSendRef.current, isStreaming]);
 
   const handleSelectModel = useCallback((newModelId: string) => {
     setModelId(newModelId);
@@ -4492,76 +4490,6 @@ ${rows.join('\n')}
       setTimeout(() => setSkillMenuOpen(true), 50);
     }
   };
-
-  const handleDelete = useCallback(async () => {
-    abortRef.current?.abort();
-
-    const node = getNode(id);
-    const nodeMdId = node?.data?.nodeMdId || id;
-    const nodeTitle = node?.data?.title || 'Untitled Node';
-
-    // 删除风险确认（应用内置弹窗，macOS 风格英文文案）
-    const outboundEdges = allEdges.filter((e) => e.source === id);
-    const inboundEdges = allEdges.filter((e) => e.target === id);
-    const edgeCount = inboundEdges.length + outboundEdges.length;
-    const messageLines = [
-      `Deleting "${nodeTitle}" will permanently remove its .md document (outcome, conversations, annotations, citations), attachments, generated output files (homework/), and ${edgeCount} connected edge(s).`,
-    ];
-    if (outboundEdges.length > 0) {
-      messageLines.push(
-        `This node is upstream of ${outboundEdges.length} node(s). Deleting it will break their upstream references and may invalidate their conclusions.`,
-      );
-    }
-    messageLines.push('This action cannot be undone.');
-    const ok = await confirmAsk({
-      title: 'Delete Node?',
-      message: messageLines.join('\n'),
-      anchor: inputAnchor(),
-    });
-    if (!ok) return;
-
-    // 节点即将删除：清空待重试持久化，避免删除后 append 请求把节点 .md 文件重建回来（节点复活）
-    pendingAppendRef.current = null;
-    // 取消进行中的持久化请求（删除确认后不再等待流式收尾的 append）
-    abortRef.current?.abort();
-
-    // 收集本节点关联的附件目录（含未持久化的 pendingAttachments），
-    // 避免"发送附件后未发送消息就删节点"时 attachments/{folder} 残留
-    const attachmentFolders = new Set<string>();
-    const collectFolder = (attPath?: string) => {
-      if (!attPath) return;
-      const m = attPath.match(/^(?:attachments|assets)\/([^/]+)\//);
-      if (m) attachmentFolders.add(m[1]);
-    };
-    for (const msg of messages) {
-      for (const att of msg.attachments || []) collectFolder(att.path);
-    }
-    for (const att of pendingAttachments) collectFolder(att.path);
-
-    // 先从画布移除（本节点一并移除；子节点保留）
-    const removeIds = new Set([id]);
-    setNodes((nds) => nds.filter((n) => !removeIds.has(n.id)));
-    setEdges((eds) => eds.filter((e) => !removeIds.has(e.source) && !removeIds.has(e.target)));
-
-    // 调用API删除节点文件和关联边
-    fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(withProjectId({
-        action: 'delete',
-        node_id: nodeMdId,
-        attachmentFolders: Array.from(attachmentFolders),
-      })),
-    }).then((r) => {
-      if (!r.ok) {
-        console.error('节点删除失败:', r.status, r.statusText);
-      }
-      // 附件清理后通知侧边栏刷新，避免残留目录仍显示
-      window.dispatchEvent(new CustomEvent('local-files-changed'));
-    }).catch((err) => {
-      console.error('节点删除请求出错:', err);
-    });
-  }, [id, getNode, getNodes, setNodes, setEdges, messages, pendingAttachments, allEdges, confirmAsk]);
 
   const handleRetryAppend = useCallback(async () => {
     const pending = pendingAppendRef.current;
@@ -4682,17 +4610,6 @@ ${rows.join('\n')}
   }, [messages, currentMdId, isStreaming, doSend]);
 
   const messagesInner = (<>
-        {messages.length === 0 && (
-          <div className="flex flex-1 items-center justify-center py-4">
-            <span
-              className="text-xs"
-              style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}
-            >
-              Type a message...
-
-            </span>
-          </div>
-        )}
         {persistError && (
           <div
             onClick={persistError === 'Save failed, click to retry' || persistError === 'Retry failed, click to try again' ? handleRetryAppend : undefined}
@@ -4713,7 +4630,7 @@ ${rows.join('\n')}
 
         {/* 消息列表：整体包一层错误边界——正文/StreamingMarkdown 渲染异常时降级为可恢复提示，避免整节点空白 */}
         <MessagesErrorBoundary>
-        {messages.map((msg, msgIdx) => {
+        {messages.map((msg) => {
           // 系统消息（如上下文压缩提示）：居中窄条展示，不参与对话气泡
           if (msg.system) {
             return (
@@ -4749,13 +4666,24 @@ ${rows.join('\n')}
           const showReasoning = msg.reasoning && msg.reasoning.trim().length > 0;
 
           const stageKind = stageKindOf(currentStage);
-          // 阶段提示文字：只显示"当前阶段"一句话（不重复思考摘要/工具名，
-          // 顶部胶囊也只显示阶段名 + 当前阶段呼吸灯），跟随当前阶段动态变化（放在 Turn 1 下方、Execution steps 上方）
-          const stageHintText =
-            stageKind === 'thinking' ? 'Analyzing task…'
-            : stageKind === 'tool' ? 'Working with tools…'
-            : stageKind === 'writing' ? 'Composing answer…'
-            : '';
+          // 「当前动作」条文案：流式中实时描述正在做什么（思考 / 正在调用的工具+目的 / 写答案）
+          let currentActionText: string | null = null;
+          if (msg.role === 'assistant' && msg.id === streamingMsgId && isStreaming) {
+            if (stageKind === 'thinking') {
+              currentActionText = 'Analyzing task…';
+            } else if (stageKind === 'tool') {
+              const activeCall = (msg.toolCalls ?? []).find((tc) => tc.phase === 'running' || tc.phase === 'pending');
+              if (activeCall) {
+                const why = activeCall.changeSummary || activeCall.purpose;
+                const tool = activeCall.toolName.replace(/^browser[._]/, '').replace(/_/g, ' ');
+                currentActionText = why ? `Doing: ${tool} — ${why}` : `Doing: ${tool}…`;
+              } else {
+                currentActionText = 'Working with tools…';
+              }
+            } else if (stageKind === 'writing') {
+              currentActionText = 'Composing answer…';
+            }
+          }
 
           // Parse <think> tags from content
           const displayConfig = DISPLAY_CONFIGS[thinkingLevel];
@@ -4816,18 +4744,16 @@ ${rows.join('\n')}
           const bodyContent = citationDisplay;
 
           const msgMatchedSkills = matchedSkillsByMsg[msg.id] ?? [];
-          const msgSkillDetails = skillDetailsByMsg[msg.id] ?? [];
           const msgUsage = usageByMsg[msg.id];
           const msgStats = statsByMsg[msg.id];
           const msgPrefixHash = prefixHashByMsg[msg.id];
           const msgPrefixChanged = !!prefixChangedByMsg[msg.id];
-          // 内联执行轨迹是否可见（思考阶段/工具步骤/技能加载）——由 dsh Trajectory 视图统一展示
+          // 对话视图是否展示紧凑「执行过程」摘要（思考 / 工具 / 技能任一存在即可）
           const hasInlineTrace = msg.role === 'assistant'
             && ((msg.toolCalls?.length ?? 0) > 0
               || msgMatchedSkills.length > 0
               || !!thinkText);
-          // 是否存在执行步骤数据（工具调用或历史过程叙述）——StepCards 与 Final Answer 分隔线共用，
-          // 避免两处条件各写一遍将来改判定时漏改一处
+          // 是否存在执行步骤数据（工具调用或历史过程叙述）——Final Answer 分隔线判定用
           const hasStepData = (msg.toolCalls && msg.toolCalls.length > 0)
             || (msg.processNarration && msg.processNarration.trim().length > 0);
 
@@ -4844,6 +4770,23 @@ ${rows.join('\n')}
               msg.role === 'user' ? 'items-end' : 'items-start',
             )}
           >
+
+            {/* 品牌标识头（标题栏南瓜图标 + BobWork）：AI 回复问题时出现在回答开头 */}
+            {msg.role === 'assistant' && (
+              <div className="mb-1 flex shrink-0 items-center gap-1.5">
+                <img
+                  src={isNote
+                    ? '/pumpkin-love.png'
+                    : typeof data.sandboxAppId === 'string' && data.sandboxAppId
+                      ? '/pumpkin-coding.png'
+                      : '/pumpkin-confused.png'}
+                  alt="BobWork"
+                  className="h-[18px] w-[18px] shrink-0 rounded-full object-cover"
+                  draggable={false}
+                />
+                <span className="text-xs font-semibold" style={{ color: 'var(--ink-strong)' }}>BobWork</span>
+              </div>
+            )}
 
             {/* ① 阶段胶囊：当前阶段指示器，固定在最上方（最顶部），归属本条回答，不跨轮次。
                 恒高容器（h-[24px] overflow-hidden）：流式期间三颗胶囊始终渲染（不再依赖 currentStage !== null），
@@ -4980,57 +4923,33 @@ ${rows.join('\n')}
                       </div>
                     )}
 
-            {/* dsh Trajectory 统一执行轨迹视图：思考 + 技能加载 + 工具/MCP调用 + 系统变更，按事件流统一展示。
-                 数据自动 assemble；thinkText 必须始终透传。 */}
+            {/* 实时「当前动作」条：流式中指示正在做什么（思考 / 正在调用的工具+目的 / 写答案），完成后消失 */}
+            {currentActionText && (
+              <div
+                className="mb-1 flex w-full items-center gap-1.5 rounded-md border px-1.5 py-0.5"
+                style={{
+                  backgroundColor: 'color-mix(in oklab, var(--primary) 7%, transparent)',
+                  borderColor: 'color-mix(in oklab, var(--primary) 20%, transparent)',
+                }}
+              >
+                <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" style={{ color: 'var(--primary-strong)' }} />
+                <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--primary-strong)' }}>
+                  {currentActionText}
+                </span>
+              </div>
+            )}
+
+            {/* 对话视图「执行过程」紧凑摘要：Think 小条 + 每工具一行 + 技能药丸；
+                点击 Think / 工具行就地展开明细（思考原文 / 参数 / 结果），无需切换到 Trace */}
             {msg.role === 'assistant' && hasInlineTrace && (
-              <div className="mb-1 w-full min-w-0">
-                <TraceTimeline
-                  thinkText={thinkText}
-                  toolCalls={msg.toolCalls ?? []}
-                  skillDetails={msgSkillDetails.length > 0 ? msgSkillDetails : msgMatchedSkills}
-                  matchedSkillNames={msgMatchedSkills}
-                  isStreaming={isStreaming}
-                  thinkingGroupFoldVersion={thinkGroupFoldTickByMsg[msg.id]}
-                  onFork={(span) => {
-                    // P3 fork：从该工具步骤之后分叉，把上文（用户问题 + 已完成工具结果）注入输入框，供用户继续提问
-                    const calls = msg.toolCalls ?? [];
-                    const forkIdx = calls.findIndex((tc) => tc.spanId === span.id);
-                    const upstream = forkIdx >= 0 ? calls.slice(0, forkIdx + 1) : calls;
-                    // 回溯最近的用户问题
-                    let userQ = '';
-                    for (let i = msgIdx - 1; i >= 0; i--) {
-                      if (messages[i]?.role === 'user') { userQ = messages[i].content; break; }
-                    }
-                    const lines: string[] = [];
-                    lines.push(`[Fork from: ${span.title}]`);
-                    if (userQ) lines.push(`Question: ${userQ.slice(0, 300)}`);
-                    if (upstream.length > 0) {
-                      lines.push('Completed steps:');
-                      for (const tc of upstream) {
-                        const r = tc.result && tc.result !== '...' ? tc.result.replace(/\s+/g, ' ').slice(0, 120) : '(pending)';
-                        lines.push(`- ${tc.toolName}: ${r}`);
-                      }
-                    }
-                    lines.push('');
-                    lines.push('Continue from here: ');
-                    setLocalInput((prev) => (prev ? prev + '\n\n' : '') + lines.join('\n'));
-                  }}
-                />
-              </div>
-            )}
-
-            {/* 执行过程步骤卡片：从 toolCalls（带真实执行状态）派生，与轨迹共享同一事实源；
-                 无工具时回退到过程叙述拆分。流式期间实时展开，任务完成后自动折叠。 */}
-            {msg.role === 'assistant' && (msg.id === streamingMsgId || hasStepData) && (
-              <StepCards toolCalls={msg.toolCalls} narration={msg.processNarration} isStreaming={isStreaming} />
-            )}
-
-            {/* 阶段提示文字：Execution steps 下方；随步骤新增被文档流自然下推，流式中随当前阶段动态变化。
-                外层 div 保占位，内层 span 收缩为文字宽度承载掠光动画；文字常态不透明（--ink-muted 全强度） */}
-            {msg.role === 'assistant' && msg.id === streamingMsgId && isStreaming && stageHintText && (
-              <div className="mb-1 w-full text-11" style={{ color: 'var(--ink-muted)' }}>
-                <span className="stage-hint-sweep">{stageHintText}</span>
-              </div>
+              <TraceProcessSummary
+                thinkText={thinkText}
+                toolCalls={msg.toolCalls ?? []}
+                skillNames={msgMatchedSkills}
+                isStreaming={msg.id === streamingMsgId && isStreaming}
+                thinkingActive={msg.id === streamingMsgId && isStreaming && stageKind === 'thinking'}
+                hideStructuralTools={msg.id === streamingMsgId && isStreaming}
+              />
             )}
 
             {/* No tools indicator — 只在无思考、无工具调用、无技能加载、非错误消息的完整回复时显示 */}
@@ -5344,10 +5263,20 @@ ${rows.join('\n')}
 
   const inputInner = (
       <div
-        className={cn('nodrag relative border-t p-2 transition-all', dragOver && 'ring-2')}
+        className={cn(
+          'nodrag relative mx-auto mb-3 flex w-full flex-col rounded-2xl p-2 pb-1.5 transition-all',
+          dragOver && 'ring-2',
+        )}
         style={{
-          borderColor: dragOver ? 'color-mix(in oklab, var(--primary) 50%, transparent)' : 'color-mix(in oklab, var(--line) 30%, transparent)',
-          backgroundColor: dragOver ? 'color-mix(in oklab, var(--primary) 6%, transparent)' : 'transparent',
+          // 空态欢迎区（新建/清空）跨正文列放大输入框（TraeWork 式），有内容时与正文阅读列同宽；
+          // 空态欢迎区按输入框 70%（缩小 30%）控制：1040 → 728
+          maxWidth: messages.length === 0 ? 'min(100%, 728px)' : 'min(100%, 800px)',
+          border: dragOver
+            ? '1px solid color-mix(in oklab, var(--primary) 50%, transparent)'
+            : '1px solid var(--line)',
+          backgroundColor: dragOver
+            ? 'color-mix(in oklab, var(--primary) 6%, transparent)'
+            : 'var(--paper)',
         }}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -5620,19 +5549,9 @@ ${rows.join('\n')}
           </div>
         )}
 
-        {/* 输入框容器：勾选的 skill / MCP 强制标签胶囊内嵌于框内，下方 contentEditable 文本区（支持 @ 文件引用 chip） */}
+        {/* 输入区（已并入 inputInner 大容器）：文本编辑区 + 胶囊 */}
         <div
-          className="rounded-lg transition-colors"
-          style={{
-            backgroundColor: 'var(--paper-soft)',
-            border: composerFocused
-              ? '1px solid color-mix(in oklab, var(--primary) 40%, transparent)'
-              : '1px solid color-mix(in oklab, var(--line) 40%, transparent)',
-          }}
-          onFocus={() => setComposerFocused(true)}
-          onBlur={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as unknown as globalThis.Node | null)) setComposerFocused(false);
-          }}
+          className="transition-colors"
           onWheel={(e) => e.stopPropagation()}
           onPointerDown={(e) => {
             // 阻止 pointer 事件冒泡，避免三指手势拖动节点
@@ -5706,8 +5625,8 @@ ${rows.join('\n')}
               'node-input flex-1 overflow-y-auto px-2 py-1.5 text-sm focus:outline-none',
             )}
             style={{
-              minHeight: (selectedSkills.size > 0 || enabledMcpIds.size > 0) ? '34px' : '54px',
-              maxHeight: '120px',
+              minHeight: (selectedSkills.size > 0 || enabledMcpIds.size > 0) ? '64px' : '84px',
+              maxHeight: '180px',
               color: 'var(--ink-strong)',
               wordBreak: 'break-word',
               whiteSpace: 'pre-wrap',
@@ -5716,16 +5635,14 @@ ${rows.join('\n')}
               touchAction: 'pan-y',
             }}
             onFocus={() => {
-              setComposerFocused(true);
               // 标记最近聚焦节点：全局截图 OCR（Cmd+Shift+O）结果插入本输入框
               setScreenOcrFocus(id);
             }}
-            onBlur={() => { /* 焦点态由外层容器统一管理 */ }}
           />
         </div>
 
-        {/* 底部工具栏：左侧附件+技能，右侧发送+推理+模型 */}
-        <div className="mt-1.5 flex items-center justify-between gap-2">
+        {/* 底部工具行：已收进大输入框容器内底部（附件/技能/指令/MCP/推理/模型/发送） */}
+        <div className="mt-0.5 flex items-center justify-between gap-2 px-0.5">
           {/* 左侧：附件 + 技能 + 目录标签 */}
           <div className="flex min-w-0 items-center gap-1.5">
             <label
@@ -6541,7 +6458,7 @@ ${rows.join('\n')}
               fontFamily: 'var(--font-sans)',
             }}
             onMouseDown={(e) => {
-              // 打标吞掉本次点击产生的 mouseup（防止附件/note 同步关窗后二次弹窗）
+              // 打标吞掉本次点击产生的 mouseup（防止附件同步关窗后二次弹窗）
               suppressNextMenuMouseUpRef.current = true;
               e.preventDefault();
               e.stopPropagation();
@@ -6551,7 +6468,7 @@ ${rows.join('\n')}
               type="button"
               onClick={() => {
                 navigator.clipboard?.writeText(selectionMenu.text).catch(() => {});
-                // 复制反馈：图标短暂变 ✓，弹窗保持不消失（可继续附件/note 等操作）
+                // 复制反馈：图标短暂变 ✓，弹窗保持不消失（可继续附件等操作）
                 setCopied(true);
                 if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
                 copyTimerRef.current = window.setTimeout(() => setCopied(false), 900);
@@ -6573,126 +6490,43 @@ ${rows.join('\n')}
               style={{ color: 'var(--ink)' }}
               title="将选中文字保存为当前节点的附件材料"
             >
-              <Bot className="h-3.5 w-3.5" style={{ color: 'var(--primary-strong)' }} />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleCreateNote(selectionMenu.text)}
-              className="flex items-center justify-center rounded-lg px-2.5 py-1.5 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink)' }}
-              title="用选中文字创建画布 note 卡片"
-            >
-              <Target className="h-3.5 w-3.5" style={{ color: '#B8860B' }} />
+              <Bot className="h-4 w-4" style={{ color: 'var(--primary-strong)' }} />
             </button>
           </div>,
           document.body,
         )}
-      {/* 展开态阴影层：位于 overflow 裁剪容器（wrapper）之外。
-          wrapper 展开时带 overflow-x-hidden，会把 inner card 外溢的 box-shadow 全部裁掉
-          （overflow-x:hidden → overflow-y 按 auto 计算 → 纵向阴影被裁）——这是阴影一直
-          "看不到"的根因。阴影层作为 wrapper 的兄弟不参与裁剪，投影完整外溢。
-          参数用可见的合理值：紧贴接触 + 中层悬浮 + 环境弥散（blur 收敛，避免弥散到不可见）。 */}
-      {isExpanded && (
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 z-0 rounded-xl"
-          style={{
-            boxShadow: [
-              '0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent)',
-              '0 12px 24px -6px color-mix(in oklab, var(--ink) 22%, transparent)',
-              '0 32px 64px -16px color-mix(in oklab, var(--ink) 28%, transparent)',
-              // 选中/编码光晕：blur 收敛到圆角尺度内（≤16px），保留状态色表达又不露方角
-              selected
-                ? (hasAccentIdentity
-                    ? `0 0 16px color-mix(in oklab, ${accentVar} 40%, transparent)`
-                    : '0 0 16px color-mix(in oklab, var(--danger) 30%, transparent)')
-                : (hasAccentIdentity
-                    ? `0 0 10px color-mix(in oklab, ${accentVar} 22%, transparent)`
-                    : null),
-            ].filter(Boolean).join(', '),
-          }}
+      {/* 右侧「DOS 执行步骤」面板：消费 todo_write 三态真状态（goal + 状态轨 + activeForm 动态文案）；
+          流式结束后保留 3 秒收尾停留（全绿/失败）再淡出 */}
+      {planInfo && (isStreaming || planPanelLingering) && !planPanelClosed && (
+        <TaskStepsPanel
+          anchor={nodeWrapperRef.current}
+          goal={planInfo.goal}
+          steps={planInfo.steps}
+          completed={planInfo.completed}
+          running={planInfo.running}
+          onClose={() => setPlanPanelClosed(true)}
         />
       )}
+      {/* 展开态外阴影层已移除（2026-09 布局重构：卡片铺满容器、统一浅色底，不再需要投影） */}
     <div
       ref={nodeWrapperRef}
       className={cn(
-        'ai-node-wrapper group relative cursor-default transition-[width,height] duration-300 ease-in-out',
-        // 展开态主节点必须自身建立横向裁剪：固定宽度下防止内容（如思考标签行的
+        'ai-node-wrapper group relative cursor-default transition-[height] duration-300 ease-in-out',
+        // 大面板自身建立横向裁剪：固定宽度下防止内容（如思考标签行的
         // shrink-0 不换行标签）抬升导致节点被内容撑宽
         // ai-node-expanded 标记类供 globals.css 壳列分离样式命中（正文列限宽 720px 居中 + 宽内容 breakout）
-        isExpanded && 'ai-node-expanded overflow-x-hidden',
+        'ai-node-expanded overflow-x-hidden',
       )}
       style={{
         width: nodeWidth,
         height: nodeHeight,
         // 实际外壳宽度透传给 globals.css：--wide-bleed 按真实壳宽计算，
-        // 避免节点被可视区上限压缩后代码块 breakout 仍按 880px 外扩导致右缘被裁
-        ['--bob-shell-w' as string]: isExpanded ? nodeWidth : undefined,
+        // 避免节点被可视区上限压缩后代码块 breakout 仍按壳宽上限外扩导致右缘被裁
+        ['--bob-shell-w' as string]: nodeWidth,
       }}
     >
-      {/* 扩展 hover 触发面积（超出节点 40px），鼠标离开节点后按钮不立即消失；
-          展开态主节点因 overflow-x-hidden 会裁掉该扩展区，故此时不渲染（节点已放大，扩展区意义不大） */}
-      {!isExpanded && <div className="absolute -inset-10 z-0" />}
-      {/* 连接点（Handle）：普通子节点走左右（Left/Right），左右双 target + 左右双 source。
-          必须放在 inner card 之外：inner card 的 overflow-x-hidden 会把左右 handle 裁剪掉
-          （source 在 left:-2px / right:-2px 完全不可见），导致无法拖线创建子节点。
-          展开态（放大）wrapper 自带 overflow-x-hidden，此时 handle 被裁属预期（编辑态无需连线）。 */}
-      <>
-        {/* Target Handle - 接收连线（内侧） */}
-        <Handle
-          type="target"
-          position={Position.Left}
-          id="left-target"
-          isConnectable
-          className="!h-3 !w-3 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-60"
-          style={{
-            backgroundColor: 'var(--paper)',
-            borderColor: 'color-mix(in oklab, var(--success) 70%, transparent)',
-            left: 0,
-          }}
-        />
-        <Handle
-          type="target"
-          position={Position.Right}
-          id="right-target"
-          isConnectable
-          className="!h-3 !w-3 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-60"
-          style={{
-            backgroundColor: 'var(--paper)',
-            borderColor: 'color-mix(in oklab, var(--success) 70%, transparent)',
-            right: 0,
-          }}
-        />
-
-        {/* Source Handle - 拖拽生成节点（外侧，稍大） */}
-        <Handle
-          type="source"
-          position={Position.Left}
-          id="left"
-          isConnectable
-          className="!h-3.5 !w-3.5 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-80"
-          style={{
-            backgroundColor: 'color-mix(in oklab, var(--primary) 80%, transparent)',
-            borderColor: 'var(--paper)',
-            left: '-2px',
-            boxShadow: '0 2px 8px color-mix(in oklab, var(--primary) 30%, transparent)',
-          }}
-        />
-        <Handle
-          type="source"
-          position={Position.Right}
-          id="right"
-          isConnectable
-          className="!h-3.5 !w-3.5 !rounded-full !border-2 !opacity-0 transition-opacity hover:!opacity-100 group-hover:!opacity-80"
-          style={{
-            backgroundColor: 'color-mix(in oklab, var(--primary) 80%, transparent)',
-            borderColor: 'var(--paper)',
-            right: '-2px',
-            boxShadow: '0 2px 8px color-mix(in oklab, var(--primary) 30%, transparent)',
-          }}
-        />
-      </>
-      {/* 展开态：编辑面板 — 带缩放展开/收缩动效 */}
+      {/* 画布连线已物理移除（2026-09）：不再渲染左右 Handle 拖线；
+          连线关系经标题栏链接图标查看、在 NodeMap 缩略图上管理。 */}
       {/* Inner card：
           min-width:0 + overflow-x:hidden 切断"长内容 min-content → 父节点 wrapper 被撑宽"的传递链
           （flex/grid 子项 flex-basis:auto 时 min-width 默认 auto=内容宽，这里显式归零） */}
@@ -6703,90 +6537,18 @@ ${rows.join('\n')}
           confirmPending && 'confirm-breathing',
         )}
         style={{
-          // 展开态：极淡的顶部受光渐变（模拟光源），增强大面板的立体感知；
-          // 非展开态保持纯纸色不变。
-          background: isExpanded
-            ? 'linear-gradient(180deg, color-mix(in srgb, #fff 7%, var(--paper)) 0%, var(--paper) 38%)'
-            : 'var(--paper)',
-          borderColor: selected
-            ? `color-mix(in oklab, ${accentVar} 85%, transparent)`
-            : (hasAccentIdentity
-                ? `color-mix(in oklab, ${accentVar} 55%, transparent)`
-                : 'color-mix(in oklab, var(--line) 45%, transparent)'),
-          // 立体感：展开态的定向投影与选中/编码光晕已上移到 wrapper 外的阴影层
-          //（wrapper 的 overflow-x-hidden 会裁剪 inner card 外溢的 box-shadow，这里只保留
-          // 不被裁剪的 inset 顶部受光高光）；非展开态保持轻量投影不变。
-          boxShadow: [
-            'inset 0 1px 0 color-mix(in srgb, #fff 18%, transparent)',
-            isExpanded
-              ? null
-              : '0 1px 3px color-mix(in oklab, var(--ink) 16%, transparent)',
-            isExpanded
-              ? null
-              : '0 8px 24px color-mix(in oklab, var(--ink) 12%, transparent)',
-            isExpanded
-              ? null
-              : selected
-                ? (hasAccentIdentity
-                    ? `0 0 16px color-mix(in oklab, ${accentVar} 40%, transparent)`
-                    : '0 0 16px color-mix(in oklab, var(--danger) 30%, transparent)')
-                : (hasAccentIdentity
-                    ? `0 0 10px color-mix(in oklab, ${accentVar} 22%, transparent)`
-                    : null),
-          ].filter(Boolean).join(', '),
+          // 极淡的顶部受光渐变（模拟光源），增强大面板的立体感知
+          background: 'linear-gradient(180deg, color-mix(in srgb, #fff 7%, var(--paper)) 0%, var(--paper) 38%)',
+          // 2026-09 口径：去除身份高亮边框——所有 agent 统一中性边框，不再按 coding/Kar/Planner 染色
+          borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
+          // inset 顶部受光高光（投影与光晕由 wrapper 外阴影层提供，overflow 裁剪不掉）
+          boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 18%, transparent)',
         }}
       >
       {/* Header — Phase 2: 统一 NodeCardHeader 三段式骨架（左锚点 + 标题 + 右操作组） */}
       <NodeCardHeader
         leftAnchor={
           <>
-            {/* 节点图标：chat 节点用南瓜表情 confused，AI Coding 节点用万圣节酷酷，Kar（note）节点用爱心喜爱 */}
-            <div
-              className={`relative shrink-0 ${isStreaming ? 'icon-breathing' : ''}`}
-              data-nodrag
-              onMouseEnter={() => setShortcutTipOpen(true)}
-              onMouseLeave={() => setShortcutTipOpen(false)}
-            >
-              <img
-                src={isNote
-                  ? '/pumpkin-love.png'
-                  : typeof data.sandboxAppId === 'string' && data.sandboxAppId
-                    ? '/pumpkin-coding.png'
-                    : '/pumpkin-confused.png'}
-                alt=""
-                className="h-[18px] w-[18px] cursor-help rounded-full object-cover"
-                draggable={false}
-              />
-              {shortcutTipOpen && (
-                <div
-                  className="absolute left-0 top-full z-50 mt-2 w-max rounded-xl border px-3 py-2 shadow-xl"
-                  style={{
-                    borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
-                    backgroundColor: 'var(--popover)',
-                    color: 'var(--ink)',
-                  }}
-                >
-                  <div className="flex flex-col gap-1.5 text-xs leading-tight">
-                    <div className="flex items-center gap-1.5">
-                      <kbd className="rounded border px-1 font-mono text-xs" style={{ borderColor: 'color-mix(in oklab, var(--line) 50%, transparent)', backgroundColor: 'var(--paper-soft)' }}>Enter</kbd>
-                      <span>Send</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <kbd className="rounded border px-1 font-mono text-xs" style={{ borderColor: 'color-mix(in oklab, var(--line) 50%, transparent)', backgroundColor: 'var(--paper-soft)' }}>Shift+Enter</kbd>
-                      <span>New line</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <kbd className="rounded border px-1 font-mono text-xs" style={{ borderColor: 'color-mix(in oklab, var(--line) 50%, transparent)', backgroundColor: 'var(--paper-soft)' }}>/</kbd>
-                      <span>Skills</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <kbd className="rounded border px-1 font-mono text-xs" style={{ borderColor: 'color-mix(in oklab, var(--line) 50%, transparent)', backgroundColor: 'var(--paper-soft)' }}>@</kbd>
-                      <span>References</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
             {/* AI Coding 专项任务循环状态徽标（改码→预览自检→测试→完成） */}
             {isCoding && CODING_PHASE_UI[codingPhase] && (
               <span
@@ -6799,65 +6561,91 @@ ${rows.join('\n')}
               </span>
             )}
             {/* AI Coding 徽标已移除：节点绑定 Bob Sandbox 小程序，通过节点标题/行为区分 */}
-            {/* === 优化4：节点状态圆点徽标 === */}
-            {outcomeStatus && (
-              <span
-                className="h-2 w-2 shrink-0 rounded-full"
-                style={{
-                  backgroundColor:
-                    outcomeStatus === 'locked'
-                      ? 'var(--success)'            // 绿色：已锁定
-                      : outcomeStatus === 'stale'
-                        ? 'var(--primary-strong)'           // 橙色：待更新
-                        : outcomeStatus === 'legacy'
-                          ? 'color-mix(in oklab, var(--ink-muted) 40%, transparent)'   // 灰色：旧节点
-                          : 'color-mix(in oklab, var(--ink-muted) 50%, transparent)',   // 草稿：浅灰
-                  boxShadow: outcomeStatus === 'locked'
-                    ? '0 0 6px color-mix(in oklab, var(--success) 50%, transparent)'
-                    : 'none',
-                }}
-                title={
-                  outcomeStatus === 'locked'
-                    ? (forceLocked ? 'Forced locked' : 'Locked')
-                    : outcomeStatus === 'stale' ? 'Upstream changed, needs re-lock'
-                    : outcomeStatus === 'legacy' ? 'Legacy node'
-                    : 'Draft'
-                }
-              />
-            )}
           </>
         }
         title={
-          titleEditing ? (
-            <input
-              ref={titleInputRef}
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onKeyDown={onTitleInputKeyDown}
-              onBlur={() => void commitTitleEdit()}
-              onClick={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-              maxLength={60}
-              className="w-full min-w-0 rounded border bg-transparent px-1 text-base font-semibold outline-none"
-              style={{ borderColor: 'color-mix(in oklab, var(--accent) 55%, transparent)', color: 'var(--ink)' }}
-              data-nodrag
-              aria-label="Rename node"
+          <span className="flex min-w-0 items-center gap-1.5">
+            <TitleIdentityIcon
+              className={cn('shrink-0', isBotTitleIcon ? 'h-[15px] w-[15px]' : 'h-4 w-4')}
+              style={{ color: 'var(--ink-muted)' }}
             />
-          ) : (
-            <span
-              className="inline-block max-w-full cursor-text truncate"
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                startTitleEdit();
-              }}
-              title="Double-click to rename"
-            >
-              {data.title}
-            </span>
-          )
+            {titleEditing ? (
+              <input
+                ref={titleInputRef}
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={onTitleInputKeyDown}
+                onBlur={() => void commitTitleEdit()}
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                maxLength={60}
+                className="w-full min-w-0 rounded border bg-transparent px-1 text-base font-semibold outline-none"
+                style={{ borderColor: 'color-mix(in oklab, var(--accent) 55%, transparent)', color: 'var(--ink)' }}
+                data-nodrag
+                aria-label="Rename node"
+              />
+            ) : (
+              <span
+                className="inline-block max-w-full cursor-text truncate"
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  startTitleEdit();
+                }}
+                title="Double-click to rename"
+              >
+                {data.title}
+              </span>
+            )}
+          </span>
         }
         rightActions={
           <>
+            {/* 视图分栏：Chat（对话）/ Trace（轨迹）——迁至标题栏右操作组 */}
+            {(messages.length > 0 || pane === 'trace') && (
+              <div
+                className="flex items-center gap-0.5 rounded-lg border p-0.5"
+                style={{
+                  borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
+                  backgroundColor: 'color-mix(in oklab, var(--paper) 75%, transparent)',
+                }}
+              >
+                {(['chat', 'trace'] as const).map((k) => {
+                  const active = pane === k;
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setPane(k); }}
+                      className={cn('flex h-5 cursor-pointer items-center rounded-md px-2 text-11 font-medium transition-colors', active ? '' : 'hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)]')}
+                      style={active
+                        ? { backgroundColor: 'color-mix(in oklab, var(--primary) 14%, transparent)', color: 'var(--primary-strong)' }
+                        : { color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                    >
+                      {k === 'chat' ? 'Chat' : 'Trace'}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {/* 连线关系入口：画布已物理移除连线（2026-09），关系经 NodeMap 查看/管理。
+                点击 → NodeMap 展开并高亮本节点及其连线。 */}
+            {linkCount > 0 && (
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent('nodemap-reveal-node', { detail: { nodeId: id } }))}
+                className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)' }}
+                title={`Connections (${linkCount}) — reveal in Node Map`}
+              >
+                <Link2 className="h-3.5 w-3.5" />
+                <span
+                  className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-7 font-bold leading-none"
+                  style={{ backgroundColor: 'var(--primary-strong)', color: '#fff' }}
+                >
+                  {linkCount > 9 ? '9+' : linkCount}
+                </span>
+              </button>
+            )}
             {/* 断线警告角标 */}
             {hasDisconnectedUpstream && (
               <span
@@ -6887,6 +6675,8 @@ ${rows.join('\n')}
                 </button>
               </>
             )}
+            {/* Todo 便签 Dock（2026-09 用户拍板：色块显示在标题栏右侧、成果块旁；点击展开完整便签卡；图钉固定） */}
+            <StickyTodoDock />
             {/* 成果块预览（有成果块时显示状态标签，无则弱化为纯图标） */}
             {data.nodeMdId && (
               <button
@@ -6951,7 +6741,7 @@ ${rows.join('\n')}
                 }}
                 title={
                   persisting
-                    ? 'Outcome is still being generated for the latest turn. Please wait before locking.'
+                    ? 'The node file is being written. Please wait before locking.'
                     : outcomeStatus === 'locked'
                       ? (forceLocked ? '已强制锁定（校验未通过·用户确认，点击解锁）' : '已锁定（点击解锁）')
                       : outcomeStatus === 'stale' ? '上游成果块已变更（点击重新锁定刷新）'
@@ -6969,90 +6759,30 @@ ${rows.join('\n')}
                   e.currentTarget.style.backgroundColor = 'transparent';
                 }}
               >
-                {outcomeStatus === 'locked'
-                  ? <ShieldCheck className="h-3.5 w-3.5" />
-                  : <Shield className="h-3.5 w-3.5" />
+                {outcomeLoading
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : outcomeStatus === 'locked'
+                    ? <ShieldCheck className="h-3.5 w-3.5" />
+                    : <Shield className="h-3.5 w-3.5" />
                 }
               </button>
             )}
-            {/* 归档按钮：节点已完成使命 → 画布导航圆点加实心外圈区分（可随时取消） */}
-            {data.nodeMdId && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleToggleArchive();
-                }}
-                disabled={persisting}
-                className="flex h-5 w-5 items-center justify-center rounded transition-colors disabled:opacity-40"
-                style={{
-                  color: archived
-                    ? 'var(--success)'
-                    : 'color-mix(in oklab, var(--ink-muted) 40%, transparent)',
-                }}
-                title={archived ? '取消归档：恢复节点到画布' : '归档：节点从画布隐藏，仅保留导航圆点（点击圆点可恢复）'}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = archived
-                    ? 'color-mix(in oklab, var(--success) 12%, transparent)'
-                    : 'color-mix(in oklab, var(--primary) 8%, transparent)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = 'transparent';
-                }}
-              >
-                <Archive className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {/* 展开/收起按钮 */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleToggleExpand();
-              }}
-              className="flex h-5 w-5 items-center justify-center rounded transition-colors"
-              style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)' }}
-              title={isExpanded ? 'Collapse' : 'Expand'}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--primary) 8%, transparent)';
-                e.currentTarget.style.color = 'var(--primary-strong)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.color = 'color-mix(in oklab, var(--ink-muted) 40%, transparent)';
-              }}
-            >
-              {isExpanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDelete();
-              }}
-              className="flex h-5 w-5 items-center justify-center rounded transition-colors"
-              style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--primary) 12%, transparent)';
-                e.currentTarget.style.color = 'var(--danger)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.color = 'color-mix(in oklab, var(--ink-muted) 50%, transparent)';
-              }}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+            {/* 展开/收起与删除 ✕ 已从标题栏移除（2026-09）：有内容节点恒为大面板无需收起；
+                删除节点入口迁至左栏会话树行 hover 操作。归档按钮已随归档功能一并移除。 */}
           </>
         }
       />
 
-      {/* Messages wrapper — 包含左侧导航圆点 + 消息滚动区 */}
+      {/* Messages wrapper — 包含顶部视图分栏（对话/轨迹）+ 左侧导航圆点 + 消息滚动区 */}
       <div
         className={cn(
-          'nodrag relative flex min-h-0 flex-1',
+          'nodrag relative flex min-h-0 flex-1 flex-col',
         )}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        {/* 左侧导航圆点（仅展开态 + ≥2 条 user 消息时显示） */}
-        {isExpanded && userMessages.length >= 2 && (
+        {/* 视图分栏 Chat/Trace 已迁至标题栏右操作组 */}
+        {/* 左侧导航圆点（对话视图 + ≥2 条 user 消息时显示） */}
+        {pane === 'chat' && userMessages.length >= 2 && (
           <div
             className="absolute left-0 top-0 bottom-0 z-10 flex flex-col items-center justify-center gap-1.5 py-2 pl-1.5"
             style={{ pointerEvents: 'auto' }}
@@ -7101,22 +6831,59 @@ ${rows.join('\n')}
       <div
         ref={scrollRef}
         className={cn(
-          'relative flex min-h-[60px] min-w-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden py-3 ai-canvas-scroll',
+          'relative flex min-h-[60px] min-w-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden py-3 hide-scrollbar ai-canvas-scroll',
           'break-words [overflow-wrap:anywhere] [word-break:break-word] [line-break:anywhere]',
-          isExpanded ? 'px-10' : 'px-3',
+          'px-7',
         )}
       >
         {/* 阅读列壳层：展开态由 globals.css 限宽 720px 居中（约 45 汉字/行舒适行长），
             收起态无任何约束、布局与原完全一致；flex-1/flex-col/gap-2 等价承接外层原样式
             （保住空状态垂直居中与消息间距），浮动按钮是兄弟节点定位不受影响 */}
-        <div className="reading-col flex w-full min-w-0 flex-1 flex-col gap-2">
-          {messagesInner}
-        </div>
+        {pane === 'chat' ? (
+          messages.length === 0 ? (
+            /* 空态欢迎（新建会话 / 清空后）：品牌图标 + BobWork 一行，完整输入框紧跟其下，
+               整体在节点中部区域垂直居中 */
+            <div className="flex w-full min-w-0 flex-1 flex-col items-center justify-center gap-5">
+              {/* 品牌行：图标 41px（37px 基础上再放大 10%≈40.7，取整 41），文字 BobWork */}
+              <div className="flex shrink-0 items-center justify-center gap-[13px]">
+                <img
+                  src="/bobagent-logo.png"
+                  alt="BobWork"
+                  draggable={false}
+                  className="h-[41px] w-[41px] shrink-0 rounded-lg object-contain"
+                  style={{ opacity: 0.95, transform: 'translateY(0.5px)' }}
+                />
+                <span
+                  className="text-[31px] font-semibold leading-none"
+                  style={{ color: 'var(--ink-strong)' }}
+                >
+                  {typedBrand}
+                  {!brandTypingDone && (
+                    <span
+                      className="ml-0.5 inline-block h-[0.95em] w-[2px] align-middle rounded-sm bg-current animate-pulse"
+                      aria-hidden
+                    />
+                  )}
+                </span>
+              </div>
+              <div className="w-full">{inputInner}</div>
+              {/* 底部等分隔块（高度=品牌行 41px，按最高元素图标取）：与品牌行等高，使输入框保持垂直居中（位置不变）；
+                 品牌行与输入框间距由外层 gap-5（20px）拉大 */}
+              <div className="h-[41px] shrink-0" aria-hidden />
+            </div>
+          ) : (
+            <div className="reading-col flex w-full min-w-0 flex-1 flex-col gap-2">
+              {messagesInner}
+            </div>
+          )
+        ) : (
+          <ConversationTrajectory embedded items={conversationTrajectoryItems} />
+        )}
 
 
 
-        {/* === 优化1：N 条新消息浮动按钮 === */}
-        {autoScrollPaused && unreadMsgCount > 0 && (
+        {/* === 优化1：N 条新消息浮动按钮（仅对话视图） === */}
+        {pane === 'chat' && autoScrollPaused && unreadMsgCount > 0 && (
           <button
             type="button"
             onClick={() => {
@@ -7148,8 +6915,12 @@ ${rows.join('\n')}
         )}
       </div>
       </div>
-      {/* Input area - visible when selected, expanded, or on new/empty nodes, or when reference tag is set */}
-      {(isExpanded || selected || messages.length === 0 || referenceTag) && inputInner}
+      {/* 底部输入框：空态已由中部欢迎区承载输入框，仅在已有对话内容时于底部展示；空态不再重复渲染 */}
+      {messages.length > 0 && (
+        <div className="w-full min-w-0 px-7">
+          {inputInner}
+        </div>
+      )}
 
       {/* 提问弹窗 */}
       {questionPopup && (
@@ -7820,7 +7591,7 @@ export function areNodePropsEqual<T extends { id: string; data: AiChatNodeData; 
   // 常用扩展字段：身份/技能/MCP等（都用引用比较）
   const extraKeys = [
     '__hasPersistedPosition', 'enabledMcpIds', 'selectedSkills',
-    'collapsed', 'nodeHeight', 'isArchived', 'archived',
+    'collapsed', 'nodeHeight', 'isArchived',
   ] as const;
   for (const k of extraKeys) {
     if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;

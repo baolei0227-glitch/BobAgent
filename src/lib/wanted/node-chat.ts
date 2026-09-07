@@ -66,9 +66,9 @@ export const SANDBOX_SYSTEM_PROMPT =
   '当前为 WANTED 临时问答模式（Node 模式）。你主要回答用户的提问，严格禁止执行多数有副作用的操作：' +
   '不调用 write_file / rename_file / delete_file / run_command / execute_script / draw 等写类工具，' +
   '不写入待办、日历或任何文件。' +
-  '唯一例外：当用户明确要求查阅/修改/删除自己的笔记（notebook）时，' +
-  '允许调用 read_notebook / update_notebook / delete_notebook 工具，' +
-  '删除仅限用户显式指定且 id 明确的笔记，其余写入一律以对话方式回答，绝不落地。';
+  '笔记/知识库（notebook）能力 2026-09-06 起收归画布「知识库（Kar）节点」专职承载，本临时问答不注入笔记工具——' +
+  '用户明确要查阅/记录/整理笔记时，请引导其使用 ⌘F / 微信的 /note 指令（/note check 查阅、/note 记录、/note ingest 编译）' +
+  '或打开画布 Kar 节点操作，不要尝试调用不存在的 read_notebook 等工具。';
 
 /**
  * 向 /chat 会话提问（原 askTempNode，已脱离节点文件模型）：

@@ -12,7 +12,7 @@
  *  - 数据源：getSnapshot() 返回当前快照（节点/边/视口），subscribe() 在画布数据变化时通知
  *    （配合 React useSyncExternalStore 使用，getSnapshot 返回缓存引用保证稳定性）；
  *  - 命令：setViewport / fitView / zoomBy / setNodePositions / setNodeSelected；
- *  - 节点展开/收起：expandNode / collapseNode（由宿主派发到节点，节点自管其展开态）；
+ *  - 节点展开：expandNode（由宿主派发到节点，节点自管其展开态）；
  *  - 外部事件：onNodeEvent 订阅节点收起 / 执行状态广播。
  */
 
@@ -35,8 +35,8 @@ export interface GraphNodeInfo {
   type: 'aiChat' | 'imageGen' | (string & {});
   /** 绑定 Bob Sandbox 小程序 id（AI Coding 节点），用于与普通 chat 节点区分颜色 / 徽章 */
   sandboxAppId?: string;
-  /** 归档：节点已完成使命（画布导航圆点以实心外圈区分） */
-  archived?: boolean;
+  /** 节点消息数（会话列表用：0 = 空会话 / 尚未执行任务，可从会话区隐藏） */
+  messageCount?: number;
 }
 
 export interface GraphEdgeInfo {
@@ -59,9 +59,11 @@ export interface GraphSnapshot {
   viewport: ViewportState;
 }
 
-export type GraphNodeEvent =
-  | { type: 'node-collapsed'; nodeId: string }
-  | { type: 'node-executing'; nodeId: string; executing: boolean };
+export type GraphNodeEvent = {
+  type: 'node-executing';
+  nodeId: string;
+  executing: boolean;
+};
 
 /** 节点类型（NodeMap 圆点颜色 / 徽章用） */
 export type NodeKind = 'chat' | 'coding' | 'imageGen';
@@ -111,11 +113,12 @@ export interface GraphGateway {
   /** 读取当前选中的节点 id（无选中返回 null） */
   getSelectedNode(): string | null;
 
-  /** 请求展开/收起节点（节点自管其展开态） */
+  /** 请求展开节点（节点自管其展开态） */
   expandNode(nodeId: string): void;
-  collapseNode(nodeId: string): void;
-  /** 恢复归档节点：取消归档标记并从画布显示（导航圆点点击触发，宿主负责持久化） */
-  restoreNode(nodeId: string): void;
+  /** 断开连线（软删 disconnected：本地立即置灰 + 落库 /api/edges delete，语义对齐 NodeMap 中点拖断） */
+  disconnectEdge(edgeId: string): void;
+  /** 重连续线（清 disconnected：本地立即恢复 + 落库 /api/edges reconnect） */
+  reconnectEdge(edgeId: string): void;
   /** 订阅节点外部事件（收起 / 执行状态），返回退订函数 */
   onNodeEvent(handler: (e: GraphNodeEvent) => void): () => void;
 }

@@ -351,6 +351,22 @@ if [ -d "$NOTES_MCP_DIR" ]; then
 else
   warn "bob-notes-mcp 目录不存在，Notes 功能不可用"
 fi
+# 内置 bob-mind-mcp（Bob-Mind 独立思维便签插件）：构建 + 复制 dist/package.json。
+#   cli.js 同为 esbuild 单文件 bundle（内联 SDK 与 web 面板），无需运行时安装。
+MIND_MCP_DIR="$PROJECT_DIR/../bob-mind-mcp"
+if [ -d "$MIND_MCP_DIR" ]; then
+  log "内置 bob-mind-mcp（Bob-Mind）..."
+  if ! (cd "$MIND_MCP_DIR" && npm run build >/dev/null 2>&1); then
+    warn "bob-mind-mcp 构建失败，Bob-Mind 功能将不可用"
+  else
+    mkdir -p "$STAGING/next-standalone/bob-mind-mcp"
+    cp -R "$MIND_MCP_DIR/dist" "$STAGING/next-standalone/bob-mind-mcp/dist"
+    cp "$MIND_MCP_DIR/package.json" "$STAGING/next-standalone/bob-mind-mcp/package.json"
+    ok "bob-mind-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bob-mind-mcp" | awk '{print $1}'))"
+  fi
+else
+  warn "bob-mind-mcp 目录不存在，Bob-Mind 功能不可用"
+fi
 ok "Next.js standalone 准备完成（node_modules: $(du -sh "$STAGING/next-standalone/node_modules" 2>/dev/null | awk '{print $1}')）"
 
 # ---------- 6. 生成 icon ----------

@@ -2,7 +2,6 @@ import { join, dirname, basename } from 'path';
 import { promises as fs } from 'fs';
 import {
   resolveAppRoot,
-  TEMPLATES_DB_FILENAME,
   PROJECT_DB_FILENAME,
   isICloudPath,
   PROJECT_DB_NOSYNC_DIRNAME,
@@ -384,21 +383,6 @@ export async function initDb(dbPath: string) {
       SELECT rowid, title, description, location, tags_json FROM events;
     `);
   }
-
-  // 工作流模板表（项目级，已废弃，templates 迁移到全局 .templates.db）
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workflow_templates (
-      template_id  TEXT PRIMARY KEY,
-      project_id   TEXT NOT NULL,
-      name         TEXT NOT NULL,
-      description  TEXT DEFAULT '',
-      category     TEXT DEFAULT '通用',
-      steps_json   TEXT NOT NULL,
-      created_at   TEXT NOT NULL,
-      updated_at   TEXT NOT NULL
-    );
-  `);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_wf_project ON workflow_templates(project_id);`);
 
   // 模型用量流水（用量统计：每次 chat 任务 done 落一条真实 token 记录）
   // task_id 为幂等键：同一任务重试/断线重放不重复记账
@@ -1074,36 +1058,6 @@ export async function rotateFeedToken(db: any, projectId: string): Promise<strin
   return token;
 }
 
-const TEMPLATES_DB_PATH = join(resolveAppRoot(), TEMPLATES_DB_FILENAME);
-
-/** 获取全局模板数据库路径 */
-export function getTemplatesDbPath(): string {
-  return TEMPLATES_DB_PATH;
-}
-
-/** 初始化全局模板数据库 */
-export async function initTemplatesDb() {
-  const Database = (await import('better-sqlite3')).default;
-  const db = new Database(TEMPLATES_DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workflow_templates (
-      template_id  TEXT PRIMARY KEY,
-      name         TEXT NOT NULL,
-      description  TEXT DEFAULT '',
-      category     TEXT DEFAULT 'General',
-      steps_json   TEXT NOT NULL,
-      created_at   TEXT NOT NULL,
-      updated_at   TEXT NOT NULL
-    );
-  `);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_wf_category ON workflow_templates(category);`);
-
-  return db;
-}
-
 // ============================================================
 // 全局日历数据库 —— 日历与项目完全独立（2026-08-18 起）
 // 事件/账户/同步日志/订阅 token 存于 app root 的 .calendar.db，
@@ -1304,101 +1258,4 @@ async function migrateLegacyCalendarData(db: any): Promise<void> {
   } catch (e) {
     console.error('[calendar-db] 历史日历数据迁移失败（不影响后续使用）:', e);
   }
-}
-
-export interface WorkflowStep {
-  order: number;
-  title: string;
-  modelId?: string;
-  thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
-  skills: string[];
-  tools: string[];
-  prompt: string;
-  attachmentHint?: string;
-  attachments?: string[];
-  nextSteps?: number[];
-}
-
-export interface WorkflowTemplate {
-  template_id: string;
-  name: string;
-  description: string;
-  category: string;
-  steps: WorkflowStep[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateWorkflowTemplateData {
-  name: string;
-  description?: string;
-  category?: string;
-  steps: WorkflowStep[];
-}
-
-function _rowToTemplate(row: any): WorkflowTemplate {
-  return {
-    template_id: row.template_id,
-    name: row.name,
-    description: row.description || '',
-    category: row.category || 'General',
-    steps: JSON.parse(row.steps_json || '[]'),
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-  };
-}
-
-export async function createWorkflowTemplate(data: CreateWorkflowTemplateData): Promise<string> {
-  const db = await initTemplatesDb();
-  const template_id = _newId();
-  const now = _now();
-  db.prepare(`
-    INSERT INTO workflow_templates (template_id, name, description, category, steps_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    template_id,
-    data.name,
-    data.description ?? '',
-    data.category ?? 'General',
-    JSON.stringify(data.steps),
-    now,
-    now,
-  );
-  return template_id;
-}
-
-export async function getWorkflowTemplate(templateId: string): Promise<WorkflowTemplate | null> {
-  const db = await initTemplatesDb();
-  const row = db.prepare(`SELECT * FROM workflow_templates WHERE template_id = ?`).get(templateId);
-  return row ? _rowToTemplate(row) : null;
-}
-
-export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
-  const db = await initTemplatesDb();
-  const rows = db.prepare(`SELECT * FROM workflow_templates ORDER BY updated_at DESC`).all();
-  return rows.map(_rowToTemplate);
-}
-
-export async function updateWorkflowTemplate(templateId: string, data: Partial<CreateWorkflowTemplateData>): Promise<void> {
-  const db = await initTemplatesDb();
-  const setters: string[] = [];
-  const params: any[] = [];
-
-  if (data.name !== undefined) { setters.push('name = ?'); params.push(data.name); }
-  if (data.description !== undefined) { setters.push('description = ?'); params.push(data.description); }
-  if (data.category !== undefined) { setters.push('category = ?'); params.push(data.category); }
-  if (data.steps !== undefined) { setters.push('steps_json = ?'); params.push(JSON.stringify(data.steps)); }
-
-  if (setters.length === 0) return;
-
-  setters.push('updated_at = ?');
-  params.push(_now());
-  params.push(templateId);
-
-  db.prepare(`UPDATE workflow_templates SET ${setters.join(', ')} WHERE template_id = ?`).run(...params);
-}
-
-export async function deleteWorkflowTemplate(templateId: string): Promise<void> {
-  const db = await initTemplatesDb();
-  db.prepare(`DELETE FROM workflow_templates WHERE template_id = ?`).run(templateId);
 }

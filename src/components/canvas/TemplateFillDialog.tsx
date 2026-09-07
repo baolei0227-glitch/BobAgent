@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Check, AlertCircle, Download, FileText, X, PackageOpen, Table, Plus, Copy, Trash2, ClipboardList, RefreshCw, Save, ChevronDown, ChevronRight, Upload, Sparkles } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import * as XLSX from 'xlsx';
 
 export interface FillTemplateItem {
@@ -490,14 +491,16 @@ export function TemplateFillPanel({
           )}
         </div>
         {!embedded && (
-          <button
+          <Button
             type="button"
             onClick={onClose}
-            className="rounded-md p-1 transition-colors hover:bg-black/5"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
+            aria-label="Close"
           >
             <X className="h-3.5 w-3.5" />
-          </button>
+          </Button>
         )}
       </div>
 
@@ -560,16 +563,18 @@ export function TemplateFillPanel({
               <span className="text-11" style={{ color: 'var(--ink-faint)' }}>
                 填到第 {(expandedRow ?? 0) + 1} 行
               </span>
-              <button
+              <Button
                 type="button"
                 onClick={handleAiExtract}
                 disabled={extracting || !pasteText.trim()}
-                className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors hover:opacity-90 disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                loading={extracting}
+                variant="solid"
+                tone="brand"
+                size="sm"
               >
                 {extracting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
                 {extracting ? '识别中…' : '识别并填充'}
-              </button>
+              </Button>
             </div>
             {extractMsg && (
               <div
@@ -705,25 +710,29 @@ export function TemplateFillPanel({
                           style={{ backgroundColor: 'var(--paper-soft)', borderBottom: '1px solid var(--line-soft)' }}
                         >
                           <div className="flex items-center gap-0.5">
-                            <button
+                            <Button
                               type="button"
                               onClick={() => duplicateRow(rowIdx)}
+                              variant="ghost"
+                              tone="neutral"
+                              size="icon-xs"
                               title="Duplicate row"
-                              className="rounded p-1 transition-colors hover:bg-black/5"
-                              style={{ color: 'var(--ink-muted)' }}
+                              aria-label="Duplicate row"
                             >
                               <Copy className="h-3 w-3" />
-                            </button>
-                            <button
+                            </Button>
+                            <Button
                               type="button"
                               onClick={() => removeRow(rowIdx)}
-                              title="Delete row"
                               disabled={rows.length <= 1}
-                              className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
-                              style={{ color: 'oklch(0.55 0.18 35)' }}
+                              variant="ghost"
+                              tone="danger"
+                              size="icon-xs"
+                              title="Delete row"
+                              aria-label="Delete row"
                             >
                               <Trash2 className="h-3 w-3" />
-                            </button>
+                            </Button>
                           </div>
                         </td>
                       </tr>
@@ -763,25 +772,29 @@ export function TemplateFillPanel({
                         </div>
                         {/* 操作按钮：阻止冒泡，避免误触折叠 */}
                         <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
-                          <button
+                          <Button
                             type="button"
                             onClick={() => duplicateRow(rowIdx)}
+                            variant="ghost"
+                            tone="neutral"
+                            size="icon-xs"
                             title="Duplicate row"
-                            className="rounded p-1 transition-colors hover:bg-black/5"
-                            style={{ color: 'var(--ink-muted)' }}
+                            aria-label="Duplicate row"
                           >
                             <Copy className="h-3 w-3" />
-                          </button>
-                          <button
+                          </Button>
+                          <Button
                             type="button"
                             onClick={() => removeRow(rowIdx)}
-                            title="Delete row"
                             disabled={rows.length <= 1}
-                            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
-                            style={{ color: 'oklch(0.55 0.18 35)' }}
+                            variant="ghost"
+                            tone="danger"
+                            size="icon-xs"
+                            title="Delete row"
+                            aria-label="Delete row"
                           >
                             <Trash2 className="h-3 w-3" />
-                          </button>
+                          </Button>
                         </div>
                       </div>
                       {/* 展开时显示字段网格 */}
@@ -820,15 +833,16 @@ export function TemplateFillPanel({
 
               {/* 行操作 + 粘贴导入 */}
               <div className="mt-1.5 flex items-center justify-between gap-2">
-                <button
+                <Button
                   type="button"
                   onClick={addRow}
-                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors hover:opacity-90"
-                  style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}
+                  variant="soft"
+                  tone="brand"
+                  size="xs"
                 >
                   <Plus className="h-3 w-3" />
                   Add row
-                </button>
+                </Button>
                 <span className="text-11 opacity-70" style={{ color: 'var(--ink-muted)' }}>
                   {rows.length} 行 · 每行生成一份文档（共 {nonEmptyRows.length} 行已填）
                 </span>
@@ -926,35 +940,37 @@ export function TemplateFillPanel({
       {/* Footer */}
       <div className="flex items-center justify-between gap-2 px-4 py-2.5" style={{ borderTop: '1px solid color-mix(in oklab, var(--line) 30%, transparent)' }}>
         <div className="flex items-center gap-1">
-          <button
+          <Button
             type="button"
             onClick={handleDownloadTemplate}
             disabled={allFields.length === 0}
-            className="rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-black/5 disabled:opacity-40"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="sm"
             title="Download .xlsx template with field headers (fill in Excel, then drop back)"
           >
             <span className="inline-flex items-center gap-1">
               <Download className="h-3 w-3" />
               Template
             </span>
-          </button>
+          </Button>
 
           {/* 填写数据保存 / 恢复（跟项目走：homework/template/.fill-data/<scene>.json；打开不自动回填） */}
           <span className="mx-1 inline-block h-4 w-px" style={{ backgroundColor: 'var(--line)' }} />
-          <button
+          <Button
             type="button"
             onClick={handleSaveData}
             disabled={dataBusy || nonEmptyRows.length === 0}
-            className="rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-black/5 disabled:opacity-40"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="sm"
             title="Save current fills to the project (homework/template/.fill-data/)"
           >
             <span className="inline-flex items-center gap-1">
               {dataBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
               Save data
             </span>
-          </button>
+          </Button>
           {savedData && (
             <>
               <button
@@ -974,36 +990,41 @@ export function TemplateFillPanel({
                   {loadArmed ? 'Load now?' : `Load saved (${savedData.rows.length})`}
                 </span>
               </button>
-              <button
+              <Button
                 type="button"
                 onClick={handleClearData}
                 disabled={dataBusy}
-                className="rounded-md p-1.5 text-xs transition-colors hover:bg-black/5 disabled:opacity-40"
-                style={{ color: 'var(--ink-muted)' }}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
                 title="Clear saved fills"
+                aria-label="Clear saved fills"
               >
                 <Trash2 className="h-3 w-3" />
-              </button>
+              </Button>
             </>
           )}
         </div>
         <div className="flex items-center gap-2">
           {!embedded && (
-            <button
+            <Button
               type="button"
               onClick={onClose}
-              className="rounded-md px-3.5 py-1.5 text-xs transition-colors hover:bg-black/5"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="md"
             >
               Close
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             type="button"
             onClick={handleSubmit}
             disabled={submitting || allFields.length === 0 || checked.size === 0}
-            className="flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
-            style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+            loading={submitting}
+            variant="solid"
+            tone="brand"
+            size="md"
           >
             {submitting ? (
               <>
@@ -1016,7 +1037,7 @@ export function TemplateFillPanel({
                 {previewRows > 1 ? `Generate × ${previewRows}` : 'Generate'}
               </>
             )}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

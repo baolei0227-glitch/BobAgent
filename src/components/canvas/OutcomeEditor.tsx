@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Save, RefreshCw, FileCheck, Edit3, Wand2, ChevronDown, AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import {
   OUTCOME_FIELD_DEFS,
   type Outcome,
@@ -276,25 +277,29 @@ export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonl
           {/* 操作按钮（仅编辑态显示） */}
           {!isLocked && editing && (
             <div className="flex items-center gap-1.5">
-              <button
+              <Button
                 onClick={(e) => { e.stopPropagation(); handleExtract(); }}
                 disabled={extracting}
-                className="flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50"
-                style={{ backgroundColor: 'var(--info)', color: '#fff' }}
+                loading={extracting}
+                variant="solid"
+                tone="info"
+                size="xs"
                 title="AI 从对话记录中提取成果块"
               >
                 <Wand2 className={`h-2.5 w-2.5 ${extracting ? 'animate-spin' : ''}`} />
                 {extracting ? '提取中...' : 'AI 提取'}
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={(e) => { e.stopPropagation(); handleSave(); }}
                 disabled={saving}
-                className="flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                loading={saving}
+                variant="solid"
+                tone="brand"
+                size="xs"
               >
                 <Save className="h-2.5 w-2.5" />
                 {saving ? '保存中...' : '保存'}
-              </button>
+              </Button>
             </div>
           )}
 

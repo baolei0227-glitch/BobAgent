@@ -25,157 +25,16 @@ interface QuestionPopupProps {
   onClose: () => void;
 }
 
-/** 按顶层括号深度把可能拼接的多个 JSON 数组拆分为独立片段（正确处理嵌套数组的 ] 不截断） */
-function splitTopLevelArrays(raw: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let start = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === '\\') esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') { inStr = true; continue; }
-    if (ch === '[' || ch === '{') { if (depth === 0) start = i; depth++; }
-    else if (ch === ']' || ch === '}') {
-      depth--;
-      if (depth === 0 && start >= 0) { parts.push(raw.slice(start, i + 1)); start = -1; }
-    }
-  }
-  return parts;
-}
-
 /**
- * 容错修复：模型偶发在选项文本内使用「未转义的英文双引号」（如 涉及"浮桥"纠纷），
- * 导致整个 JSON 非法、JSON.parse 抛错 → 弹窗不出现、原文裸露。
- * 逐字符扫描：字符串内部的裸引号（后随字符而非 , } ] :）判定为文本引号，
- * 交替替换为中文弯引号 ""（合法字符，无需转义）；字符串边界引号保持不变。
- * 对合法 JSON 无副作用（合法 JSON 中字符串内部引号必为 \" 转义形式，此处已跳过）。
+ * 漂移清洗兜底：结构化提问统一走 ask_user_questions 工具，若模型偶发无视约定
+ * 在正文输出旧版 QUESTIONS 注释块（含 JSON），此处剥掉整块防 JSON 裸露（不解析、不弹窗）。
  */
-function repairUnescapedQuotes(raw: string): string {
-  let out = '';
-  let inStr = false;
-  let esc = false;
-  let textQuoteCount = 0;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    if (!inStr) {
-      if (ch === '"') inStr = true;
-      out += ch;
-      continue;
-    }
-    // inStr 状态
-    if (esc) { out += ch; esc = false; continue; }
-    if (ch === '\\') { out += ch; esc = true; continue; }
-    if (ch === '"') {
-      // 向后看一个非空白字符：结构字符 → 字符串边界；否则 → 文本引号
-      let j = i + 1;
-      while (j < raw.length && /\s/.test(raw[j])) j++;
-      const next = raw[j];
-      if (next === ',' || next === '}' || next === ']' || next === ':' || j >= raw.length) {
-        inStr = false;
-        out += ch;
-      } else {
-        textQuoteCount++;
-        out += textQuoteCount % 2 === 1 ? '\u201c' : '\u201d';
-      }
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
-
-/** 从 AI 回复文本中提取 QUESTIONS 块，返回问题和去除块后的纯文本 */
-export function extractQuestions(content: string): { questions: QuestionItem[]; cleanContent: string } {
-  if (!content) return { questions: [], cleanContent: content };
-
-  // 尝试多种包裹格式（兼容模型偶发的 <-- / --!> 变体与注释缺失）
-  const toQuestions = (parsed: unknown): QuestionItem[] | null =>
-    Array.isArray(parsed)
-      ? (parsed as QuestionItem[])
-      : parsed && typeof parsed === 'object' && 'question' in (parsed as Record<string, unknown>)
-        ? [{
-            id: (parsed as Record<string, unknown>).id as string ?? 'q1',
-            question: String((parsed as Record<string, unknown>).question ?? ''),
-            options: Array.isArray((parsed as Record<string, unknown>).options)
-              ? ((parsed as Record<string, unknown>).options as string[])
-              : [],
-            allowCustom: (parsed as Record<string, unknown>).allowCustom !== false,
-          } satisfies QuestionItem]
-        : null;
-
-  const tryParse = (raw: string): QuestionItem[] | null => {
-    // 1) 原样解析（数组或单个对象）
-    try {
-      const parsed = JSON.parse(raw);
-      const qs = toQuestions(parsed);
-      if (qs) return qs;
-    } catch { /* 单数组解析失败，继续尝试拼接解析 */ }
-    // 2) 容错：修复选项文本内未转义英文引号（如 "浮桥"）后再解析
-    try {
-      const repaired = repairUnescapedQuotes(raw);
-      const parsed = JSON.parse(repaired);
-      const qs = toQuestions(parsed);
-      if (qs) return qs;
-    } catch { /* 仍失败，继续拼接解析 */ }
-    // 3) 容错：模型偶发把多题拆成多个数组用空格拼接（[...] [...] [...]），逐个解析后合并
-    try {
-      const segments = splitTopLevelArrays(raw);
-      const merged: QuestionItem[] = [];
-      for (const seg of segments) {
-        if (!seg.startsWith('[')) continue;
-        try {
-          const arr = JSON.parse(seg);
-          if (Array.isArray(arr)) merged.push(...(arr as QuestionItem[]));
-          continue;
-        } catch { /* 片段也可能含未转义引号 */ }
-        try {
-          const arr = JSON.parse(repairUnescapedQuotes(seg));
-          if (Array.isArray(arr)) merged.push(...(arr as QuestionItem[]));
-        } catch { /* ignore */ }
-      }
-      if (merged.length > 0) return merged;
-    } catch { /* ignore */ }
-    return null;
-  };
-
-  // 1) 标准包裹：<!-- QUESTIONS --> ... <!-- /QUESTIONS -->
-  const regex = /<!--\s*QUESTIONS\s*-->([\s\S]*?)<!--\s*\/QUESTIONS\s*-->/;
-  const match = content.match(regex);
-  if (match) {
-    const questions = tryParse(match[1].trim());
-    if (questions && questions.length > 0) {
-      return { questions, cleanContent: content.replace(regex, '').replace(/\n{3,}/g, '\n\n').trim() };
-    }
-  }
-
-  // 2) 变体包裹：<-- / -->（模型偶发的注释闭合符号错误）
-  const regexVariant = /<!--\s*QUESTIONS\s*-->([\s\S]*?)<--\s*\/QUESTIONS\s*-->/;
-  const matchV = content.match(regexVariant);
-  if (matchV) {
-    const questions = tryParse(matchV[1].trim());
-    if (questions && questions.length > 0) {
-      return { questions, cleanContent: content.replace(regexVariant, '').replace(/\n{3,}/g, '\n\n').trim() };
-    }
-  }
-
-  // 3) 无包裹：正文中出现 JSON 数组且含 question 键 → 视为问卷。
-  //    兼容模型偶发把多题拆成多个数组用空格拼接（[...] [...] [...]）的情况。
-  const bareArray = content.match(/(?:\[\s*\{[\s\S]*?\}\s*\](?:\s*\[\s*\{[\s\S]*?\}\s*\])*)/);
-  if (bareArray) {
-    const questions = tryParse(bareArray[0]);
-    if (questions && questions.length > 0) {
-      return { questions, cleanContent: content.replace(bareArray[0], '').replace(/\n{3,}/g, '\n\n').trim() };
-    }
-  }
-
-  return { questions: [], cleanContent: content };
+export function stripQuestionsBlock(content: string): string {
+  if (!content || !content.includes('QUESTIONS')) return content;
+  return content
+    .replace(/<!--\s*QUESTIONS\s*-->[\s\S]*?(?:<!--\s*\/QUESTIONS\s*-->|<--\s*\/QUESTIONS\s*-->)/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 export default function QuestionPopup({ questions, onSubmit, onClose }: QuestionPopupProps) {

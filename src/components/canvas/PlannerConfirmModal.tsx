@@ -5,6 +5,7 @@
 // 用户可修改后点确认；结果（含编辑后参数）POST /api/chat/confirm 回传，服务端再真正执行。
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Button } from '@/components/ui/button';
 
 export type PlannerCard = {
   tool: string;
@@ -153,7 +154,6 @@ export function PlannerConfirmModal({
   };
 
   const label = mode === 'create' ? '确认创建排程' : mode === 'update' ? '确认修改' : '确认删除';
-  const primaryColor = mode === 'delete' ? 'var(--danger)' : 'var(--primary)';
 
   // React Flow 节点 wrapper 带 transform → 用 portal 挂到 body，避免 fixed 定位被祖先扭曲
   return createPortal(
@@ -183,14 +183,16 @@ export function PlannerConfirmModal({
               {pending.timeoutSec ? ` ${pending.timeoutSec}s 内未操作将自动取消。` : ''}
             </div>
           </div>
-          <button
+          <Button
             type="button"
             onClick={() => submit(false)}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-black/10"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
+            aria-label="关闭"
           >
             ✕
-          </button>
+          </Button>
         </div>
 
         {mode === 'delete' ? (
@@ -300,24 +302,27 @@ export function PlannerConfirmModal({
         )}
 
         <div className="mt-4 flex justify-end gap-2">
-          <button
+          <Button
             type="button"
             onClick={() => submit(false)}
             disabled={submitting}
-            className="rounded-lg border px-3 py-1.5 text-xs font-medium transition-opacity disabled:opacity-50"
-            style={{ borderColor: 'color-mix(in oklab, var(--line) 60%, transparent)', color: 'var(--ink-muted)', backgroundColor: 'var(--paper-soft)' }}
+            variant="soft"
+            tone="neutral"
+            size="sm"
           >
             取消
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             onClick={() => submit(true)}
             disabled={submitting || (mode !== 'delete' && !title.trim())}
-            className="rounded-lg px-3.5 py-1.5 text-xs font-semibold text-white transition-opacity disabled:opacity-50"
-            style={{ backgroundColor: primaryColor }}
+            loading={submitting}
+            variant="solid"
+            tone={mode === 'delete' ? 'danger' : 'brand'}
+            size="sm"
           >
             {submitting ? '处理中…' : label}
-          </button>
+          </Button>
         </div>
       </div>
     </div>,

@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 export interface CtxMeterInfo {
   system: number;
@@ -57,6 +58,7 @@ export function ContextMeter({ meter }: { meter: CtxMeterInfo | null }) {
 
   return (
     <div ref={ref} className="relative flex shrink-0 items-center">
+      {/* 环形计量器 = 自绘 SVG 特殊控件，豁免迁移 */}
       <button
         type="button"
         onClick={(e) => {
@@ -98,14 +100,15 @@ export function ContextMeter({ meter }: { meter: CtxMeterInfo | null }) {
             <span className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>
               Context usage
             </span>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               onClick={() => setOpen(false)}
-              className="rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
+              aria-label="关闭明细"
             >
-              <X className="h-3 w-3" />
-            </button>
+              <X className="h-3.5 w-3.5" />
+            </Button>
           </div>
 
           {/* 占用率 + 进度条 */}

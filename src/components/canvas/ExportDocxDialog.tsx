@@ -7,6 +7,7 @@ import {
   Palette, Type, Pilcrow, FileText, FileCode, Lock,
 } from 'lucide-react';
 import type { DocxExportConfig } from '@/lib/md-to-docx';
+import { Button } from '@/components/ui/button';
 import { DEFAULT_DOCX_CONFIG } from '@/lib/md-to-docx';
 
 // ---------------------------------------------------------------------------
@@ -504,20 +505,16 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
                 ]}
               />
             </div>
-            <button
+            <Button
               onClick={onClose}
               disabled={exporting}
-              className="rounded-lg p-1.5 transition-colors disabled:opacity-50"
-              style={{ color: 'var(--ink-muted)' }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--ink) 8%, transparent)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
+              variant="ghost"
+              tone="neutral"
+              size="icon"
+              aria-label="Close"
             >
               <X className="h-4 w-4" />
-            </button>
+            </Button>
           </div>
 
           {/* Body */}
@@ -585,23 +582,25 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
                       }}
                       autoFocus
                     />
-                    <button
+                    <Button
                       onClick={handleSaveAs}
-                      className="rounded-md px-2.5 py-1 text-xs font-medium transition-opacity hover:opacity-80"
-                      style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                      variant="solid"
+                      tone="brand"
+                      size="sm"
                     >
                       Save
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       onClick={() => {
                         setShowSaveAs(false);
                         setNewPresetName('');
                       }}
-                      className="rounded-md px-2 py-1 text-xs font-medium transition-colors"
-                      style={{ color: 'var(--ink-muted)' }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="sm"
                     >
                       Cancel
-                    </button>
+                    </Button>
                   </div>
                 ) : (
                   <button
@@ -859,40 +858,27 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
                     onChange={handleHeaderImageFile}
                   />
                   <div className="flex items-center gap-2">
-                    <button
+                    <Button
                       type="button"
                       onClick={handlePickImage}
-                      className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors"
-                      style={{
-                        borderColor: 'var(--line)',
-                        backgroundColor: 'var(--paper)',
-                        color: 'var(--ink)',
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.backgroundColor =
-                          'color-mix(in oklab, var(--ink) 5%, transparent)';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.backgroundColor = 'var(--paper)';
-                      }}
+                      variant="outline"
+                      tone="neutral"
+                      size="sm"
                     >
                       <Upload className="h-3.5 w-3.5" />
                       {config.header.imageDataUrl ? 'Replace' : 'Upload'}
-                    </button>
+                    </Button>
                     {config.header.imageDataUrl && (
-                      <button
+                      <Button
                         type="button"
                         onClick={() => updateHeader('imageDataUrl', '')}
                         title="Remove image"
-                        className="inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors"
-                        style={{
-                          borderColor: 'var(--line)',
-                          backgroundColor: 'var(--paper)',
-                          color: 'var(--ink-muted)',
-                        }}
+                        variant="outline"
+                        tone="neutral"
+                        size="sm"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      </Button>
                     )}
                   </div>
                   {config.header.imageDataUrl ? (
@@ -1007,31 +993,26 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
               backgroundColor: 'color-mix(in oklab, var(--ink) 1.5%, transparent)',
             }}
           >
-            <button
+            <Button
               onClick={onClose}
               disabled={exporting}
-              className="rounded-lg px-4 py-1.5 text-sm font-medium transition-colors disabled:opacity-50"
-              style={{ color: 'var(--ink-muted)' }}
-              onMouseEnter={(e) => {
-                if (!exporting)
-                  e.currentTarget.style.backgroundColor =
-                    'color-mix(in oklab, var(--ink) 6%, transparent)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
+              variant="ghost"
+              tone="neutral"
+              size="md"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={handleExport}
               disabled={exporting}
-              className="rounded-lg px-5 py-1.5 text-sm font-medium flex items-center gap-1.5 transition-opacity disabled:opacity-50"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              loading={exporting}
+              variant="solid"
+              tone="brand"
+              size="md"
             >
               {exporting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {exporting ? 'Exporting...' : 'Export'}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

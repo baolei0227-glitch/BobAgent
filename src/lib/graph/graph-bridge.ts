@@ -22,7 +22,6 @@ export const GRAPH_BRIDGE_ACTIONS = [
   'graphGetSnapshot',
   'graphGetViewport',
   'graphExpandNode',
-  'graphCollapseNode',
   'graphSetViewport',
   'graphFitView',
   'graphZoomBy',
@@ -35,7 +34,6 @@ export type GraphBridgeAction = (typeof GRAPH_BRIDGE_ACTIONS)[number];
 /** 需要 control 授权的动作（可读 + 可操作画布）；其余 graph 动作只需 read（非 none） */
 const CONTROL_ACTIONS: ReadonlySet<string> = new Set([
   'graphExpandNode',
-  'graphCollapseNode',
   'graphSetViewport',
   'graphFitView',
   'graphZoomBy',
@@ -119,12 +117,6 @@ export async function executeGraphBridgeAction(
       const nodeId = String(data.nodeId ?? '');
       if (!nodeId) return { success: false, error: 'nodeId is required' };
       gateway.expandNode(nodeId);
-      return { success: true, data: { ok: true } };
-    }
-    case 'graphCollapseNode': {
-      const nodeId = String(data.nodeId ?? '');
-      if (!nodeId) return { success: false, error: 'nodeId is required' };
-      gateway.collapseNode(nodeId);
       return { success: true, data: { ok: true } };
     }
     case 'graphSetViewport': {

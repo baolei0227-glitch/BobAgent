@@ -7,6 +7,7 @@
 
 import { useState } from 'react';
 import { MessageSquare, X, Wand2, Loader2, Check, Trash2, CornerDownRight, Plus, Minus, FileDiff, ArrowRight, LocateFixed, Eye, Pencil } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 export interface MdAnnotation {
   id: string;
@@ -243,14 +244,17 @@ export function MdAnnotationPanel({
             修订{totalPending > 0 ? ` ${totalPending}` : ''}
           </button>
         </div>
-        <button
+        <Button
           onClick={onClose}
-          className="ml-auto rounded p-0.5 hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--ink-muted)' }}
+          variant="ghost"
+          tone="neutral"
+          size="icon-sm"
+          className="ml-auto"
           title="Close annotations"
+          aria-label="Close annotations"
         >
           <X className="h-3.5 w-3.5" />
-        </button>
+        </Button>
       </div>
 
       {/* 批注视图：批量操作 + 批注列表 */}
@@ -260,16 +264,19 @@ export function MdAnnotationPanel({
           只要还有未解决批注就显示，再次修订会追加新轮，而非覆盖） */}
       {unresolved.length > 0 && (
         <div className="flex shrink-0 items-center gap-1.5 border-b px-2 py-1.5" style={{ borderColor: 'var(--line)' }}>
-          <button
+          <Button
             onClick={onRevise}
             disabled={revising}
-            className="flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-11 font-semibold transition-colors disabled:opacity-50"
-            style={{ backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }}
+            loading={revising}
+            variant="solid"
+            tone="brand"
+            size="xs"
+            className="flex-1"
             title="按批注意见逐条修改（AI 结合上下文修改批注内容，结果进修订面板可回退）"
           >
             {revising ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
             {revising ? 'Revising…' : '按批注修订'}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -320,25 +327,27 @@ export function MdAnnotationPanel({
                   style={{ borderColor: 'var(--input-border)', color: 'var(--ink)', fontFamily: 'var(--font-sans)' }}
                 />
                 <div className="mt-0.5 flex items-center justify-end gap-1">
-                  <button
+                  <Button
                     onClick={(e) => { e.stopPropagation(); setEditingId(null); }}
-                    className="rounded px-1.5 py-0.5 text-10 font-medium transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{ color: 'var(--ink-muted)' }}
+                    variant="ghost"
+                    tone="neutral"
+                    size="micro"
                   >
                     取消
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={(e) => {
                       e.stopPropagation();
                       if (editText.trim()) onUpdateAnnotation(a.id, editText.trim());
                       setEditingId(null);
                     }}
-                    className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-10 font-medium"
-                    style={{ backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }}
+                    variant="solid"
+                    tone="brand"
+                    size="micro"
                   >
                     <Check className="h-2.5 w-2.5" />
                     保存
-                  </button>
+                  </Button>
                 </div>
               </div>
             ) : (
@@ -351,7 +360,7 @@ export function MdAnnotationPanel({
               <div className="flex items-center gap-0.5">
                 {!a.resolved && (
                   <>
-                    <button
+                    <Button
                       onClick={(e) => {
                         e.stopPropagation();
                         if (editingId === a.id) {
@@ -361,12 +370,15 @@ export function MdAnnotationPanel({
                           setEditText(a.content);
                         }
                       }}
-                      className="rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[var(--paper-hover)]"
-                      style={{ color: 'var(--ink-muted)' }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-xs"
+                      className="opacity-0 transition-opacity group-hover:opacity-100"
                       title="Edit annotation"
+                      aria-label="Edit annotation"
                     >
                       <Pencil className="h-3 w-3" />
-                    </button>
+                    </Button>
                     <button
                       onClick={(e) => { e.stopPropagation(); onRewriteAnnotation(a); }}
                       disabled={rewritingIndex >= 0 && a.id !== rewritingId}
@@ -382,14 +394,17 @@ export function MdAnnotationPanel({
                     </button>
                   </>
                 )}
-                <button
+                <Button
                   onClick={(e) => { e.stopPropagation(); onDeleteAnnotation(a.id); }}
-                  className="rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="danger"
+                  size="icon-xs"
+                  className="opacity-0 transition-opacity group-hover:opacity-100"
                   title="Delete annotation"
+                  aria-label="Delete annotation"
                 >
                   <Trash2 className="h-3 w-3" />
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -488,22 +503,24 @@ export function MdAnnotationPanel({
                             {pendingCount} 待处理
                           </span>
                           <div className="flex items-center gap-1">
-                            <button
+                            <Button
                               onClick={onAcceptAll}
-                              className="rounded px-1.5 py-0.5 text-10 font-medium"
-                              style={{ backgroundColor: 'var(--success-soft)', color: 'var(--success)' }}
+                              variant="soft"
+                              tone="success"
+                              size="micro"
                               title="Accept all revisions in this round"
                             >
                               全部接受
-                            </button>
-                            <button
+                            </Button>
+                            <Button
                               onClick={onRejectAll}
-                              className="rounded px-1.5 py-0.5 text-10 font-medium"
-                              style={{ backgroundColor: 'var(--danger-soft)', color: 'var(--danger)' }}
+                              variant="soft"
+                              tone="danger"
+                              size="micro"
                               title="Reject all revisions in this round"
                             >
                               全部拒绝
-                            </button>
+                            </Button>
                           </div>
                         </div>
                       )}
@@ -552,20 +569,22 @@ export function MdAnnotationPanel({
                             )}
                             {active && !allAccepted && !allRejected && (
                               <div className="mt-0.5 flex items-center gap-1">
-                                <button
+                                <Button
                                   onClick={(e) => { e.stopPropagation(); pair.items.forEach((r) => onAcceptRevision(keyOf(r))); }}
-                                  className="rounded px-1 py-0.5 text-10 font-medium hover:opacity-80"
-                                  style={{ backgroundColor: 'var(--success-soft)', color: 'var(--success)' }}
+                                  variant="soft"
+                                  tone="success"
+                                  size="micro"
                                 >
                                   接受
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                   onClick={(e) => { e.stopPropagation(); pair.items.forEach((r) => onRejectRevision(keyOf(r))); }}
-                                  className="rounded px-1 py-0.5 text-10 font-medium hover:opacity-80"
-                                  style={{ backgroundColor: 'var(--danger-soft)', color: 'var(--danger)' }}
+                                  variant="soft"
+                                  tone="danger"
+                                  size="micro"
                                 >
                                   拒绝
-                                </button>
+                                </Button>
                               </div>
                             )}
                           </div>

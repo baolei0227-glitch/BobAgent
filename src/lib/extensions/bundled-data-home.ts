@@ -23,6 +23,7 @@ export interface BundledDataHome {
 /** 登记表：plugin id → { 注入 env 键, extensions 下子目录 } */
 const PLUGIN_DATA_ENV: Record<string, { envKey: string; sub: string }> = {
   'bob-notes-mcp': { envKey: 'BOB_NOTES_MCP_HOME', sub: 'bob-notes-mcp' },
+  'bob-mind-mcp': { envKey: 'BOB_MIND_MCP_HOME', sub: 'bob-mind-mcp' },
 };
 
 /** 返回插件应注入的数据根（仅登记过的随包插件返回；其余 undefined 不注入） */

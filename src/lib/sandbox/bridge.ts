@@ -140,12 +140,6 @@ export const BRIDGE_ACTIONS: BridgeActionDef[] = [
     returns: '{ ok: true }',
   },
   {
-    action: 'graphCollapseNode',
-    description: 'Collapse a node container (requires control)',
-    params: ['nodeId:string'],
-    returns: '{ ok: true }',
-  },
-  {
     action: 'graphSetViewport',
     description: 'Set canvas viewport (requires control)',
     params: ['viewport:{ x, y, zoom }'],

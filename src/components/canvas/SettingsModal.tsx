@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef, useMemo } from 'react';
-import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, RefreshCw, Keyboard, Trash, ClipboardCheck, Bot, BookOpen, CalendarDays, Gauge } from 'lucide-react';
+import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, RefreshCw, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -41,7 +41,6 @@ import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normali
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { TemplateLibraryModal } from './TemplateLibraryModal';
 import { WechatBindModal } from './WechatBindModal';
-import { AgentSettingsModal } from './AgentSettingsModal';
 import { UsagePanel } from './UsagePanel';
 
 interface SettingsModalProps {
@@ -229,7 +228,6 @@ const SECTION_TITLES: Record<string, string> = {
   quickprompts: 'Quick Prompts',
   templates: 'Templates',
   wechat: 'WeChat Bind',
-  agents: 'Agents',
   usage: 'Model Usage',
 };
 
@@ -275,7 +273,7 @@ export function SettingsModal({
   // 单模型添加验证中（勾选 / Add 时的连接测试），驱动 spinner 与防重复点击
   const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
   // 统一导航：左栏目录选中项，右栏显示对应面板
-  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'agents' | 'usage'>('roles');
+  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'usage'>('roles');
   // Model Pool 以独立弹窗方式打开（从 Role Assignment 的按钮进入，左侧导航不再包含该项）
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
   // 默认保存目录已固定为内置 BobWorkspace（~/BobWork/BobWorkspace），不提供自定义存储位置
@@ -309,7 +307,7 @@ export function SettingsModal({
 
   // 角色派发区块折叠状态（默认全部折叠，点击标题展开/收起）
   const [rolesCollapsed, setRolesCollapsed] = useState<Record<string, boolean>>({
-    chat: true, ocr: true, stt: true, image: true,
+    chat: true, ocr: true, stt: true, image: true, task: true, outcome: true,
   });
   // 模型管理界面单一真源：pickerSide = 当前选中厂商（selectedChatProvider 即它本身）
   const [pickerSide, setPickerSide] = useState<ProviderType>('deepseek');
@@ -385,6 +383,11 @@ export function SettingsModal({
   const [imageEditSelectedModels, setImageEditSelectedModels] = useState<string[]>([]);
   // 图像编辑候选池（与 Chat 统一：首个 model 为活动模型）
   const [imagePool, setImagePool] = useState<Array<{ provider: string; modelId: string }>>([]);
+
+  // 任务模型（Task Model）：通用层，任务摘要/会议纪要/日程解析/AI 字段抽取等轻量任务（singleSelect）
+  const [taskModelPool, setTaskModelPool] = useState<Array<{ provider: string; modelId: string }>>([]);
+  // 成果块模型（Outcome Model）：成果块（法律引用）专属，默认跟随主对话（singleSelect）
+  const [outcomeModelPool, setOutcomeModelPool] = useState<Array<{ provider: string; modelId: string }>>([]);
 
   // 头像设置
   const [avatarMode, setAvatarMode] = useState<'random' | 'fixed'>('random');
@@ -488,6 +491,13 @@ export function SettingsModal({
           setImageEditSelectedModels(settings.imageEdit.selectedModels?.filter((s) => s.trim()) || []);
           setImagePool(settings.imageEdit.pool?.length ? settings.imageEdit.pool : (settings.imageEdit.model ? [{ provider: settings.imageEdit.provider || 'doubao', modelId: settings.imageEdit.model }] : []));
         }
+        // 任务模型 / 成果块模型（Wanted 系列，分别单传给通用任务层与成果块专属层）
+        if (settings.taskModel) {
+          setTaskModelPool(settings.taskModel.pool?.length ? settings.taskModel.pool : (settings.taskModel.defaultModel ? [{ provider: (settings.taskModel.defaultProvider as string) || '', modelId: settings.taskModel.defaultModel }] : []));
+        }
+        if (settings.outcomeModel) {
+          setOutcomeModelPool(settings.outcomeModel.pool?.length ? settings.outcomeModel.pool : (settings.outcomeModel.defaultModel ? [{ provider: (settings.outcomeModel.defaultProvider as string) || '', modelId: settings.outcomeModel.defaultModel }] : []));
+        }
         // 头像设置
         setAvatarMode(settings.avatar?.mode ?? 'random');
         setAvatarSelected(settings.avatar?.selected ?? '');
@@ -528,6 +538,7 @@ export function SettingsModal({
     selectedChatModel, chatModelPool,
     sttProvider, sttModel, sttPool,
     imageEditProvider, imageEditModel, imageEditSelectedModels, imagePool,
+    taskModelPool, outcomeModelPool,
     // App Icons（欢迎窗口头像 / 侧边栏品牌 Logo；头像池增删走 Electron API 直接落盘，不需保存设置）
     avatarMode, avatarSelected, brandLogo,
     theme,
@@ -903,8 +914,8 @@ export function SettingsModal({
       await updateSettingsFields({
         providers: newConfigs,
         search: { apiKey: searchConfig.apiKey.trim(), baseUrl: searchConfig.baseUrl.trim() },
-        taskModel: undefined,
-        outcomeModel: undefined,
+        taskModel: taskModelPool[0] ? { defaultProvider: taskModelPool[0].provider, defaultModel: taskModelPool[0].modelId, pool: taskModelPool } : undefined,
+        outcomeModel: outcomeModelPool[0] ? { defaultProvider: outcomeModelPool[0].provider, defaultModel: outcomeModelPool[0].modelId, pool: outcomeModelPool } : undefined,
         chatModel: {
           defaultProvider: chatRole?.provider ?? '',
           defaultModel: selectedChatModel || chatModelPool[0]?.modelId || '',
@@ -1176,17 +1187,6 @@ export function SettingsModal({
                   ],
                 },
                 {
-                  label: 'Agents',
-                  items: [
-                    {
-                      id: 'agents',
-                      label: 'Agents',
-                      icon: <Bot className="h-3.5 w-3.5" />,
-                      keywords: ['agent', 'specialized', 'coding', 'profile', 'prompt', '专项', '智能体'],
-                    },
-                  ],
-                },
-                {
                   label: 'Overview',
                   items: [
                     {
@@ -1426,10 +1426,10 @@ export function SettingsModal({
                   style={{ borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)', backgroundColor: 'var(--paper)', color: 'var(--ink-strong)' }}
                 />
                 <div className="flex justify-end gap-1.5">
-                  <button type="button" onClick={() => setQpEditor(null)} className="rounded-md px-2.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]" style={{ color: 'var(--ink-muted)' }}>
+                  <Button type="button" onClick={() => setQpEditor(null)} variant="ghost" tone="neutral" size="sm">
                     Cancel
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
                     onClick={async () => {
                       if (!qpEditor || !qpEditor.name.trim() || !qpEditor.content.trim()) return;
@@ -1446,11 +1446,12 @@ export function SettingsModal({
                       window.dispatchEvent(new Event('provider-configs-changed'));
                     }}
                     disabled={!qpEditor.name.trim() || !qpEditor.content.trim()}
-                    className="rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
-                    style={{ backgroundColor: 'var(--purple)', color: '#fff' }}
+                    variant="solid"
+                    tone="brand"
+                    size="sm"
                   >
                     Save
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
@@ -1505,7 +1506,7 @@ export function SettingsModal({
                     <div className="mt-0.5 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>{q.content}</div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <button
+                    <Button
                       type="button"
                       onClick={async () => {
                         if (origIdx <= 0) return;
@@ -1516,13 +1517,15 @@ export function SettingsModal({
                         window.dispatchEvent(new Event('provider-configs-changed'));
                       }}
                       disabled={origIdx === 0}
-                      className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-30"
-                      style={{ color: 'var(--ink-muted)' }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-sm"
                       title="Move up"
+                      aria-label="Move up"
                     >
                       <ChevronUp className="h-3.5 w-3.5" />
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       onClick={async () => {
                         if (origIdx >= quickPrompts.length - 1) return;
@@ -1533,22 +1536,25 @@ export function SettingsModal({
                         window.dispatchEvent(new Event('provider-configs-changed'));
                       }}
                       disabled={origIdx === quickPrompts.length - 1}
-                      className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-30"
-                      style={{ color: 'var(--ink-muted)' }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-sm"
                       title="Move down"
+                      aria-label="Move down"
                     >
                       <ChevronDown className="h-3.5 w-3.5" />
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       onClick={() => setQpEditor({ mode: 'edit', id: q.id, name: q.name, content: q.content, category: q.category || '' })}
-                      className="rounded px-1.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                      style={{ color: 'var(--ink-muted)' }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="sm"
                       title="Edit"
                     >
                       Edit
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       onClick={async () => {
                         const next = quickPrompts.filter((x) => x.id !== q.id);
@@ -1556,12 +1562,14 @@ export function SettingsModal({
                         setQuickPrompts(next);
                         window.dispatchEvent(new Event('provider-configs-changed'));
                       }}
-                      className="rounded px-1.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                      style={{ color: 'var(--danger, #e8463a)' }}
+                      variant="ghost"
+                      tone="danger"
+                      size="sm"
                       title="Delete"
+                      aria-label="Delete"
                     >
                       <Trash className="h-3.5 w-3.5" />
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 );
@@ -2183,6 +2191,46 @@ export function SettingsModal({
                       )}
                     </div>
 
+                    {/* 任务模型（Task Model）：通用任务层，任务摘要/会议纪要/日程解析/AI 字段抽取等轻量任务 */}
+                    <div className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('task')} className="mb-3 flex w-full items-center gap-2.5 text-left">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
+                          <Sparkles className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel icon={false} hint="For light tasks like task summary / meeting notes / schedule parsing / AI field extraction. Defaults to the main chat model when unset; configure to route these to a cheaper or preferred model.">Task Model</HintLabel>
+                        </span>
+                        {rolesCollapsed.task
+                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                      </button>
+                      {!rolesCollapsed.task && (
+                      <>
+                      {renderRolePool('Task Model', 'var(--primary-strong)', taskModelPool, setTaskModelPool, 'chat', true)}
+                      </>
+                      )}
+                    </div>
+
+                    {/* 成果块模型（Outcome Model）：成果块（法律引用）专属，默认跟随主对话 */}
+                    <div className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('outcome')} className="mb-3 flex w-full items-center gap-2.5 text-left">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
+                          <FileText className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel icon={false} hint="For outcome blocks (legal citations — quality-sensitive). Defaults to the main chat model, then the Task Model; configure to pin a dedicated model.">Outcome Model</HintLabel>
+                        </span>
+                        {rolesCollapsed.outcome
+                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                      </button>
+                      {!rolesCollapsed.outcome && (
+                      <>
+                      {renderRolePool('Outcome Model', 'var(--primary-strong)', outcomeModelPool, setOutcomeModelPool, 'chat', true)}
+                      </>
+                      )}
+                    </div>
+
                     {/* 音频转写模型（STT） */}
                     <div ref={sttSectionRef} className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
                       <button type="button" onClick={() => toggleRoleSection('stt')} className="mb-3 flex w-full items-center gap-2.5 text-left">
@@ -2263,9 +2311,6 @@ export function SettingsModal({
       )}
       {activeSection === 'wechat' && (
         <WechatBindModal embedded open onOpenChange={() => {}} />
-      )}
-      {activeSection === 'agents' && (
-        <AgentSettingsModal embedded open onOpenChange={() => {}} />
       )}
       {activeSection === 'usage' && (
         <UsagePanel embedded onClose={() => setActiveSection('roles')} />
@@ -2458,13 +2503,15 @@ export function SettingsModal({
                           style={paperInputStyle}
                         />
                         <Button
+                          variant="solid"
+                          tone="brand"
                           size="sm"
                           onClick={() => testAndAddModel(selectedChatProvider)}
-                          disabled={!newModelIdInput.trim() || !!verifyingModelId}
-                          style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                          disabled={!newModelIdInput.trim()}
+                          loading={!!verifyingModelId}
                         >
                           {verifyingModelId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-                          <span className="ml-1">{verifyingModelId ? 'Testing…' : 'Test & Add'}</span>
+                          <span>{verifyingModelId ? 'Testing…' : 'Test & Add'}</span>
                         </Button>
                       </div>
                       {testAddFeedback && testAddFeedback.provider === selectedChatProvider && (
@@ -2485,7 +2532,7 @@ export function SettingsModal({
                 <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
                   {selectedModels[selectedChatProvider].size} selected
                 </span>
-                <Button size="sm" onClick={() => setModelPoolOpen(false)} style={{ backgroundColor: 'var(--primary)', color: '#fff' }}>
+                <Button variant="solid" tone="brand" size="sm" onClick={() => setModelPoolOpen(false)}>
                   Done
                 </Button>
               </div>
@@ -2520,6 +2567,7 @@ export function SettingsModal({
           )}
           <Button
             variant="ghost"
+            tone="neutral"
             size="sm"
             onClick={() => {
               if (isDirty && !confirm('You have unsaved changes. Close anyway?')) return;
@@ -2531,15 +2579,13 @@ export function SettingsModal({
             Cancel
           </Button>
           <Button
+            variant="solid"
+            tone="brand"
             size="sm"
             onClick={handleSave}
-            disabled={saving || (!isDirty && !saved)}
+            disabled={!isDirty && !saved}
+            loading={saving}
             className="text-sm"
-            style={{
-              backgroundColor: 'var(--primary)',
-              color: 'white',
-              opacity: (saving || (!isDirty && !saved)) ? 0.5 : 1,
-            }}
           >
             {saving ? (
               <span className="flex items-center gap-1.5">

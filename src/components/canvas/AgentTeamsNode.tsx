@@ -10,10 +10,11 @@
  * 数据源：/api/team（GET 状态 + 团队列表；POST 转调 team_* 工具），2s 轮询。
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { X, CheckCircle2, XCircle, Users, ListTodo } from 'lucide-react';
 import { NodeCardHeader } from './NodeCardHeader';
 import { useConfirm } from './ConfirmDialog';
+import { Button } from '@/components/ui/button';
 import type { AgentTeamsNodeData } from '@/lib/types';
 
 /** 团队状态 → 徽标配色 */
@@ -211,9 +212,7 @@ function AgentTeamsNodeInner({ id, data, selected }: {
           : '0 4px 14px rgba(0,0,0,.08)',
       }}
     >
-      {/* 连线锚点：执行中任务连线信号流动 */}
-      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
+      {/* 画布连线已物理移除（2026-09）：不再渲染 Handle 拖线 */}
 
       <NodeCardHeader
         title="Agent Teams"
@@ -221,15 +220,17 @@ function AgentTeamsNodeInner({ id, data, selected }: {
         rightActions={
           <div className="flex items-center gap-1.5">
             <span className="flex h-5 w-5 items-center justify-center rounded-full" style={{ backgroundColor: statusColor, opacity: 0.9 }} />
-            <button
-              type="button"
+            {/* 删除 = 破坏性：ghost danger 潜伏（常态灰，hover 才显红），配合上方 confirm */}
+            <Button
+              variant="ghost"
+              tone="danger"
+              size="icon-xs"
               onClick={handleDelete}
               title="删除此节点"
-              className="flex h-5 w-5 items-center justify-center rounded-full transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
+              aria-label="删除此节点"
             >
               <X className="h-3.5 w-3.5" />
-            </button>
+            </Button>
           </div>
         }
         divider
@@ -259,38 +260,39 @@ function AgentTeamsNodeInner({ id, data, selected }: {
                   <option key={t} value={t}>{t}</option>
                 ))}
               </select>
+              {/* 批准 = 唯一实底焦点（brand）；与下方状态灯绿（running）区分，避免同屏两处绿 */}
               {hasDraft && (
-                <button
-                  type="button"
+                <Button
+                  variant="solid"
+                  tone="brand"
+                  size="sm"
                   onClick={() => doAction('approve', '批准该团队计划并开始执行？')}
                   title="Approve & Run"
-                  className="flex h-7 items-center gap-1 rounded-md px-2 text-11 font-medium text-white transition-opacity hover:opacity-90"
-                  style={{ backgroundColor: 'var(--success)' }}
                 >
                   <CheckCircle2 className="h-3 w-3" /> 批准执行
-                </button>
+                </Button>
               )}
               {team?.status === 'planning' && (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  tone="neutral"
+                  size="sm"
                   onClick={() => doAction('discard', '放弃当前计划草案？')}
                   title="Discard draft"
-                  className="flex h-7 items-center gap-1 rounded-md px-2 text-11 font-medium text-white transition-opacity hover:opacity-90"
-                  style={{ backgroundColor: 'var(--ink-muted)' }}
                 >
                   <XCircle className="h-3 w-3" /> 放弃
-                </button>
+                </Button>
               )}
               {(team?.status === 'done' || team?.status === 'archived') && (
-                <button
-                  type="button"
+                <Button
+                  variant="soft"
+                  tone="info"
+                  size="sm"
                   onClick={() => doAction('archive', '归档该团队记录？')}
                   title="Archive team"
-                  className="flex h-7 items-center gap-1 rounded-md px-2 text-11 font-medium text-white transition-opacity hover:opacity-90"
-                  style={{ backgroundColor: 'var(--info)' }}
                 >
                   归档
-                </button>
+                </Button>
               )}
             </div>
 

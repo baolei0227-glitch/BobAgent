@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { FolderCog, Loader2, ArrowRight, Sparkles } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 /**
  * 首次运行向导（First Run Setup）
@@ -149,18 +150,25 @@ export function SetupWizard() {
             Your data stays in the default app folder.
           </span>
           <div className="flex items-center gap-2">
-            <button
+            {/* Skip = 中性文字入口（焦点留给 Get Started） */}
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="md"
               onClick={finish}
               disabled={submitting}
-              className="rounded-lg px-4 py-2 text-sm font-medium transition-colors hover:opacity-75 disabled:opacity-50"
-              style={{ color: 'var(--primary)' }}
             >
               Skip
-            </button>
-            <button
+            </Button>
+            {/* 向导主 CTA：h-10 大按钮豁免（className 覆盖仅限此处） */}
+            <Button
+              variant="solid"
+              tone="brand"
+              size="md"
               onClick={finish}
               disabled={submitting}
-              className="btn btn-primary flex h-10 items-center gap-2 rounded-lg px-5 text-sm font-medium disabled:opacity-50"
+              loading={submitting}
+              className="h-10 px-5 text-sm"
             >
               {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -170,7 +178,7 @@ export function SetupWizard() {
                   <ArrowRight className="h-4 w-4" />
                 </>
               )}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

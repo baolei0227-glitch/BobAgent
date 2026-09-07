@@ -20,6 +20,59 @@
  */
 import { join } from 'path';
 
+/* ────────────────────────────────────────────────────────────
+ * 空行归一化（跨调用方共用：/api/sticky-notes 与 AI 直写工具）
+ *
+ * 背景：历史上"空内容"会落盘成 `- [ ] ` 占位行（Enter 新增空行/创建默认），
+ * 这些空行被各展示层当作真实待办渲染（见会话标题栏 Todo Dock 的空白待办）。
+ * 语义约定：**空行不是待办**。落盘前剔除纯空白行与空勾选行（`- [ ] `/`- [x] `），
+ * 并同步对齐行级日历元数据（lineCalendared / lineEventIds），避免锚点错位。
+ * 中间的纯文本空行（非 checklist）同理剔除——它们在旧 UI 中也是带勾选框的空行。
+ * ──────────────────────────────────────────────────────────── */
+const BLANK_ROW_RE = /^-\s*\[( |x)\]\s*$/;
+
+/** 判定一行是否为"空待办行"：纯空白行或空勾选行（无文本） */
+export function isBlankTodoRow(raw: string): boolean {
+  const t = raw.trim();
+  return t.length === 0 || BLANK_ROW_RE.test(t);
+}
+
+/** 归一化某张便签的全部页：剔除空行并保持行级日历元数据对齐 */
+export function normalizeStickyPages(pages: unknown[] | null | undefined): Record<string, unknown>[] | null | undefined {
+  if (!Array.isArray(pages)) return pages as null | undefined;
+  return pages.map((rawP) => {
+    const p = (rawP ?? {}) as Record<string, unknown>;
+    const content = typeof p.content === 'string' ? p.content : '';
+    const rows = content.split('\n');
+    const hasCal = Array.isArray(p.lineCalendared);
+    const hasEv = Array.isArray(p.lineEventIds);
+    const cal = hasCal ? (p.lineCalendared as unknown[]).map(Boolean) : [];
+    const ev = hasEv
+      ? (p.lineEventIds as unknown[][]).map((x) => (Array.isArray(x) ? x.map(String) : []))
+      : [];
+    const kept: string[] = [];
+    const keptCal: boolean[] = [];
+    const keptEv: string[][] = [];
+    for (let i = 0; i < rows.length; i++) {
+      if (isBlankTodoRow(rows[i])) continue;
+      kept.push(rows[i]);
+      if (hasCal) keptCal.push(cal[i] ?? false);
+      if (hasEv) keptEv.push(ev[i] ?? []);
+    }
+    const out: Record<string, unknown> = { ...p, content: kept.join('\n') };
+    if (hasCal) out.lineCalendared = keptCal;
+    if (hasEv) out.lineEventIds = keptEv;
+    return out;
+  });
+}
+
+/** 归一化整张便签（pages 维度；其余字段原样保留） */
+export function normalizeStickyNote(note: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(note.pages)) return note;
+  const pages = normalizeStickyPages(note.pages);
+  return { ...note, pages };
+}
+
 export type StickyTodoIndex = {
   version: 1;
   updatedAt: string;

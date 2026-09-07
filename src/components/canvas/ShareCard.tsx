@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Share2, ClipboardCopy, Check, X, Download, Loader2, ImageDown, Pencil } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { toPng } from 'html-to-image';
 import { XhsPanel } from './XhsCard';
 
@@ -421,14 +422,17 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
               </span>
             )}
           </div>
-          <button
+          <Button
             type="button"
             onClick={onClose}
-            className="flex-shrink-0 rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
+            className="flex-shrink-0"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </DialogHeader>
         <DialogDescription className="sr-only">Share content preview</DialogDescription>
 
@@ -483,16 +487,18 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
             borderTop: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
             backgroundColor: 'var(--panel-bg)',
           }}>
-            <button
+            <Button
               type="button"
               onClick={handleDownloadImage}
               disabled={exporting}
               title={exporting ? 'Exporting…' : 'Save image'}
-              className="flex items-center justify-center rounded-md p-2 transition-colors hover:opacity-90 disabled:opacity-50"
-              style={{ border: '1px solid color-mix(in oklab, var(--primary) 45%, transparent)', color: 'var(--ink-strong)' }}
+              variant="outline"
+              tone="brand"
+              size="icon-lg"
             >
               {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            </button>
+            </Button>
+            {/* Edit toggle：编辑/完成双态，豁免保留 */}
             <button
               type="button"
               onClick={() => setEditing((v) => !v)}
@@ -507,34 +513,37 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
             >
               {editing ? <Check className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
             </button>
-            <button
+            <Button
               type="button"
               onClick={handleCopyImage}
               disabled={copyingImage}
               title={copyingImage ? 'Copying…' : copiedImg ? 'Image copied' : 'Copy image'}
-              className="flex items-center justify-center rounded-md p-2 transition-colors hover:opacity-90 disabled:opacity-50"
-              style={{ border: '1px solid color-mix(in oklab, var(--primary) 45%, transparent)', color: 'var(--ink-strong)' }}
+              variant="outline"
+              tone="brand"
+              size="icon-lg"
             >
               {copyingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : copiedImg ? <Check className="h-4 w-4" /> : <ImageDown className="h-4 w-4" />}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={() => setXhsOpen(true)}
               title="3:4 post card"
-              className="flex items-center justify-center rounded-md p-2 transition-colors hover:opacity-90"
-              style={{ border: '1px solid color-mix(in oklab, var(--primary) 45%, transparent)', color: 'var(--ink-strong)' }}
+              variant="outline"
+              tone="brand"
+              size="icon-lg"
             >
               <XhsIcon size={16} />
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={handleCopyText}
               title={copied ? 'Copied' : 'Copy text'}
-              className="flex items-center justify-center rounded-md p-2 transition-colors hover:opacity-90"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              variant="solid"
+              tone="brand"
+              size="icon-lg"
             >
               {copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}
-            </button>
+            </Button>
           </div>
         )}
       </DialogContent>
@@ -556,17 +565,18 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
 /** Share 按钮（供父组件直接渲染） */
 export function ShareButton({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) {
   return (
-    <button
+    <Button
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
       disabled={disabled}
-      className="flex min-w-6 min-h-6 items-center justify-center rounded-md p-1.5 transition-colors hover:bg-black/5 disabled:opacity-30"
-      style={{ color: 'color-mix(in oklab, var(--ink-muted) 75%, transparent)' }}
+      variant="ghost"
+      tone="neutral"
+      size="icon-sm"
       title="Share"
     >
       <Share2 className="h-3.5 w-3.5" />
-    </button>
+    </Button>
   );
 }

@@ -33,6 +33,17 @@
     "kind": "plugin"
   },
   {
+    "id": "bob-mind-mcp",
+    "name": "Bob-Mind",
+    "description": "Standalone mind-sticky library with its own panel and data dir. Tree-organized thoughts that you (and the AI via mind_* tools) capture and recall; independent from the canvas.",
+    "group": "bundled",
+    "category": "Thinking",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "kind": "plugin"
+  },
+  {
     "id": "bob-ocr-mcp",
     "name": "Bob OCR",
     "description": "Scanned-document and image recognition service (local Vision + GLM-OCR / Online OCR). Model & vendor settings live in the plugin itself — open Configure to manage them.",

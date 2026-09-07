@@ -40,22 +40,16 @@ export interface NodeFrontmatter {
   selectedSkills?: string[];
   /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
   sandbox_app_id?: string;
-  /** 节点类型：aiChat（默认，缺省）/ imageGen（图像生成节点）/ sticky（思路便签） */
+  /** 节点类型：aiChat（默认，缺省）/ imageGen（图像生成节点）等 */
   node_type?: string;
-  /** 思路便签节点：便签正文文本（零 AI，仅作思路上游，供下游 ChatNode 引用研究对象） */
-  sticky_text?: string;
-  /** 便签绑定到笔记系统（wanted/notebook.json）的条目 id：首次保存入库后回写，后续保存走 entry_id 更新模式 */
-  notebook_entry_id?: string;
   /** 批注框节点（node_type='annotation'）：包裹的卡片节点 id 列表（自动跟随包围盒用） */
   annotation_node_ids?: string[];
   /** 批注框节点：批注文字（圆角矩形顶部展示） */
   annotation_text?: string;
   /** 星标：用户在画布标记节点重要性（仅画布提示，不影响 AI/排版） */
   starred?: boolean;
-  /** 归档：节点已完成使命，画布导航圆点以实心外圈区分（仅视觉提示） */
-  archived?: boolean;
-  /** 便签的 md 文档来源锚点（JSON）：划词创建时记录来源文档标识 + 划词文字上下文，
-   *  点击便签子弹图标可反向定位回对应 md 文档对应位置 */
+  /** md 文档来源锚点（JSON）：创建节点时记录来源文档标识 + 划词文字上下文，
+   *  支持反向定位回对应 md 文档位置 */
   md_anchor?: string;
 }
 
@@ -474,15 +468,12 @@ export function serializeNode(node: NodeMarkdown): string {
     ...(node.frontmatter.sandbox_app_id ? { sandbox_app_id: node.frontmatter.sandbox_app_id } : {}),
     // 节点类型标记（imageGen 等；缺省视为 aiChat）
     ...(node.frontmatter.node_type ? { node_type: node.frontmatter.node_type } : {}),
-    // 思路便签正文（仅 sticky 节点使用；有内容才写，避免冗余）
-    ...(node.frontmatter.sticky_text ? { sticky_text: node.frontmatter.sticky_text } : {}),
     // 批注框（仅 annotation 节点使用）：关联卡片 + 批注文字
     ...(node.frontmatter.annotation_node_ids && node.frontmatter.annotation_node_ids.length > 0 ? { annotation_node_ids: node.frontmatter.annotation_node_ids } : {}),
     ...(node.frontmatter.annotation_text ? { annotation_text: node.frontmatter.annotation_text } : {}),
     // 星标（任意节点可用）：true 才写，避免冗余
     ...(node.frontmatter.starred ? { starred: true } : {}),
-    ...(node.frontmatter.archived ? { archived: true } : {}),
-    // 便签 md 来源锚点（JSON 字符串，有才写）
+    // md 文档来源锚点（JSON 字符串，有才写）
     ...(node.frontmatter.md_anchor ? { md_anchor: node.frontmatter.md_anchor } : {}),
     ...(node.frontmatter.outcome_user_edited ? { outcome_user_edited: node.frontmatter.outcome_user_edited } : {}),
     ...(node.frontmatter.outcome_template ? { outcome_template: node.frontmatter.outcome_template } : {}),
@@ -658,13 +649,11 @@ export function createNodeMarkdown(
     sandbox_app_id?: string;
     /** 节点类型：aiChat（缺省）/ imageGen / orchestrator */
     node_type?: string;
-    /** 思路便签（sticky）节点：初始正文（如自动编号首行 "1. "） */
-    sticky_text?: string;
     /** 批注框（annotation）节点：关联的卡片节点 id 列表 */
     annotation_node_ids?: string[];
     /** 批注框（annotation）节点：初始批注文字 */
     annotation_text?: string;
-    /** 便签 md 来源锚点（JSON 字符串） */
+    /** md 文档来源锚点（JSON 字符串） */
     md_anchor?: string;
   },
 ): string {
@@ -686,7 +675,6 @@ export function createNodeMarkdown(
       ...(options?.position_y !== undefined ? { position_y: options.position_y } : {}),
       ...(options?.sandbox_app_id ? { sandbox_app_id: options.sandbox_app_id } : {}),
       ...(options?.node_type ? { node_type: options.node_type } : {}),
-      ...(options?.sticky_text ? { sticky_text: options.sticky_text } : {}),
       ...(options?.annotation_node_ids && options.annotation_node_ids.length > 0 ? { annotation_node_ids: options.annotation_node_ids } : {}),
       ...(options?.annotation_text ? { annotation_text: options.annotation_text } : {}),
       ...(options?.md_anchor ? { md_anchor: options.md_anchor } : {}),

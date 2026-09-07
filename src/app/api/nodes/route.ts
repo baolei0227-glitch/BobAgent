@@ -18,7 +18,7 @@ import {
 } from '@/lib/node-markdown';
 import { getCurrentProject, getProjectById } from '@/lib/project/project-manager';
 import { initDb, deleteEdgesByNode, listActiveEdges } from '@/lib/db';
-import { validateOutcome, renderOutcome, parseOutcome, OUTCOME_FIELD_DEFS, OUTCOME_MAX_LENGTH } from '@/lib/nodes/outcome';
+import { validateOutcome, renderOutcome, parseOutcome, OUTCOME_FIELD_DEFS, OUTCOME_MAX_LENGTH, type Outcome } from '@/lib/nodes/outcome';
 import { invalidateManifest, syncManifestAfterWrite } from '@/lib/nodes/manifest';
 import {
   shouldCompact,
@@ -29,7 +29,7 @@ import {
 } from '@/lib/nodes/compact';
 import { inferContextWindow, modelOutputTokenMaxForModel } from '@/lib/context-limits';
 import { readSettingsFromFile } from '@/lib/settings-server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel, resolveOutcomeModel } from '@/lib/wanted/task-model';
 import { promises as fs } from 'fs';
 import { join, resolve, sep, basename } from 'path';
 import OpenAI from 'openai';
@@ -61,6 +61,149 @@ async function markStale(nodeId: string, projectPath: string): Promise<void> {
     await updateNodeFile(childPath, serializeNode(child));
   } catch (e) {
     console.warn('[nodes:lock] 标记下游 stale 失败 nodeId:', nodeId, e instanceof Error ? e.message : String(e));
+  }
+}
+
+// ==================== 成果块懒生成 ====================
+
+/** 判定成果块是否仍为空模板（8 字段全为空值标记「无」/「无已知限制」/空串），用于决定锁定时是否需要懒生成 */
+function isOutcomeBlank(outcome: Outcome | null | undefined): boolean {
+  if (!outcome) return true;
+  const record = outcome as unknown as Record<string, string>;
+  return OUTCOME_FIELD_DEFS.every((def) => {
+    const val = (record[def.key] ?? '').trim();
+    return val === '' || val === '无' || val === '无已知限制';
+  });
+}
+
+/**
+ * 懒生成成果块（锁定/连线自动锁定时调用）：用模型从当前对话记录提炼成果块并写回文件。
+ * - 未配置模型 / 无对话 / 模型返回空 / 解析失败 → 返回 { ok:false, error }，调用方不阻塞，转由成果块校验兜底。
+ * - 写回时推进 outcome_turns 覆盖全部对话轮次，供后续锁定校验「是否已覆盖最新轮次」。
+ */
+async function generateOutcomeForNode(filePath: string): Promise<{ ok: boolean; outcome?: Outcome | null; error?: string }> {
+  try {
+    const cfg = await resolveOutcomeModel();
+    if (!cfg) return { ok: false, error: '未配置模型，无法生成成果块' };
+
+    const latestContent = await fs.readFile(filePath, 'utf-8');
+    const latestParsed = parseNodeMarkdown(latestContent);
+    if (latestParsed.conversations.length === 0) return { ok: false, error: '节点无对话记录，无法生成成果块' };
+    // R-9: 已锁定节点不重写成果块（保护签字；继续对话须先解锁）
+    if (latestParsed.frontmatter.outcome_status === 'locked') return { ok: true, outcome: latestParsed.outcome ?? null };
+
+    const conversationText = latestParsed.conversations
+      .map((t, i) => {
+        const parts: string[] = [];
+        parts.push(`### 第 ${i + 1} 轮`);
+        parts.push(`用户: ${t.question}`);
+        if (t.questionAttachments && t.questionAttachments.length > 0) {
+          parts.push(`(附件: ${t.questionAttachments.map(a => a.name).join(', ')})`);
+        }
+        parts.push(`AI: ${t.answer}`);
+        return parts.join('\n');
+      })
+      .join('\n\n');
+
+    // 检查是否有用户手动修改的成果块需要保护
+    const isUserEdited = latestParsed.frontmatter.outcome_user_edited === true;
+    const existingOutcome = latestParsed.outcome;
+    const preservationNote = isUserEdited && existingOutcome
+      ? [
+          '',
+          '## 当前成果块（已被用户手动修正，以下字段内容必须保留，不可修改）',
+          renderOutcome(existingOutcome),
+          '',
+          '重要：上述成果块中的字段已被用户手动修正过。',
+          '请在提炼新的成果块时，严格保留这些手动修正的内容，',
+          '仅更新其他字段以反映新增对话信息。',
+          '尤其是用户填写过非「无」值的字段，一个字都不能改。',
+        ].join('\n')
+      : '';
+
+    const OUTCOME_EXTRACT_SYSTEM = [
+      '你是法律成果提炼器。请根据对话记录，提炼出以下 8 个字段的结构化成果块。',
+      '',
+      '输出格式（严格按以下 8 节，每节以 ### 标题开头）：',
+      '### 事实认定',
+      '### 法律依据',
+      '### 分析推理',
+      '### 结论',
+      '### 明确排除',
+      '### 适用限制',
+      '### 待确认',
+      '### 用户补充',
+      '',
+      '规则：',
+      '- 每个字段如无内容，必须写「无」而非留空或省略；不得写「（暂无）」「暂无」等变体。',
+      '- 事实认定和法律依据中的每条信息须带 [来源: 本节点] 标记（本节点对话记录中提炼；若内容来自上游节点成果块，则写 [来源: n_上游节点id#q-锚点]）。',
+      '- 法律依据中的每条须可定位（含条款号/案例编号/法释编号），无法定位的标 [待核实]。',
+      '- 结论中的每条须带确定性等级：[确定] / [倾向性] / [存疑]。',
+      '- 待确认的每条须写明所需内容与责任方（如「需用户提供xxx」）。',
+      '- 适用限制如无，写「无已知限制」。',
+      '- 用户补充始终写「无」（仅用户可填写）。',
+      '- 每条以 "- " 列表项格式书写。',
+      '- 仅输出上述 8 节内容，不要输出其他解释、引言或总结。',
+      ...(isUserEdited ? ['', '重要：当前成果块中的部分字段已被用户手动修正。你必须严格保留用户修正过的内容，不得覆盖或修改。只有用户未修正的字段（内容仅为「无」或空）才可以根据新增对话内容更新。'] : []),
+    ].join('\n');
+
+    const userPrompt = [
+      '## 对话记录',
+      '',
+      conversationText,
+      preservationNote,
+      '',
+      '请提炼成果块：',
+    ].join('\n');
+
+    const client = new OpenAI({
+      apiKey: cfg.apiKey,
+      baseURL: cfg.baseUrl,
+      timeout: 60_000,
+    });
+    const resp = await client.chat.completions.create({
+      model: cfg.model,
+      messages: [
+        { role: 'system', content: OUTCOME_EXTRACT_SYSTEM },
+        { role: 'user', content: userPrompt },
+      ],
+      stream: false,
+      temperature: 0.1,
+    });
+    const rawText = (resp.choices[0]?.message?.content || '').trim();
+    if (!rawText) return { ok: false, error: '模型未返回成果块内容' };
+
+    let newOutcome = parseOutcome(rawText);
+    if (!newOutcome) return { ok: false, error: '成果块解析失败' };
+
+    // 再次读取（生成期间文件可能已被并发修改）
+    const finalContent = await fs.readFile(filePath, 'utf-8');
+    const node = parseNodeMarkdown(finalContent);
+
+    // 合并保护：用户手动修改过的非空字段 → 保留用户值，不覆盖
+    if (node.frontmatter.outcome_user_edited && node.outcome) {
+      const record = node.outcome as unknown as Record<string, string>;
+      const newRecord = newOutcome as unknown as Record<string, string>;
+      for (const key of OUTCOME_FIELD_DEFS.map(d => d.key)) {
+        const userVal = (record[key] ?? '').trim();
+        // 用户填写过非空且非空标记「无」的字段 → 保留
+        if (userVal && userVal !== '无' && userVal !== '无已知限制' && key !== 'user_notes') {
+          newRecord[key] = record[key];
+        }
+      }
+    }
+
+    node.outcome = newOutcome as typeof node.outcome;
+    if (!node.frontmatter.outcome_status || node.frontmatter.outcome_status === 'legacy') {
+      node.frontmatter.outcome_status = 'draft';
+    }
+    // 记录成果块已覆盖的对话轮次：锁定前据此判断是否有未提炼的新对话（防竞态锁旧成果块）
+    node.frontmatter.outcome_turns = node.conversations.length;
+    node.frontmatter.updated_at = new Date().toISOString();
+    await updateNodeFile(filePath, serializeNode(node));
+    return { ok: true, outcome: newOutcome };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -112,7 +255,7 @@ export async function POST(request: NextRequest) {
     setCurrentProjectPath(project.path);
 
     if (action === 'create') {
-      const { title, model, sources, tags, position_x, position_y, sandbox_app_id, node_type, sticky_text, annotated_node_ids, annotation_text, md_anchor } = body;
+      const { title, model, sources, tags, position_x, position_y, sandbox_app_id, node_type, annotated_node_ids, annotation_text, md_anchor } = body;
       if (!title) {
         return NextResponse.json({ error: 'title is required' }, { status: 400 });
       }
@@ -124,7 +267,6 @@ export async function POST(request: NextRequest) {
         position_y: typeof position_y === 'number' ? position_y : undefined,
         sandbox_app_id: typeof sandbox_app_id === 'string' && sandbox_app_id ? sandbox_app_id : undefined,
         node_type: typeof node_type === 'string' && node_type ? node_type : undefined,
-        sticky_text: typeof sticky_text === 'string' && sticky_text ? sticky_text : undefined,
         annotation_node_ids: Array.isArray(annotated_node_ids) && annotated_node_ids.length > 0 ? annotated_node_ids : undefined,
         annotation_text: typeof annotation_text === 'string' && annotation_text ? annotation_text : undefined,
         md_anchor: typeof md_anchor === 'string' && md_anchor ? md_anchor : undefined,
@@ -188,28 +330,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, node_id });
     }
 
-    // 更新思路便签正文（sticky 节点：零 AI，文本直接存 frontmatter，重启恢复）
-    if (action === 'update_sticky') {
-      const { node_id, text, notebook_entry_id } = body;
-      if (!node_id || typeof text !== 'string') {
-        return NextResponse.json({ error: 'node_id, text are required' }, { status: 400 });
-      }
-      const filePath = await findNodeFileById(node_id, project.path);
-      if (!filePath) {
-        return NextResponse.json({ error: '节点文件不存在: ' + node_id }, { status: 404 });
-      }
-      const content = await fs.readFile(filePath, 'utf-8');
-      const node = parseNodeMarkdown(content);
-      node.frontmatter.sticky_text = text;
-      // 便签 ↔ 笔记系统条目绑定：首次保存新建条目后回写 entry_id，后续保存走 entry_id 更新模式
-      if (typeof notebook_entry_id === 'string' && notebook_entry_id) {
-        node.frontmatter.notebook_entry_id = notebook_entry_id;
-      }
-      node.frontmatter.updated_at = new Date().toISOString();
-      await updateNodeFile(filePath, serializeNode(node));
-      return NextResponse.json({ success: true, node_id });
-    }
-
     // 更新批注框（annotation 节点）的批注文字
     if (action === 'update_annotation') {
       const { node_id, text } = body;
@@ -244,24 +364,6 @@ export async function POST(request: NextRequest) {
       node.frontmatter.updated_at = new Date().toISOString();
       await updateNodeFile(filePath, serializeNode(node));
       return NextResponse.json({ success: true, node_id, starred });
-    }
-
-    // 归档切换（任意节点）：节点已完成使命，画布导航圆点以实心外圈区分（仅视觉提示）
-    if (action === 'update_archive') {
-      const { node_id, archived } = body;
-      if (!node_id || typeof archived !== 'boolean') {
-        return NextResponse.json({ error: 'node_id, archived(boolean) are required' }, { status: 400 });
-      }
-      const filePath = await findNodeFileById(node_id, project.path);
-      if (!filePath) {
-        return NextResponse.json({ error: '节点文件不存在: ' + node_id }, { status: 404 });
-      }
-      const content = await fs.readFile(filePath, 'utf-8');
-      const node = parseNodeMarkdown(content);
-      node.frontmatter.archived = archived;
-      node.frontmatter.updated_at = new Date().toISOString();
-      await updateNodeFile(filePath, serializeNode(node));
-      return NextResponse.json({ success: true, node_id, archived });
     }
 
     if (action === 'append') {
@@ -397,139 +499,6 @@ export async function POST(request: NextRequest) {
       } catch (e) {
         console.warn('[nodes:append] 增量压缩阶段异常（已吞，不影响写入）:', e instanceof Error ? e.message : String(e));
       }
-
-      // ==================== 自动成果块提取 ====================
-      // 每轮对话完成后，用模型从对话记录中自动提炼成果块。
-      // 串行执行（await）：确保 append 响应返回时成果块已写入文件，
-      // 否则前端立即刷新面板会读到空成果块（表现为"第一次回复不自动提取"）。
-      await (async () => {
-        try {
-          // 未配置成果块模型时降级到已配置的聊天模型；两者皆无则静默跳过
-          const cfg = await resolveTaskModel();
-          if (!cfg) {
-            return;
-          }
-
-          const latestContent = await fs.readFile(filePath, 'utf-8');
-          const latestParsed = parseNodeMarkdown(latestContent);
-          if (latestParsed.conversations.length === 0) return;
-          // R-9: 已锁定节点不自动重写成果块（保护签字；继续对话须先解锁）
-          if (latestParsed.frontmatter.outcome_status === 'locked') return;
-
-          const conversationText = latestParsed.conversations
-            .map((t, i) => {
-              const parts: string[] = [];
-              parts.push(`### 第 ${i + 1} 轮`);
-              parts.push(`用户: ${t.question}`);
-              if (t.questionAttachments && t.questionAttachments.length > 0) {
-                parts.push(`(附件: ${t.questionAttachments.map(a => a.name).join(', ')})`);
-              }
-              parts.push(`AI: ${t.answer}`);
-              return parts.join('\n');
-            })
-            .join('\n\n');
-
-          // 检查是否有用户手动修改的成果块需要保护
-          const isUserEdited = latestParsed.frontmatter.outcome_user_edited === true;
-          const existingOutcome = latestParsed.outcome;
-          const preservationNote = isUserEdited && existingOutcome
-            ? [
-                '',
-                '## 当前成果块（已被用户手动修正，以下字段内容必须保留，不可修改）',
-                renderOutcome(existingOutcome),
-                '',
-                '重要：上述成果块中的字段已被用户手动修正过。',
-                '请在提炼新的成果块时，严格保留这些手动修正的内容，',
-                '仅更新其他字段以反映新增对话信息。',
-                '尤其是用户填写过非「无」值的字段，一个字都不能改。',
-              ].join('\n')
-            : '';
-
-          const OUTCOME_EXTRACT_SYSTEM = [
-            '你是法律成果提炼器。请根据对话记录，提炼出以下 8 个字段的结构化成果块。',
-            '',
-            '输出格式（严格按以下 8 节，每节以 ### 标题开头）：',
-            '### 事实认定',
-            '### 法律依据',
-            '### 分析推理',
-            '### 结论',
-            '### 明确排除',
-            '### 适用限制',
-            '### 待确认',
-            '### 用户补充',
-            '',
-            '规则：',
-            '- 每个字段如无内容，必须写「无」而非留空或省略；不得写「（暂无）」「暂无」等变体。',
-            '- 事实认定和法律依据中的每条信息须带 [来源: 本节点] 标记（本节点对话记录中提炼；若内容来自上游节点成果块，则写 [来源: n_上游节点id#q-锚点]）。',
-            '- 法律依据中的每条须可定位（含条款号/案例编号/法释编号），无法定位的标 [待核实]。',
-            '- 结论中的每条须带确定性等级：[确定] / [倾向性] / [存疑]。',
-            '- 待确认的每条须写明所需内容与责任方（如「需用户提供xxx」）。',
-            '- 适用限制如无，写「无已知限制」。',
-            '- 用户补充始终写「无」（仅用户可填写）。',
-            '- 每条以 "- " 列表项格式书写。',
-            '- 仅输出上述 8 节内容，不要输出其他解释、引言或总结。',
-            ...(isUserEdited ? ['', '重要：当前成果块中的部分字段已被用户手动修正。你必须严格保留用户修正过的内容，不得覆盖或修改。只有用户未修正的字段（内容仅为「无」或空）才可以根据新增对话内容更新。'] : []),
-          ].join('\n');
-
-          const userPrompt = [
-            '## 对话记录',
-            '',
-            conversationText,
-            preservationNote,
-            '',
-            '请提炼成果块：',
-          ].join('\n');
-
-          const client = new OpenAI({
-            apiKey: cfg.apiKey,
-            baseURL: cfg.baseUrl,
-            timeout: 60_000,
-          });
-          const resp = await client.chat.completions.create({
-            model: cfg.model,
-            messages: [
-              { role: 'system', content: OUTCOME_EXTRACT_SYSTEM },
-              { role: 'user', content: userPrompt },
-            ],
-            stream: false,
-            temperature: 0.1,
-          });
-          const rawText = (resp.choices[0]?.message?.content || '').trim();
-          if (!rawText) return;
-
-          let newOutcome = parseOutcome(rawText);
-          if (!newOutcome) return;
-
-          // 再次读取（压缩可能已更新文件）
-          const finalContent = await fs.readFile(filePath, 'utf-8');
-          const node = parseNodeMarkdown(finalContent);
-
-          // 合并保护：用户手动修改过的非空字段 → 保留用户值，不覆盖
-          if (node.frontmatter.outcome_user_edited && node.outcome) {
-            const record = node.outcome as unknown as Record<string, string>;
-            const newRecord = newOutcome as unknown as Record<string, string>;
-            for (const key of OUTCOME_FIELD_DEFS.map(d => d.key)) {
-              const userVal = (record[key] ?? '').trim();
-              // 用户填写过非空且非空标记「无」的字段 → 保留
-              if (userVal && userVal !== '无' && userVal !== '无已知限制' && key !== 'user_notes') {
-                newRecord[key] = record[key];
-              }
-            }
-          }
-
-          node.outcome = newOutcome as typeof node.outcome;
-          if (!node.frontmatter.outcome_status || node.frontmatter.outcome_status === 'legacy') {
-            node.frontmatter.outcome_status = 'draft';
-          }
-          // 记录成果块已覆盖的对话轮次：锁定前据此判断是否有未提炼的新对话（防竞态锁旧成果块）
-          node.frontmatter.outcome_turns = node.conversations.length;
-          node.frontmatter.updated_at = new Date().toISOString();
-          await updateNodeFile(filePath, serializeNode(node));
-          console.log('[nodes:append] 成果块自动提取完成，节点:', node_id);
-        } catch (e) {
-          console.warn('[nodes:append] 成果块自动提取异常（已吞）:', e instanceof Error ? e.message : String(e));
-        }
-      })();
 
       const finalParsed = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));
       return NextResponse.json({
@@ -731,20 +700,36 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: '节点文件不存在: ' + node_id }, { status: 404 });
       }
       const content = await fs.readFile(filePath, 'utf-8');
-      const node = parseNodeMarkdown(content);
+      let node = parseNodeMarkdown(content);
 
-      // R-1: 成果块必须存在（force 也不能跳过，无成果块锁定无意义）
-      if (!node.outcome) {
-        return NextResponse.json({ error: 'R-1 节点缺少成果块，无法锁定（旧节点请先补全成果块）' }, { status: 400 });
+      // ==================== 成果块懒生成 ====================
+      // 成果块不再于 append 时自动提炼（省 token），改为锁定时按需生成：
+      // 触发条件——成果块为空模板，或存在尚未覆盖的新对话轮次（锁定后解锁继续对话再重锁时）。
+      // 已锁定节点受 R-9 保护，不重新生成。
+      const isLockedNow = node.frontmatter.outcome_status === 'locked';
+      const coveredTurns = node.frontmatter.outcome_turns ?? 0;
+      const needsGeneration = !isLockedNow && (
+        isOutcomeBlank(node.outcome) ||
+        node.conversations.length > coveredTurns
+      );
+      if (needsGeneration) {
+        const genResult = await generateOutcomeForNode(filePath);
+        if (!genResult.ok) {
+          // 生成失败（未配置模型 / 无对话 / 模型报错）: R-1 语义要求锁定前必须有成果块，故阻塞锁定
+          return NextResponse.json({
+            success: false,
+            error: `成果块生成失败，无法锁定：${genResult.error ?? '未知错误'}`,
+            outcome_generate_error: true,
+          }, { status: 400 });
+        }
+        // 生成完成已写回文件（outcome_turns 已推进到当前轮次），重新读取以锁定最新状态
+        const regeneratedContent = await fs.readFile(filePath, 'utf-8');
+        node = parseNodeMarkdown(regeneratedContent);
       }
-      // 竞态保护：append 已写入新对话但成果块提取尚未完成时，锁定会锁到旧成果块，
-      // 且后续 append 因 R-9 跳过本轮成果块提取，导致本轮成果永久丢失 → 拒绝并提示等待。
-      const outcomeTurns = node.frontmatter.outcome_turns;
-      if (outcomeTurns !== undefined && node.conversations.length > outcomeTurns) {
-        const pendingTurns = node.conversations.length - outcomeTurns;
-        return NextResponse.json({
-          error: `Outcome has not been generated for the latest ${pendingTurns} turn(s). Please wait for outcome extraction to finish before locking.`,
-        }, { status: 409 });
+
+      // R-1: 成果块必须存在且有实质内容（懒生成后仍为空模板则不可锁定）
+      if (!node.outcome || isOutcomeBlank(node.outcome)) {
+        return NextResponse.json({ error: 'R-1 节点缺少成果块，无法锁定（旧节点请先补全成果块）' }, { status: 400 });
       }
       // R-1 ~ R-8b: 校验成果块（force=true 时校验未通过可强制锁定，由用户自主决定）
       const maxLen = typeof max_length === 'number' && max_length > 0 ? max_length : OUTCOME_MAX_LENGTH;
@@ -1400,6 +1385,14 @@ export async function GET(request: NextRequest) {
             try {
               const content = await fs.readFile(join(nodesDir, file), 'utf-8');
               const node = parseNodeMarkdown(content);
+              // 归档功能移除（2026-09）：存量 archived:true 一次性惰性迁移——
+              // serializeNode 已不再输出该字段，检测到即写回一次即可清除残留标记（幂等，前端不再读取）
+              const rawFm = node.frontmatter as unknown as Record<string, unknown>;
+              if (rawFm.archived === true) {
+                try {
+                  await updateNodeFile(join(nodesDir, file), serializeNode(node));
+                } catch { /* 写回失败静默：前端已不再消费该标记，残留无影响 */ }
+              }
               return {
                 node_id: node.frontmatter.node_id,
                 title: node.frontmatter.title,
@@ -1414,13 +1407,10 @@ export async function GET(request: NextRequest) {
                 position_y: node.frontmatter.position_y,
                 sandbox_app_id: node.frontmatter.sandbox_app_id,
                 node_type: node.frontmatter.node_type,
-                sticky_text: node.frontmatter.sticky_text,
                 annotation_node_ids: node.frontmatter.annotation_node_ids,
                 annotation_text: node.frontmatter.annotation_text,
                 starred: node.frontmatter.starred,
-                archived: node.frontmatter.archived,
                 md_anchor: node.frontmatter.md_anchor,
-                notebook_entry_id: node.frontmatter.notebook_entry_id,
                 summary: node.summary,
                 conversations: node.conversations,
                 annotations: node.annotations,

@@ -99,8 +99,6 @@ export async function POST(request: NextRequest) {
       // 例外：edge_type='bobby' 是「执行关联边」（Bobby 插件观察/授权节点），
       // edge_type='team' 是「执行关联边」（Agent Teams 观察节点），
       // 均由主 Agent 调用对应插件工具时自动建立，非成果块传播，不适用锁定约束。
-      // sticky（思路便签）零成果块，其「成果」即便签文本本身，同样豁免（前端已跳过锁定，
-      // 此处若不豁免会出现前后端不一致：便签出边一律被 400 拒绝）。
       const isBobbyEdge = edge_type === 'bobby' || edge_type === 'team';
       if (!isBobbyEdge) {
         const project = await getCurrentProject();
@@ -113,9 +111,7 @@ export async function POST(request: NextRequest) {
         }
         const fromContent = await fs.readFile(fromFile, 'utf-8');
         const fromNode = parseNodeMarkdown(fromContent);
-        // 兼容存量 sticky（旧名）与新建 note（更名后）两类便签节点
-        const isStickySource = fromNode.frontmatter.node_type === 'sticky' || fromNode.frontmatter.node_type === 'note';
-        if (!isStickySource && fromNode.frontmatter.outcome_status !== 'locked') {
+        if (fromNode.frontmatter.outcome_status !== 'locked') {
           return NextResponse.json(
             { success: false, error: 'R-8 上游节点成果块尚未锁定，无法建立出边（请先锁定上游节点）' },
             { status: 400 },

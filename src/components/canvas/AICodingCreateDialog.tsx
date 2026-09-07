@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { X, Code2, Plus, FolderOpen, Loader2, Boxes, Lightbulb, FileText } from 'lucide-react';
+import { X, Code2, Plus, FolderOpen, Loader2, Boxes, Lightbulb, FileText, Bot, Sparkles, Pencil } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { DEFAULT_MODEL_ID } from '@/lib/types';
 
 interface SandboxApp {
@@ -48,29 +49,37 @@ interface Props {
  * 后端 /api/chat 会据此注入编程上下文（写入路径、截图自检闭环）。
  */
 export function AICodingCreateDialog({ open, position, onClose, onCreated }: Props) {
+  // 产物类型：mini = Bob Sandbox 小程序（原有）；agent = 创建专属子 Agent（经 Coding 对话确认后调 create_agent_package）
+  const [kind, setKind] = useState<'mini' | 'agent'>('mini');
+  // Sub-Agent 档内部：new = 新建（create_agent_package）；existing = 改造已装 agent（update_agent_package）
+  const [agentMode, setAgentMode] = useState<'new' | 'existing'>('new');
   const [mode, setMode] = useState<'create' | 'bind'>('create');
   const [apps, setApps] = useState<SandboxApp[]>([]);
   const [templates, setTemplates] = useState<SandboxTemplate[]>([]);
   const [name, setName] = useState('');
   const [template, setTemplate] = useState('blank');
   const [prompt, setPrompt] = useState('');
+  // Agent 档：补充人设/边界（可选）
+  const [agentRole, setAgentRole] = useState('');
+  // Existing 档：已装可改造 agent（市场安装的包；chat/coding 系统内置不可经包改）
+  const [installedAgents, setInstalledAgents] = useState<{ id: string; label: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
 
   /** 灵感卡片（推荐分类 + 对应模板 id，点击即选中并预填） */
   const INSPIRATIONS: { label: string; emoji: string; tplId: string; desc: string }[] = [
-    { label: '待办清单', emoji: '✅', tplId: 'todo', desc: '任务管理、勾勾选选、历史记录保留' },
-    { label: '习惯打卡', emoji: '🌱', tplId: 'habit', desc: '每日签到、连续天数统计' },
-    { label: '番茄钟', emoji: '🍅', tplId: 'pomodoro', desc: '专注计时、短休长休、今日完成统计' },
-    { label: '联系表单', emoji: '📋', tplId: 'contact-form', desc: '客户登记、问卷收集、历史记录回看' },
-    { label: '数据报表', emoji: '📊', tplId: 'data-table', desc: 'KPI 卡 + 表格 + 达成率进度条' },
-    { label: '个人主页', emoji: '👤', tplId: 'portfolio', desc: '头像介绍 + 技能标签 + 链接入口' },
-    { label: '营销落地', emoji: '🚀', tplId: 'landing', desc: '标题卖点 + CTA 邮箱收集' },
-    { label: '文档阅读', emoji: '📖', tplId: 'reader', desc: '字号主题切换、进度条、目录导航' },
-    { label: '单位换算', emoji: '🔁', tplId: 'converter', desc: '长度/重量/温度/面积/体积六类' },
-    { label: '计算器', emoji: '🧮', tplId: 'calculator', desc: '基础四则运算、括号优先' },
-    { label: 'AI 问答', emoji: '🤖', tplId: 'blank', desc: '需要接入 AI 聊天能力的小程序' },
-    { label: '自由发挥', emoji: '✨', tplId: 'blank', desc: '空白模板，自定义功能' },
+    { label: 'To-do List', emoji: '✅', tplId: 'todo', desc: 'Task manager, check off items, keep history' },
+    { label: 'Habit Tracker', emoji: '🌱', tplId: 'habit', desc: 'Daily check-in, streak counting' },
+    { label: 'Pomodoro', emoji: '🍅', tplId: 'pomodoro', desc: 'Focus timer, short/long breaks, daily stats' },
+    { label: 'Contact Form', emoji: '📋', tplId: 'contact-form', desc: 'Lead capture, surveys, review past entries' },
+    { label: 'Data Report', emoji: '📊', tplId: 'data-table', desc: 'KPI cards + table + progress bars' },
+    { label: 'Portfolio', emoji: '👤', tplId: 'portfolio', desc: 'Intro, skills tags, links' },
+    { label: 'Landing Page', emoji: '🚀', tplId: 'landing', desc: 'Headline + CTA + email capture' },
+    { label: 'Doc Reader', emoji: '📖', tplId: 'reader', desc: 'Font/theme switch, progress bar, TOC' },
+    { label: 'Unit Converter', emoji: '🔁', tplId: 'converter', desc: 'Length/weight/temp/area/volume' },
+    { label: 'Calculator', emoji: '🧮', tplId: 'calculator', desc: 'Basic arithmetic with parentheses' },
+    { label: 'AI Chat', emoji: '🤖', tplId: 'blank', desc: 'A mini-app that talks to an AI model' },
+    { label: 'Free Build', emoji: '✨', tplId: 'blank', desc: 'Blank template — build anything' },
   ];
 
   const loadSandbox = useCallback(async () => {
@@ -90,21 +99,40 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
     }
   }, []);
 
+  const loadInstalledAgents = useCallback(async () => {
+    try {
+      const resp = await fetch('/api/agents');
+      const data = await resp.json();
+      if (data.success) {
+        const list = ((data.agents || []) as { id: string; label: string }[])
+          .filter((a) => a.id !== 'chat' && a.id !== 'coding') // 系统内置不可经包改造
+          .sort((a, b) => a.label.localeCompare(b.label));
+        setInstalledAgents(list);
+      }
+    } catch {
+      setInstalledAgents([]);
+    }
+  }, []);
+
   // 打开时重置状态并预加载小程序清单与模板
   useEffect(() => {
     if (open) {
+      setKind('mini');
+      setAgentMode('new');
       setMode('create');
       setName('');
       setTemplate('blank');
       setPrompt('');
+      setAgentRole('');
       loadSandbox();
+      loadInstalledAgents();
     }
-  }, [open, loadSandbox]);
+  }, [open, loadSandbox, loadInstalledAgents]);
 
   if (!open) return null;
 
-  /** 创建绑定节点，成功后统一回调 */
-  const createNode = async (title: string, sandboxAppId: string, appName: string, initialPromptText = '') => {
+  /** 创建绑定节点，成功后统一回调（Agent 造包会话不需要 sandbox_app_id） */
+  const createNode = async (title: string, sandboxAppId?: string, appName = '', initialPromptText = '', nodeType = 'coding') => {
     setCreating(true);
     try {
       const resp = await fetch('/api/nodes', {
@@ -115,9 +143,9 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
           title,
           model: DEFAULT_MODEL_ID,
           sources: [],
-          node_type: 'coding',
+          node_type: nodeType,
           ...(position ? { position_x: position.x, position_y: position.y } : {}),
-          sandbox_app_id: sandboxAppId,
+          ...(sandboxAppId ? { sandbox_app_id: sandboxAppId } : {}),
         }),
       });
       const data = await resp.json();
@@ -159,6 +187,48 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
     }
   };
 
+  /**
+   * Agent 档提交：创建一段对话（chat 节点，意图词会自动激活 coding 场景 → create_agent_package 可见），
+   * 预填首轮消息，由 Coding 对话引导确认 scenes/coreExclusions/skillPool 后调用 create_agent_package 完成创建。
+   */
+  const handleCreateAgentSession = async () => {
+    const agentName = name.trim();
+    const use = prompt.trim();
+    if (!agentName) return;
+    const lines = [
+      'The user wants to create a dedicated sub-agent (you design and create it). Follow the create_agent_package tool contract:',
+      `- name: ${agentName}`,
+      use ? `- description: ${use}` : '- description: first use ask_user_questions to get a one-line statement of what this agent specializes in',
+      agentRole.trim()
+        ? `- role (boundaries, one per line):\n${agentRole.trim().split('\n').map((l) => `    - ${l.trim()}`).filter((l) => l.trim() !== '-').join('\n')}`
+        : '',
+      '',
+      'Before creating, confirm three things with the user via ask_user_questions:',
+      '1) Which fixedScenes to enable (suggest: General / Legal = pkulaw / Notes = notebook domain / Node / Planner);',
+      '2) Whether coreExclusions should strip file / command / web kernel tools (typical for pure specialists);',
+      '3) skillPool skills to install (optional).',
+      'Then call create_agent_package and report the result — the agent will appear under the sidebar ＋ Add session menu and can be used right away.',
+    ].join('\n');
+    await createNode(`${agentName} · Agent`, undefined, '', lines, 'chat');
+  };
+
+  /** Existing 档提交：为已装 agent 创建 Coding 对话，预填首轮消息让其调 update_agent_package 完成改造 */
+  const handleUpdateAgentSession = async (agent: { id: string; label: string }) => {
+    if (creating) return;
+    const lines = [
+      `The user wants to modify the installed sub-agent "${agent.label}" (id: ${agent.id}).`,
+      'Call the update_agent_package tool — it must already be installed (agent.json exists).',
+      '',
+      'First use ask_user_questions to confirm with the user which of these they want to change:',
+      '1) Scenes — addScenes / removeScenes (options: General / Legal = pkulaw / Notes = notebook / Node / Planner / wanted);',
+      '2) Kernel tools — replace coreExclusions (typical: strip file / command / web tools, or clear to []);',
+      '3) Skill pool — replace skillPool (or [] to fall back to global default);',
+      '4) Persona — append short instructions to the existing prompt (preferred), or a full prompt rewrite if asked.',
+      'Change ONLY what the user confirms; keep everything else untouched. After updating, run validate_agent_package to show the resolved profile and report the result.',
+    ].join('\n');
+    await createNode(`Update ${agent.label} · Agent`, undefined, '', lines, 'chat');
+  };
+
   return (
     <div
       data-canvas-ui="overlay"
@@ -180,21 +250,193 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
         <div className="mb-4 flex items-center justify-between">
           <span className="flex items-center gap-2 text-base font-semibold" style={{ color: 'var(--ink-strong)' }}>
             <Code2 className="h-4 w-4" style={{ color: 'var(--info)' }} />
-            AI Coding 节点
+            AI Coding
           </span>
-          <button
+          <Button
             type="button"
             onClick={onClose}
-            className="flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-[var(--line-soft)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
 
         <p className="mb-3 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-          新建或绑定 Bob Sandbox 小程序，AI 将在此编程并自动预览自检。
+          Choose what to build: a runnable mini-app, or a dedicated sub-agent you can chat with.
         </p>
+
+        {/* Deliverable type: Mini App / Sub-Agent */}
+        <div className="mb-3 grid grid-cols-2 gap-1 rounded-lg p-1" style={{ backgroundColor: 'var(--paper-soft)' }}>
+          <button
+            type="button"
+            onClick={() => setKind('mini')}
+            className="flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors"
+            style={
+              kind === 'mini'
+                ? { backgroundColor: 'var(--popover)', color: 'var(--info)', boxShadow: '0 1px 4px rgba(0,0,0,0.08)' }
+                : { color: 'var(--ink-muted)' }
+            }
+          >
+            <Boxes className="h-3.5 w-3.5" />Mini App
+          </button>
+          <button
+            type="button"
+            onClick={() => setKind('agent')}
+            className="flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors"
+            style={
+              kind === 'agent'
+                ? { backgroundColor: 'var(--popover)', color: 'var(--primary)', boxShadow: '0 1px 4px rgba(0,0,0,0.08)' }
+                : { color: 'var(--ink-muted)' }
+            }
+          >
+            <Bot className="h-3.5 w-3.5" />Sub-Agent
+          </button>
+        </div>
+
+        {kind === 'agent' ? (
+          /* ============ Sub-Agent lane: New (create_agent_package) / Existing (update_agent_package) ============ */
+          <>
+            {/* 档内：New Agent / Existing Agent */}
+            <div className="mb-3 grid grid-cols-2 gap-1 rounded-lg p-1" style={{ backgroundColor: 'var(--paper-soft)' }}>
+              <button
+                type="button"
+                onClick={() => setAgentMode('new')}
+                className="flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors"
+                style={
+                  agentMode === 'new'
+                    ? { backgroundColor: 'var(--popover)', color: 'var(--primary)', boxShadow: '0 1px 4px rgba(0,0,0,0.08)' }
+                    : { color: 'var(--ink-muted)' }
+                }
+              >
+                <Plus className="h-3.5 w-3.5" />New Agent
+              </button>
+              <button
+                type="button"
+                onClick={() => setAgentMode('existing')}
+                className="flex items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors"
+                style={
+                  agentMode === 'existing'
+                    ? { backgroundColor: 'var(--popover)', color: 'var(--primary)', boxShadow: '0 1px 4px rgba(0,0,0,0.08)' }
+                    : { color: 'var(--ink-muted)' }
+                }
+              >
+                <Pencil className="h-3.5 w-3.5" />Existing Agent
+              </button>
+            </div>
+
+            {agentMode === 'new' ? (
+            <div>
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+              <Sparkles className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
+              What is this agent called and what does it do?
+            </div>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleCreateAgentSession()}
+              placeholder="Agent name (e.g. Contract Review Expert)"
+              className="w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--primary)]"
+              style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
+            />
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="One-liner purpose — what it helps the user do? (e.g. review contracts from the client side, flag risk clauses, suggest fixes. Scenes & tools are confirmed in the conversation.)"
+              rows={3}
+              className="mt-2 w-full resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--primary)]"
+              style={{
+                borderColor: 'var(--line)',
+                backgroundColor: 'var(--input-bg)',
+                color: 'var(--ink)',
+                fontFamily: 'var(--font-sans)',
+                lineHeight: 1.6,
+              }}
+            />
+            <div className="mt-2">
+              <div className="mb-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                Role / boundaries (optional)
+              </div>
+              <textarea
+                value={agentRole}
+                onChange={(e) => setAgentRole(e.target.value)}
+                placeholder={'One item per line, e.g.:\n- Only review contracts; no general legal advice\n- Always grade risk and cite legal basis\n- Deliver a revision opinion file'}
+                rows={3}
+                className="w-full resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--primary)]"
+                style={{
+                  borderColor: 'var(--line)',
+                  backgroundColor: 'var(--input-bg)',
+                  color: 'var(--ink)',
+                  fontFamily: 'var(--font-sans)',
+                  lineHeight: 1.6,
+                }}
+              />
+            </div>
+            <div className="mt-1.5 text-11 leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              On submit we open a Coding conversation: the AI first confirms scenes (Legal / Notes / General…) and whether to strip file & network kernel tools, then calls <span style={{ color: 'var(--primary)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>create_agent_package</span>. The agent then appears under the sidebar ＋ Add session menu.
+            </div>
+            <Button
+              type="button"
+              onClick={handleCreateAgentSession}
+              disabled={creating || !name.trim()}
+              loading={creating}
+              variant="solid"
+              tone="brand"
+              size="md"
+              className="mt-2 w-full"
+            >
+              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
+              Start Conversation & Create Agent
+            </Button>
+            </div>
+            ) : (
+              /* ---- Existing: modify an installed agent via a Coding conversation (update_agent_package) ---- */
+              <div className="max-h-[300px] space-y-1.5 overflow-y-auto pr-1">
+                <p className="mb-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+                  Which installed agent do you want to modify? Selecting one opens a Coding conversation that calls{' '}
+                  <span style={{ color: 'var(--primary)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>update_agent_package</span> after confirming the changes.
+                </p>
+                {installedAgents.length === 0 ? (
+                  <div
+                    className="rounded-lg border border-dashed px-3 py-4 text-center text-xs"
+                    style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+                  >
+                    No installed agents to modify yet — install one from Extensions Store → Agents, or use New Agent above.
+                  </div>
+                ) : (
+                  installedAgents.map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      disabled={creating}
+                      onClick={() => void handleUpdateAgentSession(a)}
+                      className="flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors hover:bg-[color-mix(in_oklab,var(--primary)_8%,transparent)] disabled:opacity-60"
+                      style={{ borderColor: 'color-mix(in oklab, var(--primary) 40%, transparent)', backgroundColor: 'var(--popover)' }}
+                    >
+                      <span
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+                        style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)', color: 'var(--primary)' }}
+                      >
+                        <Bot className="h-3.5 w-3.5" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium" style={{ color: 'var(--ink-strong)' }}>{a.label}</span>
+                        <span className="block font-mono text-xs" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}>id: {a.id}</span>
+                      </span>
+                      <Pencil className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+            </>
+        ) : (
+          <>
+            <p className="mb-3 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              Create or bind a Bob Sandbox mini-app — AI codes here with auto preview & self-check.
+            </p>
 
         {/* 模式切换：新建项目 / 绑定已有 */}
         <div className="mb-3 flex gap-1 rounded-lg p-1" style={{ backgroundColor: 'var(--paper-soft)' }}>
@@ -209,7 +451,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
             }
           >
             <Plus className="h-3.5 w-3.5" />
-            新建项目
+            New Project
           </button>
           <button
             type="button"
@@ -222,7 +464,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
             }
           >
             <FolderOpen className="h-3.5 w-3.5" />
-            绑定已有
+            Bind Existing
           </button>
         </div>
 
@@ -233,7 +475,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
             <div className="mb-3">
               <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
                 <Lightbulb className="h-3.5 w-3.5" style={{ color: 'var(--warn)' }} />
-                我想做…（先选一个方向，模板和需求描述会自动预填）
+                I want to make… (pick a direction — template & request auto-fill)
               </div>
               <div
                 className="grid max-h-[240px] grid-cols-2 gap-1.5 overflow-y-auto pr-0.5"
@@ -250,9 +492,9 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
                         // 预填需求描述（仅当 prompt 为空时，避免覆盖用户手写内容）
                         if (!prompt.trim()) {
                           setPrompt(
-                            `做一个「${ins.label}」小程序：${ins.desc}。${
+                            `Build a «${ins.label}» mini-app: ${ins.desc}.${
                               templates.find((t) => t.id === ins.tplId)?.promptSeed
-                                ? `\n\n我的设计偏好（AI 首轮会再弹出设计表单确认）：\n- 功能分类：${templates.find((t) => t.id === ins.tplId)!.promptSeed!.category}\n- 交互方式：${templates.find((t) => t.id === ins.tplId)!.promptSeed!.interaction}\n- 数据持久化：${templates.find((t) => t.id === ins.tplId)!.promptSeed!.persistence}`
+                                ? `\n\nDesign preferences (AI will confirm via a design form on the first turn):\n- Feature category: ${templates.find((t) => t.id === ins.tplId)!.promptSeed!.category}\n- Interaction: ${templates.find((t) => t.id === ins.tplId)!.promptSeed!.interaction}\n- Data persistence: ${templates.find((t) => t.id === ins.tplId)!.promptSeed!.persistence}`
                                 : ''
                             }`,
                           );
@@ -288,15 +530,15 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
               </div>
             </div>
 
-            {/* 基础字段：名称 + 模板下拉（兜底，灵感未覆盖时使用） */}
+            {/* Basic fields: name + template dropdown (fallback when no inspiration chosen) */}
             <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>项目名</span>
+              <span className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>App name</span>
             </div>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCreateApp()}
-              placeholder="小程序名称（如：合同审查助手）"
+              placeholder="Mini-app name (e.g. Contract Checker)"
               className="w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--info)]"
               style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
             />
@@ -307,7 +549,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
               style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
             >
               {templates.length === 0 ? (
-                <option value="blank">Blank（空白模板）</option>
+                <option value="blank">Blank template</option>
               ) : (
                 templates.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -321,7 +563,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
             <div className="mt-3">
               <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
                 <FileText className="h-3.5 w-3.5" />
-                需求描述（可选，不填直接进入设计表单）
+                Request (optional — skip to the design form)
               </div>
               <textarea
                 value={prompt}
@@ -329,7 +571,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleCreateApp();
                 }}
-                placeholder="简单告诉我你想要什么功能？比如：「做一个帮我算加班费的工具，输入月薪和加班小时数，自动算出应得金额」。创建后 AI 还会弹出设计表单供你确认。"
+                placeholder='Tell me what you want in one go — e.g. "a tool that calculates overtime pay: input monthly salary and overtime hours, get the amount owed". After creation the AI will pop a design form to confirm.'
                 rows={4}
                 className="w-full resize-none rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--info)]"
                 style={{
@@ -344,17 +586,20 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
                 className="mt-1 flex items-center justify-between"
                 style={{ color: 'var(--ink-muted)' }}
               >
-                <span className="text-11">⌘/Ctrl + Enter 快速创建 · 填写越多首版越精准</span>
+                <span className="text-11">⌘/Ctrl + Enter to create · more detail = better first build</span>
                 <span className="text-11">{prompt.length}/800</span>
               </div>
             </div>
 
-            <button
+            <Button
               type="button"
               onClick={handleCreateApp}
               disabled={creating}
-              className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-sm font-medium text-white transition-opacity disabled:opacity-60"
-              style={{ backgroundColor: 'var(--info)' }}
+              loading={creating}
+              variant="solid"
+              tone="info"
+              size="md"
+              className="mt-2 w-full"
             >
               {creating ? (
                 <>
@@ -364,10 +609,10 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
               ) : (
                 <>
                   <Code2 className="h-3.5 w-3.5" />
-                  新建并创建 Coding 节点
+                  Create Coding Node
                 </>
               )}
-            </button>
+            </Button>
           </div>
         ) : (
           /* ---- 绑定已有项目 ---- */
@@ -378,7 +623,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
               </div>
             ) : apps.length === 0 ? (
               <p className="py-4 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
-                暂无小程序，请先切换到「新建项目」创建
+                No mini-apps yet — switch to New Project to create one.
               </p>
             ) : (
               apps.map((app) => (
@@ -406,6 +651,8 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
             )}
           </div>
         )}
+        </>
+      )}
       </div>
     </div>
   );

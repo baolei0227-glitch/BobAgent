@@ -1,15 +1,17 @@
 /**
- * Wanted 模型解析：优先用设置中的 Wanted 小模型，否则降级到已配置的聊天模型。
- * 供 tasks/summarize 与 notebook 等 Wanted 系列 API 共用。
+ * Wanted 模型解析：任务/成果块系列 API 共用。
  *
- * 分层回退（依次尝试，命中即用）：
- *   1) chatModel.pool 内第一个可用条目（历史 defaultModel 优先已移除，与 Auto 一致）
- *   2) chatModel 旧式直配（defaultModel + apiKey，无 pool 的旧配置兼容）
- *   3) taskModel（设置 → Wanted 小模型，旧配置仍可能残留）
- *   4) 扫描 providers：第一个 apiKey 非空且勾选了模型的厂商，取其首个勾选模型
+ * 分层回退：
+ *   resolveTaskModel（通用任务层）：taskModel → 主对话(pool → 旧式直配) → 兜底厂商
+ *   resolveOutcomeModel（成果块专属层）：outcomeModel → 主对话(pool → 旧式直配) → taskModel → 兜底厂商
+ *
+ * 说明：
+ *   - taskModel：设置 → 任务模型，统管任务摘要/会议纪要/日程解析/AI 字段抽取等轻量任务，显式配置时优先
+ *   - outcomeModel：设置 → 成果块模型，专供成果块（法律引用，质量敏感），默认跟随主对话模型
  */
 import { PROVIDER_PRESETS, type ProviderConfig } from '@/lib/types';
 import { readSettingsFromFile } from '@/lib/settings-server';
+import type { TaskModelSettings } from '@/lib/settings';
 
 export interface ResolvedModel {
   model: string;
@@ -57,17 +59,38 @@ export async function resolveProviderModel(providerModelId: string): Promise<Res
   return { model: modelId, apiKey: cfg.apiKey, baseUrl: baseUrlFor(cfg.type, cfg.baseUrl) };
 }
 
-export async function resolveTaskModel(): Promise<ResolvedModel | null> {
-  const settings = await readSettingsFromFile();
-  const providers: ProviderConfig[] = Array.isArray(settings.providers) ? settings.providers : [];
-  const cm = settings.chatModel || {};
+/** 解析单个角色模型（taskModel / outcomeModel）：pool → 旧式直配 apiKey + defaultModel */
+function resolveRoleModel(role: TaskModelSettings | undefined, providers: ProviderConfig[]): ResolvedModel | null {
+  if (!role) return null;
+  const pool = Array.isArray(role.pool) ? role.pool : [];
+  if (pool.length > 0) {
+    for (const item of pool) {
+      const cfg = providers.find((p) => p.type === item.provider);
+      const resolved = cfg ? fromProvider(cfg, item.modelId) : null;
+      if (resolved) return resolved;
+    }
+  }
+  if (role.apiKey && role.defaultModel) {
+    const providerType =
+      (role.defaultProvider as string) ||
+      (role.defaultModel.includes('deepseek') ? 'deepseek'
+        : role.defaultModel.includes('glm') ? 'glm'
+        : role.defaultModel.includes('moonshot') ? 'moonshot'
+        : role.defaultModel.includes('qwen') ? 'qwen'
+        : role.defaultModel.includes('doubao') ? 'doubao'
+        : 'openai');
+    return {
+      model: role.defaultModel,
+      apiKey: role.apiKey,
+      baseUrl: baseUrlFor(providerType, role.baseUrl),
+    };
+  }
+  return null;
+}
 
-  // 1) 主对话候选池 pool（优先）：按条目显式的 provider 匹配正确网关，
-  //    与主对话 Auto 选模型路径一致。历史 defaultModel 优先（星标语义）已移除，
-  //    直接取 pool 里第一个可用条目。
-  //    关键：不能直接信 defaultModel + defaultProvider，因为保存时 defaultProvider 可能
-  //    被 resolveRoleFromChat 误判（同名模型出现在多个厂商时取第一个），而 pool 的
-  //    provider 才是用户真实选择的网关。
+/** 主对话模型解析：pool 内第一个可用条目 → 旧式直配（defaultModel + apiKey） */
+function resolveMainChat(cm: TaskModelSettings | undefined, providers: ProviderConfig[]): ResolvedModel | null {
+  if (!cm) return null;
   const pool = Array.isArray(cm.pool) ? cm.pool : [];
   if (pool.length > 0) {
     for (const item of pool) {
@@ -76,8 +99,6 @@ export async function resolveTaskModel(): Promise<ResolvedModel | null> {
       if (resolved) return resolved;
     }
   }
-
-  // 2) 回退：chatModel 旧式直配（defaultModel + apiKey + baseUrl，无 pool 的旧配置）
   if (cm.apiKey && cm.defaultModel) {
     const providerType =
       (cm.defaultProvider as string) ||
@@ -93,30 +114,52 @@ export async function resolveTaskModel(): Promise<ResolvedModel | null> {
       baseUrl: baseUrlFor(providerType, cm.baseUrl),
     };
   }
+  return null;
+}
 
-  // 3) taskModel（设置 → Wanted 小模型；SettingsModal 保存时已置 undefined，旧配置残留仍可兜底）
-  const tm = settings.taskModel || {};
-  if (tm.apiKey && tm.defaultModel) {
-    const providerType =
-      (tm.defaultProvider as string) ||
-      (tm.defaultModel.includes('deepseek') ? 'deepseek'
-        : tm.defaultModel.includes('glm') ? 'glm'
-        : tm.defaultModel.includes('moonshot') ? 'moonshot'
-        : tm.defaultModel.includes('qwen') ? 'qwen'
-        : tm.defaultModel.includes('doubao') ? 'doubao'
-        : 'openai');
-    return {
-      model: tm.defaultModel,
-      apiKey: tm.apiKey,
-      baseUrl: baseUrlFor(providerType, tm.baseUrl),
-    };
-  }
-
-  // 4) 兜底：第一个 apiKey 非空且勾选了模型的厂商
+/** 兜底：第一个 apiKey 非空且勾选了模型的厂商 */
+function resolveProviderFallback(providers: ProviderConfig[]): ResolvedModel | null {
   for (const cfg of providers) {
     const resolved = fromProvider(cfg);
     if (resolved) return resolved;
   }
-
   return null;
+}
+
+/** 通用任务层：taskModel（显式配置优先）→ 主对话模型 → 兜底厂商 */
+export async function resolveTaskModel(): Promise<ResolvedModel | null> {
+  const settings = await readSettingsFromFile();
+  const providers: ProviderConfig[] = Array.isArray(settings.providers) ? settings.providers : [];
+
+  // 1) taskModel（设置 → 任务模型）：显式配置时优先，统管任务摘要/会议纪要/日程解析/AI 字段抽取等轻量任务
+  const roleResolved = resolveRoleModel(settings.taskModel, providers);
+  if (roleResolved) return roleResolved;
+
+  // 2) 主对话模型（pool → 旧式直配）
+  const mainResolved = resolveMainChat(settings.chatModel, providers);
+  if (mainResolved) return mainResolved;
+
+  // 3) 兜底：第一个可用厂商
+  return resolveProviderFallback(providers);
+}
+
+/** 成果块专属层：outcomeModel（显式配置优先）→ 主对话模型 → taskModel → 兜底厂商 */
+export async function resolveOutcomeModel(): Promise<ResolvedModel | null> {
+  const settings = await readSettingsFromFile();
+  const providers: ProviderConfig[] = Array.isArray(settings.providers) ? settings.providers : [];
+
+  // 1) outcomeModel（设置 → 成果块模型）：成果块质量敏感，显式配置时优先
+  const roleResolved = resolveRoleModel(settings.outcomeModel, providers);
+  if (roleResolved) return roleResolved;
+
+  // 2) 主对话模型（pool → 旧式直配）：成果块默认跟随主对话，优先于任务模型
+  const mainResolved = resolveMainChat(settings.chatModel, providers);
+  if (mainResolved) return mainResolved;
+
+  // 3) 回退：任务模型
+  const taskResolved = resolveRoleModel(settings.taskModel, providers);
+  if (taskResolved) return taskResolved;
+
+  // 4) 兜底：第一个可用厂商
+  return resolveProviderFallback(providers);
 }

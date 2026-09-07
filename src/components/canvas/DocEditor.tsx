@@ -47,10 +47,13 @@ import {
   Heading3,
   List,
   ListOrdered,
-  ListChecks,
   Quote,
   Code2,
   Minus,
+  Pilcrow,
+  GripVertical,
+  Columns2,
+  Columns3,
   Link as LinkIcon,
   Image as ImageIcon,
   Undo,
@@ -71,12 +74,11 @@ import {
   Search,
   Hash,
   Wand2,
-  Save,
   Table as TableIcon,
   AlertTriangle,
-  RefreshCw,
 } from 'lucide-react';
 import { AnnotationBubble, mdSelTempKey } from './extensions/AnnotationBubble';
+import { Button } from '@/components/ui/button';
 import { MermaidCodeBlock } from './extensions/MermaidCodeBlock';
 import { CollapsibleHeading } from './extensions/CollapsibleHeading';
 import { MdEmbed } from './extensions/MdEmbed';
@@ -84,11 +86,14 @@ import { bus, BusEvents } from '@/lib/bus';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { extractQuestionnaires, QuestionnairePanel, type QuestionnaireBlock } from './QuestionnairePanel';
 import { ExportDocxDialog } from './ExportDocxDialog';
-import { convertMarkdownToDocx, DEFAULT_DOCX_CONFIG, type DocxExportConfig } from '@/lib/md-to-docx';
+import { convertMarkdownToDocx, type DocxExportConfig } from '@/lib/md-to-docx';
 import { MdAnnotationPanel, ANNOTATION_INTENTS, type MdAnnotation, type Revision, type RevisionRound, type RevisionOp } from './MdAnnotationPanel';
-import type { MdAnchor } from '@/lib/types';
 // track-changes：AI 修订注入为原生 ProseMirror mark（替代文本标记模拟），接受/拒绝/读取原生支持
 import { TrackChangesExtension } from 'tiptap-track-changes';
+// 块级拖拽把手：hover 块首出现，按住可拖拽排序段落/列表项/图片/表格/嵌入卡片等块（TipTap v3 官方开源扩展）
+import DragHandle from '@tiptap/extension-drag-handle-react';
+// 多栏容器 MVP：两栏/三栏并排编辑，markdown 以自定义 fence 往返
+import { BobColumn, BobColumns } from './extensions/MultiColumn';
 
 // ============================================================
 // lowlight 实例：注册常用编程语言用于代码块语法高亮
@@ -571,12 +576,12 @@ async function insertPastedImage(
 ): Promise<void> {
   const src = await upload(file);
   if (!src) {
-    alert('图片上传失败，无法插入');
+    alert('Image upload failed, could not insert');
     return;
   }
   const node = view.state.schema.nodes.image?.create({ src });
   if (!node) {
-    alert('当前文档不支持插入图片');
+    alert('This document does not support image insertion');
     return;
   }
   if (typeof pos === 'number') {
@@ -810,6 +815,8 @@ export function DocEditor({
   const [showToc, setShowToc] = useState(false);
   const [tocTick, setTocTick] = useState(0);
   const [activeHeadingPos, setActiveHeadingPos] = useState<number | null>(null);
+  // 顶部工具栏：默认折叠（保留「Formatting」常驻条，展开后可用全部格式按钮；格式操作亦可经 ⌘K / `/` 完成）
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(true);
 
   // `/` 斜杠命令：输入 / 在光标处弹出插入菜单（复用 ⌘K 面板命令，零新依赖）
   const [slashOpen, setSlashOpen] = useState(false);
@@ -821,6 +828,10 @@ export function DocEditor({
   /** ref 镜像：editorProps 回调（创建时闭包）读取最新菜单开关状态 */
   const slashOpenRef = useRef(false);
   slashOpenRef.current = slashOpen;
+  /** 斜杠行当前光标字符位置快照：菜单打开期间随输入/删除实时更新。
+   *  点击弹窗命令会令编辑器短暂失焦，PM selection 可能漂移（误删/误改其他行），
+   *  执行命令时一律以该快照定位，不信任失焦后的 selection。 */
+  const slashCaretRef = useRef<number | null>(null);
   /** 斜杠菜单键盘导航：以 ref 函数注入 editorProps.handleKeyDown，每次渲染刷新最新命令/索引 */
   const slashNavRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
   /** 表格浮动工具栏：光标在表格内时显示（x/y = 锚点坐标，above = 是否浮在表格上方） */
@@ -851,6 +862,8 @@ export function DocEditor({
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [commandIndex, setCommandIndex] = useState(0);
+  /** 顶部搜索栏左侧「历史」按钮（撤销/重做）的悬停高亮 */
+  const [historySel, setHistorySel] = useState<string | null>(null);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -1200,6 +1213,9 @@ export function DocEditor({
       MermaidCodeBlock.configure({ lowlight }),
       // 文档嵌入：`![[路径]]` → 嵌入卡片（markdown 双向序列化见扩展内）
       MdEmbed,
+      // 多栏容器 MVP：bobColumns + bobColumn（自定 markdown fence 往返，见扩展内 addStorage）
+      BobColumn,
+      BobColumns,
       // 批注高亮：被批注文字保持黄色高亮
       MdAnnotationHighlight,
       // 临时选区高亮：批注气泡编辑期间保持选中文字高亮
@@ -1280,6 +1296,7 @@ export function DocEditor({
             setSlashQuery(line.slice(1));
             setSlashIndex(0);
           }
+          slashCaretRef.current = view.state.selection.from;
           return false;
         }
         // 输入 '/'：仅当行首或前导空白时打开（'1/'、'word/' 不误触发）
@@ -1291,6 +1308,7 @@ export function DocEditor({
             setSlashOpen(true);
             setSlashQuery('');
             setSlashIndex(0);
+            slashCaretRef.current = view.state.selection.from;
           }
         }
         return false;
@@ -1824,7 +1842,7 @@ export function DocEditor({
     const round = revisionRounds.find((r) => r.id === roundId);
     const pos = locateRevision(editor, round, oldText, newText);
     if (!pos) {
-      setLocateHint('未找到该修订位置，文档可能已被编辑');
+      setLocateHint('Revision not found in the document — it may have been edited');
       return;
     }
     editor.chain().focus().setTextSelection(pos).run();
@@ -1841,7 +1859,7 @@ export function DocEditor({
     if (!pos) {
       editor.view.dispatch(editor.state.tr.setMeta(mdRevisionFocusKey, DecorationSet.empty));
       pendingRevisionScrollRef.current = false;
-      setLocateHint('未找到该修订位置，文档可能已被编辑');
+      setLocateHint('Revision not found in the document — it may have been edited');
       return;
     }
     const set = DecorationSet.create(editor.state.doc, [Decoration.inline(pos.from, pos.to, { class: 'md-revision-focus' })]);
@@ -2231,7 +2249,7 @@ export function DocEditor({
         return;
       }
 
-      alert('新建 Markdown 文档支持本地文件或项目文件场景：请先在左侧文件面板打开一个 .md 文件，再点击此按钮。');
+      alert('New Markdown files are supported for local files or project files only: open a .md file in the left file panel first, then use this command.');
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Create file failed');
     }
@@ -2309,7 +2327,7 @@ export function DocEditor({
   const handleShareDocument = useCallback(async () => {
     const path = sharePathForDoc();
     if (!path) {
-      showImageAiEditToast('当前文档不支持分享（仅支持已保存的项目/本地文件）', 'error');
+      showImageAiEditToast('This document cannot be shared (only saved project or local files can be shared)', 'error');
       return;
     }
     try {
@@ -2320,13 +2338,13 @@ export function DocEditor({
       });
       const data = await resp.json();
       if (!data.success || !data.url) {
-        showImageAiEditToast(`分享失败：${data.error ?? 'unknown'}`, 'error');
+        showImageAiEditToast(`Share failed: ${data.error ?? 'unknown'}`, 'error');
         return;
       }
       await navigator.clipboard.writeText(data.url).catch(() => {});
-      showImageAiEditToast(`分享链接已复制：${data.url}`);
+      showImageAiEditToast(`Share link copied: ${data.url}`);
     } catch (e) {
-      showImageAiEditToast(`分享失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+      showImageAiEditToast(`Share failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
     }
   }, [sharePathForDoc]);
 
@@ -2337,10 +2355,10 @@ export function DocEditor({
     setPromptState({
       title: 'Insert Document',
       initialValue: '',
-      placeholder: '粘贴链接，或输入文档路径（如 homework/report.md）',
+      placeholder: 'Paste a link, or enter a document path (e.g. homework/report.md)',
       choices: [
         {
-          label: '链接',
+          label: 'Link',
           primary: true,
           onSubmit: async (targetPath) => {
             if (!targetPath || !editor) return;
@@ -2359,13 +2377,13 @@ export function DocEditor({
                 });
                 const data = await resp.json();
                 if (!data.success || !data.url) {
-                  showImageAiEditToast(`插入失败：${data.error ?? 'unknown'}`, 'error');
+                  showImageAiEditToast(`Insert failed: ${data.error ?? 'unknown'}`, 'error');
                   return;
                 }
                 href = data.url;
                 label = raw.split('/').pop()?.replace(/\.md$/i, '') ?? 'document';
               } catch (e) {
-                showImageAiEditToast(`插入失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+                showImageAiEditToast(`Insert failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
                 return;
               }
             }
@@ -2377,15 +2395,15 @@ export function DocEditor({
               // 有选中文字：把选区包成链接
               editor.chain().focus().extendMarkRange('link').setLink({ href }).run();
             }
-            showImageAiEditToast('已插入文档链接');
+            showImageAiEditToast('Document link inserted');
           },
         },
         {
-          label: '嵌入卡片',
+          label: 'Embed Card',
           onSubmit: (targetPath) => {
             if (!targetPath || !editor) return;
             editor.chain().focus().insertContent({ type: 'mdEmbed', attrs: { path: targetPath.trim() } }).run();
-            showImageAiEditToast('已嵌入文档');
+            showImageAiEditToast('Document embedded');
           },
         },
       ],
@@ -2451,44 +2469,49 @@ export function DocEditor({
     const push = (group: string, id: string, label: string, hint: string | undefined, run: () => void) =>
       cmds.push({ id: `${group}:${id}`, group, label, hint, run });
     // 格式
-    push('格式', 'bold', '加粗', '⌘B', () => editor.chain().focus().toggleBold().run());
-    push('格式', 'italic', '斜体', '⌘I', () => editor.chain().focus().toggleItalic().run());
-    push('格式', 'strike', '删除线', '', () => editor.chain().focus().toggleStrike().run());
-    push('格式', 'code', '行内代码', '', () => editor.chain().focus().toggleCode().run());
+    push('Format', 'bold', 'Bold', '⌘B', () => editor.chain().focus().toggleBold().run());
+    push('Format', 'italic', 'Italic', '⌘I', () => editor.chain().focus().toggleItalic().run());
+    push('Format', 'strike', 'Strikethrough', '', () => editor.chain().focus().toggleStrike().run());
+    push('Format', 'code', 'Inline Code', '', () => editor.chain().focus().toggleCode().run());
     // 段落
-    push('段落', 'h1', '标题 1', '', () => editor.chain().focus().toggleHeading({ level: 1 }).run());
-    push('段落', 'h2', '标题 2', '', () => editor.chain().focus().toggleHeading({ level: 2 }).run());
-    push('段落', 'h3', '标题 3', '', () => editor.chain().focus().toggleHeading({ level: 3 }).run());
-    push('段落', 'paragraph', '正文', '', () => editor.chain().focus().setParagraph().run());
-    push('段落', 'bullet', '无序列表', '', () => editor.chain().focus().toggleBulletList().run());
-    push('段落', 'ordered', '有序列表', '', () => editor.chain().focus().toggleOrderedList().run());
-    push('段落', 'task', '任务清单', '', () => editor.chain().focus().toggleTaskList().run());
-    push('段落', 'quote', '引用', '', () => editor.chain().focus().toggleBlockquote().run());
-    push('段落', 'codeblock', '代码块', '', () => editor.chain().focus().toggleCodeBlock().run());
-    push('段落', 'hr', '分割线', '', () => editor.chain().focus().setHorizontalRule().run());
+    push('Block', 'h1', 'Heading 1', '', () => editor.chain().focus().toggleHeading({ level: 1 }).run());
+    push('Block', 'h2', 'Heading 2', '', () => editor.chain().focus().toggleHeading({ level: 2 }).run());
+    push('Block', 'h3', 'Heading 3', '', () => editor.chain().focus().toggleHeading({ level: 3 }).run());
+    push('Block', 'paragraph', 'Paragraph', '', () => editor.chain().focus().setParagraph().run());
+    push('Block', 'bullet', 'Bullet List', '', () => editor.chain().focus().toggleBulletList().run());
+    push('Block', 'ordered', 'Ordered List', '', () => editor.chain().focus().toggleOrderedList().run());
+    push('Block', 'task', 'Task List', '', () => editor.chain().focus().toggleTaskList().run());
+    push('Block', 'quote', 'Blockquote', '', () => editor.chain().focus().toggleBlockquote().run());
+    push('Block', 'codeblock', 'Code Block', '', () => editor.chain().focus().toggleCodeBlock().run());
+    push('Block', 'hr', 'Divider', '', () => editor.chain().focus().setHorizontalRule().run());
     // 插入
-    push('插入', 'link', '链接…', '', handleAddLink);
-    push('插入', 'image', '图片…', '', handleAddImage);
-    push('插入', 'footnote', '脚注', '', handleAddFootnote);
-    push('插入', 'table', '表格（3×3）', '', () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run());
+    push('Insert', 'link', 'Add Link…', '', handleAddLink);
+    push('Insert', 'image', 'Add Image…', '', handleAddImage);
+    push('Insert', 'footnote', 'Footnote', '', handleAddFootnote);
+    push('Insert', 'table', 'Table (3×3)', '', () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run());
+    push('Insert', 'columns2', 'Two Columns', '', () => editor.chain().focus().insertBobColumns(2).run());
+    push('Insert', 'columns3', 'Three Columns', '', () => editor.chain().focus().insertBobColumns(3).run());
     // 历史
-    push('历史', 'undo', '撤销', '⌘Z', () => editor.chain().focus().undo().run());
-    push('历史', 'redo', '重做', '⇧⌘Z', () => editor.chain().focus().redo().run());
+    push('History', 'undo', 'Undo', '⌘Z', () => editor.chain().focus().undo().run());
+    push('History', 'redo', 'Redo', '⇧⌘Z', () => editor.chain().focus().redo().run());
     // 工具
-    push('工具', 'format', '格式化文档', '', handleFormatMarkdown);
-    push('工具', 'annotations', '批注面板', '', () => setAnnotationPanelOpen((v) => !v));
-    push('工具', 'toc', '目录', '', () => setShowToc((v) => !v));
-    push('工具', 'docx', '导出…', 'DOCX/HTML/PDF', () => setShowExportDialog(true));
-    push('工具', 'print', '打印', '', handlePrint);
+    push('Tools', 'format', 'Format Document', '', handleFormatMarkdown);
+    push('Tools', 'annotations', 'Annotations', '', () => setAnnotationPanelOpen((v) => !v));
+    push('Tools', 'toc', 'Table of Contents', '', () => setShowToc((v) => !v));
+    push('Tools', 'docx', 'Export…', 'DOCX/HTML/PDF', () => setShowExportDialog(true));
+    push('Tools', 'print', 'Print', '', handlePrint);
+    push('Tools', 'new-doc', 'New Markdown File', '', handleCreateMdDoc);
+    push('Tools', 'insert-doc', 'Insert Document…', 'Link / Embed', handleInsertDoc);
+    push('Tools', 'share', 'Share…', '', handleShareDocument);
     return cmds;
-  }, [editor, handleAddLink, handleAddImage, handleAddFootnote, handleFormatMarkdown, handlePrint]);
+  }, [editor, handleAddLink, handleAddImage, handleAddFootnote, handleFormatMarkdown, handlePrint, handleCreateMdDoc, handleInsertDoc, handleShareDocument]);
 
   /** `/` 斜杠命令列表：复用 ⌘K 面板的段落/插入类命令，按输入查询词实时过滤 */
   const slashCommands = useMemo(() => {
     if (paletteCommands.length === 0) return [];
     const q = slashQuery.trim().toLowerCase();
     return paletteCommands
-      .filter((c) => c.group === '段落' || c.group === '插入')
+      .filter((c) => c.group === 'Block' || c.group === 'Insert')
       .filter((c) => !q || `${c.group}${c.label}`.toLowerCase().includes(q));
   }, [paletteCommands, slashQuery]);
 
@@ -2497,14 +2520,17 @@ export function DocEditor({
     (cmd: PaletteCommand) => {
       const view = editor?.view;
       if (view) {
-        const pos = view.state.selection.from;
+        // 用斜杠行光标快照定位（失焦/选区漂移时仍准确）；无快照回退当前选区
+        const caret = typeof slashCaretRef.current === 'number' ? slashCaretRef.current : view.state.selection.from;
+        const pos = Math.max(0, Math.min(caret, view.state.doc.content.size));
         const line = currentLineText(view, pos);
-        if (line.startsWith('/')) {
+        if (line.startsWith('/') && pos > 0) {
           // 与 currentLineText 一致：hardBreak 也渲染为 \n，行起点以最近换行(含软换行)为准
           const textBefore = view.state.doc.textBetween(0, pos, '\n', (leaf) => (leaf.type.name === 'hardBreak' ? '\n' : ''));
           const lineStart = textBefore.lastIndexOf('\n') + 1;
           view.dispatch(view.state.tr.delete(lineStart, pos));
         }
+        slashCaretRef.current = null;
       }
       setSlashOpen(false);
       setSlashQuery('');
@@ -2532,7 +2558,12 @@ export function DocEditor({
       const from = view?.state.selection.from ?? 0;
       const line = currentLineText(view, from);
       if (line === '/') { setSlashOpen(false); setSlashQuery(''); }
-      else if (line.startsWith('/')) { setSlashQuery(line.slice(1, -1)); setSlashIndex(0); }
+      else if (line.startsWith('/')) {
+        setSlashQuery(line.slice(1, -1));
+        setSlashIndex(0);
+        // 默认 Backspace 将删除光标前一字符：快照随之回退一位（保持与行尾一致）
+        slashCaretRef.current = Math.max(from - 1, 0);
+      }
       return false;
     }
     return false;
@@ -2737,7 +2768,7 @@ export function DocEditor({
       // 「当前节点」优先取本文档所属节点（nodeMdId）。节点文档在阅读器里打开时，
       // canvas 上的 React Flow 选中（node-selected）可能与文档归属不一致——用户打开/阅读 A 的
       // 文档时画布可能仍停留在 B 的选中态，导致引用错落到 B（“点击发送到节点，不是当前节点”）。
-      // 与「划词创建 note」的 sourceNodeId 同口径：以文档归属节点为准。
+      // 与划词引用同口径：以文档归属节点为准。
       const targetNodeId = nodeMdId || activeNodeId;
       if (!targetNodeId) return;
       window.dispatchEvent(new CustomEvent('node-ask-question', { detail: { nodeId: targetNodeId, text: quote } }));
@@ -2750,61 +2781,6 @@ export function DocEditor({
     [nodeMdId, activeNodeId],
   );
 
-  /** 划词创建 note：用选中文字生成画布 note 卡片。
-   *  节点文档（nodeMdId）→ 自动连线到该节点；同时记录来源文档锚点，
-   *  点击便签子弹图标可反向定位回本文档对应位置（kind=node/file 按宿主区分）。 */
-  const handleCreateNoteFromEditor = useCallback((quote: string, ctx: { prefix?: string; suffix?: string }) => {
-    const mdAnchor: MdAnchor | undefined = annotationKey
-      ? {
-          key: annotationKey,
-          kind: nodeMdId ? 'node' : 'file',
-          quote,
-          prefix: ctx?.prefix,
-          suffix: ctx?.suffix,
-          ...(source === 'project' || source === 'local' ? { source } : {}),
-        }
-      : undefined;
-    window.dispatchEvent(new CustomEvent('node-note-create-request', {
-      detail: { text: quote, sourceNodeId: nodeMdId || undefined, mdAnchor },
-    }));
-  }, [annotationKey, nodeMdId, source]);
-
-  /** 在本文档中定位并高亮指定文字（便签子弹图标反向定位用）：
-   *  editor 未就绪（文档刚打开）时延迟重试；找到后选中 + 滚动 + 2s 临时高亮 */
-  const locateTextInDoc = useCallback((quote: string, prefix?: string, suffix?: string, attempt = 0) => {
-    if (!editor) {
-      if (attempt < 8) setTimeout(() => locateTextInDoc(quote, prefix, suffix, attempt + 1), 250);
-      return;
-    }
-    const doc = editor.state.doc;
-    const fullText = doc.textBetween(0, doc.content.size, '\n');
-    const pos = findQuoteWithContext(fullText, quote, prefix, suffix);
-    if (!pos) return;
-    editor.chain().focus().setTextSelection({ from: pos.from, to: pos.to }).run();
-    const scroller = editor.view.dom.parentElement;
-    if (scroller) {
-      const coords = editor.view.coordsAtPos(pos.from);
-      scroller.scrollTo({ top: coords.top - scroller.getBoundingClientRect().top + scroller.scrollTop - 80, behavior: 'smooth' });
-    }
-    const set = DecorationSet.create(doc, [Decoration.inline(pos.from, pos.to, { class: 'md-locate-flash' })]);
-    editor.view.dispatch(editor.state.tr.setMeta(mdLocateKey, set));
-    window.setTimeout(() => {
-      if (!editor || editor.isDestroyed) return;
-      editor.view.dispatch(editor.state.tr.setMeta(mdLocateKey, DecorationSet.empty));
-    }, 2000);
-  }, [editor]);
-
-  // 便签反向定位：md-locate-request 事件（点击便签子弹图标派发）→ 匹配本文档则滚动高亮划词出处
-  useEffect(() => {
-    if (!annotationKey) return;
-    const handler = (e: Event) => {
-      const d = (e as CustomEvent<{ key?: string; quote?: string; prefix?: string; suffix?: string }>).detail;
-      if (!d?.key || d.key !== annotationKey || !d.quote) return;
-      locateTextInDoc(d.quote, d.prefix, d.suffix);
-    };
-    window.addEventListener('md-locate-request', handler);
-    return () => window.removeEventListener('md-locate-request', handler);
-  }, [annotationKey, locateTextInDoc]);
 
   // 本地图片选择 → 上传到节点附件目录 → 以附件 URL 插入编辑器
   const handleImageFileSelected = useCallback(
@@ -2830,26 +2806,67 @@ export function DocEditor({
     return <div className="doc-editor-loading p-4 text-sm" style={{ color: 'var(--ink-muted)' }}>Loading editor...</div>;
   }
 
+  // ⌘K 顶部历史区：撤销/重做固定在搜索栏左侧（不占命令分组行）
+  const historyCmds = paletteCommands.filter((c) => c.group === 'History');
+  // 主体命令（不含历史）：用于命令行渲染与搜索导航
+  const mainCommands = paletteCommands.filter((c) => c.group !== 'History');
+
   // ⌘K 命令面板：过滤后的命令列表
   const paletteQuery = commandQuery.trim().toLowerCase();
   const filteredCommands = paletteQuery
-    ? paletteCommands.filter((c) => `${c.group}${c.label}${c.hint ?? ''}`.toLowerCase().includes(paletteQuery))
-    : paletteCommands;
+    ? mainCommands.filter((c) => `${c.group}${c.label}${c.hint ?? ''}`.toLowerCase().includes(paletteQuery))
+    : mainCommands;
+
+  // ⌘K 横排分组布局：把扁平命令按组归拢成若干「行」（组内命令仍保持原有先后），每条记录全局 flat 索引供高亮/回车
+  const groupRuns: { group: string; items: { cmd: PaletteCommand; idx: number }[] }[] = [];
+  filteredCommands.forEach((cmd, idx) => {
+    const last = groupRuns[groupRuns.length - 1];
+    if (last && last.group === cmd.group) last.items.push({ cmd, idx });
+    else groupRuns.push({ group: cmd.group, items: [{ cmd, idx }] });
+  });
 
   return (
     <div
       className="doc-editor-wrapper flex flex-col h-full"
       onClick={() => {}}
     >
-      {/* 工具栏（仅可编辑时显示） */}
+      {/* 顶部工具栏（仅可编辑时显示）：默认折叠，常驻 Formatting 条点击展开/收起；格式操作亦可经 ⌘K / `/` 完成 */}
       {editable && (
-        <div
-          className="doc-editor-toolbar flex flex-wrap items-center gap-0.5 px-2 py-1.5"
-          style={{
-            borderBottom: '1px solid var(--line)',
-            backgroundColor: 'var(--paper-soft)',
-          }}
-        >
+        <div className="shrink-0" style={{ backgroundColor: 'var(--paper-soft)' }}>
+          {/* 折叠条：右侧常驻保存状态 */}
+          <div className="flex h-8 items-center gap-1 border-b px-2" style={{ borderColor: 'var(--line)' }}>
+            <button
+              type="button"
+              onClick={() => setToolbarCollapsed((v) => !v)}
+              title={toolbarCollapsed ? 'Show formatting toolbar' : 'Hide formatting toolbar'}
+              className="flex h-6 items-center gap-1 rounded-md px-1.5 text-12 font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_8%,transparent)]"
+              style={{ color: 'var(--ink-muted)' }}
+            >
+              <ChevronDown
+                className="h-3.5 w-3.5 transition-transform"
+                style={{ transform: toolbarCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}
+              />
+              Formatting
+            </button>
+            {toolbarCollapsed && (
+              <span className="text-10" style={{ color: 'var(--ink-faint)' }}>
+                Press ⌘K for all commands
+              </span>
+            )}
+            {/* 保存状态指示器（折叠时也可见） */}
+            <div
+              className="ml-auto flex items-center px-1"
+              title={saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : 'Unsaved changes'}
+              style={{ color: 'var(--ink-muted)' }}
+            >
+              {saveStatus === 'saving' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {saveStatus === 'saved' && <Check className="h-3.5 w-3.5" style={{ color: 'var(--success)' }} />}
+              {saveStatus === 'unsaved' && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: 'var(--warn)' }} />}
+            </div>
+          </div>
+
+          {!toolbarCollapsed && (
+            <div className="doc-editor-toolbar flex flex-wrap items-center gap-0.5 px-2 py-1.5" style={{ borderBottom: '1px solid var(--line)' }}>
           <ToolbarButton
             active={editor.isActive('bold')}
             onClick={() => editor.chain().focus().toggleBold().run()}
@@ -3110,22 +3127,14 @@ export function DocEditor({
             <ToolbarButton
               active={annotationPanelOpen}
               onClick={() => setAnnotationPanelOpen((v) => !v)}
-              title={annotationPanelOpen ? '关闭批注栏' : '批注面板'}
+              title={annotationPanelOpen ? 'Close annotations' : 'Annotations'}
             >
               <MessageSquare className="h-4 w-4" />
             </ToolbarButton>
           )}
 
-          {/* 保存状态指示器 */}
-          <div
-            className="ml-auto flex items-center px-2"
-            title={saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : 'Unsaved changes'}
-            style={{ color: 'var(--ink-muted)' }}
-          >
-            {saveStatus === 'saving' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {saveStatus === 'saved' && <Check className="h-3.5 w-3.5" style={{ color: 'var(--success)' }} />}
-            {saveStatus === 'unsaved' && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: 'var(--warn)' }} />}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3138,30 +3147,33 @@ export function DocEditor({
           <AlertTriangle className="h-4 w-4 shrink-0" style={{ color: 'var(--warn)' }} />
           <span className="text-13" style={{ color: 'var(--ink)' }}>This document was changed elsewhere.</span>
           <div className="ml-auto flex items-center gap-1.5">
-            <button
+            <Button
               type="button"
               onClick={reloadExternal}
-              className="rounded-md px-2.5 py-1 text-xs font-medium transition-colors"
-              style={{ color: 'var(--ink)', border: '1px solid var(--line)', backgroundColor: 'var(--paper)' }}
+              variant="outline"
+              tone="neutral"
+              size="sm"
             >
               Reload
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={forceSaveLocal}
-              className="rounded-md px-2.5 py-1 text-xs font-medium transition-colors"
-              style={{ color: '#fff', backgroundColor: 'var(--info)' }}
+              variant="solid"
+              tone="info"
+              size="sm"
             >
               Keep mine
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={() => setShowConflictDiff((v) => !v)}
-              className="rounded-md px-2.5 py-1 text-xs font-medium transition-colors"
-              style={{ color: 'var(--ink-muted)', border: '1px solid var(--line)', backgroundColor: 'var(--paper)' }}
+              variant="outline"
+              tone="neutral"
+              size="sm"
             >
               Compare
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -3208,33 +3220,39 @@ export function DocEditor({
             <span className="w-10 shrink-0 text-center text-11 tabular-nums" style={{ color: 'var(--ink-faint)' }}>
               {findQuery ? (findIndex >= 0 ? `${findIndex + 1}/${findMatches.length}` : '0') : ''}
             </span>
-            <button
+            <Button
               type="button"
               onClick={() => goFind(-1)}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               title="Previous (Shift+Enter)"
-              className="flex h-6 w-6 items-center justify-center rounded-md text-sm transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-              style={{ color: 'var(--ink-muted)' }}
+              aria-label="Previous match"
             >
               ↑
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={() => goFind(1)}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               title="Next (Enter)"
-              className="flex h-6 w-6 items-center justify-center rounded-md text-sm transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-              style={{ color: 'var(--ink-muted)' }}
+              aria-label="Next match"
             >
               ↓
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={closeFind}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               title="Close (Esc)"
-              className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-              style={{ color: 'var(--ink-muted)' }}
+              aria-label="Close find"
             >
               <X className="h-3.5 w-3.5" />
-            </button>
+            </Button>
           </div>
           {findQuery && (
             <>
@@ -3253,24 +3271,26 @@ export function DocEditor({
                   className="h-7 w-44 rounded-lg border bg-transparent px-2.5 text-13 outline-none"
                   style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
                 />
-                <button
+                <Button
                   type="button"
                   onClick={replaceCurrent}
+                  variant="ghost"
+                  tone="neutral"
+                  size="sm"
                   title="Replace current (Enter)"
-                  className="flex h-7 items-center justify-center rounded-lg px-2 text-11 font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-                  style={{ color: 'var(--ink-muted)' }}
                 >
                   Replace
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
                   onClick={replaceAll}
+                  variant="ghost"
+                  tone="neutral"
+                  size="sm"
                   title="Replace all"
-                  className="flex h-7 items-center justify-center rounded-lg px-2 text-11 font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-                  style={{ color: 'var(--ink-muted)' }}
                 >
                   All
-                </button>
+                </Button>
               </div>
             </>
           )}
@@ -3328,7 +3348,7 @@ export function DocEditor({
             /* 目录开关（悬浮按钮） */
             <button
               onClick={() => setShowToc((v) => !v)}
-              title={showToc ? '隐藏目录' : '显示目录'}
+              title={showToc ? 'Hide TOC' : 'Show TOC'}
               className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
               style={{ color: 'var(--ink-muted)', backgroundColor: showToc ? 'color-mix(in oklab, var(--ink) 6%, transparent)' : 'transparent' }}
             >
@@ -3411,7 +3431,7 @@ export function DocEditor({
               )}
               <div className="md-annotation-card-content">{ann.content}</div>
               <div className="md-annotation-card-time">
-                {ann.resolved ? '已解决' : new Date(ann.createdAt).toLocaleString()}
+                {ann.resolved ? 'Resolved' : new Date(ann.createdAt).toLocaleString()}
               </div>
             </div>
           );
@@ -3424,7 +3444,6 @@ export function DocEditor({
           onAdd={handleAnnotate}
           onAsk={handleAskInNode}
           canAskCurrent={!!(nodeMdId || activeNodeId)}
-          onCreateNote={handleCreateNoteFromEditor}
         />
       )}
 
@@ -3881,13 +3900,15 @@ export function DocEditor({
             >
               <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--line-soft)' }}>
                 <span className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>{promptState.title}</span>
-                <button
+                <Button
                   onClick={() => setPromptState(null)}
-                  className="flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="icon-sm"
+                  aria-label="Close"
                 >
                   <X className="h-4 w-4" />
-                </button>
+                </Button>
               </div>
               <div className="px-4 py-4">
                 <input
@@ -3909,40 +3930,41 @@ export function DocEditor({
                 />
               </div>
               <div className="flex justify-end gap-2 px-4 pb-4">
-                <button
+                <Button
                   onClick={() => setPromptState(null)}
-                  className="rounded-lg px-3.5 py-1.5 text-xs transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_5%,transparent)]"
-                  style={{ color: 'var(--ink)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="md"
                 >
                   Cancel
-                </button>
+                </Button>
                 {promptState.choices ? (
                   promptState.choices.map((c) => (
-                    <button
+                    <Button
                       key={c.label}
                       onClick={() => {
                         c.onSubmit(promptValue.trim());
                         setPromptState(null);
                       }}
-                      className="rounded-lg px-3.5 py-1.5 text-xs font-medium transition-colors hover:opacity-90"
-                      style={c.primary
-                        ? { backgroundColor: 'var(--primary)', color: '#fff' }
-                        : { backgroundColor: 'var(--paper-hover)', color: 'var(--ink)' }}
+                      variant={c.primary ? 'solid' : 'soft'}
+                      tone={c.primary ? 'brand' : 'neutral'}
+                      size="md"
                     >
                       {c.label}
-                    </button>
+                    </Button>
                   ))
                 ) : (
-                  <button
+                  <Button
                     onClick={() => {
                       promptState.onSubmit?.(promptValue.trim());
                       setPromptState(null);
                     }}
-                    className="rounded-lg px-3.5 py-1.5 text-xs font-medium transition-colors hover:opacity-90"
-                    style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                    variant="solid"
+                    tone="brand"
+                    size="md"
                   >
                     Confirm
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
@@ -3980,6 +4002,7 @@ export function DocEditor({
                 <button
                   key={cmd.id}
                   onClick={() => runSlashCommand(cmd)}
+                  onMouseDown={(e) => e.preventDefault()}
                   onMouseEnter={() => setSlashIndex(i)}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors"
                   style={{ backgroundColor: i === slashIndex ? 'var(--paper-hover)' : 'transparent', color: 'var(--ink)' }}
@@ -3991,7 +4014,7 @@ export function DocEditor({
             )}
           </div>
           <div className="border-t px-3 py-1 text-10" style={{ borderColor: 'var(--line)', color: 'var(--ink-faint)' }}>
-            ↑↓ 选择 · Enter 插入 · Esc 关闭
+            ↑↓ navigate · Enter insert · Esc close
           </div>
         </div>
       )}
@@ -4011,30 +4034,30 @@ export function DocEditor({
           } as React.CSSProperties}
         >
           <ToolbarButton title="Insert row above" onClick={() => editor.chain().focus().addRowBefore().run()}>
-            <span className="text-11 font-medium leading-none">↑行</span>
+            <span className="text-11 font-medium leading-none">R↑</span>
           </ToolbarButton>
           <ToolbarButton title="Insert row below" onClick={() => editor.chain().focus().addRowAfter().run()}>
-            <span className="text-11 font-medium leading-none">↓行</span>
+            <span className="text-11 font-medium leading-none">R↓</span>
           </ToolbarButton>
           <ToolbarButton title="Delete row" onClick={() => editor.chain().focus().deleteRow().run()}>
-            <span className="text-11 font-medium leading-none">删行</span>
+            <span className="text-11 font-medium leading-none">R−</span>
           </ToolbarButton>
           <Divider />
           <ToolbarButton title="Insert column left" onClick={() => editor.chain().focus().addColumnBefore().run()}>
-            <span className="text-11 font-medium leading-none">←列</span>
+            <span className="text-11 font-medium leading-none">C←</span>
           </ToolbarButton>
           <ToolbarButton title="Insert column right" onClick={() => editor.chain().focus().addColumnAfter().run()}>
-            <span className="text-11 font-medium leading-none">→列</span>
+            <span className="text-11 font-medium leading-none">C→</span>
           </ToolbarButton>
           <ToolbarButton title="Delete column" onClick={() => editor.chain().focus().deleteColumn().run()}>
-            <span className="text-11 font-medium leading-none">删列</span>
+            <span className="text-11 font-medium leading-none">C−</span>
           </ToolbarButton>
           <Divider />
           <ToolbarButton title="Merge cells" onClick={() => editor.chain().focus().mergeCells().run()}>
-            <span className="text-11 font-medium leading-none">合并</span>
+            <span className="text-11 font-medium leading-none">Merge</span>
           </ToolbarButton>
           <ToolbarButton title="Split cell" onClick={() => editor.chain().focus().splitCell().run()}>
-            <span className="text-11 font-medium leading-none">拆分</span>
+            <span className="text-11 font-medium leading-none">Split</span>
           </ToolbarButton>
           <Divider />
           {(['left', 'center', 'right'] as const).map((align) => (
@@ -4045,13 +4068,13 @@ export function DocEditor({
               onClick={() => editor.chain().focus().setCellAttribute('textAlign', align).run()}
             >
               <span className="text-11 font-medium leading-none">
-                {align === 'left' ? '左' : align === 'center' ? '中' : '右'}
+                {align === 'left' ? 'L' : align === 'center' ? 'C' : 'R'}
               </span>
             </ToolbarButton>
           ))}
           <Divider />
           <ToolbarButton title="Delete table" onClick={() => editor.chain().focus().deleteTable().run()}>
-            <span className="text-11 font-medium leading-none">删表</span>
+            <span className="text-11 font-medium leading-none">Del</span>
           </ToolbarButton>
         </div>
       )}
@@ -4069,47 +4092,197 @@ export function DocEditor({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-2 border-b px-3 py-2.5" style={{ borderColor: 'var(--line)' }}>
+              {/* 历史（撤销/重做）固定在搜索栏左侧，鼠标悬停高亮；不参与分组行与键盘导航 */}
+              {historyCmds.map((cmd) => {
+                const sel = historySel === cmd.id;
+                return (
+                  <button
+                    key={cmd.id}
+                    type="button"
+                    title={cmd.hint ? `${cmd.label} (${cmd.hint})` : cmd.label}
+                    onClick={() => runPaletteCommand(cmd)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setHistorySel(cmd.id)}
+                    onMouseLeave={() => setHistorySel(null)}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors"
+                    style={{
+                      color: sel ? 'var(--primary)' : 'var(--ink-muted)',
+                      backgroundColor: sel ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
+                    }}
+                  >
+                    {commandGlyph(cmd.id)}
+                  </button>
+                );
+              })}
+              <span style={{ width: '1px', height: '16px', backgroundColor: 'var(--line)' }} />
               <Search className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
               <input
                 autoFocus
                 value={commandQuery}
                 onChange={(e) => { setCommandQuery(e.target.value); setCommandIndex(0); }}
                 onKeyDown={(e) => {
-                  if (e.key === 'ArrowDown') { e.preventDefault(); setCommandIndex((i) => Math.min(i + 1, filteredCommands.length - 1)); }
-                  else if (e.key === 'ArrowUp') { e.preventDefault(); setCommandIndex((i) => Math.max(i - 1, 0)); }
-                  else if (e.key === 'Enter') { e.preventDefault(); const c = filteredCommands[commandIndex]; if (c) runPaletteCommand(c); }
-                  else if (e.key === 'Escape') { e.preventDefault(); setCommandOpen(false); }
+                  // 当前聚焦命令所在行（组）；-1 表示无可导航命令
+                  const runIdx = commandIndex >= 0 ? groupRuns.findIndex((g) => commandIndex >= g.items[0].idx && commandIndex <= g.items[g.items.length - 1].idx) : -1;
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (groupRuns.length) {
+                      const target = groupRuns[(runIdx + 1 + groupRuns.length) % groupRuns.length];
+                      setCommandIndex(target.items[0].idx);
+                    }
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (groupRuns.length) {
+                      const target = groupRuns[(runIdx - 1 + groupRuns.length) % groupRuns.length];
+                      setCommandIndex(target.items[0].idx);
+                    }
+                  } else if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    if (runIdx >= 0) {
+                      const run = groupRuns[runIdx];
+                      setCommandIndex((i) => Math.min(i + 1, run.items[run.items.length - 1].idx));
+                    }
+                  } else if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    if (runIdx >= 0) {
+                      const run = groupRuns[runIdx];
+                      setCommandIndex((i) => Math.max(i - 1, run.items[0].idx));
+                    }
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const c = filteredCommands[commandIndex];
+                    if (c) runPaletteCommand(c);
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setCommandOpen(false);
+                  }
                 }}
                 placeholder="Type a command or search…"
                 className="flex-1 bg-transparent text-sm outline-none"
                 style={{ color: 'var(--ink)' }}
               />
               <span className="shrink-0 text-10" style={{ color: 'var(--ink-faint)' }}>
-                Esc 关闭
+                Esc
               </span>
             </div>
             <div className="max-h-[340px] overflow-y-auto ai-canvas-scroll py-1">
-              {filteredCommands.length === 0 ? (
+              {groupRuns.length === 0 ? (
                 <div className="px-3 py-3 text-xs" style={{ color: 'var(--ink-faint)' }}>No matching commands</div>
               ) : (
-                filteredCommands.map((cmd, i) => (
-                  <button
-                    key={cmd.id}
-                    onClick={() => runPaletteCommand(cmd)}
-                    onMouseEnter={() => setCommandIndex(i)}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors"
-                    style={{ backgroundColor: i === commandIndex ? 'var(--paper-hover)' : 'transparent', color: 'var(--ink)' }}
+                groupRuns.map((run, gi) => (
+                  <div
+                    key={run.group}
+                    className="flex items-center gap-1 px-3 py-1.5"
+                    style={{ borderTop: gi === 0 ? undefined : '1px solid var(--line)' }}
                   >
-                    <span className="w-10 shrink-0 text-10 font-medium" style={{ color: 'var(--ink-faint)' }}>{cmd.group}</span>
-                    <span className="flex-1 truncate">{cmd.label}</span>
-                    {cmd.hint && <span className="shrink-0 text-10" style={{ color: 'var(--ink-faint)' }}>{cmd.hint}</span>}
-                  </button>
+                    <span className="w-9 shrink-0 text-10 font-medium" style={{ color: 'var(--ink-faint)' }}>{run.group}</span>
+                    <div className="flex min-w-0 flex-1 items-center gap-0.5">
+                      {run.items.map(({ cmd, idx }) => {
+                        const selected = idx === commandIndex;
+                        return (
+                          <button
+                            key={cmd.id}
+                            type="button"
+                            title={cmd.hint ? `${cmd.label} (${cmd.hint})` : cmd.label}
+                            onClick={() => runPaletteCommand(cmd)}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onMouseEnter={() => setCommandIndex(idx)}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors"
+                            style={{
+                              color: selected ? 'var(--primary)' : 'var(--ink-muted)',
+                              backgroundColor: selected ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
+                            }}
+                          >
+                            {commandGlyph(cmd.id)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 ))
               )}
             </div>
           </div>
         </div>
       )}
+
+      {/* 块级拖拽把手（仅可编辑态）：hover 块首显示，按住拖拽可排序段落/列表项/图片/表格/嵌入卡片等块 */}
+      {editable && editor && (
+        <DragHandle
+          editor={editor}
+          nested={{ edgeDetection: 'left', allowedContainers: ['bulletList', 'orderedList', 'taskList'] }}
+          className="doc-drag-handle"
+        >
+          <GripVertical />
+        </DragHandle>
+      )}
+      <style>{`
+        .doc-drag-handle {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 22px;
+          height: 24px;
+          border-radius: 6px;
+          color: var(--ink-muted);
+          cursor: grab;
+          z-index: 20;
+        }
+        .doc-drag-handle:hover {
+          color: var(--primary);
+          background: color-mix(in oklab, var(--primary) 8%, transparent);
+        }
+        .doc-drag-handle[data-dragging='true'] {
+          color: var(--primary);
+          background: color-mix(in oklab, var(--primary) 8%, transparent);
+          cursor: grabbing;
+        }
+        .doc-drag-handle svg {
+          width: 15px;
+          height: 15px;
+        }
+        .bob-columns-wrap {
+          margin: 4px 0;
+        }
+        .bob-columns-bar {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 0 0 6px;
+          font-size: 11px;
+          color: var(--ink-muted);
+          user-select: none;
+        }
+        .bob-columns-bar button {
+          width: 22px;
+          height: 20px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: var(--ink-muted);
+          cursor: pointer;
+          line-height: 1;
+        }
+        .bob-columns-bar button:hover {
+          color: var(--primary);
+          background: color-mix(in oklab, var(--primary) 10%, transparent);
+        }
+        .bob-columns-body {
+          display: flex;
+          align-items: stretch;
+          gap: 12px;
+        }
+        .bob-columns-body > [data-bob-column] {
+          flex: 1 1 0;
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 6px 10px;
+          background: color-mix(in oklab, var(--paper-soft) 45%, transparent);
+        }
+        .bob-columns-body > [data-bob-column] > p:first-child {
+          margin-top: 0;
+        }
+      `}</style>
     </div>
   );
 }
@@ -4124,6 +4297,46 @@ interface PaletteCommand {
   label: string;
   hint?: string;
   run: () => void;
+}
+
+/** ⌘K 横排命令按钮图标：命令 id → lucide 图标（与工具栏同款，便于横排识别）
+ *  注意 PaletteCommand.id 形如 `${group}:${shortId}`（如 "Format:bold"），
+ *  这里取冒号后的短 id 做匹配，避免全部走 default 返回 null 导致按钮空白。 */
+function commandGlyph(id: string): React.ReactNode {
+  const key = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
+  switch (key) {
+    case 'bold': return <Bold className="h-4 w-4" />;
+    case 'italic': return <Italic className="h-4 w-4" />;
+    case 'strike': return <Strikethrough className="h-4 w-4" />;
+    case 'code': return <Code className="h-4 w-4" />;
+    case 'h1': return <Heading1 className="h-4 w-4" />;
+    case 'h2': return <Heading2 className="h-4 w-4" />;
+    case 'h3': return <Heading3 className="h-4 w-4" />;
+    case 'paragraph': return <Pilcrow className="h-4 w-4" />;
+    case 'bullet': return <List className="h-4 w-4" />;
+    case 'ordered': return <ListOrdered className="h-4 w-4" />;
+    case 'task': return <CheckSquare className="h-4 w-4" />;
+    case 'quote': return <Quote className="h-4 w-4" />;
+    case 'codeblock': return <Code2 className="h-4 w-4" />;
+    case 'hr': return <Minus className="h-4 w-4" />;
+    case 'link': return <LinkIcon className="h-4 w-4" />;
+    case 'image': return <ImageIcon className="h-4 w-4" />;
+    case 'footnote': return <Hash className="h-4 w-4" />;
+    case 'table': return <TableIcon className="h-4 w-4" />;
+    case 'columns2': return <Columns2 className="h-4 w-4" />;
+    case 'columns3': return <Columns3 className="h-4 w-4" />;
+    case 'undo': return <Undo className="h-4 w-4" />;
+    case 'redo': return <Redo className="h-4 w-4" />;
+    case 'format': return <Wand2 className="h-4 w-4" />;
+    case 'annotations': return <MessageSquare className="h-4 w-4" />;
+    case 'toc': return <ListTree className="h-4 w-4" />;
+    case 'docx': return <FileDown className="h-4 w-4" />;
+    case 'print': return <Printer className="h-4 w-4" />;
+    case 'new-doc': return <FilePlus className="h-4 w-4" />;
+    case 'insert-doc': return <FileText className="h-4 w-4" />;
+    case 'share': return <Share2 className="h-4 w-4" />;
+    default: return null;
+  }
 }
 
 interface ToolbarButtonProps {

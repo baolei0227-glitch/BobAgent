@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { CSSProperties } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 /**
  * 应用内确认弹窗（BobWork 暖色风格，portal 到 body 避免被 ReactFlow transform 影响）。
@@ -103,47 +104,43 @@ export function ConfirmDialog({
             // 多选模式：选项按钮 + Cancel（忽略 confirmLabel/cancelLabel）
             <>
               {options.choices.map((c) => (
-                <button
+                <Button
                   key={c.value}
                   onClick={() => onChoice(c.value)}
-                  className="rounded-md px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:opacity-90"
-                  style={{ backgroundColor: c.danger ? 'var(--danger)' : 'var(--primary)' }}
+                  variant="solid"
+                  tone={c.danger ? 'danger' : 'brand'}
+                  size="md"
                 >
                   {c.label}
-                </button>
+                </Button>
               ))}
-              <button
+              <Button
                 onClick={onCancel}
-                className="rounded-md border px-3.5 py-1.5 text-xs font-medium transition-colors hover:opacity-80"
-                style={{
-                  borderColor: 'var(--line)',
-                  color: 'var(--ink-muted)',
-                  backgroundColor: 'var(--paper-soft)',
-                }}
+                variant="soft"
+                tone="neutral"
+                size="md"
               >
                 {options.cancelLabel || 'Cancel'}
-              </button>
+              </Button>
             </>
           ) : (
             <>
-              <button
+              <Button
                 onClick={onCancel}
-                className="rounded-md border px-3.5 py-1.5 text-xs font-medium transition-colors hover:opacity-80"
-                style={{
-                  borderColor: 'var(--line)',
-                  color: 'var(--ink-muted)',
-                  backgroundColor: 'var(--paper-soft)',
-                }}
+                variant="soft"
+                tone="neutral"
+                size="md"
               >
                 {options.cancelLabel || 'Cancel'}
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={onConfirm}
-                className="rounded-md px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:opacity-90"
-                style={{ backgroundColor: 'var(--danger)' }}
+                variant="solid"
+                tone="danger"
+                size="md"
               >
                 {options.confirmLabel || 'Delete'}
-              </button>
+              </Button>
             </>
           )}
         </div>

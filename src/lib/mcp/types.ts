@@ -223,10 +223,25 @@ export const MCP_PRESETS: McpServerConfig[] = [
     // 仅宿主 /api/notebook 门面经 mcpManager 转发调用（同 /api/team 模式）。
     exposeToChatNodes: false,
   },
+  {
+    id: 'bob-mind-mcp',
+    name: 'Bob-Mind',
+    // 随包分发的本地 MCP 插件（独立思维便签库 · Bob-Mind）：
+    // 数据与 UI 全部在插件域（宿主注入数据根 ~/BobWork/extensions/bob-mind-mcp；
+    // --serve 拉起插件自带 web 面板，默认 9482，供宿主 iframe 嵌入），
+    // 宿主不内置任何便签实现，仅注册本服务 + ⌘F 面板壳。
+    // 提供 mind_save/query/get/update/delete/move/star/status 工具（场景注入见 tools.ts）。
+    transport: 'stdio',
+    command: 'node',
+    args: ['{BUNDLED}:bob-mind-mcp/dist/cli.js', '--serve'],
+    timeout: 120,
+    enabled: true,
+    // 工具随场景注入 chat（MCP_SERVER_SCENES 标注 general），AI 可直接读写 Bob-Mind
+  },
 ];
 
 /** 系统 MCP 服务（随包 bundled，BobWork 核心功能依赖）：出厂默认装配，Installed 中作为 System 服务展示 */
-export const SYSTEM_MCP_IDS: string[] = ['team', 'bob-preview-mcp', 'bob-notes-mcp'];
+export const SYSTEM_MCP_IDS: string[] = ['team', 'bob-preview-mcp', 'bob-notes-mcp', 'bob-mind-mcp'];
 
 /**
  * 会出现在 Node 的 MCP 下拉中的服务（「插件 vs MCP」分区的 MCP 类）：

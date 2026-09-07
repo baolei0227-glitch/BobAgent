@@ -118,12 +118,12 @@ body {
   font-size: 14px;
 }
 
-/* React Flow 画布背景（跟随主题 --canvas-bg） */
+/* React Flow 画布背景：2026-09 统一浅色底，与根/左栏一致（var(--background)） */
 .react-flow {
-  background-color: var(--canvas-bg) !important;
+  background-color: var(--background) !important;
 }
 .react-flow__pane {
-  background-color: var(--canvas-bg) !important;
+  background-color: var(--background) !important;
 }
 
 /* 自定义弹窗动画（Apple 风格：减速进入 + 加速退出） */
@@ -241,6 +241,27 @@ body {
 }
 .icon-breathing {
   animation: icon-breathe 1.5s ease-in-out infinite;
+}
+
+/* 左侧会话/任务树执行状态呼吸灯：任务执行中绿点外发光脉动（呼吸灯），执行完毕为实心绿点（未读），点击查看后消失 */
+@keyframes rail-run-breathe {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--success) 0%, transparent);
+    opacity: 0.75;
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--success) 22%, transparent);
+    opacity: 1;
+  }
+}
+.rail-run-breathing {
+  animation: rail-run-breathe 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-run-breathing {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 /* 阶段提示文字呼吸灯：文字常态可见（opacity 低谷 0.55），紫色光晕随呼吸强弱起伏（text-shadow 渐强渐弱） */
@@ -523,15 +544,19 @@ body {
 }
 
 /* ===== 展开态对话节点：壳列分离阅读宽度 =====
-   外壳 min(72vw, 880px)，滚动区 px-10 → 内容盒 = S−80；正文列限宽 720px 居中，
-   保证约 45 汉字/行的舒适行长。收起态（无 .ai-node-expanded）不受影响。
+   外壳 min(64.8vw, 792px)（较旧版 72vw/880px 收窄 10%），滚动区 px-7 → 内容盒 = S−56；
+   正文列限宽 720px 居中，保证约 45 汉字/行的舒适行长；正文宽度不变，边距随外壳收窄变小。
+   收起态（无 .ai-node-expanded）不受影响。
    注：外壳宽度常量见 ChatNodeKernel.tsx EXPANDED_WIDTH_MAX/VW，两处需同步修改 */
 .ai-node-expanded .reading-col {
-  /* --bob-shell-w 由 ChatNodeKernel 按节点实际外壳宽注入（受可视区上限压缩时变小），
-     --wide-bleed 据此计算，避免节点被压缩后代码块 breakout 仍按 880px 外扩导致右缘被裁 */
-  --wide-bleed: max((var(--bob-shell-w, min(72vw, 880px)) - 800px) / 2, 0px);
+  /* 2026-09 布局重构：外壳自由拉伸，但正文展示区限宽——有上下限（参考 TraeWork）：
+     可用宽 > 800px 时正文封顶 800px 居中（避免超宽行长），可用宽更窄时随容器收缩。
+     min-width 仅做声明兜底（min(100%,480px)：可用宽 <480px 时回到 100% 不溢出） */
+  --wide-bleed: 0px;
 
-  max-width: min(720px, 100%);
+  width: 100%;
+  max-width: min(100%, 800px);
+  min-width: min(100%, 480px);
   margin-left: auto;
   margin-right: auto;
 }
@@ -1373,14 +1398,13 @@ body {
   .lcd-mail-arrow { animation: none; }
 }
 
-/* ===== Note（思路便签）节点：source 连线箭头悬停显示 =====
-   CSS :hover 控制（非 JS）：鼠标悬停在凸出面板外的箭头（后代元素）上时，
-   父级 .sticky-thought-node 仍匹配 :hover，箭头不会因离开节点边界而消失，
-   保证用户能稳定悬停并拖拽到箭头。 */
-.sticky-thought-node .sticky-thought__handle {
-  opacity: 0;
-  transition: opacity 0.12s ease;
+/* ===== 隐藏滚动条工具类（容器仍可滚动，仅不显示滚动条） ===== */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
-.sticky-thought-node:hover .sticky-thought__handle {
-  opacity: 1;
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }

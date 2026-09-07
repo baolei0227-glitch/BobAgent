@@ -237,8 +237,6 @@ export type AiChatNodeData = {
   modelId?: string;
   thinkingLevel?: ThinkingLevel;
   nodeMdId?: string;  // .md 文件持久化 ID（UUID），首次对话时生成
-  /** Note 便签绑定到笔记系统的条目 id：首次保存入库后回写，后续保存走 entry_id 更新模式 */
-  notebookEntryId?: string;
   /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
   sandboxAppId?: string;
   /** 已压缩对话轮次数（memory_compacted_until）：请求时跳过已压缩历史，交由压缩记忆+成果块兜底 */
@@ -251,30 +249,8 @@ export type AiChatNodeData = {
   annotationWidth?: number;
   /** 批注框（annotation）节点：包围盒高（世界坐标，动态跟随卡片重算） */
   annotationHeight?: number;
-  /** 星标：画布标记节点重要性（仅提示，不影响 AI/排版） */
-  starred?: boolean;
-  /** 归档：节点已完成使命，画布导航圆点以实心外圈区分（仅视觉提示） */
-  archived?: boolean;
-  /** Note 便签：md 文档来源锚点（划词创建时记录，点击子弹图标可反向定位回文档对应位置） */
-  mdAnchor?: MdAnchor;
   [key: string]: unknown;
 };
-
-/** Note 便签的来源 md 文档锚点：kind=node 指节点文档（key=nodeMdId），kind=file 指项目/本地文件（key=filePath 或 projectId:filePath） */
-export interface MdAnchor {
-  /** 文档标识：node 场景=nodeMdId；file 场景=filePath（项目文件含 projectId 前缀） */
-  key: string;
-  /** 文档类型 */
-  kind: 'node' | 'file';
-  /** 划词文字（定位锚） */
-  quote: string;
-  /** 划词文字前 32 字符（上下文消歧） */
-  prefix?: string;
-  /** 划词文字后 32 字符（上下文消歧） */
-  suffix?: string;
-  /** 文件文档来源（project/local），node 场景缺省 */
-  source?: 'project' | 'local';
-}
 
 /** 版本历史记录项：每次生成成功后追加一条 */
 export interface ImageGenVersion {

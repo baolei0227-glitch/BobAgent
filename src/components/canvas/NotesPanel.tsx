@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import NodeCardHeader from './NodeCardHeader';
 import { HtmlRenderer } from './HtmlRenderer';
+import { Button } from '@/components/ui/button';
 import type { WikiEntryWithContent, WikiEntryType } from '@/lib/mcp/notes-types';
 
 /** 内联编辑用的 DocEditor（懒加载，进入编辑模式才拉取 ~157KB） */
@@ -271,6 +272,16 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, brainOpen, inboxOpen]);
 
+  // 插件面板（9480）在 cfg-only 直达模式下关闭模型配置后，通知宿主收起外层弹窗（避免停留空白/需再关一次）
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      if (e.origin !== 'http://127.0.0.1:9480') return;
+      if (e.data && e.data.type === 'bob-notes-cfg-close') setBrainOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
   const selected = useMemo(
     () => notes.find((n) => n.id === selectedId) ?? null,
     [notes, selectedId],
@@ -407,70 +418,84 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
           <>
             {!brainOpen && (
             <>
-            <button
+            <Button
+              variant="soft"
+              tone="brand"
+              size="xs"
               onClick={() => runAction('ingest')}
               disabled={running !== null}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors disabled:opacity-50"
-              style={{ color: 'var(--primary)', backgroundColor: 'var(--primary-soft)' }}
+              loading={running === 'ingest'}
               title="Compile pending raw material"
             >
               {running === 'ingest' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Inbox className="h-3 w-3" />}
               Ingest
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="soft"
+              tone="brand"
+              size="xs"
               onClick={() => runAction('review')}
               disabled={running !== null}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors disabled:opacity-50"
-              style={{ color: 'var(--primary)', backgroundColor: 'var(--primary-soft)' }}
+              loading={running === 'review'}
               title="Review & rescue (promote/sink)"
             >
               {running === 'review' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
               Review
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="soft"
+              tone="neutral"
+              size="xs"
               onClick={() => runAction('lint')}
               disabled={running !== null}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors disabled:opacity-50"
-              style={{ color: 'var(--ink-muted)', backgroundColor: 'var(--paper-hover)' }}
+              loading={running === 'lint'}
               title="Self-check (broken links / orphans / duplicates)"
             >
               {running === 'lint' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Stethoscope className="h-3 w-3" />}
               Lint
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               onClick={() => load(query, typeFilter, tagFilter, dateFrom, dateTo)}
-              className="btn btn-ghost btn-sm !h-6 !w-6 !p-0"
-              style={{ color: 'var(--ink-muted)' }}
               title="Refresh"
+              aria-label="Refresh"
             >
               <RefreshCw className="h-3.5 w-3.5" />
-            </button>
+            </Button>
             {selectedId && (
-              <button
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
                 onClick={() => setHistoryOpen(true)}
-                className="btn btn-ghost btn-sm !h-6 !w-6 !p-0"
-                style={{ color: 'var(--ink-muted)' }}
                 title="Version history (undo brain rewrites)"
+                aria-label="Version history"
               >
                 <History className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               onClick={() => setLogOpen(true)}
-              className="btn btn-ghost btn-sm !h-6 !w-6 !p-0"
-              style={{ color: 'var(--ink-muted)' }}
               title="Maintenance log (what the brain did)"
+              aria-label="Maintenance log"
             >
               <ScrollText className="h-3.5 w-3.5" />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
               onClick={() => setInboxOpen(true)}
-              className="btn btn-ghost btn-sm !h-6 !w-6 !p-0"
-              style={{ color: 'var(--ink-muted)' }}
               title="Raw inbox: browse uncompiled material and compile selected"
+              aria-label="Raw inbox"
             >
               <Inbox className="h-3.5 w-3.5" />
-            </button>
+            </Button>
             </>
             )}
             <button
@@ -486,19 +511,16 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
               <Cpu className="h-3 w-3" />
               Model
             </button>
-            <button
+            <Button
+              variant="soft"
+              tone="neutral"
+              size="icon"
               onClick={onClose}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-all hover:opacity-85 active:scale-95"
-              style={{
-                color: 'var(--ink-muted)',
-                backgroundColor: 'var(--paper-hover)',
-                border: '1px solid var(--line-soft)',
-              }}
               title="Close (Esc)"
               aria-label="close notes"
             >
               <X className="h-4 w-4" />
-            </button>
+            </Button>
           </>
         }
         dividerColor="var(--line-soft)"
@@ -588,16 +610,17 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
             style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper-soft)', color: 'var(--ink)' }}
           />
           {(dateFrom || dateTo) && (
-            <button
+            <Button
+              variant="soft"
+              tone="brand"
+              size="micro"
               onClick={() => {
                 setDateFrom('');
                 setDateTo('');
               }}
-              className="rounded px-1.5 py-0.5 text-10"
-              style={{ color: 'var(--primary)', backgroundColor: 'var(--primary-soft)' }}
             >
               Clear
-            </button>
+            </Button>
           )}
         </div>
         {/* 自然语言拆解提示：已按 关键词/时间范围 检索 */}
@@ -716,24 +739,26 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
                   <span className="min-w-0 flex-1 truncate text-13 font-medium" style={{ color: 'var(--ink)' }}>
                     {selected.title}
                   </span>
-                  <button
+                  <Button
                     onClick={() => void finishEdit()}
-                    className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors"
-                    style={{ color: 'var(--success)', backgroundColor: 'var(--success-soft)' }}
+                    variant="soft"
+                    tone="success"
+                    size="xs"
                     title="Save & back"
                   >
                     <Check className="h-3 w-3" />
                     Done
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={cancelEdit}
-                    className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors"
-                    style={{ color: 'var(--ink-muted)', backgroundColor: 'var(--paper-hover)' }}
+                    variant="soft"
+                    tone="neutral"
+                    size="xs"
                     title="Discard changes"
                   >
                     <Undo2 className="h-3 w-3" />
                     Cancel
-                  </button>
+                  </Button>
                 </div>
                 <div className="min-h-0 flex-1 overflow-hidden border-t" style={{ borderColor: 'var(--line-soft)' }}>
                   <DocEditor
@@ -753,23 +778,25 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
                   {selected.title}
                 </h2>
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <button
+                  <Button
                     onClick={startEdit}
-                    className="flex items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors"
-                    style={{ color: 'var(--primary)', backgroundColor: 'var(--primary-soft)' }}
+                    variant="soft"
+                    tone="brand"
+                    size="xs"
                     title="Edit this note"
                   >
                     <Pencil className="h-3 w-3" />
                     Edit
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={() => deleteNote(selected.id)}
-                    className="flex items-center gap-1 rounded-md px-2 py-1 text-11 transition-colors"
-                    style={{ color: 'var(--danger)', backgroundColor: 'var(--danger-soft)' }}
+                    variant="soft"
+                    tone="danger"
+                    size="xs"
                   >
                     <Trash2 className="h-3 w-3" />
                     Delete
-                  </button>
+                  </Button>
                 </div>
               </div>
 
@@ -899,15 +926,16 @@ export function NotesPanel({ onClose }: { onClose: () => void }) {
                 <Cpu className="h-4 w-4" style={{ color: 'var(--primary)' }} />
                 <span className="text-13 font-semibold">Notes brain model</span>
               </div>
-              <button
+              <Button
                 onClick={() => setBrainOpen(false)}
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:opacity-70"
-                style={{ color: 'var(--ink-muted)' }}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
                 title="Close"
                 aria-label="close brain model"
               >
                 <X className="h-4 w-4" />
-              </button>
+              </Button>
             </div>
             <BrainEmbed />
           </div>
@@ -939,14 +967,15 @@ function BrainEmbed() {
         >
           <p>Plugin panel unreachable at http://127.0.0.1:9480.</p>
           <p>Confirm bob-notes-mcp is enabled in Settings → MCP — it starts with --serve.</p>
-          <button
+          <Button
             onClick={check}
-            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-11 font-medium transition-colors"
-            style={{ color: 'var(--primary)', backgroundColor: 'var(--primary-soft)' }}
+            variant="soft"
+            tone="brand"
+            size="xs"
           >
             <RefreshCw className="h-3 w-3" />
             Retry
-          </button>
+          </Button>
         </div>
       )}
       {/* ?cfg=1：面板加载后自动弹出模型设置（契约见 bob-notes-mcp panel.ts） */}
@@ -1042,9 +1071,15 @@ function HistoryDialog({
           <span className="truncate text-sm font-semibold" style={{ color: 'var(--ink-strong)' }}>
             Version history · {entryTitle}
           </span>
-          <button onClick={onClose} className="shrink-0" style={{ color: 'var(--ink-muted)' }} aria-label="close">
+          <Button
+            onClick={onClose}
+            variant="ghost"
+            tone="neutral"
+            size="icon-xs"
+            aria-label="close"
+          >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
         <div className="mb-2 text-11" style={{ color: 'var(--ink-muted)' }}>
           每次正文被覆盖前自动留存快照（每篇最多 20 个）；恢复会把当前版也留档，可反悔。
@@ -1074,11 +1109,13 @@ function HistoryDialog({
                 <span className="min-w-0 flex-1 truncate text-12" style={{ color: 'var(--ink)' }}>
                   {new Date(s.time).toLocaleString('zh-CN', { hour12: false })}
                 </span>
-                <button
+                <Button
                   onClick={() => void restore(s.time)}
                   disabled={busy !== null}
-                  className="flex shrink-0 items-center gap-1 rounded px-2 py-0.5 text-11 font-medium transition-colors disabled:opacity-50"
-                  style={{ color: 'var(--primary)', backgroundColor: 'var(--primary-soft)' }}
+                  loading={busy === String(s.time)}
+                  variant="soft"
+                  tone="brand"
+                  size="micro"
                 >
                   {busy === String(s.time) ? (
                     <Loader2 className="h-3 w-3 animate-spin" />
@@ -1086,7 +1123,7 @@ function HistoryDialog({
                     <Undo2 className="h-3 w-3" />
                   )}
                   Restore
-                </button>
+                </Button>
               </div>
             ))
           )}
@@ -1206,15 +1243,16 @@ function RawInboxDialog({ onClose, onCompiled }: { onClose: () => void; onCompil
               {pendingCount} uncompiled
             </span>
           </div>
-          <button
+          <Button
             onClick={onClose}
-            className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:opacity-70"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
             title="Close"
             aria-label="close inbox"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
 
         {/* 工具条 */}
@@ -1230,16 +1268,18 @@ function RawInboxDialog({ onClose, onCompiled }: { onClose: () => void; onCompil
             <option value="all">All</option>
           </select>
           <span className="flex-1" />
-          <button
+          <Button
             onClick={compileSelected}
             disabled={busy !== null || selCount === 0}
-            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-12 font-medium transition-colors disabled:opacity-45"
-            style={{ color: '#fff', backgroundColor: 'var(--primary)' }}
+            loading={busy === 'compile'}
+            variant="solid"
+            tone="brand"
+            size="sm"
             title="Compile selected uncompiled material into the wiki"
           >
             {busy === 'compile' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
             Compile selected{selCount > 0 ? ` (${selCount})` : ''}
-          </button>
+          </Button>
         </div>
 
         {error && (
@@ -1366,9 +1406,15 @@ function LogDialog({ onClose }: { onClose: () => void }) {
           <span className="text-sm font-semibold" style={{ color: 'var(--ink-strong)' }}>
             Maintenance log
           </span>
-          <button onClick={onClose} style={{ color: 'var(--ink-muted)' }} aria-label="close">
+          <Button
+            onClick={onClose}
+            variant="ghost"
+            tone="neutral"
+            size="icon-xs"
+            aria-label="close"
+          >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
         <div className="mb-2 text-11" style={{ color: 'var(--ink-muted)' }}>
           What the brain did to the notes library (newest first).

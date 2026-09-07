@@ -14,7 +14,6 @@ import {
   Mic,
   LayoutGrid,
   Plus,
-  LayoutTemplate,
   Boxes,
   Users,
   Gauge,
@@ -22,10 +21,12 @@ import {
   Settings,
   Sparkles,
   NotebookText,
+  BrainCircuit,
 } from 'lucide-react';
 
 import { bus, BusEvents, type ChatMessage, type WantedNoticeItem, type WantedNoticePayload } from '@/lib/bus';
 import { desktop } from '@/lib/desktop-adapter';
+import { Button } from '@/components/ui/button';
 import { isPreviewable } from './viewers/registry';
 import { FileName } from './FileName';
 import {
@@ -103,6 +104,10 @@ interface UnifiedPaletteProps {
   onOpenCalendar?: () => void;
   /** 设置面板 */
   onOpenSettings?: () => void;
+  /** 当前打开的研究会话节点（画布主焦点）；MD 按钮归属兜底来源 */
+  focusedNodeId?: string | null;
+  /** 当前项目 id（配合 focusedNodeId 归属标记） */
+  projectId?: string | null;
 }
 
 /** 文件扩展名 → 图标颜色（与本地文件浏览器一致） */
@@ -141,12 +146,14 @@ function IconBarBtn({ title, onClick, children }: {
   children: ReactNode;
 }) {
   return (
-    <button
+    <Button
       type="button"
       onClick={onClick}
+      variant="ghost"
+      tone="neutral"
+      size="icon-lg"
       aria-label={title}
-      className="group relative flex h-8 w-8 items-center justify-center rounded-lg transition-all hover:bg-[var(--paper-hover)] active:scale-90"
-      style={{ color: 'var(--ink)' }}
+      className="group relative"
     >
       {children}
       <span
@@ -155,11 +162,11 @@ function IconBarBtn({ title, onClick, children }: {
       >
         {title}
       </span>
-    </button>
+    </Button>
   );
 }
 
-export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes, onOpenCalendar, onOpenSettings }: UnifiedPaletteProps) {
+export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes, onOpenCalendar, onOpenSettings, focusedNodeId, projectId }: UnifiedPaletteProps) {
   // ===== NodeMap 最近聚焦节点（供「MD」为该节点创建 homework Markdown 文档） =====
   const [focusedNode, setFocusedNode] = useState<{ nodeId: string | null; projectId?: string | null }>({ nodeId: null });
   const [mdCreating, setMdCreating] = useState(false);
@@ -172,11 +179,18 @@ export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes,
     return () => window.removeEventListener('map-node-focused', onFocus);
   }, []);
   const handleCreateFocusedMd = async () => {
-    if (!focusedNode.nodeId || mdCreating) return;
+    // 归属节点：优先「当前打开的会话」（画布主焦点 focusedNodeId），其次 NodeMap 最近聚焦节点 focusedNode
+    const targetNodeId = focusedNodeId ?? focusedNode.nodeId;
+    const targetProjectId = projectId ?? focusedNode.projectId;
+    if (mdCreating) return;
+    if (!targetNodeId) {
+      window.alert('请先打开一个会话节点，再点击 MD 创建 Markdown 文档。');
+      return;
+    }
     setMdCreating(true);
     try {
-      const body: Record<string, unknown> = { action: 'create_homework_md', node_id: focusedNode.nodeId };
-      if (focusedNode.projectId) body.project_id = focusedNode.projectId;
+      const body: Record<string, unknown> = { action: 'create_homework_md', node_id: targetNodeId };
+      if (targetProjectId) body.project_id = targetProjectId;
       const resp = await fetch('/api/nodes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -850,15 +864,15 @@ export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes,
           </IconBarBtn>
           <div className="mx-1 h-5 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
 
-          {/* ── 组2 Library：笔记 / 方案 / 小程序 / 团队 ── */}
+          {/* ── 组2 Library：Bob-Mind / 笔记 / 方案 / 小程序 / 团队 ── */}
+          <IconBarBtn title="Bob-Mind" onClick={() => { window.dispatchEvent(new CustomEvent('open-bob-mind-panel')); onClose(); }}>
+            <BrainCircuit className="h-4 w-4" />
+          </IconBarBtn>
           {onOpenNotes && (
             <IconBarBtn title="Notes" onClick={() => { onOpenNotes(); onClose(); }}>
               <NotebookText className="h-4 w-4" />
             </IconBarBtn>
           )}
-          <IconBarBtn title="Bob Solution" onClick={() => { window.dispatchEvent(new Event('templates-toggle')); onClose(); }}>
-            <LayoutTemplate className="h-4 w-4" />
-          </IconBarBtn>
           <IconBarBtn title="Mini Program Store" onClick={() => { window.dispatchEvent(new CustomEvent('sandbox-store-open')); onClose(); }}>
             <Boxes className="h-4 w-4" />
           </IconBarBtn>
@@ -987,15 +1001,17 @@ export function UnifiedPalette({ open, onClose, onOpenProjectBoard, onOpenNotes,
               style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
               onKeyDown={(e) => { if (e.key === 'Enter') void addQuick(); }}
             />
-            <button
+            <Button
               type="button"
               disabled={quickSaving || !quickLabel.trim()}
+              loading={quickSaving}
               onClick={() => void addQuick()}
-              className="rounded-md px-2.5 py-1 text-xs font-medium transition-opacity disabled:opacity-50"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              variant="solid"
+              tone="brand"
+              size="sm"
             >
               {quickSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
-            </button>
+            </Button>
           </div>
         )}
 

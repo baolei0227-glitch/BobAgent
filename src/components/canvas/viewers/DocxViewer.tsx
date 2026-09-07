@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import type { ViewerRenderProps } from './types';
 import { desktop } from '@/lib/desktop-adapter';
+import { Button } from '@/components/ui/button';
 import { bus, BusEvents } from '@/lib/bus';
 import { convertDocxToMarkdown } from '@/lib/docx-to-md';
 
@@ -1035,14 +1036,15 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
       className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b px-4 py-2"
       style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}
     >
-      <button
+      <Button
         onClick={reloadOriginal}
-        className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-        style={{ color: 'var(--ink)' }}
+        variant="ghost"
+        tone="neutral"
+        size="sm"
         title="Reload original file (discard unsaved revisions)"
       >
         <ArrowLeft className="h-3.5 w-3.5" /> Reload
-      </button>
+      </Button>
       <span className="truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>{docName}</span>
       <span className="truncate text-xs" style={{ color: 'var(--ink-muted)' }} title={writeBlocked ?? savedPath ?? undefined}>
         {writeBlocked
@@ -1143,50 +1145,58 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
           </span>
         )}
         {/* 缩放：缩小 / 百分比(点击归 100%) / 放大 / 适应宽度 / 适应整页 */}
-        <div className="flex items-center gap-0.5 rounded-md border" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--popover)' }}>
-          <button
-            onClick={() => changeZoom(zoom - 0.1)}
-            disabled={zoom <= 0.5}
-            className="flex h-6 w-6 items-center justify-center rounded disabled:opacity-40 hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-            style={{ color: 'var(--ink)' }}
-            title="Zoom out"
-          >
-            <ZoomOut className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={() => changeZoom(1)}
-            className="min-w-10 px-1 text-center text-11 font-medium tabular-nums hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-            style={{ color: 'var(--ink)' }}
-            title="Reset to 100%"
-          >
-            {Math.round(zoom * 100)}%
-          </button>
-          <button
-            onClick={() => changeZoom(zoom + 0.1)}
-            disabled={zoom >= 2}
-            className="flex h-6 w-6 items-center justify-center rounded disabled:opacity-40 hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-            style={{ color: 'var(--ink)' }}
-            title="Zoom in"
-          >
-            <ZoomIn className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={fitWidth}
-            className="flex h-6 w-6 items-center justify-center rounded hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-            style={{ color: 'var(--ink)' }}
-            title="Fit width"
-          >
-            <Maximize className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={fitPage}
-            className="flex h-6 w-6 items-center justify-center rounded hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-            style={{ color: 'var(--ink)' }}
-            title="Fit whole page"
-          >
-            <Frame className="h-3.5 w-3.5" />
-          </button>
-        </div>
+          <div className="flex items-center gap-0.5 rounded-md border" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--popover)' }}>
+            <Button
+              onClick={() => changeZoom(zoom - 0.1)}
+              disabled={zoom <= 0.5}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Zoom out"
+              aria-label="Zoom out"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </Button>
+            <button
+              onClick={() => changeZoom(1)}
+              className="min-w-10 px-1 text-center text-11 font-medium tabular-nums hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
+              style={{ color: 'var(--ink)' }}
+              title="Reset to 100%"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <Button
+              onClick={() => changeZoom(zoom + 0.1)}
+              disabled={zoom >= 2}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Zoom in"
+              aria-label="Zoom in"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              onClick={fitWidth}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Fit width"
+              aria-label="Fit width"
+            >
+              <Maximize className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              onClick={fitPage}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Fit whole page"
+              aria-label="Fit whole page"
+            >
+              <Frame className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         {/* 修订面板 */}
         <button
           onClick={() => setPanelOpen(!panelOpen)}
@@ -1209,25 +1219,27 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
           {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save
         </button>
         {(fileInfo.full_path || savedPath) && (
-          <button
+          <Button
             onClick={() => void handleOpenExternal()}
-            className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
-            style={{ backgroundColor: 'color-mix(in oklab, var(--popover) 92%, transparent)', color: 'var(--info)', border: '1px solid color-mix(in oklab, var(--info) 35%, transparent)' }}
+            variant="outline"
+            tone="info"
+            size="sm"
             title="Open a temp copy with local default program (WPS saves won't touch the revised file)"
           >
             <ExternalLink className="h-3 w-3" /> Open
-          </button>
+          </Button>
         )}
-        {/* 一键转 Markdown：转出内容存 homework 并在 md 编辑器打开 */}
-        <button
+        <Button
           onClick={() => void handleConvertToMd()}
           disabled={!docxBase64 || converting}
-          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
-          style={{ backgroundColor: 'color-mix(in oklab, var(--popover) 92%, transparent)', color: 'var(--success)', border: '1px solid color-mix(in oklab, var(--success) 35%, transparent)' }}
+          loading={converting}
+          variant="outline"
+          tone="success"
+          size="sm"
           title="Convert to Markdown (with applied revisions), save to homework and open in the MD editor"
         >
           {converting ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileText className="h-3 w-3" />} 转 MD
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -1242,19 +1254,21 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
         <span className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Revisions ({revisions.length})</span>
         <div className="flex items-center gap-1">
           {revisions.length > 0 && (
-            <button
+            <Button
               onClick={handleAcceptAllToOriginal}
               disabled={revising || saving}
+              loading={revising}
+              variant="solid"
+              tone="brand"
+              size="xs"
               title="接受全部修订并立即写回原稿（会话首次写回前自动备份；检测到 WPS/Word 打开或原稿被外部修改时会阻止）"
-              className="flex items-center gap-1 rounded px-2 py-1 text-11 font-medium transition-opacity disabled:opacity-50"
-              style={{ color: 'var(--popover)', backgroundColor: 'var(--primary)' }}
             >
               {revising ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} 更新原稿
-            </button>
+            </Button>
           )}
-          <button onClick={() => setPanelOpen(false)} className="rounded p-1 hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]" style={{ color: 'var(--ink-muted)' }}>
+          <Button onClick={() => setPanelOpen(false)} variant="ghost" tone="neutral" size="icon-sm" aria-label="Close panel">
             <X className="h-3.5 w-3.5" />
-          </button>
+          </Button>
         </div>
       </div>
       <div ref={panelListRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2 ai-canvas-scroll">
@@ -1303,20 +1317,24 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
               {text || '（新增段落）'}
             </p>
             <div className="flex gap-1">
-              <button
+              <Button
                 onClick={() => void resolveRevisions([{ id: r.id, accept: true }])}
-                className="inline-flex flex-1 items-center justify-center gap-1 rounded border px-2 py-1 text-11 font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-                style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+                variant="outline"
+                tone="neutral"
+                size="xs"
+                className="flex-1"
               >
                 <Check className="h-3 w-3" /> Accept
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={() => void resolveRevisions([{ id: r.id, accept: false }])}
-                className="inline-flex flex-1 items-center justify-center gap-1 rounded border px-2 py-1 text-11 font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_6%,transparent)]"
-                style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+                variant="outline"
+                tone="neutral"
+                size="xs"
+                className="flex-1"
               >
                 <X className="h-3 w-3" /> Reject
-              </button>
+              </Button>
             </div>
           </div>
           );
@@ -1324,22 +1342,26 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
       </div>
       {revisions.length > 0 && (
         <div className="flex gap-1.5 border-t px-2 py-2" style={{ borderColor: 'var(--line)' }}>
-          <button
+          <Button
             onClick={() => void resolveRevisions([], true)}
             disabled={revising}
-            className="flex-1 rounded-md px-2 py-1.5 text-11 font-medium text-white disabled:opacity-50"
-            style={{ backgroundColor: 'var(--primary)' }}
+            variant="solid"
+            tone="brand"
+            size="sm"
+            className="flex-1"
           >
             Accept All
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={() => void resolveRevisions([], false)}
             disabled={revising}
-            className="flex-1 rounded-md border px-2 py-1.5 text-11 font-medium disabled:opacity-50"
-            style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+            variant="outline"
+            tone="neutral"
+            size="sm"
+            className="flex-1"
           >
             Reject All
-          </button>
+          </Button>
         </div>
       )}
     </div>

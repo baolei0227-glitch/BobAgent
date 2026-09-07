@@ -72,6 +72,18 @@ export async function register() {
     console.error('[sticky-notes] 全量清扫加载失败:', e);
   }
   try {
+    // 一次性清理旧画布便签（Bob-Mind 拆分遗留，node_type='note'/'sticky'）：备份进 .trash 后删除。
+    // 幂等；宿主已不再渲染/管理这类节点，此清扫只清理历史数据。
+    const { purgeLegacyCanvasThoughts } = await import('@/lib/legacy-canvas-thoughts-purge');
+    setTimeout(() => {
+      purgeLegacyCanvasThoughts().catch((e) => {
+        console.error('[purge] 旧画布便签清扫失败:', e);
+      });
+    }, 6000);
+  } catch (e) {
+    console.error('[purge] 旧画布便签清扫加载失败:', e);
+  }
+  try {
     // 预热 /api/chat 路由编译：dev 模式下 Next.js 按需编译，/api/chat 依赖超重
     // （tools.ts 5300+ 行 + openai/MCP/sqlite3 等），首次请求会因编译超时返回纯文本 500，
     // 导致微信端 /chat 首次提问报"节点请求失败"。启动时主动触发编译，编译完成后再启动微信桥。

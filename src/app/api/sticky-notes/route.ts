@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { join } from 'path';
 import { getCurrentProject, getProjectById } from '@/lib/project/project-manager';
-import { writeTodoIndexFile, readTodoIndexFile, buildTodoIndex, MAX_TODO_NOTES, pickTodoNoteColor } from '@/lib/sticky-todo';
+import { writeTodoIndexFile, readTodoIndexFile, buildTodoIndex, MAX_TODO_NOTES, pickTodoNoteColor, normalizeStickyNote } from '@/lib/sticky-todo';
 import { migrateStickyNotePages } from '@/lib/sticky-notes-migrate';
 import { reconcileStickyNoteEvents, cancelNoteEvents } from '@/lib/sticky-calendar-sync';
 
@@ -103,20 +103,24 @@ async function readNotes(projectDir: string): Promise<StickyNote[]> {
   }
 }
 
-/** 原子写入：先写临时文件再 rename，避免半写状态；写完主文档后同步未完成待办索引（todo-index.json，供 /inspect 零全量扫描聚合） */
+/** 原子写入：先写临时文件再 rename，避免半写状态；写完主文档后同步未完成待办索引（todo-index.json，供 /inspect 零全量扫描聚合）。
+ *  落盘前统一经 normalizeStickyNote 剔除空行（空行不是待办，见 lib/sticky-todo）。 */
 async function writeNotes(projectDir: string, notes: StickyNote[]): Promise<void> {
   const fs = require('fs/promises');
   const dir = join(projectDir, STICKY_DIR);
   await fs.mkdir(dir, { recursive: true });
   const target = join(dir, STICKY_FILE);
+  const normalized = notes.map((n) =>
+    normalizeStickyNote(n as unknown as Record<string, unknown>) as unknown as StickyNote,
+  );
   // 临时文件用唯一名：并发写（面板新增/画布自动保存/AI 工具）共用固定 tmp 名会互相踩踏
   // 导致"写→rename"后执行的写入方 ENOENT 失败（画布表现为"自动保存失败"）
   const tmp = join(dir, `.${STICKY_FILE}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
-  await fs.writeFile(tmp, JSON.stringify({ notes }, null, 2), 'utf-8');
+  await fs.writeFile(tmp, JSON.stringify({ notes: normalized }, null, 2), 'utf-8');
   await fs.rename(tmp, target);
   // 索引同步失败不影响主文档写入（/inspect 会回退扫描主文档自愈）
   try {
-    await writeTodoIndexFile(projectDir, notes);
+    await writeTodoIndexFile(projectDir, normalized);
   } catch (e) {
     console.error('[sticky-notes] 待办索引同步失败:', e);
   }
@@ -148,7 +152,7 @@ export function upgradeNotePages(note: StickyNote): StickyNote {
     const firstPage: StickyNotePage = normalizePage({
       id: newPageId(),
       title: 'P1',
-      content: raw.trim().length === 0 ? '- [ ] ' : raw,
+      content: raw.trim().length === 0 ? '' : raw,
     });
     return {
       ...note,
@@ -261,7 +265,19 @@ export async function GET(req: NextRequest) {
     }
     // 惰性迁移：停用的便签 note 页 → notebook.json（幂等，无 note 页时零开销）
     await migrateStickyNotePages(dir);
-    const notes = await readNotes(dir);
+    let notes = await readNotes(dir);
+    // 存量空行幂等清扫：读取即归一化（剔除空待办行），有变化则落盘一次，之后稳定
+    const cleaned = notes.map((n) =>
+      normalizeStickyNote(n as unknown as Record<string, unknown>) as unknown as StickyNote,
+    );
+    if (JSON.stringify(cleaned) !== JSON.stringify(notes)) {
+      try {
+        await writeNotes(dir, cleaned);
+      } catch {
+        /* 清扫失败不阻断读取 */
+      }
+      notes = cleaned;
+    }
     return NextResponse.json({ success: true, notes });
   } catch (e) {
     return NextResponse.json(
@@ -293,7 +309,7 @@ export async function POST(req: NextRequest) {
       }
       const initialContent = typeof note.content === 'string' && note.content.length > 0
         ? note.content
-        : '- [ ] ';
+        : '';
       const now = new Date().toISOString();
       const firstPage: StickyNotePage = {
         id: newPageId(),

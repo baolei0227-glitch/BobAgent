@@ -31,7 +31,6 @@ export const USER_SKILLS_DIR = path.join(resolveAppRoot(), 'skills');
  * assets/skills 下其余技能 = 下载制（随包作为源，用户点击下载物化到 USER_SKILLS_DIR 才可用）。
  */
 export const SYSTEM_BUILTIN_SKILLS: ReadonlySet<string> = new Set([
-  'agent-creator',
   'bob-ui',
   'skill-creator',
   'user-guide',

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, RefreshCw, Loader2, Plus, Check, ChevronDown, FolderOpen, Sparkles } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { TemplateFillPanel, type FillTemplateItem } from './TemplateFillDialog';
 
 /** 模板库场景（来自 /api/skills/templates） */
@@ -143,16 +144,19 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
           <span className="text-sm font-medium" style={{ color: 'var(--ink-strong)' }}>
             Templates
           </span>
-          <button
+          <Button
             type="button"
             onClick={loadScenes}
             disabled={loading}
-            className="ml-auto flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-            style={{ color: 'var(--ink-muted)' }}
+            variant="ghost"
+            tone="neutral"
+            size="icon-xs"
+            className="ml-auto"
             title="Refresh template library"
+            aria-label="Refresh template library"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
+          </Button>
         </div>
 
         {/* 场景选择：输入 + Existing 下拉 */}
@@ -171,15 +175,17 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
             />
           </div>
           <div className="relative shrink-0" ref={sceneMenuRef}>
-            <button
+            <Button
               type="button"
               onClick={() => setSceneMenuOpen((v) => !v)}
-              className="flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-              style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+              variant="outline"
+              tone="neutral"
+              size="icon-sm"
               title="Select an existing scene"
+              aria-label="Select an existing scene"
             >
               <ChevronDown className="h-3 w-3" />
-            </button>
+            </Button>
             {sceneMenuOpen && (
               <div
                 className="absolute right-0 z-50 mt-1 max-h-56 w-56 overflow-y-auto rounded-lg border shadow-lg"

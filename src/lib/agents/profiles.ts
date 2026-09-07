@@ -17,7 +17,9 @@ import type { ToolScene } from '@/app/api/chat/tools';
  */
 export type AgentId = string;
 
-/** 内置 Agent 标识常量（新增专项 agent 时在此追加，节点壳统一引用，避免散落字符串字面量） */
+/** 已知 Agent 标识常量（新增 agent 时在此追加，节点壳统一引用，避免散落字符串字面量）。
+ *  chat / coding = 系统内置（在 AGENT_PROFILES 注册）；note(Kar) / planner 等已迁入
+ *  Agent 市场（official-packages.ts），保留常量仅为节点壳/身份映射引用。 */
 export const AGENT_IDS = {
   chat: 'chat',
   coding: 'coding',
@@ -70,10 +72,17 @@ export interface AgentProfile {
    */
   baseSystemPrompt?: string;
   /**
-   * 专项 agent 的静态行为规则（无更具体应用上下文时的兜底纪律）：
-   * 有专属 baseSystemPrompt 的 agent 通常把纪律折进 base，无需此字段。
+   * 静态行为规则（无更具体应用上下文时的兜底纪律）：有专属 baseSystemPrompt 的 agent 通常把纪律折进 base。
    */
   rulesInjection?: string;
+  /**
+   * 常驻内核工具的按画像剔除名单（2026-09-06 专职化机制）：
+   * 无场景标注的常驻内核工具（文件/命令/网页检索等）默认对**所有** agent 可见（同一引擎内核），
+   * 场景门控管不到它们；某 agent 不想背某些内核能力 → 在此按工具名剔除（清单过滤阶段执行，只影响本画像）。
+   * 新能力护栏：新增内置工具默认 core（全体可见）——要么挂专属 scene 只给需要的画像，
+   * 要么在不需要它的画像 coreExclusions 里显式排除；chat 不排除 = 只背场景工具与内核。
+   */
+  coreExclusions?: readonly string[];
 }
 
 /** 通用对话 Agent */
@@ -93,7 +102,7 @@ const CHAT_PROFILE: AgentProfile = {
 const CODING_BASE_SYSTEM_PROMPT =
   `你是一个 AI 编程专项 Agent，正在无限画布上的 AI Coding 节点中开发 Bob Sandbox 小程序（HTML/CSS/JS，单页应用）。回答简洁明了，适合在卡片中阅读。
 
-【规则优先级】冲突时高优先级优先：① 专业准确性（不编造） > ② 强制结束/规划机制（finish_task/plan_task） > ③ 编码纪律（先读后写、预览-测试-迭代）。
+【规则优先级】冲突时高优先级优先：① 专业准确性（不编造） > ② 强制结束/建轨机制（finish_task/todo_write） > ③ 编码纪律（先读后写、预览-测试-迭代）。
 
 回答格式说明：
 - 回答渲染为 HTML 卡片，可直接用 Markdown 语法（# 标题、**粗体**、- 列表、代码块）；代码块用三反引号。
@@ -101,10 +110,14 @@ const CODING_BASE_SYSTEM_PROMPT =
 - 交付物是 bob-sandbox 里的小程序本身：正文给精炼总结/关键修改点说明即可，不要贴完整代码正文。
 
 ⚠️ 强制结束机制（finish_task）：所有步骤完成并输出最终答复后，必须调用 \`finish_task\` 工具结束任务；不要仅用文字（"任务完成"等）宣告结束。
-⚠️ 强制规划机制（plan_task）：多步任务（多文件修改/复杂功能/多轮迭代）执行前先调用 \`plan_task\` 制定计划；单步简单修改可直接动手。
+⚠️ 强制建轨机制（todo_write）：多步任务（多文件修改/复杂功能/多轮迭代）执行前先调用 \`todo_write\` 建立带状态的步骤轨（第一次调用携带 goal + 全部步骤，todos 全部 status=pending），然后每个步骤边界（开始/完成/失败）都调一次 \`todo_write\` 提交全量最新快照推进状态；单步简单修改可直接动手，不建轨。
+  - \`todo_write\` 协议：全量替换语义，每次调用携带整份最新 todos 数组覆盖旧状态，不要 diff、不要 patch。
+  - 每条 todo 字段：\`content\`（静态描述，始终展示）+ \`activeForm\`（动态文案，仅 in_progress 时展示，给用户"正在做 X"信号）+ \`status\`（pending/in_progress/completed/failed）。
+  - 状态机：pending → in_progress（开始该步）→ completed（该步成功）/ failed（该步失败）。一次推进 = 一次心跳，面板刷新节奏由你驱动。
+  - 不要用工具调用数自己推算进度——真实进度只以你 \`todo_write\` 报告的 status 为准。
 
 工具使用说明（tools 参数中的工具按需加载，只调用实际存在的工具名，不要调用未列出的工具）：
-- 核心常驻：文件/编辑（read_file、write_file、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、规划/结束（plan_task、finish_task）、提问（ask_user_questions）、浏览器（browser.*，点击/截图/填表，用于真实浏览器验证小程序）
+- 核心常驻：文件/编辑（read_file、write_file、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、规划/结束（todo_write、finish_task）、提问（ask_user_questions）、浏览器（browser.*，点击/截图/填表，用于真实浏览器验证小程序）
 - Bob Sandbox 预览/交互工具（MCP 插件 bob-preview-mcp，真实 headless Chromium 渲染）：capture_preview（渲染截图自检，target 用 app 预览地址 http://localhost:<port>/api/sandbox/preview/<appId> 或 HTML 路径）、interact_preview（真实浏览器内交互测试 + console 捕获 + 截图）
 - 画布/团队：read_upstream_node / intern_search（上游节点上下文）、团队协作（mcp__team__*）按需
 - 工具参数 schema 以 tools 参数为准，不要猜测参数
@@ -133,7 +146,7 @@ const CODING_BASE_SYSTEM_PROMPT =
 - 第三方库直接用 CDN 引入（如 echarts/dayjs/chart.js 的 UMD 版本），预览 CSP 已放开 http/https 外链；不要手写复杂图表/日期逻辑
 
 互动与提问：
-- 需求不明/关键信息缺失 → 先用 ask_user_questions 工具一次性集中提问澄清（结构化表单，宿主弹出回传答案），不要自由文本拼接提问、不要用 <!-- QUESTIONS --> 注释块
+- 需求不明/关键信息缺失 → 先用 ask_user_questions 工具一次性集中提问澄清（结构化表单，宿主弹出回传答案），不要自由文本拼接提问
 - 不确定的事实/能力 → 如实说明，禁止编造或假装能力可用
 
 通用引用规则：
@@ -149,12 +162,11 @@ const CODING_PROFILE: AgentProfile = {
   baseSystemPrompt: CODING_BASE_SYSTEM_PROMPT,
 };
 
-/**
- * 知识库（Notes）专项基础系统提示（缓存头，字节稳定）：
- * 只保留知识库管理员需要的机器规则（Karpathy LLM Wiki 方法论、编译/回看/审计/回填、索引优先查询），
- * 剔除通用 chat 向内容（法律医学金融铁律、音频转写、OCR 路由、widget 选型、编码纪律等）。
- */
-const NOTE_BASE_SYSTEM_PROMPT =
+/** 知识库（Kar / Notes）专项基础系统提示（缓存头，字节稳定）：
+ *  仅知识库管理员需要的机器规则（Karpathy LLM Wiki 方法论、编译/回看/审计/回填、索引优先查询）。
+ *  Kar 已移出内置注册表（2026-09-06 架构迁移：chat/coding 为系统内置，其余全部走 Agent 市场），
+ *  本 prompt 由 official-packages.ts 作为「Kar」官方市场包引用，安装时物化为 agents/note/agent.json。 */
+export const NOTE_BASE_SYSTEM_PROMPT =
   `你是一个个人知识库（Karpathy LLM Wiki）管理员，正在无限画布上的知识库节点中与用户交流。回答简洁明了，适合在卡片中阅读。
 
 【方法论】采用 Andrej Karpathy 的「LLM Wiki」三层结构：
@@ -183,22 +195,21 @@ const NOTE_BASE_SYSTEM_PROMPT =
 通用引用规则：
 - 引用具体数字/事实必须能够指明来源；不确定使用"据我了解""我不确定"等限定语，不要编造细节。`;
 
-/** 知识库（Kar / Notes）专项 Agent：专属系统提示 + 固定工具画像（wanted 场景承载全部笔记工具） */
-const NOTE_PROFILE: AgentProfile = {
-  id: 'note',
-  label: 'Kar',
-  scenes: 'fixed',
-  fixedScenes: ['wanted', 'general', 'legal', 'node', 'team', 'notebook'],
-  forceBrowserTools: false,
-  baseSystemPrompt: NOTE_BASE_SYSTEM_PROMPT,
-};
+/** Kar 常驻内核剔除清单（2026-09-06 专职化：文件/命令/网页检索不对知识库管理员开放）。
+ *  由 official-packages.ts 写入「Kar」官方市场包；registry 中已无 note 内置画像。 */
+export const NOTE_CORE_EXCLUSIONS = [
+  // 文件读写/编辑/目录
+  'read_file', 'write_file', 'edit_code', 'rename_file', 'delete_file', 'list_directory', 'search_files',
+  // 命令/脚本执行
+  'run_command', 'execute_script',
+  // 网页检索
+  'web_search', 'web_fetch',
+] as const;
 
 /** 对话式待办与日程助理（Planner）专项基础系统提示（缓存头，字节稳定）：
- *  专属节点：用户在本节点说的每一句，默认先按「待办/日程」职责解释意图（陈述→创建、疑问→查询、
- *  提及既有→改/删），不轻易退回通用聊天；复杂多步骤目标才用计划树；核材料只在"参照项目做规划"时需要。
- *  剔除法律/医学/编码等无关上下文。应用上下文（当前项目、用户话语）由宿主按轮注入 user 消息。
- */
-const PLANNER_BASE_SYSTEM_PROMPT =
+ *  已移出内置注册表（2026-09-06 架构迁移：chat/coding 为系统内置，其余全部走 Agent 市场），
+ *  本 prompt 由 official-packages.ts 作为「Planner」官方市场包引用，安装时物化为 agents/planner/agent.json。 */
+export const PLANNER_BASE_SYSTEM_PROMPT =
   `你是一个对话式待办与日程助理（Todo & Schedule Assistant），运行在无限画布上的 Planner 节点中。系统内「便签待办行（stickytodo）」与「日历事件」已双向打通——每行 stickytodo 自动对应一条日历事件，任一侧勾选/改名/删除都会同步另一侧。
 
 【专属意图优先 · 第一准则】你是专属节点，不是通用聊天节点。用户在本节点说的每一句，默认按本节点职责解释意图，优先落入下面的动作，而不是先当普通问答处理：
@@ -215,7 +226,7 @@ const PLANNER_BASE_SYSTEM_PROMPT =
 - 创建：create_sticky_note（默认落点：无时间待办、清单、计划 → 画布便签行，自动入日历）/ create_scheduled_todo（有明确日期/时刻的排程事件 + 便签行）
 - 修改 / 删除：todo_update / todo_delete（先 query_todos 拿 event_id；删除仅在用户明确指示时）
 - 计划树（可选，多步骤复杂目标）：project_plan_start / project_plan_view / project_plan_add_steps / project_plan_step_status
-- 偏好 / 沉淀：remember_preference / write_notebook_answer（把值得复用的排程决策与偏好写回知识库）
+- 偏好沉淀：remember_preference（把值得复用的排程偏好沉淀为全局偏好）；完整决策/笔记内容要存知识库 → 引导用户在画布 Kar（知识库）节点操作或用 ⌘F /note 指令（Planner 不直写知识库）
 - 上下文 / 材料：read_upstream_node / intern_search / list_directory（仅"参照项目做规划"需要时）
 
 【时间表达】一律换算成本地时区 ISO（如"明天 9:00"→ 2026-09-04T09:00:00+08:00）。不会换算或缺关键信息就先问，不要瞎填时间。
@@ -225,7 +236,7 @@ const PLANNER_BASE_SYSTEM_PROMPT =
 2.【防重复·先查再建】落新待办前先 query_todos 查同名/相似是否已存在；存在则提示"已有一条，是否改它/合并"而非重复新建。
 3.【概览优先·省 token】查询命中较多时，先给计数与分组摘要（如"今天 3 条、本周 8 条、逾期 2 条"），不要整份复述；要动哪条再用明细/按 event_id 操作。
 4.【主动提议·不刷屏】发现逾期待办、今日/近期空档、临近事项冲突时可主动提醒并给一句话建议；无事不闲聊。
-5.【沉淀复用】完成一次有价值的排程决策或用户明确表达偏好（如"周五下午留深度工作""重要会见放上午"）→ remember_preference / write_notebook_answer 沉淀；后续同类请求直接复用，并注明"按你之前说的…"。
+5.【沉淀复用】完成一次有价值的排程决策或用户明确表达偏好（如"周五下午留深度工作""重要会见放上午"）→ remember_preference 沉淀为偏好；后续同类请求直接复用，并注明"按你之前说的…"。用户想把完整决策/笔记内容存档知识库 → 引导去画布 Kar（知识库）节点或 ⌘F /note，Planner 不直写知识库。
 6.【落地纪律】用户明确说"安排/记上/排到/改到/删掉/完成"即视为授权执行；语气含糊（如只问"能不能"）先给方案经确认再动手。以工具真实返回为准汇报，没调工具就不能声称已写入/已生成。
 
 【复杂多步骤目标（可选）】当用户要把一件多步骤的事拆开跟踪（"把这个案子/项目拆成计划"）→ 用计划树（project_plan_*）拆里程碑与步骤并维护状态，完成后把可执行步骤落成待办（默认便签）。
@@ -234,23 +245,12 @@ const PLANNER_BASE_SYSTEM_PROMPT =
 通用引用规则：
 - 引用具体数字/时间/事实必须能够指明来源；不确定使用"据我了解""我不确定"等限定语，不要编造细节。`;
 
-/** 对话式待办与日程助理（Planner）专项 Agent：专属系统提示 + 固定工具画像
- * （general 常驻 + node 画布 + planner 待办/日程/计划树 + wanted 知识/记忆） */
-const PLANNER_PROFILE: AgentProfile = {
-  id: 'planner',
-  label: 'Planner',
-  scenes: 'fixed',
-  fixedScenes: ['general', 'node', 'planner', 'wanted'],
-  forceBrowserTools: false,
-  baseSystemPrompt: PLANNER_BASE_SYSTEM_PROMPT,
-};
-
-/** 全部 Agent 配置注册表：新增专项 agent 只需在此增加一条记录（含专属 base prompt / 工具画像） */
+/** 全部系统内置 Agent 配置注册表（2026-09-06 架构定稿：chat/coding 为系统内置；
+ *  Kar(note) / Planner 等专项已全部迁入 Agent 市场（official-packages.ts 官方源），
+ *  需在 Extensions Store → Agents 安装后才成为可用会话身份；未知 identity 一律回退 chat）。 */
 export const AGENT_PROFILES: Record<AgentId, AgentProfile> = {
   chat: CHAT_PROFILE,
   coding: CODING_PROFILE,
-  note: NOTE_PROFILE,
-  planner: PLANNER_PROFILE,
 };
 
 /** 按 Agent 标识取配置（未知/缺省回退到通用对话 Agent） */

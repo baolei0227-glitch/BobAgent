@@ -6,7 +6,7 @@
  *   画布 BobbyNode 仅用于：观察实时进度、授权管理（弹窗 + 复选框）、查看调用历史。
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { useReactFlow } from '@xyflow/react';
 import { X, ShieldCheck, History, ChevronDown, ChevronRight } from 'lucide-react';
 import { NodeCardHeader } from './NodeCardHeader';
 import { useConfirm } from './ConfirmDialog';
@@ -705,8 +705,6 @@ function BobbyNodeInner({ id, data, selected }: {
           </div>
         </div>
       </div>
-      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
     </div>
   );
 }

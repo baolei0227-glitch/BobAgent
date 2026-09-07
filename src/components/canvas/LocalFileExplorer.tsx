@@ -29,6 +29,7 @@ import { bus, BusEvents } from '@/lib/bus';
 import type { MessageAttachment } from '@/lib/types';
 import { isPreviewable } from './viewers/registry';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { Button } from '@/components/ui/button';
 import { FileName } from './FileName';
 
 /** 目录/文件列表项（授权目录展开浏览用） */
@@ -738,20 +739,22 @@ export function LocalFileExplorer({
             }}
           />
           <div className="flex justify-end gap-2">
-            <button
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="sm"
               onClick={() => setRenaming(null)}
-              className="rounded-md px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="solid"
+              tone="brand"
+              size="sm"
               onClick={handleRename}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90"
-              style={{ backgroundColor: 'var(--primary)' }}
             >
               Confirm
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -766,12 +769,13 @@ export function LocalFileExplorer({
       className="relative flex h-full flex-col overflow-hidden shrink-0"
       data-canvas-ui="overlay"
       style={{
-        width: 322,
-        // 独立卡片：完整圆角 + 完整边线（与预览面板之间有 gap，无需拼合）
-        backgroundColor: 'var(--paper)',
-        border: '1px solid var(--line)',
-        borderRadius: 20,
-        boxShadow: '0 8px 22px color-mix(in srgb, var(--ink) 18%, transparent)',
+        width: 280,
+        // 2026-09 同平面 dock：与中栏卡片完全一致——圆角12 + 45% 线框 + 纸色底 + 顶部受光高光
+        borderRadius: 12,
+        border: '1px solid',
+        borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
+        background: 'linear-gradient(180deg, color-mix(in srgb, #fff 7%, var(--paper)) 0%, var(--paper) 38%)',
+        boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 18%, transparent)',
         WebkitAppRegion: 'no-drag',
         pointerEvents: 'auto',
       } as React.CSSProperties}
@@ -801,41 +805,49 @@ export function LocalFileExplorer({
           )}
         </div>
         {expandedRoot && (
-          <button
+          <Button
             onClick={goUp}
             disabled={!browsePath || browsePath === expandedRoot}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40"
-            style={{ color: 'var(--info)' }}
+            variant="ghost"
+            tone="info"
+            size="icon-sm"
             title="Go up"
+            aria-label="Go up"
           >
             <CornerUpLeft className="h-3.5 w-3.5" />
-          </button>
+          </Button>
         )}
-        <button
+        <Button
           onClick={handleSelectDirectory}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--info)' }}
+          variant="ghost"
+          tone="info"
+          size="icon-sm"
           title="Add folder (browse)"
+          aria-label="Add folder"
         >
           <FolderPlus className="h-3.5 w-3.5" />
-        </button>
-        <button
+        </Button>
+        <Button
           onClick={handleCreateMdFile}
           disabled={!browsePath && !expandedRoot}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40"
-          style={{ color: 'var(--primary)' }}
+          variant="ghost"
+          tone="brand"
+          size="icon-sm"
           title={browsePath || expandedRoot ? 'Create new Markdown file here' : 'Expand a directory first to create files'}
+          aria-label="Create Markdown file"
         >
           <FilePlus className="h-3.5 w-3.5" />
-        </button>
-        <button
+        </Button>
+        <Button
           onClick={handleOpenInFinder}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--ink)' }}
+          variant="ghost"
+          tone="neutral"
+          size="icon-sm"
           title="Open folder in system file manager"
+          aria-label="Open folder in system file manager"
         >
           <FolderOpen className="h-3.5 w-3.5" />
-        </button>
+        </Button>
         {onTogglePinned && (
           <button
             onClick={onTogglePinned}
@@ -926,14 +938,17 @@ export function LocalFileExplorer({
                     >
                       <ShieldCheck className="h-3 w-3" />
                     </button>
-                    <button
+                    <Button
                       onClick={(e) => handleRemoveRoot(root, e)}
-                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-hover)] group-hover:opacity-100"
-                      style={{ color: 'var(--ink-muted)' }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-xs"
+                      className="opacity-0 transition-opacity group-hover:opacity-100"
                       title="Remove directory"
+                      aria-label="Remove directory"
                     >
                       <X className="h-3 w-3" />
-                    </button>
+                    </Button>
                   </div>
 
                   {/* 展开的目录内容（仅限授权根内导航） */}
@@ -1104,20 +1119,22 @@ export function LocalFileExplorer({
             After authorization, the AI assistant can read and modify files in this directory (create, edit, rename, delete). Applies to AI tools only.
           </p>
           <div className="flex justify-end gap-2">
-            <button
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="sm"
               onClick={cancelAuthorize}
-              className="rounded-md px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="solid"
+              tone="brand"
+              size="sm"
               onClick={confirmAuthorize}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90"
-              style={{ backgroundColor: 'var(--primary)' }}
             >
               Authorize
-            </button>
+            </Button>
           </div>
         </div>
       </div>,

@@ -7,7 +7,7 @@ import { type Editor } from '@tiptap/react';
 import { BubbleMenu } from '@tiptap/react/menus';
 import { PluginKey } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
-import { MessageSquarePlus, Loader2, Wand2, MessageSquareText, MessageSquare, X, Target } from 'lucide-react';
+import { MessageSquarePlus, Loader2, Wand2, MessageSquareText, MessageSquare, X } from 'lucide-react';
 import { ANNOTATION_INTENTS, type AnnotationIntent } from '../MdAnnotationPanel';
 
 /** 临时选区高亮 key：气泡编辑期间（编辑器失焦、原生选区高亮消失）用 Decoration 保持文字高亮；
@@ -22,11 +22,9 @@ interface AnnotationBubbleProps {
   onAsk?: (quote: string, target: 'current' | 'new') => void;
   /** 是否存在当前活跃节点（无则「Ask current」禁用置灰） */
   canAskCurrent?: boolean;
-  /** 划词创建 note：用选中文字生成画布 note 卡片（ctx 带选区前后上下文，供文档反向定位消歧） */
-  onCreateNote?: (quote: string, ctx: { prefix?: string; suffix?: string }) => void;
 }
 
-export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false, onCreateNote }: AnnotationBubbleProps) {
+export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false }: AnnotationBubbleProps) {
   const [text, setText] = useState('');
   const [intent, setIntent] = useState<AnnotationIntent | ''>('');
   const [quote, setQuote] = useState('');
@@ -99,22 +97,6 @@ export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false, 
     const quoteText = editor.state.doc.textBetween(from, to, '\n').trim();
     if (!quoteText) return;
     onAsk(quoteText, target);
-  };
-
-  /** 创建 note：用锁定选区文字生成画布 note 卡片（不收起气泡，可继续批注）；
-   *  附带选区前后 32 字符上下文，供文档反向定位消歧（与批注 findQuoteWithContext 同口径） */
-  const createNoteNow = () => {
-    if (!onCreateNote) return;
-    const locked = lastSelRef.current;
-    if (!locked) return;
-    const { from, to } = locked;
-    const quoteText = editor.state.doc.textBetween(from, to, '\n').trim();
-    if (!quoteText) return;
-    const ctxLen = 32;
-    const docText = editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n');
-    const prefix = docText.slice(Math.max(0, from - 1 - ctxLen), from - 1);
-    const suffix = docText.slice(to - 1, to - 1 + ctxLen);
-    onCreateNote(quoteText, { prefix, suffix });
   };
 
   return (
@@ -253,16 +235,6 @@ export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false, 
                 <MessageSquarePlus className="h-3.5 w-3.5" />
               </button>
             </>
-          )}
-          {onCreateNote && (
-            <button
-              onClick={createNoteNow}
-              className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: '#B8860B' }}
-              title="用选中文字创建画布 note 卡片"
-            >
-              <Target className="h-3.5 w-3.5" />
-            </button>
           )}
           <button
             disabled={!text.trim() || submitting}

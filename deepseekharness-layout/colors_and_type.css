@@ -1,0 +1,92 @@
+/* DeepSeek Harness — Desktop App Shell Tokens */
+
+:root {
+  /* Primary hue: DeepSeek cyan-blue */
+  --dh-brand-50: #ecfdff;
+  --dh-brand-100: #cff7fe;
+  --dh-brand-200: #a0edfd;
+  --dh-brand-300: #60dafa;
+  --dh-brand-400: #1cbbf2;
+  --dh-brand-500: #00a0d2;
+  --dh-brand-600: #0080af;
+  --dh-brand-700: #00678d;
+  --dh-brand-800: #005274;
+  --dh-brand-900: #06455f;
+
+  /* Neutral surface scale */
+  --dh-neutral-0: #ffffff;
+  --dh-neutral-50: #f8f9fb;
+  --dh-neutral-100: #f1f3f6;
+  --dh-neutral-200: #e3e7ec;
+  --dh-neutral-300: #c9d0d8;
+  --dh-neutral-400: #9aa5b1;
+  --dh-neutral-500: #69727d;
+  --dh-neutral-600: #4b535c;
+  --dh-neutral-700: #3a4047;
+  --dh-neutral-800: #24282d;
+  --dh-neutral-900: #15181b;
+
+  /* Semantic aliases */
+  --dh-background: var(--dh-neutral-0);
+  --dh-foreground: var(--dh-neutral-900);
+  --dh-card: var(--dh-neutral-50);
+  --dh-card-foreground: var(--dh-neutral-900);
+  --dh-popover: var(--dh-neutral-0);
+  --dh-popover-foreground: var(--dh-neutral-900);
+  --dh-primary: var(--dh-brand-600);
+  --dh-primary-foreground: var(--dh-neutral-0);
+  --dh-muted: var(--dh-neutral-100);
+  --dh-muted-foreground: var(--dh-neutral-500);
+  --dh-border: var(--dh-neutral-200);
+  --dh-input: var(--dh-neutral-200);
+  --dh-ring: var(--dh-brand-500);
+
+  /* State colors */
+  --dh-state-success: #16a34a;
+  --dh-state-warning: #d97706;
+  --dh-state-error: #dc2626;
+  --dh-state-info: var(--dh-brand-500);
+
+  /* Radius */
+  --dh-radius-xs: 2px;
+  --dh-radius-sm: 4px;
+  --dh-radius-md: 8px;
+  --dh-radius-lg: 16px;
+  --dh-radius-pill: 999px;
+
+  /* Shadows */
+  --dh-shadow-1: 0 1px 2px rgba(21, 24, 27, 0.05), 0 1px 1px rgba(21, 24, 27, 0.03);
+  --dh-shadow-2: 0 8px 24px -8px rgba(21, 24, 27, 0.18);
+  --dh-shadow-3: 0 24px 60px -20px rgba(21, 24, 27, 0.30);
+
+  /* Typography */
+  --dh-font-sans: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --dh-font-mono: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+
+  /* Spacing scale reference */
+  --dh-space-1: 4px;
+  --dh-space-2: 8px;
+  --dh-space-3: 12px;
+  --dh-space-4: 16px;
+  --dh-space-5: 24px;
+  --dh-space-6: 32px;
+  --dh-space-7: 48px;
+  --dh-space-8: 64px;
+}
+
+/* Dark mode overrides */
+html.dark {
+  --dh-background: #0d0f12;
+  --dh-foreground: #f1f3f6;
+  --dh-card: #14171b;
+  --dh-card-foreground: #f1f3f6;
+  --dh-popover: #14171b;
+  --dh-popover-foreground: #f1f3f6;
+  --dh-muted: #1c2026;
+  --dh-muted-foreground: #9aa5b1;
+  --dh-border: #2a2f36;
+  --dh-input: #2a2f36;
+  --dh-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 1px rgba(0, 0, 0, 0.15);
+  --dh-shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.45);
+  --dh-shadow-3: 0 24px 60px -20px rgba(0, 0, 0, 0.60);
+}

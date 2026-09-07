@@ -12,7 +12,7 @@ import {
   REASONING_EFFORT_MAP,
   SYSTEM_PROMPT_INJECTIONS,
 } from '@/lib/types';
-import { TOOL_DEFINITIONS, getToolDefinitions, getToolSource, getToolLayer, registerCustomTools, registerMcpTools, executeTool, getToolSummary, getLocalAuthorizedRoots, mergeForcedMcpToolDefs } from './tools';
+import { TOOL_DEFINITIONS, getToolDefinitions, getToolSource, getToolLayer, registerCustomTools, registerMcpTools, executeTool, getToolSummary, getLocalAuthorizedRoots, mergeForcedMcpToolDefs, describeToolCall } from './tools';
 import type { ToolScene, ToolDefinition } from './tools';
 import type { AgentId } from '@/lib/agents/profiles';
 import { codingPhaseForTool } from '@/lib/agents/profiles';
@@ -169,7 +169,7 @@ import { createPendingLogin, LOGIN_TIMEOUT_MS } from '@/lib/chat/login-pending';
 import { applyPdfBridge, PREWARM_MAX_PAGES } from '@/lib/pdf/bridge';
 import { buildSkillContext } from '@/lib/skills/context';
 import { getAllSkills } from '@/lib/skills/loader-server';
-import { getEnabledSkillsForAgent, hasAgentConfig } from '@/lib/skills/registry-server';
+import { getAgentSkills, getEnabledSkillsForAgent, hasAgentConfig } from '@/lib/skills/registry-server';
 import type { SkillMatchResult } from '@/lib/skills/types';
 import { getAncestorChain, loadNodeById } from '@/lib/nodes/ancestors';
 import { renderOutcome } from '@/lib/nodes/outcome';
@@ -713,7 +713,7 @@ function guardToolsPrefix(tools: unknown[]): string {
 const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在无限画布上的对话节点中与用户交流。回答简洁明了，适合在卡片中阅读。
 
 【规则优先级】以下规则冲突时，高优先级优先，低优先级让位：
-① 专业内容准确性铁律（禁编造法条/剂量/数据/转写） > ② 强制结束/规划机制（finish_task/plan_task） > ③ 输出选型与可视化规则 > ④ 场景按需规则（报告插图/浏览器操作）。
+① 专业内容准确性铁律（禁编造法条/剂量/数据/转写） > ② 强制结束/规划机制（finish_task/todo_write） > ③ 输出选型与可视化规则 > ④ 场景按需规则（报告插图/浏览器操作）。
 
 回答格式说明：
 - 你的回答会被渲染为 HTML 显示在卡片中。你可以直接使用 HTML 标签来美化排版，也可以使用 Markdown 语法（会自动转换）。
@@ -746,12 +746,15 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - 调用 \`finish_task\` 意味着你确认任务已真正结束，没有遗漏的步骤。
 - 这是一个强制性的结束仪式，请务必遵守。
 
-⚠️ **强制规划机制（plan_task）**：
-- 对于需要多步操作的任务（如搜索后分析、读取后写入、或任何需要多次调用工具的任务），**必须在执行前先调用 \`plan_task\` 工具制定计划**。
-- 计划应包含：明确的目标（goal）和按顺序排列的具体步骤（steps）。
-- 执行过程中，如果发现计划需要调整，可以重新调用 \`plan_task\` 更新计划。
-- 对于简单的、单步即可完成的问答任务（如直接回答一个事实性问题），无需调用 \`plan_task\`，直接回答即可。
-- 这是一个强制性的规划仪式，有助于确保任务有序执行，避免遗漏步骤。
+⚠️ **强制建轨机制（todo_write）**：
+- 对于需要多步操作的任务（如搜索后分析、读取后写入、或任何需要多次调用工具的任务），**必须在执行前先调用 \`todo_write\` 建立带状态的步骤轨**：第一次调用携带 goal + 全部步骤（status=pending），这就是你的执行计划。
+- \`todo_write\` 协议：全量替换语义，每次调用携带整份最新 todos 数组覆盖旧状态，不要 diff、不要 patch。
+- 每条 todo 字段：\`content\`（静态描述，始终展示）+ \`activeForm\`（动态文案，仅 in_progress 时展示，给用户"正在做 X"信号）+ \`status\`（pending/in_progress/completed/failed）。
+- 状态机：pending → in_progress（开始该步）→ completed（该步成功）/ failed（该步失败）。**每个步骤边界（开始/完成/失败）都调一次 \`todo_write\` 提交全量最新快照推进状态**，一次推进 = 一次心跳，面板刷新节奏由你驱动。
+- 不要用工具调用数自己推算进度——真实进度只以你 \`todo_write\` 报告的 status 为准。
+- 执行过程中，如果发现计划需要调整，重新调一次 \`todo_write\` 提交更新后的步骤列表即可。
+- 对于简单的、单步即可完成的问答任务（如直接回答一个事实性问题），无需调用 \`todo_write\`，直接回答即可。
+- 这是一个强制性的建轨仪式，有助于确保任务有序执行，避免遗漏步骤。
 
 ⚠️ 落盘图表文件：当用户明确要求产出「可下载/可离线打开的图表文件」（图片 / 独立 HTML）时，用 execute_script 写 Python matplotlib 脚本生成并落盘（脚本 CWD 是 homework/.ai-workspace/，交付路径用 $BOB_PROJECT_HOMEWORK 拼绝对路径，见 execute_script schema）；widget 通道仅用于对话/节点内联展示，不产出文件
 
@@ -767,7 +770,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 标题应简洁概括核心主题，只放在最后这一处，正文不重复标题内容。
 
 工具使用说明（tools 参数中的工具按需加载，只调用 tools 参数里实际存在的工具名，不要调用未列出的工具）：
-- 核心常驻工具：文件/编辑（read_file、write_file、edit_code、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、网页（web_search、web_fetch）、附件/材料（read_attachment、read_material）、规划/结束（plan_task、finish_task）、提问（ask_user_questions）、偏好（read_preferences）、技能（load_skill、read_skill_resource）
+- 核心常驻工具：文件/编辑（read_file、write_file、edit_code、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、网页（web_search、web_fetch）、附件/材料（read_attachment、read_material）、规划/结束（todo_write、finish_task）、提问（ask_user_questions）、偏好（read_preferences）、技能（load_skill、read_skill_resource）
 - 其余能力（OCR 识别、音频转写、记忆/待办/偏好写入、界面主题、Word 模板、配置/模型管理、网页浏览、企业查询、团队协作、本地软件操控等）**按需自动加载**：说出对应意图（如"识别这张扫描件""转写这段录音""查这家公司""打开这个网页"），对应工具会随本轮 tools 注入；tools 中未出现的工具不可调用，不要尝试调用不存在的工具名
 - 工具参数 schema 以 tools 参数为准，不要猜测参数
 - read_skill_resource 读技能资源：禁止用 read_file 直接读技能目录（会被权限门控挡掉），必须走本工具
@@ -785,10 +788,11 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 | 记忆/待办/偏好 | "记住这个偏好/我的待办有哪些" | 全局长期记忆+项目待办 |
 | 界面主题/前端 | "按当前主题配色做一个页面" | 读取真实主题 CSS 变量 |
 | 技能按需加载 | "用 slide-craft/docx 技能做 PPT" | 仅已下载技能可 load_skill；缺技能去 设置→技能→Download |
+| 知识库/笔记 | "查一下笔记里的X/把这段存进知识库" | 笔记能力由「知识库（Kar）节点」专职承载，本对话不注入笔记工具 → 引导打开画布 Kar 节点，或使用 ⌘F / 微信的 /note 指令（/note check 查阅） |
 若不确定是否有对应能力，可调用 \`search_capabilities\` 工具查询（该工具常驻可用）。
 
 任务执行纪律（多步任务）：
-- 执行前先规划：多步任务先调 plan_task 制定计划（见强制规划机制），再在思考区拆解具体步骤；用户指令中的目标词（如"小红书号""账号信息"）即最终交付物，禁止漏读目标词，禁止只做字面第一步就结束
+- 执行前先建轨：多步任务先调 todo_write 建立步骤轨（见强制建轨机制），再在思考区拆解具体步骤；用户指令中的目标词（如"小红书号""账号信息"）即最终交付物，禁止漏读目标词，禁止只做字面第一步就结束
 - 按步骤推进，每步完成自查是否仍朝最终目标前进；中途结果（列表页、中间截图、部分结果）只算中间态，不算完成
 - **目标/交付物不明确时先澄清再开工**：指令多解、缺关键信息（如"小红书号"指账号 ID 还是账号名）→ 先提精准问题（一次 1-2 个）问清目标，按答复调整计划后执行；目标明确时 → 执行到位再收尾，未达最终交付目标前不得结束任务，也不得用"是否需要继续"之类的反问代替继续执行；执行中遇新歧义同样先问，问完调整计划继续
 
@@ -835,7 +839,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 
 互动与提问：
 - 需求不明/多方案/涉偏好 → 主动提问澄清（简洁，数量受限）
-- 提问必须用 ask_user_questions 工具（结构化表单，宿主弹出并回传答案），禁止在正文末尾输出 <!-- QUESTIONS --> 注释块或自由文本拼接提问。每次提问把问题集中放到该工具一次调用里（question/options 2-4 个/allowCustom），避免多轮打断。
+- 提问必须用 ask_user_questions 工具（结构化表单，宿主弹出并回传答案），禁止用自由文本拼接提问。每次提问把问题集中放到该工具一次调用里（question/options 2-4 个/allowCustom），避免多轮打断。
 
 --- 专业内容准确性铁律（违反将导致严重误导用户，必须严格遵守） ---
 
@@ -961,7 +965,9 @@ export function detectSceneHints(text: string): Set<ToolScene> {
     scenes.add('wanted');
   }
   // legal：法律场景（含协议/起草/拟定等高频触发词，及刑事法核心术语）
-  if (/法条|文书|判决|合同|协议|诉讼|律师|法律|庭审|案由|罪名|法规|司法解释|起草|拟定|起诉状|答辩状|申请书|委托书|诈骗|犯罪|被害人|共犯|刑事|量刑|定罪|判刑|主犯|从犯|胁从犯|自首|立功|缓刑|拘役|有期徒刑|追诉|侦查|起诉|审判/i.test(text)) {
+  // 补执行/金钱债务领域词（执行款清偿顺序、先本后息/先息后本、加倍迟延履行利息等提问
+  // 不含"法条/法律"字样，缺词会导致 legal 场景不激活 → 北大法宝 pkulaw MCP 不注入 → 模型只能用 web_search 兜底）
+  if (/法条|文书|判决|合同|协议|诉讼|律师|法律|庭审|案由|罪名|法规|司法解释|起草|拟定|起诉状|答辩状|申请书|委托书|诈骗|犯罪|被害人|共犯|刑事|量刑|定罪|判刑|主犯|从犯|胁从犯|自首|立功|缓刑|拘役|有期徒刑|追诉|侦查|起诉|审判|执行款|执行程序|强制执行|被执行人|迟延履行|加倍部分|加倍迟延|清偿|抵充|本金|利息|债权|生效法律文书|债务/i.test(text)) {
     scenes.add('legal');
   }
   // audio：音频转写（关键词或音频附件）
@@ -974,6 +980,11 @@ export function detectSceneHints(text: string): Set<ToolScene> {
   // skill：技能检索/安装
   if (/技能|能力缺口|skill|安装技能|技能库|skill registry|找.*技能/i.test(text)) {
     scenes.add('skill');
+  }
+  // coding：Agent 造包（子 agent/子助手/专职角色/agent 包）——无沙盒的 coding 会话也能激活
+  // create_agent_package 场景，让「＋ → AI Coding → 创建子 Agent」表单预填的首轮消息可用该工具
+  if (/create_agent_package|sub.?agent|子agent|子.?.agent|创建.{0,8}(专职助手|专属助手|子助手)|做一个.{0,8}(agent|子代理)/i.test(text)) {
+    scenes.add('coding');
   }
   // design：主题/前端界面（coding 节点已在 L1 放行，此处覆盖普通对话）
   if (/主题|配色|颜色|前端|网页|网站|页面|界面|小程序|ui|设计风格|美化|风格|视觉|色值/i.test(text)) {
@@ -1030,7 +1041,7 @@ const CAPABILITY_CATALOG: CapabilityEntry[] = [
   { scene: 'company', name: '企业工商查询', keywords: ['企业', '公司', '工商', '股权', '股东', '天眼查', '注册资本', '法定代表人', '招投标', '工商信息', '信用代码', '社会信用代码'], description: '工商信息、股权结构、司法风险、招投标', triggerPhrase: '"查一下这家公司的工商信息"' },
   { scene: 'team', name: '多智能体团队', keywords: ['团队', '协作', '分工', '分配', '组队', '多智能体', 'multi-agent', '多人'], description: '多成员编排，分配任务并行执行', triggerPhrase: '"让团队协作处理"' },
   { scene: 'local', name: '本地软件操控', keywords: ['本地', '软件', '应用', '操控', '自动化', 'mac', '打开应用'], description: '本地应用自动化控制', triggerPhrase: '"打开微信应用"' },
-  { scene: 'legal', name: '法律检索/咨询', keywords: ['法律', '法条', '合同', '诉讼', '律师', '法规', '判例', '文书', '起诉', '司法'], description: '法条检索、判例查询、文书起草（含防幻觉约束）', triggerPhrase: '"查一下相关法条"' },
+  { scene: 'legal', name: '法律检索/咨询', keywords: ['法律', '法条', '合同', '诉讼', '律师', '法规', '判例', '文书', '起诉', '司法', '执行', '清偿', '本金', '利息', '债权', '迟延履行', '加倍', '抵充'], description: '法条检索、判例查询、文书起草（含防幻觉约束）', triggerPhrase: '"查一下相关法条"' },
   { scene: 'audio', name: '音频转写', keywords: ['音频', '录音', '转写', '语音', '字幕', '听写'], description: '真实音频转写，禁止凭元数据编造', triggerPhrase: '"转写这段录音"' },
   { scene: 'ocr', name: '图片/PDF 文字识别', keywords: ['识别', '扫描', 'ocr', '图片文字', 'pdf文字', '票据', '证件', '文字识别'], description: '印刷体识别 + 手写复核', triggerPhrase: '"识别这张扫描件"' },
   { scene: 'wanted', name: '记忆/待办/偏好', keywords: ['记忆', '待办', '偏好', '笔记', '日历', '提醒', '便签', '收藏', '备忘'], description: '全局长期记忆、项目待办、用户偏好', triggerPhrase: '"记住这个偏好"' },
@@ -1132,18 +1143,26 @@ interface SkillDetail {
   forced: boolean;
 }
 
-function injectSkillContext(messages: ChatMessage[], forcedSkills?: string[]): { messages: ChatMessage[]; matchedSkillNames: string[]; skillDetails: SkillDetail[] } {
+function injectSkillContext(
+  messages: ChatMessage[],
+  forcedSkills?: string[],
+  agentIdParam?: string,
+): { messages: ChatMessage[]; matchedSkillNames: string[]; skillDetails: SkillDetail[] } {
   const userContent = extractLastUserContent(messages);
   if (!userContent) return { messages, matchedSkillNames: [], skillDetails: [] };
 
   const allDefs = getAllSkills();
   if (!allDefs.length) return { messages, matchedSkillNames: [], skillDetails: [] };
 
-  const AGENT_ID = 'default';
-  // 无显式配置时：所有已发现技能默认启用
-  const enabledSet = hasAgentConfig(AGENT_ID)
-    ? getEnabledSkillsForAgent(AGENT_ID)
-    : new Set(allDefs.map(d => d.meta.name));
+  // 2026-09-06 技能按 agent 分发：画像有独立技能池（agentSkills[agentId]）→ 用它的；
+  // 否则回退 'default' 全局池（旧语义：enableSkill 只写 default / 未配置=全部技能默认启用）。
+  const agentId = agentIdParam ?? 'default';
+  const ownPool = getAgentSkills(agentId);
+  const enabledSet = ownPool
+    ? ownPool
+    : hasAgentConfig('default')
+      ? getEnabledSkillsForAgent('default')
+      : new Set(allDefs.map(d => d.meta.name));
 
   if (!enabledSet.size) return { messages, matchedSkillNames: [], skillDetails: [] };
 
@@ -2557,7 +2576,7 @@ export async function POST(request: NextRequest) {
 
     // off 模式不注入思考提示；非推理模型去掉 <think> 标签引用
     const effectiveLevel: ThinkingLevel = level;
-    const { messages: messagesWithSkill, matchedSkillNames, skillDetails } = injectSkillContext(messagesWithNodeBridge, mergedForcedSkills);
+    const { messages: messagesWithSkill, matchedSkillNames, skillDetails } = injectSkillContext(messagesWithNodeBridge, mergedForcedSkills, profile.id);
     // 基础系统提示按 Agent 隔离：专项 Agent（coding）用自己的专属 base，不背通用 chat 向内容
     const agentBasePrompt = profile.baseSystemPrompt ?? BASE_SYSTEM_PROMPT;
     let finalMessages = injectThinkingPrompt(messagesWithSkill, effectiveLevel, modelSupportsThinking, agentBasePrompt);
@@ -2650,7 +2669,7 @@ export async function POST(request: NextRequest) {
                   `  spec_5: 是否需要接入 AI 能力（模型调用）？\n` +
                   `         options 示例：["不需要，纯工具型小程序即可","需要，我稍后会说明细节","请按功能判断是否需要并询问我"]\n` +
                   `要求：\n` +
-                  `  - 6 个问题全部通过 ask_user_questions 工具提供，不要自由提问，禁止在正文输出 QUESTIONS 注释块；\n` +
+                  `  - 6 个问题全部通过 ask_user_questions 工具提供，不要自由提问；\n` +
                   `  - 正文开头先写一句话引导语（如「为了更准确地生成你想要的小程序，请先填写以下 6 个简单问题：」），然后紧接着调用 ask_user_questions 工具弹出表单；\n` +
                   `  - 正文禁止输出任何代码、伪代码或"我来写吧"等跳过采集的声明；\n` +
                   `  - 若用户在首轮消息里已明确写出需求（例如有具体功能点），请基于其描述自动预填/归纳各选项，仍调用 ask_user_questions 让用户确认或修改，不能省略采集。\n`
@@ -2895,24 +2914,36 @@ export async function POST(request: NextRequest) {
       // 内置工具定义从固定 ~18.4k token 降为「核心 ~6.5k + 已激活场景」，省出的上下文让给任务本身。
       // sandbox 受限对话保留场景过滤 + 黑名单（安全优先）；
       // coding 专项 Agent 直接用 AGENT_PROFILES 中的固定工具画像。
-      let toolDefs = (sandbox
-        ? getToolDefinitions(activeScenes).filter((t) => !SANDBOX_BLOCKED_TOOLS.has((t as any).name as string))
-        : profile.scenes === 'fixed'
-          ? getToolDefinitions(new Set<ToolScene>(profile.fixedScenes))
-          : getToolDefinitions(activeScenes)
-      ).filter((t) => {
+      // 按当前 activeScenes 计算最终工具定义。抽成同一管线供两处使用：
+      //   ① 请求首轮初始化；② 场景中途激活（search_capabilities / load_skill 法律技能）后重建，
+      // 否则 needRebuildTools 只重排序旧 toolDefs，新激活场景的工具（如 pkulaw）永远不会注入。
+      const computeActiveToolDefs = () => {
+        const base = sandbox
+          ? getToolDefinitions(activeScenes).filter((t) => !SANDBOX_BLOCKED_TOOLS.has((t as any).name as string))
+          : profile.scenes === 'fixed'
+            ? getToolDefinitions(new Set<ToolScene>(profile.fixedScenes))
+            : getToolDefinitions(activeScenes);
         // 兜底校验：工具名必须匹配 ^[a-zA-Z0-9_-]+$（OpenAI API 要求）。
         // MCP 工具名/自定义工具名可能在动态注册时产生非法字符，这里过滤掉避免 400。
-        const name = (t as any)?.function?.name ?? (t as any)?.name ?? '';
-        const ok = typeof name === 'string' && /^[a-zA-Z0-9_-]+$/.test(name);
-        if (!ok) console.warn(`[chat] 过滤非法工具名: ${JSON.stringify(name)}`);
-        return ok;
-      });
-
-      // 节点"强制使用"MCP：无视场景/画像过滤，把勾选的 MCP server 工具恒定并入本轮
-      if (mcpForceIds.size > 0) {
-        toolDefs = mergeForcedMcpToolDefs(toolDefs, Array.from(mcpForceIds));
-      }
+        const valid = base.filter((t) => {
+          const name = (t as any)?.function?.name ?? (t as any)?.name ?? '';
+          const ok = typeof name === 'string' && /^[a-zA-Z0-9_-]+$/.test(name);
+          if (!ok) console.warn(`[chat] 过滤非法工具名: ${JSON.stringify(name)}`);
+          return ok;
+        });
+        // 常驻内核按画像剔除（profile.coreExclusions）：无场景标注的内核工具（文件/命令/网页等）
+        // 默认对所有 agent 可见，场景门控管不到——专职画像在此按工具名剔除（如 Kar 不背文件/联网）。
+        const excluded = profile.coreExclusions?.length ? new Set(profile.coreExclusions) : null;
+        const trimmed = excluded
+          ? valid.filter((t) => {
+              const n = (t as any)?.function?.name ?? (t as any)?.name ?? '';
+              return !excluded.has(n);
+            })
+          : valid;
+        // 节点"强制使用"MCP：无视场景/画像过滤，把勾选的 MCP server 工具恒定并入本轮
+        return mcpForceIds.size > 0 ? mergeForcedMcpToolDefs(trimmed, Array.from(mcpForceIds)) : trimmed;
+      };
+      let toolDefs = computeActiveToolDefs();
 
       // 浏览器专精规则按需注入（browser 场景激活 / coding 专项 Agent 强制注入）：
       // 已从 system 移出以省固定 token，随当前轮 user 消息动态注入（不破坏 system 前缀缓存）；
@@ -3054,7 +3085,7 @@ export async function POST(request: NextRequest) {
             // 完成确认轮只允许一次：模型本轮未调用任何工具时，追加一轮「任务是否真正完成」确认，
             // 防止模型过早自我判定完成（假完成）导致任务不完整；再次无工具调用才接受收尾
             let completionConfirmUsed = false;
-            // 计划状态追踪：是否已调用 plan_task 进行任务规划
+            // 计划状态追踪：是否已调用 todo_write 建立执行轨
             let hasPlannedTask = false;
             // 声明真实性校验纠偏次数计数（防无限纠偏循环）
             let claimMismatchCorrections = 0;
@@ -3142,12 +3173,14 @@ export async function POST(request: NextRequest) {
             sendContextMeter(); // 首轮前下发（显示当前上下文占用，供 composer 圆环预览）
 
             for (let round = 0; ; round++) {
-              // search_capabilities 中途激活了场景 → 重建 loopToolDefs（注入新工具），
-              // 下一轮请求携带新工具集。重建后本会话场景已 sticky，后续轮次字节稳定。
+              // 场景中途激活（search_capabilities / load_skill 法律技能）→ 用最新 activeScenes
+              // 重算 toolDefs 再重建 loopToolDefs，下一轮模型请求携带新工具集；
+              // 重建后本会话场景已 sticky，后续轮次字节稳定。
               if (needRebuildTools) {
+                toolDefs = computeActiveToolDefs();
                 loopToolDefs = buildAndSortToolDefs(toolDefs, settingsForTools.mcpServers || []);
                 needRebuildTools = false;
-                console.log(`[chat] search_capabilities 激活场景后重建工具集: n=${loopToolDefs.length}`);
+                console.log(`[chat] 场景中途激活后重建工具集: n=${loopToolDefs.length}`);
               }
               const isFinalRound = forceFinalRound;
               // lite 模式不注入「基于以上结果」的收尾指令（首轮即是最终回答，无前置工具结果）
@@ -3440,7 +3473,7 @@ export async function POST(request: NextRequest) {
                 const isContinuationFlow =
                   typeof lastUserMsg?.content === 'string' &&
                   lastUserMsg.content.startsWith('用户已根据你的提问补充了以下信息');
-                // 强制 finish_task & plan_task 模式：
+                // 强制 finish_task & todo_write 模式：
                 // 1. 检查本轮是否调用了 finish_task 工具
                 const hasFinishTaskCall = Array.from(toolCallBuf.values()).some(
                   (buf) => buf.name === 'finish_task',
@@ -3451,33 +3484,33 @@ export async function POST(request: NextRequest) {
                   break;
                 }
 
-                // 2. 检查本轮是否调用了 plan_task 工具
-                const hasPlanTaskCall = Array.from(toolCallBuf.values()).some(
-                  (buf) => buf.name === 'plan_task',
+                // 2. 检查本轮是否调用了 todo_write 工具
+                const hasTodoWriteCall = Array.from(toolCallBuf.values()).some(
+                  (buf) => buf.name === 'todo_write',
                 );
 
-                if (hasPlanTaskCall) {
-                  // 模型已提交计划，标记状态，继续执行后续步骤
+                if (hasTodoWriteCall) {
+                  // 模型已提交执行轨，标记状态，继续执行后续步骤
                   hasPlannedTask = true;
                 }
 
-                // 3. 检查是否需要强制规划（首轮多步任务未规划）
-                // 触发条件：模型在首次尝试执行时调用了工具（表明是多步任务），但未先规划
+                // 3. 检查是否需要强制建轨（首轮多步任务未建 todo 轨）
+                // 触发条件：模型在首次尝试执行时调用了工具（表明是多步任务），但未先建轨
                 // 仅当模型真正调用了工具时才触发，避免误伤简单问答（纯文本回答）
                 const hasAnyToolCallsThisRound = toolCallBuf.size > 0;
                 const isFirstRoundWithoutPlan =
                   allToolCalls.length === 0 && // 从未执行过任何工具
                   !isContinuationFlow &&       // 不是续写流
-                  !hasPlannedTask &&           // 尚未规划
+                  !hasPlannedTask &&           // 尚未建轨
                   hasAnyToolCallsThisRound;    // 模型本轮调用了工具（表明是多步任务）
 
                 if (isFirstRoundWithoutPlan) {
-                  // 强制要求规划：注入追问，要求模型先调用 plan_task
+                  // 强制要求建轨：注入追问，要求模型先调用 todo_write
                   conversationMessages.push({
                     role: 'user',
                     content:
-                      '检测到这是一个可能需要多步操作的任务。为了确保任务有序执行，请你先调用 plan_task 工具来制定执行计划，然后再按计划逐步执行。\n' +
-                      '如果这是一个简单的、单步即可完成的问答任务，请直接回答（无需调用 plan_task）。',
+                      '检测到这是一个可能需要多步操作的任务。为了确保任务有序执行并向你展示实时进度，请你先调用 todo_write 工具建立步骤轨（goal + 全部步骤，status=pending），然后在每个步骤边界（开始/完成/失败）用 todo_write 提交最新状态。\n' +
+                      '如果这是一个简单的、单步即可完成的问答任务，请直接回答（无需调用 todo_write）。',
                   });
                   send({ completion_check: true, nodeId });
                   continue;
@@ -3607,11 +3640,13 @@ export async function POST(request: NextRequest) {
                     }
                   }
                 }
+                // 方案 B：本步「在做什么」中文动作描述（随 tool_call 下发供 UI 展示，不进模型上下文、不耗 token）
+                const callPurpose = describeToolCall(toolName, parsedArgs ?? {});
                 if (parsedArgs === null) {
                   // 参数既无法解析也无法修复 → 跳过执行（避免空参误执行），注入修复指令让模型重试
                   const errMsg = `工具调用参数 JSON 解析失败（可能被输出截断），已跳过执行。原始参数: ${tc.function.arguments.slice(0, 200)}。请重新调用该工具，确保 arguments 为完整合法的 JSON。`;
                   conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
-                  send({ tool_call: { name: toolName, arguments: {}, phase: 'error', spanId: toolSpanId, startAt: toolStartAt }, nodeId });
+                  send({ tool_call: { name: toolName, arguments: {}, phase: 'error', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose }, nodeId });
                   send({ tool_result: { name: toolName, result: errMsg, durationMs: 0, success: false, phase: 'error', spanId: toolSpanId, startAt: toolStartAt, endAt: Date.now() }, nodeId });
                   continue;
                 }
@@ -3643,7 +3678,7 @@ export async function POST(request: NextRequest) {
                     content: dupResult,
                   });
                   send({
-                    tool_call: { name: toolName, arguments: parsedArgs, phase: 'pending', spanId: toolSpanId, startAt: toolStartAt },
+                    tool_call: { name: toolName, arguments: parsedArgs, phase: 'pending', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose },
                     nodeId,
                   });
                   send({
@@ -3670,6 +3705,7 @@ export async function POST(request: NextRequest) {
                     phase: 'pending',
                     spanId: toolSpanId,
                     startAt: toolStartAt,
+                    purpose: callPurpose,
                   },
                   nodeId,
                 });
@@ -3677,8 +3713,7 @@ export async function POST(request: NextRequest) {
                 // ② 提问工具：模型通过 ask_user_questions 向用户发起结构化提问。
                 //    立即把 questions 推给前端（SSE questions_request），挂起等待用户 answers 回传，
                 //    再把 answers 作为 tool_result 返回给模型继续生成。
-                //    —— 相比旧的「正文末尾引导模型输出 <!-- QUESTIONS --> 注释块 + 前端流结束后正则解析」，
-                //    这里在模型决定提问的那一刻就触发弹窗，快且稳定（结构化、无格式容错）。
+                //    模型决定提问的那一刻即触发弹窗，快且稳定（结构化、无格式容错）。
                 if (toolName === 'ask_user_questions') {
                   const pendingQuestions: PendingQuestionItem[] = (
                     Array.isArray(parsedArgs.questions) ? parsedArgs.questions : []
@@ -3768,7 +3803,7 @@ export async function POST(request: NextRequest) {
                   if (newlyActivated.length > 0) needRebuildTools = true;
                   const resultText = buildCapabilityResultText(query, matched, newlyActivated);
                   send({
-                    tool_call: { name: toolName, arguments: parsedArgs, phase: 'done', spanId: toolSpanId, startAt: toolStartAt },
+                    tool_call: { name: toolName, arguments: parsedArgs, phase: 'done', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose },
                     nodeId,
                   });
                   send({
@@ -4076,6 +4111,40 @@ export async function POST(request: NextRequest) {
                           '请如实告知用户该站点仍处于未登录状态，必要时引导其手动登录。',
                         durationMs: 0,
                         success: true,
+                      };
+                    }
+                  }
+                }
+
+                // load_skill 加载法律技能 → 联动激活 legal 场景并重建工具集：
+                // 技能正文要求法条核对必须走北大法宝(pkulaw)，但 pkulaw 工具仅当 legal 场景激活才可见；
+                // 而首轮用户消息未必命中 detectSceneHints 法律关键词（如"执行款清偿顺序"类提问），
+                // 若不在此兜底激活，模型加载技能后依然看不到 pkulaw 工具，只能退化到 web_search/web_fetch。
+                if (toolName === 'load_skill' && execResult.success) {
+                  let skillName = '';
+                  try {
+                    skillName = String(((JSON.parse(execArgs) as Record<string, unknown>)?.skill_name) ?? '').trim();
+                  } catch {
+                    /* 参数解析失败则跳过 */
+                  }
+                  if (skillName && LEGAL_SKILL_NAMES.has(skillName)) {
+                    const justActivated = !activeScenes.has('legal');
+                    if (justActivated) {
+                      activeScenes.add('legal');
+                      needRebuildTools = true;
+                    }
+                    // sticky 持久化（nodeId 存在时跨请求保持，与 detectSceneHints 激活同机制）
+                    if (nodeId) {
+                      const cur = chatStickyScenes.get(nodeId) ?? new Set<ToolScene>();
+                      cur.add('legal');
+                      chatStickyScenes.set(nodeId, cur);
+                    }
+                    if (justActivated) {
+                      execResult = {
+                        ...execResult,
+                        result:
+                          execResult.result +
+                          '\n\n[宿主提示] 已自动激活法律场景(legal)：北大法宝 pkulaw MCP 法条/案例检索工具已加入可用工具集，法条原文、时效性、裁判规则核对请优先使用 mcp__pkulaw__* 工具（结果自带 pkulaw.com 原文链接），仅在 pkulaw 不可用时才用 web_search/web_fetch 降级。',
                       };
                     }
                   }

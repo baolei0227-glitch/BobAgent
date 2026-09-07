@@ -10,6 +10,7 @@ import {
   type SandboxChatPermission,
 } from '@/lib/settings';
 import { useConfirm } from './ConfirmDialog';
+import { Button } from '@/components/ui/button';
 import { loadStarredApps, toggleStarredApp, subscribeStarred } from '@/lib/sandbox-starred';
 
 /** Bridge action definition (mirrors BridgeActionDef from bridge.ts) */
@@ -434,13 +435,15 @@ export function SandboxPanel({
                   Mini-app Bridge & Storage API
                 </span>
               </div>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
                 onClick={() => setApiDocsOpen(false)}
-                className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
+                aria-label="关闭 API 文档"
               >
-                <X className="h-4 w-4" style={{ color: 'var(--ink-muted)' }} />
-              </button>
+                <X className="h-4 w-4" />
+              </Button>
             </div>
             <div className="px-4 py-3 space-y-4">
               {/* BobStorage section */}
@@ -604,26 +607,26 @@ const actions = await BobWork.listActions();`}
               style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
             />
             <div className="mt-2 flex justify-end gap-1.5">
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 onClick={() => setStarDialog(null)}
-                className="rounded px-2 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
               >
                 Cancel
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 disabled={!starDialog.label.trim()}
                 onClick={() => {
                   toggleStarredApp({ id: starDialog.appId, name: starDialog.label.trim() });
                   setStarDialog(null);
                 }}
-                className="rounded px-2 py-1 text-xs font-medium transition-opacity disabled:opacity-40"
-                style={{ backgroundColor: 'var(--primary)', color: 'white' }}
               >
                 Star
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -658,50 +661,53 @@ const actions = await BobWork.listActions();`}
             </span>
             <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>{apps.length} apps</span>
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                tone="info"
+                size="sm"
                 onClick={() => setApiDocsOpen(true)}
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--info)', border: '1px solid color-mix(in oklab, var(--info) 35%, transparent)' }}
               >
                 <Code2 className="h-3.5 w-3.5" /> API
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="outline"
+                tone="neutral"
+                size="sm"
                 onClick={handleImportClick}
                 disabled={importing}
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-50"
-                style={{ color: 'var(--ink-muted)', border: '1px solid var(--line)' }}
+                loading={importing}
               >
                 {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />} Import
-              </button>
+              </Button>
               <input ref={fileInputRef} type="file" accept=".zip" className="hidden" onChange={handleImportFile} />
-              <button
-                type="button"
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 onClick={() => setCreateOpen((v) => !v)}
-                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
-                style={{ backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }}
               >
                 <Plus className="h-3.5 w-3.5" /> New App
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="icon"
                 onClick={load}
-                className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
                 title="Refresh"
+                aria-label="Refresh"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="ghost"
+                tone="danger"
+                size="icon"
                 onClick={onClose}
-                className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--danger-soft)]"
-                style={{ color: 'var(--ink-muted)' }}
                 title="Close (Esc)"
+                aria-label="Close (Esc)"
               >
                 <X className="h-4 w-4" />
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -725,23 +731,24 @@ const actions = await BobWork.listActions();`}
                   <option key={t.id} value={t.id}>{t.label}</option>
                 ))}
               </select>
-              <button
-                type="button"
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 onClick={handleCreate}
                 disabled={creating}
-                className="flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition-opacity disabled:opacity-50"
-                style={{ backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }}
+                loading={creating}
               >
                 {creating && <Loader2 className="h-3 w-3 animate-spin" />} Create
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 onClick={() => setCreateOpen(false)}
-                className="rounded-md px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           )}
 
@@ -755,14 +762,14 @@ const actions = await BobWork.listActions();`}
               <div className="flex h-full flex-col items-center justify-center gap-3">
                 <Boxes className="h-10 w-10" style={{ color: 'var(--ink-faint)' }} />
                 <p className="text-sm" style={{ color: 'var(--ink-muted)' }}>No mini programs yet</p>
-                <button
-                  type="button"
+                <Button
+                  variant="solid"
+                  tone="brand"
+                  size="md"
                   onClick={() => setCreateOpen(true)}
-                  className="flex items-center gap-1.5 rounded-md px-4 py-2 text-xs font-medium transition-colors"
-                  style={{ backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }}
                 >
                   <Plus className="h-3.5 w-3.5" /> New App
-                </button>
+                </Button>
               </div>
             ) : (
               <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
@@ -791,17 +798,20 @@ const actions = await BobWork.listActions();`}
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
                             <span className="truncate text-sm font-semibold" style={{ color: 'var(--ink-strong)' }}>{app.name}</span>
-                            <button
-                              type="button"
+                            {/* 星标 = warn 语义（收藏/取消收藏），图标 fill 由 isStarred 驱动 */}
+                            <Button
+                              variant="ghost"
+                              tone="warn"
+                              size="icon-xs"
                               onClick={() => {
                                 if (isStarred) toggleStarredApp({ id: app.id, name: app.name });
                                 else setStarDialog({ appId: app.id, appName: app.name, label: app.name });
                               }}
-                              className="shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--warn-soft)]"
                               title={isStarred ? 'Unstar (remove from sidebar)' : 'Star (pin to sidebar)'}
+                              aria-label={isStarred ? 'Unstar' : 'Star'}
                             >
                               <Star className="h-3.5 w-3.5" style={{ color: isStarred ? 'var(--primary-strong)' : 'var(--ink-muted)', fill: isStarred ? 'var(--primary-strong)' : 'transparent' }} />
-                            </button>
+                            </Button>
                           </div>
                           <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
                             {app.description || 'No description'}
@@ -841,43 +851,45 @@ const actions = await BobWork.listActions();`}
 
                       {/* 操作行 */}
                       <div className="mt-auto flex items-center gap-1 pt-3" style={{ borderTop: '1px solid var(--line-soft)', marginTop: 10 }}>
-                        <button
-                          type="button"
+                        <Button
+                          variant="solid"
+                          tone="brand"
+                          size="sm"
                           onClick={() => { onClose?.(); openPreview(app); }}
-                          className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors"
-                          style={{ backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }}
                           title="Open preview in side panel"
                         >
                           <Play className="h-3 w-3" /> Preview
-                        </button>
-                        <button
-                          type="button"
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          tone="neutral"
+                          size="icon-sm"
                           onClick={() => handleExport(app.id)}
-                          className="flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                          style={{ color: 'var(--ink-muted)' }}
                           title="Export as ZIP"
+                          aria-label="Export as ZIP"
                         >
                           <Download className="h-3.5 w-3.5" />
-                        </button>
+                        </Button>
                         {confirmDelete === app.id ? (
-                          <button
-                            type="button"
+                          <Button
+                            variant="solid"
+                            tone="danger"
+                            size="micro"
                             onClick={() => handleDelete(app.id)}
-                            className="rounded px-1.5 py-0.5 text-11"
-                            style={{ color: '#fff', backgroundColor: 'var(--danger)' }}
                           >
                             Confirm
-                          </button>
+                          </Button>
                         ) : (
-                          <button
-                            type="button"
+                          <Button
+                            variant="ghost"
+                            tone="danger"
+                            size="icon-sm"
                             onClick={() => setConfirmDelete(app.id)}
-                            className="flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-[var(--danger-soft)]"
-                            style={{ color: 'var(--ink-muted)' }}
                             title="Delete"
+                            aria-label="Delete"
                           >
-                            <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
-                          </button>
+                            <Trash className="h-3.5 w-3.5" />
+                          </Button>
                         )}
                       </div>
                     </div>

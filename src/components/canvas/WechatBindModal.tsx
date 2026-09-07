@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Loader2, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 interface WechatBindModalProps {
   open: boolean;
@@ -143,13 +144,16 @@ export function WechatBindModal({ open, onOpenChange, onBoundChange, embedded }:
           <div className="text-sm font-bold" style={{ color: 'var(--ink)' }}>
             WeChat iLink Bind
           </div>
-          <button
+          <Button
+            variant="ghost"
+            tone="neutral"
+            size="icon-xs"
             onClick={() => onOpenChange(false)}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ink-muted)', padding: 2 }}
             title="Close"
+            aria-label="Close"
           >
-            <X size={16} />
-          </button>
+            <X size={14} />
+          </Button>
         </div>
       )}
 
@@ -173,21 +177,16 @@ export function WechatBindModal({ open, onOpenChange, onBoundChange, embedded }:
               <br />· <b>/help</b> → list all commands
               <br />· Plain text → save to todo list
             </div>
-            <button
+            {/* 解绑 = 破坏性：danger outline 常态提示（本弹窗无二次确认，保持视觉警示） */}
+            <Button
+              variant="outline"
+              tone="danger"
+              size="md"
               onClick={unbind}
-              style={{
-                width: '100%',
-                padding: '7px 0',
-                borderRadius: 4,
-                border: '1.5px solid color-mix(in oklab, var(--danger) 60%, transparent)',
-                backgroundColor: 'transparent',
-                color: 'var(--danger)',
-                fontSize: '0.8rem',
-                cursor: 'pointer',
-              }}
+              className="w-full"
             >
               Unbind WeChat
-            </button>
+            </Button>
           </div>
         ) : (
           <div>
@@ -238,20 +237,14 @@ export function WechatBindModal({ open, onOpenChange, onBoundChange, embedded }:
             {state.phase === 'expired' && (
               <div style={{ textAlign: 'center', padding: '16px 0' }}>
                 <div className="text-xs" style={{ color: 'var(--ink-muted)', marginBottom: 10 }}>QR code expired</div>
-                <button
+                <Button
+                  variant="solid"
+                  tone="brand"
+                  size="md"
                   onClick={startBind}
-                  style={{
-                    padding: '6px 16px',
-                    borderRadius: 4,
-                    border: '1.5px solid var(--primary)',
-                    backgroundColor: 'var(--primary)',
-                    color: '#fff',
-                    fontSize: '0.8rem',
-                    cursor: 'pointer',
-                  }}
                 >
                   Get QR code again
-                </button>
+                </Button>
               </div>
             )}
             {state.phase === 'error' && (
@@ -259,38 +252,26 @@ export function WechatBindModal({ open, onOpenChange, onBoundChange, embedded }:
                 <div className="text-xs" style={{ color: 'var(--danger)', marginBottom: 10 }}>
                   {state.error || 'Binding failed'}
                 </div>
-                <button
+                <Button
+                  variant="solid"
+                  tone="brand"
+                  size="md"
                   onClick={startBind}
-                  style={{
-                    padding: '6px 16px',
-                    borderRadius: 4,
-                    border: '1.5px solid var(--primary)',
-                    backgroundColor: 'var(--primary)',
-                    color: '#fff',
-                    fontSize: '0.8rem',
-                    cursor: 'pointer',
-                  }}
                 >
                   Retry
-                </button>
+                </Button>
               </div>
             )}
             {state.phase === 'idle' && (
               <div style={{ textAlign: 'center', padding: '16px 0' }}>
-                <button
+                <Button
+                  variant="solid"
+                  tone="brand"
+                  size="md"
                   onClick={startBind}
-                  style={{
-                    padding: '6px 16px',
-                    borderRadius: 4,
-                    border: '1.5px solid var(--primary)',
-                    backgroundColor: 'var(--primary)',
-                    color: '#fff',
-                    fontSize: '0.8rem',
-                    cursor: 'pointer',
-                  }}
                 >
                   {sessionDead ? 'Re-scan to bind' : 'Bind WeChat'}
-                </button>
+                </Button>
               </div>
             )}
           </div>

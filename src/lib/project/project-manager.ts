@@ -20,7 +20,7 @@
 import { promises as fs } from 'fs';
 import { join, sep, resolve, isAbsolute, basename } from 'path';
 import { homedir } from 'os';
-import { resolveAppRoot, PROJECT_DB_FILENAME, TEMPLATES_DB_FILENAME, resolveProjectDbPath } from '../app-root';
+import { resolveAppRoot, PROJECT_DB_FILENAME, resolveProjectDbPath } from '../app-root';
 import { migrateStickyNotePages } from '@/lib/sticky-notes-migrate';
 import { PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 

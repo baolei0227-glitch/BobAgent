@@ -1,0 +1,136 @@
+{
+  "success": false,
+  "outcome": "validation_failed",
+  "repairable": true,
+  "terminalViolations": [],
+  "terminalBlockingSummary": null,
+  "skillProvenance": {
+    "name": "solo-design",
+    "version": "2026.07.06.8",
+    "version_source": "skill-release-manifest.json",
+    "runtime_skill_dir": null,
+    "recorded_at": null,
+    "expected_version": "2026.08.06.19.15.08",
+    "status": "mismatch",
+    "read_status": "ok"
+  },
+  "operatingMode": "free-explore",
+  "renderBlockingErrorCount": 1,
+  "softWarningCount": 2,
+  "renderBlockingErrors": [
+    "[dispatch-changed-files] project.expectedDispatches[] is required when dispatchPreflightManifest[] exists"
+  ],
+  "errorSignatures": [
+    {
+      "errorClass": "dispatch-preflight-or-ownership",
+      "normalized": "[dispatch-changed-files] project.expectedDispatches[] is required when dispatchPreflightManifest[] exists",
+      "signature": "1863095a5236c379a633d22a8424261bfcde770ff9ab246147a2326cba87f6fd"
+    }
+  ],
+  "softWarnings": [
+    "[html-head-style] index.html: found 1 custom <style> block(s) in <head>. The <head> is owned by apply-html-head-contract.mjs; move custom styles before </body> or re-run apply-html-head-contract.mjs <css-path> <html-file> --replace-head to relocate them.",
+    "[html-quality] colors_and_type.css: ordinary/static shadow tokens must keep every shadow alpha <= 0.05; deeper shadows are allowed only for floating-layer tokens such as modal/popover/dropdown/drawer/overlay (--dh-shadow-2: 0 8px 24px -8px rgba(21, 24, 27, 0.18), --dh-shadow-3: 0 24px 60px -20px rgba(21, 24, 27, 0.30))."
+  ],
+  "repairPlanHints": [],
+  "repairActionTable": [
+    {
+      "error": "[dispatch-changed-files] project.expectedDispatches[] is required when dispatchPreflightManifest[] exists",
+      "errorClass": "dispatch-preflight-or-ownership",
+      "severity": "blocking",
+      "action": "return_to_dispatch_preflight_gate",
+      "owner": "main-agent",
+      "sourceReadPolicy": "read summary and dispatch contract only"
+    }
+  ],
+  "errorCount": 1,
+  "warningCount": 2,
+  "errors": [
+    "[dispatch-changed-files] project.expectedDispatches[] is required when dispatchPreflightManifest[] exists"
+  ],
+  "warnings": [
+    "[html-head-style] index.html: found 1 custom <style> block(s) in <head>. The <head> is owned by apply-html-head-contract.mjs; move custom styles before </body> or re-run apply-html-head-contract.mjs <css-path> <html-file> --replace-head to relocate them.",
+    "[html-quality] colors_and_type.css: ordinary/static shadow tokens must keep every shadow alpha <= 0.05; deeper shadows are allowed only for floating-layer tokens such as modal/popover/dropdown/drawer/overlay (--dh-shadow-2: 0 8px 24px -8px rgba(21, 24, 27, 0.18), --dh-shadow-3: 0 24px 60px -20px rgba(21, 24, 27, 0.30))."
+  ],
+  "validationRunDisciplineStatus": {
+    "declared": true,
+    "restoreMode": false,
+    "maxFullValidationRuns": 2,
+    "validationHistoryCount": 0,
+    "repairLedgerCount": 0,
+    "softWarningsTriggerRepair": false,
+    "terminalState": null,
+    "nextAction": null,
+    "violations": [],
+    "success": true
+  },
+  "terminalState": null,
+  "nextCheck": {
+    "type": "full",
+    "command": "node '/Users/baolei/.trae-cn/builtin/design/default/skills/solo-design/shared-runtime/deterministic-tooling/validate-design-workspace.mjs' '/Users/baolei/Desktop/BobAgent/projects/deepseekharness-layout' --report-json='/Users/baolei/Desktop/BobAgent/projects/deepseekharness-layout/validation-report.json'",
+    "fullValidationAllowed": true,
+    "reason": "no narrower deterministic targeted check is available for the current failure class"
+  },
+  "repairBatch": [
+    {
+      "error": "[dispatch-changed-files] project.expectedDispatches[] is required when dispatchPreflightManifest[] exists",
+      "errorClass": "dispatch-preflight-or-ownership",
+      "severity": "blocking",
+      "action": "return_to_dispatch_preflight_gate",
+      "owner": "main-agent",
+      "sourceReadPolicy": "read summary and dispatch contract only"
+    }
+  ],
+  "repairContextPacket": {
+    "schema_version": "1.0",
+    "purpose": "small-context repair packet; read this before full validation-report.json",
+    "success": false,
+    "terminalState": null,
+    "skillProvenance": {
+      "name": "solo-design",
+      "version": "2026.07.06.8",
+      "version_source": "skill-release-manifest.json",
+      "runtime_skill_dir": null,
+      "recorded_at": null,
+      "expected_version": "2026.08.06.19.15.08",
+      "status": "mismatch",
+      "read_status": "ok"
+    },
+    "renderBlockingErrorCount": 1,
+    "softWarningCount": 2,
+    "renderBlockingErrors": [
+      "[dispatch-changed-files] project.expectedDispatches[] is required when dispatchPreflightManifest[] exists"
+    ],
+    "repairActionTable": [
+      {
+        "errorClass": "dispatch-preflight-or-ownership",
+        "owner": "main-agent",
+        "severity": "blocking",
+        "action": "return_to_dispatch_preflight_gate",
+        "affectedFiles": [],
+        "sourceReadPolicy": "read summary and dispatch contract only"
+      }
+    ],
+    "nextCheck": {
+      "type": "full",
+      "command": "node '/Users/baolei/.trae-cn/builtin/design/default/skills/solo-design/shared-runtime/deterministic-tooling/validate-design-workspace.mjs' '/Users/baolei/Desktop/BobAgent/projects/deepseekharness-layout' --report-json='/Users/baolei/Desktop/BobAgent/projects/deepseekharness-layout/validation-report.json'",
+      "fullValidationAllowed": true,
+      "reason": "no narrower deterministic targeted check is available for the current failure class"
+    },
+    "forbidden": [
+      "do not read validator source",
+      "do not rerun full validation when nextCheck.fullValidationAllowed=false",
+      "do not start preview/browser unless user explicitly asks",
+      "do not hand-edit repair ledger fields"
+    ]
+  },
+  "projectFileHashes": {
+    "deepseekharness-layout.design": "c30d9e48ddd746df8b7ee3f5d554996f8a81fb8de1e55c089aa8ea658742b5ef",
+    "colors_and_type.css": "f9eebcae9f90fdf7082ac5bc4e9530e322cb4e86f87fc342835c68d55fdcf7a3",
+    "runtime-orchestration-summary.json": "df1beb8774ce4f04b1eae2c6e048df3fc98ca9536e32c11c7d5fcd10e6d330e6",
+    "pages/index.html": "eef5d2eaef8dbc3da7c6dadb7c624e82828f9b079635fdfd6476332e5a22db55"
+  },
+  "designDir": "/Users/baolei/Desktop/BobAgent/projects/deepseekharness-layout",
+  "expectedPages": 1,
+  "requireInteractions": null,
+  "checkedAt": "2026-09-05T01:21:57.287Z"
+}

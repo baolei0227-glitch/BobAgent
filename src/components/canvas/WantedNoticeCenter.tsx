@@ -18,7 +18,7 @@ import { createPortal } from 'react-dom';
 import {
   X, CalendarDays, Bell, CheckCircle2, ChevronLeft, ChevronRight, MessageCircle,
   LayoutGrid, Eye, EyeOff, Circle, Mail, Search, Trash,
-  Clock, ChevronDown, ChevronUp, Loader2, User, Star, MoreHorizontal, Archive, Reply, Forward,
+  Clock, Loader2, Star, MoreHorizontal, Archive, Reply, Forward,
   Download, Link2, Check,
 } from 'lucide-react';
 import { bus, BusEvents, stripThinkTags, type WantedNoticePayload, type WantedNoticeItem, type ChatMessage, type WantedExecutingPayload } from '@/lib/bus';
@@ -180,27 +180,6 @@ function senderOf(n: Notice): SenderInfo {
         to: 'me',
       };
   }
-}
-
-/**
- * Chat 邮件预览（左侧卡片 / 折叠线程行）：只显示用户问题，
- * 剥离 <think>...</think> 思考块、AI 回复正文、以及回复邮件 `> ` 引用前缀。
- * 若无 messages 则回退 body 并剥离 think / 引用 / AI 文本。
- */
-function chatQuestionPreview(n: Notice): string {
-  const userContent = (() => {
-    if (Array.isArray(n.messages) && n.messages.length > 0) {
-      const firstUser = n.messages.find((m) => m.role === 'user');
-      if (firstUser?.content) return firstUser.content;
-      const lastUser = [...n.messages].reverse().find((m) => m.role === 'user');
-      if (lastUser?.content) return lastUser.content;
-    }
-    return n.body ?? '';
-  })();
-  const stripped = stripThinkTags(userContent);
-  // 去掉引用前缀每行开头的 `> `（常见于回复邮件的用户问题被加引用）
-  const dequoted = stripped.split('\n').map((l) => l.replace(/^>\s?/, '')).join('\n');
-  return dequoted.slice(0, 160);
 }
 
 /** 正文富文本 mini processor：处理
@@ -862,7 +841,7 @@ interface WantedNoticeCenterProps {
  *  React 会卸载并重建分区，导致内部 expanded state 被重置（展开的 ARCHIVE 点击邮件后自动折叠）。 */
 function CollapsibleSection({
   title, count, defaultExpanded, renderNoticeRow, doneList, isDone,
-  tagBar, collapsedThreads, threadExpandedInArchive, onToggleThread, headerAction,
+  tagBar, collapsedThreads, threadExpandedInArchive, headerAction,
 }: {
   title: string;
   count: number;
@@ -880,8 +859,6 @@ function CollapsibleSection({
   collapsedThreads: Set<string>;
   /** ARCHIVE 区已展开的 chat 线程 ID（区分于 INBOX 的 collapsedThreads） */
   threadExpandedInArchive: Set<string>;
-  /** 线程折叠切换：传 threadId 给外层 setState，避免分区内部分 state 导致左/右栏不同步 */
-  onToggleThread: (threadId: string) => void;
   /** 标题栏右侧动作（如 ARCHIVE 的 Select 多选按钮），点击不会触发展开/收起 */
   headerAction?: React.ReactNode;
 }) {
@@ -1014,9 +991,6 @@ export function WantedNoticeCenter({
   // Sending 阶段提示：按 elapsed 秒数切换「连接中 / AI思考中 / 生成回答中」，让用户知道没卡死
   const [sendingPhase, setSendingPhase] = useState<string>('Sending…');
   const sendingTimerRef = useRef<number | null>(null);
-  // 详情区：chat 线程历史超出多少条时默认折叠最早的 N 条（"展开更早的消息"）
-  const HISTORY_UNFOLD_THRESHOLD = 4;
-  const [historyFolded, setHistoryFolded] = useState(true);
   const replyTaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   // 详情区：info 邮件带 messages（原始对话附件存档）时，是否展开附件对话记录
@@ -1045,18 +1019,6 @@ export function WantedNoticeCenter({
       return next;
     });
   }, []);
-  // 详情区 chat 线程堆叠：非当前邮件默认折叠为「摘要行」，点击展开完整信封；
-  // noticeId ∈ Set → 折叠（仅保留 sender + 时间 + 首行预览），默认除了 detail.id 以外全部折叠
-  const [foldedMailIds, setFoldedMailIds] = useState<Set<string>>(new Set());
-  const toggleMailFold = useCallback((noticeId: string) => {
-    setFoldedMailIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(noticeId)) next.delete(noticeId);
-      else next.add(noticeId);
-      return next;
-    });
-  }, []);
-
   // ===== Toast 浮层栈：toast=true 的 action 回执(task/note/info)只弹这个，不落 INBOX =====
   interface ToastItem {
     id: string;
@@ -1659,29 +1621,8 @@ export function WantedNoticeCenter({
       window.clearInterval(sendingTimerRef.current);
       sendingTimerRef.current = null;
     }
-    setHistoryFolded(true);
     applyPopupPos(WIDTH_FULL);
   }, [applyPopupPos]);
-
-  // 详情变化后：chat 线程堆叠折叠态重置（当前 detail.id 默认展开，其他 thread 兄弟默认折叠）
-  useEffect(() => {
-    if (detailIdx === null) {
-      setFoldedMailIds(new Set());
-      return;
-    }
-    const target = notices[detailIdx];
-    if (!target) return;
-    // 非 chat 类型：不需要堆叠，空折叠
-    if (target.kind !== 'chat' || !target.threadId) {
-      setFoldedMailIds(new Set());
-      return;
-    }
-    // chat + threadId：默认把同 thread 除自己之外的所有邮件折叠
-    const siblings = notices.filter((n) => n.threadId === target.threadId);
-    const folded = new Set<string>();
-    for (const sib of siblings) if (sib.id !== target.id) folded.add(sib.id);
-    setFoldedMailIds(folded);
-  }, [detailIdx, notices]);
 
   // 收起右栏详情：回到仅收件箱态
   const closeDetail = useCallback(() => {
@@ -1732,7 +1673,6 @@ export function WantedNoticeCenter({
       window.clearInterval(sendingTimerRef.current);
       sendingTimerRef.current = null;
     }
-    setHistoryFolded(true);
   }, [detailIdx, inboxNotices, notices, doneList, pendingList]);
 
   // 标记单条为已完成：从「收件箱」移入「已完成」分区；角标未完成数随之减一。
@@ -2191,7 +2131,6 @@ export function WantedNoticeCenter({
       setReplyText('');
       setReplyState('idle');
       setSendingPhase('Sending…');
-      setHistoryFolded(true);
     } catch (e: any) {
       clearTimeout(timeoutTimer);
       const msg = e?.name === 'AbortError'
@@ -2815,130 +2754,6 @@ export function WantedNoticeCenter({
       </div>
     );
   };
-
-  /** chat 线程堆叠：非当前邮件默认折叠为 sender+时间+首行预览；点击行展开或跳 Focus */
-  const ChatThreadStack = ({ threadId }: { threadId: string }) => {
-    const siblings = notices
-      .filter((n) => n.threadId === threadId)
-      .sort((a, b) => a.time - b.time);
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {/* 线程头一行：🧵 消息数 + Expand all / Collapse all */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '4px 2px 2px',
-        }}>
-          <span style={{ fontSize: '0.666667rem', fontWeight: 700, letterSpacing: '0.06em', color: 'var(--ink-muted)' }}>
-            🧵 THREAD · {siblings.length} messages
-          </span>
-          <span style={{ flex: 1 }} />
-          <button
-            onClick={() => { setFoldedMailIds(new Set()); }}
-            style={tinyBtn()}
-          >
-            Expand all
-          </button>
-          <button
-            onClick={() => {
-              const cur = siblings.find((x) => detailIdx !== null && notices[detailIdx]?.id === x.id);
-              const folded = new Set(siblings.filter((x) => !cur || x.id !== cur.id).map((x) => x.id));
-              setFoldedMailIds(folded);
-            }}
-            style={tinyBtn()}
-          >
-            Collapse others
-          </button>
-        </div>
-        {siblings.map((sib) => {
-          const folded = foldedMailIds.has(sib.id);
-          const isCurrent = detailIdx !== null && notices[detailIdx]?.id === sib.id;
-          if (!folded) {
-            return (
-              <MailEnvelope
-                key={sib.id}
-                n={sib}
-                kb={`stack-${sib.id}`}
-                isCurrentInThread={!!isCurrent}
-                showJumpTo={!isCurrent}
-              />
-            );
-          }
-          // ==== 折叠摘要行（仿 Gmail thread 折叠项） ====
-          const s = senderOf(sib);
-          // 预览文本：chat 只显示用户问题（剥离思考块 + AI 答复）；其他取 body 首行
-          const preview = (sib.kind === 'chat' ? chatQuestionPreview(sib) : sib.body).slice(0, 160);
-          return (
-            <button
-              key={sib.id}
-              onClick={() => toggleMailFold(sib.id)}
-              style={{
-                textAlign: 'left',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                padding: '8px 10px',
-                background: isCurrent ? 'var(--primary-soft)' : 'var(--paper-soft)',
-                border: `1px solid ${isCurrent ? 'var(--primary)' : 'var(--line-soft)'}`,
-                borderRadius: 6,
-                cursor: 'pointer',
-              }}
-            >
-              <ChevronRight
-                size={13}
-                style={{ flexShrink: 0, color: 'var(--ink-muted)', transition: 'transform var(--dur-fast) var(--ease-fast)' }}
-              />
-              {avatarEl(s, 26)}
-              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  gap: 8,
-                }}>
-                  <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--ink-strong)' }}>
-                    {s.name}
-                  </span>
-                  {!sib.read && (
-                    <span style={{
-                      width: 6, height: 6, borderRadius: '50%', backgroundColor: 'var(--primary)',
-                    }} />
-                  )}
-                  <span style={{ flex: 1 }} />
-                  <span style={{ fontSize: '0.7rem', color: 'var(--ink-muted)' }}>
-                    {formatTime(sib.time)}
-                  </span>
-                </div>
-                <div style={{
-                  fontSize: '0.733333rem',
-                  color: 'var(--ink-muted)',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  minWidth: 0,
-                }}>
-                  <span style={{ fontWeight: 600, color: 'var(--ink)', marginRight: 6 }}>
-                    {sib.title}
-                  </span>
-                  — {preview}
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    );
-  };
-  const tinyBtn = () => ({
-    fontSize: '0.733333rem',
-    padding: '2px 8px',
-    borderRadius: 999,
-    border: '1px solid var(--line)',
-    background: 'none',
-    color: 'var(--ink-muted)',
-    cursor: 'pointer',
-    fontWeight: 600,
-  } as React.CSSProperties);
 
   // 弹窗头部自由拖动：按下记录偏移，移动实时更新位置，松开结束
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
@@ -3595,9 +3410,9 @@ export function WantedNoticeCenter({
                         </div>
                       )}
                       <div style={{ flex: 1, overflowY: 'auto', overscrollBehavior: 'contain', padding: '4px 0' }}>
-                        <CollapsibleSection title="INBOX" count={filterCat !== null ? countVisibleEntries(filteredMails ?? []) : inboxVisibleCount} defaultExpanded renderNoticeRow={renderNoticeRow} doneList={filterCat !== null ? (filteredMails ?? []) : pendingList} isDone={false} tagBar={tagBarNode} collapsedThreads={collapsedThreads} threadExpandedInArchive={threadExpandedInArchive} onToggleThread={toggleThreadCollapse} />
+                        <CollapsibleSection title="INBOX" count={filterCat !== null ? countVisibleEntries(filteredMails ?? []) : inboxVisibleCount} defaultExpanded renderNoticeRow={renderNoticeRow} doneList={filterCat !== null ? (filteredMails ?? []) : pendingList} isDone={false} tagBar={tagBarNode} collapsedThreads={collapsedThreads} threadExpandedInArchive={threadExpandedInArchive} />
                         {doneList.length > 0 && (
-                          <CollapsibleSection title="ARCHIVE" count={archiveVisibleCount} defaultExpanded={false} renderNoticeRow={renderNoticeRow} doneList={doneList} isDone collapsedThreads={collapsedThreads} threadExpandedInArchive={threadExpandedInArchive} onToggleThread={toggleThreadInArchive} headerAction={(
+                          <CollapsibleSection title="ARCHIVE" count={archiveVisibleCount} defaultExpanded={false} renderNoticeRow={renderNoticeRow} doneList={doneList} isDone collapsedThreads={collapsedThreads} threadExpandedInArchive={threadExpandedInArchive} headerAction={(
                             <button
                               onClick={(e) => { e.stopPropagation(); if (archiveSelMode) exitArchiveSelect(); else setArchiveSelMode(true); }}
                               title={archiveSelMode ? 'Exit multi-select' : 'Multi-select to delete'}
@@ -4210,8 +4025,6 @@ export function WantedNoticeCenter({
                       <button
                         onClick={() => {
                           dismissToast(t.id);
-                          // 同 markDone 中的 open-calendar 动作：dispatch 让日历面板可见
-                          window.dispatchEvent(new CustomEvent('open-calendar-panel'));
                           // 同时做个保守动作：关闭 BobMail 弹层
                           closePopup();
                         }}

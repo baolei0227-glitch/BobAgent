@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Check, ClipboardList, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 /**
  * 问卷交互面板：识别节点 .md 文档中 ```json 代码块形式的问卷（数组结构，
@@ -278,16 +279,18 @@ export function QuestionnairePanel({
                 已写回文档
               </span>
             )}
-            <button
+            <Button
               onClick={handleWrite}
               disabled={writing || !hasChanges}
-              className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40"
-              style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+              loading={writing}
+              variant="solid"
+              tone="brand"
+              size="sm"
               title="将当前答案写入节点文档（JSON 附加 answer 字段）"
             >
               {writing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
               {hasChanges ? '写回文档' : '无更改'}
-            </button>
+            </Button>
           </div>
         </div>
       )}

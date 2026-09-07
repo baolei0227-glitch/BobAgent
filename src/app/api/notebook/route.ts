@@ -120,7 +120,7 @@ export async function POST(request: NextRequest) {
       const content = String((body as Record<string, unknown>).content || '').trim();
       const r = await callNotes('update', { id: entryId, ...(content ? { content } : {}) });
       if (!r.ok) {
-        // 条目不存在 → 404（StickyThought 依赖 404 判定条目已被外部删除，降级新建）
+        // 条目不存在 → 404（调用方据此判定条目已被外部删除，降级为新建）
         const isNotFound = /not found|不存在/i.test(r.error || '');
         return NextResponse.json(
           { success: false, error: r.error },

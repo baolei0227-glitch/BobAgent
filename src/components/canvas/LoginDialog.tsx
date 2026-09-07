@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Lock, X, Globe, User } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 interface LoginDialogProps {
   /** 站点名（如 xiaohongshu.com） */
@@ -108,15 +109,16 @@ export default function LoginDialog({ siteName, url, timeoutSec, onSubmit, onClo
               </p>
             ) : null}
           </div>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            tone="neutral"
+            size="icon"
             aria-label="Close"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors"
-            style={{ color: 'var(--ink-muted)' }}
             onClick={() => { if (!submitting) onClose(); }}
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
 
         {/* 表单 */}
@@ -178,23 +180,26 @@ export default function LoginDialog({ siteName, url, timeoutSec, onSubmit, onClo
             <span />
           )}
           <div className="flex gap-2">
-            <button
+            <Button
               type="button"
-              className="rounded-lg px-3 py-1.5 text-sm font-medium transition-colors"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="md"
               onClick={() => { if (!submitting) onClose(); }}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="rounded-lg px-4 py-1.5 text-sm font-semibold text-white transition-colors disabled:opacity-50"
-              style={{ backgroundColor: 'var(--primary)' }}
+              variant="solid"
+              tone="brand"
+              size="md"
               disabled={submitting || !username.trim() || !password}
+              loading={submitting}
               onClick={handleSubmit}
             >
               {submitting ? 'Signing in…' : 'Sign in & fill'}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

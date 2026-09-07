@@ -1,12 +1,10 @@
 'use client';
 
 import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore } from 'react';
-import { ChevronsLeft, ChevronsRight, PanelRightOpen, PanelRightClose, RectangleHorizontal, RectangleVertical, X, Code2, MessageSquareText, Check, FileText, ClipboardList, Image as ImageIcon, Target, NotebookText, CalendarClock, Folder, Monitor, Trash } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, RectangleHorizontal, RectangleVertical, X, Code2, MessageSquareText, Check, FileText, ClipboardList, NotebookText, CalendarClock, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot } from 'lucide-react';
 import {
   ReactFlow,
   ReactFlowProvider,
-  Background,
-  BackgroundVariant,
   ConnectionMode,
   SelectionMode,
   useNodesState,
@@ -18,13 +16,10 @@ import {
   type Edge,
   type Connection,
   type NodeChange,
-  type HandleType,
-  type OnConnectStart,
-  type OnConnectEnd,
   type OnNodeDrag,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { NodeReaderContext } from './ChatNodeKernel';
+import { ChatNodeKernel, NodeReaderContext, type ChatNodeKernelProps } from './ChatNodeKernel';
 import { ChatNode } from './ChatNode';
 import { CodingNode } from './CodingNode';
 import { NoteNode } from './NoteNode';
@@ -35,29 +30,27 @@ import { BobbyNode } from './BobbyNode';
 import { AgentTeamsNode } from './AgentTeamsNode';
 import { AgentTeamsPanel } from './AgentTeamsPanel';
 import { UsagePanel } from './UsagePanel';
-import { StickyThoughtNode } from './StickyThoughtNode';
 import { AnnotationNode } from './AnnotationNode';
 import { useConfirm } from './ConfirmDialog';
 import { SandboxPanel } from './SandboxPanel';
 import { outcomeMaxLengthForModel } from '@/lib/context-limits';
+import { setCurrentProject } from '@/lib/current-project';
 import { NodeMap } from './NodeMap';
-import { CanvasStickyNotes, type CanvasStickyNotesHandle, type StickyNoteChip, NOTE_COLOR_SWATCH } from './CanvasStickyNotes';
-import { FloatingEdge, FloatingEdgeDefs } from './FloatingEdge';
 import { SettingsModal } from './SettingsModal';
 import { ProjectBoardView } from './ProjectBoardView';
 import { DocxTemplatePanel } from './DocxTemplatePanel';
 import { UnifiedViewer } from './UnifiedViewer';
 import { Sidebar } from './Sidebar';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 
 import { CalendarPanel } from './CalendarPanel';
 import { NotesPanel } from './NotesPanel';
+import { BobMindPanel } from './BobMindPanel';
 import { WelcomeScreen } from './WelcomeScreen';
-import { TemplateApplyDialog } from './TemplateApplyDialog';
-import { SaveAsTemplateDialog } from './SaveAsTemplateDialog';
 import { LocalFileExplorer } from './LocalFileExplorer';
 import { UnifiedPalette } from './UnifiedPalette';
 import { AICodingCreateDialog } from './AICodingCreateDialog';
-import type { AiChatNodeData, BobbyNodeData, AgentTeamsNodeData, ProviderConfig, ChatMessage, MdAnchor } from '@/lib/types';
+import type { AiChatNodeData, BobbyNodeData, AgentTeamsNodeData, ProviderConfig, ChatMessage } from '@/lib/types';
 import { DEFAULT_MODEL_ID, DEFAULT_THINKING_LEVEL } from '@/lib/types';
 import type { FileSourceKind } from '@/lib/files/types';
 import type { FileOpenPayload } from '@/lib/files/types';
@@ -67,9 +60,8 @@ import { bus, BusEvents } from '@/lib/bus';
 import { edgeTypeToRelation } from '@/lib/edge/relations';
 import type { GraphGateway, GraphSnapshot } from '@/lib/graph/graph-gateway';
 import { executeGraphBridgeAction, isGraphBridgeAction } from '@/lib/graph/graph-bridge';
-import { layoutChildrenColumn } from '@/lib/graph/children-layout';
 import { buildChains } from '@/lib/graph/chain-utils';
-import { updateSandboxGraphPermission, updateSandboxChatPermission, getSandboxChatPermission, PRESET_THEME_VARIABLES, estimateChatCost, type SandboxChatPermission, isSandboxChatAllowed } from '@/lib/settings';
+import { updateSandboxGraphPermission, updateSandboxChatPermission, getSandboxChatPermission, PRESET_THEME_VARIABLES, estimateChatCost, type SandboxChatPermission } from '@/lib/settings';
 import { HOST_CHAT_PERMISSION_ACTIONS } from '@/lib/sandbox/bridge-constants';
 import {
   setImageAiEditHidden,
@@ -79,7 +71,19 @@ import {
 } from '@/lib/image-ai-edit-runtime';
 import { ImageAiEditToast } from './ImageAiEditToast';
 import { SetupWizard } from './SetupWizard';
-import { desktop } from '@/lib/desktop-adapter';
+import { desktop, isDesktop } from '@/lib/desktop-adapter';
+import pkg from '../../../package.json';
+
+// —— 预览面板自由缩放常量 ——
+// 面板宽度由固定两档（580/960）改为可在 [PANEL_W_MIN, 可用上限] 之间自由拖拽，
+// 并随窗口/左栏/文件面板动态收敛，避免小窗口下被中间对话面板卡死而无法打开。
+const PANEL_W_MIN = 320; // 面板最小宽度（px）
+const PANEL_W_DEFAULT = 720; // 无持久化记录时的默认宽度
+const PANEL_W_PRESET_NARROW = 580; // 竖屏（窄）快捷档位
+const PANEL_W_PRESET_WIDE = 960; // 横屏（宽）快捷档位
+const PANEL_W_ABS_MAX = 1440; // 绝对上限（超宽屏也不至于过宽）
+const PANEL_W_PERSIST_KEY = 'bobwork.ui.panel.width'; // 持久化 key
+const PANEL_CONVERSATION_MIN = 200; // 为中间对话区保留的最小宽度，防止面板拖到把对话挤没
 
 // 注册统一文件来源（Step 2）：模块加载时注册，幂等
 registerFileSources();
@@ -93,6 +97,25 @@ const AGENT_NODE_SHELLS: Record<string, React.ComponentType<any>> = {
   note: NoteNode,
   planner: PlannerNode,
 };
+
+/**
+ * 市场/自定义 agent 通用壳（2026-09-06 Agent 市场）：未在 AGENT_NODE_SHELLS 登记的内置壳时，
+ * 一律用 ChatNodeKernel + identity=<agentId> 渲染——agent 画像（prompt/场景/工具/技能池）全部服务端解析，
+ * 前端无需为新 agent 写专属壳。按 id 缓存组件实例保证 memo 稳定。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const genericAgentNodeCache = new Map<string, React.ComponentType<any>>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function genericAgentNodeFor(agentId: string): React.ComponentType<any> {
+  let node = genericAgentNodeCache.get(agentId);
+  if (!node) {
+    node = function GenericAgentNode(props: Omit<ChatNodeKernelProps, 'identity'>) {
+      return <ChatNodeKernel {...props} identity={agentId} />;
+    };
+    genericAgentNodeCache.set(agentId, node);
+  }
+  return node;
+}
 const nodeTypes = {
   // 兼容存量：旧 aiChat/aiCoding 节点（frontmatter 无 node_type）仍可渲染
   aiChat: ChatNode,
@@ -107,17 +130,28 @@ const nodeTypes = {
   imagegenAlbum: ImageGenAlbumNode,
   bobby: BobbyNode,
   agentTeams: AgentTeamsNode,
-  note: StickyThoughtNode,
   annotation: AnnotationNode,
 };
 // 展开/聚焦节点时可视区最低可用宽度：低于该值说明右侧宽屏预览面板严重挤占（14" 屏 + 宽面板场景），
 // 自动折叠面板让出空间，否则展开节点会与面板重叠且宽度被压到不可用
 const MIN_EXPAND_VISIBLE_W = 480;
-// 展开态默认尺寸兜底（事件未携带宽高时用）：与 ChatNodeKernel EXPANDED_WIDTH_MAX/HEIGHT_MAX 一致
-const EXPAND_DEFAULT_W = 880;
-const EXPAND_DEFAULT_H = 900;
 // 节点间不重叠：避让后保留的间距
 const NODE_GAP = 24;
+
+// —— 窄屏自适应断点（级联收起，画布优先）——
+// 画布舒适下限与 MIN_EXPAND_VISIBLE_W 一致(480)：低于相应宽度时全开/逐级让位也难以保住它，
+// 因此窗口过窄时按优先级自动收起「左栏 → 本地文件面板 → 预览面板」，拉宽后恢复被自动收起的部分。
+// 每个断点 = 该级收起前仍在场各列宽度之和 + 画布舒适 480（本地文件面板被 pin 固定时不自动收起）
+const NARROW_COMFORT_CANVAS = MIN_EXPAND_VISIBLE_W; // 480
+const NAV_W_EXPANDED = 280; // 展开态左栏宽度（与 className w-[280px] 保持一致）
+const NAV_W_COLLAPSED = 52; // 折叠态左栏宽度（与 className w-[52px] 保持一致）
+const EXPLORER_W_OPEN = 280; // 本地文件面板展开宽度（与 LocalFileExplorer width:280 保持一致）
+// ① 左栏最先收起：全开（左栏+文件+预览最小）时画布已不足 480
+const NARROW_W_NAV = NAV_W_EXPANDED + EXPLORER_W_OPEN + PANEL_W_MIN + NARROW_COMFORT_CANVAS; // 1360
+// ② 其次收起本地文件面板：此时左栏已折为 52，剩余（文件+预览最小）画布仍不足 480
+const NARROW_W_EXPLORER = NAV_W_COLLAPSED + EXPLORER_W_OPEN + PANEL_W_MIN + NARROW_COMFORT_CANVAS; // 1132
+// ③ 最后收起预览面板：仅剩（左栏52+预览最小）也保不住画布 480 时才让步（预览最受保护）
+const NARROW_W_PANEL = NAV_W_COLLAPSED + PANEL_W_MIN + NARROW_COMFORT_CANVAS; // 852
 
 interface OverlapRect {
   id: string;
@@ -195,13 +229,36 @@ function flowNodeTypeForData(data: { sandboxAppId?: string; nodeType?: string })
   if (data.sandboxAppId) return 'aiCoding';
   return 'aiChat';
 }
-const edgeTypes = { floating: FloatingEdge };
+// 画布物理不再渲染节点连线（2026-09 用户拍板：连线关系改由 NodeMap 缩略图管理，
+// 节点标题栏以链接图标表达关系）。edges 数据仍完整保留在 ReactFlow store：
+// gateway 快照 → NodeMap 渲染/管理、链导航圆点、上游上下文注入、断线状态均继续消费。
+// 因此注册一个空渲染边类型，避免 React Flow 兜底绘制默认直线。
+function EmptyCanvasEdge() {
+  return null;
+}
+const edgeTypes = { floating: EmptyCanvasEdge };
+
+/** 单焦点画布：可被"桌面单节点 + 左侧圆点"收纳的节点类型。
+ *  agent 研究节点（含旧 aiChat/aiCoding）纳入单焦点；note/annotation/imageGen 等豁免（常驻画布）。 */
+function isFocusableResearch(type?: string): boolean {
+  return type === 'aiChat' || type === 'aiCoding' || (!!type && type.startsWith('agent-'));
+}
+
+/** 由节点 type 推导 agent 身份（chat/coding/note/planner）；无法识别返回 undefined */
+function agentIdentityFromNodeType(type?: string): string | undefined {
+  if (type === 'aiChat') return 'chat';
+  if (type === 'aiCoding') return 'coding';
+  if (type && type.startsWith('agent-')) return type.slice('agent-'.length);
+  return undefined;
+}
 
 /** 右键菜单 agent 项图标（id → 图标元素；未配置的 agent 用默认聊天气泡）。
  *  颜色与各身份节点实际外框高亮色保持一致：coding 蓝(--info)/Kar 黄(--warn)/Planner 绿(--success)/chat 暖红(--danger)，
  *  与 ChatNodeKernel 的 accentVar 映射同源。 */
 const AGENT_MENU_ICONS: Record<string, { icon: React.ReactNode; color: string; hoverBg: string }> = {
-  chat: { icon: <MessageSquareText className="h-4 w-4 shrink-0" />, color: 'var(--danger)', hoverBg: 'var(--danger-soft)' },
+  // chat 统一用 Bot 图标（2026-09：与阅读面板标题身份图标同源；Bot 字形较实，光学收半档到 15px，
+  // coding/note/planner 专属图标纤细维持 16px 才能视觉等大）
+  chat: { icon: <Bot className="h-[15px] w-[15px] shrink-0" />, color: 'var(--danger)', hoverBg: 'var(--danger-soft)' },
   coding: { icon: <Code2 className="h-4 w-4 shrink-0" />, color: 'var(--info)', hoverBg: 'var(--info-soft)' },
   note: { icon: <NotebookText className="h-4 w-4 shrink-0" />, color: 'var(--warn)', hoverBg: 'var(--warn-soft)' },
   planner: { icon: <CalendarClock className="h-4 w-4 shrink-0" />, color: 'var(--success)', hoverBg: 'var(--success-soft)' },
@@ -230,7 +287,6 @@ function restoredNodeToFlowNode(
     conversations: Array<{ question: string; answer: string; questionTime: string; answerTime: string; modelId?: string; thinkingLevel?: string; reasoning?: string; processNarration?: string; toolCalls?: ChatMessage['toolCalls']; outputFiles?: ChatMessage['outputFiles'] }>;
     enabledMcpIds?: string[];
     selectedSkills?: string[];
-    archived?: boolean;
     position_x?: number;
     position_y?: number;
     sandbox_app_id?: string;
@@ -262,7 +318,7 @@ function restoredNodeToFlowNode(
       // 历史消息追溯真实调用模型与推理强度（auto 模式下每轮可能不同）
       modelId: conv.modelId,
       thinkingLevel: conv.thinkingLevel as ChatMessage['thinkingLevel'],
-      // 恢复持久化的思考内容 + 工具调用记录：think 标签与 executing steps 重新加载后不丢失
+      // 恢复持久化的思考内容 + 工具调用记录：think 标签与 Trajectory 重新加载后不丢失
       reasoning: conv.reasoning,
       processNarration: conv.processNarration,
       toolCalls: conv.toolCalls,
@@ -288,8 +344,6 @@ function restoredNodeToFlowNode(
     id: nodeData.node_id,
     type: flowNodeTypeForData({ sandboxAppId: nodeData.sandbox_app_id, nodeType: nodeData.node_type }),
     position,
-    // 归档节点加载后直接隐藏（已完成使命，仅保留导航圆点；点击圆点可恢复）
-    hidden: nodeData.archived === true,
     data: {
       title: nodeData.title,
       messages,
@@ -297,61 +351,10 @@ function restoredNodeToFlowNode(
       modelId: nodeData.model || DEFAULT_MODEL_ID,
       thinkingLevel: DEFAULT_THINKING_LEVEL,
       nodeMdId: nodeData.node_id,
-      ...(nodeData.archived === true ? { archived: true } : {}),
       ...(nodeData.enabledMcpIds !== undefined ? { enabledMcpIds: nodeData.enabledMcpIds } : {}),
       ...(nodeData.selectedSkills !== undefined ? { selectedSkills: nodeData.selectedSkills } : {}),
       ...(nodeData.sandbox_app_id ? { sandboxAppId: nodeData.sandbox_app_id } : {}),
       ...(typeof nodeData.compacted_until === 'number' && nodeData.compacted_until > 0 ? { compactedUntil: nodeData.compacted_until } : {}),
-      __hasPersistedPosition: hasPersistedPosition,
-    },
-  };
-}
-
-/** 将恢复的思路便签节点转换为 flow 节点（note 类型，零 AI 思路上游） */
-function restoredStickyToFlowNode(
-  nodeData: {
-    node_id: string;
-    title: string;
-    sticky_text?: string;
-    notebook_entry_id?: string;
-    starred?: boolean;
-    md_anchor?: string;
-    position_x?: number;
-    position_y?: number;
-  },
-  index: number,
-): Node<AiChatNodeData> {
-  let position: { x: number; y: number };
-  const hasPersistedPosition = typeof nodeData.position_x === 'number' && typeof nodeData.position_y === 'number';
-  if (hasPersistedPosition) {
-    position = { x: nodeData.position_x as number, y: nodeData.position_y as number };
-  } else {
-    const col = index % 3;
-    const row = Math.floor(index / 3);
-    position = { x: -300 + col * 400, y: -200 + row * 350 };
-  }
-  // md 来源锚点：frontmatter 存 JSON 字符串，解析为结构化对象（点击子弹图标反向定位文档用）
-  let mdAnchor: MdAnchor | undefined;
-  if (typeof nodeData.md_anchor === 'string' && nodeData.md_anchor) {
-    try {
-      mdAnchor = JSON.parse(nodeData.md_anchor) as MdAnchor;
-    } catch {
-      mdAnchor = undefined;
-    }
-  }
-  return {
-    id: nodeData.node_id,
-    type: 'note',
-    position,
-    data: {
-      title: nodeData.title || 'Note',
-      stickyText: nodeData.sticky_text ?? '',
-      notebookEntryId: nodeData.notebook_entry_id || undefined,
-      starred: nodeData.starred === true,
-      mdAnchor,
-      nodeMdId: nodeData.node_id,
-      messages: [],
-      isStreaming: false,
       __hasPersistedPosition: hasPersistedPosition,
     },
   };
@@ -481,19 +484,6 @@ function restoredAgentTeamsToFlowNode(
   };
 }
 
-/** 节点宽高常量（与 AiChatNode 一致） */
-const NODE_WIDTH = 400;
-const NODE_HEIGHT = 400;
-
-/** 批量应用列重排位置 */
-function applyPositions(
-  nodes: Node<AiChatNodeData>[],
-  positions: Record<string, { x: number; y: number }>,
-): { nodes: Node<AiChatNodeData>[]; allPositions: Record<string, { x: number; y: number }> } {
-  const next = nodes.map((n) => (positions[n.id] ? { ...n, position: positions[n.id] } : n));
-  return { nodes: next, allPositions: positions };
-}
-
 /** 估算标签胶囊宽度（用于溢出折叠测量，避免依赖 DOM 布局状态） */
 function estimateTabWidth(label: string): number {
   const textW = Array.from(label).reduce((w, ch) => w + (ch.charCodeAt(0) > 0xff ? 13 : 7), 0);
@@ -508,7 +498,7 @@ function UnifiedReaderPanel({
   readerTitles,
   activePanelTab,
   collapsed,
-  panelWide,
+  panelWidth,
   onToggleCollapse,
   onToggleWide,
   onSelectTab,
@@ -536,8 +526,8 @@ function UnifiedReaderPanel({
   readerTitles: Record<string, string>;
   activePanelTab: { type: 'node' | 'file' | 'sandbox' | 'template'; id: string } | null;
   collapsed: boolean;
-  /** 横屏宽模式（更宽），false = 竖屏窄模式 */
-  panelWide: boolean;
+  /** 面板当前宽度（px），可在 [PANEL_W_MIN, 可用上限] 之间自由缩放 */
+  panelWidth: number;
   onSelectTab: (type: 'node' | 'file' | 'sandbox' | 'template', id: string) => void;
   onCloseNodeTab: (nodeMdId: string) => void;
   onCloseFileTab: (tabId: string) => void;
@@ -554,8 +544,10 @@ function UnifiedReaderPanel({
   /** Bob Sandbox 预览强制刷新信号（Play / 绑定 / AI 写入后递增） */
   sandboxRefreshTick: number;
 }) {
-  // 竖屏（窄）580 / 横屏（宽）960：放大 = 增加宽度
-  const PANEL_W = panelWide ? 960 : 580;
+  // 面板宽度：由父组件传入的 panelWidth 控制，可在最小宽度与可用上限之间自由缩放
+  const PANEL_W = panelWidth;
+  // 便捷档位图标判定：宽度 ≥ 宽窄两档中值视为"宽屏"，用于宽窄切换按钮的图形/文案
+  const panelWide = panelWidth >= (PANEL_W_PRESET_NARROW + PANEL_W_PRESET_WIDE) / 2;
 
   // 标签悬停提示（完整文件名，仅在被截断时显示）
   const [hoverTip, setHoverTip] = useState<{ text: string; x: number; y: number } | null>(null);
@@ -671,7 +663,7 @@ function UnifiedReaderPanel({
     const ro = new ResizeObserver(compute);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [allTabs, panelWide]);
+  }, [allTabs, panelWidth]);
 
   // 点击外部关闭 "…" 下拉菜单
   useEffect(() => {
@@ -718,11 +710,13 @@ function UnifiedReaderPanel({
       style={{
         width: PANEL_W,
         zIndex: 50,
-        // 独立卡片：完整圆角 + 完整边线（与文件面板之间有 gap，无需拼合）
-        backgroundColor: 'var(--paper)',
-        border: '1px solid var(--line)',
-        borderRadius: 20,
-        boxShadow: '0 8px 22px color-mix(in srgb, var(--ink) 18%, transparent)',
+        // 2026-09：恢复卡片样式，与中间对话节点卡片完全一致——圆角/1px边框/顶部受光渐变/内嵌高光
+        borderRadius: 12,
+        overflow: 'hidden',
+        border: '1px solid',
+        borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
+        background: 'linear-gradient(180deg, color-mix(in srgb, #fff 7%, var(--paper)) 0%, var(--paper) 38%)',
+        boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 18%, transparent)',
         WebkitAppRegion: 'no-drag',
         pointerEvents: 'auto',
       } as React.CSSProperties}
@@ -730,13 +724,13 @@ function UnifiedReaderPanel({
       {/* 标签栏（overflow-visible：供 "…" 下拉菜单浮出；标签列表自身 overflow-hidden 负责裁剪） */}
       <div
         className="flex shrink-0 items-center"
-        style={{ borderBottom: '1px solid var(--line)', backgroundColor: 'var(--paper-soft)' }}
+        style={{ borderBottom: '1px solid', borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)' }}
       >
         {/* 折叠按钮（面板左上角，仅折叠预览面板） */}
         <button
           onClick={(e) => { e.stopPropagation(); onToggleCollapse(); }}
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--ink-muted)' }}
+          style={{ color: 'var(--ink-muted)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           title="Collapse preview panel"
         >
           <PanelRightClose className="h-3.5 w-3.5" />
@@ -746,7 +740,7 @@ function UnifiedReaderPanel({
         <button
           onClick={(e) => { e.stopPropagation(); onToggleWide(); }}
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--ink-muted)' }}
+          style={{ color: 'var(--ink-muted)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           title={panelWide ? 'Switch to portrait (narrower)' : 'Switch to landscape (wider)'}
         >
           {panelWide ? <RectangleVertical className="h-3.5 w-3.5" /> : <RectangleHorizontal className="h-3.5 w-3.5" />}
@@ -964,10 +958,33 @@ function UnifiedReaderPanel({
   );
 }
 
+/** 左列/工具条圆形小图标按钮（2026-09 布局重构后复用） */
+function ToolBtn({ title, active, onClick, children }: { title: string; active?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={title}
+          onClick={onClick}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--paper-hover)]"
+          style={{
+            color: active ? 'var(--primary)' : 'var(--ink-muted)',
+            backgroundColor: active ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
+          }}
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right">{title}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function CanvasFlowInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<AiChatNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const { screenToFlowPosition, getNodes, getEdges, getIntersectingNodes, getViewport, fitView, setViewport, zoomIn, zoomOut } = useReactFlow();
+  const { screenToFlowPosition, getNodes, getEdges, getViewport, fitView, setViewport, zoomIn, zoomOut } = useReactFlow();
   const rfStoreApi = useStoreApi();
   const nodeIdCounter = useRef(0);
   // 画布 wrapper 引用：用于 setCenter 手动计算真实视口中心（消除侧边栏/预览面板挤压导致的 636px 偏差）
@@ -975,50 +992,72 @@ function CanvasFlowInner() {
   const wrapperRef = useRef<HTMLDivElement>(null);
   // 侧边栏当前宽度 ref：供 graphGateway 内部 fitBounds/setCenter 实时读取，
   // 修正 sidebar overlay 导致的居中偏移（展开 322px / 折叠 50px）
-  const sidebarWidthRef = useRef(322);
+  const sidebarWidthRef = useRef(0); // 2026-09 布局重构：旧悬浮侧栏宽度占位已无效，左列常驻不参与画布宽度计算
   // 画布真实可视宽度：wrapper 全窗宽 − 侧边栏 overlay − 右侧预览面板/本地文件面板 overlay。
   // 面板折叠（display:none 或未挂载）时宽度按 0 计。setCenter/fitBounds 居中与 ChatNode 展开
   // 宽度上限共用，避免展开节点被右侧宽屏面板遮挡（14" 屏 + 宽面板场景）
   const computeVisibleCanvasWidth = useCallback(() => {
+    // 2026-09 布局重构：右 dock 为并列列（不在 wrapper 内），wrapper 宽度即对话可视宽度
     const pw = wrapperRef.current?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1200);
     const sw = sidebarWidthRef.current;
-    let overlayW = 0;
-    const panelEl = document.querySelector<HTMLElement>('[data-reader-panel-wrapper]');
-    if (panelEl) overlayW += panelEl.getBoundingClientRect().width;
-    const explorerEl = document.querySelector<HTMLElement>('[data-local-explorer-wrapper]');
-    if (explorerEl) overlayW += explorerEl.getBoundingClientRect().width;
-    return Math.max(pw - sw - overlayW, 0);
+    return Math.max(pw - sw, 0);
   }, []);
   // 画布缩放锁定（默认开启）：锁定时 zoom 固定 100%，禁用滚轮/pinch 缩放与自动 fitView。
   // 由 NodeMap 的锁定按钮通过 canvas-zoom-lock 事件控制。锁定是最高优先级——
   // 即使新建节点也不允许改变画布比例。
-  const [zoomLocked, setZoomLocked] = useState(true);
-  useEffect(() => {
-    const onLock = (e: Event) => {
-      const locked = (e as CustomEvent<{ locked?: boolean }>).detail?.locked;
-      if (typeof locked === 'boolean') setZoomLocked(locked);
-    };
-    window.addEventListener('canvas-zoom-lock', onLock);
-    return () => window.removeEventListener('canvas-zoom-lock', onLock);
-  }, []);
+  const [zoomLocked] = useState(true);
 
   // 执行中的节点 id 集合（AiChatNode 流式执行中/结束广播 node-executing 事件）
   const [executingNodeIds, setExecutingNodeIds] = useState<Set<string>>(new Set());
+  // 执行完毕后未读的节点 id 集合（左侧会话/任务树绿点实心，点击查看后清除）
+  const [unreadDoneIds, setUnreadDoneIds] = useState<Set<string>>(new Set());
+  // 当前聚焦(正在查看)节点 id 的 ref：node-executing 监听器依赖为空闭包拿不到最新 state，改用 ref 读取
+  const focusedNodeIdRef = useRef<string | null>(null);
   useEffect(() => {
     const onExecuting = (e: Event) => {
-      const d = (e as CustomEvent<{ node_id?: string; executing?: boolean }>).detail;
+      const d = (e as CustomEvent<{ node_id?: string; executing?: boolean; unmount?: boolean }>).detail;
       const nodeId = d?.node_id;
       if (!nodeId) return;
+      // unmount=true 是节点隐藏/卸载（单焦点切换走）时的清理广播，而非真实任务结束：
+      // 只清呼吸灯，不点亮未读绿点，避免"切换到别的会话后绿点又恢复"。
+      const isUnmountCleanup = d.unmount === true;
       setExecutingNodeIds((prev) => {
         const next = new Set(prev);
         if (d.executing) next.add(nodeId);
         else next.delete(nodeId);
         return next;
       });
+      setUnreadDoneIds((prev) => {
+        const next = new Set(prev);
+        if (d.executing) {
+          // 任务重新开始执行，清除该节点已完成未读标记
+          next.delete(nodeId);
+        } else if (isUnmountCleanup) {
+          // 卸载清理：不计入未读，保留当前未读状态不变
+          return prev;
+        } else if (focusedNodeIdRef.current === nodeId) {
+          // 任务执行完毕且该会话正被查看(已读)：不点亮未读绿点
+          next.delete(nodeId);
+        } else {
+          // 任务执行完毕：标记为未读绿点（实心），点击查看后清除
+          next.add(nodeId);
+        }
+        return next.size === prev.size ? prev : next;
+      });
     };
     window.addEventListener('node-executing', onExecuting);
     return () => window.removeEventListener('node-executing', onExecuting);
   }, []);
+
+  // 左侧会话/任务树圆点状态：running=执行中(呼吸灯) / done=未读实心 / idle=普通
+  const railDotState = useCallback(
+    (nodeId: string): 'running' | 'done' | 'idle' => {
+      if (executingNodeIds.has(nodeId)) return 'running';
+      if (unreadDoneIds.has(nodeId)) return 'done';
+      return 'idle';
+    },
+    [executingNodeIds, unreadDoneIds],
+  );
 
   // 执行中节点相连的边标记 data.executing → FloatingEdge 渲染"输送电流"效果
   useEffect(() => {
@@ -1030,7 +1069,8 @@ function CanvasFlowInner() {
         if (running === cur) return e;
         changed = true;
         if (running) return { ...e, data: { ...(e.data ?? {}), executing: true } };
-        const { executing: _omit, ...rest } = (e.data ?? {}) as { executing?: boolean };
+        const rest = { ...(e.data ?? {}) } as { executing?: boolean };
+        delete rest.executing;
         return { ...e, data: rest };
       });
       return changed ? next : eds;
@@ -1044,6 +1084,18 @@ function CanvasFlowInner() {
   const graphGateway = useMemo<GraphGateway>(() => {
     let dirty = true;
     let cached: GraphSnapshot | null = null;
+    // 断开/重连续线：本地 setEdges 即时生效（NodeMap 与画布同步变色），
+    // 再落库 /api/edges（delete 软删含下游 markStale，reconnect 仅恢复）——与 FloatingEdge 拖断同构
+    const setEdgeDisconnected = (edgeId: string, disconnected: boolean) => {
+      setEdges((eds) =>
+        eds.map((ed) => (ed.id === edgeId ? { ...ed, data: { ...ed.data, disconnected } } : ed)),
+      );
+      fetch('/api/edges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(disconnected ? { action: 'delete', edge_id: edgeId } : { action: 'reconnect', edge_id: edgeId }),
+      }).catch((err) => console.error('Edge connectivity update error:', err));
+    };
     const compute = (): GraphSnapshot => {
       const rfNodes = getNodes();
       const rfEdges = getEdges();
@@ -1060,7 +1112,7 @@ function CanvasFlowInner() {
           measuredWidth: n.measured?.width,
           type: (n.type as FlowAiNodeType | 'imageGen') || 'aiChat',
           sandboxAppId: (n.data as { sandboxAppId?: string } | undefined)?.sandboxAppId,
-          archived: Boolean((n.data as { archived?: boolean } | undefined)?.archived),
+          messageCount: ((n.data as { messages?: unknown[] } | undefined)?.messages?.length) || 0,
         })),
         edges: rfEdges.map((e) => ({
           id: e.id,
@@ -1166,32 +1218,21 @@ function CanvasFlowInner() {
       },
       getSelectedNode: () => rfStoreApi.getState().nodes.find((n) => n.selected)?.id ?? null,
       expandNode: (nodeId) => window.dispatchEvent(new CustomEvent('node-expand-request', { detail: { node_id: nodeId } })),
-      collapseNode: (nodeId) => window.dispatchEvent(new CustomEvent('node-collapse-request', { detail: { node_id: nodeId } })),
-      // 恢复归档节点：取消隐藏 + 清除归档标记，持久化由 node-archive-restore 事件监听完成
-      restoreNode: (nodeId) => {
-        setNodes((nds) =>
-          nds.map((n) => (n.id === nodeId ? { ...n, hidden: false, data: { ...n.data, archived: false } } : n))
-        );
-        window.dispatchEvent(new CustomEvent('node-archive-restore', { detail: { node_id: nodeId } }));
-      },
+      disconnectEdge: (edgeId) => setEdgeDisconnected(edgeId, true),
+      reconnectEdge: (edgeId) => setEdgeDisconnected(edgeId, false),
       onNodeEvent: (handler) => {
-        const onCollapsed = (e: Event) => {
-          const d = (e as CustomEvent<{ node_id?: string }>).detail;
-          if (d?.node_id) handler({ type: 'node-collapsed', nodeId: d.node_id });
-        };
+        // node-collapsed 桥接已随恒展开收敛移除（ChatNodeKernel 不再广播 node-collapsed）
         const onExecuting = (e: Event) => {
           const d = (e as CustomEvent<{ node_id?: string; executing?: boolean }>).detail;
           if (d?.node_id) handler({ type: 'node-executing', nodeId: d.node_id, executing: !!d.executing });
         };
-        window.addEventListener('node-collapsed', onCollapsed);
         window.addEventListener('node-executing', onExecuting);
         return () => {
-          window.removeEventListener('node-collapsed', onCollapsed);
           window.removeEventListener('node-executing', onExecuting);
         };
       },
     };
-  }, [rfStoreApi, getNodes, getEdges, getViewport, setViewport, fitView, zoomIn, zoomOut, setNodes, computeVisibleCanvasWidth]);
+  }, [rfStoreApi, getNodes, getEdges, getViewport, setViewport, fitView, zoomIn, zoomOut, setNodes, setEdges, computeVisibleCanvasWidth]);
 
   // ---- 画布链导航圆点：订阅快照 → 分链 → 点击圆点居中对应链 ----
   // 水平居中以 wrapperRef 真实可视区为基准：wrapper 是 Sidebar 的 flex 兄弟，
@@ -1207,77 +1248,159 @@ function CanvasFlowInner() {
     () => buildChains(graphSnap.nodes, graphSnap.edges),
     [graphSnap.nodes, graphSnap.edges],
   );
-  // 当前被圆点聚焦的链（激活圆点实心高亮；用户手动平移/缩放后自动清除）
-  const [activeChainId, setActiveChainId] = useState<string | null>(null);
-  const focusChainFromCanvas = useCallback((rootId: string, ids: string[]) => {
-    const w = 400, h = 400;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const id of ids) {
-      const n = graphSnap.nodes.find((nd) => nd.id === id);
-      if (!n) continue;
-      // 用实际渲染尺寸收紧 bounds（便签 220×110、AI Chat 400×400）；未测量时按类型回退
-      const nw = n.measuredWidth ?? (n.type === 'note' ? 220 : w);
-      const nh = n.measuredHeight ?? (n.type === 'note' ? 110 : h);
-      minX = Math.min(minX, n.x);
-      minY = Math.min(minY, n.y);
-      maxX = Math.max(maxX, n.x + nw);
-      maxY = Math.max(maxY, n.y + nh);
-    }
-    if (!isFinite(minX)) return;
-    setActiveChainId(rootId);
-    // rAF 延迟 viewport 变更到下一帧：让 React 先提交 state → dot 高亮落 DOM，
-    // 再执行视口变更（避免同步重渲染触发意外副作用如弹窗）。
-    // 左对齐而非居中：各链深度/宽度不同，居中会让根节点位置随链宽漂移；
-    // 固定让链左缘（第一个节点）贴侧边栏右缘 + 48px，所有链的根节点落点一致。
-    const sw = sidebarWidthRef.current;
-    const leftPadPx = 48 + sw;
-    requestAnimationFrame(() => {
-      const wrapper = wrapperRef.current;
-      const pw = wrapper?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1200);
-      const ph = wrapper?.clientHeight ?? (typeof window !== 'undefined' ? window.innerHeight : 800);
-      const availableW = pw - sw;
-      if (zoomLocked) {
-        // zoom=1：仅平移。链左缘对齐侧边栏右缘 + 边距，垂直居中
-        const vpx = -minX + leftPadPx;
-        const vpy = ph / 2 - (minY + maxY) / 2;
-        const { panZoom } = rfStoreApi.getState();
-        if (panZoom) {
-          void panZoom.setViewport({ x: vpx, y: vpy, zoom: 1 }, { duration: 0 });
-        } else {
-          rfStoreApi.setState({ transform: [vpx, vpy, 1] });
-        }
-      } else {
-        // 自动缩放适配整链（与 fitBounds 同 clamp）+ 左对齐 + 垂直居中
-        const pad = 0.1;
-        const bW = Math.max(maxX - minX, 1);
-        const bH = Math.max(maxY - minY, 1);
-        const scaleX = (availableW * (1 - pad)) / bW;
-        const scaleY = (ph * (1 - pad)) / bH;
-        const state = rfStoreApi.getState();
-        const minZoom = state.minZoom ?? 0.1;
-        const maxZoom = state.maxZoom ?? 2;
-        const zoom = Math.max(minZoom, Math.min(maxZoom, Math.min(scaleX, scaleY)));
-        const vpx = -minX * zoom + leftPadPx;
-        const vpy = -minY * zoom + (ph - bH * zoom) / 2;
-        const { panZoom } = rfStoreApi.getState();
-        if (panZoom) {
-          void panZoom.setViewport({ x: vpx, y: vpy, zoom }, { duration: 0 });
-        } else {
-          rfStoreApi.setState({ transform: [vpx, vpy, zoom] });
-        }
-      }
+  // ———— 单焦点画布（2026-09）：桌面同一时刻只打开一个研究节点，其余研究节点归左侧节点圆点。
+  //  focusedNodeId = 当前打开节点；annotation/imageGen 等豁免常驻；Todo 已上收为会话标题栏
+  //  Dock（StickyTodoDock，见 ChatNodeKernel 成果块旁），不再占用画布。————
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  // 同步当前聚焦节点到 ref，供依赖为空的 node-executing 监听器判断"是否正在查看"
+  useEffect(() => {
+    focusedNodeIdRef.current = focusedNodeId;
+  }, [focusedNodeId]);
+  // 单焦点渲染派生：非激活研究节点置 hidden（保留在 store 供 NodeMap/链/关系消费，但画布不渲染）；
+  // 豁免类型不动。
+  const displayNodes = useMemo(() => {
+    if (!focusedNodeId) return nodes;
+    let changed = false;
+    const next = nodes.map((n) => {
+      const research = isFocusableResearch(n.type);
+      // 豁免类型（annotation/imageGen 等）原样保留；研究节点由焦点决定显示/隐藏
+      if (!research) return n;
+      const shouldHide = n.id !== focusedNodeId;
+      if (shouldHide === Boolean(n.hidden)) return n;
+      changed = true;
+      return shouldHide ? { ...n, hidden: true } : { ...n, hidden: false };
     });
-  }, [graphSnap.nodes, graphGateway, rfStoreApi, zoomLocked]);
+    return changed ? next : nodes;
+  }, [nodes, focusedNodeId]);
+  // 单焦点切换：把 nodeId 设为当前打开的研究节点。
+  //  其余非激活研究节点由 displayNodes 派生隐藏；目标节点取消隐藏、选中并展开居中。
+  const switchFocusNode = useCallback((nodeId: string) => {
+    const snap = graphGateway.getSnapshot();
+    const target = snap.nodes.find((n) => n.id === nodeId);
+    if (!target) return;
+    // 点击查看该节点后清除"已完成未读"绿点标记
+    setUnreadDoneIds((prev) => {
+      if (!prev.has(nodeId)) return prev;
+      const next = new Set(prev);
+      next.delete(nodeId);
+      return next;
+    });
+    setFocusedNodeId(nodeId);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === nodeId
+          ? { ...n, selected: true, hidden: false }
+          : { ...n, selected: false },
+      ),
+    );
+    graphGateway.setCenter(target.x + 200, target.y + 200);
+    // 展开目标（带内容节点挂载即大阅读面板；内核随后 canvas-center-request 精确居中）
+    window.dispatchEvent(new CustomEvent('node-expand-request', { detail: { node_id: nodeId } }));
+    // 窄容器（左栏 + 右 dock）下固定偏移会让宽/高卡片偏出视口被裁切：
+    // 挂载测宽测高后按真实渲染尺寸补一次精确居中
+    window.setTimeout(() => {
+      const el = wrapperRef.current?.querySelector<HTMLElement>('.react-flow__node');
+      const rect = el ? el.getBoundingClientRect() : null;
+      const w = rect ? rect.width : 792;
+      const h = rect ? rect.height : 400;
+      graphGateway.setCenter(target.x + w / 2, target.y + h / 2);
+    }, 180);
+  }, [graphGateway, setNodes]);
 
-  // 链内归档节点映射（rootId → 该链归档节点 id 列表）：链导航圆点以成功色实心外圈标识归档，
-  // 点击先恢复归档节点回画布再聚焦（与 NodeMap 圆点行为一致）
-  const chainArchived = useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const chain of canvasChains) {
-      const archivedIds = chain.ids.filter((id) => graphSnap.nodes.find((n) => n.id === id)?.archived);
-      if (archivedIds.length > 0) map.set(chain.rootId, archivedIds);
+  // 新建研究节点后立即打开（传统 Agent "New Chat"语义）。
+  // 节点刚写入受控 state，RF store 同步可能晚于首帧 → 轮询等待节点进入快照后切换焦点；
+  // 空节点经 expand-request 进入全宽输入态。
+  const openNewlyCreatedNode = useCallback((nodeId: string) => {
+    let tries = 0;
+    const attempt = () => {
+      tries += 1;
+      const snap = graphGateway.getSnapshot();
+      if (!snap.nodes.some((n) => n.id === nodeId)) {
+        if (tries <= 6) window.setTimeout(attempt, 120);
+        return;
+      }
+      switchFocusNode(nodeId);
+    };
+    requestAnimationFrame(attempt);
+  }, [graphGateway, switchFocusNode]);
+
+  // 桌面单焦点自动打开/回退：数据就绪打开第一个可用研究节点；
+  // 当前焦点被删除后回退到下一个可用研究节点。
+  const autoOpenNextRef = useRef(false);
+  useEffect(() => {
+    const snap = graphGateway.getSnapshot();
+    if (focusedNodeId) {
+      const cur = snap.nodes.find(
+        (n) => n.id === focusedNodeId && isFocusableResearch(n.type),
+      );
+      if (cur) return;
     }
-    return map;
+    const first = snap.nodes.find((n) => isFocusableResearch(n.type));
+    const nextId = first?.id ?? null;
+    if (nextId === focusedNodeId) return;
+    if (!nextId) {
+      setFocusedNodeId(null);
+      return;
+    }
+    if (autoOpenNextRef.current) {
+      switchFocusNode(nextId);
+      return;
+    }
+    autoOpenNextRef.current = true;
+    // 首次：直接置焦点，渲染派生生效后居中并请求展开
+    setFocusedNodeId(nextId);
+    requestAnimationFrame(() => {
+      graphGateway.setCenter(first!.x + 200, first!.y + 200);
+      window.dispatchEvent(new CustomEvent('node-expand-request', { detail: { node_id: nextId } }));
+    });
+  }, [graphGateway, focusedNodeId, nodes, switchFocusNode]);
+
+  // 外部统一"打开某研究节点"入口：NodeMap 卡片点击等 → 单焦点切换
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const d = (e as CustomEvent<{ nodeId?: string }>).detail;
+      if (!d?.nodeId) return;
+      const snap = graphGateway.getSnapshot();
+      const n = snap.nodes.find((nd) => nd.id === d.nodeId);
+      if (!n || !isFocusableResearch(n.type)) return;
+      switchFocusNode(d.nodeId);
+    };
+    window.addEventListener('canvas-focus-node', onFocus);
+    return () => window.removeEventListener('canvas-focus-node', onFocus);
+  }, [graphGateway, switchFocusNode]);
+
+  // 单焦点左侧节点圆点列数据：研究节点按链顺序分组展平；未入链的独立研究节点排尾组。
+  // 不再隐藏空会话（messageCount=0）节点——即使尚未执行任务也保留在侧边栏。
+  const focusRail = useMemo(() => {
+    type Dot = { id: string; title: string; isNote: boolean; sandboxAppId?: string; identity?: string };
+    const groups: Array<{ key: string; dots: Dot[] }> = [];
+    const seen = new Set<string>();
+    for (const chain of canvasChains) {
+      const items = chain.ids
+        .map((id) => graphSnap.nodes.find((n) => n.id === id))
+        .filter((n): n is NonNullable<(typeof graphSnap.nodes)[number]> => !!n && isFocusableResearch(n.type));
+      if (items.length === 0) continue;
+      const dots: Dot[] = items.map((n) => ({
+        id: n.id,
+        title: n.title,
+        isNote: n.type === 'agent-note',
+        sandboxAppId: n.sandboxAppId,
+        identity: agentIdentityFromNodeType(n.type),
+      }));
+      for (const d of dots) seen.add(d.id);
+      groups.push({ key: chain.rootId, dots });
+    }
+    const strayDots = graphSnap.nodes
+      .filter((n) => isFocusableResearch(n.type) && !seen.has(n.id))
+      .map((n): Dot => ({
+        id: n.id,
+        title: n.title,
+        isNote: n.type === 'agent-note',
+        sandboxAppId: n.sandboxAppId,
+        identity: agentIdentityFromNodeType(n.type),
+      }));
+    if (strayDots.length > 0) groups.push({ key: '__strays__', dots: strayDots });
+    return groups;
   }, [canvasChains, graphSnap.nodes]);
 
   // 替代原生 fitView：先算全部节点 bounds，再走 graphGateway.fitBounds（含侧边栏偏移修正）
@@ -1320,22 +1443,6 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('canvas-center-request', onCenterRequest);
   }, [graphGateway, computeVisibleCanvasWidth]);
 
-  // 侧边栏点击节点 → 画布选中并居中定位（Sidebar 发布 node-reveal 事件）
-  useEffect(() => {
-    const onNodeReveal = (e: Event) => {
-      const nodeId = ((e as CustomEvent).detail as { node_id?: string })?.node_id;
-      if (!nodeId) return;
-      const node = getNodes().find((n) => n.id === nodeId);
-      if (!node) return;
-      graphGateway.setNodeSelected(nodeId);
-      const w = node.measured?.width ?? 400;
-      const h = node.measured?.height ?? 400;
-      graphGateway.setCenter(node.position.x + w / 2, node.position.y + h / 2, { zoom: 1 });
-    };
-    window.addEventListener('node-reveal', onNodeReveal);
-    return () => window.removeEventListener('node-reveal', onNodeReveal);
-  }, [getNodes, graphGateway]);
-
   // 应用内置确认弹窗（macOS 风格英文文案）
   const { ask: confirmAsk, render: confirmRender } = useConfirm();
 
@@ -1373,7 +1480,7 @@ function CanvasFlowInner() {
     return { ok: true };
   }, [confirmAsk, nodes]);
   const lastActiveNodeIdRef = useRef<string | null>(null); // 当前活跃节点，用于全局文字选择
-  const [flowKey, setFlowKey] = useState(0); // 强制 ReactFlow 重新挂载的 key，修复长时间空闲后 store 失活
+  const [flowKey] = useState(0); // 强制 ReactFlow 重新挂载的 key，修复长时间空闲后 store 失活
   const savedViewportRef = useRef<{ x: number; y: number; zoom: number } | null>(null);
   // 用户是否已对画布产生过手动交互（pan/缩放/拖节点）。初始 fit 前若已交互则跳过，
   // 避免"打开时 fetch 完成较晚 → fit 在用户滑动后才执行 → 节点突然跳到画布中央"的竞态。
@@ -1437,26 +1544,32 @@ function CanvasFlowInner() {
   }, []);
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  // Bob-Mind 插件全屏面板壳（⌘F Bob-Mind 按钮派发 open-bob-mind-panel）
+  const [bobMindOpen, setBobMindOpen] = useState(false);
   // Bob Sandbox 全屏管理页（小程序商城）开关
   const [storeOpen, setStoreOpen] = useState(false);
   // Agent Teams 全屏面板开关（侧边栏入口派发 team-panel-open 事件打开）
   const [teamsFullscreenOpen, setTeamsFullscreenOpen] = useState(false);
   // 模型用量统计面板（图标栏/调色板入口派发 usage-panel-open 事件打开）
   const [usageOpen, setUsageOpen] = useState(false);
-  // 任一全屏浮层打开（日历/笔记/Bob Sandbox/Agent Teams/用量）→ 画布导航圆点等画布元素应让位，避免浮在其上被遮挡/误点
-  const anyFullscreenPanelOpen = calendarOpen || notesOpen || storeOpen || teamsFullscreenOpen || usageOpen;
-  const [applyDialogOpen, setApplyDialogOpen] = useState(false);
-  const [applyTemplateId, setApplyTemplateId] = useState<string | null>(null);
-  const [saveAsTemplateOpen, setSaveAsTemplateOpen] = useState(false);
-  const [saveAsTemplateNodes, setSaveAsTemplateNodes] = useState<Node<AiChatNodeData>[]>([]);
-  const [saveAsTemplateEdges, setSaveAsTemplateEdges] = useState<Edge[]>([]);
   // 统一悬浮面板
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   // ImageAiEditor keep-alive：生成中/结果待查看时，折叠面板也保持内部挂载不中断
   const [aiEditKeepAlive, setAiEditKeepAlive] = useState<boolean>(() => isImageAiEditKeepAlive());
   useEffect(() => onImageAiEditStateChange(() => setAiEditKeepAlive(isImageAiEditKeepAlive())), []);
-  // 预览面板宽窄：true = 横屏（960px），false = 竖屏（580px，放大为增加宽度）；默认宽屏
-  const [panelWide, setPanelWide] = useState(true);
+  // 预览面板宽度（px）：可在 [PANEL_W_MIN, 可用上限] 之间自由拖拽缩放；持久化到 localStorage
+  const [panelWidth, setPanelWidthRaw] = useState<number>(() => {
+    if (typeof window === 'undefined') return PANEL_W_DEFAULT;
+    try {
+      const stored = Number(window.localStorage.getItem(PANEL_W_PERSIST_KEY));
+      if (Number.isFinite(stored) && stored > 0) {
+        return Math.min(Math.max(stored, PANEL_W_MIN), PANEL_W_ABS_MAX);
+      }
+    } catch { /* ignore */ }
+    return PANEL_W_DEFAULT;
+  });
+  // 便捷档位图标判定：宽度 ≥ 宽窄两档中值视为"宽屏"（用于宽窄切换按钮的图形/文案）
+  const panelWide = panelWidth >= (PANEL_W_PRESET_NARROW + PANEL_W_PRESET_WIDE) / 2;
 
   // 本地文件夹面板：默认折叠（隐藏侧栏列表，让出画布空间）。
   // localStorage: bobwork.ui.localExplorer.collapsed
@@ -1486,19 +1599,53 @@ function CanvasFlowInner() {
     setLocalExplorerPinned((v) => !v);
   }, []);
 
+  // 聚焦会话重新居中：按节点真实渲染宽高把中心对准 wrapper 中心。
+  // 宽度/高度变化或切换会话后必须用它（固定 +200 猜测偏移会让宽高卡片偏出容器被裁切）
+  const centerFocusedNode = useCallback(() => {
+    const f = graphSnap.nodes.find((n) => n.id === focusedNodeId);
+    if (!f) return;
+    const el = wrapperRef.current?.querySelector<HTMLElement>('.react-flow__node');
+    const rect = el ? el.getBoundingClientRect() : null;
+    const w = rect ? rect.width : 792;
+    const h = rect ? rect.height : 400;
+    graphGateway.setCenter(f.x + w / 2, f.y + h / 2);
+  }, [graphSnap.nodes, focusedNodeId, graphGateway]);
+
+  // wrapper 尺寸变化（右 dock 开合 / 左栏折叠过渡 / 窗口缩放）或焦点切换后，
+  // 等节点尺寸随 canvas-visible-width 收敛再重新居中，避免对话卡片偏出容器被裁切
+  useEffect(() => {
+    const target = wrapperRef.current;
+    if (!target) return;
+    let timer = 0;
+    const schedule = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(centerFocusedNode, 260);
+    };
+    const ro = new ResizeObserver(schedule);
+    ro.observe(target);
+    window.addEventListener('resize', schedule);
+    schedule(); // 挂载/焦点变化后补一次（首次打开、切换会话时 wrapper 尺寸不变，观察者不触发）
+    return () => {
+      ro.disconnect();
+      window.clearTimeout(timer);
+      window.removeEventListener('resize', schedule);
+    };
+  }, [centerFocusedNode, focusedNodeId]);
+
   // 画布可视宽度广播：预览面板/本地文件面板/窗口尺寸变化 → dispatch canvas-visible-width，
   // ChatNode 等订阅者据此实时调整展开宽度上限（避免展开节点被右侧宽屏面板遮挡）。
-  // 面板折叠/宽窄切换/本地面板挂载状态变化时重跑（ResizeObserver 需重挂到最新的元素上）
+  // 面板折叠/宽窄切换/本地面板挂载状态变化时重跑（ResizeObserver 需重挂到最新的元素上）；
+  // 依赖 focusedNodeId：单焦点切换后新挂载节点需要立刻拿到当前面板宽度（否则新节点
+  // 收不到已发生的广播 → 不按已打开面板收窄）。
   useEffect(() => {
     const broadcast = () => {
       window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
     };
     broadcast();
+    // 观察对话容器（wrapper）尺寸：右 dock 折叠/展开会改变 wrapper 宽度
     const ro = new ResizeObserver(broadcast);
-    const panelEl = document.querySelector<HTMLElement>('[data-reader-panel-wrapper]');
-    if (panelEl) ro.observe(panelEl);
-    const explorerEl = document.querySelector<HTMLElement>('[data-local-explorer-wrapper]');
-    if (explorerEl) ro.observe(explorerEl);
+    const target = wrapperRef.current;
+    if (target) ro.observe(target);
     let raf = 0;
     const onResize = () => {
       cancelAnimationFrame(raf);
@@ -1510,9 +1657,145 @@ function CanvasFlowInner() {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
     };
-  }, [computeVisibleCanvasWidth, panelCollapsed, panelWide, localExplorerCollapsed]);
+  }, [computeVisibleCanvasWidth, panelCollapsed, panelWidth, localExplorerCollapsed, focusedNodeId]);
   // 侧边栏折叠状态：折叠时 Sidebar 渲染 56px rail（悬浮 overlay），NodeMap 依据该状态左移避开面板
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  // 左列导航折叠状态（2026-09 布局重构）：折叠为窄图标轨，中栏自动占满；状态持久化
+  const [navCollapsed, setNavCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('bobwork.nav-collapsed') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('bobwork.nav-collapsed', navCollapsed ? '1' : '0'); } catch { /* ignore */ }
+  }, [navCollapsed]);
+
+  // —— 预览面板自由缩放（拖拽 + 动态收敛）——
+  // 监听窗口宽度：面板可用上限随窗口/左栏/文件面板实时变化
+  const [windowWidth, setWindowWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1200));
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // 面板可用上限：窗口宽 − 左栏 − 文件面板 − 对话最小保留。
+  // 不足最小面板宽时按最小取（保证小窗口下面板仍能打开，对话区被 min-w-0 自然压缩）。
+  // 窄屏（低于首个级联收起断点）时把对话区保留从 200 提升到画布舒适 480，
+  // 让 clamp 自动把预览面板压小，配合级联收起确保画布不被挤到不可用
+  const maxPanelWidth = useMemo(() => {
+    if (typeof window === 'undefined') return PANEL_W_ABS_MAX;
+    const navW = navCollapsed ? NAV_W_COLLAPSED : NAV_W_EXPANDED;
+    const explorerW = localExplorerCollapsed ? 0 : EXPLORER_W_OPEN;
+    const reserve = windowWidth < NARROW_W_NAV ? NARROW_COMFORT_CANVAS : PANEL_CONVERSATION_MIN;
+    const avail = windowWidth - navW - explorerW - reserve;
+    return Math.min(Math.max(avail, PANEL_W_MIN), PANEL_W_ABS_MAX);
+  }, [windowWidth, navCollapsed, localExplorerCollapsed]);
+
+  // 把任意宽度收敛到 [PANEL_W_MIN, 可用上限]
+  const clampPanelWidth = useCallback(
+    (w: number) => Math.min(Math.max(w, PANEL_W_MIN), Math.max(maxPanelWidth, PANEL_W_MIN)),
+    [maxPanelWidth],
+  );
+
+  const persistPanelWidth = useCallback((w: number) => {
+    try { window.localStorage.setItem(PANEL_W_PERSIST_KEY, String(w)); } catch { /* ignore */ }
+  }, []);
+
+  // 实时更新面板宽度（拖拽/切档用，不在此处持久化；抬起或点击时再 write）
+  const setPanelWidthLive = useCallback((w: number) => {
+    setPanelWidthRaw((prev) => clampPanelWidth(w));
+  }, [clampPanelWidth]);
+
+  // 宽窄快捷档位：点击时在窄/宽两档间切换（仍受可用上限收敛）
+  const togglePanelWide = useCallback(() => {
+    const target = panelWide ? PANEL_W_PRESET_NARROW : PANEL_W_PRESET_WIDE;
+    const next = clampPanelWidth(target);
+    setPanelWidthLive(next);
+    persistPanelWidth(next);
+  }, [panelWide, setPanelWidthLive, clampPanelWidth, persistPanelWidth]);
+
+  // 窗口尺寸/左栏/文件面板变化时，把面板宽度收敛到当前可用上限（防止溢出被裁切）
+  useEffect(() => {
+    setPanelWidthRaw((w) => {
+      const next = clampPanelWidth(w);
+      return next === w ? w : next;
+    });
+  }, [clampPanelWidth]);
+
+  // —— 窄屏自适应：窗口过窄时按优先级级联收起（左栏 → 本地文件 → 预览），拉宽后恢复 ——
+  // prevNarrowW 记录上次各断点是否越界，只在“越过断点”瞬间动作，避免与用户手动开关打架；
+  // autoCollapsed* 标记“是本逻辑自动收起的”，恢复仅针对自动行为，不打扰用户主动关闭的面板
+  const prevNarrowW = useRef({ explorer: false, panel: false, nav: false });
+  const autoCollapsedExplorer = useRef(false);
+  const autoCollapsedPanel = useRef(false);
+  const autoCollapsedNav = useRef(false);
+  useEffect(() => {
+    const now = {
+      explorer: windowWidth < NARROW_W_EXPLORER,
+      panel: windowWidth < NARROW_W_PANEL,
+      nav: windowWidth < NARROW_W_NAV,
+    };
+    const prev = prevNarrowW.current;
+    prevNarrowW.current = now;
+
+    // 收紧：首次越过断点 → 自动收起对应面板（本地文件面板尊重 pin，用户固定时不强收）
+    if (!prev.explorer && now.explorer && !localExplorerCollapsed && !localExplorerPinned) {
+      autoCollapsedExplorer.current = true;
+      setLocalExplorerCollapsed(true);
+    }
+    if (!prev.panel && now.panel && !panelCollapsed) {
+      autoCollapsedPanel.current = true;
+      setImageAiEditHidden(true);
+      setPanelCollapsed(true);
+    }
+    if (!prev.nav && now.nav && !navCollapsed) {
+      autoCollapsedNav.current = true;
+      setNavCollapsed(true);
+    }
+
+    // 放宽：拉宽越过断点 → 恢复本逻辑自动收起的面板（逆序：高优先级面板先恢复）
+    if (prev.explorer && !now.explorer && autoCollapsedExplorer.current) {
+      autoCollapsedExplorer.current = false;
+      setLocalExplorerCollapsed(false);
+    }
+    if (prev.panel && !now.panel && autoCollapsedPanel.current) {
+      autoCollapsedPanel.current = false;
+      setImageAiEditHidden(false);
+      setImageAiEditKeepAlive(false);
+      setPanelCollapsed(false);
+    }
+    if (prev.nav && !now.nav && autoCollapsedNav.current) {
+      autoCollapsedNav.current = false;
+      setNavCollapsed(false);
+    }
+  }, [windowWidth, localExplorerCollapsed, localExplorerPinned, panelCollapsed, navCollapsed]);
+
+  // 打开预览面板（面板从折叠→展开）时自动折叠左栏，为中间对话区让出空间；
+  // 用上一次 panelCollapsed 判断"打开"这个动作，避免面板默认展开时初始加载就折叠左栏
+  const prevPanelCollapsedRef = useRef(panelCollapsed);
+  useEffect(() => {
+    const wasCollapsed = prevPanelCollapsedRef.current;
+    prevPanelCollapsedRef.current = panelCollapsed;
+    if (wasCollapsed && !panelCollapsed) {
+      setNavCollapsed(true);
+      // 折叠切换后中栏宽度变化：广播可视宽度（内核据此调整展开宽度上限），
+      // 再等宽度过渡完成后重新居中（宽度收敛后按真实渲染宽度对准，避免卡片偏出容器）
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
+      });
+      window.setTimeout(centerFocusedNode, 400);
+    }
+  }, [panelCollapsed, computeVisibleCanvasWidth, centerFocusedNode]);
+  const toggleNav = useCallback(() => {
+    const next = !navCollapsed;
+    setNavCollapsed(next);
+    // 折叠切换后中栏宽度变化：广播可视宽度（内核据此调整展开宽度上限），
+    // 再等宽度过渡完成后重新居中（宽度收敛后按真实渲染宽度对准，避免卡片偏出容器）
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
+    });
+    window.setTimeout(centerFocusedNode, 400);
+  }, [navCollapsed, computeVisibleCanvasWidth, centerFocusedNode]);
 
   // 侧边栏展开/折叠时**不**平移画布：
   //  - ReactFlow pane 是悬浮 overlay 的全宽画布，居中/适配一律通过 fitBounds/setCenter 的
@@ -1524,7 +1807,7 @@ function CanvasFlowInner() {
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
   sidebarCollapsedRef.current = sidebarCollapsed;
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
-    sidebarWidthRef.current = collapsed ? 50 : 322;
+    sidebarWidthRef.current = 0; // 2026-09 布局重构：Workspace 为临时浮层，不占画布宽度
     setSidebarCollapsed(collapsed);
     // 侧边栏宽度变化会改变画布可视区，立即广播供展开节点宽度上限同步
     window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
@@ -1543,6 +1826,75 @@ function CanvasFlowInner() {
   // 新建节点对话框（双击画布空白触发）：AI Chat / AI Coding 类型选择 + 小程序项目绑定
   const [nodeCreateDialogOpen, setNodeCreateDialogOpen] = useState(false);
   const [nodeCreatePos, setNodeCreatePos] = useState<{ x: number; y: number } | null>(null);
+  // 标题栏「＋」会话类型下拉菜单
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  // Agent 市场已装画像（2026-09-06）：创建菜单与节点类型动态并入 /api/agents 返回的已装市场 agent
+  const [marketAgents, setMarketAgents] = useState<Array<{ id: string; label: string }>>([]);
+  // 已禁用 agent 名单：＋ Add session 菜单过滤掉禁用项（chat 系统恒可用；2026-09-06）
+  const [disabledAgentIds, setDisabledAgentIds] = useState<Set<string>>(new Set());
+  // 菜单隐藏名单（≠禁用）：装了但不出现在 ＋ 菜单，能力与身份保留（2026-09-06）
+  const [hiddenMenuAgentIds, setHiddenMenuAgentIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      fetch('/api/agents')
+        .then((r) => r.json())
+        .then((d: { agents?: Array<{ id?: string; label?: string }>; disabled?: string[]; hiddenMenu?: string[] }) => {
+          if (!alive || !d || !Array.isArray(d.agents)) return;
+          const builtin = new Set(listAgents().map((a) => a.id));
+          const dis = new Set(d.disabled || []);
+          setDisabledAgentIds(dis);
+          setHiddenMenuAgentIds(new Set(d.hiddenMenu || []));
+          const extras: Array<{ id: string; label: string }> = [];
+          for (const a of d.agents) {
+            if (a && typeof a.id === 'string' && !builtin.has(a.id) && !dis.has(a.id)) {
+              extras.push({ id: a.id, label: a.label ?? a.id });
+            }
+          }
+          setMarketAgents(extras);
+        })
+        .catch(() => { /* 拉取失败保持仅内置 */ });
+    };
+    load();
+    // 市场安装/卸载/启停/可见性变更后由市场面板派发刷新事件
+    const onAgentsChanged = () => load();
+    window.addEventListener('agents-changed', onAgentsChanged);
+    return () => {
+      alive = false;
+      window.removeEventListener('agents-changed', onAgentsChanged);
+    };
+  }, []);
+  // 节点类型动态合并：内置壳（AGENT_NODE_SHELLS）+ 市场 agent 通用壳（agent-<id> → ChatNodeKernel）
+  const effectiveNodeTypes = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const map: Record<string, React.ComponentType<any>> = { ...nodeTypes };
+    for (const a of marketAgents) {
+      const flowType = agentFlowType(a.id);
+      if (!map[flowType]) map[flowType] = genericAgentNodeFor(a.id);
+    }
+    return map;
+  }, [marketAgents]);
+  // 底部品牌区：应用版本号 + 点击触发更新检查（复用 desktop.update）
+  const [appVersion, setAppVersion] = useState<string>(pkg.version);
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'no-update' | 'error'>('idle');
+  const [updateVersion, setUpdateVersion] = useState<string>('');
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    desktop.update.getVersion().then((v) => {
+      if (v) setAppVersion(v);
+    }).catch(() => {});
+    const unsubs = [
+      desktop.update.onChecking(() => setUpdateStatus('checking')),
+      desktop.update.onAvailable((info) => {
+        setUpdateVersion(info?.version || '');
+        setUpdateStatus('available');
+      }),
+      desktop.update.onNotAvailable(() => setUpdateStatus('no-update')),
+      desktop.update.onError(() => setUpdateStatus('error')),
+    ];
+    return () => unsubs.forEach((fn) => fn());
+  }, []);
   const [, setProviderConfigs] = useState<ProviderConfig[]>([]);
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
@@ -1579,8 +1931,6 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  // 项目名卡片：默认半透明，鼠标悬停在卡片上时显现（不随全局鼠标移动激活）
-  const [cardHovered, setCardHovered] = useState(false);
   useEffect(() => {
     if (!currentProjectId) return;
     let alive = true;
@@ -1591,6 +1941,11 @@ function CanvasFlowInner() {
       })
       .catch(() => { /* 静默：名称加载失败则隐藏标签 */ });
     return () => { alive = false; };
+  }, [currentProjectId]);
+
+  // 广播当前项目 id：会话标题栏 todo/便签 Dock（ChatNodeKernel 深层组件）经此订阅
+  useEffect(() => {
+    setCurrentProject(currentProjectId);
   }, [currentProjectId]);
 
   // 首次进入项目：恢复该项目保存的视口（项目级 key）；无保存视口则 fit 全部节点。
@@ -1612,20 +1967,10 @@ function CanvasFlowInner() {
       }
     });
   }, [hasProject, currentProjectId, readSavedViewport, setViewport, fitAllNodesWithSidebar, zoomLocked, getNodes]);
-  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
-  const [selectionBoxPosition, setSelectionBoxPosition] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  // 选区拖拽连线：从选区锚点拖到目标节点（flow 坐标，用于渲染临时虚线）
-  const [selectionConnect, setSelectionConnect] = useState<{ from: { x: number; y: number }; to: { x: number; y: number } } | null>(null);
+  const [, setSelectedNodeIds] = useState<Set<string>>(new Set());
 
-  // 跟踪从哪个节点的哪个方向开始拖拽连线
-  const connectingRef = useRef<{
-    nodeId: string | null;
-    handleType: HandleType | null;
-    handleId: string | null;
-  } | null>(null);
-
-  // 框选 + 手动 pan 状态（统一 5px 阈值，避免点击微抖动触发画布平移）
-  // 模式：mode=null 尚在阈值内未决；mode='select'=框选（Shift或拖到阈值后我们判定选择了框选）；mode='pan'=平移（默认）
+  // 手动 pan 状态（统一 5px 阈值，避免点击微抖动触发画布平移）
+  // 模式：mode=null 尚在阈值内未决；mode='pan'=平移中；mode='off'=初始
   const dragSelectRef = useRef<{
     // 起点：相对于 wrapper 的像素坐标
     startX: number;
@@ -1635,10 +1980,9 @@ function CanvasFlowInner() {
     startClientY: number;
     // 起点时的 viewport（pan 用）
     startViewport: { x: number; y: number; zoom: number };
-    // 模式：null=未达阈值待定；'select'=框选中；'pan'=平移中；'off'=初始
-    mode: 'off' | 'select' | 'pan' | null;
+    // 模式：null=未达阈值待定；'pan'=平移中；'off'=初始
+    mode: 'off' | 'pan' | null;
     hadDrag: boolean;
-    isTouchSelect: boolean;
     // pan 目标视口（rAF 节流：mousemove 只更新此字段，每帧最多一次 setViewport）
     panTarget: { x: number; y: number; zoom: number } | null;
   }>({
@@ -1649,7 +1993,6 @@ function CanvasFlowInner() {
     startViewport: { x: 0, y: 0, zoom: 1 },
     mode: 'off',
     hadDrag: false,
-    isTouchSelect: false,
     panTarget: null,
   });
   // pan 的 requestAnimationFrame 句柄：同一时刻至多一个 rAF 挂起，每帧最多提交一次 viewport
@@ -1723,47 +2066,6 @@ function CanvasFlowInner() {
       return next;
     });
   }, [activeReaderId, fileTabs, sandboxTabs]);
-  const bringReaderToFront = useCallback((nodeMdId: string) => {
-    setActiveReaderId(nodeMdId);
-    setActivePanelTab({ type: 'node', id: nodeMdId });
-    lastActiveNodeIdRef.current = nodeMdId;
-    setPanelCollapsed(false);
-  }, []);
-
-  // note 卡片子弹图标点击 → ①链导航联动（高亮所属链圆点并聚焦整链，与点击圆点等效）
-  // ②若卡片带 md 来源锚点：打开对应 md 文档（节点阅读器 / 文件面板）并定位高亮划词出处
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const d = (e as CustomEvent<{ nodeId?: string; mdAnchor?: MdAnchor }>).detail;
-      if (!d?.nodeId) return;
-      const chain = canvasChains.find((c) => c.ids.includes(d.nodeId!));
-      if (chain) focusChainFromCanvas(chain.rootId, chain.ids);
-      const anchor = d.mdAnchor;
-      if (!anchor?.key || !anchor.quote) return;
-      // 打开文档宿主
-      if (anchor.kind === 'node') {
-        bringReaderToFront(anchor.key);
-      } else if (anchor.kind === 'file') {
-        // key = filePath（本地）或 projectId:filePath（项目）
-        let path = anchor.key;
-        const idx = anchor.key.indexOf(':');
-        if (anchor.source === 'project' && idx > 0) path = anchor.key.slice(idx + 1);
-        const name = path.split('/').pop() || path;
-        bus.publish(BusEvents.fileOpen, {
-          source: anchor.source === 'local' ? 'local' : 'project',
-          path,
-          name,
-        });
-      }
-      // 定位划词出处：DocEditor 监听 md-locate-request（文档刚打开时内部延迟重试）
-      window.dispatchEvent(new CustomEvent('md-locate-request', {
-        detail: { key: anchor.key, quote: anchor.quote, prefix: anchor.prefix, suffix: anchor.suffix },
-      }));
-    };
-    window.addEventListener('note-chain-nav-request', handler);
-    return () => window.removeEventListener('note-chain-nav-request', handler);
-  }, [canvasChains, focusChainFromCanvas, bringReaderToFront]);
-
   // 图片文件扩展名（与后端 local-files read_file 的 imageExts 保持一致）
   const isImageFile = (name: string) => {
     const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -1919,10 +2221,13 @@ function CanvasFlowInner() {
         modelId: DEFAULT_MODEL_ID,
         thinkingLevel: DEFAULT_THINKING_LEVEL,
         nodeMdId: payload.nodeId,
+        initialExpanded: true,
         ...(payload.sandboxAppId ? { sandboxAppId: payload.sandboxAppId } : {}),
       },
     };
     setNodes((nds) => [...nds, newNode]);
+    // 单焦点：对话框新建（Coding/Chat）= 打开为新对话
+    openNewlyCreatedNode(payload.nodeId);
     if (payload.sandboxAppId && payload.appName) {
       openSandboxTab(payload.sandboxAppId, payload.appName);
       window.dispatchEvent(new Event('sandbox-changed'));
@@ -1945,7 +2250,7 @@ function CanvasFlowInner() {
         // 写入失败忽略：节点内存里已存在用户消息，不影响 UI
       }
     }
-  }, [nodeCreatePos, openSandboxTab, setNodes]);
+  }, [nodeCreatePos, openSandboxTab, setNodes, openNewlyCreatedNode]);
 
   // Step：订阅 open-sandbox-preview 事件 —— SandboxPanel 派发，查看舱统一处理
   useEffect(() => {
@@ -1978,11 +2283,11 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('usage-panel-open', handler);
   }, []);
 
-  // 订阅 open-notes-panel 事件 —— MCP 设置内 bob-notes-mcp 卡片按钮派发，打开笔记库独立界面
+  // 订阅 open-bob-mind-panel 事件 —— ⌘F Bob-Mind 按钮派发，打开 Bob-Mind 插件面板壳
   useEffect(() => {
-    const handler = () => setNotesOpen(true);
-    window.addEventListener('open-notes-panel', handler);
-    return () => window.removeEventListener('open-notes-panel', handler);
+    const handler = () => setBobMindOpen(true);
+    window.addEventListener('open-bob-mind-panel', handler);
+    return () => window.removeEventListener('open-bob-mind-panel', handler);
   }, []);
 
   // 监听 open-settings 事件：节点内模型菜单等入口派发，打开设置弹窗并聚焦指定区块
@@ -2639,11 +2944,9 @@ function CanvasFlowInner() {
             ? restoredBobbyToFlowNode(n as Parameters<typeof restoredBobbyToFlowNode>[0], i)
             : n.node_type === 'agentTeams'
               ? restoredAgentTeamsToFlowNode(n as Parameters<typeof restoredAgentTeamsToFlowNode>[0], i)
-              : n.node_type === 'sticky' || n.node_type === 'note'
-                ? restoredStickyToFlowNode(n as Parameters<typeof restoredStickyToFlowNode>[0], i)
-                : n.node_type === 'annotation'
-                  ? restoredAnnotationToFlowNode(n as Parameters<typeof restoredAnnotationToFlowNode>[0])
-                  : restoredNodeToFlowNode(n as Parameters<typeof restoredNodeToFlowNode>[0], i),
+              : n.node_type === 'annotation'
+                ? restoredAnnotationToFlowNode(n as Parameters<typeof restoredAnnotationToFlowNode>[0])
+                : restoredNodeToFlowNode(n as Parameters<typeof restoredNodeToFlowNode>[0], i),
       );
       setNodes(restoredNodes);
 
@@ -2716,9 +3019,7 @@ function CanvasFlowInner() {
 
   // 启动时恢复节点和连线（先加载节点，再加载连线，避免边引用不存在的节点）
   useEffect(() => {
-    let cancelled = false;
     void loadProjectData();
-    return () => { cancelled = true; };
   }, [loadProjectData]);
 
   // 无刷新切换项目：监听 Sidebar 广播的 bobagent:project-switched，
@@ -2736,99 +3037,10 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('bobagent:project-switched', handler);
   }, [loadProjectData]);
 
-  // 节点间不重叠（展开时推开被覆盖的邻居）：
-  // expandOverlapRestoreRef[nodeId] = 展开瞬间其他节点的原始位置快照（作收起还原与宽变重解析的基准）
-  const expandOverlapRestoreRef = useRef<Record<string, Record<string, { x: number; y: number }>>>({});
-  /** 以展开节点为锚解析重叠：takeSnapshot=true 记录其他节点原始位置；重解析（宽变）沿用快照基准 */
-  const pushExpandOverlaps = useCallback((nodeId: string, w: number, h: number, takeSnapshot: boolean) => {
-    const nds = getNodes();
-    const me = nds.find((n) => n.id === nodeId);
-    if (!me) return;
-    const others = nds.filter((n) => n.id !== nodeId);
-    if (takeSnapshot) {
-      const snap: Record<string, { x: number; y: number }> = {};
-      for (const n of others) snap[n.id] = { x: n.position.x, y: n.position.y };
-      expandOverlapRestoreRef.current = { ...expandOverlapRestoreRef.current, [nodeId]: snap };
-    }
-    const snap = expandOverlapRestoreRef.current[nodeId];
-    if (!snap) return;
-    const fixed: OverlapRect = { id: nodeId, x: me.position.x, y: me.position.y, w, h, fixed: true };
-    const freeRects: OverlapRect[] = others
-      .filter((n) => snap[n.id])
-      .map((n) => ({ id: n.id, x: snap[n.id].x, y: snap[n.id].y, w: n.measured?.width ?? 400, h: n.measured?.height ?? 400 }));
-    const resolved = resolveNodeOverlaps([fixed, ...freeRects]);
-    if (resolved.size === 0) return;
-    setNodes((nds2) => nds2.map((n) => {
-      const p = resolved.get(n.id);
-      return p ? { ...n, position: p } : n;
-    }));
-  }, [getNodes, setNodes]);
-
-  // 节点放大置顶：node-expanded → zIndex 提到最前（递增，最新放大的在最上）；
-  // node-collapsed → 还原默认层级。只改叠加层级，不改 position，不影响节点排版。
-  // 展开/收起同时触发"节点间不重叠"：展开把被覆盖邻居推开（快照），收起还原原位置。
-  useEffect(() => {
-    const topZRef = { current: 0 };
-    const onNodeExpanded = (e: Event) => {
-      const d = (e as CustomEvent).detail as { node_id?: string; w?: number; h?: number };
-      const nodeId = d?.node_id;
-      if (!nodeId) return;
-      topZRef.current += 1;
-      setNodes((nds) => nds.map((n) => (n.id === nodeId ? { ...n, zIndex: 1000 + topZRef.current } : n)));
-      pushExpandOverlaps(nodeId, d.w ?? EXPAND_DEFAULT_W, d.h ?? EXPAND_DEFAULT_H, true);
-    };
-    const onNodeCollapsed = (e: Event) => {
-      const nodeId = ((e as CustomEvent).detail as { node_id?: string })?.node_id;
-      if (!nodeId) return;
-      setNodes((nds) => nds.map((n) => (n.id === nodeId ? { ...n, zIndex: undefined } : n)));
-      // 还原被推开的邻居（含展开期间被拖拽过而持久化的位置回写）
-      const snap = expandOverlapRestoreRef.current[nodeId];
-      if (snap) {
-        delete expandOverlapRestoreRef.current[nodeId];
-        const positions: Record<string, { x: number; y: number }> = {};
-        for (const n of getNodes()) if (snap[n.id]) positions[n.id] = snap[n.id];
-        if (Object.keys(positions).length > 0) {
-          setNodes((nds) => nds.map((n) => {
-            const p = snap[n.id];
-            return p ? { ...n, position: p } : n;
-          }));
-          window.dispatchEvent(new CustomEvent('nodes-position-changed', { detail: { positions } }));
-        }
-      }
-    };
-    window.addEventListener('node-expanded', onNodeExpanded);
-    window.addEventListener('node-collapsed', onNodeCollapsed);
-    return () => {
-      window.removeEventListener('node-expanded', onNodeExpanded);
-      window.removeEventListener('node-collapsed', onNodeCollapsed);
-    };
-  }, [setNodes, getNodes, pushExpandOverlaps]);
-
-  // 展开期间节点宽高变化（预览面板开合/宽窄/侧边栏/窗口）→ 以原始位置为基准重新解析重叠
-  useEffect(() => {
-    const onExpandResize = (e: Event) => {
-      const d = (e as CustomEvent).detail as { node_id?: string; w?: number; h?: number };
-      if (!d?.node_id || typeof d.w !== 'number' || typeof d.h !== 'number') return;
-      pushExpandOverlaps(d.node_id, d.w, d.h, false);
-    };
-    window.addEventListener('node-expand-resize', onExpandResize);
-    return () => window.removeEventListener('node-expand-resize', onExpandResize);
-  }, [pushExpandOverlaps]);
-
-  // 导航圆点恢复归档节点：持久化取消归档到 .md frontmatter（节点显示已由 gateway.restoreNode 完成）
-  useEffect(() => {
-    const onRestore = (e: Event) => {
-      const d = (e as CustomEvent).detail as { node_id?: string };
-      if (!d?.node_id || !currentProjectId) return;
-      void fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'update_archive', node_id: d.node_id, archived: false, project_id: currentProjectId }),
-      }).catch(() => undefined);
-    };
-    window.addEventListener('node-archive-restore', onRestore);
-    return () => window.removeEventListener('node-archive-restore', onRestore);
-  }, [currentProjectId]);
+  // 节点间避让（单焦点画布 2026-09 起不再需要"展开时推开邻居"）：
+  // 中栏同一时刻仅承载 focusedNodeId 一个研究节点，其余研究节点由 displayNodes 置 hidden，
+  // 不存在展开节点与可见邻居重叠的场景；node-expanded/node-collapsed/node-expand-resize
+  // 广播已随 ChatNodeKernel 恒展开收敛而整体移除（死链清理）。
 
   // 标签页/窗口从后台恢复可见时，轻量触发一次重绘（不再整体重挂载 ReactFlow，
   // 避免中止节点正在进行的流式任务 / 丢失节点展开等内部状态）
@@ -2863,451 +3075,6 @@ function CanvasFlowInner() {
     }
   }, [flowKey, currentProjectId, readSavedViewport, setViewport]);
 
-  // 开始拖拽连线：记录源节点和 Handle 信息
-  const onConnectStart: OnConnectStart = useCallback((_, params) => {
-    connectingRef.current = {
-      nodeId: params.nodeId,
-      handleType: params.handleType,
-      handleId: params.handleId,
-    };
-  }, []);
-
-  // 拖拽结束：如果从 source handle 拖到空白处，则在释放位置创建新节点并连线
-  // 便签（note）父节点整列重排：子节点纵向列在父右侧（紧凑间距 32/16），onConnect 与手动建边共用
-  const reorderStickyChildren = useCallback(
-    (parentId: string, newChildId?: string) => {
-      const srcNode = getNodes().find((n) => n.id === parentId);
-      if (!srcNode || srcNode.type !== 'note') return;
-      const BULLET_W = 220;
-      const BULLET_H = 110;
-      const hasM = (h?: number) => Number.isFinite(h) && (h ?? 0) > 0;
-      const existingChildren = getEdges()
-        .filter((e) => e.source === parentId)
-        .map((e) => e.target);
-      const allChildren = newChildId
-        ? Array.from(new Set([...existingChildren, newChildId]))
-        : existingChildren;
-      if (allChildren.length === 0) return;
-      const childSizes: Record<string, { width?: number; height?: number }> = {};
-      for (const n of getNodes()) {
-        if (!allChildren.includes(n.id)) continue;
-        childSizes[n.id] = {
-          width: hasM(n.measured?.width) ? n.measured?.width : BULLET_W,
-          height: hasM(n.measured?.height) ? n.measured?.height : BULLET_H,
-        };
-      }
-      const layoutParent = {
-        position: srcNode.position,
-        measured: hasM(srcNode.measured?.height) ? srcNode.measured : { width: BULLET_W, height: BULLET_H },
-      };
-      const colPositions = layoutChildrenColumn(layoutParent, allChildren, 1, childSizes, { h: 32, v: 16 });
-      const positions: Record<string, { x: number; y: number }> = {};
-      for (const id of allChildren) {
-        const p = colPositions[id];
-        if (p) positions[id] = p;
-      }
-      const applied = applyPositions(getNodes() as Node<AiChatNodeData>[], positions);
-      setNodes(() => applied.nodes);
-      if (Object.keys(applied.allPositions).length > 0) {
-        window.dispatchEvent(new CustomEvent('nodes-position-changed', { detail: { positions: applied.allPositions } }));
-      }
-    },
-    [getNodes, getEdges, setNodes],
-  );
-
-  // 手动建立便签出边（note → 已有节点）：跳过成果块锁定（便签零成果块），建边后整列重排
-  const connectStickyEdge = useCallback(
-    async (sourceId: string, targetId: string, opts?: { skipReorder?: boolean }) => {
-      const edgeResp = await fetch('/api/edges', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'create', from: sourceId, to: targetId, edge_type: 'parallel' }),
-      });
-      const data = await edgeResp.json();
-      if (data.success && data.edge) {
-        setEdges((eds) => addEdge({
-          id: data.edge.edge_id,
-          source: data.edge.from,
-          target: data.edge.to,
-          sourceHandle: 'note-arrow-single',
-          type: 'floating',
-          data: { relation: 'child', disconnected: data.edge.disconnected ?? false },
-        }, eds));
-        // 划词创建等场景卡片位置已按源节点右侧排好，跳过整列重排避免挪动源节点
-        if (!opts?.skipReorder) reorderStickyChildren(sourceId, targetId);
-      } else {
-        console.warn('[note] 连线失败:', data.error);
-      }
-    },
-    [setEdges, reorderStickyChildren],
-  );
-
-  const onConnectEnd: OnConnectEnd = useCallback(async (event) => {
-      const startData = connectingRef.current;
-      connectingRef.current = null;
-      if (!startData) return;
-
-      const sourceNodeId = startData.nodeId;
-      const sourceHandleId = startData.handleId || 'right';
-      const sourceHandleType = startData.handleType;
-
-      if (!sourceNodeId) return;
-
-      // 只有 source handle 拖拽到空白处才创建新节点
-      // target handle 的拖拽由 onConnect 处理
-      if (sourceHandleType === 'target') {
-        return;
-      }
-
-      // 将屏幕坐标转为画布坐标
-      const clientX = 'changedTouches' in event
-        ? event.changedTouches[0]?.clientX ?? 0
-        : event.clientX;
-      const clientY = 'changedTouches' in event
-        ? event.changedTouches[0]?.clientY ?? 0
-        : event.clientY;
-      const targetPosition = screenToFlowPosition({ x: clientX, y: clientY });
-
-      // 空白处释放 → 创建新节点
-      const sourceNode = getNodes().find((n) => n.id === sourceNodeId);
-      if (!sourceNode) return;
-
-      // Note（思路便签）源：手动精确判定目标（React Flow 的 handle 距离判定对面板外箭头无效，
-      // 拖到卡片上距 handle 必然超 radius → onConnect 不触发）。
-      // 松手点命中某已有节点卡片（point-in-rect）→ 建立连线；未命中 → 生成新卡片。
-      if (sourceNode.type === 'note') {
-        // 手动精确判定目标（React Flow 的 handle 距离判定对面板外箭头无效，
-        // 拖到卡片上距 handle 必然超 radius → onConnect 不触发）。
-        // 松手点命中某已有节点卡片（point-in-rect）→ 建立连线；未命中 → 生成新卡片。
-        const hitNode = getNodes().find((n) => {
-          if (n.id === sourceNodeId || n.type === 'annotation') return false;
-          const w = n.measured?.width ?? 220;
-          const h = n.measured?.height ?? 110;
-          return (
-            targetPosition.x >= n.position.x && targetPosition.x <= n.position.x + w &&
-            targetPosition.y >= n.position.y && targetPosition.y <= n.position.y + h
-          );
-        });
-        if (hitNode) {
-          await connectStickyEdge(sourceNodeId, hitNode.id);
-          return;
-        }
-        // 未命中 → 空白处生成新卡片
-        const noteDir: 1 | -1 = 1; // note 固定向右排
-        // Note 专属默认尺寸：便签宽固定 220、高近恒定 ~110。
-        // layoutChildrenColumn 在 measured 缺失时会回退 AI Chat 的 400×400（CHILD_NODE_W/H），
-        // 刚创建的 note 未完成测量时会把新节点排到 520px 外且垂直错位 → 必须用专属兜底尺寸。
-        const NOTE_NODE_W = 220;
-        const NOTE_NODE_H = 110;
-        const hasMeasured = (h?: number) => Number.isFinite(h) && (h ?? 0) > 0;
-        const existingChildIds = getEdges()
-          .filter((e) => e.source === sourceNodeId)
-          .map((e) => e.target);
-        const NOTE_PLACEHOLDER = `__new_note_${Date.now()}__`;
-        const noteSizes: Record<string, { width?: number; height?: number }> = {};
-        for (const n of getNodes()) {
-          if (existingChildIds.includes(n.id)) {
-            // 兄弟未测量也按 note 默认高兜底，避免纵向间距被 400 撑乱
-            noteSizes[n.id] = {
-              width: hasMeasured(n.measured?.width) ? n.measured?.width : NOTE_NODE_W,
-              height: hasMeasured(n.measured?.height) ? n.measured?.height : NOTE_NODE_H,
-            };
-          }
-        }
-        // 新便签高度用兄弟均值或固定默认估算（便签高度近恒定，无需渲染后校准）
-        const siblingBs = existingChildIds
-          .map((id) => noteSizes[id]?.height)
-          .filter((h): h is number => Number.isFinite(h) && (h ?? 0) > 0);
-        noteSizes[NOTE_PLACEHOLDER] = {
-          height: siblingBs.length > 0
-            ? siblingBs.reduce((s, h) => s + h, 0) / siblingBs.length
-            : NOTE_NODE_H,
-        };
-        const noteParent = {
-          position: sourceNode.position,
-          // 源节点测量缺失时同样用 note 默认尺寸兜底
-          measured: hasMeasured(sourceNode.measured?.height) ? sourceNode.measured : { width: NOTE_NODE_W, height: NOTE_NODE_H },
-        };
-        const noteCol = layoutChildrenColumn(
-          noteParent,
-          [...existingChildIds, NOTE_PLACEHOLDER],
-          noteDir,
-          noteSizes,
-          // Note 紧凑间距：左右上下贴近排列，不像 AI Chat 那样拉开 120px
-          { h: 32, v: 16 },
-        );
-        const position = {
-          x: noteCol[NOTE_PLACEHOLDER]?.x ?? targetPosition.x,
-          y: noteCol[NOTE_PLACEHOLDER]?.y ?? targetPosition.y,
-        };
-
-        const noteResp = await fetch('/api/nodes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'create',
-            title: 'Note',
-            model: DEFAULT_MODEL_ID,
-            sources: [],
-            node_type: 'note',
-            sticky_text: '1. ',
-            position_x: position.x,
-            position_y: position.y,
-          }),
-        });
-        const noteData = await noteResp.json();
-        if (!noteData.success) return;
-        const noteId = noteData.node_id;
-        const noteNode: Node<AiChatNodeData> = {
-          id: noteId,
-          type: 'note',
-          position,
-          data: {
-            title: 'Note',
-            stickyText: '1. ',
-            nodeMdId: noteId,
-            messages: [],
-            isStreaming: false,
-            __hasPersistedPosition: true,
-          },
-        };
-        setNodes((nds) => [...nds, noteNode]);
-
-        const noteEdgeResp = await fetch('/api/edges', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'create',
-            from: sourceNodeId,
-            to: noteId,
-            edge_type: 'parallel',
-          }),
-        });
-        const noteEdgeData = await noteEdgeResp.json();
-        if (noteEdgeData.success && noteEdgeData.edge) {
-          setEdges((eds) => addEdge({
-            id: noteEdgeData.edge.edge_id,
-            source: noteEdgeData.edge.from,
-            target: noteEdgeData.edge.to,
-            // 多 source handle（→/↔ 均有 id）的边必须带 sourceHandle，
-            // 否则 React Flow 无法锚定非首个 handle → 边不渲染（↔ 的边会"消失"）
-            sourceHandle: sourceHandleId,
-            type: 'floating',
-            data: {
-              relation: 'child',
-              disconnected: noteEdgeData.edge.disconnected ?? false,
-            },
-          }, eds));
-        } else {
-          // 建边失败：回滚刚创建的孤立 note，避免堆积无连线节点
-          console.warn('[note] 建边失败，回滚新节点:', noteEdgeData.error);
-          fetch('/api/nodes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'delete', node_id: noteId }),
-          }).catch(() => {});
-          setNodes((nds) => nds.filter((n) => n.id !== noteId));
-        }
-
-        // 同簇整体重排：已有下游节点也移到居中后的新位置（保持子列中心对齐源）
-        const noteReorder: Record<string, { x: number; y: number }> = {};
-        for (const id of existingChildIds) {
-          const p = noteCol[id];
-          if (p) noteReorder[id] = p;
-        }
-        if (Object.keys(noteReorder).length > 0) {
-          const noteApplied = applyPositions(getNodes() as Node<AiChatNodeData>[], noteReorder);
-          setNodes(() => noteApplied.nodes);
-          if (Object.keys(noteApplied.allPositions).length > 0) {
-            window.dispatchEvent(new CustomEvent('nodes-position-changed', { detail: { positions: noteApplied.allPositions } }));
-          }
-        }
-        return;
-      }
-
-      // 非 note 源（AI Chat 等）：检查释放位置是否在某个节点上（由 onConnect 处理，这里不创建新节点）。
-      // 排除源节点自身：箭头手柄贴在节点右侧，短距拖拽松手点常落在源节点边界内，
-      // 若不加排除会静默放弃（既不连线也不创建），表现为"拖了没反应"。
-      const targetNodes = getIntersectingNodes({
-        x: targetPosition.x - 20,
-        y: targetPosition.y - 20,
-        width: 40,
-        height: 40,
-      });
-      if (targetNodes && targetNodes.some((n) => n.id !== sourceNodeId)) {
-        return;
-      }
-
-      // 子节点列布局：1 子平行 / 2+ 子纵向对齐，父节点始终位于子列垂直中心
-      // （复用 children-layout 纯函数；每次新增都整列重排——从第 2 个起子列中心仍对齐父节点）
-      const handleId = sourceHandleId.replace('-source', '');
-      const dir: 1 | -1 = handleId === 'left' ? -1 : 1;
-      // 父节点已有的直接子节点（不含新建，此时新边尚未创建）
-      const existingChildIds = getEdges()
-        .filter((e) => e.source === sourceNodeId)
-        .map((e) => e.target);
-      const NEW_CHILD_PLACEHOLDER = `__new_child_${Date.now()}__`;
-      const childSizes: Record<string, { width?: number; height?: number }> = {};
-      for (const n of getNodes()) {
-        if (existingChildIds.includes(n.id)) {
-          childSizes[n.id] = { width: n.measured?.width, height: n.measured?.height };
-        }
-      }
-      // 新节点尚未渲染 → 用已有兄弟节点的实际高度估算；
-      // 无兄弟时用固定默认高度（新建 AI Chat 折叠态约 260px），
-      // 不能用父节点高度——父节点若展开过（最高 980px）会算出严重偏离的位置。
-      // 初始估算仅作占位，渲染完成后有「渲染后校准」用真实高度精确重排。
-      const siblingsH = existingChildIds
-        .map((id) => childSizes[id]?.height)
-        .filter((h): h is number => Number.isFinite(h) && (h ?? 0) > 0);
-      const DEFAULT_NEW_CHILD_H = 260;
-      childSizes[NEW_CHILD_PLACEHOLDER] = {
-        height: siblingsH.length > 0
-          ? siblingsH.reduce((s, h) => s + h, 0) / siblingsH.length
-          : DEFAULT_NEW_CHILD_H,
-      };
-      const colPositions = layoutChildrenColumn(
-        sourceNode,
-        [...existingChildIds, NEW_CHILD_PLACEHOLDER],
-        dir,
-        childSizes,
-      );
-      const newX = colPositions[NEW_CHILD_PLACEHOLDER]?.x ?? sourceNode.position.x;
-      const newY = colPositions[NEW_CHILD_PLACEHOLDER]?.y ?? sourceNode.position.y;
-
-      // 所有连线统一为 child（横向/子节点）
-      const relation = 'child' as const;
-      const edgeType = 'parallel' as const;
-
-      // 先锁定上游成果块，再创建子节点：锁定失败（含用户取消强制锁定）则取消创建，
-      // 避免留下"已建节点但无连线"的孤儿节点
-      const srcMdId = (sourceNode.data as AiChatNodeData).nodeMdId || sourceNodeId;
-      const lockRes = relation === 'child'
-        ? await lockUpstreamNode(srcMdId)
-        : ({ ok: true } as const);
-
-      if (relation === 'child' && !lockRes.ok) {
-        console.error('[auto-lock] 锁定失败:', lockRes.error);
-        alert('无法锁定上游节点：' + (lockRes.error || '未知错误') + '\n\n已取消创建子节点。');
-        return;
-      }
-
-      try {
-        // 创建节点文件（带初始位置，重启恢复布局）
-        const resp = await fetch('/api/nodes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'create',
-            title: 'AI Chat',
-            model: DEFAULT_MODEL_ID,
-            sources: [],
-            position_x: newX,
-            position_y: newY,
-          }),
-        });
-        const data = await resp.json();
-        if (!data.success) return;
-        const newNodeId = data.node_id;
-
-        // 添加节点
-        const newNode: Node<AiChatNodeData> = {
-          id: newNodeId,
-          type: 'aiChat',
-          position: { x: newX, y: newY },
-          data: {
-            title: 'AI Chat',
-            messages: [],
-            isStreaming: false,
-            modelId: DEFAULT_MODEL_ID,
-            thinkingLevel: DEFAULT_THINKING_LEVEL,
-            nodeMdId: newNodeId,
-          },
-        };
-        setNodes((nds) => [...nds, newNode]);
-
-        // 锁定已成功（或非 child 边）：创建边
-        const edgeResp = await fetch('/api/edges', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'create',
-            from: sourceNodeId,
-            to: newNodeId,
-            edge_type: edgeType,
-          }),
-        });
-        const edgeData = await edgeResp.json();
-        if (edgeData.success && edgeData.edge) {
-          setEdges((eds) => addEdge({
-            id: edgeData.edge.edge_id,
-            source: edgeData.edge.from,
-            target: edgeData.edge.to,
-            type: 'floating',
-            data: {
-              relation,
-              disconnected: edgeData.edge.disconnected ?? false,
-            },
-          }, eds));
-        }
-        // 整列重排：已有子节点也移到居中后的新位置（保持子列中心对齐父节点）
-        const reorder: Record<string, { x: number; y: number }> = {};
-        for (const id of existingChildIds) {
-          const p = colPositions[id];
-          if (p) reorder[id] = p;
-        }
-        const applied = applyPositions(getNodes() as Node<AiChatNodeData>[], reorder);
-        setNodes(() => applied.nodes);
-        if (Object.keys(applied.allPositions).length > 0) {
-          window.dispatchEvent(new CustomEvent('nodes-position-changed', { detail: { positions: applied.allPositions } }));
-        }
-
-        // 渲染后校准：新节点完成测量（measured 就绪）后用真实高度重排整列，
-        // 确保子列垂直中心精确对齐父节点中心水平线（初始估算是近似值）。
-        // 循环重试：新节点测量可能晚于 200ms（首帧渲染/内容布局），单次放弃会留下偏离位置；
-        // 最多重试 5 次（共约 1.2s），期间测量就绪即校准。
-        window.setTimeout(() => {
-          let retry = 0;
-          const tryCalibrate = () => {
-            const curSource = getNodes().find((n) => n.id === sourceNodeId);
-            if (!curSource) return;
-            const childIds = getEdges()
-              .filter((e) => e.source === sourceNodeId)
-              .map((e) => e.target);
-            if (childIds.length === 0) return;
-            const realSizes: Record<string, { width?: number; height?: number }> = {};
-            let allMeasured = true;
-            for (const id of childIds) {
-              const n = getNodes().find((nn) => nn.id === id);
-              const h = n?.measured?.height;
-              if (!n || !Number.isFinite(h) || (h ?? 0) <= 0) { allMeasured = false; break; }
-              realSizes[id] = { width: n.measured?.width, height: n.measured?.height };
-            }
-            if (!allMeasured) {
-              if (retry < 5) { retry += 1; window.setTimeout(tryCalibrate, 200); }
-              return; // 仍无测量 → 保留当前近似位置
-            }
-            const realPositions = layoutChildrenColumn(curSource, childIds, dir, realSizes);
-            const reorderReal: Record<string, { x: number; y: number }> = {};
-            for (const id of childIds) {
-              const p = realPositions[id];
-              if (p) reorderReal[id] = p;
-            }
-            const appliedReal = applyPositions(getNodes() as Node<AiChatNodeData>[], reorderReal);
-            setNodes(() => appliedReal.nodes);
-            if (Object.keys(appliedReal.allPositions).length > 0) {
-              window.dispatchEvent(new CustomEvent('nodes-position-changed', { detail: { positions: appliedReal.allPositions } }));
-            }
-          };
-          tryCalibrate();
-        }, 200);
-      } catch (err) {
-        console.error('[auto-lock] 创建子节点出错:', err);
-      }
-    },
-    [screenToFlowPosition, getIntersectingNodes, getNodes, getEdges, setNodes, setEdges, lockUpstreamNode],
-  );
-
   // 连线创建时持久化到数据库
   const onConnect = useCallback((connection: Connection) => {
     if (!connection.source || !connection.target) return;
@@ -3317,11 +3084,10 @@ function CanvasFlowInner() {
     const relation = 'child' as const;
     const edgeType = 'parallel' as const;
 
-    // 先锁定上游，再建边（避免 R-8 死锁）；思路便签为无成果块节点，跳过锁定
+    // 先锁定上游，再建边（避免 R-8 死锁）
     const srcNode = getNodes().find((n) => n.id === connection.source);
     const srcMdId = srcNode ? ((srcNode.data as AiChatNodeData).nodeMdId || connection.source) : connection.source;
-    const isStickySource = srcNode?.type === 'note';
-    const ensureLocked = relation === 'child' && !isStickySource
+    const ensureLocked = relation === 'child'
       ? lockUpstreamNode(srcMdId)
       : Promise.resolve<{ ok: boolean; error?: string }>({ ok: true });
 
@@ -3347,7 +3113,7 @@ function CanvasFlowInner() {
             id: data.edge.edge_id,
             source: data.edge.from,
             target: data.edge.to,
-            // 带 sourceHandle 的节点（如 Note 的 → 手柄）必须回传 sourceHandle，否则边不渲染
+            // 带 sourceHandle 的节点（多 handle 节点 →/↔）必须回传 sourceHandle，否则边不渲染
             sourceHandle: connection.sourceHandle ?? undefined,
             type: 'floating',
             data: {
@@ -3356,56 +3122,6 @@ function CanvasFlowInner() {
             },
           };
           setEdges((eds) => addEdge(newEdge, eds));
-
-          // 子节点列布局：1 子平行 / 2+ 子纵向对齐，父节点始终位于子列垂直中心
-          // （复用 children-layout 纯函数；新增连接时整列重排——从第 2 个起子列中心仍对齐父节点）
-          if (srcNode) {
-            // Note 父节点：紧凑间距 + 专属尺寸兜底（measured 缺失时不再回退 AI Chat 的 400×400）
-            const isStickyParent = srcNode.type === 'note';
-            const BULLET_W = 220;
-            const BULLET_H = 110;
-            const hasM = (h?: number) => Number.isFinite(h) && (h ?? 0) > 0;
-            const existingChildren = getEdges()
-              .filter((e) => e.source === connection.source)
-              .map((e) => e.target);
-            const dir: 1 | -1 = connection.sourceHandle?.includes('left') ? -1 : 1;
-            const allChildren = Array.from(new Set([...existingChildren, connection.target]));
-            const childSizes: Record<string, { width?: number; height?: number }> = {};
-            for (const n of getNodes()) {
-              if (allChildren.includes(n.id)) {
-                childSizes[n.id] = isStickyParent
-                  ? {
-                      width: hasM(n.measured?.width) ? n.measured?.width : BULLET_W,
-                      height: hasM(n.measured?.height) ? n.measured?.height : BULLET_H,
-                    }
-                  : { width: n.measured?.width, height: n.measured?.height };
-              }
-            }
-            const layoutParent = isStickyParent
-              ? {
-                  position: srcNode.position,
-                  measured: hasM(srcNode.measured?.height) ? srcNode.measured : { width: BULLET_W, height: BULLET_H },
-                }
-              : srcNode;
-            const colPositions = layoutChildrenColumn(
-              layoutParent,
-              allChildren,
-              dir,
-              childSizes,
-              isStickyParent ? { h: 32, v: 16 } : undefined,
-            );
-            const positions: Record<string, { x: number; y: number }> = {};
-            for (const id of allChildren) {
-              const p = colPositions[id];
-              if (p) positions[id] = p;
-            }
-            // 应用整列重排位置
-            const applied = applyPositions(getNodes() as Node<AiChatNodeData>[], positions);
-            setNodes(() => applied.nodes);
-            if (Object.keys(applied.allPositions).length > 0) {
-              window.dispatchEvent(new CustomEvent('nodes-position-changed', { detail: { positions: applied.allPositions } }));
-            }
-          }
         } else if (data.message === '连线已存在') {
           // 连线已存在，不做处理
         } else {
@@ -3417,7 +3133,7 @@ function CanvasFlowInner() {
     }).catch((err) => {
       console.error('[auto-lock] 出错:', err);
     });
-  }, [setEdges, getNodes, getEdges, setNodes]);
+  }, [setEdges, getNodes, lockUpstreamNode]);
 
   // 连线删除时从数据库彻底删除（键盘 Delete/Backspace 触发硬删除）
   const onEdgesDelete = useCallback((deletedEdges: Edge[]) => {
@@ -3501,6 +3217,43 @@ function CanvasFlowInner() {
     window.dispatchEvent(new CustomEvent('local-files-changed'));
   }, [getNodes, setNodes, setEdges]);
 
+  // 左栏会话树删除入口（2026-09：删除 ✕ 从标题栏迁至左栏行 hover）：
+  // 确认后移除节点/关联边 + 删除磁盘档案/附件，行为与键盘删除 onNodesDelete 一致
+  const deleteNodeFromRail = useCallback(async (nodeId: string) => {
+    const node = getNodes().find((n) => n.id === nodeId);
+    if (!node) return;
+    const nData = node.data as AiChatNodeData | undefined;
+    const nodeMdId = nData?.nodeMdId || nodeId;
+    const nodeTitle = nData?.title || 'Untitled Node';
+    // 附件目录收集（与 onNodesDelete 一致），避免 attachments/{folder} 残留
+    const attachmentFolders = new Set<string>();
+    for (const msg of nData?.messages || []) {
+      for (const att of msg.attachments || []) {
+        const m = att.path?.match(/^(?:attachments|assets)\/([^/]+)\//);
+        if (m) attachmentFolders.add(m[1]);
+      }
+    }
+    const ok = await confirmAsk({
+      title: 'Delete Node?',
+      message: `Deleting "${nodeTitle}" will permanently remove its .md document (outcome, conversations, annotations, citations), attachments, generated output files (homework/), and connected edges.\nThis action cannot be undone.`,
+    });
+    if (!ok) return;
+    setNodes((nds) => nds.filter((n) => n.id !== nodeId));
+    setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
+    fetch('/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'delete',
+        node_id: nodeMdId,
+        attachmentFolders: Array.from(attachmentFolders),
+      }),
+    }).catch((err) => {
+      console.error('节点删除出错:', err);
+    });
+    window.dispatchEvent(new CustomEvent('local-files-changed'));
+  }, [confirmAsk, getNodes, setNodes, setEdges]);
+
   const handleNodesChange = useCallback((changes: NodeChange<Node<AiChatNodeData>>[]) => {
     // 广播节点选中变化：Sidebar 订阅后高亮 homework 中对应的节点分组
     //    （select change 逐个触发，最后一条生效；selected=false 表示取消选中）
@@ -3512,7 +3265,7 @@ function CanvasFlowInner() {
     onNodesChange(changes);
   }, [onNodesChange]);
 
-  // ---- Note 簇联动拖拽：拖动「根 note」（无上游边的便签）时带动整簇便签平移 ----
+  // ---- 批注框（annotation）拖动联动：拖动批注框时带动其包裹的卡片一起平移 ----
   const noteClusterDragRef = useRef<{
     rootId: string;
     othersStart: Record<string, { x: number; y: number }>;
@@ -3524,49 +3277,8 @@ function CanvasFlowInner() {
   // 拖拽期间被"节点间不重叠"推开的节点集合：拖拽停止时批量持久化新位置
   const dragPushedRef = useRef<Set<string>>(new Set());
 
-  // 从根节点出发，沿边收集可达的 sticky（note）节点组成簇（不含 AI Chat 等其他类型）
-  const collectNoteCluster = useCallback((rootId: string): string[] => {
-    const adj: Record<string, string[]> = {};
-    for (const e of getEdges()) {
-      if (e.data?.disconnected) continue;
-      (adj[e.source] ||= []).push(e.target);
-    }
-    const stickyIds = new Set(getNodes().filter((n) => n.type === 'note').map((n) => n.id));
-    const visited = new Set<string>([rootId]);
-    const queue = [rootId];
-    while (queue.length) {
-      const cur = queue.shift()!;
-      for (const next of adj[cur] || []) {
-        if (!visited.has(next) && stickyIds.has(next)) {
-          visited.add(next);
-          queue.push(next);
-        }
-      }
-    }
-    return [...visited];
-  }, [getNodes, getEdges]);
-
-  // 拖拽开始：仅 Note 根节点（无上游边）登记簇，记录簇内各节点起始位置
+  // 拖拽开始：仅批注框（annotation）登记联动，记录被包裹卡片起始位置
   const onNodeDragStart: OnNodeDrag = useCallback((_, node) => {
-    if (node.type === 'note') {
-      const hasUpstream = getEdges().some((e) => e.target === node.id && !e.data?.disconnected);
-      if (hasUpstream) return;
-      const cluster = collectNoteCluster(node.id);
-      const othersStart: Record<string, { x: number; y: number }> = {};
-      for (const id of cluster) {
-        if (id === node.id) continue;
-        const n = getNodes().find((nd) => nd.id === id);
-        if (n) othersStart[id] = { x: n.position.x, y: n.position.y };
-      }
-      noteClusterDragRef.current = {
-        rootId: node.id,
-        othersStart,
-        startX: node.position.x,
-        startY: node.position.y,
-      };
-      return;
-    }
-    // 批注框（annotation）拖动：带动其包裹的卡片一起移动（复用同一联动机制）
     if (node.type === 'annotation') {
       const ids = (node.data as AiChatNodeData).annotationNodeIds ?? [];
       const othersStart: Record<string, { x: number; y: number }> = {};
@@ -3582,9 +3294,9 @@ function CanvasFlowInner() {
       };
       annotationDragActiveRef.current = true;
     }
-  }, [getEdges, getNodes, collectNoteCluster]);
+  }, [getNodes]);
 
-  // 拖拽中：根节点位移 delta 应用到簇内其他便签（绝对位置 = 起始 + delta，避免重复累加）；
+  // 拖拽中：根节点位移 delta 应用到簇内其他卡片（绝对位置 = 起始 + delta，避免重复累加）；
   // 普通节点拖拽同时触发"节点间不重叠"——把被拖节点盖住的自由节点沿最小位移轴推开（拖拽节点固定）
   const onNodeDrag: OnNodeDrag = useCallback((_, node) => {
     const drag = noteClusterDragRef.current;
@@ -3599,8 +3311,8 @@ function CanvasFlowInner() {
       );
       return;
     }
-    // 便签根节点（无簇）与批注框拖动不做避让：便签小尺寸 / 批注框本就包裹卡片
-    if (node.type === 'note' || node.type === 'annotation') return;
+    // 批注框拖动不做避让：批注框本就包裹卡片（其联动移动在上面已处理）
+    if (node.type === 'annotation') return;
     const fixed: OverlapRect = {
       id: node.id,
       x: node.position.x,
@@ -3660,7 +3372,7 @@ function CanvasFlowInner() {
       }
     }
 
-    // 簇内其他便签被编程平移（不走各自拖拽事件），需手动批量持久化
+    // 簇内其他卡片被编程平移（不走各自拖拽事件），需手动批量持久化
     if (drag && drag.rootId === node.id && Object.keys(drag.othersStart).length > 0) {
       const positions: Record<string, { x: number; y: number }> = {};
       for (const n of getNodes()) {
@@ -3802,9 +3514,17 @@ function CanvasFlowInner() {
               modelId: DEFAULT_MODEL_ID,
               thinkingLevel: DEFAULT_THINKING_LEVEL,
               nodeMdId: nodeId,
+              initialExpanded: true,
             },
           };
           setNodes((nds) => [...nds, newNode]);
+          // 新建即选中并聚焦输入框（ChatGPT 式「点新建即打字」）：等待节点挂载后再聚焦
+          setSelectedNodeIds(new Set([nodeId]));
+          // 单焦点：新建 = 打开为新对话（New Chat 语义）
+          openNewlyCreatedNode(nodeId);
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('chat-composer-focus', { detail: { node_id: nodeId } }));
+          }, 120);
         }
       })
       .catch(() => {
@@ -3821,11 +3541,17 @@ function CanvasFlowInner() {
             modelId: DEFAULT_MODEL_ID,
             thinkingLevel: DEFAULT_THINKING_LEVEL,
             nodeMdId: id, // 降级节点也需要 nodeMdId
+            initialExpanded: true,
           },
         };
         setNodes((nds) => [...nds, newNode]);
+        setSelectedNodeIds(new Set([id]));
+        openNewlyCreatedNode(id);
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('chat-composer-focus', { detail: { node_id: id } }));
+        }, 120);
       });
-  }, [setNodes]);
+  }, [setNodes, setSelectedNodeIds, openNewlyCreatedNode]);
 
   // 创建知识库（Kar / Notes）Agent 节点：Karpathy LLM Wiki 管理员，专属系统提示 + 笔记工具画像
   const createNoteAgentNode = useCallback((position: { x: number; y: number }) => {
@@ -3857,9 +3583,12 @@ function CanvasFlowInner() {
               modelId: DEFAULT_MODEL_ID,
               thinkingLevel: DEFAULT_THINKING_LEVEL,
               nodeMdId: nodeId,
+              initialExpanded: true,
             },
           };
           setNodes((nds) => [...nds, newNode]);
+          // 单焦点：新建 Kar = 打开为新对话
+          openNewlyCreatedNode(nodeId);
         }
       })
       .catch(() => {
@@ -3876,11 +3605,13 @@ function CanvasFlowInner() {
             modelId: DEFAULT_MODEL_ID,
             thinkingLevel: DEFAULT_THINKING_LEVEL,
             nodeMdId: id,
+            initialExpanded: true,
           },
         };
         setNodes((nds) => [...nds, newNode]);
+        openNewlyCreatedNode(id);
       });
-  }, [setNodes]);
+  }, [setNodes, openNewlyCreatedNode]);
 
   // 通用专项 Agent 节点创建（node_type = agent-<id>，frontmatter 写入；节点壳 identity 由 AGENT_NODE_SHELLS 派生）
   const createAgentNode = useCallback(
@@ -3914,9 +3645,17 @@ function CanvasFlowInner() {
                 modelId: DEFAULT_MODEL_ID,
                 thinkingLevel: DEFAULT_THINKING_LEVEL,
                 nodeMdId: nodeId,
+                initialExpanded: true,
               },
             };
             setNodes((nds) => [...nds, newNode]);
+            // 新建即选中并聚焦输入框（ChatGPT 式「点新建即打字」）：等待节点挂载后再聚焦
+            setSelectedNodeIds(new Set([nodeId]));
+            // 单焦点：新建专项 Agent = 打开为新对话
+            openNewlyCreatedNode(nodeId);
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('chat-composer-focus', { detail: { node_id: nodeId } }));
+            }, 120);
           }
         })
         .catch(() => {
@@ -3932,93 +3671,19 @@ function CanvasFlowInner() {
               modelId: DEFAULT_MODEL_ID,
               thinkingLevel: DEFAULT_THINKING_LEVEL,
               nodeMdId: id,
+              initialExpanded: true,
             },
           };
           setNodes((nds) => [...nds, newNode]);
+          setSelectedNodeIds(new Set([id]));
+          openNewlyCreatedNode(id);
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('chat-composer-focus', { detail: { node_id: id } }));
+          }, 120);
         });
     },
-    [setNodes],
+    [setNodes, setSelectedNodeIds, openNewlyCreatedNode],
   );
-
-  // 在指定位置创建思路便签节点（零 AI，仅作思路上游；source-only 可被连线）
-  // linkSourceId：划词创建等场景传入源 ChatNode，卡片落盘后自动建立 note → 源节点边，
-  // 使其纳入源节点的链导航（skipReorder：卡片位置已按源节点右侧排好，不挪动源节点）。
-  const createStickyNote = useCallback((position: { x: number; y: number }, text?: string, linkSourceId?: string, mdAnchor?: MdAnchor) => {
-    const content = text || '1. ';
-    fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'create',
-        title: 'Note',
-        model: DEFAULT_MODEL_ID,
-        sources: [],
-        node_type: 'note',
-        sticky_text: content,
-        position_x: position.x,
-        position_y: position.y,
-        // md 来源锚点：序列化 JSON 持久化到 frontmatter（点击子弹图标反向定位文档用）
-        md_anchor: mdAnchor ? JSON.stringify(mdAnchor) : undefined,
-      }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success) {
-          const nodeId = data.node_id;
-          const newNode: Node<AiChatNodeData> = {
-            id: nodeId,
-            type: 'note',
-            position,
-            data: {
-              title: 'Note',
-              stickyText: content,
-              mdAnchor,
-              nodeMdId: nodeId,
-              messages: [],
-              isStreaming: false,
-              __hasPersistedPosition: true,
-            },
-          };
-          setNodes((nds) => [...nds, newNode]);
-          if (linkSourceId) void connectStickyEdge(nodeId, linkSourceId, { skipReorder: true });
-        }
-      })
-      .catch(() => {
-        const id = `node-${Date.now()}-${nodeIdCounter.current++}`;
-        const newNode: Node<AiChatNodeData> = {
-          id,
-          type: 'note',
-          position,
-          data: {
-            title: 'Note',
-            stickyText: content,
-            mdAnchor,
-            nodeMdId: id,
-            messages: [],
-            isStreaming: false,
-            __hasPersistedPosition: true,
-          },
-        };
-        setNodes((nds) => [...nds, newNode]);
-      });
-  }, [setNodes, connectStickyEdge]);
-
-  // 划词创建 note：ChatNodeKernel / DocEditor 选中文字 → "Create note" → 生成带内容的 note 卡片
-  // mdAnchor：md 编辑器场景携带来源文档锚点（点击子弹图标反向定位文档对应位置用）
-  // 创建不自动连线：卡片独立成链；如需与节点关联，由用户手动拖线建立连线。
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const d = (e as CustomEvent<{ text: string; sourceNodeId?: string; mdAnchor?: MdAnchor }>).detail;
-      if (!d?.text) return;
-      const source = d.sourceNodeId ? getNodes().find((n) => n.id === d.sourceNodeId) : undefined;
-      const position = source
-        ? { x: source.position.x + (source.measured?.width ?? 400) + 24, y: source.position.y }
-        : { x: 200, y: 200 };
-      createStickyNote(position, d.text, undefined, d.mdAnchor);
-    };
-    window.addEventListener('node-note-create-request', handler);
-    return () => window.removeEventListener('node-note-create-request', handler);
-  }, [getNodes, createStickyNote]);
 
   // 在指定位置创建图像生成节点（文生图/图生图独立工作台，与 AI Chat 节点并列）
   const createImageGenNode = useCallback((position: { x: number; y: number }) => {
@@ -4353,23 +4018,8 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('bobby:run-state', onBobbyRunState);
   }, [getNodes, setEdges]);
 
-  // 右键画布空白：弹出节点创建菜单（AI Chat / AI Coding / Note / Todo），x/y 为屏幕坐标
-  const [nodeContextMenu, setNodeContextMenu] = useState<{ x: number; y: number } | null>(null);
-  // 画布便签层句柄（右键菜单 Todo / Note 新建叠加便签用）
-  const stickyNotesRef = useRef<CanvasStickyNotesHandle>(null);
-  // 顶部色块坞数据（便签摘要，来自 CanvasStickyNotes.onChipsChange）
-  const [noteChips, setNoteChips] = useState<StickyNoteChip[]>([]);
-
-  const handlePaneContextMenu = useCallback((event: MouseEvent | React.MouseEvent<Element, MouseEvent>) => {
-    event.preventDefault();
-    const target = event.target as HTMLElement;
-    if (target.closest('.react-flow__node, .react-flow__controls, .react-flow__handle, .react-flow__edge')) return;
-    if (target.closest('[data-canvas-ui="overlay"]')) return;
-    setNodeContextMenu({ x: event.clientX, y: event.clientY });
-  }, []);
-
   // 判断是否命中画布空白区域（节点、UI浮层、Handle、自定义组件之上都不算空白）
-  // 只有空白处才允许触发画布拖拽/平移/框选，避免操作其他功能时"顺手"把画布动了
+  // 只有空白处才允许触发画布拖拽/平移，避免操作其他功能时"顺手"把画布动了
   const isHittingCanvasBlank = useCallback((event: React.MouseEvent | React.PointerEvent | MouseEvent): boolean => {
     const target = event.target as HTMLElement;
     if (!target) return false;
@@ -4398,14 +4048,14 @@ function CanvasFlowInner() {
     return hitPane || !!hitWrapper;
   }, []);
 
-  // 框选 / 平移 开始（仅左键 + 命中空白区域 + 排除连线拖拽）
+  // 平移 开始（仅左键 + 命中空白区域 + 排除连线拖拽）
   const onPaneClickStart = useCallback(
     (event: React.MouseEvent) => {
       if (event.button !== 0) return; // 仅左键
 
       const target = event.target as HTMLElement;
 
-      // 核心：命中了任何"非空白"元素 → 不启动 框选/平移
+      // 核心：命中了任何"非空白"元素 → 不启动平移
       if (!isHittingCanvasBlank(event)) {
         if (target.closest('[data-canvas-ui="overlay"]')) {
           event.stopPropagation();
@@ -4426,22 +4076,19 @@ function CanvasFlowInner() {
         startClientX: event.clientX,
         startClientY: event.clientY,
         startViewport: { x: vp.x, y: vp.y, zoom: vp.zoom },
-        // mode=null：等超过 5px 阈值再决定是 pan 还是 select
-        // 左键拖拽 → select（框选，恢复用户习惯）；Shift+拖拽 → pan（手动平移入口）
+        // mode=null：等超过 5px 阈值再判定进入平移
         mode: null,
         hadDrag: false,
-        isTouchSelect: false,
         panTarget: null,
       };
     },
     [isHittingCanvasBlank, getViewport],
   );
 
-  // 框选 / 平移 拖拽（统一 5px 阈值：<5px 当作点击，≥5px 根据 Shift 判定选框或平移）
+  // 平移拖拽（统一 5px 阈值：<5px 当作点击，≥5px 进入画布平移）
   const onPaneMouseMove = useCallback(
     (event: React.MouseEvent) => {
       if (dragSelectRef.current.mode === 'off') return;
-      if (dragSelectRef.current.isTouchSelect) return;
 
       const wrapper = wrapperRef.current;
       if (!wrapper) return;
@@ -4452,77 +4099,42 @@ function CanvasFlowInner() {
       const dx = currentX - dragSelectRef.current.startX;
       const dy = currentY - dragSelectRef.current.startY;
 
-      // ========= 1) 阈值内：啥也不做，当作"点"（不 pan 不框选，避免手抖抖动一下画布）=========
+      // ========= 1) 阈值内：啥也不做，当作"点"（不平移，避免手抖抖动一下画布）=========
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
 
       dragSelectRef.current.hadDrag = true;
 
-      // ========= 2) 超过阈值，mode=null 时首次判定模式 =============
-      // 左键拖拽默认框选（select）；Shift+拖拽 → 平移（pan）
+      // ========= 2) 超过阈值，mode=null 时进入平移 =============
       if (dragSelectRef.current.mode === null) {
-        dragSelectRef.current.mode = event.shiftKey ? 'pan' : 'select';
+        dragSelectRef.current.mode = 'pan';
       }
+      if (dragSelectRef.current.mode !== 'pan') return;
 
-      // ========= 3) pan 模式：rAF 节流平移（替换 ReactFlow 内置 pan）============
-      if (dragSelectRef.current.mode === 'pan') {
-        const start = dragSelectRef.current.startViewport;
-        const dxClient = event.clientX - dragSelectRef.current.startClientX;
-        const dyClient = event.clientY - dragSelectRef.current.startClientY;
-        // 只更新"目标视口"：mousemove 频率可达 100+Hz，若每个事件都 setViewport，
-        // 节点多时会超过 16ms 帧预算导致掉帧/闪烁。这里把提交收敛到每帧一次。
-        dragSelectRef.current.panTarget = {
-          x: start.x + dxClient,
-          y: start.y + dyClient,
-          zoom: start.zoom,
-        };
-        if (panRafRef.current === null) {
-          panRafRef.current = requestAnimationFrame(() => {
-            panRafRef.current = null;
-            const target = dragSelectRef.current.panTarget;
-            if (!target) return;
-            // 直接写 store，不触发 setViewport 的动画队列
-            setViewport({ x: target.x, y: target.y, zoom: target.zoom }, { duration: 0 });
-          });
-        }
-        return;
+      // ========= 3) pan：rAF 节流平移（替换 ReactFlow 内置 pan）============
+      const start = dragSelectRef.current.startViewport;
+      const dxClient = event.clientX - dragSelectRef.current.startClientX;
+      const dyClient = event.clientY - dragSelectRef.current.startClientY;
+      // 只更新"目标视口"：mousemove 频率可达 100+Hz，若每个事件都 setViewport，
+      // 节点多时会超过 16ms 帧预算导致掉帧/闪烁。这里把提交收敛到每帧一次。
+      dragSelectRef.current.panTarget = {
+        x: start.x + dxClient,
+        y: start.y + dyClient,
+        zoom: start.zoom,
+      };
+      if (panRafRef.current === null) {
+        panRafRef.current = requestAnimationFrame(() => {
+          panRafRef.current = null;
+          const target = dragSelectRef.current.panTarget;
+          if (!target) return;
+          // 直接写 store，不触发 setViewport 的动画队列
+          setViewport({ x: target.x, y: target.y, zoom: target.zoom }, { duration: 0 });
+        });
       }
-
-      // ========= 4) select 模式：原框选逻辑 ==========
-      // 选择框屏幕坐标（相对于 wrapper）
-      const left = Math.min(dragSelectRef.current.startX, currentX);
-      const top = Math.min(dragSelectRef.current.startY, currentY);
-
-      // 选择框画布坐标（用于碰撞检测）
-      const viewport = getViewport();
-      const flowStart = screenToFlowPosition({
-        x: dragSelectRef.current.startX + rect.left,
-        y: dragSelectRef.current.startY + rect.top,
-      });
-      const flowEnd = screenToFlowPosition({
-        x: currentX + rect.left,
-        y: currentY + rect.top,
-      });
-
-      const flowX = Math.min(flowStart.x, flowEnd.x);
-      const flowY = Math.min(flowStart.y, flowEnd.y);
-      const flowW = Math.abs(flowEnd.x - flowStart.x);
-      const flowH = Math.abs(flowEnd.y - flowStart.y);
-
-      setSelectionBoxPosition({ x: left, y: top, width: Math.abs(dx), height: Math.abs(dy) });
-
-      const intersectingNodes = getIntersectingNodes({
-        x: flowX,
-        y: flowY,
-        width: flowW,
-        height: flowH,
-      });
-
-      setSelectedNodeIds(new Set(intersectingNodes.map((n) => n.id)));
     },
-    [screenToFlowPosition, getIntersectingNodes, getViewport, setViewport],
+    [setViewport],
   );
 
-  // 框选 / 平移 结束
+  // 平移结束
   const onPaneClickEnd = useCallback(() => {
     // 取消可能挂起的 pan rAF，并清掉待提交的目标视口
     if (panRafRef.current !== null) {
@@ -4530,9 +4142,8 @@ function CanvasFlowInner() {
       panRafRef.current = null;
     }
     dragSelectRef.current.panTarget = null;
-    if (dragSelectRef.current.mode !== 'off' && !dragSelectRef.current.isTouchSelect) {
+    if (dragSelectRef.current.mode !== 'off') {
       dragSelectRef.current.mode = 'off';
-      setSelectionBoxPosition(null);
     }
   }, []);
 
@@ -4540,8 +4151,6 @@ function CanvasFlowInner() {
   // 注意：点击节点/连线/Handle/浮层等非空白区域时，click 也会冒泡到这里，
   // 必须跳过取消选中，否则节点刚被选中就被重置（"已执行节点点击输入框不弹出"的根因）。
   const onPaneClick = useCallback((event: React.MouseEvent) => {
-    // 点击画布空白处时关闭右键菜单
-    if (nodeContextMenu) setNodeContextMenu(null);
     if (!isHittingCanvasBlank(event)) return;
     if (dragSelectRef.current.hadDrag) {
       dragSelectRef.current.hadDrag = false;
@@ -4549,321 +4158,9 @@ function CanvasFlowInner() {
     }
     setSelectedNodeIds(new Set());
     setNodes((nds) => nds.map((n) => ({ ...n, selected: false })));
-    setSelectionBoxPosition(null);
-    setActiveChainId(null); // 点击画布空白清除链导航高亮
-    stickyNotesRef.current?.deactivateNote(); // 便签临时置顶回落（重新低于节点层级）
-  }, [isHittingCanvasBlank, setNodes, nodeContextMenu]);
+  }, [isHittingCanvasBlank, setNodes]);
 
   // === 画布内自动聚焦已移除（用户要求选中节点不再自动放大画布） ===
-
-  // 基于选中节点创建新节点（可指定落点位置：拖拽到空白处时在释放位置创建）
-  const createNodeFromSelection = useCallback(async (dropPosition?: { x: number; y: number }) => {
-    if (selectedNodeIds.size === 0) return;
-
-    const viewport = getViewport();
-    const selectedNodes = getNodes().filter((n) => selectedNodeIds.has(n.id));
-
-    if (selectedNodes.length === 0) {
-      setSelectedNodeIds(new Set());
-      return;
-    }
-
-    // 计算选中节点的包围盒，新节点默认放置在右侧，垂直居中
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const n of selectedNodes) {
-      const w = n.measured?.width ?? NODE_WIDTH;
-      const h = n.measured?.height ?? NODE_HEIGHT;
-      minX = Math.min(minX, n.position.x);
-      maxX = Math.max(maxX, n.position.x + w);
-      minY = Math.min(minY, n.position.y);
-      maxY = Math.max(maxY, n.position.y + h);
-    }
-    const boundingCenterY = (minY + maxY) / 2;
-    const GAP = 120;
-
-    // 拖拽释放位置优先（节点居中于落点）；否则放包围盒右侧
-    const newPosition = dropPosition
-      ? { x: dropPosition.x - NODE_WIDTH / 2, y: dropPosition.y - NODE_HEIGHT / 2 }
-      : { x: maxX + GAP, y: boundingCenterY - NODE_HEIGHT / 2 };
-
-    const resp = await fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'create',
-        title: 'AI Chat',
-        model: DEFAULT_MODEL_ID,
-        sources: Array.from(selectedNodeIds),
-        position_x: newPosition.x,
-        position_y: newPosition.y,
-      }),
-    });
-
-    const data = await resp.json();
-    if (data.success) {
-      const newNode: Node<AiChatNodeData> = {
-        id: data.node_id,
-        type: 'aiChat',
-        position: newPosition,
-        data: {
-          title: 'AI Chat',
-          messages: [],
-          isStreaming: false,
-          modelId: DEFAULT_MODEL_ID,
-          thinkingLevel: DEFAULT_THINKING_LEVEL,
-          nodeMdId: data.node_id,
-        },
-      };
-      setNodes((nds) => [...nds, newNode]);
-
-      // 自动创建连线（先锁定每个上游成果块，再建边，避免 R-8 死锁）
-      const failedEdges: Array<{ node: string; error: string }> = [];
-      for (const sourceId of selectedNodeIds) {
-        // 自动锁定上游成果块（与单节点拉出/拖拽连线一致；校验不过时由用户确认强制锁定）
-        const srcNode = getNodes().find((n) => n.id === sourceId);
-        const srcMdId = srcNode ? ((srcNode.data as AiChatNodeData).nodeMdId || sourceId) : sourceId;
-        const lockRes = await lockUpstreamNode(srcMdId);
-        if (!lockRes.ok) {
-          failedEdges.push({ node: sourceId, error: lockRes.error || '自动锁定上游失败' });
-          continue;
-        }
-        const edgeResp = await fetch('/api/edges', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'create',
-            from: sourceId,
-            to: data.node_id,
-            edge_type: 'parallel',
-          }),
-        });
-        const edgeData = await edgeResp.json();
-        if (edgeData.success && edgeData.edge) {
-          setEdges((eds) =>
-            addEdge(
-              {
-                id: edgeData.edge.edge_id,
-                source: edgeData.edge.from,
-                target: edgeData.edge.to,
-                type: 'floating',
-                data: {
-                  relation: 'child',
-                  disconnected: edgeData.edge.disconnected ?? false,
-                },
-              },
-              eds,
-            ),
-          );
-        } else {
-          failedEdges.push({
-            node: sourceId,
-            error: edgeData.error || '未知错误',
-          });
-        }
-      }
-
-      // 汇总失败提示
-      if (failedEdges.length > 0) {
-        const nodeList = failedEdges.map((f) => `- ${f.node}`).join('\n');
-        const sampleErr = failedEdges[0].error;
-        alert(`部分连线创建失败（${failedEdges.length}/${selectedNodeIds.size}）：\n\n${nodeList}\n\n原因：${sampleErr}`);
-      }
-    }
-
-    setSelectedNodeIds(new Set());
-  }, [selectedNodeIds, getNodes, getViewport, setNodes, setEdges, lockUpstreamNode]);
-
-  // 选区拖拽连线：把选中的节点们全部连到目标节点（与 createNodeFromSelection 同语义：source=选中节点，target=目标）
-  const connectSelectionToNode = useCallback(async (targetNodeId: string) => {
-    if (selectedNodeIds.size === 0 || !targetNodeId) return;
-    if (selectedNodeIds.has(targetNodeId)) return; // 不允许连回选区内节点
-    const failedEdges: Array<{ node: string; error: string }> = [];
-    for (const sourceId of selectedNodeIds) {
-      // 自动锁定每个上游成果块（与合并/拉出节点一致；校验不过时由用户确认强制锁定）
-      const srcNode = getNodes().find((n) => n.id === sourceId);
-      const srcMdId = srcNode ? ((srcNode.data as AiChatNodeData).nodeMdId || sourceId) : sourceId;
-      const lockRes = await lockUpstreamNode(srcMdId);
-      if (!lockRes.ok) {
-        failedEdges.push({ node: sourceId, error: lockRes.error || '自动锁定上游失败' });
-        continue;
-      }
-      const edgeResp = await fetch('/api/edges', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'create',
-          from: sourceId,
-          to: targetNodeId,
-          edge_type: 'parallel',
-        }),
-      });
-      const edgeData = await edgeResp.json();
-      if (edgeData.success && edgeData.edge) {
-        setEdges((eds) =>
-          addEdge(
-            {
-              id: edgeData.edge.edge_id,
-              source: edgeData.edge.from,
-              target: edgeData.edge.to,
-              type: 'floating',
-              data: {
-                relation: 'child',
-                disconnected: edgeData.edge.disconnected ?? false,
-              },
-            },
-            eds,
-          ),
-        );
-      } else {
-        failedEdges.push({ node: sourceId, error: edgeData.error || '未知错误' });
-      }
-    }
-    if (failedEdges.length > 0) {
-      const nodeList = failedEdges.map((f) => `- ${f.node}`).join('\n');
-      const sampleErr = failedEdges[0].error;
-      alert(`部分连线创建失败（${failedEdges.length}/${selectedNodeIds.size}）：\n\n${nodeList}\n\n原因：${sampleErr}\n\n请先在上游节点的成果块面板中补全内容并锁定。`);
-    }
-  }, [selectedNodeIds, setEdges, getNodes, lockUpstreamNode]);
-
-  // 选区批注：按选中 note 卡片的包围盒（+padding）创建批注框节点（annotation）
-  const createAnnotationFromSelection = useCallback(() => {
-    if (selectedNodeIds.size === 0) return;
-    const selectedNodes = getNodes().filter(
-      (n) => selectedNodeIds.has(n.id) && n.type === 'note',
-    );
-    if (selectedNodes.length === 0) return;
-    // 计算选中卡片包围盒（position + measured 尺寸）
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of selectedNodes) {
-      const w = n.measured?.width ?? 220;
-      const h = n.measured?.height ?? 110;
-      minX = Math.min(minX, n.position.x);
-      minY = Math.min(minY, n.position.y);
-      maxX = Math.max(maxX, n.position.x + w);
-      maxY = Math.max(maxY, n.position.y + h);
-    }
-    const PAD = 24; // 批注框与卡片的留白
-    const box = {
-      x: Math.round(minX - PAD),
-      y: Math.round(minY - PAD),
-      w: Math.round(maxX - minX + PAD * 2),
-      h: Math.round(maxY - minY + PAD * 2),
-    };
-    const annotated = selectedNodes.map((n) => (n.data as AiChatNodeData).nodeMdId || n.id);
-    fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'create',
-        title: '批注',
-        model: DEFAULT_MODEL_ID,
-        sources: [],
-        node_type: 'annotation',
-        annotated_node_ids: annotated,
-        position_x: box.x,
-        position_y: box.y,
-      }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (!data.success) {
-          console.warn('[annotation] 创建失败:', data.error);
-          return;
-        }
-        const nodeId = data.node_id;
-        const newNode: Node<AiChatNodeData> = {
-          id: nodeId,
-          type: 'annotation',
-          position: { x: box.x, y: box.y },
-          data: {
-            title: '批注',
-            messages: [],
-            isStreaming: false,
-            nodeMdId: nodeId,
-            annotationText: '',
-            annotationNodeIds: annotated,
-            annotationWidth: box.w,
-            annotationHeight: box.h,
-            __hasPersistedPosition: true,
-          },
-        };
-        setNodes((nds) => [...nds, newNode]);
-      })
-      .catch((e) => console.warn('[annotation] 创建失败:', String(e)));
-  }, [selectedNodeIds, getNodes, setNodes]);
-
-  // 选中 note 卡片 → 自动生成批注框（替代右键菜单入口；"+"合并按钮对纯 note 选中不再出现）
-  const autoAnnotationRef = useRef<{ key: string; timer: number | null }>({ key: '', timer: null });
-  useEffect(() => {
-    const selectedNotes = nodes.filter((n) => selectedNodeIds.has(n.id) && n.type === 'note');
-    if (selectedNotes.length === 0) return;
-    const noteIds = selectedNotes.map((n) => n.id).sort();
-    const key = noteIds.join(',');
-    // 该 note 集合已被现有批注框完全包裹 → 不重复创建
-    const covered = nodes.some(
-      (n) =>
-        n.type === 'annotation' &&
-        (n.data as AiChatNodeData).annotationNodeIds?.length === noteIds.length &&
-        (n.data as AiChatNodeData).annotationNodeIds!.every((id) => noteIds.includes(id)),
-    );
-    if (covered) return;
-    if (autoAnnotationRef.current.key === key) return;
-    autoAnnotationRef.current.key = key;
-    if (autoAnnotationRef.current.timer) clearTimeout(autoAnnotationRef.current.timer);
-    autoAnnotationRef.current.timer = window.setTimeout(() => {
-      createAnnotationFromSelection();
-    }, 350);
-  }, [selectedNodeIds, nodes, createAnnotationFromSelection]);
-
-  // 选中的节点是否全部为 note（纯 note 选中时用自动批注，不显示"+"合并按钮）
-  const selectedNodesList = useMemo(
-    () => nodes.filter((n) => selectedNodeIds.has(n.id)),
-    [nodes, selectedNodeIds],
-  );
-  const selectedAreAllNotes =
-    selectedNodesList.length > 0 && selectedNodesList.every((n) => n.type === 'note');
-
-  // 选区拖拽（合并按钮 "+"）：按住 → 跟随鼠标画临时虚线 → 松开时
-  //   - 命中节点（非选区）→ 选中节点们连到目标节点
-  //   - 命中空白处 → 在释放位置创建新节点并连线
-  //   - 未发生拖拽（视为点击）→ 不处理，交给 onClick 执行默认创建
-  const startSelectionConnect = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const startClient = { x: e.clientX, y: e.clientY };
-      let dragged = false;
-      const from = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      setSelectionConnect({ from, to: from });
-
-      const handleMove = (ev: MouseEvent) => {
-        if (Math.abs(ev.clientX - startClient.x) + Math.abs(ev.clientY - startClient.y) > 8) {
-          dragged = true;
-        }
-        const to = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-        setSelectionConnect((prev) => (prev ? { ...prev, to } : prev));
-      };
-      const handleUp = (ev: MouseEvent) => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        setSelectionConnect(null);
-        if (!dragged) return; // 纯点击（无拖拽）→ 由 onClick 处理
-        const pos = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-        // 命中目标节点（排除选区内节点，避免自连）
-        const hit = getIntersectingNodes({ x: pos.x - 20, y: pos.y - 20, width: 40, height: 40 });
-        const target = hit.find((n) => !selectedNodeIds.has(n.id));
-        if (target) {
-          void connectSelectionToNode(target.id);
-        } else {
-          // 空白处释放 → 在落点创建新节点并连线
-          void createNodeFromSelection(pos);
-        }
-      };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-    },
-    [screenToFlowPosition, getIntersectingNodes, selectedNodeIds, connectSelectionToNode, createNodeFromSelection],
-  );
 
   // 在画布视口中央创建新的 AI Chat 节点，返回节点 ID（无则 null）
   const handleCreateNode = useCallback(async (): Promise<string | null> => {
@@ -4900,11 +4197,14 @@ function CanvasFlowInner() {
         modelId: DEFAULT_MODEL_ID,
         thinkingLevel: DEFAULT_THINKING_LEVEL,
         nodeMdId: data.node_id,
+        initialExpanded: true,
       },
     };
     setNodes((nds) => [...nds, newNode]);
+    // 单焦点：新建 AI Chat（划词/文件等入口）= 打开为新对话
+    openNewlyCreatedNode(data.node_id as string);
     return data.node_id as string;
-  }, [getViewport, setNodes]);
+  }, [getViewport, setNodes, openNewlyCreatedNode]);
 
   // 划词追问「新建节点」：创建节点并把选中段落写入引用标签缓冲（新节点 kernel 挂载时消费为引用标签，等用户补写问题后发送）
   useEffect(() => {
@@ -4921,6 +4221,19 @@ function CanvasFlowInner() {
     window.addEventListener('node-create-and-ask', handler);
     return () => window.removeEventListener('node-create-and-ask', handler);
   }, [handleCreateNode]);
+
+  // NodeMap 拖拽建边请求：复刻画布拖拽连线的完整 onConnect 语义（先自动锁定上游源节点、
+  // POST /api/edges create、成功后 addEdge + 子列布局）。成功经 edges store 自动回流到
+  // NodeMap 缩略图；失败（锁定取消 / R-8 / 重复 / 环）沿用 onConnect 的 alert 提示。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ from?: string; to?: string }>).detail;
+      if (!detail?.from || !detail?.to || detail.from === detail.to) return;
+      onConnect({ source: detail.from, target: detail.to, sourceHandle: null, targetHandle: null });
+    };
+    window.addEventListener('edge-create-request', handler);
+    return () => window.removeEventListener('edge-create-request', handler);
+  }, [onConnect]);
 
   // 新建节点并从本地文件复制附件
   const handleCreateNodeWithFile = useCallback(async (filePath: string, isDir = false): Promise<{ nodeId: string; attachment: unknown } | null> => {
@@ -4958,42 +4271,6 @@ function CanvasFlowInner() {
     return { nodeId, attachment: attachmentData.success ? attachmentData.attachment : null };
   }, [handleCreateNode]);
 
-  // 从 Sidebar 触发：保存整个项目为模板
-  const openSaveAsTemplateDialog = useCallback(() => {
-    const allNodes = getNodes() as Node<AiChatNodeData>[];
-    if (allNodes.length === 0) return;
-    setSaveAsTemplateNodes(allNodes);
-    setSaveAsTemplateEdges(edges);
-    setSaveAsTemplateOpen(true);
-  }, [getNodes, edges]);
-
-  // 切换项目后自动打开"保存为模板"对话框
-  useEffect(() => {
-    const flag = localStorage.getItem('openSaveAsTemplateAfterSwitch');
-    if (flag) {
-      localStorage.removeItem('openSaveAsTemplateAfterSwitch');
-      // 等待节点加载完成后打开
-      const timer = setTimeout(() => openSaveAsTemplateDialog(), 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [openSaveAsTemplateDialog]);
-
-  // 监听 Sidebar 模板"保存并应用"事件
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.template_id) {
-        setApplyTemplateId(detail.template_id);
-        setApplyDialogOpen(true);
-      }
-    };
-    window.addEventListener('apply-workflow-template', handler);
-    return () => window.removeEventListener('apply-workflow-template', handler);
-  }, []);
-
-  // 跟踪 viewport 变换，用于计算选中节点边界框的屏幕位置
-  const [viewport, setViewportState] = useState({ x: 0, y: 0, zoom: 1 });
-
   // 当前项目 id 的 ref 副本：视口持久化 effect 闭包使用（避免 stale）
   const currentProjectIdRef = useRef(currentProjectId);
   currentProjectIdRef.current = currentProjectId;
@@ -5027,103 +4304,6 @@ function CanvasFlowInner() {
       document.removeEventListener('visibilitychange', onVisibilityHidden);
     };
   }, [rfStoreApi]);
-
-  // 计算选中节点（≥1）的边界框
-  const selectionOutline = useMemo(() => {
-    if (selectedNodeIds.size < 1) return null;
-    const selectedNodes = getNodes().filter((n) => selectedNodeIds.has(n.id));
-    if (selectedNodes.length < 1) return null;
-
-    const NODE_WIDTH = 400;
-    const NODE_HEIGHT = 160;
-
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of selectedNodes) {
-      const w = n.measured?.width ?? NODE_WIDTH;
-      const h = n.measured?.height ?? NODE_HEIGHT;
-      const x = n.position.x;
-      const y = n.position.y;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x + w > maxX) maxX = x + w;
-      if (y + h > maxY) maxY = y + h;
-    }
-
-    // 从 flow 坐标转换到屏幕坐标
-    const pad = 12;
-    return {
-      left: minX * viewport.zoom + viewport.x - pad,
-      top: minY * viewport.zoom + viewport.y - pad,
-      width: (maxX - minX) * viewport.zoom + pad * 2,
-      height: (maxY - minY) * viewport.zoom + pad * 2,
-    };
-  }, [selectedNodeIds, getNodes, viewport]);
-
-  // 监听"DSH 插件一键安装"：有激活节点 → 直接派发任务给该节点；
-  // 无激活节点 → 创建专用安装节点，挂载后自动发送执行（__pendingNodeTasks 缓冲）
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { task?: string } | undefined;
-      const task = detail?.task;
-      if (!task) return;
-      const targetNodeId = lastActiveNodeIdRef.current;
-      if (targetNodeId) {
-        window.dispatchEvent(
-          new CustomEvent('send-task-to-node', { detail: { node_id: targetNodeId, text: task } }),
-        );
-        return;
-      }
-      const paneEl = document.querySelector('.react-flow__pane');
-      const rect = paneEl?.getBoundingClientRect();
-      const cx = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
-      const cy = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
-      const position = screenToFlowPosition({ x: cx, y: cy });
-      const finalPosition = {
-        x: position.x + 20 + (Math.random() * 40 - 20),
-        y: position.y + 60 + (Math.random() * 40 - 20),
-      };
-      const title = 'DSH Plugin Install';
-      const finish = (nodeId: string) => {
-        const pendingTaskMap = (window.__pendingNodeTasks ??= {});
-        pendingTaskMap[nodeId] = task;
-        const newNode: Node<AiChatNodeData> = {
-          id: nodeId,
-          type: 'aiChat',
-          position: finalPosition,
-          data: {
-            title,
-            messages: [],
-            isStreaming: false,
-            modelId: DEFAULT_MODEL_ID,
-            thinkingLevel: DEFAULT_THINKING_LEVEL,
-            nodeMdId: nodeId,
-          },
-        };
-        setNodes((nds) => [...nds, newNode]);
-      };
-      fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'create',
-          title,
-          model: DEFAULT_MODEL_ID,
-          sources: [],
-          position_x: finalPosition.x,
-          position_y: finalPosition.y,
-        }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          finish(data.success ? data.node_id : `node-${Date.now()}-${nodeIdCounter.current++}`);
-        })
-        .catch(() => {
-          finish(`node-${Date.now()}-${nodeIdCounter.current++}`);
-        });
-    };
-    window.addEventListener('dsh-install-plugin', handler);
-    return () => window.removeEventListener('dsh-install-plugin', handler);
-  }, [screenToFlowPosition, setNodes]);
 
   // 监听"用 Image Gen 打开图片编辑"事件：预览页点 AI 编辑时，创建预载该图的 imageGen 节点并居中
   useEffect(() => {
@@ -5175,96 +4355,6 @@ function CanvasFlowInner() {
     window.addEventListener('open-imagegen-editor', handler);
     return () => window.removeEventListener('open-imagegen-editor', handler);
   }, [screenToFlowPosition, setNodes, fitView, zoomLocked]);
-
-  // 监听"HTML 编辑创建新节点"事件：创建新节点 + 预填编辑记录 + 自动连线溯源节点
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as {
-        fileName: string;
-        refText: string;
-        sourceNodeId: string | null;
-      };
-      if (!detail?.refText) return;
-
-      const paneEl = document.querySelector('.react-flow__pane');
-      const rect = paneEl?.getBoundingClientRect();
-      const cx = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
-      const cy = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
-      const position = screenToFlowPosition({ x: cx, y: cy });
-      const finalPosition = {
-        x: position.x + 20 + (Math.random() * 40 - 20),
-        y: position.y + 60 + (Math.random() * 40 - 20),
-      };
-
-      const nodeTitle = `HTML 编辑: ${detail.fileName}`;
-
-      fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'create',
-          title: nodeTitle,
-          model: DEFAULT_MODEL_ID,
-          sources: [],
-          position_x: finalPosition.x,
-          position_y: finalPosition.y,
-        }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          const nodeId: string = data.success ? data.node_id : `node-${Date.now()}-${nodeIdCounter.current++}`;
-          // 预填编辑记录为引用标签
-          const pendingRefMap = (window.__pendingNodeReference ??= {});
-          pendingRefMap[nodeId] = detail.refText;
-          const newNode: Node<AiChatNodeData> = {
-            id: nodeId,
-            type: 'aiChat',
-            position: finalPosition,
-            data: {
-              title: nodeTitle,
-              messages: [],
-              isStreaming: false,
-              modelId: DEFAULT_MODEL_ID,
-              thinkingLevel: DEFAULT_THINKING_LEVEL,
-              nodeMdId: nodeId,
-            },
-          };
-          setNodes((nds) => [...nds, newNode]);
-
-          // 自动建立父子连线（溯源节点 → 新节点）
-          if (detail.sourceNodeId) {
-            const newEdge: Edge = {
-              id: `e-${detail.sourceNodeId}-${nodeId}`,
-              source: detail.sourceNodeId,
-              target: nodeId,
-              type: 'smoothstep',
-            };
-            setEdges((eds) => [...eds, newEdge]);
-          }
-        })
-        .catch(() => {
-          const nodeId = `node-${Date.now()}-${nodeIdCounter.current++}`;
-          const pendingRefMap = (window.__pendingNodeReference ??= {});
-          pendingRefMap[nodeId] = detail.refText;
-          const newNode: Node<AiChatNodeData> = {
-            id: nodeId,
-            type: 'aiChat',
-            position: finalPosition,
-            data: {
-              title: nodeTitle,
-              messages: [],
-              isStreaming: false,
-              modelId: DEFAULT_MODEL_ID,
-              thinkingLevel: DEFAULT_THINKING_LEVEL,
-              nodeMdId: nodeId,
-            },
-          };
-          setNodes((nds) => [...nds, newNode]);
-        });
-    };
-    window.addEventListener('send-html-edit-to-new-node', handler);
-    return () => window.removeEventListener('send-html-edit-to-new-node', handler);
-  }, [screenToFlowPosition, setNodes, setEdges]);
 
   // 【核心】防止画布 pan/zoom 误触：在捕获阶段判断 mousedown 是否落在非空白元素上，
   // 若是则停止事件传播，阻止 React Flow 的 document 级 pan 监听器启动。
@@ -5330,6 +4420,12 @@ function CanvasFlowInner() {
     };
   }, []);
 
+  // 左列"新建"落点：聚焦节点下方（保留初始次序），否则用原点附近默认值
+  const spawnSiblingPosition = useCallback(() => {
+    const f = graphSnap.nodes.find((n) => n.id === focusedNodeId);
+    return f ? { x: Math.round(f.x + 24), y: Math.round(f.y + 120) } : { x: 96, y: 96 };
+  }, [graphSnap.nodes, focusedNodeId]);
+
   // 预览面板实体：折叠时若 ImageAiEditor 需保活，则用 display:none 隐藏挂载以延续生成；否则正常展示
   const readerPanelEl = (
     <UnifiedReaderPanel
@@ -5339,7 +4435,7 @@ function CanvasFlowInner() {
       readerTitles={readerTitles}
       activePanelTab={activePanelTab}
       collapsed={false}
-      panelWide={panelWide}
+      panelWidth={panelWidth}
       onSelectTab={(type, id) => {
         setActivePanelTab({ type, id });
         if (type === 'node') {
@@ -5353,28 +4449,12 @@ function CanvasFlowInner() {
       onCloseTemplateTab={closeTemplateTab}
       templateInitialScene={templateInitialScene}
       onToggleCollapse={handleTogglePanel}
-      onToggleWide={() => setPanelWide((v) => !v)}
+      onToggleWide={togglePanelWide}
       currentProjectId={currentProjectId}
       outcomeModeTabIds={outcomeModeTabIds}
       sandboxRefreshTick={sandboxRefreshTick}
     />
   );
-
-  // 顶部项目名卡片：正常态置于 mac 红绿灯下方（不追求与灯水平对齐）；全屏（无灯）时上移贴顶。
-  // 与任一节点在屏幕上重叠时不渲染（不得遮挡 node）
-  const projCardTop = isNativeFullscreen ? 4 : 30;
-  const projCardLeft = isNativeFullscreen ? 10 : 14;
-  const projCardRight = projCardLeft + 340;
-  const projCardBottom = projCardTop + 24;
-  const cardOccluded = nodes.some((n) => {
-    const w = n.measured?.width ?? 300;
-    const h = n.measured?.height ?? 200;
-    const l = n.position.x * viewport.zoom + viewport.x;
-    const t = n.position.y * viewport.zoom + viewport.y;
-    const r = l + w * viewport.zoom;
-    const b = t + h * viewport.zoom;
-    return r > projCardLeft && l < projCardRight && t < projCardBottom && b > projCardTop;
-  });
 
   return (
     <NodeReaderContext.Provider value={openReader}>
@@ -5388,7 +4468,7 @@ function CanvasFlowInner() {
         // 根容器显式裁剪：全屏应用不应出现 body 滚动。
         // 预览面板等 overlay 依赖 self-stretch/h-full 约束高度，若某渲染时机下约束失效，
         // 长文档会把面板撑到视口底部之外（"文档出现在画布下方 + 界面可滑动"），此处兜底裁剪。
-        <div className="relative h-screen w-screen overflow-hidden">
+        <div className="relative flex h-screen w-screen overflow-hidden">
           {/* 顶部拖拽区域：absolute 覆盖在画布之上（z-30，低于悬浮面板 z-40）。
               这样三块面板的 top-[8px] 直接相对窗口顶部，mac 红绿灯覆盖在左侧面板左上角 */}
           <div
@@ -5399,105 +4479,370 @@ function CanvasFlowInner() {
               cursor: 'default',
             } as React.CSSProperties}
           >
-            {/* 项目名称卡片：位于 mac 红绿灯右侧；含 workspace / 本地文件 / 回收站 工具。原生全屏时红绿灯隐藏 → 卡片移到最左；与节点重叠或全屏面板打开时隐藏，不遮挡 node/面板 */}
-            {currentProjectTitle && !cardOccluded && !anyFullscreenPanelOpen && (
+            {/* 项目名卡片已迁入左列导航（2026-09 布局重构）；此处保留空白拖拽条 */}
+          </div>
+
+          {/* ===== 左列：项目 + 会话/任务树（2026-09 布局重构，TraeWork 式常驻导航） ===== */}
+          <TooltipProvider delayDuration={150}>
+          <aside
+            className={`relative flex ${navCollapsed ? 'w-[52px]' : 'w-[280px]'} shrink-0 select-none flex-col overflow-hidden transition-[width] duration-150`}
+            style={{
+              backgroundColor: 'transparent',
+              WebkitAppRegion: 'no-drag',
+            } as React.CSSProperties}
+          >
+            {/* mac 红绿灯 + 拖拽留白 + 折叠按钮（同排右置；按钮区域为 no-drag 以保留点击） */}
+            <div
+              className={`flex shrink-0 items-center ${navCollapsed ? 'justify-center' : 'justify-end'}`}
+              style={{
+                minHeight: isNativeFullscreen ? 8 : 32,
+                // 折叠态（52px 窄栏）：红绿灯占满横向，无法靠右避让，只需把按钮下移到红绿灯垂直区域之下，
+                // 避免 native 红绿灯拦截点击（展开态 280px 靠右本就与红绿灯无交叠）。
+                paddingTop: navCollapsed && !isNativeFullscreen ? 40 : 0,
+                WebkitAppRegion: 'drag',
+                WebkitUserSelect: 'none',
+              } as React.CSSProperties}
+            >
               <div
-                className="absolute flex h-6 items-center transition-opacity duration-200"
-                style={{
-                  top: projCardTop,
-                  left: projCardLeft,
-                  opacity: cardHovered ? 1 : 0.35,
-                  WebkitAppRegion: 'no-drag',
-                } as React.CSSProperties}
-                onMouseEnter={() => setCardHovered(true)}
-                onMouseLeave={() => setCardHovered(false)}
+                className="relative z-[31] flex shrink-0 items-center justify-center pr-1"
+                style={{ WebkitAppRegion: 'no-drag', WebkitUserSelect: 'none' } as React.CSSProperties}
               >
-                <div
-                  className="flex max-w-[340px] items-center gap-1 rounded-lg border px-1 py-0.5"
-                  style={{ backgroundColor: 'var(--paper-soft)', borderColor: 'var(--line)', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}
+                <ToolBtn
+                  title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                  onClick={toggleNav}
                 >
-                  <span className="min-w-0 max-w-[160px] truncate pl-1 pr-1 text-xs font-semibold" style={{ color: 'var(--ink-strong)' }}>
-                    {currentProjectTitle}
-                  </span>
-                  <span className="mx-0.5 h-3 w-px shrink-0" style={{ backgroundColor: 'var(--line)' }} />
+                  {navCollapsed ? <PanelRightOpen className="h-3.5 w-3.5" /> : <PanelRightClose className="h-3.5 w-3.5" />}
+                </ToolBtn>
+              </div>
+            </div>
+            {!navCollapsed && (
+            <>
+            {/* 全局工具 */}
+            <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 pb-2">
+              <ToolBtn title="Search (⌘F)" onClick={() => setPaletteOpen(true)}><Search className="h-3.5 w-3.5" /></ToolBtn>
+              <ToolBtn title="Project board" onClick={() => setProjectBoardOpen(true)}><LayoutGrid className="h-3.5 w-3.5" /></ToolBtn>
+              <ToolBtn title="Calendar" onClick={() => setCalendarOpen(true)}><CalendarClock className="h-3.5 w-3.5" /></ToolBtn>
+              <ToolBtn title="Local files" onClick={() => setLocalExplorerCollapsed((v) => !v)}><Monitor className="h-3.5 w-3.5" /></ToolBtn>
+              <ToolBtn title="Trash (deleted nodes)" onClick={() => window.dispatchEvent(new Event('trash-open'))}><Trash className="h-3.5 w-3.5" /></ToolBtn>
+            </div>
+            {/* 项目名标题栏：左侧项目名（点击切换项目），右侧 ＋ 添加会话（chat/coding/note/planner/imageGen 等类型下拉） */}
+            <div className="flex shrink-0 items-center gap-1 px-2 pb-1.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
                   <button
                     type="button"
-                    title="Workspace"
                     onClick={() => window.dispatchEvent(new Event('workspace-toggle'))}
-                    className="flex h-4 w-4 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{ color: 'var(--ink-muted)' }}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ cursor: 'pointer' }}
                   >
-                    <Folder className="h-3 w-3" />
+                    <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-bold" style={{ color: 'var(--ink-strong)' }}>
+                      {currentProjectTitle || 'Project'}
+                    </span>
                   </button>
-                  <button
-                    type="button"
-                    title="Local files"
-                    onClick={() => setLocalExplorerCollapsed((v) => !v)}
-                    className="flex h-4 w-4 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{ color: 'var(--ink-muted)' }}
-                  >
-                    <Monitor className="h-3 w-3" />
-                  </button>
-                  <button
-                    type="button"
-                    title="Trash (deleted nodes)"
-                    onClick={() => window.dispatchEvent(new Event('trash-open'))}
-                    className="flex h-4 w-4 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{ color: 'var(--ink-muted)' }}
-                  >
-                    <Trash className="h-3 w-3" />
-                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">Switch project</TooltipContent>
+              </Tooltip>
+              <div className="relative shrink-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => setAddMenuOpen((v) => !v)}
+                      className="flex h-6 w-6 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
+                    >
+                      <Plus className="h-3.5 w-3.5 shrink-0" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">Add session</TooltipContent>
+                </Tooltip>
+                {addMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-[290]" onClick={() => setAddMenuOpen(false)} />
+                    <div
+                      className="absolute right-0 top-full z-[300] mt-1 w-48 rounded-xl border p-1.5 shadow-xl"
+                      style={{
+                        borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
+                        backgroundColor: '#ffffff',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      {listAgents()
+                        .filter((a) => a.id === 'chat' || !disabledAgentIds.has(a.id))
+                        .map((a) => {
+                        const meta = AGENT_MENU_ICONS[a.id] ?? AGENT_MENU_DEFAULT_ICON;
+                        const label = AGENT_MENU_LABELS[a.id] ?? a.label;
+                        const pos = spawnSiblingPosition();
+                        let onClick: () => void;
+                        if (a.id === 'coding') {
+                          onClick = () => { setNodeCreatePos(pos); setNodeCreateDialogOpen(true); };
+                        } else if (a.id === 'note') {
+                          onClick = () => createNoteAgentNode(pos);
+                        } else if (a.id === 'planner') {
+                          onClick = () => createAgentNode('planner', 'Planner', pos);
+                        } else {
+                          onClick = () => createPlainNode(pos);
+                        }
+                        return (
+                          <button
+                            key={a.id}
+                            type="button"
+                            onClick={() => { onClick(); setAddMenuOpen(false); }}
+                            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                            style={{ color: 'var(--ink)' }}
+                          >
+                            {meta.icon}
+                            <span className="flex-1 truncate">{label}</span>
+                          </button>
+                        );
+                      })}
+                      {/* Agent 市场已装 agent（2026-09-06）：随 /api/agents 动态并入，点击走通用 createAgentNode */}
+                      {marketAgents.some((ma) => !hiddenMenuAgentIds.has(ma.id)) && (
+                        <>
+                          <div className="mx-2 my-1" style={{ borderTop: '1px solid color-mix(in oklab, var(--line) 35%, transparent)' }} />
+                          {marketAgents
+                            .filter((ma) => !hiddenMenuAgentIds.has(ma.id))
+                            .map((ma) => {
+                            const meta = AGENT_MENU_ICONS[ma.id] ?? AGENT_MENU_DEFAULT_ICON;
+                            const label = AGENT_MENU_LABELS[ma.id] ?? ma.label;
+                            return (
+                              <button
+                                key={ma.id}
+                                type="button"
+                                onClick={() => {
+                                  createAgentNode(ma.id, label, spawnSiblingPosition());
+                                  setAddMenuOpen(false);
+                                }}
+                                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                                style={{ color: 'var(--ink)' }}
+                              >
+                                {meta.icon}
+                                <span className="flex-1 truncate">{label}</span>
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
+                      <div className="mx-2 my-1" style={{ borderTop: '1px solid color-mix(in oklab, var(--line) 35%, transparent)' }} />
+                      <button
+                        type="button"
+                        onClick={() => { createImageGenNode(spawnSiblingPosition()); setAddMenuOpen(false); }}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--info-soft)]"
+                        style={{ color: 'var(--ink)' }}
+                      >
+                        <Plus className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--info)' }} />
+                        <span className="flex-1">ImageGen</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+            {/* 会话/任务树：链分组（含散落节点），点击切换到该节点 */}
+            <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
+              {focusRail.length === 0 ? (
+                <div className="px-2 pt-4 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+                  No conversations yet.
+                  <br />Create one below.
                 </div>
+              ) : (
+                focusRail.map((group, gi) => {
+                  const rootDot = group.dots[0];
+                  const rootTitle = rootDot?.title || 'Untitled';
+                  const rootActive = focusedNodeId === rootDot?.id;
+                  // 会话级聚合状态：任一子节点执行中=呼吸灯，任一已完成未读=实心绿点
+                  const rootRunning = group.dots.some((d) => railDotState(d.id) === 'running');
+                  const rootDone = group.dots.some((d) => railDotState(d.id) === 'done');
+                  return (
+                    <div key={group.key} style={{ marginTop: gi === 0 ? 2 : 14 }}>
+                      {/* 根行 = 会话标题（点击聚焦根节点）；hover 显示删除入口（2026-09：自标题栏迁入） */}
+                      <div className="group flex items-center">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (rootDot && !rootActive) switchFocusNode(rootDot.id);
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                          style={{
+                            backgroundColor: rootActive ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {AGENT_MENU_ICONS[rootDot?.identity ?? '']?.icon ?? AGENT_MENU_DEFAULT_ICON.icon}
+                          <span
+                            className="min-w-0 flex-1 truncate text-xs"
+                            style={{ color: rootActive ? 'var(--ink-strong)' : 'var(--ink)', fontWeight: rootActive ? 600 : 400 }}
+                          >
+                            {rootTitle}
+                          </span>
+                          {(rootRunning || rootDone) && (
+                            <span
+                              className={`block h-1.5 w-1.5 shrink-0 rounded-full${rootRunning ? ' rail-run-breathing' : ''}`}
+                              style={{ backgroundColor: 'var(--success)' }}
+                            />
+                          )}
+                          {group.dots.length > 1 && (
+                            <span className="shrink-0 text-[11px]" style={{ color: 'var(--ink-faint)' }}>{group.dots.length - 1}</span>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          title="Delete node"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (rootDot) void deleteNodeFromRail(rootDot.id);
+                          }}
+                          className="flex h-5 w-0 shrink-0 items-center justify-center overflow-hidden rounded text-[var(--ink-faint)] transition-all duration-100 hover:text-[var(--danger)] group-hover:w-5"
+                        >
+                          <X className="h-3 w-3 shrink-0" />
+                        </button>
+                      </div>
+                      {group.dots.slice(1).map((dot) => {
+                        const active = focusedNodeId === dot.id;
+                        const dotState = railDotState(dot.id);
+                        return (
+                          <div key={dot.id} className="group flex items-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!active) switchFocusNode(dot.id);
+                              }}
+                              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                              style={{
+                                backgroundColor: active ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {dotState === 'running' || dotState === 'done' ? (
+                                <span
+                                  className={`block h-1.5 w-1.5 shrink-0 rounded-full${dotState === 'running' ? ' rail-run-breathing' : ''}`}
+                                  style={{ backgroundColor: 'var(--success)' }}
+                                />
+                              ) : (
+                                <span className="block h-1.5 w-1.5 shrink-0" />
+                              )}
+                              <span
+                                className="min-w-0 flex-1 truncate text-xs"
+                                style={{ color: active ? 'var(--ink-strong)' : 'var(--ink)', fontWeight: active ? 600 : 400 }}
+                              >
+                                {dot.title}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              title="Delete node"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void deleteNodeFromRail(dot.id);
+                              }}
+                              className="flex h-5 w-0 shrink-0 items-center justify-center overflow-hidden rounded text-[var(--ink-faint)] transition-all duration-100 hover:text-[var(--danger)] group-hover:w-5"
+                            >
+                              <X className="h-3 w-3 shrink-0" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            {/* 底部品牌区：品牌图标 + BobWork 版本号，点击版本号触发更新检查 */}
+            <div className="shrink-0 px-2 py-2">
+              <button
+                type="button"
+                title={updateStatus === 'checking' ? 'Checking for updates…' : 'Check for updates'}
+                onClick={() => {
+                  if (updateStatus === 'checking' || !isDesktop()) return;
+                  setUpdateStatus('checking');
+                  desktop.update.check().then((r) => {
+                    if (r && !r.success) {
+                      setUpdateStatus('error');
+                      setTimeout(() => setUpdateStatus('idle'), 3000);
+                    }
+                  }).catch(() => {
+                    setUpdateStatus('error');
+                    setTimeout(() => setUpdateStatus('idle'), 3000);
+                  });
+                }}
+                className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)', cursor: isDesktop() ? 'pointer' : 'default' }}
+              >
+                <img src="/bobwork-logo.png" alt="BobWork" className="h-4 w-4 shrink-0 rounded object-contain" draggable={false} />
+                <span className="shrink-0 text-xs font-medium" style={{ color: 'var(--ink-strong)' }}>BobWork</span>
+                <span className="ml-auto flex shrink-0 items-center gap-1 text-[11px]">
+                  {updateStatus === 'checking' ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Checking…
+                    </>
+                  ) : (
+                    <>
+                      v{appVersion}
+                      {updateStatus === 'available' && ` → v${updateVersion}`}
+                      {updateStatus === 'error' && ' Check failed'}
+                    </>
+                  )}
+                </span>
+              </button>
+            </div>
+            </>
+            )}
+            {/* 折叠态：窄图标轨 */}
+            {navCollapsed && (
+              <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto px-1 py-1">
+                <ToolBtn title="Search (⌘F)" onClick={() => setPaletteOpen(true)}><Search className="h-4 w-4" /></ToolBtn>
+                <ToolBtn title="Project board" onClick={() => setProjectBoardOpen(true)}><LayoutGrid className="h-4 w-4" /></ToolBtn>
+                <ToolBtn title="Calendar" onClick={() => setCalendarOpen(true)}><CalendarClock className="h-4 w-4" /></ToolBtn>
+                <ToolBtn title="Local files" onClick={() => setLocalExplorerCollapsed((v) => !v)}><Monitor className="h-4 w-4" /></ToolBtn>
+                <ToolBtn title="Trash (deleted nodes)" onClick={() => window.dispatchEvent(new Event('trash-open'))}><Trash className="h-4 w-4" /></ToolBtn>
               </div>
             )}
-          </div>
-          {/* 项目名称标签已移至 NodeMap 展开面板标题栏（2026-09-01）：此处不再渲染 */}
-          {/* 画布区域：全屏，Sidebar 与右侧面板以 overlay 悬浮其上。
-              圆角对齐 macOS 27 窗口 22pt，与三面板（22px）弧度统一 */}
+          </aside>
+          </TooltipProvider>
+
+          {/* 画布区域：承载当前聚焦会话（TraeWork 式单会话宿主，画布交互已移除） */}
           <div
             ref={wrapperRef}
-            className="relative h-full w-full overflow-hidden"
-            style={{ borderRadius: 22, zIndex: 20 }}
+            className="relative min-w-0 flex-1 overflow-hidden"
           >
       <ReactFlow
         key={flowKey}
-        nodes={nodes}
+        nodes={displayNodes}
         edges={edges}
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
-        onConnectStart={onConnectStart}
-        onConnectEnd={onConnectEnd}
         onEdgesDelete={onEdgesDelete}
         onNodeDragStart={onNodeDragStart}
         onNodeDrag={onNodeDrag}
         onNodeDragStop={onNodeDragStop}
-        onPaneContextMenu={handlePaneContextMenu}
+        onPaneContextMenu={(e) => { e.preventDefault(); /* 2026-09 布局重构：停用画布空白右键新建 */ }}
         onMouseDown={onPaneClickStart}
         onMouseMove={onPaneMouseMove}
         onMouseUp={onPaneClickEnd}
         onMouseLeave={onPaneClickEnd}
         onClick={onPaneClick}
-        nodeTypes={nodeTypes}
+        nodeTypes={effectiveNodeTypes}
         edgeTypes={edgeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
         connectionMode={ConnectionMode.Loose}
         selectionMode={SelectionMode.Partial}
         selectionOnDrag={false}
-        // 关闭 ReactFlow 内部左键 pan：
-        // - 我们手动接管 pan，加入 5px 阈值（避免点击时手抖动 1~3px 导致画布"抖一下"）
-        // - 同时解决内置 pan 与我们自定义框选逻辑（dragSelectRef）的冲突
+        // 自由画布交互已移除（2026-09 布局重构）：中栏仅承载聚焦会话，禁平移/缩放/拖拽/键盘删除
+        nodesDraggable={false}
         panOnDrag={[]}
-        panOnScroll={true}
-        zoomOnScroll={!zoomLocked}
-        zoomOnPinch={!zoomLocked}
+        panOnScroll={false}
+        zoomOnScroll={false}
+        zoomOnPinch={false}
         zoomOnDoubleClick={false}
         preventScrolling={false}
-        minZoom={zoomLocked ? 1 : 0.1}
-        maxZoom={zoomLocked ? 1 : 3}
+        minZoom={1}
+        maxZoom={1}
         defaultViewport={savedViewportRef.current || { x: 0, y: 0, zoom: 1 }}
         proOptions={{ hideAttribution: true }}
-        deleteKeyCode={['Backspace', 'Delete']}
+        deleteKeyCode={null}
         onBeforeDelete={onBeforeDelete}
         onNodesDelete={onNodesDelete}
         onNodeClick={(_event, node) => {
@@ -5508,196 +4853,36 @@ function CanvasFlowInner() {
           lastActiveNodeIdRef.current = node.id;
         }}
         onMoveStart={() => {
-          setActiveChainId(null);
           // 任何手动平移/缩放都视为用户已接管画布，阻止后续自动 fit 抢占
           userInteractedRef.current = true;
         }}
-        onMoveEnd={(event, vp) => {
-          setViewportState(vp);
-        }}
       >
-        <Background
-          variant={BackgroundVariant.Dots}
-          gap={24}
-          size={1.5}
-          color="var(--line)"
-        />
-        <FloatingEdgeDefs />
-        {/* NodeMap 左下角悬浮：rail 已移除恒为折叠态，固定贴最左侧缘（不再随 sidebarCollapsed 偏移）；
-            展开面板标题栏展示当前项目名称 */}
-        <NodeMap
-          gateway={graphGateway}
-          left={16}
-          title={currentProjectTitle || undefined}
-          projectId={currentProjectId || undefined}
-          onAfterFit={() => stickyNotesRef.current?.focusAllNotes()}
-        />
       </ReactFlow>
 
-      {/* 画布便签层：项目级私有便利贴（世界坐标贴纸，跟随缩放） */}
-      <CanvasStickyNotes ref={stickyNotesRef} projectId={currentProjectId || null} onChipsChange={setNoteChips} />
+      {/* NodeMap 左下角悬浮（2026-09-06 恢复挂载）：折叠态 MapIcon 贴中栏左下角，点击展开连线管理缩略图 */}
+      <NodeMap
+        gateway={graphGateway}
+        left={16}
+        title={currentProjectTitle || undefined}
+        projectId={currentProjectId || undefined}
+        focusedNodeId={focusedNodeId}
+      />
 
-      {/* 画布链导航圆点：左侧竖排，固定贴最左侧缘（每链一个；点击后该链在可视区水平居中） */}
-      {/* 全屏浮层(日历/笔记/Sandbox/Teams)打开时隐藏——圆点 z-[70] 高于面板 z-[51]，会浮在面板上造成遮挡 */}
-      {!anyFullscreenPanelOpen && canvasChains.length > 0 && (
-        <div
-          className="absolute top-1/2 z-[70] flex -translate-y-1/2 flex-col items-center gap-1.5 pointer-events-none"
-          style={{ left: 16 }}
-        >
-          {canvasChains.map((chain) => {
-            const active = activeChainId === chain.rootId;
-            // 归档标识：该链含归档节点时圆点加成功色实心外圈（与 NodeMap 圆点一致），点击先恢复再聚焦
-            const archivedIds = chainArchived.get(chain.rootId) || [];
-            const isArchived = archivedIds.length > 0;
-            return (
-              <button
-                key={chain.rootId}
-                type="button"
-                data-chain-nav
-                onClick={() => {
-                  if (isArchived) {
-                    for (const id of archivedIds) graphGateway.restoreNode(id);
-                  }
-                  focusChainFromCanvas(chain.rootId, chain.ids);
-                }}
-                className="pointer-events-auto flex items-center justify-center rounded-full transition-all group"
-                style={{
-                  width: 20,
-                  height: 20,
-                  padding: 0,
-                  border: 'none',
-                  background: 'transparent',
-                  cursor: 'pointer',
-                }}
-                aria-label={isArchived ? `Restore archived node(s) in chain ${chain.order}` : `Chain ${chain.order}`}
-                title={isArchived
-                  ? (archivedIds.length === 1 ? 'Restore archived node' : `Restore ${archivedIds.length} archived nodes`)
-                  : `Chain ${chain.order}`}
-              >
-                <span
-                  className="block rounded-full transition-all group-hover:scale-125 group-active:scale-95"
-                  style={{
-                    width: active ? 11 : 9,
-                    height: active ? 11 : 9,
-                    backgroundColor: active
-                      // 激活态：画布底为基 → 混入 28% 浓淡灰(--ink-muted，接近深灰) → 再混 7% 主题色，仅保留一丝色相温度不发"死灰"
-                      ? 'color-mix(in oklab, color-mix(in oklab, var(--canvas-bg) 65%, var(--ink-muted) 28%) 93%, var(--primary) 7%)'
-                      // 未激活态：画布底色为基 → 混 12% 淡灰 → 再混 7% 主题色（仅微弱主题色倾向，远看接近画布自带的"淡灰颗粒"）
-                      : 'color-mix(in oklab, color-mix(in oklab, var(--canvas-bg) 88%, var(--ink-faint) 12%) 93%, var(--primary) 7%)',
-                    border: 'none',
-                    boxShadow: [
-                      // 归档外圈（成功色实心圆环，优先显示）
-                      isArchived ? '0 0 0 3px color-mix(in oklab, var(--success) 50%, transparent)' : '',
-                      active
-                        // 激活态投影：淡灰投影为主，主题色光晕极弱几乎不可见
-                        ? '0 0 5px color-mix(in oklab, var(--ink-muted) 30%, transparent), 0 0 10px 3px color-mix(in oklab, var(--primary) 8%, transparent)'
-                        // 未激活态阴影：非常淡的画布灰投影，几乎融入背景
-                        : '0 0 5px 2px color-mix(in oklab, var(--ink-faint) 8%, transparent), 0 0 10px 3px color-mix(in oklab, var(--ink-faint) 4%, transparent)',
-                    ].filter(Boolean).join(', '),
-                  }}
-                />
-              </button>
-            );
-          })}
+      {/* 空态提示：无聚焦会话时中栏居中提示 */}
+      {!focusedNodeId && (
+        <div className="pointer-events-none absolute inset-0 z-[15] flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-sm font-medium" style={{ color: 'var(--ink-muted)' }}>
+              No conversation open
+            </div>
+            <div className="mt-1 text-xs" style={{ color: 'var(--ink-faint)' }}>
+              Pick one from the list on the left, or create a new task below.
+            </div>
+          </div>
         </div>
       )}
 
-      {/* 框选矩形 */}
-      {selectionBoxPosition && (
-        <div
-          className="absolute pointer-events-none"
-          style={{
-            left: selectionBoxPosition.x,
-            top: selectionBoxPosition.y,
-            width: selectionBoxPosition.width,
-            height: selectionBoxPosition.height,
-            border: '2px dashed var(--primary)',
-            zIndex: 100,
-          }}
-        />
-      )}
-
-      {/* 多节点选中虚线框 */}
-      {selectionOutline && (
-        <div
-          className="absolute pointer-events-none"
-          style={{
-            left: selectionOutline.left,
-            top: selectionOutline.top,
-            width: selectionOutline.width,
-            height: selectionOutline.height,
-            border: '2px dashed var(--primary-strong)',
-            borderRadius: '8px',
-            zIndex: 50,
-          }}
-        />
-      )}
-
-      {/* 选区拖拽临时连线（flow 坐标，应用 viewport transform 与内容对齐） */}
-      {selectionConnect && (
-        <svg
-          className="pointer-events-none absolute"
-          style={{
-            left: 0,
-            top: 0,
-            width: '100%',
-            height: '100%',
-            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
-            transformOrigin: '0 0',
-            zIndex: 150,
-          }}
-        >
-          <line
-            x1={selectionConnect.from.x}
-            y1={selectionConnect.from.y}
-            x2={selectionConnect.to.x}
-            y2={selectionConnect.to.y}
-            stroke="var(--primary)"
-            strokeWidth={2 / viewport.zoom}
-            strokeDasharray={6 / viewport.zoom}
-            strokeLinecap="round"
-          />
-        </svg>
-      )}
-
-      {/* 选中节点后显示操作按钮 — 放在虚线框右侧垂直居中 */}
-      {selectedNodeIds.size >= 1 && (
-        <div
-          className="absolute flex flex-col gap-2"
-          data-canvas-ui="overlay"
-          style={{
-            left: selectionOutline
-              ? selectionOutline.left + selectionOutline.width + 20
-              : '12px',
-            top: selectionOutline
-              ? selectionOutline.top + selectionOutline.height / 2
-              : '12px',
-            transform: 'translateY(-50%)',
-            zIndex: 200,
-          }}
-        >
-          {/* 选中全是 note 时：不显示"+"（自动批注已替代 chatnode 合并创建）；含 AI Chat 等仍保留 */}
-          {selectedNodeIds.size >= 2 && !selectedAreAllNotes && (
-            <button
-              onClick={() => createNodeFromSelection()}
-              onMouseDown={startSelectionConnect}
-              className="flex h-8 w-8 items-center justify-center rounded-full text-lg font-bold shadow-lg transition-transform hover:scale-110"
-              style={{
-                backgroundColor: 'var(--primary)',
-                color: '#fff',
-                border: '2px solid rgba(255,255,255,0.65)',
-                boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
-                cursor: 'crosshair',
-                fontFamily: 'var(--font-sans)',
-              }}
-              title="点击：创建新节点并连线；拖拽：连线到其他节点，或拖到空白处创建节点"
-            >
-              +
-            </button>
-          )}
-        </div>
-        )}
-
+      {/* 框选/多选选中虚线框已移除（2026-09：删除框选相关功能） */}
 
       <div data-canvas-ui="overlay">
         <SettingsModal
@@ -5715,27 +4900,14 @@ function CanvasFlowInner() {
           onOpenNotes={() => setNotesOpen(true)}
           onOpenCalendar={() => setCalendarOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
+          focusedNodeId={focusedNodeId}
+          projectId={currentProjectId || undefined}
         />
 
         {/* 项目看板：全屏大视图（Workspace 标题看板按钮打开） */}
         <ProjectBoardView
           open={projectBoardOpen}
           onClose={() => setProjectBoardOpen(false)}
-        />
-
-        {/* 应用模板对话框 */}
-         <TemplateApplyDialog
-          open={applyDialogOpen}
-          onOpenChange={setApplyDialogOpen}
-          templateId={applyTemplateId}
-        />
-
-        {/* 保存为模板对话框 */}
-        <SaveAsTemplateDialog
-          open={saveAsTemplateOpen}
-          onOpenChange={setSaveAsTemplateOpen}
-          nodes={saveAsTemplateNodes}
-          edges={saveAsTemplateEdges}
         />
 
         {/* 日历面板 */}
@@ -5749,6 +4921,11 @@ function CanvasFlowInner() {
         {/* 笔记库独立界面 */}
         {notesOpen && (
           <NotesPanel onClose={() => setNotesOpen(false)} />
+        )}
+
+        {/* Bob-Mind 插件面板壳：内嵌 bob-mind-mcp 自带 Web UI（宿主零便签实现） */}
+        {bobMindOpen && (
+          <BobMindPanel onClose={() => setBobMindOpen(false)} />
         )}
 
         {/* Bob Sandbox 全屏管理页（小程序商城）：全屏覆盖层，Esc / 关闭按钮退出 */}
@@ -5774,110 +4951,18 @@ function CanvasFlowInner() {
           onCreated={handleNodeCreated}
         />
 
-        {/* 右键画布空白菜单：新建节点（AI Chat / AI Coding / Image Gen） */}
-        {nodeContextMenu && (
-          <div
-            data-canvas-ui="overlay"
-            className="fixed z-[300] rounded-2xl border p-1.5 shadow-xl"
-            style={{
-              left: nodeContextMenu.x,
-              top: nodeContextMenu.y,
-              minWidth: '190px',
-              borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
-              backgroundColor: 'var(--popover)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onMouseDown={(e) => e.stopPropagation()}
-          >
-            {/* 便签类一级入口：Note（画布可连线便签）置于最上，Todo（旧叠加便签）并列 */ }
-            <button
-              type="button"
-              onClick={() => {
-                createStickyNote(screenToFlowPosition({ x: nodeContextMenu.x, y: nodeContextMenu.y }));
-                setNodeContextMenu(null);
-              }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink)' }}
-            >
-              <Target className="h-4 w-4 shrink-0" style={{ color: '#B8860B' }} />
-              Note
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                stickyNotesRef.current?.createNote(nodeContextMenu.x, nodeContextMenu.y);
-                setNodeContextMenu(null);
-              }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink)' }}
-            >
-              <ClipboardList className="h-4 w-4 shrink-0" style={{ color: NOTE_COLOR_SWATCH.green }} />
-              Todo
-            </button>
-            {/* 便签类与节点类入口分组分隔线 */}
-            <div
-              className="mx-2 my-1"
-              style={{ borderTop: '1px solid color-mix(in oklab, var(--line) 35%, transparent)' }}
-            />
-            {/* 节点类：agent 节点由 AGENT_PROFILES 注册表驱动（加新 agent 只需注册 + 提供创建逻辑） */}
-            {listAgents().map((a) => {
-              const meta = AGENT_MENU_ICONS[a.id] ?? AGENT_MENU_DEFAULT_ICON;
-              const pos = screenToFlowPosition({ x: nodeContextMenu.x, y: nodeContextMenu.y });
-              let onClick: () => void;
-              if (a.id === 'coding') {
-                onClick = () => {
-                  setNodeCreatePos(pos);
-                  setNodeCreateDialogOpen(true);
-                };
-              } else if (a.id === 'note') {
-                onClick = () => createNoteAgentNode(pos);
-              } else if (a.id === 'planner') {
-                onClick = () => createAgentNode('planner', 'Planner', pos);
-              } else {
-                onClick = () => createPlainNode(pos);
-              }
-              return (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() => {
-                    onClick();
-                    setNodeContextMenu(null);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink)', backgroundColor: undefined }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.backgroundColor = meta.hoverBg; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.backgroundColor = ''; }}
-                >
-                  <span style={{ color: meta.color }}>{meta.icon}</span>
-                  <span className="flex-1">{AGENT_MENU_LABELS[a.id] ?? a.label}</span>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => {
-                createImageGenNode(screenToFlowPosition({ x: nodeContextMenu.x, y: nodeContextMenu.y }));
-                setNodeContextMenu(null);
-              }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--info-soft)]"
-              style={{ color: 'var(--ink)' }}
-            >
-              <ImageIcon className="h-4 w-4 shrink-0" style={{ color: 'var(--info)' }} />
-              ImageGen
-            </button>
-          </div>
-        )}
-
       </div>
 
-      {/* 悬浮 Sidebar：贴左缘 overlay（z-40；外层容器不拦截画布事件，面板自身可交互） */}
+      </div>
+      {/* ^^ 上面第一个 </div> 关闭 data-canvas-ui 覆盖层，第二个 </div> 关闭 wrapper（对话容器）。
+          Sidebar 浮层与右 dock 自此成为 root flex 的并列子级 */}
+
+      {/* 悬浮 Sidebar（Workspace 浮层）：整窗级，盖在左栏/对话之上 */}
       <div className="pointer-events-none absolute bottom-[10px] left-[10px] top-[10px] z-40">
         <div className="pointer-events-auto h-full">
           <Sidebar
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenCalendar={() => setCalendarOpen(true)}
-            onOpenSaveAsTemplate={openSaveAsTemplateDialog}
             onOpenProjectBoard={() => setProjectBoardOpen(true)}
             projectId={currentProjectId}
             onCollapsedChange={handleSidebarCollapsedChange}
@@ -5886,12 +4971,11 @@ function CanvasFlowInner() {
         </div>
       </div>
 
-      {/* 悬浮右侧容器：预览面板 + 本地文件面板（独立卡片 + 小间距），各自独立折叠互不影响。
-          溢出兜底：面板高度依赖 self-stretch/h-full，约束失效时内容会溢出到视口底部下方，
-          这里裁剪兜底，确保任何面板内容都不会撑出全屏应用滚动条 */}
-      <div className="pointer-events-none absolute bottom-[10px] right-[10px] top-[10px] z-40 flex items-start overflow-hidden" style={{ gap: 6 }}>
+      {/* 右侧 dock：预览面板 + 本地文件面板（真并列列，与左栏/对话同级，互不重叠，保留固定间距）。
+          wrapper（对话容器）在上面已闭合；此处 dock 为 root flex 行的最后一个子级，自动挤窄对话区 */}
+      <div className="relative z-40 flex shrink-0 items-start gap-0.5 overflow-hidden py-[3px] pr-[3px]">
         {/* 折叠后仅展示的展开按钮：用固定占位 div 包裹，保持预览面板在树中的位置稳定，避免折叠时卸载导致生成中断 */}
-        <div className="shrink-0">
+        <div className="shrink-0 self-start">
           {panelCollapsed && (
             <button
               onClick={handleTogglePanel}
@@ -5903,11 +4987,11 @@ function CanvasFlowInner() {
             </button>
           )}
         </div>
-        {/* 预览面板：始终位于容器内固定位置；折叠时以 display:none 隐藏而非卸载。
+        {/* 预览面板：折叠时以 display:none 隐藏而非卸载。
             若 ImageAiEditor 生成中/结果待查看（keepAlive），隐藏挂载延续生成；否则折叠时彻底卸载以释放资源 */}
         {(!panelCollapsed || aiEditKeepAlive) && (
           <div
-            className="pointer-events-auto self-stretch"
+            className="self-stretch"
             data-reader-panel-wrapper
             style={panelCollapsed ? { display: 'none' } : undefined}
             aria-hidden={panelCollapsed || undefined}
@@ -5915,9 +4999,9 @@ function CanvasFlowInner() {
             {readerPanelEl}
           </div>
         )}
-        {/* 本地文件面板（主面板）：展开/折叠由左侧边栏电脑图标或自动折叠控制 */}
+        {/* 本地文件面板：展开/折叠由左侧栏电脑图标或自动折叠控制 */}
         {!localExplorerCollapsed && (
-          <div className="pointer-events-auto self-stretch" data-local-explorer-wrapper>
+          <div className="self-stretch" data-local-explorer-wrapper>
             <LocalFileExplorer
               activeNodeIdRef={lastActiveNodeIdRef}
               onCreateNodeWithFile={handleCreateNodeWithFile}
@@ -5927,7 +5011,6 @@ function CanvasFlowInner() {
             />
           </div>
         )}
-      </div>
       </div>
       </div>
       ) : (

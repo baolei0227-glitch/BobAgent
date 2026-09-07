@@ -10,36 +10,32 @@ import {
   Check,
   RefreshCw,
   FileText,
-  ChevronDown,
   FolderPlus,
   Upload,
   FolderUp,
-  FileStack,
   Shield,
   ShieldCheck,
   ArrowUpCircle,
   PlusCircle,
   Pencil,
   ExternalLink,
-  LayoutTemplate,
   LayoutGrid,
   StickyNote,
   X,
   Star,
+  MoreHorizontal,
 } from 'lucide-react';
 import { WantedNoticeCenter } from './WantedNoticeCenter';
 import { SkillManagerModal } from './SkillManagerModal';
-import { TemplatePanel } from './TemplatePanel';
-import { TemplateApplyDialog } from './TemplateApplyDialog';
 import { TrashDialog } from './TrashDialog';
 import { bus, BusEvents } from '@/lib/bus';
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { loadSettings, applyCustomTheme, applyFontScale } from '@/lib/settings';
-import { isPreviewable } from './viewers/registry';
 import type { MessageAttachment } from '@/lib/types';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { Button } from '@/components/ui/button';
 import { FileName } from './FileName';
 
 export interface ProjectInfo {
@@ -76,26 +72,15 @@ interface HomeworkKindGroup {
   files: { name: string; extension?: string; path: string; source?: 'project' | 'local' }[];
 }
 
-/** 便签颜色中文简称（彩色分布图标 tooltip 用） */
-const STICKY_COLOR_LABEL: Record<string, string> = { yellow: '黄', blue: '蓝', green: '绿', pink: '粉' };
-
-// 文件树层级标记：微缩进（每级 6px、封顶 3 级）+ 圆点大小/竖线粗细/透明度随深度递减，
-// 避免多级文件夹把文件名空间越压越窄
-const LEVEL_INDENT_STEP = 6; // 每级微缩进 px
+// 文件树层级缩进：每级 6px、封顶 3 级；多级文件夹通过缩进表达层级（无圆点/竖线装饰）
+const LEVEL_INDENT_STEP = 6; // 每级缩进 px
 const LEVEL_INDENT_CAP = 3; // 缩进封顶级数（更深层级不再右移）
-/** 层级微缩进（封顶） */
+/** 层级缩进（封顶） */
 const levelIndent = (level: number) => Math.min(Math.max(level, 0), LEVEL_INDENT_CAP) * LEVEL_INDENT_STEP;
-/** 层级圆点直径：7→6→5→4（封顶） */
-const levelDotSize = (level: number) => Math.max(4, 7 - Math.max(level, 0));
-/** 层级竖线粗细：1.5 / 1（封顶） */
-const levelLineWidth = (level: number) => (level <= 1 ? 1.5 : 1);
-/** 层级圆点透明度：1→0.4（封顶） */
-const levelDotOpacity = (level: number) => Math.max(0.4, 1 - Math.max(level, 0) * 0.15);
 
 interface SidebarProps {
   onOpenSettings: () => void;
   onOpenCalendar: () => void;
-  onOpenSaveAsTemplate: () => void;
   projectId: string;
   /** 折叠状态变化通知（父级据此调整顶部拖拽区让出按钮区域；rail 已移除恒为折叠态） */
   onCollapsedChange?: (collapsed: boolean) => void;
@@ -160,66 +145,61 @@ function fileIcon(ext?: string): { color: string; label: string } {
   }
 }
 
-export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, projectId, onCollapsedChange, onCreateNodeWithFile, onOpenProjectBoard }: SidebarProps) {
+export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreateNodeWithFile, onOpenProjectBoard }: SidebarProps) {
   // 侧边栏仅保留浮层渲染（rail 视觉条已迁至 ⌘F 面板底部图标栏，2026-09-01）：
-  // Workspace → 可拖动浮层（项目列表 + 文件树）；Bob Solution → 完整模板面板浮层
+  // Workspace → 可拖动浮层（项目列表 + 文件树）
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [templatesOpen, setTemplatesOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   // 浮层位置（初始贴左缘；拖动标题栏可移动，会话内记忆）
   const [wsPos, setWsPos] = useState<{ x: number; y: number }>({ x: 52, y: 96 });
-  const [tplPos, setTplPos] = useState<{ x: number; y: number }>({ x: 52, y: 96 });
   // 无 rail 视觉条：通知父级布局按"折叠态"处理（NodeMap / 预览面板偏移保持折叠值）
   useEffect(() => {
     onCollapsedChange?.(true);
   }, [onCollapsedChange]);
   // 点击浮层外部 → 关闭
   useEffect(() => {
-    if (!workspaceOpen && !templatesOpen) return;
+    if (!workspaceOpen) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as Node | null;
       if (t && t.nodeType === 1) {
         const el = t as Element;
         if (el.closest('[data-bob-sidebar-popover]')) return; // 浮层内部点击不关闭
         if (el.closest('[data-bob-sidebar-rail]')) return; // rail 按钮（重新点击切换）不关闭
+        if (el.closest('[data-quick-switch]')) return; // 项目切换下拉 portal 到 body（浮层 DOM 之外）：点击项须先完成切换，不在此关闭浮层
+        if (el.closest('[data-material-menu]')) return; // materials 操作菜单同样 portal 到 body：点击菜单项不关闭浮层
       }
       setWorkspaceOpen(false);
-      setTemplatesOpen(false);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [workspaceOpen, templatesOpen]);
+  }, [workspaceOpen]);
 
   // 事件桥接：⌘F 面板底部图标栏触发 Sidebar 内部面板（rail 已移除，2026-09-01）
   useEffect(() => {
     const onWorkspaceToggle = () => setWorkspaceOpen((v) => !v);
     const onCreateProject = () => setCreateDialogOpen(true);
-    const onTemplatesToggle = () => setTemplatesOpen((v) => !v);
     const onTrashOpen = () => setTrashOpen(true);
     window.addEventListener('workspace-toggle', onWorkspaceToggle);
     window.addEventListener('create-project-open', onCreateProject);
-    window.addEventListener('templates-toggle', onTemplatesToggle);
     window.addEventListener('trash-open', onTrashOpen);
     return () => {
       window.removeEventListener('workspace-toggle', onWorkspaceToggle);
       window.removeEventListener('create-project-open', onCreateProject);
-      window.removeEventListener('templates-toggle', onTemplatesToggle);
       window.removeEventListener('trash-open', onTrashOpen);
     };
   }, []);
 
   // 浮层拖动：标题栏按下（非按钮）→ pointermove 更新位置，pointerup 结束
-  const startDrag = useCallback((e: React.PointerEvent, which: 'ws' | 'tpl') => {
+  const startDrag = useCallback((e: React.PointerEvent) => {
     if ((e.target as Element).closest('button')) return; // 标题栏上的按钮（切换/关闭等）不触发拖动
     e.preventDefault();
     const startX = e.clientX;
     const startY = e.clientY;
-    const base = which === 'ws' ? wsPos : tplPos;
+    const base = wsPos;
     const move = (ev: PointerEvent) => {
       const nx = Math.max(0, base.x + ev.clientX - startX);
       const ny = Math.max(8, base.y + ev.clientY - startY);
-      if (which === 'ws') setWsPos({ x: nx, y: ny });
-      else setTplPos({ x: nx, y: ny });
+      setWsPos({ x: nx, y: ny });
     };
     const up = () => {
       window.removeEventListener('pointermove', move);
@@ -227,7 +207,7 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
-  }, [wsPos, tplPos]);
+  }, [wsPos]);
 
   // BobMail 受控状态：入口图标统一在 ⌘F 面板底部图标栏，弹层由 WantedNoticeCenter 受控渲染
   const [wantedOpen, setWantedOpen] = useState(false);
@@ -293,11 +273,6 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
   const [installProgress, setInstallProgress] = useState<{ stage: string; message: string; percent?: number } | null>(null);
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 模板相关状态
-  const [applyDialogOpen, setApplyDialogOpen] = useState(false);
-  const [applyingTemplateId, setApplyingTemplateId] = useState<string | null>(null);
-  const [templateRefreshTrigger, setTemplateRefreshTrigger] = useState(0);
-
   // Materials 相关状态（上传/新建共用）
   const [newFolderParent, setNewFolderParent] = useState<string>('');
   const [newFolderName, setNewFolderName] = useState('');
@@ -314,15 +289,6 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
   const renameRef = useRef<HTMLInputElement>(null);
   // 当前激活节点 ID（用于"发送到当前节点"）
   const activeNodeIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.node_id) activeNodeIdRef.current = detail.node_id;
-    };
-    window.addEventListener('node-focused', handler);
-    return () => window.removeEventListener('node-focused', handler);
-  }, []);
-
   // 关闭右键菜单（点击任意位置）
   useEffect(() => {
     if (!ctxMenu) return;
@@ -625,10 +591,11 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
   const [loadingFiles, setLoadingFiles] = useState<Set<string>>(new Set());
   // homework 按 kind 类别分组的输出文件，key 为项目 id
   const [homeworkGroups, setHomeworkGroups] = useState<Map<string, HomeworkKindGroup[]>>(new Map());
-  // 画布当前选中节点 id（由 CanvasFlow 广播 node-selected 更新；null = 无选中）
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  // 类别分组展开状态（默认空 = 全折叠）；key 为 `${projId}:${kind}`
+  // 类别分组展开状态；key 为 `${projId}:${kind}`。
+  // 默认展开：首次收到某项目的类别分组时全部展开，之后尊重用户手动折叠（见 loadProjectFiles）
   const [homeworkOpenGroups, setHomeworkOpenGroups] = useState<Set<string>>(new Set());
+  // 已执行过"默认展开"的项目 id（防止后续刷新/重开浮层覆盖用户手动折叠状态）
+  const defaultHomeworkExpandedRef = useRef<Set<string>>(new Set());
   // Workspace 区块折叠状态（与 Bob Items / Bob Sandbox 同级标题样式）
   const [projectsOpen, setProjectsOpen] = useState(true);
   // 快速切换下拉（当前项目行 ▾）：展示全部活跃项目
@@ -725,16 +692,6 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
     if (workspaceOpen && currentId) loadProjectFiles(currentId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceOpen]);
-
-  // 监听画布节点选中变化：选中节点时高亮 homework 中对应的节点分组
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const d = (e as CustomEvent<{ node_id?: string | null }>).detail;
-      setSelectedNodeId(d?.node_id ?? null);
-    };
-    window.addEventListener('node-selected', handler);
-    return () => window.removeEventListener('node-selected', handler);
-  }, []);
 
   // 监听 AI 工具文件变更，自动刷新文件树
   useEffect(() => {
@@ -872,6 +829,15 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
 
   // 快速切换下拉（Workspace 标题栏项目图标）：锚点位置（fixed 定位菜单用）
   const [quickSwitchAnchor, setQuickSwitchAnchor] = useState<{ top: number; right: number } | null>(null);
+  // materials 目录行「⋯」操作菜单：锚点位置 + 当前行上下文（菜单项操作跟随上下文执行）
+  const [materialMenu, setMaterialMenu] = useState<{
+    top: number;
+    right: number;
+    projId: string;
+    isRoot: boolean;
+    materialsRelPath: string;
+    folderName: string;
+  } | null>(null);
 
   /** 点击项目图标：toggle 快速切换下拉（菜单右对齐按钮渲染） */
   const toggleQuickSwitch = useCallback((e: React.MouseEvent) => {
@@ -884,6 +850,30 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
     setQuickSwitchAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
     setQuickSwitchOpen(true);
   }, [quickSwitchOpen]);
+
+  // 点击 materials 菜单外部 / Esc / 滚动 → 关闭
+  useEffect(() => {
+    if (!materialMenu) return;
+    const close = () => setMaterialMenu(null);
+    const onDocDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('[data-material-menu]')) return;
+      close();
+    };
+    document.addEventListener('mousedown', onDocDown);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    };
+  }, [materialMenu]);
+
+  // 浮层关闭时同步关闭 materials 菜单（菜单 portal 独立渲染，不随浮层卸载）
+  useEffect(() => {
+    if (!workspaceOpen) setMaterialMenu(null);
+  }, [workspaceOpen]);
 
   // 点击快速切换下拉外部 / Esc / 滚动 → 关闭
   useEffect(() => {
@@ -925,6 +915,17 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
           next.set(pid, data.homework_kind_groups || []);
           return next;
         });
+        // 默认展开：首次收到该项目类别分组时全部展开（此后不覆盖用户手动折叠）
+        const groupKeys: string[] = (data.homework_kind_groups || []).map((g: HomeworkKindGroup) => `${pid}:${g.kind}`);
+        if (groupKeys.length > 0 && !defaultHomeworkExpandedRef.current.has(pid)) {
+          setHomeworkOpenGroups((prev) => {
+            if (defaultHomeworkExpandedRef.current.has(pid)) return prev;
+            const next = new Set(prev);
+            groupKeys.forEach((k) => next.add(k));
+            return next;
+          });
+          defaultHomeworkExpandedRef.current.add(pid);
+        }
       }
     } catch (err) {
       console.error('加载文件树失败:', err);
@@ -1062,7 +1063,7 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
   }, [currentId]);
 
   /** 递归渲染文件树 */
-  const renderFileTree = (nodes: FileNode[], depth: number, parentPath: string, projId: string, hasPrevSiblings = false) => {
+  const renderFileTree = (nodes: FileNode[], depth: number, parentPath: string, projId: string) => {
     // 将文件树虚拟路径（<projectId>/...）转换为真实文件系统路径
     const toRealPath = (virtualPath: string): string => {
       const project = projects.find((p) => p.id === projId);
@@ -1077,10 +1078,7 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
       return children.filter((n) => n.type === 'directory' && !KIND_DIR_NAMES.has(n.name));
     };
 
-    // 当前项目是否选中：选中时其文件夹树的线与点同步加深（与项目行一致）
-    const treeActive = projId === currentId;
-
-    return nodes.map((node, idx) => {
+    return nodes.map((node) => {
       const nodePath = `${parentPath}/${node.name}`;
       const isExpanded = expandedFolders.has(nodePath);
       // 真实路径：优先用服务端下发的 rel（摊平展示的 template 文档路径与名称链不一致时仍正确），否则按名称链还原
@@ -1101,38 +1099,13 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
           <div key={nodePath}>
             <div
               className="group relative flex w-full items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ paddingLeft: `${15 + levelIndent(depth + 1)}px`, backgroundColor: treeActive ? 'var(--paper-hover)' : 'transparent' }}
+              style={{ paddingLeft: `${15 + levelIndent(depth + 1)}px` }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 setCtxMenu({ x: e.clientX, y: e.clientY, filePath: realPath, fileName: node.name, isDir: true });
               }}
             >
-              {/* 垂直引导线（首项从半高起、末项到半高止；上方有节点分组时首项贯穿与节点组衔接）；比项目行右移一档，选中项目时深色加深；粗细随层级递减 */}
-              <div
-                style={{
-                  position: 'absolute',
-                  left: `${levelIndent(depth + 1) + 5}px`,
-                  top: idx === 0 && !hasPrevSiblings ? '50%' : 0,
-                  bottom: idx === nodes.length - 1 ? '50%' : 0,
-                  width: levelLineWidth(depth + 1),
-                  backgroundColor: treeActive ? 'var(--ink)' : 'var(--line)',
-                }}
-              />
-              {/* 树节点圆点（选中项目时深色加深；大小/透明度随层级递减） */}
-              <div
-                style={{
-                  position: 'absolute',
-                  left: `${levelIndent(depth + 1) + 5 - levelDotSize(depth + 1) / 2}px`,
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  width: levelDotSize(depth + 1),
-                  height: levelDotSize(depth + 1),
-                  borderRadius: 999,
-                  backgroundColor: treeActive ? 'var(--ink)' : 'var(--ink-muted)',
-                  opacity: (treeActive ? 1 : 0.65) * levelDotOpacity(depth + 1),
-                }}
-              />
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1149,76 +1122,26 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
               </button>
 
               {isUnderMaterials && (
-                <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
-                  {isMaterialsRoot && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleMaterialsAuth(projId);
-                      }}
-                      className="rounded p-0.5 transition-colors hover:bg-[var(--success-soft)]"
-                      style={{ color: isMaterialsAuthed(projId) ? 'var(--success)' : 'var(--ink-muted)' }}
-                      title={isMaterialsAuthed(projId) ? 'AI read/write authorized, click to revoke' : 'Authorize AI read/write for this directory (@ mentions, file tools)'}
-                    >
-                      {isMaterialsAuthed(projId) ? (
-                        <ShieldCheck className="h-3 w-3" />
-                      ) : (
-                        <Shield className="h-3 w-3" />
-                      )}
-                    </button>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setUploadTargetFolder(materialsRelPath);
-                      setTimeout(() => uploadInputRef.current?.click(), 50);
-                    }}
-                    className="rounded p-0.5 transition-colors hover:bg-[var(--info-soft)]"
-                    style={{ color: 'var(--info)' }}
-                    title="Upload file"
-                  >
-                    <Upload className="h-3 w-3" />
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setUploadTargetFolder(materialsRelPath);
-                      setTimeout(() => uploadFolderInputRef.current?.click(), 50);
-                    }}
-                    className="rounded p-0.5 transition-colors hover:bg-[var(--info-soft)]"
-                    style={{ color: 'var(--info)' }}
-                    title="Upload folder"
-                  >
-                    <FolderUp className="h-3 w-3" />
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setNewFolderParent(materialsRelPath);
-                      setNewFolderName('');
-                      setNewFolderVisible(true);
-                    }}
-                    className="rounded p-0.5 transition-colors hover:bg-[var(--primary-soft)]"
-                    style={{ color: 'var(--ink-muted)' }}
-                    title="New subfolder"
-                  >
-                    <FolderPlus className="h-3 w-3" />
-                  </button>
-                  {!isMaterialsRoot && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!confirm(`Delete folder "${node.name}" and all its contents?`)) return;
-                        handleDeleteMaterial(materialsRelPath, true);
-                      }}
-                      className="rounded p-0.5 transition-colors hover:bg-[var(--danger-soft)]"
-                      style={{ color: 'var(--danger)' }}
-                      title="Delete"
-                    >
-                      <Trash className="h-3 w-3" />
-                    </button>
-                  )}
-                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    setMaterialMenu({
+                      top: rect.bottom + 4,
+                      right: window.innerWidth - rect.right,
+                      projId,
+                      isRoot: isMaterialsRoot,
+                      materialsRelPath,
+                      folderName: node.name,
+                    });
+                  }}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink)]"
+                  title="Actions"
+                  aria-label="Actions"
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </button>
               )}
             </div>
             {isExpanded && node.children && (
@@ -1229,7 +1152,6 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
                   depth + 1,
                   nodePath,
                   projId,
-                  isHomeworkRoot ? (homeworkGroups.get(projId) || []).length > 0 : false,
                 )}
               </div>
             )}
@@ -1348,46 +1270,20 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
 
     return (
       <div className="mt-0.5">
-        {groups.map((g, idx) => {
+        {groups.map((g) => {
           const key = `${projId}:${g.kind}`;
           const isOpen = homeworkOpenGroups.has(key);
-          const nodeActive = projId === currentId;
           return (
             <div key={key}>
-              {/* 类别目录行：与文件系统目录统一形态（文件夹图标 + 标签 + 文件数 + 引导线/圆点） */}
+              {/* 类别目录行：文件夹图标 + 标签 + 文件数 */}
               <div
                 className="group relative flex cursor-pointer items-center rounded-md py-1 transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ paddingLeft: `${15 + levelIndent(depth + 1)}px`, backgroundColor: nodeActive ? 'var(--paper-hover)' : 'transparent' }}
+                style={{ paddingLeft: `${15 + levelIndent(depth + 1)}px` }}
                 onClick={() => {
                   toggleHomeworkGroup(key);
                 }}
                 title={g.label}
               >
-                {/* 垂直引导线（节点组首项从半高起、其余贯穿到底，与下方文件系统目录衔接）；选中项目/节点时深色加深；粗细随层级递减 */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: `${levelIndent(depth + 1) + 5}px`,
-                    top: idx === 0 ? '50%' : 0,
-                    bottom: 0,
-                    width: levelLineWidth(depth + 1),
-                    backgroundColor: nodeActive ? 'var(--ink)' : 'var(--line)',
-                  }}
-                />
-                {/* 树节点圆点（选中项目/节点时深色加深；大小/透明度随层级递减） */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: `${levelIndent(depth + 1) + 5 - levelDotSize(depth + 1) / 2}px`,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    width: levelDotSize(depth + 1),
-                    height: levelDotSize(depth + 1),
-                    borderRadius: 999,
-                    backgroundColor: nodeActive ? 'var(--ink)' : 'var(--ink-muted)',
-                    opacity: (nodeActive ? 1 : 0.65) * levelDotOpacity(depth + 1),
-                  }}
-                />
                 {isOpen ? (
                   <FolderOpen className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--primary)' }} />
                 ) : (
@@ -1505,7 +1401,7 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
     <>
       {/* 侧边条 rail 已移除（2026-09-01）：全部按钮迁至 ⌘F 面板底部图标栏；
           常驻状态提示（BobMail 角标 / 更新进度）迁移至 NodeMap。
-          本组件仅保留浮层渲染（Workspace / Bob Solution / BobMail / 回收站 / 新建项目等）。 */}
+          本组件仅保留浮层渲染（Workspace / BobMail / 回收站 / 新建项目等）。 */}
 
       {/* Workspace 浮层（可拖动）：项目列表 + 当前项目文件树（完整交互） */}
       {workspaceOpen && typeof document !== 'undefined' && createPortal(
@@ -1527,7 +1423,7 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
           <div
             className="cursor-move select-none px-2 py-1"
             style={{ WebkitUserSelect: 'none' }}
-            onPointerDown={(e) => startDrag(e, 'ws')}
+            onPointerDown={(e) => startDrag(e)}
           >
             <div className="flex items-center gap-1">
               <button
@@ -1540,37 +1436,44 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
                 </span>
               </button>
               {/* 项目切换（下拉选择项目）：原项目行 ▾ 移至 Workspace 标题栏，换为项目图标 */}
-              <button
+              <Button
                 type="button"
                 onClick={(e) => toggleQuickSwitch(e)}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
                 title="Switch project"
-                className="flex-shrink-0 rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
+                aria-label="Switch project"
               >
                 <FolderOpen className="h-3.5 w-3.5" />
-              </button>
+              </Button>
               {/* 刷新当前项目文件列表 */}
               {currentId && (
-                <button
+                <Button
                   type="button"
                   onClick={() => loadProjectFiles(currentId)}
+                  variant="ghost"
+                  tone="neutral"
+                  size="icon-sm"
                   title="Refresh file list"
-                  className="flex-shrink-0 rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  aria-label="Refresh file list"
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${currentId && loadingFiles.has(currentId) ? 'animate-spin' : ''}`} />
-                </button>
+                </Button>
               )}
               {/* 关闭浮层（最右侧） */}
-              <button
+              <Button
                 type="button"
                 onClick={() => setWorkspaceOpen(false)}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
+                className="ml-auto"
                 title="Close"
-                className="ml-auto flex-shrink-0 rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
+                aria-label="Close"
               >
                 <X className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -1590,8 +1493,6 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
                 </div>
                 {starredList.map((p) => (
                   <div key={p.id} className="group relative flex items-center rounded-md transition-colors" style={{ paddingLeft: 16 }}>
-                    <div style={{ position: 'absolute', left: 5, top: '50%', bottom: '50%', width: 1.5, backgroundColor: 'var(--ink)' }} />
-                    <div style={{ position: 'absolute', left: 2.25, top: '50%', transform: 'translateY(-50%)', width: 7, height: 7, borderRadius: 999, backgroundColor: 'var(--primary)', opacity: 0.8 }} />
                     <button
                       onClick={() => handleSwitch(p.id)}
                       className="flex flex-1 min-w-0 items-center gap-2 truncate rounded-md px-1.5 py-1.5 text-left text-sm"
@@ -1640,15 +1541,17 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
                   <div className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
                     Create a project to get started
                   </div>
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setCreateDialogOpen(true)}
-                    className="mt-2 inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-90"
-                    style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
+                    variant="solid"
+                    tone="brand"
+                    size="sm"
+                    className="mt-2"
                   >
                     <Plus className="h-3.5 w-3.5" />
                     New project
-                  </button>
+                  </Button>
                 </div>
               );
             }
@@ -1660,39 +1563,11 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
             <>
             <TooltipProvider delayDuration={0}>
             <div className="mx-1.5 mb-1">
-              {/* 当前项目行（树状引导线 + 圆点） */}
+              {/* 当前项目行 */}
               <div
-                className="group relative flex items-center rounded-md transition-colors"
-                style={{
-                  paddingLeft: 16,
-                  backgroundColor: 'var(--paper-hover)',
-                }}
+                className="group relative flex items-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ paddingLeft: 16 }}
               >
-                {/* 垂直引导线（单个项目：线从半高到半高） */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: 5,
-                    top: '50%',
-                    bottom: '50%',
-                    width: 1.5,
-                    backgroundColor: 'var(--ink)',
-                  }}
-                />
-                {/* 项目圆点（当前项目深色强调） */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: 2.25,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    width: 7,
-                    height: 7,
-                    borderRadius: 999,
-                    backgroundColor: 'var(--ink)',
-                    opacity: 1,
-                  }}
-                />
                 {/* 项目名称（点击展开/折叠文件树；加载中在名称后显示 spinner） */}
                 <button
                   onClick={() => toggleProjectExpand(currentProject.id)}
@@ -1788,20 +1663,7 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
                   </button>
                 )}
 
-                {/* 保存为模板 */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenSaveAsTemplate();
-                  }}
-                  className="hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)] group-hover:block"
-                  style={{ color: 'var(--primary)' }}
-                  title="Save as Template"
-                >
-                  <FileStack className="h-3.5 w-3.5" />
-                </button>
-              </div>
+                </div>
 
               {/* 文件树（homework 目录内含 AI 节点目录） */}
               {isExpanded && (
@@ -1886,53 +1748,101 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
         document.body,
       )}
 
-      {/* Bob Solution 完整模板面板（独立浮层，可拖动） */}
-      {templatesOpen && typeof document !== 'undefined' && createPortal(
+      {/* materials 目录「⋯」操作菜单（portal 挂 body，避免被浮层滚动容器裁切） */}
+      {materialMenu && typeof document !== 'undefined' && createPortal(
         <div
-          data-bob-sidebar-popover
-          className="fixed z-[60] flex flex-col overflow-hidden rounded-xl border font-sans"
-          style={{
-            left: tplPos.x,
-            top: tplPos.y,
-            width: 320,
-            maxHeight: 'calc(100vh - 40px)',
-            backgroundColor: 'var(--paper)',
-            borderColor: 'color-mix(in oklab, var(--line) 35%, transparent)',
-            boxShadow: '0 12px 32px color-mix(in srgb, var(--ink) 22%, transparent)',
-          }}
+          data-material-menu
+          className="fixed z-[500] w-56 overflow-hidden rounded-lg border py-1 shadow-xl"
+          style={{ top: materialMenu.top, right: materialMenu.right, backgroundColor: 'var(--popover)', borderColor: 'var(--line)' }}
         >
-          <div
-            className="flex h-9 shrink-0 cursor-move select-none items-center gap-2 border-b px-3"
-            style={{ borderColor: 'var(--line-soft)', WebkitUserSelect: 'none' }}
-            onPointerDown={(e) => startDrag(e, 'tpl')}
-          >
-            <LayoutTemplate className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
-            <span className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
-              Bob Solution
-            </span>
-            <button
-              type="button"
-              onClick={() => setTemplatesOpen(false)}
-              title="Close"
-              className="ml-auto flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-muted)' }}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <TemplatePanel
-              onApplyTemplate={(templateId) => {
-                setApplyingTemplateId(templateId);
-                setApplyDialogOpen(true);
-              }}
-              refreshTrigger={templateRefreshTrigger}
-            />
-          </div>
+          {(() => {
+            const authed = isMaterialsAuthed(materialMenu.projId);
+            const itemBase = 'flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors hover:bg-[var(--paper-hover)]';
+            return (
+              <>
+                {materialMenu.isRoot && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMaterialMenu(null);
+                      toggleMaterialsAuth(materialMenu.projId);
+                    }}
+                    className={itemBase}
+                    style={{ color: authed ? 'var(--success)' : 'var(--ink)' }}
+                  >
+                    {authed ? (
+                      <ShieldCheck className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--success)' }} />
+                    ) : (
+                      <Shield className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                    )}
+                    {authed ? 'Revoke AI access' : 'Authorize AI access'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaterialMenu(null);
+                    setUploadTargetFolder(materialMenu.materialsRelPath);
+                    setTimeout(() => uploadInputRef.current?.click(), 50);
+                  }}
+                  className={itemBase}
+                  style={{ color: 'var(--ink)' }}
+                >
+                  <Upload className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--info)' }} />
+                  Upload file
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaterialMenu(null);
+                    setUploadTargetFolder(materialMenu.materialsRelPath);
+                    setTimeout(() => uploadFolderInputRef.current?.click(), 50);
+                  }}
+                  className={itemBase}
+                  style={{ color: 'var(--ink)' }}
+                >
+                  <FolderUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--info)' }} />
+                  Upload folder
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaterialMenu(null);
+                    setNewFolderParent(materialMenu.materialsRelPath);
+                    setNewFolderName('');
+                    setNewFolderVisible(true);
+                  }}
+                  className={itemBase}
+                  style={{ color: 'var(--ink)' }}
+                >
+                  <FolderPlus className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                  New subfolder
+                </button>
+                {!materialMenu.isRoot && (
+                  <>
+                    <div className="my-1 h-px" style={{ backgroundColor: 'var(--line)' }} />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMaterialMenu(null);
+                        if (confirm(`Delete folder "${materialMenu.folderName}" and all its contents?`)) {
+                          handleDeleteMaterial(materialMenu.materialsRelPath, true);
+                        }
+                      }}
+                      className={itemBase}
+                      style={{ color: 'var(--danger)' }}
+                    >
+                      <Trash className="h-3.5 w-3.5 shrink-0" />
+                      Delete folder
+                    </button>
+                  </>
+                )}
+              </>
+            );
+          })()}
         </div>,
         document.body,
       )}
-
 
       {/* BobMail 通知中心：入口图标在 Sidebar（collapsed rail），弹层受控渲染（portal 到 body） */}
       <WantedNoticeCenter
@@ -2081,7 +1991,10 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
               />
             </div>
             <div className="mt-5 flex justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 onClick={() => {
                   setCreateDialogOpen(false);
                   setNewProjectName('');
@@ -2091,17 +2004,19 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
                   setNewProjectTag2('');
                 }}
                 disabled={creating}
-                className="btn btn-ghost btn-sm"
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 onClick={handleCreate}
                 disabled={creating || !newProjectName.trim()}
-                className="btn btn-primary btn-sm"
+                loading={creating}
               >
                 {creating ? 'Creating...' : 'Create'}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2209,34 +2124,29 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
             </div>
 
             <div className="mt-5 flex justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 onClick={() => setEditMetaProject(null)}
                 disabled={savingMeta}
-                className="btn btn-ghost btn-sm"
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 onClick={handleSaveProjectMeta}
                 disabled={savingMeta}
-                className="btn btn-primary btn-sm"
+                loading={savingMeta}
               >
                 {savingMeta ? 'Saving...' : 'Save'}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
       )}
-
-      {/* 模板应用对话框 */}
-      <TemplateApplyDialog
-        open={applyDialogOpen}
-        onOpenChange={setApplyDialogOpen}
-        templateId={applyingTemplateId}
-        onApplied={(nodes) => {
-          setTemplateRefreshTrigger((v) => v + 1);
-        }}
-      />
 
       {/* 节点回收站对话框 */}
       <TrashDialog open={trashOpen} onOpenChange={setTrashOpen} projectId={projectId} />
@@ -2314,22 +2224,26 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
               }}
             />
             <div className="mt-4 flex justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 onClick={() => {
                   setNewFolderVisible(false);
                   setNewFolderName('');
                 }}
-                className="btn btn-ghost btn-sm"
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 onClick={handleCreateFolder}
                 disabled={!newFolderName.trim()}
-                className="btn btn-primary btn-sm"
               >
                 Create
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2432,19 +2346,23 @@ export function Sidebar({ onOpenSettings, onOpenCalendar, onOpenSaveAsTemplate, 
               }}
             />
             <div className="flex justify-end gap-2">
-              <button
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
                 onClick={() => setRenaming(null)}
-                className="btn btn-ghost btn-sm"
               >
                 取消
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
                 onClick={handleRename}
                 disabled={!renameValue.trim() || renameValue.trim() === renaming.oldName}
-                className="btn btn-primary btn-sm"
               >
                 确认
-              </button>
+              </Button>
             </div>
           </div>
         </div>

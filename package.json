@@ -1,6 +1,6 @@
 {
   "name": "bob-work",
-  "version": "0.5.341",
+  "version": "0.5.353",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {
@@ -74,6 +74,7 @@
     "@tiptap/core": "^3.29.2",
     "@tiptap/extension-bubble-menu": "^3.29.2",
     "@tiptap/extension-code-block-lowlight": "^3.29.2",
+    "@tiptap/extension-drag-handle-react": "^3.29.2",
     "@tiptap/extension-floating-menu": "^3.29.2",
     "@tiptap/extension-heading": "^3.29.2",
     "@tiptap/extension-highlight": "^3.29.2",

@@ -1135,21 +1135,36 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
               const pageId = typeof pg.id === 'string' ? pg.id : '';
               const pageTitle = typeof pg.title === 'string' && pg.title.trim() ? pg.title.trim() : 'P1';
               const content = typeof pg.content === 'string' ? pg.content : '';
-              const lines = parseTodoLines(content);
+              let lines = parseTodoLines(content);
               // 保留行级日历元数据（画布便签发送到日历后在此显示闹钟；不写回则下次打开丢失标记）
-              const lineEventIds = Array.isArray(pg.lineEventIds)
+              let lineEventIds = Array.isArray(pg.lineEventIds)
                 ? (pg.lineEventIds as unknown[][]).map((x) => (Array.isArray(x) ? x.map(String) : []))
                 : undefined;
-              const lineCalendared = Array.isArray(pg.lineCalendared) ? pg.lineCalendared.map(Boolean) : undefined;
+              let lineCalendared = Array.isArray(pg.lineCalendared) ? pg.lineCalendared.map(Boolean) : undefined;
+              // 空行不是待办：解析即剔除空待办行，并同步对齐行级日历元数据，
+              // 避免脏空行进入本地数据 / 撤销栈（回撤后"冒出空白待办"的根源）
+              if (lines.some((l) => !l.text.trim())) {
+                const keptLines: TodoLine[] = [];
+                const keptEv: string[][] = [];
+                const keptCal: boolean[] = [];
+                for (let i = 0; i < lines.length; i++) {
+                  if (!lines[i].text.trim()) continue;
+                  keptLines.push(lines[i]);
+                  if (lineEventIds) keptEv.push(lineEventIds[i] ?? []);
+                  if (lineCalendared) keptCal.push(lineCalendared[i] ?? false);
+                }
+                lines = keptLines;
+                if (lineEventIds) lineEventIds = keptEv;
+                if (lineCalendared) lineCalendared = keptCal;
+              }
               // 空待办页也保留在弹窗里（新建后无事项 / 事项被清空时仍可在此添加、编辑）
               if (pageId) {
                 pages.push({ pageId, pageTitle, lines, ...(lineEventIds ? { lineEventIds } : {}), ...(lineCalendared ? { lineCalendared } : {}) });
               }
             }
-            // 兼容老数据 content → P1（同样保留空内容页以便继续编辑）
+            // 兼容老数据 content → P1（同样保留空内容页以便继续编辑；剔除空行，语义同上）
             if (pages.length === 0 && typeof n.content === 'string' && n.content.trim()) {
-              const lines = parseTodoLines(n.content);
-              pages.push({ pageId: 'pg-legacy', pageTitle: 'P1', lines });
+              pages.push({ pageId: 'pg-legacy', pageTitle: 'P1', lines: parseTodoLines(n.content).filter((l) => l.text.trim()) });
             }
             if (pages.length === 0) return null;
             return { noteId, title, color, pages, activePageId } as TodoNoteData;

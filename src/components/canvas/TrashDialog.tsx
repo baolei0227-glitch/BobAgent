@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Trash2, RotateCcw, Loader2, AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 interface TrashItem {
   file: string;
@@ -141,17 +142,18 @@ export function TrashDialog({ open, onOpenChange, projectId }: TrashDialogProps)
                       {new Date(it.deleted_at).toLocaleString()} · {it.turns} turn{it.turns === 1 ? '' : 's'} · {(it.size / 1024).toFixed(1)} KB
                     </div>
                   </div>
-                  <button
-                    type="button"
+                  <Button
+                    variant="solid"
+                    tone="brand"
+                    size="sm"
                     disabled={busyFile !== null}
+                    loading={busyFile === it.file}
                     onClick={() => void restore(it.file)}
                     title="Restore node"
-                    className="flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors hover:opacity-80 disabled:opacity-50"
-                    style={{ backgroundColor: 'var(--brand)', color: 'var(--brand-on)' }}
                   >
                     {busyFile === it.file ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
                     Restore
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
@@ -162,36 +164,37 @@ export function TrashDialog({ open, onOpenChange, projectId }: TrashDialogProps)
           {items.length > 0 && (
             confirmEmpty ? (
               <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
+                <Button
+                  variant="outline"
+                  tone="neutral"
+                  size="sm"
                   disabled={emptying}
                   onClick={() => setConfirmEmpty(false)}
-                  className="h-7 rounded-md px-2.5 text-xs transition-colors hover:opacity-80 disabled:opacity-50"
-                  style={{ border: '1px solid var(--line)' }}
                 >
                   Cancel
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="solid"
+                  tone="danger"
+                  size="sm"
                   disabled={emptying}
+                  loading={emptying}
                   onClick={() => void emptyTrash()}
-                  className="flex h-7 items-center gap-1 rounded-md px-2.5 text-xs text-white transition-colors hover:opacity-80 disabled:opacity-50"
-                  style={{ backgroundColor: 'var(--danger)' }}
                 >
                   {emptying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                   Confirm Empty
-                </button>
+                </Button>
               </div>
             ) : (
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                tone="danger"
+                size="sm"
                 onClick={() => setConfirmEmpty(true)}
-                className="flex h-7 items-center gap-1 rounded-md px-2.5 text-xs transition-colors hover:opacity-80"
-                style={{ border: '1px solid var(--danger)', color: 'var(--danger)' }}
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 Empty Trash
-              </button>
+              </Button>
             )
           )}
         </div>

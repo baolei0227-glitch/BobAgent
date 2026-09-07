@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 import { type FillTemplateItem } from './TemplateFillDialog';
 
 interface TemplateLibraryModalProps {
@@ -317,15 +318,16 @@ export function TemplateLibraryModal({ open, onOpenChange, embedded }: TemplateL
                   />
                 </div>
                 <div className="relative shrink-0" ref={sceneMenuRef}>
-                  <button
+                  <Button
                     type="button"
                     onClick={() => setSceneMenuOpen((v) => !v)}
-                    className="rounded-md border px-2 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-                    style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
+                    variant="outline"
+                    tone="neutral"
+                    size="sm"
                     title="Select or manage existing scenes"
                   >
                     Existing ▾
-                  </button>
+                  </Button>
                   {sceneMenuOpen && (
                     <div
                       className="absolute right-0 z-50 mt-1 w-56 overflow-hidden rounded-lg border shadow-lg"
@@ -357,18 +359,21 @@ export function TemplateLibraryModal({ open, onOpenChange, embedded }: TemplateL
                           ) : confirmDeleteScene === scene.name ? (
                             <div className="flex items-center gap-1 px-1.5 py-1 text-xs">
                               <span style={{ color: 'var(--ink)' }}>Delete &amp; its files?</span>
-                              <button
+                              <Button
                                 type="button"
                                 onClick={() => setConfirmDeleteScene(null)}
-                                className="ml-auto rounded px-1.5 py-0.5 transition-colors hover:bg-[var(--paper-hover)]"
-                                style={{ color: 'var(--ink-muted)' }}
-                              >Cancel</button>
-                              <button
+                                variant="ghost"
+                                tone="neutral"
+                                size="micro"
+                                className="ml-auto"
+                              >Cancel</Button>
+                              <Button
                                 type="button"
                                 onClick={handleDeleteSceneSubmit}
-                                className="rounded px-1.5 py-0.5 text-white transition-opacity hover:opacity-90"
-                                style={{ backgroundColor: 'var(--danger)' }}
-                              >Delete</button>
+                                variant="solid"
+                                tone="danger"
+                                size="micro"
+                              >Delete</Button>
                             </div>
                           ) : (
                             <div className="group flex items-center gap-0.5 rounded px-1.5 py-1">
@@ -498,16 +503,17 @@ export function TemplateLibraryModal({ open, onOpenChange, embedded }: TemplateL
                 <p className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
                   Existing templates{activeScene ? ` (${activeTemplates.length})` : ''}
                 </p>
-                <button
+                <Button
                   type="button"
                   onClick={loadTemplates}
                   disabled={templatesLoading}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-                  style={{ color: 'var(--ink-muted)' }}
+                  variant="ghost"
+                  tone="neutral"
+                  size="micro"
                 >
                   <RefreshCw className={`h-3 w-3 ${templatesLoading ? 'animate-spin' : ''}`} />
                   Refresh
-                </button>
+                </Button>
               </div>
               {templatesLoading ? (
                 <div className="flex items-center justify-center py-4">
@@ -597,16 +603,18 @@ export function TemplateLibraryModal({ open, onOpenChange, embedded }: TemplateL
                   Local path
                 </p>
                 {templateRoot && (
-                  <button
+                  <Button
                     type="button"
                     onClick={openTemplatesFolder}
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs transition-colors hover:bg-[var(--paper-soft)] shrink-0"
-                    style={{ color: 'var(--primary)' }}
+                    variant="ghost"
+                    tone="brand"
+                    size="sm"
+                    className="shrink-0"
                     title="Open template library folder in Finder"
                   >
                     <FolderOpen className="h-3 w-3" />
                     Open Folder
-                  </button>
+                  </Button>
                 )}
               </div>
               {templateRoot && (
@@ -623,14 +631,15 @@ export function TemplateLibraryModal({ open, onOpenChange, embedded }: TemplateL
 
         {!embedded && (
           <div className="flex items-center justify-end gap-2 px-6 py-4">
-            <button
+            <Button
               type="button"
               onClick={() => onOpenChange(false)}
-              className="rounded-md px-4 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
-              style={{ color: 'var(--ink-muted)' }}
+              variant="ghost"
+              tone="neutral"
+              size="md"
             >
               Close
-            </button>
+            </Button>
           </div>
         )}
     </>
