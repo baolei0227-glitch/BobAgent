@@ -27,6 +27,14 @@ export const OUTCOME_MAX_LENGTH_FLOOR = 8000;
 export const CONTEXT_GATE_FLOOR = 32000;
 /** 记忆压缩 token 阈值下限（字符估算），保证小模型也不会过于频繁压缩 */
 export const COMPACT_TOKEN_FLOOR = 16000;
+/** R-14-C 预算前瞻（T2）高水位：未压缩历史（字符）达 contextGate 该比例即「提前一轮」离散折叠。
+ *  1M→120000 字符（≈ estimateTokens 96k token ≈ contextWindow×9.6%），与 R-26 100k token 触发
+ *  同量级，但作用在「请求内未压缩消息」（含 think 回填/附件序列化的真实上传体）而非 .md 纯文本，
+ *  且不依赖上游链 → 使服务端实际裁剪与游标推进同步、每轮 prompt 提前变小（孤立节点同样受益）。 */
+export const COMPACT_LOOKAHEAD_HIGH_GATE_RATIO = 0.6;
+/** R-14-C 预算前瞻低水位：折叠后未压缩历史压到 contextGate 该比例以下即停（保留最近轮上下文，
+ *  避免单次折叠过深；1M→60000 字符）。折叠频率上限由低水位与 R-26 冷却共同约束（离散、非每轮）。 */
+export const COMPACT_LOOKAHEAD_LOW_GATE_RATIO = 0.3;
 
 /** 按模型 id 推断 contextWindow；空模型或推断失败按 DEFAULT_CONTEXT_WINDOW（1M）假设 */
 export function inferContextWindow(modelId: string, thinking = false): number {
@@ -52,6 +60,16 @@ export function toolOutputMaxForContext(contextWindow: number): number {
 /** 记忆压缩 token 触发阈值：contextWindow × 10%（1M→100000、256k→25600、128k→12800），下限 16000 */
 export function compactTriggerTokensForContext(contextWindow: number): number {
   return Math.max(COMPACT_TOKEN_FLOOR, Math.round(contextWindow * COMPACT_TOKEN_RATIO));
+}
+
+/** R-14-C 预算前瞻高水位（字符）：contextGate × 60%（1M→120000，小模型随闸值下限 32k → 19200） */
+export function compactLookaheadHighCharsForContext(contextWindow: number): number {
+  return Math.max(1, Math.round(contextGateForContext(contextWindow) * COMPACT_LOOKAHEAD_HIGH_GATE_RATIO));
+}
+
+/** R-14-C 预算前瞻低水位（字符）：contextGate × 30%（1M→60000，小模型随闸值下限 32k → 9600） */
+export function compactLookaheadLowCharsForContext(contextWindow: number): number {
+  return Math.max(1, Math.round(contextGateForContext(contextWindow) * COMPACT_LOOKAHEAD_LOW_GATE_RATIO));
 }
 
 /** 一步到位：按模型 id 计算 R-7 成果块动态上限 */

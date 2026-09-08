@@ -54,6 +54,28 @@ export function estimateTokens(text: string): number {
 }
 
 /**
+ * R-14-C 预算前瞻（T2，route projection hook）折叠量计算：
+ * 给定「从旧到新」的逐对字符长度数组，从最老开始折叠，使保留（最新）部分的总字符
+ * ≤ lowWaterChars，且至少保留 minKeepPairs 对（最新轮上下文不被折叠进摘要）。
+ * @param pairChars 每轮 (user+assistant) 字符长度，下标 0 = 最老轮
+ * @returns 应折叠的最老对数（0 = 无需折叠）；纯函数，便于单测。
+ */
+export function oldestPairsToFold(pairChars: number[], lowWaterChars: number, minKeepPairs = 2): number {
+  const n = pairChars.length;
+  if (n <= 0 || !(lowWaterChars > 0)) return 0;
+  let keep = 0;
+  let sum = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    const len = pairChars[i] > 0 ? pairChars[i] : 0;
+    // 最新 minKeepPairs 对无条件保留；之后仅当累加不超低水位才继续保留更老轮
+    if (keep >= minKeepPairs && sum + len > lowWaterChars) break;
+    sum += len;
+    keep += 1;
+  }
+  return Math.max(0, n - keep);
+}
+
+/**
  * R-26 触发判定：只看 memory_compacted_until 之后的新增轮次
  * @param conversations 全量对话轮次
  * @param compactedUntil 已压缩游标（= 已压缩轮次数量，0 表示从未压缩）

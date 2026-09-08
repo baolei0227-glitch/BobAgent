@@ -33,6 +33,10 @@ export interface NodeFrontmatter {
   memory_compacted_at?: string;
   memory_compacted_until?: number;
   memory_turn_count?: number;
+  /** T2 一次性回声标记（gap 修复）：route（R-14-C/预算前瞻）在 chat 请求内折叠推进游标后置位，
+   *  随折叠写回持久化；同轮 append 读到后把真实游标随响应 compacted 回传前端并清除本标记。
+   *  属瞬态协调字段（非记忆内容），序列化仅在 === true 时写出。 */
+  memory_compacted_pending_echo?: boolean;
   manifest_hash?: string;
   /** 节点级 MCP 选择：undefined=跟随全局设置；[]=显式全关；[id]=自定义启用 */
   enabledMcpIds?: string[];
@@ -480,6 +484,8 @@ export function serializeNode(node: NodeMarkdown): string {
     ...(node.frontmatter.memory_compacted_at ? { memory_compacted_at: node.frontmatter.memory_compacted_at } : {}),
     ...(node.frontmatter.memory_compacted_until !== undefined ? { memory_compacted_until: node.frontmatter.memory_compacted_until } : {}),
     ...(node.frontmatter.memory_turn_count !== undefined ? { memory_turn_count: node.frontmatter.memory_turn_count } : {}),
+    // T2 一次性回声标记：仅在 true 时写出（append 回声后即清除，不残留）
+    ...(node.frontmatter.memory_compacted_pending_echo === true ? { memory_compacted_pending_echo: true } : {}),
     ...(node.frontmatter.manifest_hash ? { manifest_hash: node.frontmatter.manifest_hash } : {}),
     // 节点级 MCP / 技能选择：undefined 不写（跟随全局），空数组显式全关也保留
     ...(node.frontmatter.enabledMcpIds !== undefined ? { enabledMcpIds: node.frontmatter.enabledMcpIds } : {}),

@@ -38,6 +38,7 @@ import { PROJECT_DB_FILENAME } from '@/lib/app-root';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 import { readEventLog } from '@/lib/trajectory/event-log';
 import { appendPayloadFromEvents, type AppendDerivedPayload } from '@/lib/trajectory/export';
+import { deriveCompactionTurnsFromLogs } from '@/lib/nodes/compact-source';
 
 /** 在请求处理前设置当前项目路径 */
 async function withProjectContext<T>(handler: () => Promise<T>): Promise<T> {
@@ -457,7 +458,15 @@ export async function POST(request: NextRequest) {
         if (decision.shouldCompact && decision.range) {
           const { start, end } = decision.range;
           const existing = parsedAfterAppend.compressedMemory || '';
-          const turnsToCompact = parsedAfterAppend.conversations.slice(start, end);
+          // T2 折叠源切换（D）：range 内每轮若有 taskId → 读该轮 .trajectory 日志 →
+          // appendPayloadFromEvents 派生 {question, answer, reasoning, toolNames} 的精简文本
+          // （只取 Q/A/reasoning，不取 tool result 全文）；日志缺失/晚落盘 → 该轮回退 .md 文本
+          // （回退安全，行为 = 现网）。早期轮摘要从此基于权威事件而非 .md/request 被裁文本。
+          const turnsToCompact = deriveCompactionTurnsFromLogs(
+            parsedAfterAppend.conversations.slice(start, end),
+            project.path,
+            node_id,
+          );
           const finalText = turnsToCompact.reduce((s, t) => s + (t.question || '') + (t.answer || ''), '');
           const finalHardFacts = extractHardFacts(finalText);
 
@@ -543,6 +552,30 @@ export async function POST(request: NextRequest) {
         }
       } catch (e) {
         console.warn('[nodes:append] 增量压缩阶段异常（已吞，不影响写入）:', e instanceof Error ? e.message : String(e));
+      }
+
+      // T2 gap 修复：route（R-14-C/预算前瞻）在 chat 请求内折叠并推进过 .md 游标时，本 append 的
+      // R-26 判定会因「已被覆盖」（newUntil ≤ compactedUntil）返回 compacted=null → 前端内存游标
+      // compactedUntilRef 不推进 → 下轮仍全量上传已被折叠轮次。route 折叠写回 .md 时置一次性标记
+      // memory_compacted_pending_echo = true，这里据此把真实游标随 append 响应 compacted 回传
+      // （有实质推进才回声，避免每轮噪音/假压缩提示），并清除标记（一次性，落盘防跨 route bundle
+      // 状态丢失——chat 与 nodes 是 Next 独立 bundle，进程内 Map 不可靠）。
+      const pendingEcho = parsedAfterAppend.frontmatter.memory_compacted_pending_echo === true;
+      if (pendingEcho) {
+        if (!compacted) {
+          const persistedCursor = parsedAfterAppend.frontmatter.memory_compacted_until ?? 0;
+          if (persistedCursor > 0) {
+            compacted = { new_compacted_until: persistedCursor, appended_facts: 0 };
+            console.log(`[nodes:append] 回传 route 折叠游标 ${persistedCursor}（前端下轮跳过，消除滞后 gap）`);
+          }
+        }
+        try {
+          const clearParsed = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));
+          delete clearParsed.frontmatter.memory_compacted_pending_echo;
+          await updateNodeFile(filePath, serializeNode(clearParsed));
+        } catch (e) {
+          console.warn('[nodes:append] 清除 route 折叠回声标记失败（下轮 append 会再回声一次）:', e instanceof Error ? e.message : String(e));
+        }
       }
 
       const finalParsed = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));

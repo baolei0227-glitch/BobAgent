@@ -192,6 +192,7 @@ import {
   extractHardFacts,
   extractGoalFromExistingMemory,
   compactionFallbackSummary,
+  oldestPairsToFold,
   COMPACT_COOLDOWN_MS,
   type CompactModelConfig,
 } from '@/lib/nodes/compact';
@@ -201,7 +202,8 @@ import {
   findNodeFileById,
   type ConversationTurn,
 } from '@/lib/node-markdown';
-import { inferContextWindow, contextGateForContext, toolOutputMaxForContext, modelOutputTokenMaxForModel } from '@/lib/context-limits';
+import { inferContextWindow, contextGateForContext, toolOutputMaxForContext, modelOutputTokenMaxForModel, compactLookaheadHighCharsForContext, compactLookaheadLowCharsForContext } from '@/lib/context-limits';
+import { deriveCompactionTurnsFromLogs } from '@/lib/nodes/compact-source';
 import { readManifest, extractKeywords } from '@/lib/nodes/manifest';
 import { internSearchNode } from '@/lib/nodes/intern';
 import { matchTerms } from '@/lib/legal/synonyms';
@@ -2050,11 +2052,15 @@ async function compactTrimmedHistoryForCache(
     rendered = compactionFallbackSummary(compressInput);
   }
 
-  // 持久化：压缩记忆 + 游标推进（前端下轮按 ×2 跳过这些轮次 → 前缀稳定）
+  // 持久化：压缩记忆 + 游标推进（前端下轮按 ×2 跳过这些轮次 → 前缀稳定）。
+  // T2 gap 修复：折叠真实落盘时置一次性回声标记——同轮 append 侧 R-26 会因「已被覆盖」
+  // （newUntil ≤ compactedUntil）返回 compacted=null，前端内存游标收不到新值 → 下轮仍全量上传。
+  // append 读到本标记后把真实游标随响应 compacted 回传并清除（见 /api/nodes append）。
   node.compressedMemory = rendered;
   node.frontmatter.memory_compacted_at = new Date().toISOString();
   node.frontmatter.memory_compacted_until = newUntil;
   node.frontmatter.memory_turn_count = 0;
+  node.frontmatter.memory_compacted_pending_echo = true;
   node.frontmatter.updated_at = new Date().toISOString();
   try {
     const filePath = await findNodeFileById(nodeId, project.path);
@@ -2079,8 +2085,143 @@ async function compactTrimmedHistoryForCache(
   return rendered;
 }
 
+// ==================== R-14-C 预算前瞻（T2：提前折叠 + chain 判断外 + 折叠源切日志派生） ====================
+
+/** 取消息文本（content 非字符串时按空处理，与 extractTrimmedTurns 同口径） */
+function messageText(m: ChatMessage): string {
+  return typeof m?.content === 'string' ? m.content : '';
+}
+
+/** 历史字符数：不含最后一条（当前轮 user，其体积由 R-14 硬闸负责，不属于「未压缩历史」） */
+function historyCharsOf(msgs: ChatMessage[]): number {
+  let sum = 0;
+  for (let i = 0; i < msgs.length - 1; i++) sum += messageText(msgs[i]).length;
+  return sum;
+}
+
+/** 把折叠后更新的压缩记忆 prepend 到当前轮最后一条 user（C8：不进 system，缓存头字节稳定） */
+function prependCompactedMemoryToTail(messages: ChatMessage[], memoryText: string): ChatMessage[] {
+  const result = [...messages];
+  const block = '\n\n## 本节点压缩记忆（本轮裁剪后更新）\n\n' + memoryText.trim();
+  const last = result[result.length - 1];
+  if (last && last.role === 'user') {
+    const prev = last.content || '';
+    result[result.length - 1] = { ...last, content: block + '\n\n' + prev };
+  } else {
+    // 兜底：最后一条不是 user（历史重放等边界）→ 追加一条 user 消息，仍不进 system
+    result.push({ role: 'user', content: block });
+  }
+  return result;
+}
+
+/**
+ * 折叠输入解析（T2：C/D 共用同一日志派生函数）：
+ * 请求消息与 .md 对话记录对齐（同游标、无丢轮/续写错位）时，把被裁轮次映射回 .md 轮次，
+ * 再经 .trajectory 事件日志派生出权威压缩输入（Q/A/reasoning，不含工具结果全文）；
+ * 日志缺失 → 该轮 .md 文本兜底。请求与 .md 不对齐（续写、丢失 append 等）→ 沿用「被裁
+ * request 文本」现网语义（foldTurns = trimmedTurns，零漂移）。
+ * @param originalMessages 裁剪前请求消息（含可能的头部队 system 也可，按对计数即可）
+ */
+async function resolveHistoryFoldTurns(
+  nodeId: string,
+  project: NonNullable<Awaited<ReturnType<typeof getCurrentProject>>>,
+  originalMessages: ChatMessage[],
+  trimmedTurns: ConversationTurn[],
+): Promise<ConversationTurn[]> {
+  if (trimmedTurns.length === 0) return trimmedTurns;
+  let node: Awaited<ReturnType<typeof loadNodeById>> | null = null;
+  try {
+    node = await loadNodeById(nodeId, project.path);
+  } catch {
+    node = null;
+  }
+  if (!node) return trimmedTurns;
+  const cursor = node.frontmatter.memory_compacted_until ?? 0;
+  const lastIsUser = originalMessages[originalMessages.length - 1]?.role === 'user';
+  const pairCount = Math.floor((originalMessages.length - (lastIsUser ? 1 : 0)) / 2);
+  const aligned =
+    pairCount > 0 &&
+    trimmedTurns.length <= pairCount &&
+    cursor + pairCount === node.conversations.length &&
+    cursor + trimmedTurns.length <= node.conversations.length;
+  if (!aligned) return trimmedTurns;
+  const mdTurns = node.conversations.slice(cursor, cursor + trimmedTurns.length);
+  return deriveCompactionTurnsFromLogs(mdTurns, project.path, nodeId);
+}
+
+/**
+ * R-14-C 预算前瞻（route projection hook，chain 判断之外——孤立节点同样受益）：
+ * 触发从「总长超闸才裁」升级为「未压缩历史接近预算（高水位 = contextGate×60%）即提前离散折叠」，
+ * 折叠最早轮直到保留历史 ≤ 低水位（= contextGate×30%，至少保留最近 1 轮 + 当前轮）。
+ *   - 折叠 = 现网 R-14-C 同款：最早轮增量压缩进节点记忆 + .md 游标推进 + 记忆 prepend 当前轮 user；
+ *   - 收益：服务端实际裁剪与游标推进同步（消除 append 侧「已被覆盖」导致的游标滞后 gap），
+ *     前端下轮 skip 生效，每轮 prompt 提前变小；
+ *   - 默认零漂移：历史未达高水位 / 消息结构异常（含非成对历史）→ 原样返回，逐字节不变。
+ */
+async function applyHistoryProjectionHook(
+  messages: ChatMessage[],
+  nodeId: string | undefined,
+  project: Awaited<ReturnType<typeof getCurrentProject>> | null,
+  contextWindow: number,
+  taskId: string,
+  eventLog: EventLog,
+): Promise<ChatMessage[]> {
+  if (!nodeId || !project || messages.length < 3) return messages;
+
+  // 头部队 system 等非对话消息拆出，折叠只在对话体上操作（system 从不参与折叠/不丢）
+  const head = messages[0]?.role === 'system' ? [messages[0]] : [];
+  const body = head.length > 0 ? messages.slice(1) : messages;
+  if (body.length < 3) return messages;
+
+  // 结构守卫：仅处理「成对历史 + 当前轮 user 结尾」的标准形态；异常形态跳过（保零漂移）
+  const last = body[body.length - 1];
+  if (!last || last.role !== 'user') return messages;
+  if (body.length % 2 !== 1) return messages;
+  const pairCount = (body.length - 1) / 2;
+  for (let i = 0; i < pairCount; i++) {
+    if (body[i * 2]?.role !== 'user' || body[i * 2 + 1]?.role !== 'assistant') return messages;
+  }
+
+  const highWater = compactLookaheadHighCharsForContext(contextWindow);
+  const lowWater = compactLookaheadLowCharsForContext(contextWindow);
+  const histChars = historyCharsOf(body);
+  if (histChars < highWater) return messages; // 未触发折叠的会话逐字节不变
+
+  const pairChars: number[] = [];
+  for (let i = 0; i < pairCount; i++) {
+    pairChars.push(messageText(body[i * 2]).length + messageText(body[i * 2 + 1]).length);
+  }
+  const foldCount = oldestPairsToFold(pairChars, lowWater, 1);
+  if (foldCount <= 0) return messages;
+
+  const originalBody = body;
+  const trimmedBody = body.slice(foldCount * 2);
+  const trimmedTurns: ConversationTurn[] = [];
+  for (let i = 0; i < foldCount; i++) {
+    trimmedTurns.push({
+      question: messageText(originalBody[i * 2]),
+      answer: messageText(originalBody[i * 2 + 1]),
+      questionTime: '',
+      answerTime: '',
+    });
+  }
+
+  // 折叠主流程失败（读节点/压缩模型/写回异常）不阻断：降级为直接裁剪（与 R-14 硬闸同款）
+  try {
+    const foldTurns = await resolveHistoryFoldTurns(nodeId, project, originalBody, trimmedTurns);
+    const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog);
+    let out = [...head, ...trimmedBody];
+    if (newMemory) out = prependCompactedMemoryToTail(out, newMemory);
+    return out;
+  } catch (e) {
+    console.warn('[R-14-前瞻] 预算前瞻折叠失败，降级为直接裁剪:', e instanceof Error ? e.message : String(e));
+    return [...head, ...trimmedBody];
+  }
+}
+
 /**
  * Node Bridge：按祖先链注入上游信息（规格 v3 §七 R-12~R-18 + §八）
+ *  - R-14-C 预算前瞻（T2）：hook 在 chain 判断之前执行（孤立节点同样可折叠），见上
  *  - R-12 直接上游（深度 1）成果块全文注入，不截断不递归
  *  - R-17 祖先（深度 ≥2）只注入存在性声明一行
  *  - R-14 注入总长超限自动回退（裁剪旧对话），注入独占时才拒绝
@@ -2096,6 +2237,9 @@ async function applyUpstreamNodeBridge(
   eventLog: EventLog,
 ): Promise<ChatMessage[]> {
   if (!nodeId || !project) return messages;
+
+  // ===== R-14-C 预算前瞻（chain 判断之外：孤立节点同样受益）=====
+  messages = await applyHistoryProjectionHook(messages, nodeId, project, contextWindow, taskId, eventLog);
 
   let chain;
   try {
@@ -2202,7 +2346,10 @@ async function applyUpstreamNodeBridge(
     let compactedMemoryInjection = '';
     if (trimmedTurns.length > 0) {
       try {
-        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, trimmedTurns, taskId, eventLog);
+        // T2 折叠源切换：请求与 .md 对齐时经 .trajectory 日志派生权威压缩输入（含 reasoning），
+        // 否则沿用被裁 request 文本（现网语义）；两轨与 /api/nodes append 共用同一派生函数
+        const foldTurns = await resolveHistoryFoldTurns(nodeId, project, originalMessages, trimmedTurns);
+        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog);
         if (newMemory) {
           compactedMemoryInjection = '\n\n## 本节点压缩记忆（本轮裁剪后更新）\n\n' + newMemory.trim();
         }

@@ -4,9 +4,12 @@ import {
   compactionFallbackSummary,
   extractHardFacts,
   extractGoalFromExistingMemory,
+  oldestPairsToFold,
   renderCompressedMemory,
+  shouldCompact,
   type CompressInput,
 } from './compact';
+import { compactionTurnFromDerivedPayload } from './compact-source';
 
 /** 夹具：含日期/金额/条款号硬事实（R-27 规则可抽取）的两轮对话 */
 function fixtureTurns(): ConversationTurn[] {
@@ -82,5 +85,113 @@ describe('compact: P4c-1 compactionFallbackSummary 双轨收敛等价', () => {
       preferences: [],
     });
     expect(compactionFallbackSummary(input)).toBe(original);
+  });
+});
+
+describe('compact: T2 触发策略参数化（shouldCompact 轮数/token 可配，默认不激进）', () => {
+  const mkTurns = (n: number): ConversationTurn[] =>
+    Array.from({ length: n }, () => ({ question: 'q', answer: 'a', questionTime: '', answerTime: '' }));
+
+  it('默认轮数 15 / token 阈值（1M→100k）与既有语义一致：小会话不触发（默认不激进）', () => {
+    expect(shouldCompact(mkTurns(14), 0).shouldCompact).toBe(false);
+    const d = shouldCompact(mkTurns(15), 0);
+    expect(d.shouldCompact).toBe(true);
+    expect(d.reason).toBe('turns');
+    // 默认 token 阈值：一两轮普通对话远达不到 → 未达长会话不折叠
+    expect(shouldCompact(mkTurns(1), 0).shouldCompact).toBe(false);
+  });
+
+  it('轮数阈值可配（滚动投影调小 K 即更早触发；K 默认不收紧）', () => {
+    const cfg = { triggerTokens: 1_000_000, triggerTurns: 8 };
+    expect(shouldCompact(mkTurns(7), 0, cfg).shouldCompact).toBe(false);
+    expect(shouldCompact(mkTurns(8), 0, cfg).shouldCompact).toBe(true);
+    expect(shouldCompact(mkTurns(14), 0, cfg).shouldCompact).toBe(true);
+  });
+
+  it('token 阈值可配（与既有「字符×0.8 估 token」口径一致）', () => {
+    const big = [{ question: 'x'.repeat(200), answer: 'y'.repeat(200), questionTime: '', answerTime: '' }];
+    // 400 字符 → ≈320 tokens
+    expect(shouldCompact(big, 0, { triggerTokens: 300, triggerTurns: 15 }).shouldCompact).toBe(true);
+    expect(shouldCompact(big, 0, { triggerTokens: 500, triggerTurns: 15 }).shouldCompact).toBe(false);
+    // 游标推进后只看未压缩段（R-25）
+    expect(shouldCompact([...mkTurns(20), ...big], 20, { triggerTokens: 300, triggerTurns: 15 }).shouldCompact).toBe(true);
+    expect(shouldCompact([...mkTurns(20), ...big], 21, { triggerTokens: 300, triggerTurns: 15 }).shouldCompact).toBe(false);
+  });
+});
+
+describe('compact: T2 预算前瞻折叠量 oldestPairsToFold', () => {
+  it('空/零水位 → 不折叠', () => {
+    expect(oldestPairsToFold([], 100, 1)).toBe(0);
+    expect(oldestPairsToFold([10, 10], 0, 1)).toBe(0);
+  });
+
+  it('从最老开始折叠，保留（最新）总字符 ≤ 低水位', () => {
+    // 4 轮各 10 字符，低水位 25：保留最新 2 轮（20）即可，折叠最老 2 轮
+    expect(oldestPairsToFold([10, 10, 10, 10], 25, 1)).toBe(2);
+    // 低水位足够大 → 无需折叠
+    expect(oldestPairsToFold([10, 10, 10, 10], 40, 1)).toBe(0);
+  });
+
+  it('至少保留 minKeepPairs 对（最新轮上下文不折叠进摘要）', () => {
+    // 3 轮各 50，低水位 30：最新 1 对也无条件保留 → 折叠 2；minKeep=2 → 只折叠 1
+    expect(oldestPairsToFold([50, 50, 50], 30, 1)).toBe(2);
+    expect(oldestPairsToFold([50, 50, 50], 30, 2)).toBe(1);
+  });
+
+  it('最新轮已超低水位时不强行多折叠（保留下限生效）', () => {
+    // 最老轮很小、最新轮巨大：只折叠最老的能折叠部分，保留巨大最新轮
+    expect(oldestPairsToFold([5, 500], 100, 1)).toBe(1);
+    // 单轮超低水位且只有它 → 不折叠（请求体里它仍是当前可见上下文）
+    expect(oldestPairsToFold([500], 100, 1)).toBe(0);
+  });
+});
+
+describe('compact: T2 折叠源切 .trajectory 日志派生 compactionTurnFromDerivedPayload', () => {
+  const fallback: ConversationTurn = {
+    question: '.md 问题',
+    answer: '.md 回答',
+    questionTime: 't1',
+    answerTime: 't2',
+  };
+
+  it('日志派生 Q/A/reasoning/toolNames → 精简压缩输入文本（不含工具结果全文）', () => {
+    const turn = compactionTurnFromDerivedPayload(
+      {
+        question: '日志问题',
+        answer: '日志回答',
+        reasoning: '思考内容 2026-07-31 到期',
+        toolNames: ['read_file', 'write_file'],
+      },
+      fallback,
+    );
+    expect(turn.question).toBe('日志问题');
+    expect(turn.answer).toContain('日志回答');
+    expect(turn.answer).toContain('[推理过程] 思考内容 2026-07-31 到期');
+    expect(turn.answer).toContain('[本轮工具] read_file、write_file');
+    // 工具结果全文不得进入压缩输入（R4：防压缩模型输入爆炸）
+    expect(turn.answer).not.toContain('tool result 全文');
+  });
+
+  it('reasoning 参与 R-27 硬事实抽取（日期可被规则命中）', () => {
+    const turn = compactionTurnFromDerivedPayload(
+      { answer: 'ok', reasoning: '标的额 8000元，2026/8/15 前支付' },
+      fallback,
+    );
+    const facts = extractHardFacts(turn.question + turn.answer);
+    expect(facts.some((f) => f.includes('8000'))).toBe(true);
+    expect(facts.some((f) => f.includes('2026'))).toBe(true);
+  });
+
+  it('日志无可用文本 → 原样回退 .md 轮次（现网语义零漂移）', () => {
+    const empty = compactionTurnFromDerivedPayload({}, fallback);
+    expect(empty).toBe(fallback);
+    expect(compactionTurnFromDerivedPayload({ question: '', answer: '', reasoning: '', toolNames: [] }, fallback)).toBe(fallback);
+  });
+
+  it('派生缺 answer/reasoning 时保留 .md 正文，避免内容丢失', () => {
+    const turn = compactionTurnFromDerivedPayload({ question: '仅问题派生', toolNames: ['read_file'] }, fallback);
+    expect(turn.question).toBe('仅问题派生');
+    expect(turn.answer).toContain('.md 回答');
+    expect(turn.answer).toContain('[本轮工具] read_file');
   });
 });
