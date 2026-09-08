@@ -520,15 +520,16 @@ async function diffHomeworkFiles(
 // （K2-S1 工具面 service 抽取，行为不变：CacheGuard 前缀守卫整体迁至 src/lib/runtime/tools.ts，
 //  module 级可变状态随迁、进程内共享语义不变；guardToolsPrefix 由 buildAndSortToolDefs 调用）
 
-/** BASE_SYSTEM_PROMPT —— 缓存头（version 冻结，当前 v4）：基础系统提示（不包含思考指令）。
+/** BASE_SYSTEM_PROMPT —— 缓存头（version 冻结，当前 v5）：基础系统提示（不包含思考指令）。
  *  本段字节一旦上线即冻结；任何修改必须整体递增版本号（v3→v4…），否则 DeepSeek 前缀缓存整段失效一次。
  *  动态/低频变化内容一律走 prependDynamicContext 注入 user 消息，禁止写进本段。
+ *  v5（2026-09-08）：规则优先级措辞 DSH 化（② 强制结束机制 → 收尾/建轨机制）。
  *  v4（2026-09-08）：结束机制 DSH 化——finish_task 由"强制收尾仪式"改为"正文即交付物，finish_task 可选"；
  *  其余 v3 字节保持不变。 */
 const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在无限画布上的对话节点中与用户交流。回答简洁明了，适合在卡片中阅读。
 
 【规则优先级】以下规则冲突时，高优先级优先，低优先级让位：
-① 专业内容准确性铁律（禁编造法条/剂量/数据/转写） > ② 强制结束/规划机制（finish_task/todo_write） > ③ 输出选型与可视化规则 > ④ 场景按需规则（报告插图/浏览器操作）。
+① 专业内容准确性铁律（禁编造法条/剂量/数据/转写） > ② 收尾/建轨机制（正文即交付物、finish_task 可选、todo_write 建轨） > ③ 输出选型与可视化规则 > ④ 场景按需规则（报告插图/浏览器操作）。
 
 回答格式说明：
 - 你的回答会被渲染为 HTML 显示在卡片中。你可以直接使用 HTML 标签来美化排版，也可以使用 Markdown 语法（会自动转换）。
@@ -3509,11 +3510,11 @@ export async function POST(request: NextRequest) {
                   break;
                 }
 
-                // 5. 检查是否处于"假完成"状态（未调用 finish_task 且无其他工具调用）
-                // 如果之前执行过工具（kctx.allToolCalls > 0）或是续写流，但本轮没有产生新的工具调用（且不是 finish_task）
+                // 5. 检查是否处于"假完成"状态（连续轮无正文且无任何工具调用）
+                // 如果之前执行过工具（kctx.allToolCalls > 0）或是续写流，但本轮没有产生新的工具调用
                 if (kctx.allToolCalls.length > 0 || isContinuationFlow) {
                   if (!kctx.completionConfirmUsed) {
-                    // 第一次追问：强制要求模型要么继续调用工具，要么调用 finish_task
+                    // 第一次追问：要求模型要么继续调工具，要么直接输出正文收尾
                     kctx.completionConfirmUsed = true;
                     kctx.conversationMessages.push({
                       role: 'user',
@@ -3526,7 +3527,7 @@ export async function POST(request: NextRequest) {
                     continue;
                   } else {
                     // 第二次仍无工具调用，视为真正的完成（或者模型放弃了），强制收尾
-                    console.warn('[chat] 模型连续两次未调用工具或 finish_task，强制结束任务');
+                    console.warn('[chat] 模型连续两次未输出正文或调用工具，强制结束任务');
                     eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
                     break;
                   }
