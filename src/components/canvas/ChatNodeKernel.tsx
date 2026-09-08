@@ -3646,6 +3646,16 @@ ${rows.join('\n')}
           requestBody.apiKey = providerConfig.apiKey;
           requestBody.baseUrl = providerConfig.baseUrl?.trim() || preset.baseUrl;
           requestBody.providerModelId = parsed.modelId;
+          // R-14-C：随 /api/chat 请求透传压缩模型配置（节点自定义模型正在用它）——
+          // 服务端长会话折叠/裁剪压缩复用同一 Key，不必再回退 settings；与 append 侧
+          // compact_model_config（L4424 同源同字段：providerConfigs + preset.baseUrl）
+          if (providerConfig.apiKey) {
+            requestBody.compact_model_config = {
+              apiKey: providerConfig.apiKey,
+              baseURL: providerConfig.baseUrl?.trim() || preset.baseUrl,
+              model: parsed.modelId,
+            };
+          }
         }
       }
     }

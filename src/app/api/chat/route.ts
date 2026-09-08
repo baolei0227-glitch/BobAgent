@@ -1993,6 +1993,41 @@ async function resolveCompactModelConfig(): Promise<CompactModelConfig | null> {
 }
 
 /**
+ * chat 侧压缩模型配置三来源解析（R-14-C，与 /api/nodes append 侧 L474-485 同语义）：
+ *   1) 请求体透传 compact_model_config（节点自定义模型正在用它，随 /api/chat 请求带来，
+ *      能省 Key 就省——避免这里再回退 settings 换 Key/换供应商）；字段校验同 append 侧
+ *      （apiKey/baseURL/model 均为字符串）。
+ *   2) settings 第一个可用自定义 provider + 默认聊天模型（既有 resolveCompactModelConfig）。
+ *   3) 当前 chat 请求模型回退：本次请求实际用的模型（providerModelId + baseUrl + 明文 apiKey）。
+ *      key/baseUrl 在路由兜底解析后已以「可发请求」的明文形式就绪（前端直传，或 settings 经
+ *      readSettingsFromFile→decryptSettings 解密）——复用当前请求模型发压缩可再省一次 Key 查找，
+ *      且压缩模型与对话模型同源、口径一致；托管池模型无明文 Key 时该项跳过。
+ *   仍无 → null → 折叠降级 compactionFallbackSummary 硬事实直写（现网行为不变）。
+ */
+async function resolveChatCompactModelConfig(
+  bodyCompactCfg: { apiKey?: string; baseURL?: string; model?: string } | undefined,
+  currentModel: { apiKey?: string; baseUrl?: string; model?: string } | null,
+): Promise<CompactModelConfig | null> {
+  // 1) 请求体透传（校验同 append：三者均须为字符串）
+  if (
+    bodyCompactCfg &&
+    typeof bodyCompactCfg.apiKey === 'string' &&
+    typeof bodyCompactCfg.baseURL === 'string' &&
+    typeof bodyCompactCfg.model === 'string'
+  ) {
+    return { apiKey: bodyCompactCfg.apiKey, baseURL: bodyCompactCfg.baseURL, model: bodyCompactCfg.model };
+  }
+  // 2) settings（既有）
+  const fromSettings = await resolveCompactModelConfig();
+  if (fromSettings) return fromSettings;
+  // 3) 当前请求模型回退（三项均明文就绪才可复用；托管池无明文 Key → null）
+  if (currentModel && currentModel.apiKey && currentModel.baseUrl && currentModel.model) {
+    return { apiKey: currentModel.apiKey, baseURL: currentModel.baseUrl, model: currentModel.model };
+  }
+  return null;
+}
+
+/**
  * 缓存感知压缩（R-14-C）：R-14 裁剪旧对话时，把被裁轮次增量压缩进节点压缩记忆并推进
  * memory_compacted_until（持久化）。
  *   - 信息不丢：被裁文本 → runCompaction 合并进 compressedMemory（含硬事实 R-27 兜底）；
@@ -2007,6 +2042,8 @@ async function compactTrimmedHistoryForCache(
   trimmedTurns: ConversationTurn[],
   taskId: string,
   eventLog: EventLog,
+  /** R-14-C 压缩模型配置（由 POST 侧按「请求透传 → settings → 当前请求模型」三来源解析后传入；null=无可用模型） */
+  modelCfg: CompactModelConfig | null,
 ): Promise<string | null> {
   if (!nodeId || !project || trimmedTurns.length === 0) return null;
 
@@ -2036,19 +2073,18 @@ async function compactTrimmedHistoryForCache(
   const compressInput = { goal, existingMemory: existing, uncompressedTurns: trimmedTurns, hardFacts };
   let rendered: string;
   let fallbackKind: 'none' | 'no-model' | 'cooldown' = 'none';
-  if (!inCooldown) {
-    const modelCfg = await resolveCompactModelConfig();
-    if (modelCfg) {
-      const result = await runCompaction(compressInput, modelCfg);
-      rendered = result.rendered;
-    } else {
-      // 无可用模型 → 硬事实直写（与 /api/nodes 降级逻辑一致）
-      fallbackKind = 'no-model';
-      rendered = compactionFallbackSummary(compressInput);
-    }
-  } else {
+  if (!inCooldown && modelCfg) {
+    // R-14-C 真模型分支：命中压缩模型 → 走 runCompaction 产出模型叙事摘要
+    //（模型配置由 POST 侧三来源解析后传入，见 resolveChatCompactModelConfig）
+    const result = await runCompaction(compressInput, modelCfg);
+    rendered = result.rendered;
+  } else if (inCooldown) {
     // 冷却期内 → 降级硬事实直写，不调模型，避免长文档逐轮触发压缩风暴
     fallbackKind = 'cooldown';
+    rendered = compactionFallbackSummary(compressInput);
+  } else {
+    // 无可用模型 → 硬事实直写（与 /api/nodes 降级逻辑一致）
+    fallbackKind = 'no-model';
     rendered = compactionFallbackSummary(compressInput);
   }
 
@@ -2165,6 +2201,7 @@ async function applyHistoryProjectionHook(
   contextWindow: number,
   taskId: string,
   eventLog: EventLog,
+  compactModelCfg: CompactModelConfig | null,
 ): Promise<ChatMessage[]> {
   if (!nodeId || !project || messages.length < 3) return messages;
 
@@ -2209,7 +2246,7 @@ async function applyHistoryProjectionHook(
   // 折叠主流程失败（读节点/压缩模型/写回异常）不阻断：降级为直接裁剪（与 R-14 硬闸同款）
   try {
     const foldTurns = await resolveHistoryFoldTurns(nodeId, project, originalBody, trimmedTurns);
-    const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog);
+    const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog, compactModelCfg);
     let out = [...head, ...trimmedBody];
     if (newMemory) out = prependCompactedMemoryToTail(out, newMemory);
     return out;
@@ -2235,11 +2272,13 @@ async function applyUpstreamNodeBridge(
   contextWindow: number,
   taskId: string,
   eventLog: EventLog,
+  /** R-14-C 压缩模型配置（POST 侧三来源解析：请求透传 → settings → 当前请求模型；null=降级硬事实） */
+  compactModelCfg: CompactModelConfig | null,
 ): Promise<ChatMessage[]> {
   if (!nodeId || !project) return messages;
 
   // ===== R-14-C 预算前瞻（chain 判断之外：孤立节点同样受益）=====
-  messages = await applyHistoryProjectionHook(messages, nodeId, project, contextWindow, taskId, eventLog);
+  messages = await applyHistoryProjectionHook(messages, nodeId, project, contextWindow, taskId, eventLog, compactModelCfg);
 
   let chain;
   try {
@@ -2349,7 +2388,7 @@ async function applyUpstreamNodeBridge(
         // T2 折叠源切换：请求与 .md 对齐时经 .trajectory 日志派生权威压缩输入（含 reasoning），
         // 否则沿用被裁 request 文本（现网语义）；两轨与 /api/nodes append 共用同一派生函数
         const foldTurns = await resolveHistoryFoldTurns(nodeId, project, originalMessages, trimmedTurns);
-        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog);
+        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog, compactModelCfg);
         if (newMemory) {
           compactedMemoryInjection = '\n\n## 本节点压缩记忆（本轮裁剪后更新）\n\n' + newMemory.trim();
         }
@@ -2788,6 +2827,8 @@ export async function POST(request: NextRequest) {
       lite?: boolean;
       /** 续写请求携带的初始产物（如模板填充面板生成的文件），补进本轮 output_files 卡片 */
       initialOutputFiles?: OutputFileItem[];
+      /** R-14-C：前端透传压缩模型配置（节点自定义模型在用的 apiKey/baseURL/model；与 /api/nodes append 同字段同校验） */
+      compact_model_config?: { apiKey?: string; baseURL?: string; model?: string };
     };
     const {
       messages,
@@ -2938,12 +2979,20 @@ export async function POST(request: NextRequest) {
     const taskId = genTaskId();
     const eventLog = new EventLog();
 
+    // R-14-C：chat 折叠/裁剪压缩模型配置三来源解析（请求透传 compact_model_config → settings →
+    // 当前请求模型回退），供 applyUpstreamNodeBridge 内预算前瞻折叠与 R-14 超闸折叠复用；
+    // 三项来源均无明文可用（托管池等）→ null → 折叠降级硬事实直写（现网行为不变）。
+    const chatCompactModelCfg = await resolveChatCompactModelConfig(
+      body.compact_model_config,
+      apiKey && baseUrl && providerModelId ? { apiKey, baseUrl, model: providerModelId } : null,
+    );
+
     // Node Bridge（v3）：注入上游成果块 + 祖先存在性声明 + 托管模型自动派发实习生
     let messagesWithNodeBridge = messagesWithPdf;
     try {
       const project = await resolveNodeProject(nodeId, projectId);
       if (project) {
-        messagesWithNodeBridge = await applyUpstreamNodeBridge(messagesWithPdf, nodeId, project, !isCustom, requestContextWindow, taskId, eventLog);
+        messagesWithNodeBridge = await applyUpstreamNodeBridge(messagesWithPdf, nodeId, project, !isCustom, requestContextWindow, taskId, eventLog, chatCompactModelCfg);
       }
     } catch (e) {
       // R-14: 注入超长 → 拒绝执行并提示拆分，不静默截断
