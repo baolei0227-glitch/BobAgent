@@ -3703,6 +3703,7 @@ export async function POST(request: NextRequest) {
                 //    注册 handler（handleAskUserQuestions，见模块级注册）经 ctx 服务面逐位复刻；
                 //    'handled_continue' = 已由宿主接管完成 → 跳过下方通用执行逻辑（等价原 if 分支
                 //    continue；'handled_fallback'/'noop' 保留给 P4a-3 后续 confirm/login/grant 类）。
+                // K3 hook: ask_user (consult seq #1 · before_execute_running)
                 const askUserTakeover = hostTakeoverFor(toolName, 'ask_user', 'pre');
                 if (askUserTakeover) {
                   const askUserArgs = parsedArgs;
@@ -3739,6 +3740,7 @@ export async function POST(request: NextRequest) {
                 //     decision 仍非 null（scenes 空），照常返回"未找到"文案。decision.meta 携带
                 //     匹配条目（含已激活场景）供 buildCapabilityResultText 生成能力清单。
                 //     与 ask_user_questions 同为"宿主接管、不落 executeTool"的模式。
+                // K3 hook: search_capabilities→scenario_activate (consult seq #2 · before_execute_running)
                 const searchCapabilityTakeover = takeoverFor(toolName, 'pre');
                 if (searchCapabilityTakeover && searchCapabilityTakeover.kind === 'scenario_activate') {
                   const scenarioDecision =
@@ -3805,6 +3807,7 @@ export async function POST(request: NextRequest) {
                 //          重复弹窗）；'noop'（非 planner 身份/名单外/卡片构建失败）→ 照常进入
                 //          tool_confirm consult。
                 //     咨询点物理位置保持在 tool_confirm（①.5）之前 —— planner 先判的顺序约束不因迁移改变。
+                // K3 hook: planner_confirm (consult seq #3 · before_execute_running)
                 const plannerTakeover = hostTakeoverFor(toolName, 'planner_confirm', 'pre');
                 // 编辑覆盖中间通道：approved + edited.toolArgs 时 handler 经 ctx.setExecArgs 写入，
                 // handle() 返回后再同步应用到本轮 parsedArgs / execArgs（避免在异步闭包内改写捕获
@@ -3888,6 +3891,7 @@ export async function POST(request: NextRequest) {
                 //     consult 后 usesPlannerCard → noop 的照常执行，无任何副作用差异）；仅 planner
                 //     verdict === 'noop'（含卡片构建失败 → usesPlannerCard 冗余判定在 handleToolConfirm
                 //     内保留，保证仍不弹通用确认）或 planner 未命中时本 consult 才执行。
+                // K3 hook: tool_confirm (consult seq #4 · before_execute_running；planner 卡覆盖后跳过)
                 const confirmTakeover = hostTakeoverFor(toolName, 'tool_confirm', 'pre');
                 if (confirmTakeover && !plannerCardCovered) {
                   const confirmToolArgs = parsedArgs;
@@ -3969,6 +3973,7 @@ export async function POST(request: NextRequest) {
                 // bob-sandbox/apps/<appId>/（不落 homework）。P4a-2a 迁移：名单与注入规则收敛为
                 // 注册式 args_transform 接管（tool-pipeline.ts，行为不变）——命中返回注入后的参数
                 // 字符串、未命中/解析失败返回 null 原样执行。
+                // K3 hook: args_transform (consult seq #5 · before_execute；节点参数注入 + browser.login mode 注入两注册条目共用本咨询点)
                 const nodeParamTakeover = takeoverOfKind(toolName, 'args_transform');
                 const injectedExecArgs = nodeParamTakeover?.transformArgs?.(toolName, execArgs, {
                   currentNodeId: nodeId,
@@ -4029,6 +4034,7 @@ export async function POST(request: NextRequest) {
                 //     随后照常落入通用落账（send tool_result / tool_span / kctx.allToolCalls / 对话历史 /
                 //     eventLog），与迁移前分支体直接改写 execResult 后继续向下逐位等价；loginRequired
                 //     未命中 → 'noop'（execResult 原样）。
+                // K3 hook: grant (consult seq #6 · after_execute)
                 const grantTakeover = hostTakeoverFor(toolName, 'grant', 'post');
                 if (execResult.success && grantTakeover) {
                   await grantTakeover.handle({
@@ -4043,6 +4049,7 @@ export async function POST(request: NextRequest) {
                     commitToolResult: () => { /* 占位：grant handler 不调用，落账走通用路径 */ },
                   });
                 }
+                // K3 hook: login (consult seq #7 · after_execute)
                 const loginTakeover = hostTakeoverFor(toolName, 'login', 'post');
                 if (execResult.success && loginTakeover) {
                   // 登录代填结果写回通道：handler 在 loginRequired 命中后经 setExecResult 写入，
@@ -4074,6 +4081,7 @@ export async function POST(request: NextRequest) {
                 // P4a 三段化骨架：本段已收敛为注册式 post-execute 接管（tool-pipeline.ts，行为不变）——
                 // 仅当工具执行成功（execResult.success）且工具在注册表中被 scenario_activate 命中才咨询；
                 // 激活/sticky/kctx.needRebuildTools 由 applyScenarioActivation 统一执行。
+                // K3 hook: load_skill→scenario_activate (consult seq #8 · after_execute)
                 const legalSkillTakeover = takeoverFor(toolName, 'post');
                 if (execResult.success && legalSkillTakeover && legalSkillTakeover.kind === 'scenario_activate') {
                   const scenarioDecision = legalSkillTakeover.handleScenario?.(toolName, parsedArgs) ?? null;
@@ -4161,6 +4169,7 @@ export async function POST(request: NextRequest) {
                 // 行为不变 —— 阈值 / 保头保尾 / LIST_LIKE 提示文案均由 compactToolResult 原样产出，
                 // 全工具命中、仅超阈值结果才实际压缩）；SSE tool_compact 帧与压缩日志仍由宿主按
                 // compacted 标志发送（pipeline 不产 SSE）。
+                // K3 hook: result_compact (consult seq #9 · after_tool_result)
                 const compactTakeover = takeoverOfKind(toolName, 'result_compact', 'post');
                 const compactOut = compactTakeover?.compactResult?.(toolName, execResult.result) ?? null;
                 const toolMsgContent = compactOut ? compactOut.text : execResult.result;

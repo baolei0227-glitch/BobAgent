@@ -50,6 +50,10 @@
  *     由宿主事后判 kind；同 priority 保持注册顺序 —— "注册顺序即判定顺序"。
  *   - takeoverOfKind 把 kind 前置过滤：供 args_transform / result_compact 独立咨询点使用，
  *     避免与 pre/post 场景激活咨询（search_capabilities / load_skill）跨 kind 串扰。
+ *   - K3-1（契约显式化，行为零变化）：route 工具轮（r16）内 9 个咨询点的物理硬顺序固化为
+ *     TOOL_CONSULT_SEQUENCE（接口面盘点 §1.2「咨询点顺序（硬性，跨 kind）」的显式化，
+ *     见下「K3-1 咨询链顺序契约」段）；route 咨询点旁仅加「K3 hook … (consult seq #N)」
+ *     注释编号、不加运行时检查，顺序防护由 tool-pipeline.test.ts 单测承担。
  */
 import type { ToolScene } from '@/app/api/chat/tools';
 // P4b-1 审批策略层：type-only import（approval.ts 为纯函数模块、不 import tool-pipeline → 无循环）
@@ -89,6 +93,101 @@ export type ToolTakeoverKind =
 
 /** 接管咨询时机：pre = 工具执行前（可替代执行，如 search_capabilities）；post = 工具执行成功后联动（如 load_skill） */
 export type ToolTakeoverPhase = 'pre' | 'post';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K3-1 咨询链顺序契约 —— hook 边界显式化（行为零变化：仅枚举 + 单测断言 + route 注释编号）。
+// route.ts 工具轮（接口面盘点 §1.2 的 r16「每 tool 子流程」）内 9 个接管咨询点有物理硬顺序
+// （§1.2「咨询点顺序（硬性，跨 kind）」）：
+//   ask_user(pre) → search_capabilities(pre 全接管) → planner_confirm(pre) →
+//   tool_confirm(pre) → [tool_call_update running] → args_transform(pre) →
+//   [keepalive/bobby/team] → executeTool → grant(post) → login(post) →
+//   load_skill(post 联动) → tool_result → result_compact(post)；planner 卡覆盖后跳过 tool_confirm。
+// 本段把该顺序固化为可枚举常量 TOOL_CONSULT_SEQUENCE：新增/移动咨询点必须同步
+//   ① 本序列（含 consultPoint 稳定名）② route.ts 咨询点旁「K3 hook … (consult seq #N)」
+//   注释编号 ③ tool-pipeline.test.ts 顺序断言 —— 顺序防护由单测承担，route 不加运行时开销。
+// 条目口径 = 物理咨询点（非注册条目数）：search_capabilities 与 load_skill 同 kind
+// （scenario_activate）但 phase / 物理咨询点不同，分别列出（序列 #2 / #8）；args_transform
+// 的两条注册条目（节点参数注入 + browser.login mode 注入）共享同一咨询点，合并为一项（#5）。
+// consultPoint 取值 = 咨询点相对工具轮里程碑的物理位置稳定名：
+//   before_execute_running = tool_call(pending) 帧后、running 心跳帧前（挂起/全接管 pre 段）；
+//   before_execute         = running 心跳帧后、executeTool 前（参数注入）；
+//   after_execute          = executeTool 成功后（post 段挂起/联动）；
+//   after_tool_result      = tool_result 帧后、结果写入对话历史前（结果压缩）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** K3-1：工具轮咨询阶段定义 —— TOOL_CONSULT_SEQUENCE 的条目形态（顺序契约声明） */
+export interface ConsultStageDef {
+  /** 咨询的接管 kind（与注册条目 kind 对齐；查询口径 = 注册表按 kind(+phase) 的查询函数） */
+  readonly kind: ToolTakeoverKind;
+  /** 咨询时机（决定挂在工具轮 pre / post 哪个区段；与 consultPoint 前缀语义一致） */
+  readonly phase: ToolTakeoverPhase;
+  /** 咨询点物理位置稳定名（before_execute_running / before_execute / after_execute /
+   *  after_tool_result 四值之一；映射 route.ts 对应咨询行，配套该处「K3 hook」注释编号） */
+  readonly consultPoint: string;
+  /** 备注：物理位置 / 注册条目对应关系 / 跳过条件（可空） */
+  readonly note?: string;
+}
+
+/**
+ * K3-1：工具轮 9 个咨询点物理顺序（§1.2 硬顺序的显式化）。数组序 = 物理硬顺序；
+ * 1-based 序号即 route.ts 咨询点旁「consult seq #N」注释编号；两处 + 单测断言必须一致。
+ */
+export const TOOL_CONSULT_SEQUENCE = [
+  {
+    kind: 'ask_user',
+    phase: 'pre',
+    consultPoint: 'before_execute_running',
+    note: '咨询链最顶端：tool_call(pending) 帧后、running 心跳帧前；ask_user_questions 结构化提问挂起（挂起型 pre 全接管）',
+  },
+  {
+    kind: 'scenario_activate',
+    phase: 'pre',
+    consultPoint: 'before_execute_running',
+    note: 'search_capabilities pre-execute 全接管（能力目录检索命中即替代 executeTool）——与 #8 load_skill 同 kind 不同 phase/咨询点，故分别列出',
+  },
+  {
+    kind: 'planner_confirm',
+    phase: 'pre',
+    consultPoint: 'before_execute_running',
+    note: 'planner 结构化可编辑确认卡（挂起型 pre；approved 回落通用执行）——物理位置在 tool_confirm 之前，planner 先判',
+  },
+  {
+    kind: 'tool_confirm',
+    phase: 'pre',
+    consultPoint: 'before_execute_running',
+    note: '需手动确认名单通用确认（挂起型 pre）——planner 卡覆盖（planner_confirm approved）后跳过本点',
+  },
+  {
+    kind: 'args_transform',
+    phase: 'pre',
+    consultPoint: 'before_execute',
+    note: 'running 心跳帧后、executeTool 前参数注入；两注册条目（节点参数注入 + browser.login mode 注入）同一咨询点合并为一项',
+  },
+  {
+    kind: 'grant',
+    phase: 'post',
+    consultPoint: 'after_execute',
+    note: 'executeTool 成功后 grantRequired → SSE grant_required 旁路（mcp__bobby__*，挂起型旁路）',
+  },
+  {
+    kind: 'login',
+    phase: 'post',
+    consultPoint: 'after_execute',
+    note: 'executeTool 成功后 loginRequired → 挂起 + login_fill 代填（browser.login，挂起型）',
+  },
+  {
+    kind: 'scenario_activate',
+    phase: 'post',
+    consultPoint: 'after_execute',
+    note: 'load_skill 法律联动 post-execute 场景激活（成功 → 激活 legal + sticky + 工具重建）——与 #2 search_capabilities 同 kind 不同 phase/咨询点',
+  },
+  {
+    kind: 'result_compact',
+    phase: 'post',
+    consultPoint: 'after_tool_result',
+    note: 'tool_result 帧后、结果写入对话历史前压缩（通用变换：全工具命中、仅超阈值才实际压缩）',
+  },
+] as const satisfies readonly ConsultStageDef[];
 
 /** 工具接管匹配上下文（预留：未来统一执行入口 takeToolOver(match, services) 的入参形态） */
 export interface ToolTakeoverMatch {
