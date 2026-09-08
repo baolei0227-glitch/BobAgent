@@ -189,6 +189,50 @@ export const TOOL_CONSULT_SEQUENCE = [
   },
 ] as const satisfies readonly ConsultStageDef[];
 
+/**
+ * K3-2：咨询链契约加载期自检（顺序防护的运行时化）。
+ * 校验：① 9 个物理咨询点；② phase ∈ {pre,post} 且 consultPoint ∈ 四值词表，且
+ * before_* ↔ pre / after_* ↔ post 前缀一致；③ (kind, phase) 组合唯一；
+ * ④ 序列 kind 集合 = 全部可注册 kind，scenario_activate 恰出现 2 次。
+ * 由 route.ts 模块顶层调用一次（进程/热更加载即断言，廉价线性），
+ * 与 tool-pipeline.test.ts 的编译期/单测断言互为双保险——新增/错序咨询点在此立刻暴露。
+ */
+export function assertConsultContract(): void {
+  const KINDS: readonly ToolTakeoverKind[] = [
+    'scenario_activate', 'args_transform', 'result_compact',
+    'ask_user', 'tool_confirm', 'planner_confirm', 'login', 'grant',
+  ];
+  const PHASES: readonly string[] = ['pre', 'post'];
+  const POINTS: readonly string[] = [
+    'before_execute_running', 'before_execute', 'after_execute', 'after_tool_result',
+  ];
+  const seq: readonly ConsultStageDef[] = TOOL_CONSULT_SEQUENCE;
+
+  if (seq.length !== 9) {
+    throw new Error(`[consult] TOOL_CONSULT_SEQUENCE 长度 ${seq.length} ≠ 9（咨询点物理顺序契约）`);
+  }
+  const seen = new Set<string>();
+  const seenKind = new Set<ToolTakeoverKind>();
+  for (const s of seq) {
+    if (!KINDS.includes(s.kind)) throw new Error(`[consult] 未知 kind: ${s.kind}`);
+    if (!PHASES.includes(s.phase)) throw new Error(`[consult] 非法 phase: ${s.phase}`);
+    if (!POINTS.includes(s.consultPoint)) throw new Error(`[consult] 非法 consultPoint: ${s.consultPoint}`);
+    const prefixPhase = s.consultPoint.startsWith('before_') ? 'pre' : 'post';
+    if (s.phase !== prefixPhase) throw new Error(`[consult] consultPoint/phase 前缀不一致: ${s.consultPoint} vs ${s.phase}`);
+    const key = `${s.kind}:${s.phase}`;
+    if (seen.has(key)) throw new Error(`[consult] (kind,phase) 重复咨询点: ${key}`);
+    seen.add(key);
+    seenKind.add(s.kind);
+  }
+  for (const k of KINDS) {
+    if (!seenKind.has(k)) throw new Error(`[consult] 注册 kind 未进咨询序列: ${k}`);
+  }
+  const scenarioCount = seq.filter((s) => s.kind === 'scenario_activate').length;
+  if (scenarioCount !== 2) {
+    throw new Error(`[consult] scenario_activate 应恰好 2 个咨询点（pre/post），实际 ${scenarioCount}`);
+  }
+}
+
 /** 工具接管匹配上下文（预留：未来统一执行入口 takeToolOver(match, services) 的入参形态） */
 export interface ToolTakeoverMatch {
   name: string;

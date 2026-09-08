@@ -31,8 +31,11 @@ import { decideToolApproval } from '@/lib/chat/approval';
 import { createPendingConfirm, CONFIRM_TIMEOUT_MS, type ConfirmResult } from '@/lib/chat/confirm-pending';
 // P4a 三段化骨架：工具轮宿主接管注册表 + 场景激活统一执行（纯类型 + 编排，见 tool-pipeline.ts 文件头注释）
 // P4a-3-1：挂起型（host-pending）接管注册/查询（registerHostTakeover / hostTakeoverFor）
-import { registerTakeover, takeoverFor, takeoverOfKind, applyScenarioActivation, registerHostTakeover, hostTakeoverFor } from '@/lib/chat/tool-pipeline';
+import { registerTakeover, takeoverFor, takeoverOfKind, applyScenarioActivation, registerHostTakeover, hostTakeoverFor, assertConsultContract } from '@/lib/chat/tool-pipeline';
 import type { TakeoverServices, HostTakeoverContext, HostTakeoverVerdict } from '@/lib/chat/tool-pipeline';
+
+// K3-2：工具轮咨询链契约加载期自检（9 咨询点顺序/覆盖/唯一性；热更加载即断言，与单测双保险）
+assertConsultContract();
 // Phase 2 策略层抽取：思考档位决策收敛到纯函数模块（默认行为与现网一致）
 import { v4ThinkingModeForLevel, executionDowngrade, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
 

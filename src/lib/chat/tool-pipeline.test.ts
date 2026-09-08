@@ -9,7 +9,7 @@
  * 必须同步 TOOL_CONSULT_SEQUENCE + route 注释编号 + 本文件（顺序断言本体见「顺序与清单一致」）。
  */
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { TOOL_CONSULT_SEQUENCE } from './tool-pipeline';
+import { assertConsultContract, TOOL_CONSULT_SEQUENCE } from './tool-pipeline';
 import type { ToolTakeoverKind, ToolTakeoverPhase } from './tool-pipeline';
 
 /** 允许的咨询时机（= ToolTakeoverPhase 全部取值） */
@@ -107,5 +107,9 @@ describe('TOOL_CONSULT_SEQUENCE 顺序与清单（§1.2 硬顺序）', () => {
     for (const [kind, n] of counts) {
       if (kind !== 'scenario_activate') expect(n).toBe(1);
     }
+  });
+
+  it('K3-2 加载期自检通过：assertConsultContract() 对当前契约不抛', () => {
+    expect(() => assertConsultContract()).not.toThrow();
   });
 });
