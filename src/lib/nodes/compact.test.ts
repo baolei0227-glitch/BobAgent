@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { ConversationTurn } from '@/lib/node-markdown';
 import {
   compactionFallbackSummary,
@@ -9,7 +12,11 @@ import {
   shouldCompact,
   type CompressInput,
 } from './compact';
-import { compactionTurnFromDerivedPayload } from './compact-source';
+import {
+  compactionTurnFromDerivedPayload,
+  deriveCompactionTurnsFromLogs,
+  readLogDerivedCompactionTurn,
+} from './compact-source';
 
 /** 夹具：含日期/金额/条款号硬事实（R-27 规则可抽取）的两轮对话 */
 function fixtureTurns(): ConversationTurn[] {
@@ -193,5 +200,62 @@ describe('compact: T2 折叠源切 .trajectory 日志派生 compactionTurnFromDe
     expect(turn.question).toBe('仅问题派生');
     expect(turn.answer).toContain('.md 回答');
     expect(turn.answer).toContain('[本轮工具] read_file');
+  });
+});
+
+describe('compact-source：负向回退（日志缺失/非法 → 原样回退 .md 轮次，不丢内容）', () => {
+  // 真实临时目录 + .trajectory 落盘，覆盖 readLogDerivedCompactionTurn / deriveCompactionTurnsFromLogs 文件级链路
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'bob-compact-source-'));
+  const nodeId = 'node-abc123';
+  const logDir = join(tmpRoot, '.trajectory', nodeId);
+  mkdirSync(logDir, { recursive: true });
+  afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
+
+  /** 一轮最小可派生日志（question=日志问题、answer=日志回答、reasoning 含日期硬事实） */
+  function writeDerivableLog(taskId: string): void {
+    const lines = [
+      `{"seq":0,"type":"turn/start","ts":1,"payload":{"nodeId":"${nodeId}","userInput":"日志问题"}}`,
+      `{"seq":1,"type":"user/message","ts":1,"payload":{"role":"user","content":"日志问题"}}`,
+      `{"seq":2,"type":"step/start","ts":1,"payload":{"round":0}}`,
+      `{"seq":3,"type":"assistant/message","ts":2,"payload":{"content":"日志回答","reasoning":"日志推理 2026-08-14 到期","toolCalls":[]}}`,
+      `{"seq":4,"type":"turn/end","ts":3,"payload":{"rounds":1}}`,
+    ];
+    writeFileSync(join(logDir, `${taskId}.jsonl`), lines.join('\n'));
+  }
+
+  it('readLogDerivedCompactionTurn：日志文件不存在 → null（调用方回退 md）', () => {
+    const turn: ConversationTurn = { question: '.md 问题', answer: '.md 回答', questionTime: '', answerTime: '', taskId: 'task-missing-0000' };
+    expect(readLogDerivedCompactionTurn(tmpRoot, nodeId, turn)).toBeNull();
+  });
+
+  it('readLogDerivedCompactionTurn：日志为空 / 非法 taskId → null（不读、不回退错内容）', () => {
+    const emptyLog = join(logDir, 'task-empty-0000.jsonl');
+    writeFileSync(emptyLog, '');
+    const turnA: ConversationTurn = { question: 'q', answer: 'a', questionTime: '', answerTime: '', taskId: 'task-empty-0000' };
+    expect(readLogDerivedCompactionTurn(tmpRoot, nodeId, turnA)).toBeNull();
+    // 路径段非法（穿越/超长）→ 直接 null，不触盘
+    const turnB: ConversationTurn = { question: 'q', answer: 'a', questionTime: '', answerTime: '', taskId: '../evil/../../x' };
+    expect(readLogDerivedCompactionTurn(tmpRoot, nodeId, turnB)).toBeNull();
+    const turnC: ConversationTurn = { question: 'q', answer: 'a', questionTime: '', answerTime: '' }; // 无 taskId
+    expect(readLogDerivedCompactionTurn(tmpRoot, nodeId, turnC)).toBeNull();
+  });
+
+  it('deriveCompactionTurnsFromLogs：逐轮独立——某轮日志缺失回退 md 原文（占位也保留），有日志轮走日志派生', () => {
+    writeDerivableLog('task-ok-0001');
+    const mdLost: ConversationTurn = { question: '[MD-TEXT-LOST md 已被清空]', answer: 'md 回答', questionTime: '', answerTime: '', taskId: 'task-missing-0001' };
+    const mdOk: ConversationTurn = { question: '.md 问题二', answer: '.md 回答二', questionTime: '', answerTime: '', taskId: 'task-ok-0001' };
+    const mdNoLog: ConversationTurn = { question: '.md 问题三', answer: '.md 回答三', questionTime: '', answerTime: '' }; // 无 taskId
+    const out = deriveCompactionTurnsFromLogs([mdLost, mdOk, mdNoLog], tmpRoot, nodeId);
+
+    // ① 日志缺失轮 → 回退 .md 原文（含占位文本也不丢，防折叠源漂移后内容黑洞）
+    expect(out[0]).toBe(mdLost);
+    expect(out[0].question).toContain('[MD-TEXT-LOST');
+    // ② 有日志轮 → 日志派生（question/answer 来自日志，reasoning 以 [推理过程] 入答）
+    expect(out[1]).not.toBe(mdOk);
+    expect(out[1].question).toBe('日志问题');
+    expect(out[1].answer).toContain('日志回答');
+    expect(out[1].answer).toContain('[推理过程] 日志推理');
+    // ③ 无 taskId 轮 → 保持 .md 原样（不触盘）
+    expect(out[2]).toBe(mdNoLog);
   });
 });
