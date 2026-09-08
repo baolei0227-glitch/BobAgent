@@ -47,6 +47,23 @@ import { createTraceWindow, normalizeSseFrame, pushWindowFrame, finishWindow, ev
 // P5a-2 Trace 面板窗口派生（可回退），行为不变：窗口 → ConversationTrajectoryItem 同形素材
 import { windowToTrajectoryItems, type TraceWindowTurnItem } from '@/lib/trajectory/render';
 
+// ── S2b 思考档位徽标元数据（字母 + 颜色）：DSH 四档 off/low/high/max + legacy medium
+//  legacy medium 保留旧 M/蓝 显示（存量消息/节点向后兼容）
+const THINKING_LEVEL_LETTER: Record<ThinkingLevel, string> = {
+  off: 'O',
+  low: 'L',
+  medium: 'M',
+  high: 'H',
+  max: 'X',
+};
+const THINKING_LEVEL_COLOR: Record<ThinkingLevel, string> = {
+  off: 'var(--ink-muted)',
+  low: 'var(--info)',
+  medium: 'var(--info)',
+  high: 'color-mix(in oklab, var(--primary-strong) 55%, var(--info))',
+  max: 'var(--primary-strong)',
+};
+
 
 /**
  * 复制文本到剪贴板（带降级与错误处理）。
@@ -4270,7 +4287,8 @@ ${rows.join('\n')}
             const nonSystemMsgs = messages.filter((m) => !m.system);
             const startMsg = Math.min(compactedUntilRef.current * 2, Math.max(0, nonSystemMsgs.length - 1));
             const uncompressed = nonSystemMsgs.slice(startMsg);
-            const triggerTokens = compactTriggerTokensForContext(inferContextWindow(currentModelId, actualThinkingLevel === 'high'));
+            // 压缩预判的上下文窗口：high/max 档按推理大模型估算（S2b：max 为新深档，一并计入）
+            const triggerTokens = compactTriggerTokensForContext(inferContextWindow(currentModelId, actualThinkingLevel === 'high' || actualThinkingLevel === 'max'));
             const totalTokens = Math.ceil(uncompressed.reduce((s, m) => s + (m.content || '').length, 0) * 0.8);
             const willCompact = uncompressed.length > 0 && (totalTokens >= triggerTokens || Math.ceil(uncompressed.length / 2) >= 15);
             if (willCompact) {
@@ -5423,9 +5441,9 @@ ${rows.join('\n')}
                     const metaLabel = metaModelOpt
                       ? metaModelOpt.label
                       : (metaModel || 'Auto');
-                    const levelLetter = ({ low: 'L', medium: 'M', high: 'H' } as Record<ThinkingLevel, string>)[metaLevel];
-                    // low/medium 同色（信息蓝），high 用品牌紫强调
-                    const levelColor = metaLevel === 'high' ? 'var(--primary-strong)' : 'var(--info)';
+                    const levelLetter = THINKING_LEVEL_LETTER[metaLevel];
+                    // 档位色阶（S2b）：off 灰 / low·legacy medium 信息蓝 / high 紫蓝过渡 / max 品牌紫强调
+                    const levelColor = THINKING_LEVEL_COLOR[metaLevel];
                     const levelName = THINKING_LEVELS.find((l) => l.value === metaLevel)?.label ?? metaLevel;
                     const metaExpanded = expandedMetaId === msg.id;
                     return (
@@ -5470,7 +5488,7 @@ ${rows.join('\n')}
                 const metaModelOptShare = metaModelShare ? availableModels.find((mm) => mm.modelId === metaModelShare) : undefined;
                 const shareModelLabel = metaModelOptShare ? metaModelOptShare.label : (metaModelShare || 'Auto');
                 const shareLevel = (msg.thinkingLevel ?? data.thinkingLevel ?? DEFAULT_THINKING_LEVEL) as ThinkingLevel;
-                const shareLevelLetter = ({ low: 'L', medium: 'M', high: 'H' } as Record<ThinkingLevel, string>)[shareLevel];
+                const shareLevelLetter = THINKING_LEVEL_LETTER[shareLevel];
                 return (
                   <ShareCard
                     question={question}
@@ -6333,22 +6351,15 @@ ${rows.join('\n')}
                 }}
               >
                 <Brain className="h-3.5 w-3.5 shrink-0" />
-                {/* ⑫ 思考级别徽标：右上角 L/M/H（Auto 模式默认 H 且可手动调整） */}
+                {/* ⑫ 思考档位徽标：右上角 O/L/H/X（Off/Low/High/Max；legacy medium=M；Auto 模式默认 High 且可手动调整） */}
                 <span
                     className="absolute -right-1 -top-1 inline-flex h-[13px] min-w-[13px] items-center justify-center rounded-full px-[3px] text-10 font-bold leading-none text-white"
                     style={{
-                      backgroundColor: (() => {
-                        switch (thinkingLevel) {
-                          case 'low':    return 'var(--info)';
-                          case 'medium': return 'var(--info)';
-                          case 'high':   return 'var(--primary-strong)';
-                          default:       return 'var(--ink-muted)';
-                        }
-                      })(),
+                      backgroundColor: THINKING_LEVEL_COLOR[thinkingLevel],
                       boxShadow: '0 0 0 1px var(--paper)',
                     }}
                   >
-                    {({ low: 'L', medium: 'M', high: 'H' } as Record<ThinkingLevel, string>)[thinkingLevel]}
+                    {THINKING_LEVEL_LETTER[thinkingLevel]}
                   </span>
               </button>
               {thinkingMenuOpen && (
@@ -6366,7 +6377,8 @@ ${rows.join('\n')}
                     backgroundColor: 'var(--popover)',
                   }}
                 >
-                  {THINKING_LEVELS.map((lvl) => {
+                  {/* S2b 四档可选（legacy medium 仅存量显示，不进菜单） */}
+                  {THINKING_LEVELS.filter((l) => l.value !== 'medium').map((lvl) => {
                 const modelSupportsThinking = thinkingAutoMode || (availableModels.find((m) => m.modelId === modelId)?.thinking ?? true);
                 const isDisabled = !modelSupportsThinking;
                 const levelSelected = thinkingLevel === lvl.value;

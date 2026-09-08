@@ -190,26 +190,45 @@ export { getAvailableModels, isCustomModel, parseCustomModel, getProviderPreset 
 
 /* ==================== 思考深度控制系统 ==================== */
 
-export type ThinkingLevel = 'low' | 'medium' | 'high';
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
 
+/** UI 思考档位展示表（S2b 定稿 P-A：DSH 四档 off/low/high/max 可选；'medium' 为旧三档遗留值，
+ *  仅用于存量消息/节点持久化的向后兼容显示——不可选，语义视同 high）。
+ *  label = DSH 档位名（与 harness 对齐）；shortLabel 供紧凑场景使用。 */
 export const THINKING_LEVELS: { value: ThinkingLevel; label: string; shortLabel: string }[] = [
-  { value: 'low', label: 'Awareness', shortLabel: '浅' },
-  { value: 'medium', label: 'Deliberation', shortLabel: '中' },
-  { value: 'high', label: 'Retrospection', shortLabel: '深' },
+  { value: 'off',    label: 'Off',         shortLabel: '关' },
+  { value: 'low',    label: 'Low',         shortLabel: '浅' },
+  { value: 'high',   label: 'High',        shortLabel: '中' },
+  { value: 'max',    label: 'Max',         shortLabel: '深' },
+  { value: 'medium', label: 'Deliberation', shortLabel: '中' }, // legacy：旧三档中档，语义并入 high
 ];
 
-/** reasoning_effort API 参数映射 */
+/** reasoning_effort API 参数映射（S2b 词表；实际决策已收敛到 lib/thinking/policy.effortForLevel，
+ *  此处仅作类型化兜底/文档） */
 export const REASONING_EFFORT_MAP: Record<ThinkingLevel, string> = {
+  off: 'none',
   low: 'low',
-  medium: 'medium',
+  medium: 'high',
   high: 'high',
+  max: 'max',
 };
 
-/** 系统提示注入 */
-export const SYSTEM_PROMPT_INJECTIONS: Record<ThinkingLevel, string> = {
+/** 思考引导注入文案（非 V4 推理模型用；DeepSeek V4 恒不注入——原生 reasoning_content）。
+ *  S2b 四档语义：low=简要思考（原 low）；high=充分思考（承接原中档 Deliberation）；
+ *  max=深度结构化推理框架（原深档 Retrospection）；off/legacy medium 见 SYSTEM_PROMPT_INJECTIONS。 */
+const THINK_GUIDE_TEXT: Record<'low' | 'deliberation' | 'retrospection', string> = {
   low: '\n## 思考要求\n在回答前进行简要思考，但不要过度分析。思考过程用 <think></think> 标签包裹。\n\n## 提问限制\n每次最多向用户提 1-2 个问题。判断确实需要用户补充信息时才提问，不要为提问而提问。\n',
-  medium: '\n## 思考要求\n每轮回答前先进行充分的思考，用 <think></think> 标签包裹。\n思考内容应包括：\n- 对用户问题的理解和拆解\n- 需要确认的前提条件\n- 推理的关键步骤\n\n## 提问限制\n每次最多向用户提 1-3 个问题。当需求、偏好或关键信息不明确时，主动向用户澄清。\n',
-  high: '\n## 深度思考要求\n对于每一个问题，请进行深度、结构化的思考。思考过程用 <think></think> 标签包裹。\n必须包含以下步骤：\n1. 用自己的话复述问题，确认理解正确\n2. 列出已知条件和未知信息\n3. 识别真正的问题（用户问的和用户需要的可能不同）\n4. 构建推理链条，逐步推导\n5. 检查每一步的可靠性，标注不确定的地方\n6. 考虑多种可能的答案或方案，比较优劣\n思考深度应足够：如果一个问题有隐含的前提假设，必须挖出来审视；如果有多种解法，必须全部列出并对比。\n\n对于疑难问题（复杂推理、长文档分析、多步骤任务），升级为以下推理框架：\n### Phase 1: 理解\n- 用自己的话完整复述问题\n- 标记所有不确定的信息和假设\n- 识别问题的隐含前提和边界条件\n### Phase 2: 拆解\n- 将问题拆解为 2~5 个子问题\n- 理清子问题之间的依赖关系\n- 确定哪些可以并行思考，哪些必须串行\n### Phase 3: 深度推理\n- 对每个子问题，从第一性原理出发逐步推导\n- 列举所有合理的替代方案或解释\n- 对每种方案进行优劣比较\n- 标注推理中的薄弱环节\n### Phase 4: 整合\n- 检查子问题之间的衔接是否自洽\n- 回溯到原始问题，确认是否完整回答\n- 标注遗留的未解决问题\n### Phase 5: 验证\n- 如果可能，用另一种方式验证结论\n- 设定检验标准：什么情况下你的答案会被证明是错的？\n\n## 提问限制\n每次最多向用户提 2-4 个问题。深度思考过程中发现的不确定因素、隐含假设和方案歧义都应向用户确认。\n',
+  deliberation: '\n## 思考要求\n每轮回答前先进行充分的思考，用 <think></think> 标签包裹。\n思考内容应包括：\n- 对用户问题的理解和拆解\n- 需要确认的前提条件\n- 推理的关键步骤\n\n## 提问限制\n每次最多向用户提 1-3 个问题。当需求、偏好或关键信息不明确时，主动向用户澄清。\n',
+  retrospection: '\n## 深度思考要求\n对于每一个问题，请进行深度、结构化的思考。思考过程用 <think></think> 标签包裹。\n必须包含以下步骤：\n1. 用自己的话复述问题，确认理解正确\n2. 列出已知条件和未知信息\n3. 识别真正的问题（用户问的和用户需要的可能不同）\n4. 构建推理链条，逐步推导\n5. 检查每一步的可靠性，标注不确定的地方\n6. 考虑多种可能的答案或方案，比较优劣\n思考深度应足够：如果一个问题有隐含的前提假设，必须挖出来审视；如果有多种解法，必须全部列出并对比。\n\n对于疑难问题（复杂推理、长文档分析、多步骤任务），升级为以下推理框架：\n### Phase 1: 理解\n- 用自己的话完整复述问题\n- 标记所有不确定的信息和假设\n- 识别问题的隐含前提和边界条件\n### Phase 2: 拆解\n- 将问题拆解为 2~5 个子问题\n- 理清子问题之间的依赖关系\n- 确定哪些可以并行思考，哪些必须串行\n### Phase 3: 深度推理\n- 对每个子问题，从第一性原理出发逐步推导\n- 列举所有合理的替代方案或解释\n- 对每种方案进行优劣比较\n- 标注推理中的薄弱环节\n### Phase 4: 整合\n- 检查子问题之间的衔接是否自洽\n- 回溯到原始问题，确认是否完整回答\n- 标注遗留的未解决问题\n### Phase 5: 验证\n- 如果可能，用另一种方式验证结论\n- 设定检验标准：什么情况下你的答案会被证明是错的？\n\n## 提问限制\n每次最多向用户提 2-4 个问题。深度思考过程中发现的不确定因素、隐含假设和方案歧义都应向用户确认。\n',
+};
+
+/** 系统提示注入（off 不注入；medium legacy 与新 high 档同为 Deliberation 文案） */
+export const SYSTEM_PROMPT_INJECTIONS: Record<ThinkingLevel, string> = {
+  off: '',
+  low: THINK_GUIDE_TEXT.low,
+  medium: THINK_GUIDE_TEXT.deliberation, // legacy：旧三档中档
+  high: THINK_GUIDE_TEXT.deliberation,   // 新 high 档 = 原中档深度
+  max: THINK_GUIDE_TEXT.retrospection,   // 原深档文案随 max 档
 };
 
 /** 前端展示策略。
@@ -223,12 +242,15 @@ export interface ThinkingDisplayConfig {
 }
 
 export const DISPLAY_CONFIGS: Record<ThinkingLevel, ThinkingDisplayConfig> = {
+  off: { showThinkBlock: true, thinkCollapsed: true, thinkDimmed: true },
   low: { showThinkBlock: true, thinkCollapsed: true, thinkDimmed: true },
   medium: { showThinkBlock: true, thinkCollapsed: true, thinkDimmed: true },
   high: { showThinkBlock: true, thinkCollapsed: true, thinkDimmed: true },
+  max: { showThinkBlock: true, thinkCollapsed: true, thinkDimmed: true },
 };
 
-export const DEFAULT_THINKING_LEVEL: ThinkingLevel = 'medium';
+/** 缺省档位 = high（DSH 官方默认；S2b 后 UI/后端默认统一，off/low 显式选择才生效） */
+export const DEFAULT_THINKING_LEVEL: ThinkingLevel = 'high';
 
 export type AiChatNodeData = {
   title: string;

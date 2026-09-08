@@ -72,8 +72,8 @@ export interface ConversationTurn {
   anchor?: string;
   /** 该轮回答实际使用的模型 id（auto 模式每轮可能不同；custom 模型为完整配置串） */
   modelId?: string;
-  /** 该轮回答实际使用的思考等级 */
-  thinkingLevel?: 'off' | 'low' | 'medium' | 'high';
+  /** 该轮回答实际使用的思考等级（S2b：DSH 四档 off/low/high/max + legacy medium） */
+  thinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'max';
   /** 该轮回答的思考内容（reasoning_content，think 标签持久化，恢复后仍可回看） */
   reasoning?: string;
   /** 该轮工具调用轮剥离出的执行过程叙述（持久化，恢复后仍可按步骤卡片回看） */
@@ -598,7 +598,7 @@ export function appendConversation(
   mdString: string,
   question: string,
   answer: string,
-  options?: { questionTime?: string; answerTime?: string; summary?: string; title?: string; questionAttachments?: ConversationAttachment[]; modelId?: string; thinkingLevel?: 'off' | 'low' | 'medium' | 'high'; reasoning?: string; processNarration?: string; taskId?: string; toolCalls?: ConversationTurn['toolCalls']; outputFiles?: ConversationTurn['outputFiles'] },
+  options?: { questionTime?: string; answerTime?: string; summary?: string; title?: string; questionAttachments?: ConversationAttachment[]; modelId?: string; thinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'max'; reasoning?: string; processNarration?: string; taskId?: string; toolCalls?: ConversationTurn['toolCalls']; outputFiles?: ConversationTurn['outputFiles'] },
 ): string {
   const node = parseNodeMarkdown(mdString);
   const now = new Date().toISOString();

@@ -21,9 +21,9 @@ export type ThinkingEffort = 'off' | 'low' | 'high' | 'max';
  *  （off 显式 → none；UI low→low、medium→high、high→max）。 */
 export type ReasoningEffort = 'none' | 'low' | 'high' | 'max';
 
-/** 档位决策输入（UI 层）：ThinkingLevel 三档 + 显式 off（与 @/lib/types 的 ThinkingLevel 同构，
- *  policy 不依赖 types.ts，保持零 import）。 */
-export type EffortLevel = 'off' | 'low' | 'medium' | 'high';
+/** 档位决策输入（UI 层）：DSH 四档 off/low/high/max + 旧三档遗留 medium（与 @/lib/types 的
+ *  ThinkingLevel 同构，policy 不依赖 types.ts，保持零 import）。 */
+export type EffortLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
 
 /** 思考档位策略开关（对应 settings.thinking 字段落盘值的运行时形态）：
  *  - harnessPure：纯 DSH 固定档（默认 true）——每轮一律发用户所选档位，不降级、不 C1 关思考；
@@ -41,21 +41,23 @@ export interface ThinkingPolicyConfig {
   injectThinkGuide?: boolean;
 }
 
-/** UI 档位 → reasoning_effort 基映射（不含 C1/off 特判）：low→low、medium→high、high→max */
-const LEVEL_TO_EFFORT: Record<Exclude<EffortLevel, 'off'>, ReasoningEffort> = {
+/** UI 档位 → reasoning_effort 基映射（S2b 四档语义）：off→none、low→low、medium(legacy)→high、high→high、max→max */
+const LEVEL_TO_EFFORT: Record<EffortLevel, ReasoningEffort> = {
+  off: 'none',
   low: 'low',
   medium: 'high',
-  high: 'max',
+  high: 'high',
+  max: 'max',
 };
 
 /**
- * 档位 → reasoning_effort 映射（S2a 统一词表，V4 与非 V4 共用；原 route 的 REASONING_EFFORT_MAP
+ * 档位 → reasoning_effort 映射（S2a/S2b 统一词表，V4 与非 V4 共用；原 route 的 REASONING_EFFORT_MAP
  *  恒等映射 + V4ThinkingMode 映射合并收敛于此）：
  *  - off 显式 → 'none'（DSH 语义 off = wire none）；
- *  - C1（仅 harnessPure=false && trivialPromptOff && trivialPrompt && level!=='high'）→ 'none'：
+ *  - C1（仅 harnessPure=false && trivialPromptOff && trivialPrompt && level 非 high/max）→ 'none'：
  *    琐碎关思考修复为发 reasoning_effort: 'none'（探针证实 non-thinking 不关思考是官方 bug）；
- *    用户显式选 high 深度时尊重用户不降级；harnessPure=true 时忽略 trivial（纯固定档）；
- *  - 否则 low→'low'、medium→'high'、high→'max'。
+ *    用户显式选 high/max 深度时尊重用户不降级；harnessPure=true 时忽略 trivial（纯固定档）；
+ *  - 否则 low→'low'、medium(legacy)→'high'、high→'high'、max→'max'。
  * 注：trivialPrompt 由调用方用 isTrivialPrompt 计算。
  */
 export function effortForLevel(
@@ -64,7 +66,7 @@ export function effortForLevel(
   trivialPrompt = false,
 ): ReasoningEffort {
   if (level === 'off') return 'none';
-  if (!config.harnessPure && config.trivialPromptOff && trivialPrompt && level !== 'high') return 'none';
+  if (!config.harnessPure && config.trivialPromptOff && trivialPrompt && level !== 'high' && level !== 'max') return 'none';
   return LEVEL_TO_EFFORT[level];
 }
 

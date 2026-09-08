@@ -2719,8 +2719,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 注入思考深度系统提示
-    const level: ThinkingLevel = thinkingLevel ?? 'medium';
+    // 注入思考深度系统提示（S2b：UI 四档 off/low/high/max + legacy medium；缺省 high = DSH 默认档）
+    const level: ThinkingLevel = thinkingLevel ?? 'high';
 
     // Phase 2 策略层抽取（S2a 语义定稿，默认=纯 DSH 固定档）：思考档位决策读 settings.thinking，
     // harnessPure 缺省 true —— 每轮一律发用户所选档位，不降级、不 C1 关思考；显式 false 才启用
@@ -2757,8 +2757,8 @@ export async function POST(request: NextRequest) {
       return !!providerModelId && /reason|r1|z1|think|k2/i.test(providerModelId);
     })();
 
-    // S2a 统一档位：V4 与非 V4 同走 reasoning_effort 词表（none/low/high/max）。
-    // 档位决策收敛到 policy.effortForLevel：UI low→low、medium→high、high→max；
+    // S2a/S2b 统一档位：V4 与非 V4 同走 reasoning_effort 词表（none/low/high/max）。
+    // 档位决策收敛到 policy.effortForLevel：off→none、low→low、medium(legacy)→high、high→high、max→max；
     // C1（仅 harnessPure=false）或 off 显式 → none。供整轮共享（每轮 base，执行轮降级见循环内）
     const baseEffort = effortForLevel(level, thinkingPolicyConfig, trivialPrompt);
 
@@ -3219,8 +3219,8 @@ export async function POST(request: NextRequest) {
               // item 6：max_tokens 分级——max 深度放宽到 32k（高思考深度下
               // reasoning 占用大半输出预算，16k 仍可能截断正文）；仅对 1M 推理大模型档
               // （函数返回 16384）翻倍，128k/小模型档保持不动，避免超出模型支持上限触发 API 400。
-              // S2a：判据由 thinking_mode==='thinking_max'（V4）/ effort==='high'（非 V4）收敛为
-              // 统一 baseEffort==='max'（level=high → max；medium→high 不放大）
+              // S2b：判据收敛为统一 baseEffort==='max'（仅 UI max 档 → max；legacy medium→high、
+              // high→high 不放大）
               const baseMaxTokens = modelOutputTokenMaxForModel(providerModelId || '', baseEffort !== 'none');
               const highDepthRequest = baseEffort === 'max';
               const effectiveMaxTokens = highDepthRequest && baseMaxTokens >= 16384

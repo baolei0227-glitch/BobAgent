@@ -434,7 +434,7 @@ export async function POST(request: NextRequest) {
         questionTime, answerTime, summary,
         questionAttachments: question_attachments,
         modelId: typeof model_id === 'string' ? model_id : undefined,
-        thinkingLevel: typeof thinking_level === 'string' ? thinking_level as 'off' | 'low' | 'medium' | 'high' : undefined,
+        thinkingLevel: typeof thinking_level === 'string' ? thinking_level as 'off' | 'low' | 'medium' | 'high' | 'max' : undefined,
         reasoning: reasoningText && reasoningText.trim() ? reasoningText : undefined,
         processNarration: typeof process_narration === 'string' && process_narration.trim() ? process_narration : undefined,
         taskId: typeof task_id === 'string' && task_id.trim() ? task_id : undefined,

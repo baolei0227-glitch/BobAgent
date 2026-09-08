@@ -494,8 +494,9 @@ export function defaultSettings(): AppSettings {
     quickLaunchers: [],
     theme: 'warm',
     fontScale: 'l',
-    // Phase 2-2a：思考档位策略开关默认开（与策略抽取前行为一致）
-    thinking: { downgradeOnExecution: true, trivialPromptOff: true, injectThinkGuide: true },
+    // Phase 2-2a/2b（S2a/S2b）：思考档位策略开关——harnessPure 默认 true（纯 DSH 固定档），
+    // 显式 false 才启用旧业务插件行为（执行轮降级 + C1）；下两开关仅 harnessPure=false 生效
+    thinking: { harnessPure: true, downgradeOnExecution: true, trivialPromptOff: true, injectThinkGuide: true },
     // P4b-1：审批策略默认 allow_scope —— 与现网行为逐位一致（仅 confirmTools 名单内需确认）
     approval: { defaultStrategy: 'allow_scope' },
   };

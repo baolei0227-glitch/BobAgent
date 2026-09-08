@@ -400,8 +400,10 @@ export function SettingsModal({
   const [theme, setTheme] = useState<string>('warm');
   // 全局字号档位（'m' | 'l' | 'xl'，undefined = 'l' 默认）
   const [fontScale, setFontScale] = useState<'m' | 'l' | 'xl'>('l');
-  // 思考档位策略开关（settings.thinking）：缺省均 true，与后端/默认设置语义一致（draft 加载时合并初始化）
-  const [thinkingPolicy, setThinkingPolicy] = useState<{ downgradeOnExecution: boolean; trivialPromptOff: boolean; injectThinkGuide: boolean }>({
+  // 思考档位策略开关（settings.thinking）：缺省均 true（harnessPure 默认=纯 DSH 固定档），
+  // 与后端/默认设置语义一致（draft 加载时合并初始化）
+  const [thinkingPolicy, setThinkingPolicy] = useState<{ harnessPure: boolean; downgradeOnExecution: boolean; trivialPromptOff: boolean; injectThinkGuide: boolean }>({
+    harnessPure: true,
     downgradeOnExecution: true,
     trivialPromptOff: true,
     injectThinkGuide: true,
@@ -487,6 +489,7 @@ export function SettingsModal({
         // 思考档位策略：settings.thinking 字段缺省均视为 true（与后端消费语义一致）
         const thinkingCfg = settings.thinking ?? {};
         setThinkingPolicy({
+          harnessPure: thinkingCfg.harnessPure !== false,
           downgradeOnExecution: thinkingCfg.downgradeOnExecution !== false,
           trivialPromptOff: thinkingCfg.trivialPromptOff !== false,
           injectThinkGuide: thinkingCfg.injectThinkGuide !== false,
@@ -957,8 +960,9 @@ export function SettingsModal({
         avatar: { mode: avatarMode, selected: avatarMode === 'fixed' ? avatarSelected : undefined },
         brandLogo: brandLogo || undefined,
         theme: 'warm',
-        // 思考档位策略：显式写三值（缺省 true 语义已由初始化时归一，确保开关与后端一致）
+        // 思考档位策略：显式写四值（缺省语义已由初始化时归一，确保开关与后端一致；harnessPure=true=纯固定档）
         thinking: {
+          harnessPure: thinkingPolicy.harnessPure,
           downgradeOnExecution: thinkingPolicy.downgradeOnExecution,
           trivialPromptOff: thinkingPolicy.trivialPromptOff,
           injectThinkGuide: thinkingPolicy.injectThinkGuide,
@@ -2208,13 +2212,33 @@ export function SettingsModal({
                         </select>
                       </div>
 
-                      {/* ── Thinking Policy（思考档位策略，高级；随主表单 Save 统一落盘，缺省全开=策略抽取前行为）── */}
+                      {/* ── Thinking Policy（思考档位策略，高级；随主表单 Save 统一落盘）── */}
                       <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--line-soft)' }}>
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Thinking Policy</div>
+                        {/* S2b：harnessPure = 纯 DSH 固定档总开关（默认 On）；Off = 启用下方执行轮降级 + C1 省 token */}
+                        <div className="flex items-center justify-between gap-3 py-1.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Pure DSH tiers (harnessPure)</div>
+                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>
+                              On = fixed reasoning tier every round (DSH native, no downgrade / no trivial-off). Off = legacy plugin behavior: tool-round downgrade + C1 skip-thinking to save tokens.
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setThinkingPolicy((p) => ({ ...p, harnessPure: !p.harnessPure }))}
+                            className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors"
+                            style={{
+                              backgroundColor: thinkingPolicy.harnessPure ? 'var(--primary-soft)' : 'var(--paper-hover)',
+                              color: thinkingPolicy.harnessPure ? 'var(--primary-strong)' : 'var(--ink-muted)',
+                            }}
+                          >
+                            {thinkingPolicy.harnessPure ? 'On' : 'Off'}
+                          </button>
+                        </div>
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Downgrade thinking during tool execution</div>
-                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — savings of reasoning tokens.</div>
+                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — savings of reasoning tokens (applies only when Pure DSH tiers is Off).</div>
                           </div>
                           <button
                             type="button"
