@@ -199,11 +199,15 @@ export interface QuickLauncher {
   prompt: string;
 }
 
-/** 思考档位策略开关（Phase 2 策略层抽取，chat 后端 thinking 决策；默认两开关均开 → 与抽取前行为一致）。
- *  存 settings.thinking；undefined = 走默认（downgradeOnExecution / trivialPromptOff 均视为 true）。
- *  - downgradeOnExecution：工具循环执行轮（round>0 且非收尾轮）思考降一级；
- *  - trivialPromptOff：琐碎对话（问候/致谢等）直接关思考（C1）。 */
+/** 思考档位策略开关（Phase 2 策略层抽取 + S2a，chat 后端 thinking 决策）。
+ *  存 settings.thinking；字段 undefined = 走默认（各开关缺省语义见下）。
+ *  - harnessPure：纯 DSH 固定档（缺省 true，S2a 拍板 P-B）——每轮一律发用户所选档位，
+ *    不降级、不 C1 关思考；显式 false = 旧业务插件行为（执行轮降级 + C1）。
+ *  - downgradeOnExecution：工具循环执行轮（round>0 且非收尾轮）思考降一级（仅 harnessPure=false 生效）；
+ *  - trivialPromptOff：琐碎对话（问候/致谢等）直接关思考 C1（仅 harnessPure=false 生效）。 */
 export interface ThinkingSettings {
+  /** 纯 DSH 固定档（缺省 true）：true = 固定档不降级不 C1；false = 旧业务插件（降级 + C1 沿用下两开关） */
+  harnessPure?: boolean;
   downgradeOnExecution?: boolean;
   trivialPromptOff?: boolean;
   /** 非 V4 推理模型的 <think> 标签引导注入开关（DeepSeek V4 恒不注入） */

@@ -1,110 +1,106 @@
 /**
- * 思考档位策略层 —— Phase 2 策略层抽取（默认行为与现网完全一致）
+ * 思考档位策略层 —— Phase 2 策略层抽取 + S2a 档位词表统一（reasoning_effort）
  * ------------------------------------------------------------------
- * 将 /api/chat/route.ts 内散落的思考档位决策收敛为纯函数模块：
- *  - C1 琐碎对话关思考（问候/致谢等简单轮次白烧 reasoning tokens）
- *  - DeepSeek V4 thinking_mode 档位映射（non-thinking / thinking / thinking_max）
- *  - item 4 工具循环「执行轮」思考降级（省 reasoning tokens）
- * 本模块无 route 依赖、无 I/O、纯函数；调用方负责注入 messages / level / config。
- * settings.thinking 两个开关默认开 —— 用户不配置 thinking 字段时，
- * 所有决策结果与策略抽取前（2026-09）逐位一致。
+ * 将 /api/chat/route.ts 内散落的思考档位决策收敛为纯函数模块。
+ * S2a（2026-09-08，基于 S1 探针）后语义定稿：
+ *  - V4 与非 V4 统一走 reasoning_effort 词表（none/low/high/max），删除 thinking_mode 专用分支；
+ *  - off 的 wire 表达 = reasoning_effort: 'none'（探针证实 non-thinking 不关思考是官方 bug，真正关思考 = none）；
+ *  - C1 琐碎关思考 = 发 reasoning_effort: 'none'（不再是 non-thinking）；
+ *  - 纯 DSH 固定档（thinking.harnessPure=true，默认）：每轮一律发用户所选档位，
+ *    不降级、不做 C1 关思考；harnessPure=false = 旧业务插件行为（执行轮降级 + C1 保留）。
+ * 本模块无 route 依赖、无 I/O、纯函数；调用方负责注入 level / messages / config。
  */
 
-/** DSH 思考档位语义枚举（4 档）：off / low / high / max。
- *  本期仅作类型与映射锚点：BobWork 现网 UI 档位为 3 档 ThinkingLevel
- *  （low/medium/high，reasoning_effort 取同名字符串，DeepSeek V4 走 thinking_mode），
- *  DSH 4 档语义将在 Phase 2 后续（2b+）作为统一收敛目标，本期未被 route 消费。 */
+/** DSH 思考档位语义锚点（4 档）：off / low / high / max。
+ *  与 DSH harness 的 ReasoningEffortId 对齐，作为统一收敛目标被 effortForLevel 消费；
+ *  wire 表达（reasoning_effort 字段）中 off 对应 'none'，见 ReasoningEffort。 */
 export type ThinkingEffort = 'off' | 'low' | 'high' | 'max';
 
+/** reasoning_effort 请求字段取值（wire 词表）：
+ *  官方支持 none/minimal/low/medium/high/xhigh/max，本项目收窄为 none/low/high/max 四档
+ *  （off 显式 → none；UI low→low、medium→high、high→max）。 */
+export type ReasoningEffort = 'none' | 'low' | 'high' | 'max';
+
+/** 档位决策输入（UI 层）：ThinkingLevel 三档 + 显式 off（与 @/lib/types 的 ThinkingLevel 同构，
+ *  policy 不依赖 types.ts，保持零 import）。 */
+export type EffortLevel = 'off' | 'low' | 'medium' | 'high';
+
 /** 思考档位策略开关（对应 settings.thinking 字段落盘值的运行时形态）：
- *  - downgradeOnExecution：工具循环执行轮（round>0 且非收尾轮）思考降一级，
+ *  - harnessPure：纯 DSH 固定档（默认 true）——每轮一律发用户所选档位，不降级、不 C1 关思考；
+ *  - downgradeOnExecution：工具循环执行轮（round>0 且非收尾轮）思考降一级（仅 harnessPure=false 生效），
  *    深度推理只在规划轮做，执行轮只做决策，省 reasoning tokens（原 item 4）；
- *  - trivialPromptOff：琐碎对话（问候/致谢/简短确认等）直接关思考（原 C1）。
- *  两开关缺省均视为开（默认 true），用户显式 false 才关闭对应策略。 */
+ *  - trivialPromptOff：琐碎对话（问候/致谢/简短确认等）直接关思考（C1，仅 harnessPure=false 生效）。
+ *  harnessPure=false 时两开关缺省均视为开（默认 true），用户显式 false 才关闭对应策略。 */
 export interface ThinkingPolicyConfig {
+  /** 纯 DSH 固定档：true = 每轮一律用户所选档位（不降级 / 不 C1）；false = 旧业务插件行为 */
+  harnessPure: boolean;
   downgradeOnExecution: boolean;
   trivialPromptOff: boolean;
   /** 非 V4 推理模型的「<think> 标签引导」注入开关（Phase 2b）：
-   *  默认 true（现网行为）；DeepSeek V4 恒不注入（原生 reasoning_content，纯 API 驱动）。 */
+   *  默认 true；DeepSeek V4 恒不注入（原生 reasoning_content，纯 API 驱动）。 */
   injectThinkGuide?: boolean;
 }
 
-/** DeepSeek V4 thinking_mode 取值（non-thinking/thinking/thinking_max） */
-export type V4ThinkingMode = 'thinking' | 'thinking_max' | 'non-thinking';
+/** UI 档位 → reasoning_effort 基映射（不含 C1/off 特判）：low→low、medium→high、high→max */
+const LEVEL_TO_EFFORT: Record<Exclude<EffortLevel, 'off'>, ReasoningEffort> = {
+  low: 'low',
+  medium: 'high',
+  high: 'max',
+};
 
 /**
- * V4 thinking_mode 档位映射（迁移 route.ts L2501-2511 的 deepseekThinkingMode IIFE）：
- *  - trivialPrompt 琐碎且 level!=='high'：仅当 config.trivialPromptOff 开启时 → non-thinking（C1，
- *    用户显式选高思考深度时尊重用户不降级）；
- *  - 否则 low/medium → thinking；high → thinking_max。
- * 注：原逻辑仅 DeepSeek V4 使用，调用方负责 isDeepseekV4 判断；trivialPrompt 由 isTrivialPrompt 计算。
+ * 档位 → reasoning_effort 映射（S2a 统一词表，V4 与非 V4 共用；原 route 的 REASONING_EFFORT_MAP
+ *  恒等映射 + V4ThinkingMode 映射合并收敛于此）：
+ *  - off 显式 → 'none'（DSH 语义 off = wire none）；
+ *  - C1（仅 harnessPure=false && trivialPromptOff && trivialPrompt && level!=='high'）→ 'none'：
+ *    琐碎关思考修复为发 reasoning_effort: 'none'（探针证实 non-thinking 不关思考是官方 bug）；
+ *    用户显式选 high 深度时尊重用户不降级；harnessPure=true 时忽略 trivial（纯固定档）；
+ *  - 否则 low→'low'、medium→'high'、high→'max'。
+ * 注：trivialPrompt 由调用方用 isTrivialPrompt 计算。
  */
-export function v4ThinkingModeForLevel(
-  level: 'low' | 'medium' | 'high',
+export function effortForLevel(
+  level: EffortLevel,
   config: ThinkingPolicyConfig,
   trivialPrompt = false,
-): V4ThinkingMode {
-  if (config.trivialPromptOff && trivialPrompt && level !== 'high') return 'non-thinking';
-  switch (level) {
-    case 'low':
-    case 'medium':
-      return 'thinking';
-    case 'high':
-      return 'thinking_max';
-    default:
-      return 'thinking'; // 类型穷尽后不可达，兜底
-  }
+): ReasoningEffort {
+  if (level === 'off') return 'none';
+  if (!config.harnessPure && config.trivialPromptOff && trivialPrompt && level !== 'high') return 'none';
+  return LEVEL_TO_EFFORT[level];
 }
 
-/** 非 V4（reasoning_effort 系）执行轮降级表（迁移原 REASONING_EFFORT_EXECUTION_DOWNGRADE）：
- *  high→medium、medium→low、low→low */
-const REASONING_EFFORT_EXECUTION_DOWNGRADE: Record<string, string> = {
-  high: 'medium',
-  medium: 'low',
-  low: 'low',
+/** 执行轮降级表（effort 语义，仅 harnessPure=false 时启用）：max→high、high→low、low→none、none→none。
+ *  原 DEEPSEEK_EXECUTION_THINKING_DOWNGRADE（thinking_max→thinking、thinking→non-thinking）与
+ *  REASONING_EFFORT_EXECUTION_DOWNGRADE（high→medium、medium→low）统一收敛于此——
+ *  因 non-thinking 关思考在官方是 bug（探针 rcLen 61），V4 执行轮降级必须一并 effort 化。 */
+const EXECUTION_DOWNGRADE: Record<ReasoningEffort, ReasoningEffort> = {
+  max: 'high',
+  high: 'low',
+  low: 'none',
+  none: 'none',
 };
 
-/** V4（thinking_mode 系）执行轮降级表（迁移原 DEEPSEEK_EXECUTION_THINKING_MODE）：
- *  thinking_max→thinking、thinking→non-thinking、non-thinking→non-thinking。
- *  降级结果只会是 thinking / non-thinking，不会产生 thinking_max。 */
-const DEEPSEEK_EXECUTION_THINKING_DOWNGRADE: Record<V4ThinkingMode, 'thinking' | 'non-thinking'> = {
-  thinking_max: 'thinking',
-  thinking: 'non-thinking',
-  'non-thinking': 'non-thinking',
-};
-
-/** 工具循环执行轮降级结果（V4 与 非V4 二选一落地；与 base 档位比对用于降级遥测） */
+/** 工具循环执行轮降级结果（统一 effort；与 base 档位比对用于降级遥测） */
 export interface ExecutionDowngradeResult {
-  /** V4：降级后的 thinking_mode（仅 thinking / non-thinking） */
-  thinkingMode?: 'thinking' | 'non-thinking';
-  /** 非 V4：降级后的 reasoning_effort */
-  reasoningEffort?: string;
+  /** 执行轮 reasoning_effort（wire 词表：none/low/high/max） */
+  reasoningEffort: ReasoningEffort;
 }
 
 /**
- * 工具循环执行轮思考降级（迁移 route.ts L3233-3256 的降级段）：
- * 仅当 round>0 且非收尾轮 且 config.downgradeOnExecution 开启时返回降级结果；
- * 规划轮（round=0）/ 收尾轮 / 开关关闭 → 返回 null（不降级，调用方维持原档位）。
- *  - V4：按 DEEPSEEK_EXECUTION_THINKING_DOWNGRADE 映射 base thinking_mode 降一级。
- *    （C1 琐碎关思考只会把 base 变成 non-thinking，而 non-thinking 是降级映射的不动点，
- *    故此处按 level 推算 base 与按实际 base 推算的输出完全一致，无需感知 trivialPrompt。）
- *  - 非 V4：reasoning_effort 与 level 同名（low/medium/high），high→medium、medium→low、low→low。
+ * 工具循环执行轮思考降级（迁移 route.ts 的降级段）：
+ * 仅当 config.harnessPure=false 且 round>0 且非收尾轮 且 config.downgradeOnExecution 开启时返回降级结果；
+ * 规划轮（round=0）/ 收尾轮 / 开关关闭 / harnessPure=true（纯固定档）→ 返回 null（不降级，调用方维持原档位）。
+ * 降级以 effortForLevel 输出为基点（C1/off 均为 'none'，是降级表不动点，故无需感知 trivialPrompt）。
  */
 export function executionDowngrade(
   round: number,
   isFinalRound: boolean,
-  level: 'low' | 'medium' | 'high',
-  isV4: boolean,
+  level: EffortLevel,
   config: ThinkingPolicyConfig,
 ): ExecutionDowngradeResult | null {
+  if (config.harnessPure) return null;
   if (round <= 0 || isFinalRound || !config.downgradeOnExecution) return null;
-  if (isV4) {
-    const base = v4ThinkingModeForLevel(level, config);
-    return { thinkingMode: DEEPSEEK_EXECUTION_THINKING_DOWNGRADE[base] };
-  }
-  // REASONING_EFFORT_MAP 是恒等映射（low/medium/high → 同名字符串），effort 可直接用 level
-  const effort = level;
-  return { reasoningEffort: REASONING_EFFORT_EXECUTION_DOWNGRADE[effort] ?? effort };
+  const base = effortForLevel(level, config);
+  return { reasoningEffort: EXECUTION_DOWNGRADE[base] };
 }
 
 /** isTrivialPrompt 入参的消息形状（结构最小化，兼容 route 的本地 ChatMessage） */
@@ -152,8 +148,9 @@ export function isTrivialPrompt(messages: TrivialPromptMessage[]): boolean {
 
 /**
  * 思考提示注入开关（Phase 2b：全面 DSH 化）：
- *  - DeepSeek V4：**恒不注入** —— 原生返回 reasoning_content，思考纯由 API thinking_mode 驱动，
- *    注入「<think> 引导/提问限制」反而与 C1 关思考产生矛盾（prompt 叫它想 / API 不让想）；
+ *  - DeepSeek V4：**恒不注入** —— 原生返回 reasoning_content，思考纯由 API 驱动
+ *    （V4 已统一走 reasoning_effort，但仍是原生 reasoning_content，无需 <think> 标签引导），
+ *    注入「<think> 引导/提问限制」反而与关思考（effort none）产生矛盾（prompt 叫它想 / API 不让想）；
  *  - 非 V4 推理模型：默认注入 <think> 标签引导（其思考块显示依赖该格式），可由
  *    settings.thinking.injectThinkGuide=false 关闭；
  *  - 非推理模型：不注入（原「清洗版思考引导」也随之移除，DSH 语义）。

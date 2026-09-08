@@ -9,7 +9,6 @@ import {
   type ProviderType,
   type ThinkingLevel,
   type OutputFileItem,
-  REASONING_EFFORT_MAP,
   SYSTEM_PROMPT_INJECTIONS,
 } from '@/lib/types';
 import { TOOL_DEFINITIONS, executeTool, getToolSummary, describeToolCall } from './tools';
@@ -36,8 +35,8 @@ import type { TakeoverServices, HostTakeoverContext, HostTakeoverVerdict } from 
 
 // K3-2：工具轮咨询链契约加载期自检（9 咨询点顺序/覆盖/唯一性；热更加载即断言，与单测双保险）
 assertConsultContract();
-// Phase 2 策略层抽取：思考档位决策收敛到纯函数模块（默认行为与现网一致）
-import { v4ThinkingModeForLevel, executionDowngrade, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
+// Phase 2 策略层抽取：思考档位决策收敛到纯函数模块（S2a 后统一 reasoning_effort 词表，默认行为=纯固定档）
+import { effortForLevel, executionDowngrade, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
 
 // ── Planner 结构化确认卡片（排程创建/修改/删除走可编辑确认，而非直接执行）──
 const PLANNER_CARD_TOOLS = new Set(['create_scheduled_todo', 'todo_update', 'todo_delete']);
@@ -2562,9 +2561,9 @@ function toolDisplaySiteName(url?: string): string {
  *    CacheGuard guard 已随 K2-S1 收敛进 ToolRuntime（src/lib/runtime/tools.ts）、
  *    pending 各容器（挂起型接管，保留原地）；
  *  - 请求通道对象：ReadableStream / controller / send / eventLog / taskId；
- *  - 请求级只读配置：level / reasoningEffort / thinkingPolicyConfig / deepseekThinkingMode /
- *    isDeepseekV4 / modelSupportsThinking（声明于 POST 作用域 2976-3013，跨 start() 只读引用，最小 diff）；
- *  - 单轮派生 const：for 自增 round、roundThinkingMode / roundReasoningEffort / thinkingDowngraded /
+ *  - 请求级只读配置：level / baseEffort / thinkingPolicyConfig / isDeepseekV4 /
+ *    modelSupportsThinking / trivialPrompt（声明于 POST 作用域，跨 start() 只读引用，最小 diff）；
+ *  - 单轮派生 const：for 自增 round、roundEffort / thinkingDowngraded /
  *    downgradeDecision / isFinalRound / finalRoundInjection（每轮重新计算，非跨轮共享）；
  *  - 结算期派生：hitRatio / hitTotal / ttftMs / taskDurationMs / tokensPerSec / finalCtx / outputFiles；
  *  - 只读一次计算遥测：prefixSegments / prefixHash（首帧 context_meter 与 done 帧共用，值不变）。
@@ -2722,20 +2721,22 @@ export async function POST(request: NextRequest) {
 
     // 注入思考深度系统提示
     const level: ThinkingLevel = thinkingLevel ?? 'medium';
-    const reasoningEffort = REASONING_EFFORT_MAP[level];
 
-    const thinkingEnabled = thinking ?? 'enabled';
-
-    // Phase 2 策略层抽取（默认行为一致）：思考档位决策开关读 settings.thinking，缺省两开关均开。
+    // Phase 2 策略层抽取（S2a 语义定稿，默认=纯 DSH 固定档）：思考档位决策读 settings.thinking，
+    // harnessPure 缺省 true —— 每轮一律发用户所选档位，不降级、不 C1 关思考；显式 false 才启用
+    // 旧业务插件行为（执行轮降级 + C1，沿用 downgradeOnExecution/trivialPromptOff 语义）。
     // 读取发生在思考决策前（settingsForTools 于 isCustom 分支内才加载，此处无法复用其作用域）
     const thinkingSettings = await readSettingsFromFile();
     const thinkingPolicyConfig: ThinkingPolicyConfig = {
+      harnessPure: thinkingSettings.thinking?.harnessPure !== false,
       downgradeOnExecution: thinkingSettings.thinking?.downgradeOnExecution !== false,
       trivialPromptOff: thinkingSettings.thinking?.trivialPromptOff !== false,
       injectThinkGuide: thinkingSettings.thinking?.injectThinkGuide !== false,
     };
 
-    // C1（deepseek-harness）：琐碎对话直接关 thinking，避免琐碎轮次白烧 30-300 reasoning tokens
+    // C1（deepseek-harness）：琐碎对话判定（问候/致谢等，避免白烧 reasoning tokens）——
+    // 仅 harnessPure=false 时由 effortForLevel 消费并把档位压成 reasoning_effort: none；
+    // harnessPure=true（纯固定档）忽略 trivial，不关思考
     const trivialPrompt = isTrivialPrompt(messages);
 
     // 判断当前模型是否支持推理（用于决定是否传 reasoning_effort 参数）
@@ -2750,17 +2751,16 @@ export async function POST(request: NextRequest) {
     const requestContextWindow = inferContextWindow(providerModelId || modelId || '', thinking === 'enabled');
     const modelSupportsThinking = (() => {
       if (!isCustom) return thinking === 'enabled';
-      // DeepSeek V4：两个模型都支持思考模式
+      // DeepSeek V4：模型支持思考模式（S2a 后 V4 与非 V4 统一走 reasoning_effort，不再有 thinking_mode 专用分支）
       if (isDeepseekV4) return true;
       // 其他自定义模型：通过模型名判断
       return !!providerModelId && /reason|r1|z1|think|k2/i.test(providerModelId);
     })();
 
-    // DeepSeek V4 使用 thinking_mode 参数（non-thinking/thinking/thinking_max），而非 reasoning_effort。
-    // Phase 2 策略层抽取：档位映射收敛到 policy.v4ThinkingModeForLevel（C1 琐碎关思考 + low/medium→thinking、high→thinking_max）
-    const deepseekThinkingMode: string | null = isDeepseekV4
-      ? v4ThinkingModeForLevel(level, thinkingPolicyConfig, trivialPrompt)
-      : null;
+    // S2a 统一档位：V4 与非 V4 同走 reasoning_effort 词表（none/low/high/max）。
+    // 档位决策收敛到 policy.effortForLevel：UI low→low、medium→high、high→max；
+    // C1（仅 harnessPure=false）或 off 显式 → none。供整轮共享（每轮 base，执行轮降级见循环内）
+    const baseEffort = effortForLevel(level, thinkingPolicyConfig, trivialPrompt);
 
     // 上游节点上下文已在前端注入到系统提示中，后端直接使用
     const messagesWithContext = messages;
@@ -2824,7 +2824,7 @@ export async function POST(request: NextRequest) {
     const { messages: messagesWithSkill, matchedSkillNames, skillDetails } = injectSkillContext(messagesWithNodeBridge, mergedForcedSkills, profile.id);
     // 基础系统提示按 Agent 隔离：专项 Agent（coding）用自己的专属 base，不背通用 chat 向内容
     const agentBasePrompt = profile.baseSystemPrompt ?? BASE_SYSTEM_PROMPT;
-    // Phase 2b（全面 DSH 化）：DeepSeek V4 不再注入思考引导（纯 API thinking_mode 驱动，原生 reasoning），
+    // Phase 2b（全面 DSH 化）：DeepSeek V4 不再注入思考引导（原生 reasoning_content，纯 API reasoning_effort 驱动），
     // 非 V4 推理模型按 settings.thinking.injectThinkGuide 决定是否注入 <think> 标签引导（默认注入）
     const shouldInjectThink = shouldInjectThinkPrompt(isDeepseekV4, modelSupportsThinking, thinkingPolicyConfig);
     let finalMessages = shouldInjectThink
@@ -3176,7 +3176,8 @@ export async function POST(request: NextRequest) {
                   conversation: ctx.conversationTokens,
                   capacity: inferContextWindow(
                     providerModelId || '',
-                    !!(reasoningEffort || deepseekThinkingMode),
+                    // S2a：effort≠none 视为思考模式请求（none = off/C1 关思考）
+                    baseEffort !== 'none',
                   ),
                 },
                 prefixHash,
@@ -3215,13 +3216,13 @@ export async function POST(request: NextRequest) {
               const isFinalRound = kctx.forceFinalRound;
               // lite 模式不注入「基于以上结果」的收尾指令（首轮即是最终回答，无前置工具结果）
               const finalRoundInjection = isFinalRound && !lite;
-              // item 6：max_tokens 分级——high/thinking_max 深度放宽到 32k（高思考深度下
+              // item 6：max_tokens 分级——max 深度放宽到 32k（高思考深度下
               // reasoning 占用大半输出预算，16k 仍可能截断正文）；仅对 1M 推理大模型档
               // （函数返回 16384）翻倍，128k/小模型档保持不动，避免超出模型支持上限触发 API 400。
-              const baseMaxTokens = modelOutputTokenMaxForModel(providerModelId || '', reasoningEffort != null || deepseekThinkingMode != null);
-              const highDepthRequest = isDeepseekV4
-                ? deepseekThinkingMode === 'thinking_max'
-                : reasoningEffort === 'high';
+              // S2a：判据由 thinking_mode==='thinking_max'（V4）/ effort==='high'（非 V4）收敛为
+              // 统一 baseEffort==='max'（level=high → max；medium→high 不放大）
+              const baseMaxTokens = modelOutputTokenMaxForModel(providerModelId || '', baseEffort !== 'none');
+              const highDepthRequest = baseEffort === 'max';
               const effectiveMaxTokens = highDepthRequest && baseMaxTokens >= 16384
                 ? Math.min(baseMaxTokens * 2, 32768)
                 : baseMaxTokens;
@@ -3257,38 +3258,38 @@ export async function POST(request: NextRequest) {
                 requestBody.tools = loopToolDefs;
               }
 
-              // 工具循环思考降级（item 4）：执行轮（round>0 且非收尾轮）降一级，
-              // 收尾轮/首轮保持用户选择深度——深度推理放在规划轮，执行轮只做决策，省 reasoning tokens
-              // Phase 2 策略层抽取：降级决策收敛到 policy.executionDowngrade（默认开，行为与现网一致）
-              const downgradeDecision = executionDowngrade(round, isFinalRound, level, isDeepseekV4, thinkingPolicyConfig);
-              const roundThinkingMode = isDeepseekV4 && deepseekThinkingMode
-                ? (downgradeDecision?.thinkingMode ?? deepseekThinkingMode)
+              // 思考决策（S2a 统一 effort 词表，V4 与非 V4 同一套）：
+              //  - harnessPure=true（默认，纯 DSH 固定档）：每轮一律发 baseEffort（用户所选档位），不降级、不 C1；
+              //  - harnessPure=false（旧业务插件）：执行轮（round>0 且非收尾轮）按 policy 的 effort 降级表
+              //    降一档（max→high、high→low、low→none、none→none）；首轮/收尾轮保持 baseEffort
+              //    （baseEffort 可含 C1 压成的 none）。深度推理放规划轮，执行轮只做决策，省 reasoning tokens。
+              // 降级决策收敛到 policy.executionDowngrade（仅 harnessPure=false 时生效，默认开）
+              const downgradeDecision = modelSupportsThinking
+                ? executionDowngrade(round, isFinalRound, level, thinkingPolicyConfig)
                 : null;
-              const roundReasoningEffort = !isDeepseekV4 && reasoningEffort && modelSupportsThinking
-                ? (downgradeDecision?.reasoningEffort ?? reasoningEffort)
-                : reasoningEffort;
-              const thinkingDowngraded = round > 0 && !isFinalRound &&
-                ((isDeepseekV4 && roundThinkingMode !== deepseekThinkingMode) ||
-                 (!isDeepseekV4 && roundReasoningEffort !== reasoningEffort));
+              const roundEffort = downgradeDecision?.reasoningEffort ?? baseEffort;
+              const thinkingDowngraded = round > 0 && !isFinalRound && roundEffort !== baseEffort;
               eventLog.mark(CORE_EVENT.STEP_START, `${taskId}:r${round}`, { round });
               kctx.totalRounds++;
               if (thinkingDowngraded) kctx.thinkingDowngradedRounds++;
-              // 思考决策可见性（方向 D）：每轮实际模式入账，done 帧带出供前端展示降级/C1 命中
+              // 思考决策可见性（方向 D）：每轮实际档位入账（effort 值 none/low/high/max），
+              // done 帧带出供前端展示降级/C1 命中
               kctx.thinkingModes.push({
                 round,
-                mode: roundThinkingMode ?? roundReasoningEffort ?? null,
+                mode: roundEffort,
                 downgraded: thinkingDowngraded,
-                trivialOff: isDeepseekV4 && trivialPrompt && round === 0,
+                // C1 命中（仅 harnessPure=false）：琐碎关思考把首轮档位压成 none
+                trivialOff: !thinkingPolicyConfig.harnessPure && round === 0 && roundEffort === 'none' && trivialPrompt,
               });
 
-              if (isDeepseekV4 && roundThinkingMode) {
-                requestBody.thinking_mode = roundThinkingMode;
-              } else if (roundReasoningEffort && modelSupportsThinking) {
-                requestBody.reasoning_effort = roundReasoningEffort;
+              // 统一传输：支持思考的模型每轮都带 reasoning_effort（含 none，C1/off 即 none）；
+              // 不支持的模型不传（模型能力判定 modelSupportsThinking 保留）
+              if (modelSupportsThinking) {
+                requestBody.reasoning_effort = roundEffort;
               }
 
               console.log(
-                `[chat] round=${round}${thinkingDowngraded ? ' [thinking降级]' : ''} model: ${providerModelId} | thinking_level: ${level} | mode: ${roundThinkingMode ?? roundReasoningEffort ?? 'off'} | reasoning_effort: ${isDeepseekV4 ? '(skipped)' : roundReasoningEffort}`,
+                `[chat] round=${round}${thinkingDowngraded ? ' [thinking降级]' : ''} model: ${providerModelId} | thinking_level: ${level} | effort: ${roundEffort} | reasoning_effort: ${modelSupportsThinking ? roundEffort : '(unsupported)'}`,
               );
 
               // C7（deepseek-harness）：DeepSeek V4 发送前校验 prompt+max_tokens ≤ 1,048,576 硬上限。
@@ -4364,7 +4365,8 @@ export async function POST(request: NextRequest) {
                 conversation: finalCtx.conversationTokens,
                 capacity: inferContextWindow(
                   providerModelId || '',
-                  !!(reasoningEffort || deepseekThinkingMode),
+                  // S2a：effort≠none 视为思考模式请求（none = off/C1 关思考）
+                  baseEffort !== 'none',
                 ),
               },
               prefixHash,
