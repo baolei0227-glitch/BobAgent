@@ -12,18 +12,19 @@ import {
   REASONING_EFFORT_MAP,
   SYSTEM_PROMPT_INJECTIONS,
 } from '@/lib/types';
-import { TOOL_DEFINITIONS, executeTool, getToolSummary, getLocalAuthorizedRoots, describeToolCall } from './tools';
+import { TOOL_DEFINITIONS, executeTool, getToolSummary, describeToolCall } from './tools';
 import type { ToolScene } from './tools';
 // K2-S1 工具面 runtime service 抽取，行为不变：注册/组装/排序/CacheGuard 收敛进 ToolRuntime
 import { ToolRuntime } from '@/lib/runtime/tools';
 // K2-S2 会话态 runtime service 抽取，行为不变：chatStickyScenes 收敛进 SessionRuntime 单例
 import { sessionRuntime } from '@/lib/runtime/session';
+// K2-S3 动态上下文链 runtime service 抽取，行为不变：路径/授权/偏好/OCR 文本生成收敛进 ContextRuntime
+import { contextRuntime } from '@/lib/runtime/context';
 import type { AgentId } from '@/lib/agents/profiles';
 import { codingPhaseForTool } from '@/lib/agents/profiles';
 import { resolveAgentProfile } from '@/lib/agents/store';
 import { getCurrentProject, getProjectById, listProjects, type ProjectConfig } from '@/lib/project/project-manager';
 import { readSettingsFromFile } from '@/lib/settings-server';
-import { pluginDataHome } from '@/lib/extensions/data-home';
 import { DEFAULT_CONFIRM_TOOLS } from '@/lib/settings';
 // P4b-1 审批策略层：tool_confirm 名单判定后走 decideToolApproval（纯函数裁决，见 approval.ts）
 import { decideToolApproval } from '@/lib/chat/approval';
@@ -1584,96 +1585,6 @@ function prependDynamicContext(messages: ChatMessage[], text: string): ChatMessa
 }
 
 /**
- * OCR/视觉引擎现状事实注入（[SYS FACT]）
- *
- * 问题背景：BASE_SYSTEM_PROMPT 曾硬编码「bob-ocr-mcp 已配置本地视觉模型（Qwen2.5-VL）」，
- * 而插件真实配置由用户随时可改（云端 DeepSeek VL / GLM-OCR / 本地 MLX 等皆可能）——
- * 配置变了、缓存头里的静态断言没变，模型据 stale 文案向用户转述错误引擎归属。
- * 根因：易变配置被写进了字节稳定的 system 缓存头。
- *
- * 方案：system 保持零插值（C8）；每轮从插件数据根 config.json
- * （BobWork 托管：~/BobWork/extensions/bob-ocr-mcp）读真实生效值，
- * 以固定格式事实行走 prependDynamicContext 低频通道注入。只原样转述字段值，不做
- * 本地/云端的语义推断（provider/baseUrl 字段本身已表达），绝不输出 apiKey。
- * 兼容 v2 schema（vision.* / ocr.*）与旧版 schema（顶层 glmOcr / onlineOcr）。
- *
- * 缓存影响：注入落在所有历史之后（当前轮 user 消息内），跨轮前缀
- * （system + 工具 + 历史）字节不变，命中率不受影响；用户改插件配置的瞬间
- * 仅影响本轮及之后的消息前缀，属预期失效（事实必须反映最新配置）。
- */
-function buildOcrEngineFactInjection(): string {
-  try {
-    const cfgPath = join(pluginDataHome('bob-ocr-mcp'), 'config.json');
-    if (!existsSync(cfgPath)) return '';
-    const raw = JSON.parse(readFileSync(cfgPath, 'utf-8')) as Record<string, unknown>;
-    const str = (v: unknown): string => (typeof v === 'string' && v.trim() ? v.trim() : '');
-    const lines: string[] = [];
-
-    // 视觉理解（v2：vision.selected 指向 vision.models[] 中某条目）
-    if (raw.vision && typeof raw.vision === 'object') {
-      const vision = raw.vision as { selected?: unknown; models?: unknown };
-      const selected = str(vision.selected);
-      const models = Array.isArray(vision.models)
-        ? (vision.models as { id?: unknown; provider?: unknown; baseUrl?: unknown }[]).filter(
-            (m): m is NonNullable<typeof m> => !!m && typeof m === 'object',
-          )
-        : [];
-      const entry = selected ? models.find((m) => str(m.id) === selected) : undefined;
-      if (entry) {
-        lines.push(`- 视觉理解模型：${selected}（provider=${str(entry.provider) || '未声明'}，baseUrl=${str(entry.baseUrl) || '默认'}）`);
-      } else if (selected) {
-        lines.push(`- 视觉理解模型：${selected}（模型清单中未找到对应条目）`);
-      } else {
-        lines.push('- 视觉理解模型：未选择');
-      }
-    }
-
-    // 文字识别（v2：ocr.source / ocr.glm / ocr.local；旧版兜底：顶层 glmOcr / onlineOcr）
-    if (raw.ocr && typeof raw.ocr === 'object') {
-      const ocr = raw.ocr as Record<string, unknown>;
-      const src = str(ocr.source);
-      const sel = str(ocr.selected);
-      const detail: string[] = [];
-      if (ocr.glm && typeof ocr.glm === 'object') {
-        const glm = ocr.glm as { model?: unknown; baseUrl?: unknown; enabled?: unknown };
-        const state = glm.enabled === true ? '启用' : glm.enabled === false ? '停用' : '未声明';
-        detail.push(`glm=${str(glm.model) || state}@${str(glm.baseUrl) || '默认'}`);
-      }
-      if (ocr.local && typeof ocr.local === 'object') {
-        const local = ocr.local as { baseUrl?: unknown; enabled?: unknown };
-        const state = local.enabled === true ? '' : local.enabled === false ? '（停用）' : '';
-        detail.push(`local=${str(local.baseUrl) || '默认'}${state}`);
-      }
-      lines.push(`- 文字识别主力：${src || sel || '未配置'}${src && sel ? `（selected=${sel}）` : ''}${detail.length ? `｜${detail.join('｜')}` : ''}`);
-    } else if (
-      ((raw.glmOcr ?? null) && typeof raw.glmOcr === 'object') ||
-      ((raw.onlineOcr ?? null) && typeof raw.onlineOcr === 'object')
-    ) {
-      const seg: string[] = [];
-      if (raw.glmOcr && typeof raw.glmOcr === 'object') {
-        const leg = raw.glmOcr as { model?: unknown; enabled?: unknown };
-        seg.push(`glm=${str(leg.model) || (leg.enabled === false ? '停用' : '已配置')}`);
-      }
-      if (raw.onlineOcr && typeof raw.onlineOcr === 'object') {
-        const onl = raw.onlineOcr as { model?: unknown; provider?: unknown; enabled?: unknown };
-        seg.push(`online=${str(onl.model) || str(onl.provider) || (onl.enabled === false ? '停用' : '已配置')}`);
-      }
-      lines.push(`- 文字识别主力（旧版配置）：${seg.join('｜')}`);
-    }
-
-    if (!lines.length) return '';
-    return (
-      `\n\n## OCR/视觉引擎现状（[SYS FACT]）\n以下为 bob-ocr-mcp 插件本轮实际生效的引擎配置（读取自其 config.json 原样字段值）。` +
-      `回答任何"用的什么视觉模型 / OCR 引擎是本地还是云端 / 是否已配置"等引擎归属类问题时，必须以此为准：\n` +
-      lines.join('\n')
-    );
-  } catch {
-    /* 配置缺失/损坏一律静默跳过——此时 system 护栏要求如实回答"无法确认"，不得虚构 */
-  }
-  return '';
-}
-
-/**
  * 工具循环不设轮数硬上限：任务只要在推进，就一直做下去直到完成。
  * 仅保留「停滞保护」安全网（不是轮数限制）：
  * - STALL_LIMIT：连续 N 轮没有任何实质进展（无成功工具结果 / 工具全部失败或重复 / 无文本输出）→ 判定死循环，强制收尾
@@ -2896,25 +2807,12 @@ export async function POST(request: NextRequest) {
     // 注入当前项目路径到系统提示，让 AI 知道文档应该写入哪里。
     // 普通节点：统一写 homework/ 根目录（归属由 .ownership.json 清册追踪）。
     const nodeHomeworkDir = 'homework';
-    const projectPathInjection = currentProjectPath
-      ? `\n\n当前项目路径：${currentProjectPath}\n产出文档默认 .md，用 ${nodeHomeworkDir}/ 前缀相对路径写入（如 write_file(path="${nodeHomeworkDir}/报告.md")），不要写入 homework/.ai-workspace/ 临时工作区。\n【产物声明】写文件成功后，在最终回答末尾另起一行输出 \`OutputFile: ${nodeHomeworkDir}/文件名\`（每行一个），前端据此生成可点击打开的产物卡片；禁止声明未写入或写入失败的路径。\n【模板填充产物路径】模板填充生成的 .docx 保存在 homework/template/ 目录（Finder 可见），读取/检查须用 homework/template/ 前缀。`
-      : `\n\n当前没有激活项目：所有相对路径将解析到临时工作区 ~/BobWork/.sandbox。如果你的产出属于某个项目，请提醒用户先在 BobWork 中激活该项目，再把文件写入该项目的 homework/ 目录。`;
+    // K2-S3 动态上下文链 runtime service 抽取（行为不变）：项目路径/授权目录文本生成收敛进
+    // ContextRuntime（src/lib/runtime/context.ts），prepend 注入动作仍保留在 route 原位（见下）
+    const projectPathInjection = contextRuntime.buildProjectPathInjection({ currentProjectPath, nodeHomeworkDir });
 
     // 注入用户授权目录清单，让 AI 知道除了项目目录外还可以操作哪些本地目录
-    let authorizedRootsInjection = '';
-    try {
-      const authorizedRoots = await getLocalAuthorizedRoots();
-      if (authorizedRoots.length > 0) {
-        const list = authorizedRoots.map((r) => `- ${r.replace(homedir(), '~')}`).join('\n');
-        authorizedRootsInjection =
-          `\n\n你已被授权操作的本地目录（与项目目录同级，可读可写）：\n${list}\n` +
-          `- 用户明确要求操作某授权目录时，用完整绝对路径在该目录执行；未指定目录时默认当前项目目录\n` +
-          `- 最终产出仍统一写入当前项目 ${nodeHomeworkDir}/ 目录（产物声明规则同上），授权目录仅用于读素材和写临时/中间文件，除非用户明确指定"把产出保存到某授权目录"\n` +
-          `- 除当前项目目录和上述授权目录外，禁止读写其他本地路径`;
-      }
-    } catch {
-      // 无授权目录时忽略
-    }
+    const authorizedRootsInjection = await contextRuntime.buildAuthorizedRootsInjection({ nodeHomeworkDir });
 
     // off 模式不注入思考提示；非推理模型去掉 <think> 标签引用
     const effectiveLevel: ThinkingLevel = level;
@@ -2939,31 +2837,22 @@ export async function POST(request: NextRequest) {
     // 此处仅保留「低频变化」动态内容（项目路径 / 用户偏好 / OCR 引擎现状）prepend 到 user 消息。
 
     // ===== 用户偏好注入（全局长期记忆，类型目录模式：只注入目录，完整记录按需 read_preferences 调取） =====
-    try {
-      const { listPreferences } = await import('@/lib/wanted/preferences');
-      const prefs = await listPreferences();
-      if (prefs.length > 0) {
-        // 类型目录：按 type 分组统计条数（不注入具体内容，节省上下文、避免无关偏好干扰）
-        const typeCounts = new Map<string, number>();
-        for (const p of prefs) {
-          typeCounts.set(p.type, (typeCounts.get(p.type) || 0) + 1);
-        }
-        const typeLines = Array.from(typeCounts.entries())
-          .sort((a, b) => b[1] - a[1])
-          .map(([type, count]) => `- [${type}] ×${count}`)
-          .join('\n');
-        const prefInjection = `\n\n## 用户偏好（全局长期记忆，类型目录，按需调取）\n已记录 ${prefs.length} 条偏好，类型目录：\n${typeLines}\n\n当前任务涉及上述某类偏好时（输出格式、引用规范、任务流程、沟通风格等），调用 read_preferences(type) 读取该类完整记录并严格遵守；需要全部记录时调用 read_preferences()。若用户明确要求记住新偏好，调用 remember_preference 写入（可带 type 分类）；遗忘用 delete_preference（按序号）。`;
-        // 缓存前缀稳定化：偏好目录属「低频变化」动态内容。若注入 system（缓存头），
-        // 用户新增/删除偏好 → system 字节变化 → 前缀整段失效，历史缓存全部作废。
-        // 改为 prepend 到当前轮最后一条 user 消息：system + 工具 + 历史前缀保持字节稳定，
-        // 偏好变化只影响当前轮 user 消息（本轮内容本就每次不同），历史缓存不受影响。
-        finalMessages = prependDynamicContext(finalMessages, prefInjection);
-      }
-    } catch { /* 偏好读取/注入失败忽略，不影响对话 */ }
+    // K2-S3：偏好类型目录文本（listPreferences 读取/type 统计/拼装）收敛进
+    // ContextRuntime.buildUserPreferencesInjection；注入动作 prependDynamicContext 仍保留在 route 原位。
+    // 缓存前缀稳定化：偏好目录属「低频变化」动态内容。若注入 system（缓存头），
+    // 用户新增/删除偏好 → system 字节变化 → 前缀整段失效，历史缓存全部作废。
+    // 改为 prepend 到当前轮最后一条 user 消息：system + 工具 + 历史前缀保持字节稳定，
+    // 偏好变化只影响当前轮 user 消息（本轮内容本就每次不同），历史缓存不受影响。
+    const prefInjection = await contextRuntime.buildUserPreferencesInjection();
+    if (prefInjection) {
+      finalMessages = prependDynamicContext(finalMessages, prefInjection);
+    }
 
     // ===== OCR/视觉引擎事实注入（防 system 硬编码引擎断言与插件真实配置脱节） =====
     // C8 低频通道：与路径/镜像/偏好一致 prepend 到当前轮 user 消息，system 缓存头保持字节稳定
-    const ocrEngineFactInjection = buildOcrEngineFactInjection();
+    // K2-S3：事实文本生成（config.json 读取/schema 解析）收敛进 ContextRuntime.buildOcrEngineFactInjection，
+    // 注入动作 prependDynamicContext 仍保留在 route 原位。
+    const ocrEngineFactInjection = contextRuntime.buildOcrEngineFactInjection();
     if (ocrEngineFactInjection) {
       finalMessages = prependDynamicContext(finalMessages, ocrEngineFactInjection);
     }
