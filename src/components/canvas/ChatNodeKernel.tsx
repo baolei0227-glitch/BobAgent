@@ -6507,12 +6507,6 @@ ${rows.join('\n')}
                           >
                             Auto
                           </span>
-                          <span
-                            className="text-xs"
-                            style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
-                          >
-                            自动选择最佳模型
-                          </span>
                         </div>
                         {modelId === DEFAULT_MODEL_ID && (
                           <Check
@@ -6521,11 +6515,7 @@ ${rows.join('\n')}
                           />
                         )}
                       </button>
-                      {groupEntries.length === 0 ? (
-                        <div className="px-2.5 py-3 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-                          未配置主对话模型，请到 设置 → Role Assignment 中指定
-                        </div>
-                      ) : groupEntries.map(([groupName, models]) => (
+                      {groupEntries.length === 0 ? null : groupEntries.map(([groupName, models]) => (
                         <div key={groupName}>
                           <div
                             className="px-2.5 py-1 text-xs font-semibold uppercase tracking-wide"
@@ -6549,11 +6539,11 @@ ${rows.join('\n')}
                             const isLocal = isLocalEndpointUrl(baseUrl);
                             let statusBadge: string | null = null;
                             if (parsed && !providerCfg) {
-                              statusBadge = '未配置';
+                              statusBadge = 'Unconfigured';
                             } else if (parsed && isLocal) {
                               const h = localHealth[parsed.provider];
-                              if (h === 'down') statusBadge = '本地未连接';
-                              else if (h === 'checking') statusBadge = '检测中…';
+                              if (h === 'down') statusBadge = 'Local offline';
+                              else if (h === 'checking') statusBadge = 'Checking…';
                             }
                             return (
                             <button
@@ -6589,7 +6579,7 @@ ${rows.join('\n')}
                                     className="mt-0.5 inline-flex w-fit items-center rounded px-1 py-px text-10 leading-none"
                                     style={{
                                       backgroundColor: 'color-mix(in oklab, var(--ink-faint) 14%, transparent)',
-                                      color: statusBadge === '本地未连接'
+                                      color: statusBadge === 'Local offline'
                                         ? 'color-mix(in oklab, var(--danger) 80%, var(--ink-faint))'
                                         : 'var(--ink-faint)',
                                     }}
@@ -6630,7 +6620,7 @@ ${rows.join('\n')}
                       >
                         <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
                         <span className="text-xs font-medium" style={{ color: 'var(--ink)' }}>
-                          模型配置
+                          Model settings
                         </span>
                       </button>
                     </>
