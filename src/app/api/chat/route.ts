@@ -2603,6 +2603,8 @@ interface KernelContext {
   ocrBudgetExceeded: boolean;
   /** 工具循环思考降级遥测：执行轮降级计数（对照 done hitRate 判断 thinking 降级是否影响缓存命中） */
   thinkingDowngradedRounds: number;
+  /** 思考决策可见性（方向 D）：每轮实际模式/降级/C1 命中记录，done 帧带出供前端展示 */
+  thinkingModes: Array<{ round: number; mode: string | null; downgraded: boolean; trivialOff: boolean }>;
   /** 模型调用总轮数（done 结算 rounds 字段 / TURN_END） */
   totalRounds: number;
   /** 跨轮累计本次任务真实 token 消耗（cacheHit/cacheMiss：DeepSeek 前缀缓存遥测 §4.4） */
@@ -3088,6 +3090,8 @@ export async function POST(request: NextRequest) {
               ocrBudgetExceeded: false,
               // 工具循环思考降级遥测（item 4 验证）：执行轮降级轮数（对照 done 日志 hitRate）
               thinkingDowngradedRounds: 0,
+              // 思考决策可见性（方向 D）：每轮实际模式入账
+              thinkingModes: [],
               // 模型调用总轮数（dsh 完成轮次统计条 / done rounds 字段）
               totalRounds: 0,
               // 跨轮累计本次任务真实 token 消耗（所有模型调用轮次之和）。
@@ -3269,6 +3273,13 @@ export async function POST(request: NextRequest) {
               eventLog.mark(CORE_EVENT.STEP_START, `${taskId}:r${round}`, { round });
               kctx.totalRounds++;
               if (thinkingDowngraded) kctx.thinkingDowngradedRounds++;
+              // 思考决策可见性（方向 D）：每轮实际模式入账，done 帧带出供前端展示降级/C1 命中
+              kctx.thinkingModes.push({
+                round,
+                mode: roundThinkingMode ?? roundReasoningEffort ?? null,
+                downgraded: thinkingDowngraded,
+                trivialOff: isDeepseekV4 && trivialPrompt && round === 0,
+              });
 
               if (isDeepseekV4 && roundThinkingMode) {
                 requestBody.thinking_mode = roundThinkingMode;
@@ -4334,6 +4345,13 @@ export async function POST(request: NextRequest) {
               skillDetails,
               usage: kctx.taskUsage,
               stats: { ttftMs, durationMs: taskDurationMs, tokensPerSec },
+              // 思考决策可见性（方向 D）：每轮实际档位/降级/C1 命中，前端完成统计条渲染
+              thinking: {
+                level,
+                downgradedRounds: kctx.thinkingDowngradedRounds,
+                trivialOff: kctx.thinkingModes.some((m) => m.trivialOff),
+                modes: kctx.thinkingModes,
+              },
               // 缓存命中率遥测（P1）：显式下发 hitRate，随事件日志落盘供离线复盘
               cache: {
                 hitRate: hitTotal > 0 ? Math.round(hitRatio * 10) / 10 : 0,

@@ -1166,8 +1166,12 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [skillDetailsByMsg, setSkillDetailsByMsg] = useState<Record<string, SkillDetail[]>>({});
   /** msgId → 本轮任务累计 token 消耗 { promptTokens, completionTokens, cacheHitTokens, cacheMissTokens, calls } */
   const [usageByMsg, setUsageByMsg] = useState<Record<string, { promptTokens: number; completionTokens: number; cacheHitTokens: number; cacheMissTokens: number; calls: number }>>({});
-  /** msgId → 完成轮次统计 { ttftMs, durationMs, tokensPerSec }（dsh 完成轮次统计条） */
-  const [statsByMsg, setStatsByMsg] = useState<Record<string, { ttftMs: number | null; durationMs: number; tokensPerSec: number }>>({});
+  /** msgId → 完成轮次统计 { ttftMs, durationMs, tokensPerSec, thinking? }（dsh 完成轮次统计条）
+   *  thinking：思考决策可见性（方向 D）——每轮实际档位/降级/C1 命中摘要 */
+  const [statsByMsg, setStatsByMsg] = useState<Record<string, {
+    ttftMs: number | null; durationMs: number; tokensPerSec: number;
+    thinking?: { level?: string; downgradedRounds: number; trivialOff: boolean } | null;
+  }>>({});
   /** composer 上下文占用环数据（dsh ContextMeter）：取最近一次 context_meter 事件 */
   const [composerCtxMeter, setComposerCtxMeter] = useState<CtxMeterInfo | null>(null);
   /** msgId → 缓存头指纹（system+tools SHA-256 前 12 位；pi-reasonix 思路，缓存命中归因诊断） */
@@ -4025,8 +4029,13 @@ ${rows.join('\n')}
                 const st = parsed.stats as { ttftMs?: number | null; durationMs?: number; tokensPerSec?: number } | undefined;
                 if (st && typeof st.durationMs === 'number') {
                   if (mountedRef.current) {
-                    const statsVal = { ttftMs: st.ttftMs ?? null, durationMs: st.durationMs, tokensPerSec: st.tokensPerSec ?? 0 };
-                    setStatsByMsg((prev) => ({ ...prev, [assistantId]: statsVal }));
+                    // 思考决策可见性（方向 D）：done.thinking → 统计条展示降级/C1 命中
+                    const th = parsed.thinking as { level?: string; downgradedRounds?: number; trivialOff?: boolean } | undefined;
+                    const statsVal: Record<string, unknown> = { ttftMs: st.ttftMs ?? null, durationMs: st.durationMs, tokensPerSec: st.tokensPerSec ?? 0 };
+                    if (th && ((th.downgradedRounds ?? 0) > 0 || th.trivialOff)) {
+                      statsVal.thinking = { level: th.level ?? '', downgradedRounds: th.downgradedRounds ?? 0, trivialOff: !!th.trivialOff };
+                    }
+                    setStatsByMsg((prev) => ({ ...prev, [assistantId]: statsVal as never }));
                   }
                 }
                 // 最终上下文占用（含工具结果回灌）→ composer 圆环
@@ -5124,6 +5133,20 @@ ${rows.join('\n')}
                           <span className="opacity-70" title={`TTFT ${msgStats.ttftMs === null ? 'n/a' : msgStats.ttftMs + 'ms'} · total ${(msgStats.durationMs / 1000).toFixed(1)}s`}>
                             · ttft {msgStats.ttftMs === null ? '—' : msgStats.ttftMs < 1000 ? `${Math.round(msgStats.ttftMs)}ms` : `${(msgStats.ttftMs / 1000).toFixed(1)}s`}
                             · {msgStats.tokensPerSec} tok/s
+                          </span>
+                        )}
+                        {/* 思考决策可见性（方向 D）：实际执行轮降档 / C1 琐碎关思考命中，仅在发生过时显示 */}
+                        {msgStats?.thinking && msgStats.thinking.downgradedRounds > 0 && (
+                          <span
+                            className="opacity-75"
+                            title={`用户档位 ${msgStats.thinking.level || ''}：执行轮按策略降档以省 reasoning tokens（配置 thinking.downgradeOnExecution）`}
+                          >
+                            · 思考 {msgStats.thinking.level || ''}（执行轮降档 ×{msgStats.thinking.downgradedRounds}）
+                          </span>
+                        )}
+                        {msgStats?.thinking?.trivialOff && (
+                          <span className="opacity-75" title="琐碎问答自动关闭思考省 token（配置 thinking.trivialPromptOff）">
+                            · C1 琐碎关思考
                           </span>
                         )}
                       </div>
