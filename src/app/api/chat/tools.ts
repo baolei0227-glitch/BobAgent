@@ -5357,7 +5357,7 @@ function buildAgentBasePrompt(name: string, description: string, role: string): 
     `\n## Workflow`,
     `- For any multi-step task, first call todo_write to publish the full todo list (goal + all steps as status=pending), then call todo_write again at every step boundary (pending→in_progress→completed/failed) so the side panel reflects real progress.`,
     `- Use your available tools only when needed; never call a tool "just in case".`,
-    `- Always end the turn by calling finish_task(summary) with a short summary of what was accomplished.`,
+    `- Finish by writing your final answer directly in the reply body: the body itself is the deliverable and the turn ends there naturally. finish_task is OPTIONAL (an explicit completion signal only) — never call it as a ritual, and never append empty "task done" closers.`,
     `\n## Deliverables & output`,
     `- To save a deliverable file, write it under the homework/ directory (path "homework/<filename>") and end your reply with the marker line \`OutputFile: homework/<filename>\` so it is shown to the user as an output card.`,
     `- When quoting law articles, judgments or other materials, give the source and version date.`,
