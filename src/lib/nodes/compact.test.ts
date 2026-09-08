@@ -259,3 +259,46 @@ describe('compact-source：负向回退（日志缺失/非法 → 原样回退 .
     expect(out[2]).toBe(mdNoLog);
   });
 });
+
+describe('compact: R-26/append 侧触发一致性（与 chat R-14-C 共享 shouldCompact 的 append 参数形态）', () => {
+  const mkTurns = (n: number): ConversationTurn[] =>
+    Array.from({ length: n }, () => ({ question: 'q', answer: 'a', questionTime: '', answerTime: '' }));
+  const COOLDOWN_MS = 10 * 60 * 1000;
+
+  it('append 传 contextWindow 数字 → 按窗口动态 triggerTokens（1M→100k token≈125k 字符）', () => {
+    // 单轮 150k 字符 → tokens 超 100k 触发；append 侧调用形态：shouldCompact(convs, until, contextWindow, compactedAt)
+    const big = [{ question: 'x'.repeat(150_000), answer: '', questionTime: '', answerTime: '' }];
+    const d = shouldCompact(big, 0, 1_000_000, null);
+    expect(d.shouldCompact).toBe(true);
+    expect(d.reason).toBe('tokens');
+    expect(d.range).toEqual({ start: 0, end: 1 });
+  });
+
+  it('冷却压制只作用于 token 触发：10 分钟内超 token 不触发，轮数兜底照走（R-26 语义）', () => {
+    const inCooldown = Date.now() - 60_000; // 1 分钟前压过
+    // token 触发被压制
+    const big = [{ question: 'x'.repeat(150_000), answer: '', questionTime: '', answerTime: '' }];
+    expect(shouldCompact(big, 0, 1_000_000, inCooldown).shouldCompact).toBe(false);
+    // 轮数兜底不受冷却（append 长文档逐轮 append 的主防线）
+    expect(shouldCompact(mkTurns(15), 0, 1_000_000, inCooldown).shouldCompact).toBe(true);
+    expect(shouldCompact(mkTurns(15), 0, 1_000_000, inCooldown).reason).toBe('turns');
+  });
+
+  it('冷却期过后 token 触发恢复；ISO 字符串 compactedAt 同语义', () => {
+    const cooled = Date.now() - COOLDOWN_MS - 60_000; // 冷却期已过
+    const big = [{ question: 'x'.repeat(150_000), answer: '', questionTime: '', answerTime: '' }];
+    expect(shouldCompact(big, 0, 1_000_000, cooled).shouldCompact).toBe(true);
+    expect(shouldCompact(big, 0, 1_000_000, new Date(cooled).toISOString()).shouldCompact).toBe(true);
+    expect(shouldCompact(big, 0, 1_000_000, null).shouldCompact).toBe(true);
+  });
+
+  it('游标推进后只看未压缩段（append 每轮推进 memory_compacted_until → 已被覆盖轮不再计）', () => {
+    // 150k 字符轮在游标之前（已被上次折叠覆盖）→ 未压缩段为空 → 不触发
+    const big = [{ question: 'x'.repeat(150_000), answer: '', questionTime: '', answerTime: '' }];
+    expect(shouldCompact([...big], 1, 1_000_000, null).shouldCompact).toBe(false);
+    // 游标后 15 轮仍触发（range 从游标起）
+    const d = shouldCompact(mkTurns(15), 0, 1_000_000, Date.now());
+    expect(d.shouldCompact).toBe(true);
+    expect(d.range).toEqual({ start: 0, end: 15 });
+  });
+});
