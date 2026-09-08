@@ -3793,13 +3793,13 @@ async function toolInternSearch(args: Record<string, unknown>): Promise<string> 
 const toolDefs: Tool[] = [
   {
     name: 'finish_task',
-    description: 'Signal that the current task is fully completed. This tool marks the end of the agent\'s work. It should ONLY be called when all required steps have been successfully executed and the final answer or deliverable has been produced. Calling this tool will immediately end the current turn and deliver the results to the user. Do NOT use this tool prematurely or as a substitute for actually completing the work.',
+    description: 'Signal full task completion — immediately ends the turn and delivers results. Call ONLY after all required steps succeeded and the final answer/deliverable is produced; never prematurely or instead of finishing the work.',
     parameters: {
       type: 'object',
       properties: {
         summary: {
           type: 'string',
-          description: 'A brief summary of what was accomplished in this task. This will be logged for audit purposes.',
+          description: 'Brief summary of what was accomplished (audit log).',
         },
       },
       required: ['summary'],
@@ -3814,7 +3814,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'todo_write',
-    description: 'Publish the full task step list with current statuses (replacement semantics). This is the ONLY planning + execution-tracking tool for multi-step tasks: the FIRST call creates the track (supply goal + all steps as status=pending), and EVERY step boundary call (a step becomes in_progress, or transitions to completed/failed) resends the FULL latest snapshot. Each call REPLACES the entire list — do NOT diff, do NOT patch. MANDATORY for any multi-step task (multiple tool calls, search→analyze→write flows); do NOT call for single-step or trivial conversational tasks (panel would be noise). Status transitions: pending → in_progress → completed (or failed on error). activeForm is shown ONLY while status=in_progress and gives the user a one-line "currently doing X" signal — keep it concrete and verb-led. Never estimate progress yourself by counting tool calls: the real progress is exactly what you report here.',
+    description: 'Publish the full task step list with current statuses (REPLACEMENT semantics — each call resends the FULL snapshot; do not diff/patch). First call of a multi-step task creates the track (goal + steps pending); every step boundary (in_progress/completed/failed) resends the latest list. MANDATORY for multi-step tasks; skip trivial chats. Status: pending → in_progress → completed (or failed). activeForm is a one-line "currently doing X" shown ONLY while in_progress. Report real progress; never estimate it.',
     parameters: {
       type: 'object',
       properties: {
@@ -3833,7 +3833,7 @@ const toolDefs: Tool[] = [
         },
         goal: {
           type: 'string',
-          description: 'The ultimate goal or deliverable of the entire task, shown at the top of the steps panel. Only needs to be set on the FIRST (track-creating) call; may be omitted on subsequent status-heartbeat calls. (e.g., "Find the user ID for Selenasaid")',
+          description: 'The ultimate goal or deliverable of the task, shown at the top of the steps panel. Set on the FIRST (track-creating) call only; may be omitted on later heartbeats.',
         },
       },
       required: ['todos'],
@@ -3857,13 +3857,13 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read file content. Supports text files like source code, configs, documents etc. Supports relative paths (based on workspace root), absolute paths, and ~ for home directory. .docx files are automatically extracted to plain text (paragraphs and table rows preserved), so you can read generated Word documents directly to verify content.',
+    description: 'Read file content (source code, configs, documents). Relative paths resolve from the workspace root; "homework/…" and "attachments/…" map to the project root; absolute and ~/ paths supported. .docx files are auto-extracted to plain text (paragraphs/tables preserved), so generated Word files can be read directly to verify.',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'File path. Relative paths based on workspace root; "homework/..." and "attachments/..." resolve to the project root (e.g. "homework/报告.html"). Also supports absolute paths or ~/ paths. e.g. "homework/报告.html", "src/main.ts" or "~/.bashrc"',
+          description: 'File path: relative to workspace root ("src/main.ts"), "homework/<file>" or "attachments/…" for project-root paths, or absolute / ~/ path.',
         },
       },
       required: ['path'],
@@ -3874,13 +3874,13 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'write_file',
-    description: 'Write or create a file. Parent directories are auto-created. Use for code generation, config editing, document creation etc. IMPORTANT: to save a project deliverable, the path MUST start with "homework/" (e.g. "homework/报告.html") so it lands in the project homework/ folder and is shown as an output card. Paths NOT starting with "homework/" or "attachments/" resolve to the temporary workspace and count as scratch files only.',
+    description: 'Write or create a file (parent dirs auto-created) for code/config/docs. Deliverables MUST use a path starting with "homework/" (e.g. "homework/报告.html") to land in the project homework/ folder and show as an output card; paths not starting with "homework/" or "attachments/" are scratch files in the temporary workspace.',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'File path. Use "homework/<filename>" for final deliverables (saved to project homework/ folder, shown as output card, e.g. "homework/报告.html"). Bare relative paths resolve to the temporary workspace (scratch only, not shown as output). Supports absolute and ~/ paths.',
+          description: 'File path. "homework/<filename>" for final deliverables (project homework/ folder, shown as output card); other relative paths are scratch in the temporary workspace; absolute and ~/ paths supported.',
         },
         content: {
           type: 'string',
@@ -3895,7 +3895,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'edit_code',
-    description: 'Edit a file by replacing the FIRST exact occurrence of "search" with "replace" (SearchReplace-style). PREFER this over write_file for small iterative edits on existing files (large files, one-line changes, fixing a bug) — avoids rewriting the whole file and burning tokens. The search text must match the file content character-for-character (including indentation/newlines); if not found, the error includes the file head to help you craft a correct search. For sandbox mini-app files it writes atomically with automatic .history snapshot (recoverable via sandbox_rollback).',
+    description: 'Replace the FIRST exact occurrence of "search" with "replace" (must match verbatim, incl. indentation/newlines; on not-found the error shows the file head to help craft the search). Prefer over write_file for small iterative edits on existing files — avoids rewriting the whole file and burning tokens. Mini-app files are written atomically with an automatic .history snapshot (recoverable via sandbox_rollback).',
     parameters: {
       type: 'object',
       properties: {
@@ -3920,7 +3920,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'sandbox_rollback',
-    description: 'List or restore previous versions of a Bob Sandbox mini-app file. Every write_file / edit_code on a mini-app file auto-saves a snapshot under bob-sandbox/apps/<appId>/.history/ (keeps the most recent ones). Use when the latest edit broke the app: action="list" to see available versions, then action="restore" with a stamp to bring back an older version. After restore, re-verify with capture_preview.',
+    description: 'List or restore previous versions of a Bob Sandbox mini-app file. Every write_file/edit_code on a mini-app file auto-saves a snapshot under bob-sandbox/apps/<appId>/.history/. action="list" shows available versions; "restore"+stamp brings one back. After restore, re-verify with capture_preview.',
     parameters: {
       type: 'object',
       properties: {
@@ -3950,7 +3950,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'sandbox_export',
-    description: 'Export a Bob Sandbox mini-app as a standalone single-file HTML page for sharing or publishing. Inlines the app\u2019s own relative css/js references (local <link href> and <script src> become inline <style>/<script>), keeps external CDN links untouched. Output is written to bob-sandbox/exports/<appId>-<ts>.html — open it directly in a browser or share the file.',
+    description: 'Export a Bob Sandbox mini-app as a standalone single-file HTML for sharing/publishing: inlines the app\'s own relative css/js (<link href>/<script src> become inline), keeps external CDN links untouched. Output: bob-sandbox/exports/<appId>-<ts>.html — open directly or share the file.',
     parameters: {
       type: 'object',
       properties: {
@@ -4043,7 +4043,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'run_command',
-    description: 'Execute a shell command and return output. Use for running tests, building, git operations, process inspection etc. Runs in workspace root. Timeout: install commands (pip/npm/brew/cargo etc.) get 180s, all others 30s. Files generated by the command land in the workspace root unless you use an absolute path or a "homework/"-prefixed path (project deliverables should use "homework/...").',
+    description: 'Execute a shell command and return output (tests, builds, git, process inspection). Runs in the workspace root. Timeout: install commands (pip/npm/brew/cargo…) get 180s, others 30s. Files generated land in the workspace root unless the path is absolute or "homework/"-prefixed (project deliverables should use "homework/…").',
     parameters: {
       type: 'object',
       properties: {
@@ -4061,14 +4061,14 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'execute_script',
-    description: 'Write and execute a script (Python or Shell) to solve problems autonomously. When encountering issues not solvable by other tools, write a script to analyze, fix, or automate the solution. Supports Python (python3) and Shell (bash). Script runs in the project AI workspace (homework/.ai-workspace/) with 30s timeout. Use this for data processing, file manipulation, automation, analysis etc. IMPORTANT PATH RULE: the script CWD is homework/.ai-workspace/, NOT the project root. Writing a relative path like "homework/xxx.png" inside the script will land at homework/.ai-workspace/homework/xxx.png, which the UI CANNOT see. To produce a visible deliverable, write to the ABSOLUTE path from env var BOB_PROJECT_HOMEWORK: Python: os.path.join(os.environ["BOB_PROJECT_HOMEWORK"], fn); Shell: "$BOB_PROJECT_HOMEWORK/fn". Also use it to read project homework files. Then print "OutputFile: homework/<filename>" so the file is shown to the user.',
+    description: 'Write and execute a Python/Shell script (30s timeout) when other tools cannot solve the problem (data processing, automation, analysis). IMPORTANT PATH RULE: the script CWD is homework/.ai-workspace/, NOT the project root — a relative path like "homework/xxx.png" inside the script lands at homework/.ai-workspace/homework/xxx.png, which the UI CANNOT see. To write a visible deliverable or read project homework files, use the ABSOLUTE path from env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: "$BOB_PROJECT_HOMEWORK"), then print "OutputFile: homework/<filename>" so the file is shown to the user.',
     parameters: {
       type: 'object',
       properties: {
         language: {
           type: 'string',
           enum: ['python', 'shell'],
-          description: 'Script language. "python" for Python3, "shell" for Bash.',
+          description: 'Script language: python=Python3, shell=Bash.',
         },
         script: {
           type: 'string',
@@ -4085,7 +4085,7 @@ const toolDefs: Tool[] = [
   {
     name: 'web_search',
     description:
-      'Search the web for information. Use when you need latest info, facts, or real-time content. Multiple search engines with auto-fallback. When the query returns multiple results, present them as an ai-card card list (one .ai-card per result with title/meta/body).',
+      'Search the web for latest info, facts, or real-time content (multiple engines, auto-fallback). When several results match, present them as an ai-card list (one .ai-card per result: title/meta/body).',
     parameters: {
       type: 'object',
       properties: {
@@ -4119,26 +4119,26 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_attachment',
-    description: 'Read user-uploaded attachment content. Supports: text/code files (txt/md/json/csv etc., GBK/GB18030 encoding auto-detected), Excel (.xls/.xlsx per-sheet rows; sheet param picks a single sheet), Word (.docx structure-preserving incl. tables/lists; legacy .doc/.rtf via textutil), PowerPoint (.pptx per-slide text), PDF (native extract or scanned OCR), images (.png/.jpg/.jpeg/.gif/.webp etc. OCR/vision), video (ffmpeg frame analysis), audio (STT transcription), and .zip archives (safely unpacked to homework/.unpacks/, then read inner files one by one). Long text/Word/Excel/PPT content beyond the single-return limit prints a next-offset marker — re-call with offset=<value> to keep reading. When user questions involve attachment content, proactively call this tool. EFFICIENCY: recognition results are cached by content hash — re-reading the same image/page (even under a different filename) returns the cached result instantly. For scanned PDFs, prefer page-range reads (pages="x-y") or reading already-rendered page images over re-recognizing the whole document each time. ASYNC NOTE: large scanned PDFs (>=15 pages or >=5MB, full-document read) are recognized in the background — the first call returns a "⏳ recognizing in background" notice, then a SECOND call on the same file returns the result instantly from cache. Do not treat the first notice as failure; just call this tool again on the same path after a moment.',
+    description: 'Read user-uploaded attachment content. Supports: text/code (GBK/GB18030 auto-detected), Excel (.xls/.xlsx; sheet param picks one sheet), Word (.docx structure-preserving; legacy .doc/.rtf via textutil), PowerPoint, PDF (native extract or scanned OCR), images (OCR/vision), video (ffmpeg frames), audio (STT), .zip (unpacked to homework/.unpacks/). Long content truncates with a next-offset marker — re-call with offset=<value> to keep reading. Results cache by content hash: re-reading the same image/page (even under a different filename) returns instantly. For scanned PDFs prefer pages="x-y" reads. Large scanned PDFs (>=15 pages or >=5MB, full read) recognize in background — the first call returns a "⏳ recognizing in background" notice; call this tool again on the same path after a moment to get the result from cache (do NOT treat the notice as failure). Proactively read attachments when the user asks about them.',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'Attachment path, format: attachments/{nodeId}/{filename} (relative to project root). Get from the attachment list in user message. Uploaded attachments are already copied into the project attachments/ folder, so read them directly with this tool — do NOT ask the user for permission or a Downloads/Desktop path, and do NOT emit AUTH_REQ for attachments. You may also pass an absolute path (or ~/ path) of a file inside a user-authorized directory — it will be resolved and read directly.',
+          description: 'Attachment path: attachments/{nodeId}/{filename} from the attachment list in the user message (already copied into the project attachments/ folder — do NOT ask permission or a Downloads path, and do NOT emit AUTH_REQ). Absolute / ~/ paths inside a user-authorized directory are also resolved and read directly.',
         },
         pages: {
           type: 'string',
-          description: '可选，仅扫描件 PDF 生效：按页读取，格式如 "1-5"、"3"、"6,8-10"。用于长 PDF 分片读取——不传时读取全部页，若内容超过单次上限会在返回头部标注已返回的页码区间，并提示用本参数继续读取剩余页（如 pages="6-14"）。',
+          description: '可选，仅扫描件 PDF：按页读取，如 "1-5" / "3" / "6,8-10"。长 PDF 分片用——返回头部会标注已返回页码区间并提示续读剩余页（如 pages="6-14"）。',
         },
         offset: {
           type: 'integer',
           minimum: 0,
-          description: '可选，通用续读偏移（文本/Word/Excel(.xls/.xlsx)/PPT 等）：内容超过单次输出上限被截断时，返回头部会标注 "offset=<数值>"，把该数值原样传回即可继续读取后半部分。不传=从头读。',
+          description: '可选，通用续读偏移（文本/Word/Excel/PPT）：内容超限截断时头部标注 "offset=<数值>"，原样传回即可续读后半；不传=从头读。',
         },
         sheet: {
           type: 'string',
-          description: '可选，仅 Excel(.xls/.xlsx) 生效：按 sheet 名（不区分大小写）只读该表；不传=输出全部 sheet。指定不存在的 sheet 时会返回可用 sheet 清单。',
+          description: '可选，仅 Excel(.xls/.xlsx)：按 sheet 名（不区分大小写）只读该表；不传=全部 sheet。指定不存在的 sheet 会返回可用清单。',
         },
       },
       required: ['path'],
@@ -4149,18 +4149,18 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'ocr_document',
-    description: 'OCR 识别（独立工具）：对 PDF 扫描件或图片做高质量文字识别，返回结构化结果（逐页文本 + 质量评分 + 余额勾稽校验报告）。【级联原则】印刷体（正文、证件复印件、印章防伪码）默认走本地 macOS Vision（确定性、零成本、结果稳定），仅在本地质量低（qualityScore<0.30）/文本为空/勾稽异常时自动升级 VLM。因此手写填写字段（姓名、身份证、日期）识别多次给出不同候选属正常波动——不要为求稳定而反复整页重试，应改用 crop_image 只裁剪可疑区域单独复核，或直接标注【需人工复核】核对原件。区别于 read_attachment：本工具聚焦纯 OCR，不处理 docx/视频等，返回更精简且带质量元数据。适用于：扫描版合同/判决书/银行流水/证据材料的文字提取；图片中的文字识别；旋转 90° 扫描的表格（自动转置）。传入文件路径（支持 attachments/ 相对路径、homework/ 相对路径或绝对路径），识别结果含每页 [Page N] 头、qualityScore（0-1 文本质量）、ledgerVerified（流水表格页余额勾稽一致行数，-1 表示非流水页）。增强仅用于识别辅助，原始扫描图始终保留。',
+    description: 'OCR 识别（独立工具）：对 PDF 扫描件/图片做高质量文字识别，返回逐页文本 + qualityScore（0-1）+ ledgerVerified（流水勾稽）。【级联】印刷体默认走本地 macOS Vision（确定性、零成本），仅本地质量低（qualityScore<0.30）/文本为空/勾稽异常时自动升级 VLM。手写字段（姓名/身份证/日期）多次识别结果波动属正常——不要整页反复重试，改用 crop_image 裁可疑区域单独复核，或标注【需人工复核】。区别于 read_attachment：纯 OCR，不处理 docx/视频，返回精简且带质量元数据。传入 attachments/、homework/ 相对或绝对路径。',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: '文件路径：attachments/{nodeId}/{filename}（项目内附件）或 homework/ 相对路径或绝对路径。支持 PDF（扫描件自动 OCR）与图片（png/jpg/jpeg/gif/webp/bmp/tif）。',
+          description: '文件路径：attachments/{nodeId}/{filename}（项目内附件）、homework/ 相对路径或绝对路径。支持 PDF（扫描件自动 OCR）与图片（png/jpg/jpeg/gif/webp/bmp/tif）。',
         },
         upgrade: {
           type: 'string',
           enum: ['off', 'auto', 'always'],
-          description: '可选，VLM 升级策略：off=纯本地识别（默认，无需视觉模型）；auto=本地质量低（qualityScore<0.30）/勾稽异常/文本为空时，该页自动升级走视觉大模型；always=所有页全部走视觉大模型。auto/always 需在 Role Assignment 配置 Vision Model，未配置时静默退化为纯本地。返回结果中会标注每页是否经 VLM 升级。',
+          description: '可选，VLM 升级：off=纯本地（默认）；auto=本地质量低（qualityScore<0.30）/勾稽异常/文本为空时该页升级视觉大模型；always=全部走 VLM。auto/always 需在 Role Assignment 配置 Vision Model，未配置则静默退化为纯本地。',
         },
       },
       required: ['path'],
@@ -4171,7 +4171,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'crop_image',
-    description: '图像 ROI 裁剪（中文）：从整页图片中裁出指定坐标区域（手写字段栏、印章、签名、日期等），输出到 homework/.crops/（隐藏中间产物目录，侧边栏与 Finder 不可见，任务结束即清理）。用于扫描件识别中"只对可疑区域单独复核"，避免反复整页重识别浪费轮次。传入图片路径 + bbox=[x1,y1,x2,y2]（像素坐标，图片左上角为原点，x 向右 y 向下，需 x1<x2 且 y1<y2）；可选 margin=外扩像素（默认 8，避免裁掉笔画）、scale=放大倍率（默认 2，便于看清手写）。裁剪后把返回的输出路径传给 ocr_document / read_attachment 或视觉模型单独识别该字段。',
+    description: '图像 ROI 裁剪（中文）：从整页图裁出指定坐标区域（手写字段栏/印章/签名/日期），输出到 homework/.crops/（隐藏中间产物，任务结束清理）——用于扫描件"只对可疑区域单独复核"，避免整页反复重识别。传图片路径 + bbox=[x1,y1,x2,y2]（像素，原点左上，x 向右 y 向下，需 x1<x2 且 y1<y2）；可选 margin=外扩像素（默认 8）、scale=放大倍率（默认 2）。裁完把返回的输出路径交给 ocr_document / read_attachment / 视觉模型单独识别该字段。',
     parameters: {
       type: 'object',
       properties: {
@@ -4203,7 +4203,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_upstream_node',
-    description: 'Read the full .md document of an upstream connected node. Use node_id (preferred, from the upstream node index in system prompt) or title to identify the node. Can be called multiple times for multiple nodes. Note: only reads nodes within the current project.',
+    description: 'Read the full .md document of an upstream connected node. Identify by node_id (preferred — from the upstream node index in system prompt) or exact title; callable multiple times. Only reads nodes within the current project.',
     parameters: {
       type: 'object',
       properties: {
@@ -4224,7 +4224,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_manifest',
-    description: 'Read the structured directory (manifest) of an ancestor node: lists all indexed entries (conversations, annotations, attachments) with anchors and keywords, WITHOUT content. Use to see what an ancestor node contains before fetching details. Pass the ancestor node_id from the upstream ancestor declaration in system prompt.',
+    description: 'Read the structured directory (manifest) of an ancestor node: indexed entries (conversations/annotations/attachments) with anchors + keywords, WITHOUT content. Pass the ancestor node_id from the upstream ancestor declaration.',
     parameters: {
       type: 'object',
       properties: {
@@ -4241,7 +4241,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'intern_search',
-    description: 'Fetch original conversation fragments from an ancestor node by instruction. The intern matches the instruction against the node manifest keywords (with legal synonym expansion), locates anchor blocks, and returns original text verbatim (read-only, no processing). Returned content is always marked [原始对话·未认定] - treat as unverified, mark [存疑] or move to pending, NEVER mark [确定]. Max 2 round trips; on exhaustion stop that reasoning line and note "需人工确认" in pending. target_node_id must be an ancestor of current_node_id.',
+    description: 'Fetch original conversation fragments from an ancestor node by instruction: matches against the node manifest keywords (legal synonym expansion), locates anchor blocks, returns original text verbatim (read-only). Returned content is always marked [原始对话·未认定] — treat as unverified, mark [存疑] or move to pending, NEVER [确定]. Max 2 round trips, then stop and note "需人工确认". target_node_id must be an ancestor of current_node_id.',
     parameters: {
       type: 'object',
       properties: {
@@ -4274,7 +4274,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_material',
-    description: 'Read a material file from the project materials folder. Materials are files uploaded by the user as reference documents (e.g. PDFs, reports, images, code files). When user refers to "@filename" in their message, use this tool to read the referenced material. Pass the material file path from the user message. NOTE: materials live at <project>/materials/ (NOT in your workspace root, which only contains scripts/). Always read materials with THIS tool; do NOT use list_directory/read_file on the workspace root to locate them — they are listed in the material reference list in the user message.',
+    description: 'Read a material file from the project materials folder (reference docs the user uploaded: PDFs, reports, images, code). Call when the user refers to "@filename". NOTE: materials live at <project>/materials/, NOT the workspace root (which only holds scripts/) — always use THIS tool; never list_directory/read_file on the workspace root to find them.',
     parameters: {
       type: 'object',
       properties: {
@@ -4291,7 +4291,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_todo',
-    description: 'Read WANTED todo records from the current project. Use to query what tasks were recently added, tasks of a specific category (会议/开发/文档/学习/沟通/生活/规划/其他), or today\'s schedule. Supports filtering by time range (today/week/all) and category.',
+    description: 'Read WANTED todo records of the current project: recent tasks, by category (会议/开发/文档/学习/沟通/生活/规划/其他), or today\'s schedule. Filter by time range (today/week/all) and category.',
     parameters: {
       type: 'object',
       properties: {
@@ -4314,14 +4314,14 @@ const toolDefs: Tool[] = [
 
   {
     name: 'read_notebook',
-    description: 'Search/read personal notes from the Karpathy-style wiki (notes/wiki/, AI-compiled interlinked markdown, with type/tags/links). Supports keyword search (query, matches title+tags+content) and exact tag filtering (tag, comma-separated = AND). No vector search. "index" mode (default) returns the type/topic index with counts; when searching it lists each hit with id + short excerpt (token-efficient). "full" mode returns full note bodies when few hits (<=3); for more hits it returns id + excerpts only — then call read_note <id> to read a specific note in full. Use when the user asks about their recorded ideas, notes, or personal knowledge.',
+    description: 'Search/read personal notes from the Karpathy-style wiki (notes/wiki/, AI-compiled interlinked markdown with type/tags/links). query matches title+tags+content; tag filters exactly (comma = AND); no vector search. mode "index" (default) = type/topic index with counts, or per-hit id + short excerpt when searching (token-efficient); "full" = full note bodies when few hits (<=3), otherwise id + excerpts only — then call read_note <id> for a full note. Use when the user asks about their recorded notes/knowledge.',
     parameters: {
       type: 'object',
       properties: {
         mode: {
           type: 'string',
           enum: ['index', 'full'],
-          description: '"index" (default) returns the index with counts + hit excerpts; "full" returns matching note bodies (<=3 hits) or excerpts with ids (many hits).',
+          description: '"index" (default) = index with counts + hit excerpts; "full" = full note bodies when <=3 hits, else excerpts with ids.',
         },
         query: {
           type: 'string',
@@ -4348,7 +4348,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_note',
-    description: 'Read ONE note from the personal wiki in full by its id (e.g. "w-xxx"). Use AFTER read_notebook returns many hits as excerpts, to read the exact note(s) that look relevant. Each read_notebook hit line includes "id: <id>". Prefer this over read_notebook full mode when you only need one or two notes\' full content (token-efficient).',
+    description: 'Read ONE wiki note in full by id (w-xxx). Use after read_notebook returns hits as excerpts — each hit line carries "id: <id>". Prefer over read_notebook "full" mode when you need only one or two notes (token-efficient).',
     parameters: {
       type: 'object',
       properties: {
@@ -4365,7 +4365,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_note_history',
-    description: 'List the saved version history of ONE wiki note (id w-xxx). Each version has a "time" value. Use when the user suspects a note was corrupted by a bad compile/merge and asks "这篇之前是什么样 / 能回滚吗" — then restore_note with the chosen time. Note-node context.',
+    description: 'List the saved version history of ONE wiki note (id w-xxx); each version has a "time". Use when the user suspects a note was corrupted by a bad compile/merge and asks "之前是什么样/能回滚吗" — then restore_note with the chosen time.',
     parameters: {
       type: 'object',
       properties: {
@@ -4382,7 +4382,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'restore_note',
-    description: 'Restore a wiki note to one of its saved history versions (id w-xxx + time from read_note_history). Rolls back the body only; type/tags/links stay current; the restore itself also leaves a snapshot so it is reversible. ONLY call when the user explicitly asks to restore/revert a note to an earlier version.',
+    description: 'Restore a wiki note to a saved history version (id w-xxx + time from read_note_history). Rolls back the body only; type/tags/links stay current; the restore itself is also snapshotted (reversible). Call ONLY when the user explicitly asks to restore/revert a note.',
     parameters: {
       type: 'object',
       properties: {
@@ -4403,7 +4403,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_raw_inbox',
-    description: 'List the raw/ inbox (material layer) — what has been clipped/saved but not yet compiled. Returns each item with its id (r-xxx), title, source URL, status (uncompiled/compiled) and a body preview. Note-node only. Use FIRST when the user asks 素材箱里有什么 / inbox 有哪些 / 有哪些待编译的素材 / 让我挑几条编译 — then compare against existing notes via read_notebook, tell the user which raw items match existing notes (would merge, not create new), and pass the chosen ids to ingest_notes.',
+    description: 'List the raw/ inbox (material layer — clipped/saved but not yet compiled): each item with id (r-xxx), title, source URL, status (uncompiled/compiled) and body preview. Note-node only. Use FIRST when the user asks 素材箱里有什么 / inbox / 待编译素材 — then compare against notes via read_notebook, tell the user which raw items match existing notes (merge, not duplicate), and pass the chosen ids to ingest_notes.',
     parameters: {
       type: 'object',
       properties: {
@@ -4422,7 +4422,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'update_notebook',
-    description: 'Modify one note in the wiki (notes/wiki/) by its id. Use when the user asks to change/update a specific recorded note, e.g. "把笔记改成…" or "给这条笔记换个标题". Only update the provided fields (title/content/tags); other fields are preserved. Use read_notebook (full mode) to find the id first.',
+    description: 'Update one note in the wiki (notes/wiki/) by its id — only the provided fields (title/content/tags) change; others preserved. Use when the user asks to change a recorded note. Find the id first via read_notebook (full mode).',
     parameters: {
       type: 'object',
       properties: {
@@ -4452,7 +4452,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'delete_notebook',
-    description: 'Delete one note from the wiki (notes/wiki/) by its id. Use ONLY when the user explicitly asks to delete/remove a specific recorded note (e.g. "删掉那条笔记", "把笔记删了") — never auto-delete notes on your own. Use read_notebook (full mode) or /note check mail to find the id first; if the id is unknown, ask the user which note to delete. This is irreversible.',
+    description: 'Delete one note from the wiki (notes/wiki/) by its id. ONLY when the user explicitly asks to delete a specific note — never auto-delete. Find the id via read_notebook (full mode) or /note check mail; if unknown, ask the user. Irreversible.',
     parameters: {
       type: 'object',
       properties: {
@@ -4469,7 +4469,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'write_notebook_answer',
-    description: 'Backfill (write back) an answer/analysis into the personal wiki — the Karpathy "answers compound into knowledge" loop. Use AFTER answering a question based on read_notebook, when the user says "把答案记下来 / 存进笔记 / 沉淀一下", or when an answer is valuable enough to keep. The content is stored directly (no re-compile). MERGE-AWARE: if title exactly matches an existing note (or you pass merge_into with its title), it updates that note instead of creating a new one — new content first, old kept below a divider; only brand-new topics create a new note. Pass links with referenced note titles/ids so the note connects to the knowledge graph. type: concept (knowledge point) / note (analysis/idea) / source / todo; default note.',
+    description: 'Backfill an answer/analysis into the personal wiki — the "answers compound into knowledge" loop. Call AFTER answering from read_notebook, when the user says 把答案记下来/存进笔记/沉淀一下 or the answer is worth keeping. Stored directly (no re-compile). MERGE-AWARE: exact same title (or merge_into) updates that note — new content first, old kept below a divider; brand-new topics create a note. type: concept/note/source/todo (default note).',
     parameters: {
       type: 'object',
       properties: {
@@ -4488,7 +4488,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'create_note',
-    description: 'Record material the user wants to keep into the notes system (Karpathy raw-first capture loop). Use when the user asks to record/save/keep something ("帮我记一笔…", "把这段记到笔记里", "记一下…"), shares an idea/thought worth keeping, or when an earlier note is now wrong and the user provides a correction/update. The content is DROPPED INTO raw/ and compiled by the notes brain (equivalent to /note): the brain decides title/type/tags/links and merges same-topic content into the existing note — feed corrections/updates here and the brain updates the original entry. Only use update_notebook / delete_notebook for structural fixes (rename / delete an entry).',
+    description: 'Record material the user wants kept into the notes system (raw-first capture loop, equivalent to /note). Use when the user asks to record/save/keep something (帮我记一笔 / 把这段记到笔记里), shares an idea worth keeping, or corrects an earlier note. Content drops into raw/ and the notes brain compiles it — the brain decides title/type/tags/links and merges same-topic content into existing notes, so feed corrections here too. Only update_notebook/delete_notebook for structural fixes (rename/delete).',
     parameters: {
       type: 'object',
       properties: {
@@ -4504,7 +4504,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'ingest_notes',
-    description: 'Compile pending raw material(s) into the wiki (Karpathy ingest loop) — Note-node only. Triggers the bob-notes-mcp brain model (its own separately-configured model) to compile the raw/ inbox into interlinked notes (with merge_into dedupe). Pass ids (raw ids or r-xxx prefix) to compile only those; omit to compile all pending. Use when the user, in the notes node, asks to compile/整理/入库 raw material (等价 /note ingest).',
+    description: 'Compile pending raw material(s) into the wiki (Karpathy ingest) via the bob-notes-mcp brain model (its own separately-configured model). Pass ids (raw ids / r-xxx prefix) to compile only those; omit to compile all pending. Use when the user (in the notes node) asks to compile/整理/入库 raw material (等价 /note ingest).',
     parameters: {
       type: 'object',
       properties: {
@@ -4518,7 +4518,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'review_notes',
-    description: 'Run the review & rescue pass over the wiki (Karpathy review): picks the most stale notes and the bob-notes-mcp brain model decides rescue (promote / rewrite) or sink (demote, never delete). Note-node only. Use when the user asks 回看/打捞/review the notes (等价 /note review).',
+    description: 'Run the review & rescue pass over the wiki: picks the most stale notes; the notes brain decides rescue (promote/rewrite) or sink (demote, never delete). Use when the user asks 回看/打捞/review（等价 /note review）.',
     parameters: { type: 'object', properties: {} },
     category: '文件',
     execute: toolReviewNotes,
@@ -4527,7 +4527,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'lint_notes',
-    description: 'Health-check the personal wiki (Karpathy lint): broken links / orphan notes / duplicate titles (deterministic) plus an LLM contradiction check across notes (brain model). Note-node only. Use when the user asks 自检/lint/查矛盾 (等价 /note lint).',
+    description: 'Health-check the wiki: broken links / orphan notes / duplicate titles (deterministic) + an LLM contradiction check across notes (brain model). Use when the user asks 自检/lint/查矛盾（等价 /note lint）.',
     parameters: { type: 'object', properties: {} },
     category: '文件',
     execute: toolLintNotes,
@@ -4536,7 +4536,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_note_rules',
-    description: 'Read the knowledge-base organizing rules (SCHEMA.md — the user-preference charter the notes brain loads before every ingest/review). Note-node only. Use before tweaking rules or when asked how notes get organized.',
+    description: 'Read the knowledge-base organizing rules (SCHEMA.md — the charter the notes brain loads before every ingest/review). Use before tweaking rules or when asked how notes get organized.',
     parameters: { type: 'object', properties: {} },
     category: '文件',
     execute: toolReadNoteRules,
@@ -4545,7 +4545,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'set_note_rules',
-    description: 'Record an organizing preference/rule the notes brain must follow (SCHEMA.md). Note-node only. VETO RIGHT: you may DECLINE (do not call) a rule you judge unnecessary, vague, harmful, or conflicting with knowledge-base boundaries (no deletion, no rewriting raw, no degrading future maintenance) — when you decline, you MUST reply to the user with the reason and a concrete better suggestion, never record blindly to please. CALL ONLY when the user states a repeatable, concrete, executable organizing preference with future intent in this node ("以后这类素材都…", "帮我记一条整理规则：标签用两三个字"). DO NOT record: one-off remarks about a single note, general chat habits (use remember_preference instead), vague praise/criticism. If unsure the user wants it kept as a rule, ASK first ("要记成整理规则吗？"). Keep each rule within 120 chars. Default append:true — dedup + 24-item cap enforced server-side; when it reports "未记录", tell the user why and suggest consolidating old rules.',
+    description: 'Record an organizing preference/rule the notes brain must follow (SCHEMA.md). Note-node only. VETO RIGHT: you may decline (do not call) a rule you judge unnecessary/vague/harmful/conflicting with knowledge-base boundaries (no deletion, no rewriting raw) — when declining, reply with the reason + a better suggestion. CALL ONLY when the user states a repeatable, concrete, executable preference with future intent ("以后这类素材都…", "帮我记一条整理规则：标签用两三个字"). DO NOT record one-off remarks about a single note, general chat habits (use remember_preference instead), or vague praise/criticism; if unsure, ask first ("要记成整理规则吗？"). Keep each rule <=120 chars. Default append:true — dedup + 24-item cap enforced server-side; when it reports "未记录", tell the user why and suggest consolidating.',
     parameters: {
       type: 'object',
       properties: {
@@ -4561,7 +4561,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'remember_preference',
-    description: 'Record a user preference/habit into global long-term memory (wanted/preferences.md), with structured metadata (type/created_at/source). Call when: (1) the user explicitly asks to remember something (e.g. "记住：以后都用表格输出", "以后引用法条记得标注时效性"), OR (2) the user expresses a clear preference/habit signal (e.g. "我习惯…", "以后都这样", or repeats the same working style twice or more) AND you first proactively ask "需要我把这条记入长期偏好吗？" and the user approves. NEVER record without user consent — if you suggest remembering but the user declines or does not clearly agree, do NOT call this tool. Do NOT record ordinary conversation content on your own. Use content for a one-sentence description of the preference; type is optional and can classify it (e.g. 输出格式 / 引用规范 / 任务流程 / 沟通风格), defaulting to 通用 when omitted.',
+    description: 'Record a user preference/habit into global long-term memory (wanted/preferences.md) with structured metadata. Call when: (1) the user explicitly asks to remember something ("记住：以后都用表格输出"), OR (2) a clear habit signal appears AND the user approves your "需要我把这条记入长期偏好吗？" question. NEVER record without consent — if declined, do NOT call. Do NOT record ordinary chat content on your own. content = one-sentence preference; type optional (e.g. 输出格式/引用规范/任务流程/沟通风格), default 通用.',
     parameters: {
       type: 'object',
       properties: {
@@ -4643,7 +4643,7 @@ const toolDefs: Tool[] = [
 
   {
     name: 'scan_docx_templates',
-    description: '扫描 Word 模板（.docx）中的 Jinja2 占位符（{{ 字段名 }}）。支持指定自定义目录（dir="..."）或显式文件列表（files=["/abs/path/a.docx"]），典型场景是用户上传了 .docx 模板附件后由 AI 调用扫描其中的字段。返回 JSON，包含每个模板的字段列表（key/raw/kind）以及合并去重后的 unique_placeholders 字段总表。AI 和用户确认字段时必须先调用此工具，避免漏字段或填错字段名。仅支持 .docx。',
+    description: '扫描 Word 模板（.docx）中的 Jinja2 占位符（{{ 字段名 }}）。支持自定义目录 dir="…" 或显式文件列表 files=[…]（如用户上传 .docx 模板附件后扫描字段）。返回 JSON：每模板字段列表（key/raw/kind）+ 合并去重后的 unique_placeholders 总表。与用户确认字段前必须先调此工具，避免漏字段/填错字段名。仅 .docx。',
     parameters: {
       type: 'object',
       properties: {
@@ -4665,7 +4665,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'fill_docx_templates',
-    description: '用 JSON 数据批量填写 Word 模板（仅 .docx）。1) 指定模板：dir（自定义模板目录）或 files（模板文件列表，如 attachments/{nodeId}/{filename}）；2) 提供数据：context={...} 单套数据或 rows=[{...},{...},...] 多套批量；3) 可选 namingRule 自定义输出文件名（Python str.format 风格：{templatePrefix} {rowIndex:03d} {contractNo} {signDate}）。输出 JSON，包含生成的所有文件绝对路径、文件大小，以及自动打包的 zip 路径。所有文件落在项目 homework/template/docx_fill_*/ 下并自动在前端展示。',
+    description: '用 JSON 数据批量填写 Word 模板（仅 .docx）。1) 选模板：dir（模板目录）或 files（模板文件列表，如 attachments/{nodeId}/{filename}）；2) 给数据：context={...} 单套 或 rows=[{...},...] 多套批量；3) 可选 namingRule 自定义输出名（str.format 风格）。返回 JSON：所有生成文件绝对路径、大小与自动打包 zip 路径。文件落在 homework/template/docx_fill_*/ 并自动前端展示。',
     parameters: {
       type: 'object',
       properties: {
@@ -4682,7 +4682,7 @@ const toolDefs: Tool[] = [
         },
         namingRule: {
           type: 'string',
-          description: `输出文件名规则（Python str.format 风格，单花括号），可用变量：{templatePrefix}（如 01采购合同模板）、{templateBasename}、{templateNo}、{templateBasenameOrig}、{rowIndex}（从0开始）、{contractNo}、{signDate}。默认值："{templatePrefix}_{templateBasename}__R{rowIndex:03d}__{contractNo}.docx"`,
+          description: '输出文件名规则（Python str.format，单花括号）。可用变量：{templatePrefix}、{templateBasename}、{templateBasenameOrig}、{templateNo}、{rowIndex}（0 起）、{contractNo}、{signDate}。默认："{templatePrefix}_{templateBasename}__R{rowIndex:03d}__{contractNo}.docx"',
         },
       },
       required: [],
@@ -4693,7 +4693,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'transcribe_audio',
-    description: 'Transcribe an audio file (mp3, wav, m4a, aac, ogg, flac, opus, amr) into text using the configured STT engine (cloud: Volcengine Doubao / Alibaba DashScope / SiliconFlow / OpenAI-compatible, with optional local whisper fallback). Use when the user uploads an audio file or asks to transcribe/convert a voice memo, recording, or meeting audio. Returns the full transcript (chunked with timestamps for audio over 60s). Path format: attachments/{nodeId}/{filename} or a project-relative path.',
+    description: 'Transcribe audio (mp3/wav/m4a/aac/ogg/flac/opus/amr) to text via the configured STT engine (cloud Volcengine Doubao / Alibaba DashScope / SiliconFlow / OpenAI-compatible, optional local whisper fallback). Use when the user uploads audio or asks to transcribe a voice memo/recording/meeting. Returns the full transcript (chunked with timestamps >60s). Path: attachments/{nodeId}/{filename} or project-relative.',
     parameters: {
       type: 'object',
       properties: {
@@ -4729,7 +4729,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'load_skill',
-    description: 'Load the complete SKILL.md instructions of a locally available skill by name (e.g. "bob-ui", "slide-craft", "intern-lawyer", "docx", "pdf"). Only skills listed in the available-skills directory can be loaded — a skill NOT listed there is not downloaded yet and cannot be loaded; tell the user to download it in Settings → Skills → Download first. The system prompt only lists skill names + one-line descriptions — call this tool to get the full operational instructions BEFORE performing a task that falls into a skill\'s domain, then follow them strictly. Skills the user force-injected (shown as 已触发技能 in the message) are already fully included and do NOT need this. Read smaller resource files (color palettes, font tables) with read_skill_resource afterwards if the skill body references them.',
+    description: 'Load the full SKILL.md instructions of a locally available skill by name. Only skills in the available-skills directory can be loaded — others are not downloaded yet; tell the user to download in Settings → Skills first. The system prompt lists only names + one-liners: call this BEFORE performing a task in a skill\'s domain and follow it strictly. Skills the user force-injected (已触发技能) are already fully included — do NOT load. Read smaller resources (palettes, font tables) with read_skill_resource if the body references them.',
     parameters: {
       type: 'object',
       properties: {
@@ -4746,7 +4746,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'check_mcp_gaps',
-    description: 'Check MCP (Model Context Protocol) server availability against the local BobWork config — which MCPs are configured, enabled, and actually connected (with tool counts). Local-only, does NOT touch the open internet. Use when the current task needs a capability that might come from an MCP (browser automation, GitHub, code docs, legal search, company data, file system, web search), or when a tool call failed because the MCP is missing/offline. Returns a status list so you can tell the user exactly what to configure in Settings → MCP Servers. Never claim an MCP is available unless it shows connected here.',
+    description: 'Local-only check of MCP server status against the local BobWork config — which MCPs are configured/enabled/connected (with tool counts); never touches the internet. Use when a task needs a capability that may come from an MCP (browser automation, GitHub, code docs, legal search, company data, file system, web search), or a tool call failed because an MCP is missing/offline. Returns a status list to tell the user exactly what to configure. Never claim an MCP is available unless it shows connected.',
     parameters: {
       type: 'object',
       properties: {
@@ -4763,7 +4763,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_skill_resource',
-    description: '读取已加载/内建技能的 L3「按需资源」文件（结构化分块文档：色板/字号表/组件类/示例代码/自检清单等），用于在技能 L2 正文（规则层）注入后，需要精确细节时部分读取。不传 resource 时返回该技能 resources 目录的索引表（文件名 + 内容摘要）。传 resource + 可选 section 时可只读文件的某一段（按 ## / ### 段落切分），避免整份大文件全量进上下文。适用：bob-ui 等已拆分为「L2 规则 + L3 细节文档」的技能。',
+    description: '读取已加载/内建技能的 L3「按需资源」文件（结构化分块文档：色板/字号表/组件类/示例代码/自检清单等），在 L2 正文（规则层）注入后需精确细节时按需读取。不传 resource 返回 resources/ 索引表（文件名+摘要）。传 resource + 可选 section 只读某节（按 ##/### 切分），避免整份大文件进上下文。适用 bob-ui 等「L2 规则 + L3 细节」拆分技能。',
     parameters: {
       type: 'object',
       properties: {
@@ -4773,11 +4773,11 @@ const toolDefs: Tool[] = [
         },
         resource: {
           type: 'string',
-          description: '资源文件名（含扩展名，如 "01-style-rulers.md"、"03-widget-examples.md"）；支持 resources/ 下相对路径（子目录以 / 分隔）。留空或省略时：返回 resources/ 目录索引（文件名 + 首段摘要）。',
+          description: '资源文件名（含扩展名，如 "01-style-rulers.md"）；支持 resources/ 下相对路径。留空/省略=返回 resources/ 目录索引（文件名+首段摘要）。',
         },
         section: {
           type: 'string',
-          description: '可选：只读资源文件中的某一节，按 `##`（父节）或 `###`（子节）标题匹配，传节标题的关键词即可（如 "字号梯度"、"2.2"、"HTML 组件类"、"antv 工具清单"）。省略时返回整个文件。示例：resource="01-style-rulers.md" + section="字号梯度" 只返回该节。',
+          description: '可选：只读资源文件中的一节，按 `##`/`###` 标题关键词匹配（如 "字号梯度"、"HTML 组件类"）；省略=整个文件。例：resource="01-style-rulers.md" + section="字号梯度"。',
         },
       },
       required: ['skill_name'],
@@ -4788,7 +4788,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'get_app_config',
-    description: '读取当前应用配置摘要（只读，不改动任何内容）：各聊天厂商（deepseek/glm/moonshot/qwen/openai/doubao）的 API Key 是否已配置、视觉/STT 角色的模型与 Key 状态；任务归纳/成果块编辑已归入主对话模型（taskModel/outcomeModel 字段即为 chatModel 状态，不再独立）；欢迎头像与侧边栏 logo、MCP 服务器列表、自定义工具列表、当前界面主题（主题 id / 自定义主题 id / 自定义主题库摘要）。用户要求修改配置时，先调用本工具确认现状，再调用对应配置工具。',
+    description: '读取当前应用配置摘要（只读，不改动）：各厂商（deepseek/glm/moonshot/qwen/openai/doubao）API Key 是否配置、视觉/STT 角色模型状态；任务归纳/成果块编辑已归入主对话模型（taskModel/outcomeModel=chatModel）；欢迎头像与 logo、MCP 服务器列表、自定义工具、当前主题。要改配置时先调本工具确认现状，再调对应工具。',
     parameters: {
       type: 'object',
       properties: {},
@@ -4799,7 +4799,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'set_app_icon',
-    description: '修改应用图标设置：target=avatar 设置欢迎窗口头像（mode=random 随机 / mode=fixed 固定，fixed 时 selected 传头像池 id，如 builtin/pumpkin-a.png 或 custom/xxx.png）；target=logo 设置侧边栏品牌 logo（selected 传头像池 id，传空字符串恢复默认 logo）。修改会写入配置并即时生效（欢迎窗口头像下次启动生效）。',
+    description: '修改应用图标设置：target=avatar 设欢迎窗口头像（mode=random 随机 / mode=fixed 固定；fixed 时 selected 传头像池 id，如 builtin/pumpkin-a.png / custom/xxx.png）；target=logo 设侧边栏品牌 logo（selected 传头像池 id，空字符串恢复默认）。写配置并即时生效（欢迎窗头像下次启动生效）。',
     parameters: {
       type: 'object',
       properties: {
@@ -4815,11 +4815,11 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'update_provider_config',
-    description: '修改模型配置并即时生效。target=provider 设置聊天厂商的 API Key / 自定义 baseUrl / 勾选模型（provider 取 deepseek/glm/moonshot/qwen/openai/doubao，model 为模型 id，如 qwen-vl-max）；target=vision 设置视觉角色；target=task/outcome 等价于改主对话模型（task/outcome 已归入 chatModel）；target=stt 设置音频转写（provider 取 doubao-stream/doubao/dashscope/siliconflow/openai）。apiKey 传空字符串表示清空该 Key；baseUrl 传空字符串恢复厂商默认端点。',
+    description: '修改模型配置并即时生效。target=provider 设聊天厂商 API Key/自定义 baseUrl/勾选模型（provider: deepseek/glm/moonshot/qwen/openai/doubao；model 如 qwen-vl-max）；target=vision 设视觉角色；target=task/outcome = 改主对话模型（已归入 chatModel）；target=stt 设音频转写（doubao-stream/doubao/dashscope/siliconflow/openai）。apiKey 空=清空；baseUrl 空=恢复默认端点。',
     parameters: {
       type: 'object',
       properties: {
-        target: { type: 'string', enum: ['provider', 'vision', 'task', 'outcome', 'stt'], description: 'provider=聊天厂商；vision=视觉；task=任务归纳（已归入主对话模型）；outcome=成果块编辑（已归入主对话模型）；stt=音频转写' },
+        target: { type: 'string', enum: ['provider', 'vision', 'task', 'outcome', 'stt'], description: 'provider=聊天厂商；vision=视觉；task/outcome=主对话模型（已归入）；stt=音频转写' },
         provider: { type: 'string', description: '厂商 type，见描述中各目标允许的取值' },
         apiKey: { type: 'string', description: 'API Key；传空字符串清空' },
         baseUrl: { type: 'string', description: '自定义 baseUrl；传空字符串恢复默认' },
@@ -4833,7 +4833,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'test_model',
-    description: '验证模型连接是否正常（TRAE 式校验）：对指定厂商的模型发极简请求，返回 ok/error/status。用于修改配置后验证是否修复成功，或诊断连接失败原因（404=模型未开通/ID 错误，401/403=API Key 无效，超时=网络问题或图片生成耗时较长）。provider 取 deepseek/glm/moonshot/qwen/openai/doubao/agentplan/codingplan/siliconflow；models 可选（省略时测试该厂商所有已勾选模型）。建议配合 get_app_config + update_provider_config 形成「诊断→修改→验证」闭环。',
+    description: '验证模型连接（对指定厂商发极简请求，返回 ok/error/status）：404=模型未开通/ID 错误，401/403=API Key 无效，超时=网络或图片生成耗时。provider: deepseek/glm/moonshot/qwen/openai/doubao/agentplan/codingplan/siliconflow；models 可选（省略=测该厂商全部已勾选）。与 get_app_config + update_provider_config 构成「诊断→修改→验证」闭环。',
     parameters: {
       type: 'object',
       properties: {
@@ -4852,7 +4852,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'manage_mcp_server',
-    description: '增删改 MCP 服务器配置（写入设置文件并立即按新配置重连，之后该服务器工具可被调用）。action=add 新增（server 传 name、transport=stdio 时传 command/args/env，transport=streamable-http 时传 url/headers，enabled 默认 true）；action=update 按 server.id 或 server.name 更新字段；action=toggle 切换启用/停用；action=remove 删除。新增前先调 get_app_config 确认现有服务器，避免重复添加。',
+    description: '增删改 MCP 服务器配置（写设置并立即按新配置重连，之后该服务器工具可调用）。action=add 新增（server 传 name；stdio 传 command/args/env；streamable-http 传 url/headers；enabled 默认 true）；action=update 按 server.id 或 server.name 更新字段；action=toggle 启停；action=remove 删除。新增前先 get_app_config 确认现有服务器，避免重复。',
     parameters: {
       type: 'object',
       properties: {
@@ -4881,7 +4881,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'manage_quick_launch',
-    description: '管理 ⌘F 里的自定义快捷入口（My Quick）：action=add 新增一条（label 名称、agent 目标节点类型 chat/coding、prompt 预设提示词）；action=remove 按 id 删除；action=list 列出当前全部入口。当用户说“在 ⌘F 添加/建一个快捷入口/快捷按钮”或要求把某个自研插件/工作流做成一键入口时调用；已有入口可通过 list 确认避免重复。',
+    description: '管理 ⌘F 自定义快捷入口（My Quick）：action=add 新增（label、agent 目标节点 chat/coding、prompt 预设提示词）；action=remove 按 id 删除；action=list 列出全部。用户要"在 ⌘F 加一个快捷入口/把某工作流做成一键入口"时调用；list 可先查避免重复。',
     parameters: {
       type: 'object',
       properties: {
@@ -4899,7 +4899,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'get_current_theme',
-    description: '获取当前生效的界面主题完整设计规范（只读）：返回当前主题 id、名称、是否深色、来源（preset/custom）、关键色摘要（primary/background/surface/text/border/muted）、完整 CSS 变量集（40+ 变量，含 shadcn 基底 + 语义纸张/文字/边框/主色/状态色），以及一份设计指南（每个关键变量的用途说明）。用户询问"当前是什么主题"、"主色是什么"、或需要生成与当前主题配色一致的前端代码/小程序时调用本工具。',
+    description: '获取当前生效主题的完整设计规范（只读）：主题 id/名称/是否深色/来源（preset/custom）、关键色摘要、完整 CSS 变量集（40+，含 shadcn 基底+语义色）、每变量用途的设计指南。用户问"当前主题/主色"或需生成与当前主题配色一致的前端代码时调用。',
     parameters: {
       type: 'object',
       properties: {},
@@ -4910,7 +4910,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'list_configured_models',
-    description: 'List all models available in the user\'s configured model pool (read-only). Returns an array of providers, each with its API-key status and the list of selected (enabled) model IDs. Use this when the user wants to add AI capabilities to a mini-program/app and needs to choose which model to use. The returned model IDs are in "provider:modelId" format, which is exactly the format expected by the sandbox chat bridge (BobWork.request("chat", { model: "..." })). If the pool is empty, inform the user to configure models in Manage Models first.',
+    description: 'List all models in the user\'s configured model pool (read-only): each provider with API-key status and selected (enabled) model ids, formatted "provider:modelId" — the exact format the sandbox chat bridge expects (BobWork.request("chat", { model })). Use when adding AI capability to a mini-program/app. Empty pool → tell the user to configure models first.',
     parameters: {
       type: 'object',
       properties: {},
@@ -4921,7 +4921,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'ask_user_questions',
-    description: 'Pause the response to ask the user structured questions, then wait for their answers before continuing. Use this whenever you need information, clarification, or a decision from the user to proceed (e.g. gathering requirements, confirming preferences, choosing between options). The host will pop up a structured form; the user\'s answers are returned to you as the tool result so you can continue. Prefer this over asking questions in free text.',
+    description: 'Pause to ask the user structured questions and wait for their answers before continuing — use whenever you need info/clarification/a decision to proceed. The host pops up a form; the answers return to you as the tool result. Prefer over free-text questions.',
     parameters: {
       type: 'object',
       properties: {
@@ -4956,7 +4956,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'search_capabilities',
-    description: 'Search the on-demand capability catalog (browser automation, company lookup, team orchestration, local app control, legal, audio, OCR, memory/todo, theme, skills, etc.). Use this when you are unsure whether a capability exists or which intent phrase activates it — the host activates the matched capability (its tools become available in the following rounds) and returns the result. Always available.',
+    description: 'Search the on-demand capability catalog (browser, company lookup, team orchestration, local app control, legal, audio, OCR, memory/todo, theme, skills…). Use when unsure a capability exists or which intent activates it — the host activates the match (its tools become available next rounds) and returns the result.',
     parameters: {
       type: 'object',
       properties: {
@@ -4975,7 +4975,7 @@ const toolDefs: Tool[] = [
   {
     name: 'query_schedule',
     description:
-      'Query the user schedule / calendar events (from the calendar events database, cross-project) within a time window. Use BEFORE proposing any arrangement: check which time slots are already occupied so your suggestion does not create conflicts. Returns scheduled (and optionally done/cancelled) events sorted by start time, plus any open untimed checklist items. Prefer this over read_todo for schedule/conflict questions.',
+      'Query the user schedule/calendar events (cross-project calendar DB) in a time window. Use BEFORE proposing any arrangement — check which slots are occupied to avoid conflicts. Returns scheduled (optionally done/cancelled) events sorted by start, plus open untimed checklist items. Prefer over read_todo for schedule/conflict questions.',
     parameters: {
       type: 'object',
       properties: {
@@ -5010,7 +5010,7 @@ const toolDefs: Tool[] = [
   {
     name: 'create_scheduled_todo',
     description:
-      'Create a scheduled todo: writes a calendar event AND, when the current project has room for a sticky note, appends the todo as a `- [ ]` line on the project sticky note and links them two-way (so ticking either side syncs the other). Call ONLY after the user has explicitly confirmed your proposed arrangement. Params title/start_time/end_time/all_day/reminder_minutes define the event; description goes into the event notes. If no start_time is given, a default next-hour slot is used. If the project already holds three todo sticky notes, the event is still created and reported as calendar-only.',
+      'Create a scheduled todo: writes a calendar event AND appends a `- [ ]` line to the project sticky note when it has room, linking them two-way (ticking either side syncs). Call ONLY after the user has explicitly confirmed your proposed arrangement. title/start_time/end_time/all_day/reminder_minutes define the event; description goes into its notes. No start_time → default next-hour slot. At the 3-todo-sticky cap, the event is still created and reported as calendar-only.',
     parameters: {
       type: 'object',
       properties: {
@@ -5049,7 +5049,7 @@ const toolDefs: Tool[] = [
   {
     name: 'query_todos',
     description:
-      'Query TODOs/tasks the same way the /todo check command does, with free-form semantic queries: natural language time ranges ("today"/"this week"/"tomorrow"/"next Monday"), status keywords ("overdue"/"done"), content keywords, or empty = today. Reads the shared calendar-events database (scope all: project todos + global untimed items). Use for "有什么待办/这周要做什么/查逾期/搜某件事" type questions. For schedule-window conflict checks prefer query_schedule.',
+      'Query TODOs/tasks like /todo check, with free-form semantic queries: time ranges ("today"/"this week"/"tomorrow"/"next Monday"), status keywords ("overdue"/"done"), content keywords, empty = today. Reads the shared calendar-events database (project todos + global untimed items). For schedule-window conflict checks prefer query_schedule.',
     parameters: {
       type: 'object',
       properties: {
@@ -5065,7 +5065,7 @@ const toolDefs: Tool[] = [
   {
     name: 'todo_update',
     description:
-      'Update an existing todo/event by its event_id: change title, start/end time, all_day, status (done/scheduled), priority, color, location, description or reminder_minutes. Get the event_id first via query_todos (ids are listed there). Changes propagate both ways: calendar event updates, and if it originated from a sticky note line the line is synced too.',
+      'Update an existing todo/event by its event_id (from query_todos): change title, start/end time, all_day, status (done/scheduled), priority, color, location, description, reminder_minutes. Changes propagate two-way: calendar updates; a sticky-note-sourced line syncs too.',
     parameters: {
       type: 'object',
       properties: {
@@ -5090,7 +5090,7 @@ const toolDefs: Tool[] = [
   {
     name: 'todo_delete',
     description:
-      'Delete a todo/event by its event_id (soft delete: status → cancelled; external calendars see CANCELLED). If the event came from a sticky note line, the corresponding sticky line is removed as well (two-way). Get event_id first via query_todos. Use only when the user clearly asks to remove/delete a todo.',
+      'Delete a todo/event by its event_id (soft delete: status → cancelled; external calendars see CANCELLED). Sticky-note-sourced lines are removed too (two-way). Get the id from query_todos. Only when the user clearly asks to remove a todo.',
     parameters: {
       type: 'object',
       properties: {
@@ -5106,7 +5106,7 @@ const toolDefs: Tool[] = [
   {
     name: 'project_plan_start',
     description:
-      'Start a project plan (plan tree) for the current project: creates a persistent plan with milestones → steps and returns its id. Use for any multi-step goal the user wants planned (milestones / phases / dependencies). Pass title/goal and either a flat "steps" list or structured "milestones" [{title, steps:[...]}]. Kept in the project .planner/plans.json; track progress afterwards with project_plan_view / project_plan_add_steps / project_plan_step_status.',
+      'Start a persistent project plan (plan tree) in .planner/plans.json: milestones → steps; returns its id. Pass title/goal and either a flat "steps" list or structured "milestones" [{title, steps}]. Track afterwards with project_plan_view / project_plan_add_steps / project_plan_step_status.',
     parameters: {
       type: 'object',
       properties: {
@@ -5124,7 +5124,7 @@ const toolDefs: Tool[] = [
   {
     name: 'project_plan_view',
     description:
-      'Read back the project plan tree(s). Without plan_id: list all plans (title/status/progress). With plan_id: full tree of milestones and steps with their ids and statuses (pending/in_progress/done/blocked). Call this before updating steps so you address steps by their real ids.',
+      'Read back the project plan tree(s): no plan_id → list all plans (title/status/progress); with plan_id → full milestones/steps with ids and statuses. Call before updating so you address steps by their real ids.',
     parameters: {
       type: 'object',
       properties: { plan_id: { type: 'string', description: 'Optional plan id.' } },
@@ -5137,7 +5137,7 @@ const toolDefs: Tool[] = [
   {
     name: 'project_plan_add_steps',
     description:
-      'Append steps to a plan. Default target = the first (or only) milestone; pass milestone_id (from project_plan_view) to target a specific one, or milestone_title to create/find a milestone by title. Use when the plan grows or a milestone needs more granular steps.',
+      'Append steps to a plan. Default target = the first (or only) milestone; pass milestone_id (from project_plan_view) for a specific one, or milestone_title to create/find a milestone by title.',
     parameters: {
       type: 'object',
       properties: {
@@ -5155,7 +5155,7 @@ const toolDefs: Tool[] = [
   {
     name: 'project_plan_step_status',
     description:
-      'Advance one step in the plan tree state machine: pending → in_progress → done; blocked (with reason) → pending/in_progress. Milestone and plan completion are derived automatically from their steps. Call when a step is started, finished, or blocked.',
+      'Advance one step in the plan state machine: pending → in_progress → done; blocked (with reason) → pending/in_progress. Milestone/plan completion derive automatically from steps. Call when a step starts, finishes, or blocks.',
     parameters: {
       type: 'object',
       properties: {
@@ -5172,7 +5172,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'create_sticky_note',
-    description: 'Create a sticky note on the canvas (project-private). Use when you have produced a plan, checklist, reminder or todo list and the user wants it saved as a sticky note (e.g. a legal work plan split into phases/tasks). The note is written silently to the project sticky-notes.json and the canvas refreshes automatically — no user confirmation dialog is shown. Note: sticky notes are private user data; after creation you must NOT read back or modify their contents via file tools. Note position is auto-assigned on a visible cascade; do not try to control placement. Each project allows up to three todo sticky notes: if three already exist, creation is skipped and an existing note is returned instead of duplicating.',
+    description: 'Create a sticky note on the canvas (project-private). Use for a produced plan/checklist/reminder the user wants saved as a sticky (e.g. a legal work plan split into phases). Written silently to the project sticky-notes.json; canvas refreshes automatically (no confirm dialog). Sticky notes are private — after creation never read back or modify them via file tools. Position is auto-assigned on a cascade; do not try to control it. Max 3 todo stickies per project: at the cap, creation is skipped and an existing note is returned.',
     parameters: {
       type: 'object',
       properties: {
@@ -5197,7 +5197,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'create_agent_package',
-    description: 'Create a new specialized sub-agent package and install it instantly. Call when the user asks to build a dedicated agent (e.g. "帮我创建一个合同审核 agent"). Inputs: id, name, description (what the agent does), optional scenes (fixed scene list), optional coreExclusions (built-in kernel tools this agent must NOT see), optional skillPool (skills enabled for this agent), optional version. The tool validates the id, resolves scenes, auto-generates a complete base system prompt (persona + standing rules + todo_write/ask_user_questions/finish_task/OutputFile mechanics), writes agent.json to the installed agents directory, and verifies the result. The agent immediately appears in Extensions Store → Agents and the sidebar ＋ Add session menu (dispatch agents-changed to refresh UI).',
+    description: 'Create and instantly install a new specialized sub-agent package. Call when the user asks to build a dedicated agent (e.g. "创建一个合同审核 agent"). Inputs: id, name, description, optional scenes (fixed list), coreExclusions (kernel tools to hide), skillPool, version. Validates the id, resolves scenes, auto-generates the complete base system prompt (persona + standing rules + todo_write/ask_user_questions/finish_task/OutputFile mechanics), writes agent.json to the installed agents dir, and verifies. The agent appears immediately in Extensions Store → Agents and the sidebar ＋ Add session menu.',
     parameters: {
       type: 'object',
       properties: {
@@ -5264,7 +5264,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'update_agent_package',
-    description: 'Update an already-installed sub-agent package (created via create_agent_package or installed from the Agent Market, e.g. Kar / Planner). Call when the user asks to change a running agent, e.g. add/remove scenes, change persona instructions, replace core exclusions, or adjust its skill pool. Only the fields you pass are changed; anything omitted is preserved. The installed agent.json is rewritten and takes effect on the agent\'s next conversation (Settings → Agents → Edit Prompt edits the override, not the package).',
+    description: 'Update an already-installed sub-agent package (created via create_agent_package or installed from the Agent Market, e.g. Kar/Planner). Call when the user asks to change a running agent: add/remove scenes, change persona, replace core exclusions, adjust its skill pool. Only the fields you pass change; omitted ones are preserved. The installed agent.json is rewritten and takes effect on the agent\'s next conversation (Settings → Agents → Edit Prompt edits an override, not the package).',
     parameters: {
       type: 'object',
       properties: {
@@ -7394,6 +7394,9 @@ async function pruneCaptureDir(dir: string): Promise<void> {
 /** Schema 内 description / enum 字符串的截断上限（字符数）。工具用途关键信息通常在前半段，截断不影响调用正确性。 */
 const SCHEMA_DESC_MAX = 160;
 const SCHEMA_ENUM_MAX = 120;
+/** MCP 工具级（顶层）description 截断上限（字符）。MCP 工具描述来自远端且常冗长（browser.*、pkulaw 等可达数百上千字符），
+ *  关键语义集中在前段；参数级说明已由 trimMcpSchema 截到 SCHEMA_DESC_MAX。仅作用于注入侧，实际调用不受影响。 */
+const MCP_TOOL_DESC_MAX = 500;
 
 /**
  * 精简 MCP 工具的 JSON Schema，降低每轮注入给模型的 token 量：
@@ -7492,7 +7495,10 @@ export async function registerMcpTools(opts?: { excludeServerIds?: Set<string>; 
 
     const tool: Tool = {
       name: mcpTool.fullName,
-      description: `[MCP: ${mcpTool.serverName}] ${mcpTool.description}`,
+      description: (() => {
+        const d = `[MCP: ${mcpTool.serverName}] ${mcpTool.description}`;
+        return d.length > MCP_TOOL_DESC_MAX ? d.slice(0, MCP_TOOL_DESC_MAX) + '…' : d;
+      })(),
       parameters: (trimMcpSchema(mcpTool.inputSchema) as Record<string, unknown>) || { type: 'object', properties: {}, required: [] },
       category: '网络',
       scenes,

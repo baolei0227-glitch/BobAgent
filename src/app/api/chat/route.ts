@@ -2418,12 +2418,12 @@ function repairTruncatedJson(raw: string): string | null {
 
 /**
  * 成本控制（pi-reasonix Pillar 3）：工具结果超长时"保头保尾"压缩再进模型上下文。
- * 默认 3000 tokens 阈值（可感知 ~1/50 缓存价下仍值得省的输入量）；保留开头 + 结尾，
+ * 默认 1800 tokens 阈值（可感知 ~1/50 缓存价下仍值得省的输入量）；保留开头 + 结尾，
  * 长输出的尾部（错误信息、汇总、末行数据）绝不被静默丢弃，并用显式标记告知模型内容已截断、
  * 需要时按需分片重读。仅压缩进入对话历史（模型付费输入）的副本，工具执行的完整结果仍保留在
  * allToolCalls（供去重/声明校验/前端展示使用）。
  */
-const TOOL_RESULT_TOKEN_CAP = 3000;
+const TOOL_RESULT_TOKEN_CAP = 1800;
 const TOOL_RESULT_HEAD_RATIO = 0.4;
 /** 目录/列表/搜索结果类工具：返回多为多条记录，压缩时按条目（换行）对齐保头部，避免切断单条记录 */
 const LIST_LIKE_TOOLS = new Set([
