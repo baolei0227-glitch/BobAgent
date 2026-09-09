@@ -32,8 +32,8 @@ export type ConfirmResult = {
   edited?: Record<string, unknown>;
 };
 
-/** 默认确认等待时长（毫秒），超时视为未操作（timeout），不等同于用户拒绝 */
-export const CONFIRM_TIMEOUT_MS = 120_000;
+/** 默认确认等待时长（毫秒）：10 分钟。用户可能正在处理别的事，超时只是防挂起的最后防线（视为未操作 timeout，不等同于用户拒绝） */
+export const CONFIRM_TIMEOUT_MS = 600_000;
 
 /**
  * 登记一个待确认的工具调用。

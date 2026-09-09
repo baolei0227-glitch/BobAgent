@@ -377,14 +377,15 @@ async function describeWritableRoots(): Promise<string> {
   return `${base}，以及用户授权可写目录：${writableRoots.join('、')}`;
 }
 
-/** 检查路径是否在可读范围内（AI 侧文件操作工具统一限制：当前项目 + 技能 + Bob Sandbox 小程序 + 用户授权目录） */
+/** 检查路径是否在可读范围内（AI 侧文件操作工具统一限制：BobWork 数据根 appRoot 全量 + 当前项目 + 用户授权目录） */
 async function isReadablePath(resolvedPath: string): Promise<boolean> {
   const [projectRoot, localRoots] = await Promise.all([getProjectRootPath(), getLocalAuthorizedRoots()]);
-  // 画布便签（sticky-notes/）为纯用户私有数据：不写入节点 .md、不接入搜索，AI 一律不可读
-  const privateNotes = resolve(join(projectRoot, 'sticky-notes'));
-  if (resolvedPath.startsWith(privateNotes + sep)) return false;
-  const sandboxApps = join(resolveAppRoot(), BOB_SANDBOX_DIRNAME, 'apps');
-  const allRoots = [projectRoot, SKILLS_DIR, sandboxApps, ...localRoots];
+  // 便签（sticky-notes/）为纯用户私有数据：不写入节点 .md、不接入搜索，AI 一律不可读。
+  // 按路径段排除，保证 appRoot 全量授权后其它项目下的 sticky-notes 同样不可读。
+  if (resolvedPath.split(sep).includes('sticky-notes')) return false;
+  // appRoot 全量放行（skills/extensions/mcp/bob-sandbox/BobWorkspace 各项目等尽在其内）；
+  // 另保留 projectRoot 以覆盖不在 appRoot 下的外置项目。
+  const allRoots = [resolveAppRoot(), projectRoot, ...localRoots];
   return allRoots.some(root => {
     const r = resolve(root);
     return resolvedPath === r || resolvedPath.startsWith(r + sep);
@@ -394,7 +395,7 @@ async function isReadablePath(resolvedPath: string): Promise<boolean> {
 /** 动态获取可读根路径描述字符串（用于错误提示） */
 async function describeReadableRoots(): Promise<string> {
   const localRoots = await getLocalAuthorizedRoots();
-  const base = '当前项目目录、~/BobWork/skills/、bob-sandbox/apps/（Bob Sandbox 小程序）';
+  const base = `BobWork 数据根 ${resolveAppRoot()}（skills/extensions/mcp/bob-sandbox/BobWorkspace 全部内容）及当前项目目录`;
   if (localRoots.length === 0) return base;
   return `${base}，以及用户授权目录：${localRoots.join('、')}`;
 }
@@ -545,6 +546,11 @@ const SCENED_TOOLS: Record<string, ToolScene[]> = {
   query_schedule: ['planner', 'wanted'],
   query_todos: ['planner', 'wanted'],
   create_scheduled_todo: ['planner', 'wanted'],
+  // 待办修改/删除：与 query_todos 对齐挂 planner+wanted（2026-09-09 修正：此前无标注落入
+  // core 常驻 general，纯问候也背 11 字段 schema；现按意图激活——planner 固定画像含 wanted 不受影响，
+  // 普通 chat 说"改/删待办"时 detectSceneHints 命中 wanted 注入，否则 0 成本）。
+  todo_update: ['planner', 'wanted'],
+  todo_delete: ['planner', 'wanted'],
   // ---- planner 计划树状态机（项目规划：里程碑 → 步骤 → 状态推进）----
   project_plan_start: ['planner'],
   project_plan_view: ['planner'],
@@ -4061,7 +4067,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'execute_script',
-    description: 'Write and execute a Python/Shell script (30s timeout) when other tools cannot solve the problem (data processing, automation, analysis). IMPORTANT PATH RULE: the script CWD is homework/.ai-workspace/, NOT the project root — a relative path like "homework/xxx.png" inside the script lands at homework/.ai-workspace/homework/xxx.png, which the UI CANNOT see. To write a visible deliverable or read project homework files, use the ABSOLUTE path from env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: "$BOB_PROJECT_HOMEWORK"), then print "OutputFile: homework/<filename>" so the file is shown to the user.',
+    description: 'Write and execute a Python/Shell script (30s timeout) for data processing / automation / analysis that single tools cannot do. IMPORTANT PATH RULE: script CWD = homework/.ai-workspace/ (hidden temp area, NOT the project root) — a relative "homework/xxx" path inside the script lands there and is invisible to the UI. To write a visible deliverable or read project homework files, use the absolute env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: "$BOB_PROJECT_HOMEWORK") and print "OutputFile: homework/<filename>" so the file is shown to the user.',
     parameters: {
       type: 'object',
       properties: {
@@ -4119,7 +4125,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_attachment',
-    description: 'Read user-uploaded attachment content. Supports: text/code (GBK/GB18030 auto-detected), Excel (.xls/.xlsx; sheet param picks one sheet), Word (.docx structure-preserving; legacy .doc/.rtf via textutil), PowerPoint, PDF (native extract or scanned OCR), images (OCR/vision), video (ffmpeg frames), audio (STT), .zip (unpacked to homework/.unpacks/). Long content truncates with a next-offset marker — re-call with offset=<value> to keep reading. Results cache by content hash: re-reading the same image/page (even under a different filename) returns instantly. For scanned PDFs prefer pages="x-y" reads. Large scanned PDFs (>=15 pages or >=5MB, full read) recognize in background — the first call returns a "⏳ recognizing in background" notice; call this tool again on the same path after a moment to get the result from cache (do NOT treat the notice as failure). Proactively read attachments when the user asks about them.',
+    description: 'Read a user-uploaded attachment (path from the attachment list in the user message). Formats: text/code (GBK auto-detect), Excel (.xls/.xlsx), Word (.docx; legacy .doc/.rtf via textutil), PowerPoint, PDF (native extract or scanned OCR), images (OCR/vision), video frames, audio (STT), .zip (unpacked to homework/.unpacks/). Long content truncates with a next-offset marker — re-call with the returned offset=<value> to continue reading. Reads cache by content hash (re-reading the same file returns instantly). For scanned PDFs prefer pages="x-y" reads. Large scanned PDFs (>=15 pages or >=5MB full read) recognize in background: the first call returns a "⏳ recognizing in background" notice — call this tool again on the same path after a moment to get the result from cache (do NOT treat the notice as failure).',
     parameters: {
       type: 'object',
       properties: {
@@ -5010,7 +5016,7 @@ const toolDefs: Tool[] = [
   {
     name: 'create_scheduled_todo',
     description:
-      'Create a scheduled todo: writes a calendar event AND appends a `- [ ]` line to the project sticky note when it has room, linking them two-way (ticking either side syncs). Call ONLY after the user has explicitly confirmed your proposed arrangement. title/start_time/end_time/all_day/reminder_minutes define the event; description goes into its notes. No start_time → default next-hour slot. At the 3-todo-sticky cap, the event is still created and reported as calendar-only.',
+      'Schedule a todo INTO the calendar at an explicit time (sticky rows do NOT auto-enter the calendar): writes a calendar event and links it to a `- [ ]` sticky line — if the project already has an identical unscheduled sticky line it binds that one (no duplicate); otherwise it appends one (calendar-only at the 3-todo-sticky cap). Ticking either side syncs. Call ONLY after the user has explicitly confirmed your proposed arrangement. title/start_time/end_time/all_day/reminder_minutes define the event; description goes into its notes. Missing start_time → default next-hour slot.',
     parameters: {
       type: 'object',
       properties: {
@@ -5172,7 +5178,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'create_sticky_note',
-    description: 'Create a sticky note on the canvas (project-private). Use for a produced plan/checklist/reminder the user wants saved as a sticky (e.g. a legal work plan split into phases). Written silently to the project sticky-notes.json; canvas refreshes automatically (no confirm dialog). Sticky notes are private — after creation never read back or modify them via file tools. Position is auto-assigned on a cascade; do not try to control it. Max 3 todo stickies per project: at the cap, creation is skipped and an existing note is returned.',
+    description: 'Create a sticky note on the canvas (project-private). Use for a produced plan/checklist/reminder the user wants saved as a sticky (e.g. a legal work plan split into phases). Lines are NOT auto-added to the calendar: they appear in to-do queries as "not scheduled" until the user schedules them or taps "Add to calendar" in the sticky card. Written silently to the project sticky-notes.json; canvas refreshes automatically (no confirm dialog). Sticky notes are private — after creation never read back or modify them via file tools. Position is auto-assigned on a cascade; do not try to control it. Max 3 todo stickies per project: at the cap, creation is skipped and an existing note is returned.',
     parameters: {
       type: 'object',
       properties: {
@@ -5988,8 +5994,10 @@ async function toolQuerySchedule(args: Record<string, unknown>): Promise<string>
 }
 
 /**
- * create_scheduled_todo 工具执行器：写日历事件 + 在当前项目便签上追加一行待办并双向绑定。
- * 仅在用户明确同意安排后调用（日程专家先查冲突、再提议、用户确认后才落地）。
+ * create_scheduled_todo 工具执行器：给「有明确时刻/用户要求入日历」的待办写日历事件，
+ * 并把事件绑定到项目便签行（StickyTodo 不自动入日历——只有这里与用户手动「Add to calendar」才产生事件）。
+ * 绑定规则：项目便签里已有同文本且未入日历的行 → 直接绑定该行（不新增重复行）；
+ * 否则在便签上追加一行（无便签位时仅建日历事件）。仅在用户明确同意安排后调用（日程专家先查冲突、再提议、用户确认后才落地）。
  */
 async function toolCreateScheduledTodo(args: Record<string, unknown>): Promise<string> {
   try {
@@ -6021,42 +6029,76 @@ async function toolCreateScheduledTodo(args: Record<string, unknown>): Promise<s
           ? []
           : [30];
 
-    // 选择一个可挂载的便签页；无则尝试新建（每项目最多三张，超限则只建日历事件）
+    // StickyTodo 不自动入日历（2026-09-08）：只有排程 / 用户手动入日历才产生事件。
+    // 排程时若该项目已有「同文本且未入日历」的便签行 → 绑定该行（避免把既有待办排期时新增重复行）。
     const MAX_TODO_NOTES = 3;
-    let note = notes.find((n) => Array.isArray(n.pages) && n.pages.some((p) => p.kind !== 'note'));
+
+    // 1) 复用同文本的未排程行
+    let bindRow: { noteIdx: number; pageId: string; lineIndex: number } | null = null;
+    for (let ni = 0; ni < notes.length && !bindRow; ni++) {
+      const n = notes[ni];
+      if (!Array.isArray(n.pages)) continue;
+      for (const pg of n.pages) {
+        if (pg.kind === 'note') continue;
+        const rows = String(pg.content ?? '').split('\n');
+        const calArr = Array.isArray(pg.lineCalendared) ? pg.lineCalendared : [];
+        const evsArr = Array.isArray(pg.lineEventIds) ? pg.lineEventIds : [];
+        for (let li = 0; li < rows.length; li++) {
+          const m = rows[li].match(/^-\s*\[( |x)\]\s*(.*)$/);
+          const done = m ? m[1] === 'x' : false;
+          const rowText = (m ? m[2] : rows[li]).trim();
+          if (done || !rowText || rowText !== title) continue;
+          const anchored = Array.isArray(evsArr[li]) && (evsArr[li] as string[]).length > 0;
+          const flagged = calArr[li] === true;
+          if (anchored || flagged) continue;
+          bindRow = { noteIdx: ni, pageId: pg.id, lineIndex: li };
+          break;
+        }
+      }
+    }
+
+    // 2) 选择可挂载的便签页；无则尝试新建（每项目最多三张，超限则只建日历事件）
     let pageId: string | undefined;
     let attachNote: (typeof notes)[number] | undefined;
     let newNoteCreated = false;
-    if (note) {
-      const page = note.pages!.find((p) => p.kind !== 'note')!;
-      pageId = page.id;
-      attachNote = note;
-    } else if (notes.length < MAX_TODO_NOTES) {
-      const now = new Date().toISOString();
-      const pid = `pg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-      const nid = `sn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const topZ = notes.reduce((m, n) => Math.max(m, n.z ?? 0), 0);
-      const { pickTodoNoteColor } = await import('@/lib/sticky-todo');
-      note = {
-        id: nid,
-        x: 40 + (notes.length % 5) * 28,
-        y: 120 + (notes.length % 5) * 28,
-        color: pickTodoNoteColor(notes as Array<Record<string, unknown>>),
-        kind: 'todo',
-        title: project.name || 'Untitled',
-        pages: [{ id: pid, title: 'P1', content: `- [ ] ${title}`, kind: 'todo' }],
-        activePageId: pid,
-        createdAt: now,
-        updatedAt: now,
-        width: 400,
-        height: 225,
-        sidebarCollapsed: true,
-        z: topZ + 1,
-      } as import('@/app/api/sticky-notes/route').StickyNote;
-      pageId = pid;
-      attachNote = note;
-      newNoteCreated = true;
-      notes.push(note);
+    let bindLineIndex: number | undefined;
+    if (bindRow) {
+      attachNote = notes[bindRow.noteIdx];
+      pageId = bindRow.pageId;
+      bindLineIndex = bindRow.lineIndex;
+    } else {
+      const note = notes.find((n) => Array.isArray(n.pages) && n.pages.some((p) => p.kind !== 'note'));
+      if (note) {
+        const page = note.pages!.find((p) => p.kind !== 'note')!;
+        pageId = page.id;
+        attachNote = note;
+      } else if (notes.length < MAX_TODO_NOTES) {
+        const now = new Date().toISOString();
+        const pid = `pg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const nid = `sn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const topZ = notes.reduce((m, n) => Math.max(m, n.z ?? 0), 0);
+        const { pickTodoNoteColor } = await import('@/lib/sticky-todo');
+        const createdNote = {
+          id: nid,
+          x: 40 + (notes.length % 5) * 28,
+          y: 120 + (notes.length % 5) * 28,
+          color: pickTodoNoteColor(notes as Array<Record<string, unknown>>),
+          kind: 'todo',
+          title: project.name || 'Untitled',
+          pages: [{ id: pid, title: 'P1', content: `- [ ] ${title}`, kind: 'todo' }],
+          activePageId: pid,
+          createdAt: now,
+          updatedAt: now,
+          width: 400,
+          height: 225,
+          sidebarCollapsed: true,
+          z: topZ + 1,
+        } as import('@/app/api/sticky-notes/route').StickyNote;
+        pageId = pid;
+        attachNote = createdNote;
+        newNoteCreated = true;
+        notes.push(createdNote);
+      }
     }
 
     // 建日历事件（先建，获得 event_id 后再回填到便签行锚点）
@@ -6081,18 +6123,27 @@ async function toolCreateScheduledTodo(args: Record<string, unknown>): Promise<s
       const noteIdx = notes.findIndex((n) => n.id === attachNote!.id);
       const page = notes[noteIdx].pages!.find((p) => p.id === pageId)!;
       const rawLines = String(page.content ?? '').split('\n');
-      lineIndex = newNoteCreated ? 0 : rawLines.length;
       const evs = Array.isArray(page.lineEventIds)
         ? page.lineEventIds.map((x) => [...x])
-        : Array.from({ length: lineIndex }, () => [] as string[]);
+        : rawLines.map(() => [] as string[]);
       const calArr = Array.isArray(page.lineCalendared)
         ? [...page.lineCalendared]
-        : Array.from({ length: lineIndex }, () => false);
-      if (newNoteCreated) {
+        : rawLines.map(() => false);
+      if (bindLineIndex !== undefined) {
+        // 绑定既有同文本的未排程行（Planner 把已有便签待办排期时不新增重复行）
+        lineIndex = bindLineIndex;
+        rawLines[lineIndex] = `- [ ] ${title}`;
+        while (evs.length <= lineIndex) evs.push([]);
+        evs[lineIndex] = [...(evs[lineIndex] ?? []), eventId];
+        while (calArr.length <= lineIndex) calArr.push(false);
+        calArr[lineIndex] = true;
+      } else if (newNoteCreated) {
+        lineIndex = 0;
         rawLines[0] = `- [ ] ${title}`;
         evs[0] = [eventId];
         calArr[0] = true;
       } else {
+        lineIndex = rawLines.length;
         rawLines.push(`- [ ] ${title}`);
         evs.push([eventId]);
         calArr.push(true);
@@ -6202,24 +6253,9 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
       z: topZ + 1,
     });
 
-    // 便签待办行自动入日历（打通）：与 /api/sticky-notes 写盘路径一致地 reconcile，
-    // 让 AI 静默创建的便签行也获得事件锚点（lineEventIds 回填）；失败不阻断便签本身
-    let saved = notes;
-    try {
-      const { getCurrentProject: getCurrentProjectSafe } = await import('@/lib/project/project-manager');
-      const cur = await getCurrentProjectSafe();
-      const { reconcileStickyNoteEvents } = await import('@/lib/sticky-calendar-sync');
-      if (cur?.id) {
-        const synced = await reconcileStickyNoteEvents(
-          cur.id,
-          notes[notes.length - 1] as unknown as import('@/app/api/sticky-notes/route').StickyNote,
-        );
-        saved = notes.map((n, i) => (i === notes.length - 1 ? (synced as unknown as Record<string, unknown>) : n));
-      }
-    } catch (e) {
-      console.error('[create_sticky_note] 自动入日历失败（不阻断）:', e);
-    }
-    const arrToWrite = saved.map((n) =>
+    // StickyTodo 不自动入日历（2026-09-08 起）：AI 静默创建的便签行保持纯便签、无事件锚点；
+    // 入日历只在用户手动「Add to calendar」或 Planner 排程时发生（见 addStickyLineToCalendar / create_scheduled_todo）
+    const arrToWrite = notes.map((n) =>
       normalizeStickyNote(n as unknown as Record<string, unknown>),
     );
 

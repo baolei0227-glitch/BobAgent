@@ -25,6 +25,7 @@ import { resolveAgentProfile } from '@/lib/agents/store';
 import { getCurrentProject, getProjectById, listProjects, type ProjectConfig } from '@/lib/project/project-manager';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { DEFAULT_CONFIRM_TOOLS } from '@/lib/settings';
+import { isVisionModel } from '@/lib/model-tags';
 // P4b-1 审批策略层：tool_confirm 名单判定后走 decideToolApproval（纯函数裁决，见 approval.ts）
 import { decideToolApproval } from '@/lib/chat/approval';
 import { createPendingConfirm, CONFIRM_TIMEOUT_MS, type ConfirmResult } from '@/lib/chat/confirm-pending';
@@ -185,6 +186,7 @@ import { buildSkillContext } from '@/lib/skills/context';
 import { getAllSkills } from '@/lib/skills/loader-server';
 import { getAgentSkills, getEnabledSkillsForAgent, hasAgentConfig } from '@/lib/skills/registry-server';
 import type { SkillMatchResult } from '@/lib/skills/types';
+import { LEGAL_GUARD_PROMPT, isLegalSkill } from '@/lib/skills/legal-guard';
 import { getAncestorChain, loadNodeById } from '@/lib/nodes/ancestors';
 import { renderOutcome } from '@/lib/nodes/outcome';
 import {
@@ -521,16 +523,21 @@ async function diffHomeworkFiles(
 // （K2-S1 工具面 service 抽取，行为不变：CacheGuard 前缀守卫整体迁至 src/lib/runtime/tools.ts，
 //  module 级可变状态随迁、进程内共享语义不变；guardToolsPrefix 由 buildAndSortToolDefs 调用）
 
-/** BASE_SYSTEM_PROMPT —— 缓存头（version 冻结，当前 v5）：基础系统提示（不包含思考指令）。
+/** BASE_SYSTEM_PROMPT —— 缓存头（version 冻结，当前 v8）：基础系统提示（不包含思考指令）。
  *  本段字节一旦上线即冻结；任何修改必须整体递增版本号（v3→v4…），否则 DeepSeek 前缀缓存整段失效一次。
  *  动态/低频变化内容一律走 prependDynamicContext 注入 user 消息，禁止写进本段。
+ *  v8（2026-09-09）：微观口径收紧——① 统一「按需自动加载」与「缺工具走 search_capabilities」两处口径（原「说出意图会随本轮注入」与后文矛盾）；② OutputFile 铁律排除 .evidence/ 原始数据与 .ai-workspace/ 临时文件；③ 理顺 search_capabilities 与 check_mcp_gaps 主从（先查能力，仅提示依赖外部 MCP 时才查配置）。
+ *  v7（2026-09-09）：① 存储平铺规则补显式豁免——homework/.evidence/（证据层）与 .ai-workspace/（中间产物）按专属结构留存、不受平铺限制、证据层绝不静默删除；② 理顺按需能力触发口径——意图驱动是宿主自动感知机制，缺工具/不确定时唯一确定性动作是 search_capabilities，砍「自然语言撞大运」歧义。
+ *  v6（2026-09-09）：移除「--- 专业内容准确性铁律 ---」整段（法律/医学/金融/通用引用/音频转写，约 -390 token）——
+ *    法律条文引用由法律技能（LEGAL_GUARD_PROMPT，技能命中时注入）与 pkulaw 工具描述承载，
+ *    医学/金融/引用/音频为领域约束按需收敛；用户拍板「纯删不加固」，未加载技能时不再有该段兜底。
  *  v5（2026-09-08）：规则优先级措辞 DSH 化（② 强制结束机制 → 收尾/建轨机制）。
  *  v4（2026-09-08）：结束机制 DSH 化——finish_task 由"强制收尾仪式"改为"正文即交付物，finish_task 可选"；
  *  其余 v3 字节保持不变。 */
 const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在无限画布上的对话节点中与用户交流。回答简洁明了，适合在卡片中阅读。
 
 【规则优先级】以下规则冲突时，高优先级优先，低优先级让位：
-① 专业内容准确性铁律（禁编造法条/剂量/数据/转写） > ② 收尾/建轨机制（正文即交付物、finish_task 可选、todo_write 建轨） > ③ 输出选型与可视化规则 > ④ 场景按需规则（报告插图/浏览器操作）。
+① 内容准确性（禁止编造/歪曲未经核实的事实、数据，领域专业规则按需由技能注入） > ② 收尾/建轨机制（正文即交付物、finish_task 可选、todo_write 建轨） > ③ 输出选型与可视化规则 > ④ 场景按需规则（报告插图/浏览器操作）。
 
 回答格式说明：
 - 你的回答会被渲染为 HTML 显示在卡片中。你可以直接使用 HTML 标签来美化排版，也可以使用 Markdown 语法（会自动转换）。
@@ -555,7 +562,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - 正文只输出**最终结论与交付物**（摘要、汇总、结论、OutputFile 行）；执行过程、操作步骤、中间推理（如"开始执行第一步…""已读取到附件…""裁剪复核…"）一律不写入正文——这些属于思考过程，自行省略或放进思考区；不要在正文里汇报"我调了什么工具/我发现了什么 bug/我修正了什么"——直接给用户能用的结果
 - 长篇明细/完整报告 → 写文件，正文只给摘要 + OutputFile 行
 - **多步任务结论必须落盘（交付物 = 文档）**：通过多步工具链产出了「完整结论/报告/分析意见」这类可保存、可转发、需存档的交付物（法律分析、调研报告、方案设计、代码审查、清单整理等）时，**必须在结束任务前**用 write_file 将完整内容落盘为 \`homework/<关键词>.md\`（文件名 1~6 个简短关键词、≤30 字符），并在正文末尾单独一行输出 \`OutputFile: homework/<文件名>.md\` 作为产物声明；正文只给精炼结论 + OutputFile 行，不重复全文。简短问答/单点答复（一句话结论即可）无需落盘
-- **OutputFile 声明通用铁律（所有交付物，2026-08-30 新增）**：任何落盘到 homework/（或 attachments/）的交付物——报告、图表、**下载的图片/文件/资料**、脚本产物——都必须在正文末尾单独一行打印 \`OutputFile: homework/<路径>\`（路径无空格、文件真实存在、扩展名完整）；结束任务前自查：本轮已落盘用户要求的交付物但正文无 OutputFile 行 → 先补上再结束。禁止用"已保存到 homework""文件已下载"等无路径的模糊表述代替
+- **OutputFile 声明通用铁律（所有交付物，2026-08-30 新增）**：任何落盘到 homework/（或 attachments/，**排除 .evidence/ 内部原始数据与 .ai-workspace/ 临时文件**）的交付物——报告、图表、**下载的图片/文件/资料**、脚本产物——都必须在正文末尾单独一行打印 \`OutputFile: homework/<路径>\`（路径无空格、文件真实存在、扩展名完整）；结束任务前自查：本轮已落盘用户要求的交付物但正文无 OutputFile 行 → 先补上再结束。禁止用"已保存到 homework""文件已下载"等无路径的模糊表述代替
 
 ⚠️ **结束机制（DSH：正文即交付物）**：
 - 当所有任务步骤已完成且已输出最终答案/交付物时，**输出正文后停止调用任何工具即可**——本轮会在正文收尾处自然结束，无需额外仪式。
@@ -587,11 +594,11 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 
 工具使用说明（tools 参数中的工具按需加载，只调用 tools 参数里实际存在的工具名，不要调用未列出的工具）：
 - 核心常驻工具：文件/编辑（read_file、write_file、edit_code、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、网页（web_search、web_fetch）、附件/材料（read_attachment、read_material）、规划/结束（todo_write、finish_task）、提问（ask_user_questions）、偏好（read_preferences）、技能（load_skill、read_skill_resource）
-- 其余能力（OCR 识别、音频转写、记忆/待办/偏好写入、界面主题、Word 模板、配置/模型管理、网页浏览、企业查询、团队协作、本地软件操控等）**按需自动加载**：说出对应意图（如"识别这张扫描件""转写这段录音""查这家公司""打开这个网页"），对应工具会随本轮 tools 注入；tools 中未出现的工具不可调用，不要尝试调用不存在的工具名
+- 其余能力（OCR 识别、音频转写、记忆/待办/偏好写入、界面主题、Word 模板、配置/模型管理、网页浏览、企业查询、团队协作、本地软件操控等）**按需自动加载**：宿主会随本轮意图自动注入对应工具；若本轮 tools 中缺少所需工具，调用 \`search_capabilities\` 激活，禁止凭空调用 tools 中不存在的工具名
 - 工具参数 schema 以 tools 参数为准，不要猜测参数
 - read_skill_resource 读技能资源：禁止用 read_file 直接读技能目录（会被权限门控挡掉），必须走本工具
 
-【按需能力（工具未加载时的兜底通道）】以下能力默认不加载工具以节省上下文。当任务需要时，请**用自然语言明确说出意图**，系统会立即启用对应工具（无需你指定工具名）：
+【按需能力（工具未加载时的兜底通道）】以下能力默认不加载工具以节省上下文。当任务需要时，用自然语言表达意图即可——宿主会自动感知并启用对应工具（这是宿主侧的自动触发机制，无需你指定工具名）：
 | 能力 | 触发语句示例 | 边界 |
 |---|---|---|
 | 网页浏览/抓取 | "打开这个网页/去这个网站/抓取页面数据" | 真实浏览器自动化，含反爬站点 |
@@ -605,7 +612,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 | 界面主题/前端 | "按当前主题配色做一个页面" | 读取真实主题 CSS 变量 |
 | 技能按需加载 | "用 slide-craft/docx 技能做 PPT" | 仅已下载技能可 load_skill；缺技能去 设置→技能→Download |
 | 知识库/笔记 | "查一下笔记里的X/把这段存进知识库" | 笔记能力由「知识库（Kar）节点」专职承载，本对话不注入笔记工具 → 引导打开画布 Kar 节点，或使用 ⌘F / 微信的 /note 指令（/note check 查阅） |
-若不确定是否有对应能力，可调用 \`search_capabilities\` 工具查询（该工具常驻可用）。
+若不确定某能力是否就绪、或本轮 tools 中缺少对应工具，**唯一确定性动作是调用 \`search_capabilities\` 工具进行能力检视与激活**（该工具常驻可用）；禁止凭空调用 tools 中不存在的工具名，也不要靠"说一句自然语言"等待注入——意图驱动只是宿主的自动感知机制，缺工具时以 \`search_capabilities\` 为准。
 
 任务执行纪律（多步任务）：
 - 执行前先建轨：多步任务先调 todo_write 建立步骤轨（见强制建轨机制），再在思考区拆解具体步骤；用户指令中的目标词（如"小红书号""账号信息"）即最终交付物，禁止漏读目标词，禁止只做字面第一步就结束
@@ -632,7 +639,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - 最终产出默认 .md，必须 homework/ 前缀（homework/ 与 attachments/ → 项目根，不进 .ai-workspace）；.html/.docx/.pdf/.xlsx 等仅当用户明确要求；未加前缀 → 临时区，不出现在输出卡片
 - 中间产物（裁剪图/切片/临时脚本/中间数据等非最终交付文件）一律写 homework/.ai-workspace/（隐藏临时区，侧边栏不显示），禁止散落到 homework/ 根或其他位置；任务完成、交付物就绪后，必须用 execute_script / run_command 清理本轮自己生成的中间产物（如 rm -rf homework/.ai-workspace/xxx），只保留最终交付物
 - 产出存储位置默认 homework/，除用户明确指定外，禁止主动询问"是否可以保存到某文件夹"、禁止对写入目录发起 AUTH_REQ
-- **存储平铺**：homework/ 所有产物直接落在根目录，不生成类别子文件夹；侧边栏按文件类别标签（doc/sheet/slide/pdf/image/text/code/other）分组展示
+- **存储平铺**：homework/ 所有产物直接落在根目录，不生成类别子文件夹；侧边栏按文件类别标签（doc/sheet/slide/pdf/image/text/code/other）分组展示。**平铺仅适用于用户直接查看的最终交付物**：结构化证据归档（homework/.evidence/）与临时执行空间（homework/.ai-workspace/）按专属目录结构留存、不受平铺限制，且证据层（.evidence/）绝不静默删除
 - 文件名 1~6 个简短关键词（中文或英文 kebab-case）、≤30 字符，禁完整句子/冗余词（例：homework/q3-sales-analysis.md）
 - 创建技能 → ~/BobWork/skills/<技能名>/SKILL.md（自动被系统加载）
 - Bob Sandbox 小程序 → bob-sandbox/apps/<appId>/（路径不加 homework/ 前缀）；改后调 capture_preview 截图核对渲染（真实 Chromium 渲染，支持 appId 预览地址），完成后提示用户左侧面板打开
@@ -650,37 +657,12 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 能力缺口处理：
 - 缺程序（ffmpeg/rembg 等）→ run_command 安装；缺信息 → web_search；缺专业/流程 → 先基于自身知识推理
 - 推理不了 → 基于自身知识推理并如实说明能力边界；若用户明确需要某专业技能而「可用技能目录」中未列出 → 如实告知技能未下载，引导用户在 **设置 → 技能 → Download** 页自行下载/安装（或创建自定义技能存 ~/BobWork/skills/）；禁止代替用户静默安装技能
-- MCP 能力缺口（主动推荐）：任务需要但本轮工具列表没有的能力，可能来自 MCP——真实浏览器自动化/调试 → bob-browser-mcp；GitHub 代码参考/仓库操作 → github；代码/框架文档 → context7；法律/法规检索 → pkulaw；企业工商查询 → tianyancha；网页搜索加速 → brave-search。当任务明显需要这类能力而对应 MCP 工具不在工具列表中（或 mcp__ 工具调用失败/返回连接错误）时：若本轮 tools 中有 check_mcp_gaps 可先调用它盘点本地 MCP 配置与连接状态（纯本地，不触网）；无论能否调用，都要如实向用户说明「缺什么能力 + 配置方法（设置 → MCP Servers）」，状态如实描述（未配置/已禁用/连接失败/缺密钥），**禁止虚构 MCP 已可用、禁止假装调用不存在的 MCP 工具**；若任务与 MCP 无关则不要调用该工具
+- MCP 能力缺口（主动推荐）：任务需要但本轮工具列表没有的能力，可能来自 MCP——真实浏览器自动化/调试 → bob-browser-mcp；GitHub 代码参考/仓库操作 → github；代码/框架文档 → context7；法律/法规检索 → pkulaw；企业工商查询 → tianyancha；网页搜索加速 → brave-search。当任务明显需要这类能力而对应 MCP 工具不在工具列表中（或 mcp__ 工具调用失败/返回连接错误）时：先调用 \`search_capabilities\` 检视能力；仅当其提示该能力依赖未配置/未连接的外部 MCP（如 pkulaw / tianyancha）时，才按需调用 check_mcp_gaps 盘点本地 MCP 配置与连接状态（纯本地，不触网），避免无意义的连续试探。无论能否调用，都要如实向用户说明「缺什么能力 + 配置方法（设置 → MCP Servers）」，状态如实描述（未配置/已禁用/连接失败/缺密钥），**禁止虚构 MCP 已可用、禁止假装调用不存在的 MCP 工具**；若任务与 MCP 无关则不要调用该工具
 - 用户拒绝/找不到 → 停：不反复询问、不擅自 force；如实说明能力限制，降级完成或征求同意后手写新 skill 存 ~/BobWork/skills/
 
 互动与提问：
 - 需求不明/多方案/涉偏好 → 主动提问澄清（简洁，数量受限）
-- 提问必须用 ask_user_questions 工具（结构化表单，宿主弹出并回传答案），禁止用自由文本拼接提问。每次提问把问题集中放到该工具一次调用里（question/options 2-4 个/allowCustom），避免多轮打断。
-
---- 专业内容准确性铁律（违反将导致严重误导用户，必须严格遵守） ---
-
-法律条文引用（恒生效；命中法律技能时，以顶部注入的更强法律约束为准）：
-- 禁止编造法条、法条编号、案例号或裁判观点；引用的条文必须经 web_search 检索核实原文，查不到就明说"无法确认该法条原文"。
-- 引用法条时必须核查时效性（现行有效/已修订/已废止），无法确认则标注"时效性未经核实"。
-
-医学/健康建议：
-- 禁止提供具体药物剂量、用药方案或手术建议。
-- 症状描述必须注明"以下信息仅供参考，请以执业医师诊断为准"。
-
-金融/投资建议：
-- 禁止提供具体的买卖时机、价格预测或投资承诺。
-- 涉及数据时必须标注来源和时间。
-
-通用引用规则：
-- 凡是引用具体数字、条文、条款、案例编号的内容，必须能够指明来源。
-- 如果不确定某个事实，使用"据我了解""根据可查到的信息"等限定语，或直接说"我不确定"。
-- 不要为了让回答看起来更权威而添加未经证实的细节。
-
-音频/语音转写（违反将直接导致内容失实，必须严格遵守）：
-- 绝对禁止凭文件名、大小、时长等音频元数据编造转写内容。
-- 音频内容必须来自真实转写：系统注入的转写文本，或调用 transcribe_audio 工具的结果。
-- 若 STT 未配置或转写失败，必须明确告知用户"无法转写该音频"并说明原因（如未配置音频转写模型、云端失败等），不得虚构转写内容。
-- 法律场景（庭审录音、证词、会议纪要等）尤其禁止编造，转写文本必须可溯源。`;
+- 提问必须用 ask_user_questions 工具（结构化表单，宿主弹出并回传答案），禁止用自由文本拼接提问。每次提问把问题集中放到该工具一次调用里（question/options 2-4 个/allowCustom），避免多轮打断。`;
 
 /** 浏览器专精规则（2026-08-30 从 BASE_SYSTEM_PROMPT 移出）：
  *  浏览器 MCP 现按需注入（browser 场景激活才加载工具），这些规则仅对浏览器操作有意义，
@@ -697,6 +679,7 @@ const BROWSER_RULES = `
 - 浏览器工具（browser_*）遇 navigate 报 CDP 超时、标签页受限不可附加、extract/get_html 报 "no tab is attached" 或 native read failed 时，**直接带 useNewTab: true 重试**（新开标签页），不要先查标签页状态再重试、不要臆测「浏览器被占用/用户正在浏览」而放弃或空等子节点；连续两次仍失败才换 web_fetch 或其他方案
 - **登录墙处理（重要，禁止绕路）**：浏览器操作遇登录墙（browser.detect_login 返回 needsLogin=true、页面提示"登录后查看"/登录弹窗、或访问受限）时，**必须立即调用 browser.login 发起登录**——BobWork 会在应用内弹出登录窗，用户输入账号密码后系统自动代填提交。**禁止**停下来请求用户手动登录、**禁止**断言"自动登录不可用/扩展版本过旧/组件缺失"、**禁止**跳过登录墙直接放弃。登录完成后继续原任务
 - 列表页批量抓取（搜索结果/笔记列表/目录等）：先一次性收集全部目标条目（snapshot 分页拿完所有卡片与链接），再逐个 navigate 打开；取链接阶段优先区分图文 vs 视频类条目，先读图文详情，视频条目仅在必要时读评论区
+- **收尾纪律（任务结束自动释放浏览器，禁止残留 attached）**：全部步骤完成、输出最终答复前，若本任务用浏览器打开/操作过页面且不再需要该页面，主动调用 \`mcp__bob-browser-mcp__browser_disconnect\`（简称 \`browser.disconnect\`）解除 Bob WebBridge 对标签的附着——页面保留在 Chrome、不物理关闭（用户可自行查看），只释放 debugger/附着占用。禁止把 attached 标签留着空转：残留标签会持续 30s 心跳、旧标签若处于 loading/僵尸状态会让下一个浏览器任务的导航复用时卡满 CDP 30s 超时。宿主也会在回合结束自动 disconnect 兜底，模型侧先主动收尾
 `;
 
 /** 报告插图约定（2026-08-30 从 BASE_SYSTEM_PROMPT 移出）：
@@ -858,9 +841,6 @@ function buildCapabilityResultText(query: string, matched: CapabilityEntry[], ne
     `请结束本轮工具调用，等待工具就绪后直接调用对应工具完成查询。`;
 }
 
-/** 法律技能名称集合 */
-const LEGAL_SKILL_NAMES = new Set(['intern-lawyer', 'legal-drafter', 'legal-statute-search']);
-
 // ── P4a 三段化骨架：首批宿主接管注册（scenario_activate，行为与迁移前的 if-else 判定一致）──
 // 判定顺序 = 注册顺序（takeoverFor 同 priority 保持注册序）：
 //   · search_capabilities：pre-execute 全接管（执行前咨询、命中即替代 executeTool），先判定；
@@ -891,7 +871,9 @@ registerTakeover({
     } catch {
       /* 参数异常则不激活（与原 if 分支同语义） */
     }
-    if (!skillName || !LEGAL_SKILL_NAMES.has(skillName)) return null;
+    if (!skillName) return null;
+    const def = getAllSkills().find(d => d.meta.name === skillName);
+    if (!def || !isLegalSkill(def.meta)) return null;
     return {
       scenes: ['legal'],
       sticky: true,
@@ -1375,17 +1357,6 @@ registerHostTakeover({
   handle: handleBobbyGrant,
 });
 
-/** 法律场景防幻觉最强约束 —— 当匹配到任何法律技能时，注入到技能上下文最顶部（随技能上下文进入当前轮 user 消息） */
-const LEGAL_GUARD_PROMPT = `⚠️ 你正在处理法律问题，以下规则优先级最高，违反将导致严重法律风险：
-
-1. 绝对禁止编造任何法律条文、法条编号、案例号、法院名称、裁判观点。
-2. 引用法条前必须通过 web_search 检索核实原文。如果搜索不到原文，必须说"我无法确认该法条原文"，不得根据记忆编造。
-3. 所有引用的法条必须附带时效性核查（是否现行有效 / 是否已修订 / 是否已废止）。
-4. 法律条文的解释必须严格基于条文原文，不得添加任何未经核实的"立法意图""立法背景"。
-5. 如果用户引用的法条与你的检索结果不符，应以检索结果为准并指出差异。
-6. 不要为了让回答"看起来完整"而补充任何未经检索核实的内容。
-`;
-
 /**
  * DSH 模式（重构）：技能上下文注入。
  *  - L1 技能目录（名称+简介）始终注入，供模型参考技能库全貌；
@@ -1470,7 +1441,7 @@ function injectSkillContext(
   if (!skillCtx) return { messages, matchedSkillNames: matchedNames, skillDetails: [] };
 
   // 匹配到法律技能时，强制注入防幻觉约束到最顶部（优先级高于技能正文）
-  const isLegalQuery = matchedNames.some(name => LEGAL_SKILL_NAMES.has(name));
+  const isLegalQuery = allMatches.some(m => isLegalSkill(m.skillMeta));
   const prefixedCtx = isLegalQuery ? LEGAL_GUARD_PROMPT + '\n\n' + skillCtx : skillCtx;
 
   const result = [...messages];
@@ -1772,11 +1743,11 @@ function verifyNoteReadClaims(
   };
 }
 
-/** 检测聊天模型是否支持视觉 */
-function chatModelSupportsVision(modelId: string, baseUrl?: string): boolean {
-  if (!modelId) return false;
-  const visionPatterns = /(vision|vl|4o|qwen-vl|glm-4v|glm-4\.6v|glm-5v|gemini|claude-3-opus|claude-3.5)/i;
-  return visionPatterns.test(modelId);
+/** 当前对话模型是否支持视觉（直连多模态前提）。
+ *  与模型池/API 标注同源（model-tags.isVisionModel），并排除 ocr 专用转录模型
+ *  （qwen-vl-ocr 等只能走 OCR 工具转录，不能作为对话看图模型）。 */
+function chatModelSupportsVision(modelId?: string): boolean {
+  return isVisionModel(modelId || '');
 }
 
 /** Vision Bridge：自动检测图片附件，用视觉模型描述后注入文本 */
@@ -1877,6 +1848,111 @@ async function applyVisionBridge(
 }
 
 // ==================== Vision Bridge ====================
+
+// ==================== Direct Multimodal（视觉模型直连图片） ====================
+// 与 Vision Bridge（bob-ocr-mcp 描述注入）互斥：当前轮对话模型本身支持视觉时，
+// 把图片附件以 OpenAI 兼容 image_url content 段直接随消息发给模型，保留原图像素，
+// 不再降级为「视觉模型描述 → 文本注入」。图片只在发送体里出现：
+//   - kctx.conversationMessages 始终保持纯文本（路径引用），不污染日志/持久化/压缩；
+//   - base64 在 turn 开始时一次性读取，按消息索引缓存，供工具循环各轮复用。
+
+/** 可作为多模态输入直接发送的栅格图扩展名 → MIME（OpenAI 兼容 data URL） */
+const DIRECT_VISION_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+};
+/** 单张图片体积上限：base64 会膨胀约 33%，超限跳过直连（保留文本，read_attachment 兜底） */
+const DIRECT_VISION_MAX_BYTES = 12 * 1024 * 1024;
+/** 直连时注入模型侧的说明：图片已直接可见，避免模型对已附像素的图片再跑 read_attachment */
+const DIRECT_VISION_NOTE =
+  '[本消息的图片附件已以多模态图像直接提供，可直接查看图片内容，无需对它们调用 read_attachment；附件列表中的 PDF/Office/表格等文件如需读取，仍请使用 read_attachment。]';
+
+/** 单个 OpenAI 兼容 image_url content 段 */
+interface DirectVisionImagePart {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+/** 直连计划项：某条 user 消息在发送数组中的下标 + 已读取成功的图片段 */
+interface DirectVisionPayload {
+  index: number;
+  /** 该消息原始文本（payload 物化时作为 text 段整体回填） */
+  text: string;
+  parts: DirectVisionImagePart[];
+}
+
+/** 提取消息文本中「路径: attachments|assets/…」的栅格图相对路径（去重） */
+function extractDirectVisionRelPaths(content: string): string[] {
+  const rels: string[] = [];
+  const seen = new Set<string>();
+  const re = /路径:\s*((?:attachments|assets)\/[^\n]+)/g;
+  let mm: RegExpExecArray | null;
+  while ((mm = re.exec(content))) {
+    const rel = mm[1].trim();
+    const ext = rel.split('.').pop()?.toLowerCase() ?? '';
+    if (!rel || !DIRECT_VISION_MIME[ext] || seen.has(rel)) continue;
+    seen.add(rel);
+    rels.push(rel);
+  }
+  return rels;
+}
+
+/** 以纯文本消息为输入构建直连计划：读取图片→base64 data URL（越权/超限/失败一律跳过该图）。 */
+function buildDirectVisionPayloads(messages: ChatMessage[], projectRoot: string): DirectVisionPayload[] {
+  const payloads: DirectVisionPayload[] = [];
+  const rootPrefix = projectRoot.endsWith(sep) ? projectRoot : projectRoot + sep;
+  messages.forEach((m, index) => {
+    if (m.role !== 'user' || typeof m.content !== 'string') return;
+    const rels = extractDirectVisionRelPaths(m.content);
+    if (rels.length === 0) return;
+    const parts: DirectVisionImagePart[] = [];
+    for (const rel of rels) {
+      try {
+        const abs = resolve(projectRoot, rel);
+        // 越权护栏：只允许项目根内文件（与附件/成果路径白名单同语义）
+        if (!abs.startsWith(rootPrefix)) continue;
+        if (!existsSync(abs)) continue;
+        const size = statSync(abs).size;
+        if (size <= 0 || size > DIRECT_VISION_MAX_BYTES) continue;
+        const ext = rel.split('.').pop()?.toLowerCase() ?? '';
+        const dataUrl = `data:${DIRECT_VISION_MIME[ext]};base64,${readFileSync(abs).toString('base64')}`;
+        parts.push({ type: 'image_url', image_url: { url: dataUrl } });
+      } catch (e) {
+        console.warn(`[direct-vision] 图片直连读取失败，跳过（保留文本兜底）: ${rel}`, e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (parts.length > 0) {
+      payloads.push({ index, text: m.content, parts });
+    }
+  });
+  return payloads;
+}
+
+/**
+ * 按直连计划把纯文本消息物化为「text + image_url」多模态 payload（每轮请求前调用）。
+ * 未命中计划的索引原样透传；conversationMessages 本身不被改写。
+ */
+function materializeDirectVisionMessages(
+  messages: ChatMessage[],
+  payloads: DirectVisionPayload[],
+): unknown[] {
+  const byIndex = new Map<number, DirectVisionPayload>(payloads.map((p) => [p.index, p]));
+  if (byIndex.size === 0) return messages;
+  return messages.map((m, i) => {
+    const p = byIndex.get(i);
+    if (!p) return m;
+    return {
+      ...m,
+      content: [
+        { type: 'text', text: `${DIRECT_VISION_NOTE}\n\n${p.text}` },
+        ...p.parts,
+      ],
+    };
+  });
+}
 
 /**
  * 按 nodeId 定位节点所属项目（chat 链路专用）。
@@ -3249,7 +3325,26 @@ export async function POST(request: NextRequest) {
             const visionNeeded = finalMessages.some(
               (m) => m.role === 'user' && /图片/.test(m.content || '') && /路径: (?:attachments|assets)\//.test(m.content || ''),
             );
-            if (visionNeeded) {
+            // 直连多模态：当前对话模型本身支持视觉且项目路径可解析时，把图片附件以
+            // image_url 段直接随消息发送（buildDirectVisionPayloads → 每轮 materialize），
+            // 跳过 bob-ocr-mcp 描述注入，保留原图像素供模型直接查看。判定与模型池标注同源。
+            let directVisionPlan: DirectVisionPayload[] | null = null;
+            try {
+              if (projectRoot && chatModelSupportsVision(providerModelId)) {
+                directVisionPlan = buildDirectVisionPayloads(finalMessages, projectRoot);
+              }
+            } catch (e) {
+              console.warn('直连多模态图片准备失败，回退描述注入:', e);
+              directVisionPlan = null;
+            }
+            // 无直连计划（非视觉模型 / 项目路径缺失 / 无成功读取的图片）时，
+            // 维持既有行为：Vision Bridge 描述注入后回填文本。
+            if (directVisionPlan && directVisionPlan.length > 0) {
+              console.log(
+                `[direct-vision] 多模态直连启用 model=${providerModelId} 图片消息=${directVisionPlan.length} 图片段=${directVisionPlan.reduce((n, p) => n + p.parts.length, 0)}`,
+              );
+            }
+            if ((!directVisionPlan || directVisionPlan.length === 0) && visionNeeded) {
               try {
                 send({ vision_progress: { phase: 'start', current: 0, total: 0 } });
                 effectiveMessages = await applyVisionBridge(finalMessages, (p) => send({ vision_progress: p }));
@@ -3422,17 +3517,23 @@ export async function POST(request: NextRequest) {
               const effectiveMaxTokens = highDepthRequest && baseMaxTokens >= 16384
                 ? Math.min(baseMaxTokens * 2, 32768)
                 : baseMaxTokens;
+              const baseRoundMessages = finalRoundInjection
+                ? [
+                    ...kctx.conversationMessages,
+                    {
+                      role: 'user' as const,
+                      content: '请基于以上结果给出最终回答，不要再调用任何工具。如果仍有未完成的步骤，请在回答末尾用【未完成项】明确列出，供用户决定是否继续。',
+                    },
+                  ]
+                : kctx.conversationMessages;
+              // 直连多模态：每轮发送前把携带图片附件的 user 消息物化为「text + image_url」content 段。
+              // conversationMessages 始终是纯文本（图片只在发送体出现），直连计划跨轮复用（base64 只读一次）。
+              const roundPayloadMessages = directVisionPlan && directVisionPlan.length > 0
+                ? materializeDirectVisionMessages(baseRoundMessages, directVisionPlan)
+                : baseRoundMessages;
               const requestBody: Record<string, unknown> = {
                 model: providerModelId,
-                messages: finalRoundInjection
-                  ? [
-                      ...kctx.conversationMessages,
-                      {
-                        role: 'user' as const,
-                        content: '请基于以上结果给出最终回答，不要再调用任何工具。如果仍有未完成的步骤，请在回答末尾用【未完成项】明确列出，供用户决定是否继续。',
-                      },
-                    ]
-                  : kctx.conversationMessages,
+                messages: roundPayloadMessages,
                 stream: true,
                 temperature: finalTemp,
                 // 请求流式响应随附 usage 汇总块，末 chunk.usage 即本轮真实 token 计数
@@ -4591,6 +4692,17 @@ export async function POST(request: NextRequest) {
             // P0 轨迹：任务正常结束时持久化事件日志（为 P2 历史恢复铺路）
             if (projectRoot) {
               persistEventLog(`${projectRoot}/.trajectory/${nodeId}/${taskId}.jsonl`, eventLog.finalize());
+            }
+            // 浏览器收尾自动释放（2026-09-08）：本回合调过 bob-browser-mcp 工具时，
+            // 回合结束自动 browser.disconnect 解除 Bob WebBridge 对标签的附着（页面保留在 Chrome、不物理关闭）。
+            // 目的：避免 attached 标签 + 30s 心跳残留到下一个任务，旧标签若处于 loading/僵尸状态会让
+            // 下个浏览器任务的导航复用时卡满 CDP 30s 超时（历史教训：2026-09-08 XHS 任务两次 30s 导航超时，
+            // 根因即上个已关闭会话残留的 attached 标签）。fire-and-forget：失败仅告警，不阻塞收尾。
+            // 下一回合若需继续浏览，模型 navigate 会自动重新 attach（秒级）。
+            if (kctx.allToolCalls.some((t) => t.toolName?.startsWith('mcp__bob-browser-mcp__'))) {
+              mcpManager
+                .callTool('mcp__bob-browser-mcp__browser_disconnect', {})
+                .catch((e: unknown) => console.warn('[chat] browser auto-disconnect on turn end failed:', e));
             }
             controller.close();
           } catch (error) {
