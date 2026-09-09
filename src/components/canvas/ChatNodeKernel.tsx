@@ -30,6 +30,7 @@ import {
 import { loadSettings, getQuickPrompts, updateQuickPrompts, type QuickPrompt } from '@/lib/settings';
 import type { McpServerConfig } from '@/lib/mcp/types';
 import { analyzeTask, selectBestModel } from '@/lib/model-matcher';
+import { isVisionModel } from '@/lib/model-tags';
 import { outcomeMaxLengthForModel, inferContextWindow, compactTriggerTokensForContext } from '@/lib/context-limits';
 import { WidgetRenderer, WidgetSkeleton, parseWidgetBlocks, hasWidgetBlocks, hasOpenWidgetFence } from './WidgetRenderer';
 import { desktop } from '@/lib/desktop-adapter';
@@ -294,6 +295,26 @@ function extractTitleSuggestion(content: string): { title: string | null; cleanC
   return { title: null, cleanContent: content };
 }
 
+/**
+ * 即时标题（发出即命名，0 token 规则层）：从用户首条消息提取简短标题。
+ * 取首个非空行 → 剥离常见祈使引导词（请/帮我/麻烦…）→ 空白归一 → 截断 ≤20 字符。
+ * 回答结束后若主模型给出 <!-- TITLE --> 注释，再由精修逻辑替换为更优标题。
+ */
+function deriveInstantTitle(text: string): string {
+  const firstLine = text
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((s) => s.trim())
+    .find((s) => s.length > 0) ?? '';
+  if (!firstLine) return '';
+  const stripped = firstLine
+    .replace(/^(请帮我|请你帮我|帮我写|帮我做|帮我生成|帮我|麻烦你|麻烦|拜托|请帮我|请你|请|我想|我想要|我要|我需要|能否|能不能|能帮我)[：:，,。.、\s]*/i, '')
+    .trim();
+  const base = stripped.length >= 2 ? stripped : firstLine;
+  const compact = base.replace(/\s+/g, ' ').trim();
+  return compact.length > 20 ? `${compact.slice(0, 20).trim()}…` : compact;
+}
+
 
 /** 本组件视图的宿主节点形态（替代旧 React Flow Node 泛型） */
 type KernelNode = HostNode<AiChatNodeData>;
@@ -432,6 +453,14 @@ function StepTypeIcon({ name, size = 14 }: { name: string; size?: number }) {
   return <Wrench style={cls} />;
 }
 
+/** 结束态整体折叠辅助：估算「执行过程」区占行数（Think 芯片 1 行 + 每个工具 1 行 + 技能一行）。 */
+function estimateProcessRows(thinkText: string | undefined, toolCalls: ToolCallRecord[] | undefined, skillNames: string[] | undefined): number {
+  const hasThink = !!thinkText && thinkText.trim().length > 0;
+  const calls = toolCalls ?? [];
+  const skills = skillNames ?? [];
+  return (hasThink ? 1 : 0) + calls.length + (skills.length > 0 ? 1 : 0);
+}
+
 /**
  * TraceProcessSummary — 对话视图「执行过程」紧凑摘要（对齐 dsh 对话页签）。
  * 只给过程感：思考收成小条、每个工具一行摘要、技能小药丸；
@@ -456,6 +485,21 @@ function TraceProcessSummary({
 }) {
   const [thinkOpen, setThinkOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState<number | null>(null);
+  /** 结束态整体折叠：已完成且过程区超一行时默认折叠；流式中恒展开以便看实时进度 */
+  const [groupFolded, setGroupFolded] = useState<boolean>(
+    () => !isStreaming && estimateProcessRows(thinkText, toolCalls, skillNames) > 1,
+  );
+  const prevStreamingRef = useRef<boolean>(isStreaming);
+  // 流式结束（true→false）且过程区超过一行时，整块自动收成一条 Process 标题行；同时收起块内已展开的 Think/工具明细
+  useEffect(() => {
+    const wasStreaming = prevStreamingRef.current;
+    prevStreamingRef.current = isStreaming;
+    if (wasStreaming && !isStreaming && estimateProcessRows(thinkText, toolCalls, skillNames) > 1) {
+      setGroupFolded(true);
+      setThinkOpen(false);
+      setToolOpen(null);
+    }
+  }, [isStreaming, thinkText, toolCalls, skillNames]);
   const hasThink = !!thinkText && thinkText.trim().length > 0;
   const calls = toolCalls ?? [];
   const visibleCalls = hideStructuralTools
@@ -463,6 +507,22 @@ function TraceProcessSummary({
     : calls;
   const skills = skillNames ?? [];
   if (!hasThink && calls.length === 0 && skills.length === 0) return null;
+  const totalRows = estimateProcessRows(thinkText, toolCalls, skillNames);
+  const showFoldHeader = !isStreaming && totalRows > 1;
+  const showDetail = isStreaming || !showFoldHeader || !groupFolded;
+  const failCount = visibleCalls.filter((tc) => tc.phase === 'error' || tc.success === false).length;
+  const processSummary = [
+    hasThink ? '1 thought' : null,
+    visibleCalls.length > 0 ? `${visibleCalls.length} tool${visibleCalls.length === 1 ? '' : 's'}` : null,
+    skills.length > 0 ? `${skills.length} skill${skills.length === 1 ? '' : 's'}` : null,
+  ].filter(Boolean).join(' · ');
+  const toggleGroupFold = () => {
+    if (!groupFolded) {
+      setThinkOpen(false);
+      setToolOpen(null);
+    }
+    setGroupFolded((v) => !v);
+  };
   const human = (name: string) => name.replace(/^browser[._]/, '').replace(/_/g, ' ');
   const phaseLabel = (phase: ToolCallPhase): string =>
     phase === 'running' ? 'Running…' : phase === 'pending' ? 'Pending…' : phase === 'error' ? 'Failed' : 'Success';
@@ -477,6 +537,36 @@ function TraceProcessSummary({
   };
   return (
     <div className="mb-1 flex w-full min-w-0 flex-col items-start gap-0.5">
+      {/* 结束态整体折叠标题行：已完成且过程区超一行时显示；点击展开/收起整块过程明细 */}
+      {showFoldHeader && (
+        <button
+          type="button"
+          onClick={toggleGroupFold}
+          title={groupFolded ? 'Show process details' : 'Hide process details'}
+          className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 px-1 py-0.5 text-left transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_5%,transparent)]"
+        >
+          <Wrench className="h-3 w-3 shrink-0" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }} />
+          <span className="text-10 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
+            Process
+          </span>
+          {processSummary && (
+            <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--ink)' }}>
+              {processSummary}
+            </span>
+          )}
+          {failCount > 0 && (
+            <span className="shrink-0 text-[10px] font-bold leading-none" style={{ color: 'var(--danger)' }}>
+              ✕ {failCount}
+            </span>
+          )}
+          <ChevronDown
+            className={cn('h-3 w-3 shrink-0 transition-transform duration-150', !groupFolded && 'rotate-180')}
+            style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)' }}
+          />
+        </button>
+      )}
+      {showDetail && (
+        <>
       {/* Think 小条：默认收起，点击就地展开思考原文 */}
       {hasThink && (
         <>
@@ -639,6 +729,8 @@ function TraceProcessSummary({
             </span>
           ))}
         </div>
+      )}
+        </>
       )}
     </div>
   );
@@ -1197,6 +1289,38 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [prefixChangedByMsg, setPrefixChangedByMsg] = useState<Record<string, boolean>>({});
   /** 最近一次见到的缓存头指纹（跨任务对比基准） */
   const lastPrefixHashRef = useRef<string>('');
+  /** msgId → 缓存头分段指纹（system / tools / history / toolsByte），漂移时定位到段 */
+  const [prefixSegsByMsg, setPrefixSegsByMsg] = useState<Record<string, { system: string; tools: string; toolsByte: string; history: string }>>({});
+  /** msgId → 相对上一任务各分段是否变化（true 仅置位不回落，防止 done 帧同值覆盖 start 判定） */
+  const [prefixSegChangedByMsg, setPrefixSegChangedByMsg] = useState<Record<string, { tools: boolean; toolsByte: boolean; history: boolean }>>({});
+  /** 最近一次见到的分段指纹（跨任务逐段对比基准） */
+  const lastPrefixSegsRef = useRef<{ system: string; tools: string; toolsByte: string; history: string } | null>(null);
+
+  /**
+   * 缓存头分段诊断落点：context_meter 与 done 两帧共用。
+   * 对比基准语义：分段在「本任务首次收到」时与上一任务比对并记录 changed（只置 true 不回落），
+   * 之后同任务重复帧（start/done 同值）不再改标记 → 渲染时能稳定展示"哪段漂移"。
+   */
+  const applyPrefixSegments = (assistantId: string, segs?: Record<string, unknown> | null): void => {
+    if (!segs || !mountedRef.current) return;
+    const cur = {
+      system: typeof segs.system === 'string' ? segs.system : '',
+      tools: typeof segs.tools === 'string' ? segs.tools : '',
+      toolsByte: typeof segs.toolsByte === 'string' ? segs.toolsByte : '',
+      history: typeof segs.history === 'string' ? segs.history : '',
+    };
+    const prev = lastPrefixSegsRef.current;
+    const changed = {
+      tools: !!prev && prev.tools !== cur.tools,
+      toolsByte: !!prev && prev.toolsByte !== cur.toolsByte,
+      history: !!prev && prev.history !== cur.history,
+    };
+    setPrefixSegsByMsg((p) => ({ ...p, [assistantId]: cur }));
+    if (changed.tools || changed.toolsByte || changed.history) {
+      setPrefixSegChangedByMsg((p) => ({ ...p, [assistantId]: changed }));
+    }
+    lastPrefixSegsRef.current = cur;
+  };
 
   // P5a-1 事件窗口 schema（P5a-2 起 Trace 渲染消费，可回退）：旁路窗口 ref —— 每轮 doSend 开始 reset，
   // SSE 解析入口把每个已解析对象经 normalizeSseFrame + pushWindowFrame 喂入；
@@ -1971,19 +2095,26 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const nodeWrapperRef = useRef<HTMLDivElement>(null);
   // contentEditable 输入框（支持 @ 文件引用 chip）：同 ImageGenPromptBar 的富文本输入机制
   const textareaRef = useRef<HTMLDivElement>(null);
+  // 输入框根容器（inputInner，含边框/padding 的视觉外沿）：供 inputAnchor 量取与弹窗对齐的精确宽度
+  const inputBoxRef = useRef<HTMLDivElement>(null);
   // IME 合成状态追踪：macOS 中文拼音输入法确认候选词时，浏览器先触发 compositionend 再触发 keydown(Enter)，
   // 此时 nativeEvent.isComposing 已为 false。用 ref 手动追踪合成状态，弥补这一竞态。
   const composingRef = useRef(false);
   // 左侧导航圆点：每个 user 消息一个 ref，用于点击跳转 + 滚动联动高亮
   const userMsgRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [activeUserMsgId, setActiveUserMsgId] = useState<string | null>(null);
-  /** 当前对话输入框顶部中心位置：锚定确认/表单弹窗到输入框上方（无输入框时返回 null = 居中） */
-  const inputAnchor = useCallback((): { x: number; y: number } | null => {
-    const el = textareaRef.current;
+  /** 输入框根容器顶部中心位置 + 视觉外沿宽度：锚定确认/表单弹窗到输入框上方并保持等宽（无输入框时返回 null = 居中） */
+  const inputAnchor = useCallback((): { x: number; y: number; w: number } | null => {
+    const el = inputBoxRef.current;
     if (!el) return null;
     const r = el.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top };
+    return { x: r.left + r.width / 2, y: r.top, w: r.width };
   }, []);
+  /** Planner 确认卡片锚点：卡片到来时取一次输入框位置并固定，避免挂起期间画布平移/缩放导致卡片跳动 */
+  const plannerAnchor = useMemo(
+    () => (plannerConfirm ? inputAnchor() : null),
+    [plannerConfirm, inputAnchor],
+  );
   const mountedRef = useRef(true);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   // 新节点自动填充授权目录（只执行一次）
@@ -2998,10 +3129,10 @@ ${rows.join('\n')}
       if (!d.success && action === 'lock' && (d.errors?.length || String(d.error || '').includes('校验'))) {
         // 校验未通过：由用户自主决定是否强制锁定
         const force = await confirmAsk({
-          title: '成果块校验未通过',
-          message: `${d.error || ''}\n\n是否仍要强制锁定该节点？（强制锁定后成果块未通过质量校验，下游引用请自行确认）`,
-          confirmLabel: '强制锁定',
-          cancelLabel: '取消',
+          title: 'Output block validation failed',
+          message: `${d.error || ''}\n\nForce lock this node anyway? (Once locked, the output block stays unvalidated — downstream references are at your own risk.)`,
+          confirmLabel: 'Force lock',
+          cancelLabel: 'Cancel',
           anchor: inputAnchor(),
         });
         if (!force) {
@@ -3267,6 +3398,9 @@ ${rows.join('\n')}
     traceWindowRef.current = createTraceWindow();
     // P5b-1 历史 replay：新一轮发送时退出回放态，回到 live 轨迹
     setReplay(null);
+    // 即时命名标记：本轮发送瞬间是否已用规则标题命名过（回答结束后 refine 时参考，
+    // 避免把更优的即时标题降级回"用户首条消息截断"）
+    let instantNamed = false;
 
     // 已锁定则自动解锁，允许用户继续追问
     if (data.nodeMdId && outcomeStatus === 'locked') {
@@ -3306,6 +3440,13 @@ ${rows.join('\n')}
 
     if (!currentModelId || currentModelId === DEFAULT_MODEL_ID) {
       const taskAnalysis = analyzeTask(userInput);
+      // 本轮上下文是否携带图片附件（新挂的附件 + 发送窗口内历史 user 消息仍带图的）。
+      // 命中时 Auto 优先选视觉模型，使后端能把图片以多模态直连喂给模型（而非描述注入兜底）。
+      const hasImageInContext =
+        (pendingAttachments?.length > 0 && pendingAttachments.some((a) => a.type === 'image')) ||
+        messages.some(
+          (m) => m.role === 'user' && !!m.attachments && m.attachments.some((a) => a.type === 'image'),
+        );
       // Auto 模式选模型：直接在主对话候选池（settings.chatModel.pool）内按任务类型智能匹配。
       // 历史"星标模型"优先级（chatModel.defaultModel 排最前并直接使用）已移除，
       // 一律由 selectBestModel 按任务类型打分；候选池为空/匹配不到 → 回退全部可用模型。
@@ -3316,6 +3457,21 @@ ${rows.join('\n')}
         // P3-3a：Auto 任务类型智能匹配开关（settings.chatModel.auto，默认开）——
         // 关 → 静态首选（候选池首项，等同服务端 resolveMainChat 语义）；开 → 按任务类型 selectBestModel 打分
         const autoModelRouting = settings.chatModel?.auto !== false;
+        // Auto 视觉优先开关（settings.chatModel.autoVisionOnImage，默认开）；关 = 带图也不为视觉模型加权
+        const autoVisionOnImage = settings.chatModel?.autoVisionOnImage !== false;
+        // Auto + 上下文带图片 → 只在视觉模型子集内按任务打分选模；
+        // 候选池没有视觉模型时返回 null，交由上层正常任务打分（图片走描述/read_attachment 兜底）。
+        const pickBest = (list: AvailableModel[]): AvailableModel | null => {
+          if (list.length === 0) return null;
+          if (autoModelRouting && hasImageInContext && autoVisionOnImage) {
+            const visionList = list.filter((m) => {
+              const parsed = parseCustomModel(m.modelId);
+              return isVisionModel(parsed ? parsed.modelId : m.modelId);
+            });
+            if (visionList.length > 0) return selectBestModel(visionList, taskAnalysis);
+          }
+          return selectBestModel(list, taskAnalysis);
+        };
         // availableModels 的 modelId 是 `provider:modelId` 格式，配置存的是裸 modelId
         const findInAvailable = (modelId: string, provider?: string) =>
           availableModels.find((m) => {
@@ -3331,9 +3487,9 @@ ${rows.join('\n')}
           if (m && !seen.has(m.modelId)) { poolModels.push(m); seen.add(m.modelId); }
         }
         if (poolModels.length > 0) {
-          bestModel = autoModelRouting ? selectBestModel(poolModels, taskAnalysis) : poolModels[0];
+          bestModel = autoModelRouting ? pickBest(poolModels) : poolModels[0];
         }
-        if (!bestModel) bestModel = autoModelRouting ? selectBestModel(availableModels, taskAnalysis) : (availableModels[0] ?? null);
+        if (!bestModel) bestModel = autoModelRouting ? pickBest(availableModels) : (availableModels[0] ?? null);
       } catch { /* 读取失败则回退自动选择 */ }
       bestModel = bestModel ?? selectBestModel(availableModels, taskAnalysis);
 
@@ -3660,6 +3816,48 @@ ${rows.join('\n')}
       }
     }
 
+    // ============================================================
+    // 即时命名（发出即命名，0 token 规则层）：用户发出首条消息的瞬间，先用规则从消息里
+    // 提取标题落盘（rename_title），让节点立刻有名字——长任务期间不再一直显示 "AI Chat"。
+    // 触发条件：非续写 + 标题仍为默认占位 + 节点文件已存在 + 首条对话（无历史 user 消息）。
+    // 回答结束后若主模型给出 <!-- TITLE --> 注释，下方 refine 会用更优标题替换它。
+    // ============================================================
+    if (
+      !isContinuation
+      && data.title === 'AI Chat'
+      && typeof data.nodeMdId === 'string'
+      && !messages.some((m) => !m.system && m.role === 'user')
+      && userInput.trim()
+    ) {
+      const instantTitle = deriveInstantTitle(userInput);
+      if (instantTitle) {
+        try {
+          const instantResp = await fetch('/api/nodes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(withProjectId({
+              action: 'rename_title',
+              node_id: currentMdId,
+              new_title: instantTitle,
+            })),
+          });
+          const instantData = await instantResp.json();
+          if (instantData.success && instantData.title && mountedRef.current) {
+            instantNamed = true;
+            setNodes((nds) =>
+              nds.map((n) =>
+                n.id === id
+                  ? { ...n, data: { ...n.data, title: instantData.title } }
+                  : n,
+              ),
+            );
+          }
+        } catch {
+          // 即时命名失败不影响主流程：标题保持占位，回答结束后仍走下方 refine 兜底
+        }
+      }
+    }
+
     try {
       // fetchWithServerRecovery：网络层失败（Failed to fetch）时探活等待本地服务
       // 恢复后重发一次，避免长时间闲置后一次性连接失败直接报错
@@ -3717,10 +3915,13 @@ ${rows.join('\n')}
                   // 缓存头指纹（pi-reasonix）：与上一个任务对比，变化即前缀缓存必然失效（归因诊断）
                   if (typeof parsed.prefixHash === 'string' && parsed.prefixHash) {
                     const prevHash = lastPrefixHashRef.current;
-                    setPrefixChangedByMsg((p) => ({ ...p, [assistantId]: !!prevHash && prevHash !== parsed.prefixHash }));
+                    if (prevHash && prevHash !== parsed.prefixHash) {
+                      setPrefixChangedByMsg((p) => ({ ...p, [assistantId]: true }));
+                    }
                     lastPrefixHashRef.current = parsed.prefixHash;
                     setPrefixHashByMsg((p) => ({ ...p, [assistantId]: parsed.prefixHash }));
                   }
+                  applyPrefixSegments(assistantId, parsed.prefixSegments as Record<string, unknown> | undefined);
                 }
               }
               if (parsed.reasoning) {
@@ -3790,15 +3991,15 @@ ${rows.join('\n')}
                 };
                 void (async () => {
                   const raw = cf.arguments ? JSON.stringify(cf.arguments, null, 2) : '{}';
-                  const paramText = raw.length > 600 ? `${raw.slice(0, 600)}\n…(已截断)` : raw;
+                  const paramText = raw.length > 600 ? `${raw.slice(0, 600)}\n…(truncated)` : raw;
                   // 提醒用户：桌面通知（Electron IPC / web 浏览器 Notification）+ 本节点呼吸灯
                   setConfirmPending(true);
                   notifyToolConfirm(cf.name, cf.timeoutSec);
                   const approved = await confirmAsk({
-                    title: `工具「${cf.name}」需要确认`,
-                    message: `该工具在「需手动确认名单」中，经你确认后才会真正执行（${Math.ceil((cf.timeoutSec ?? 600) / 60)} 分钟内未操作将自动跳过，不会执行）。\n\n参数：\n${paramText}`,
-                    confirmLabel: '允许执行',
-                    cancelLabel: '拒绝',
+                    title: `Tool "${cf.name}" needs confirmation`,
+                    message: `This tool is on the manual-confirm list and will only run after you approve it (auto-skipped without execution if no action within ${Math.ceil((cf.timeoutSec ?? 600) / 60)} min).\n\nParams:\n${paramText}`,
+                    confirmLabel: 'Allow',
+                    cancelLabel: 'Deny',
                     anchor: inputAnchor(),
                   }).catch(() => false);
                   try {
@@ -3836,7 +4037,7 @@ ${rows.join('\n')}
                 };
                 setQuestionPopup({ questions: qr.questions, requestId: qr.requestId, timeoutSec: qr.timeoutSec });
                 setQuestionTitleFlash(true);
-                notifyUserInput('BobWork：需要你的回答', `AI 提出了 ${qr.questions.length} 个问题，请在 ${Math.ceil((qr.timeoutSec ?? 600) / 60)} 分钟内作答，超时将按未回答继续。`);
+                notifyUserInput('BobWork: Your answer is needed', `AI asked ${qr.questions.length} question${qr.questions.length > 1 ? 's' : ''}. Answer within ${Math.ceil((qr.timeoutSec ?? 600) / 60)} min — it will continue unanswered when time runs out.`);
               }
               if (parsed.login_required) {
                 // browser.login（BobWork 模式）：弹出登录窗输入账号密码。
@@ -3853,7 +4054,7 @@ ${rows.join('\n')}
                   url: lr.url || '',
                   timeoutSec: lr.timeoutSec,
                 });
-                notifyUserInput('BobWork：需要登录', `请在弹窗中输入 ${lr.siteName || '该站点'} 的账号密码。`);
+                notifyUserInput('BobWork: Login required', `Enter the username and password for ${lr.siteName || 'this site'} in the popup.`);
               }
               if (parsed.tool_call_update) {
                 const up = parsed.tool_call_update as { name: string; phase?: 'running' | 'done' | 'error'; spanId?: string; startAt?: number };
@@ -4072,10 +4273,13 @@ ${rows.join('\n')}
                     // 缓存头指纹（done 最终值，与 start 一致；幂等更新）
                     if (typeof parsed.prefixHash === 'string' && parsed.prefixHash) {
                       const prevHash = lastPrefixHashRef.current;
-                      setPrefixChangedByMsg((p) => ({ ...p, [assistantId]: !!prevHash && prevHash !== parsed.prefixHash }));
+                      if (prevHash && prevHash !== parsed.prefixHash) {
+                        setPrefixChangedByMsg((p) => ({ ...p, [assistantId]: true }));
+                      }
                       lastPrefixHashRef.current = parsed.prefixHash;
                       setPrefixHashByMsg((p) => ({ ...p, [assistantId]: parsed.prefixHash }));
                     }
+                    applyPrefixSegments(assistantId, parsed.prefixSegments as Record<string, unknown> | undefined);
                   }
                 }
               }
@@ -4213,6 +4417,18 @@ ${rows.join('\n')}
               : n,
           ),
         );
+
+        // 界面产物自动进预览：本轮流式完成后，若有 .html 交付产物，自动在右侧预览面板打开
+        // （CanvasFlow 订阅 file.open 事件统一开 Tab；同路径幂等——已打开则只聚焦，避免重复建 Tab）
+        if (assistantContent && !assistantContent.startsWith('Error:')) {
+          for (const f of outputFileItems) {
+            const norm = f.path.replace(/\\/g, '/');
+            if (!/\.html?$/i.test(norm)) continue;
+            const name = norm.split('/').pop() || 'page.html';
+            const source = norm.startsWith('~/') || norm.startsWith('/') ? 'local' : 'project';
+            bus.publish(BusEvents.fileOpen, { source, path: norm, name });
+          }
+        }
 
         // 漂移清洗兜底：模型若无视工具约定在正文输出旧版 QUESTIONS 注释块，
         // 仅剥块防 JSON 裸露（同步更新内存与落盘内容），不再弹窗——结构化提问统一走 ask_user_questions 工具
@@ -4449,9 +4665,14 @@ ${rows.join('\n')}
           //    续写模式跳过：标题已在首轮设置过
           if (appendSuccess && !isContinuation && data.title === 'AI Chat') {
             // 标题来源优先级：1) 模型输出的 TITLE 注释  2) 用户首条消息截断
-            const finalTitle = (suggestedTitle && suggestedTitle.length > 2 && suggestedTitle.length <= 50)
+            // 若发送瞬间已即时命名成功（instantNamed）且模型未给出 TITLE 注释，
+            // 则保留即时标题，不再用首条消息截断降级覆盖（即时标题已剥离祈使前缀、更精炼）。
+            const hasSuggested = !!(suggestedTitle && suggestedTitle.length > 2 && suggestedTitle.length <= 50);
+            const finalTitle = hasSuggested
               ? suggestedTitle
-              : userInput.replace(/\n/g, ' ').trim().slice(0, 20) || null;
+              : (instantNamed
+                  ? null
+                  : userInput.replace(/\n/g, ' ').trim().slice(0, 20) || null);
 
             if (finalTitle) {
               try {
@@ -4991,6 +5212,8 @@ ${rows.join('\n')}
           const msgStats = statsByMsg[msg.id];
           const msgPrefixHash = prefixHashByMsg[msg.id];
           const msgPrefixChanged = !!prefixChangedByMsg[msg.id];
+          const msgPrefixSegs = prefixSegsByMsg[msg.id];
+          const msgPrefixSegChanged = prefixSegChangedByMsg[msg.id];
           // 对话视图是否展示紧凑「执行过程」摘要（思考 / 工具 / 技能任一存在即可）
           const hasInlineTrace = msg.role === 'assistant'
             && ((msg.toolCalls?.length ?? 0) > 0
@@ -5152,9 +5375,25 @@ ${rows.join('\n')}
                           <span
                             className="opacity-80"
                             style={msgPrefixChanged ? { color: 'var(--warning)' } : undefined}
-                            title={`cache head fingerprint (system + tools SHA-256)${msgPrefixChanged ? '\n⚠ differs from previous task → prefix cache invalidated, this task billed at full price' : '\nstable since previous task → prefix cache can hit'}`}
+                            title={(() => {
+                              if (!msgPrefixChanged) return '缓存头指纹稳定：与上一任务前缀一致，前缀缓存可命中';
+                              const segC = msgPrefixSegChanged;
+                              const drift: string[] = [];
+                              if (segC?.tools) drift.push('tools 工具集变化（MCP 增删/技能激活）');
+                              if (segC?.toolsByte && !segC.tools) drift.push('tools 发送顺序漂移');
+                              if (segC?.history) drift.push('history 历史段变化（裁剪/折叠/新对话）');
+                              const hint = drift.length > 0 ? drift.join('；') : 'system 段变化';
+                              return `⚠ 缓存头已变化（vs 上一任务）→ 前缀缓存失效，本轮按全价计费\n${hint}`;
+                            })()}
                           >
                             · head {msgPrefixHash.slice(0, 8)}
+                          </span>
+                        )}
+                        {msgPrefixSegs && msgPrefixChanged && msgPrefixSegChanged && (
+                          <span className="opacity-80" style={{ color: 'var(--warning)' }}>
+                            {msgPrefixSegChanged.tools ? ` tools+` : ''}
+                            {msgPrefixSegChanged.toolsByte && !msgPrefixSegChanged.tools ? ' order+' : ''}
+                            {msgPrefixSegChanged.history ? ' history+' : ''}
                           </span>
                         )}
                         {msgStats && msgStats.durationMs > 0 && (
@@ -5520,6 +5759,7 @@ ${rows.join('\n')}
 
   const inputInner = (
       <div
+        ref={inputBoxRef}
         className={cn(
           'nodrag relative mx-auto mb-3 flex w-full flex-col rounded-2xl p-2 pb-1.5 transition-all',
           dragOver && 'ring-2',
@@ -7198,15 +7438,41 @@ ${rows.join('\n')}
         )}
       </div>
       </div>
-      {/* 底部输入框：空态已由中部欢迎区承载输入框，仅在已有对话内容时于底部展示；空态不再重复渲染 */}
+      {/* 底部输入框：空态已由中部欢迎区承载输入框，仅在已有对话内容时于底部展示；空态不再重复渲染。
+          提问卡活跃（未最小化）时以停靠卡片替代输入框占位，不遮挡正文；用 display 切换而非条件卸载，
+          保证最小化↔恢复往返时组件实例与已作答内容不丢失 */}
       {messages.length > 0 && (
         <div className="w-full min-w-0 px-7">
-          {inputInner}
+          <div
+            className="mx-auto"
+            style={{
+              display: questionPopup && !questionPopup.minimized ? 'block' : 'none',
+              // 与输入框同宽（inputInner 对话态 maxWidth 800px）：停靠提问卡替换输入框时左右边缘对齐
+              maxWidth: messages.length === 0 ? 'min(100%, 728px)' : 'min(100%, 800px)',
+            }}
+          >
+            {questionPopup && (
+              <QuestionPopup
+                docked
+                questions={questionPopup.questions}
+                timeoutSec={questionPopup.timeoutSec}
+                minimized={questionPopup.minimized}
+                onSubmit={handleQuestionSubmit}
+                onClose={handleQuestionMinimize}
+                onSkip={handleQuestionSkip}
+                onRestore={handleQuestionRestore}
+                onExpire={handleQuestionExpire}
+              />
+            )}
+          </div>
+          <div style={{ display: questionPopup && !questionPopup.minimized ? 'none' : 'block' }}>
+            {inputInner}
+          </div>
         </div>
       )}
 
-      {/* 提问弹窗（翻页式；关闭=最小化为悬浮胶囊，显式跳过才放弃） */}
-      {questionPopup && (
+      {/* 提问弹窗（仅空态回退为全屏居中形态；对话态已由底部停靠卡片承载；胶囊分支内部自行 portal） */}
+      {questionPopup && messages.length === 0 && (
         <QuestionPopup
           questions={questionPopup.questions}
           timeoutSec={questionPopup.timeoutSec}
@@ -7230,9 +7496,13 @@ ${rows.join('\n')}
         />
       )}
 
-      {/* Planner 结构化确认卡片（创建/修改/删除排程） */}
+      {/* Planner 结构化确认卡片（创建/修改/删除排程）；锚定输入框上方 + 透明遮罩，不遮挡正文 */}
       {plannerConfirm && (
-        <PlannerConfirmModal pending={plannerConfirm} onClose={() => setPlannerConfirm(null)} />
+        <PlannerConfirmModal
+          pending={plannerConfirm}
+          anchor={plannerAnchor}
+          onClose={() => setPlannerConfirm(null)}
+        />
       )}
 
       {/* 删除确认弹窗 */}
@@ -7269,8 +7539,8 @@ function sendDesktopNotification(title: string, body: string, tag?: string) {
 /** 工具确认桌面通知 */
 function notifyToolConfirm(toolName: string, timeoutSec?: number) {
   sendDesktopNotification(
-    'BobWork：需要你的确认',
-    `工具「${toolName}」在需手动确认名单中，请在应用内选择「允许执行」或「拒绝」（${Math.ceil((timeoutSec ?? 600) / 60)} 分钟内未操作将自动跳过）。`,
+    'BobWork: Confirmation needed',
+    `Tool "${toolName}" is on the manual-confirm list. Choose "Allow" or "Deny" in the app (auto-skipped if no action within ${Math.ceil((timeoutSec ?? 600) / 60)} min).`,
     'bob-tool-confirm',
   );
 }
