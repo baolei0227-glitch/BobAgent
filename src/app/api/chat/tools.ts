@@ -7204,9 +7204,19 @@ const BUILTIN_LAYER: Record<string, ToolLayer> = {
   delete_preference: 'ondemand', draw: 'ondemand',
 };
 
-/** 查询内置工具分层（供排序/过滤用；未标注默认 core） */
+/** 查询内置工具分层（供排序/过滤用）：
+ *  判定顺序：BUILTIN_LAYER 显式标注优先；其次若工具在 SCENED_TOOLS 有场景门控
+ *  （专属工具，场景激活才注入）→ 归 ondemand；否则默认 core（通用工具每轮常驻）。
+ *  2026-09-09 修复：此前 SCENED_TOOLS 门控但未显式标 ondemand 的内置工具（planner/
+ *  wanted/todo 系如 query_todos、create_scheduled_todo、project_plan_* 等）被默认归 core，
+ *  落入「常驻锚点段」——它们随画像/场景切换增减时既破坏 core 段前缀连续性（缓存整段失效），
+ *  又被 CacheGuard 豁免判定误判为异常漂移。现按「场景门控即动态」统一归 ondemand：core 段
+ *  只剩真正每轮常驻的通用工具，锚点字节更稳；场景工具增减只影响尾段。 */
 export function getToolLayer(name: string): ToolLayer {
-  return BUILTIN_LAYER[name] ?? 'core';
+  const explicit = BUILTIN_LAYER[name];
+  if (explicit) return explicit;
+  if (name in SCENED_TOOLS) return 'ondemand';
+  return 'core';
 }
 
 /** 判定工具来源：route.ts 排序按来源分段（内置最前、MCP 最后），
