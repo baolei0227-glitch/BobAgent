@@ -78,6 +78,7 @@ import { Button } from '@/components/ui/button';
 import { MermaidCodeBlock } from './extensions/MermaidCodeBlock';
 import { CollapsibleHeading } from './extensions/CollapsibleHeading';
 import { MdEmbed } from './extensions/MdEmbed';
+import { LinkCard } from './extensions/LinkCard';
 import { bus, BusEvents } from '@/lib/bus';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { extractQuestionnaires, QuestionnairePanel, type QuestionnaireBlock } from './QuestionnairePanel';
@@ -1207,6 +1208,8 @@ export function DocEditor({
       MermaidCodeBlock.configure({ lowlight }),
       // 文档嵌入：`![[路径]]` → 嵌入卡片（markdown 双向序列化见扩展内）
       MdEmbed,
+      // 链接卡片：独占一行的裸链接 → 卡片（markdown 仍为 `[url](url)`，元数据异步抓取）
+      LinkCard,
       // 多栏容器 MVP：bobColumns + bobColumn（自定 markdown fence 往返，见扩展内 addStorage）
       BobColumn,
       BobColumns,
@@ -3280,6 +3283,128 @@ export function DocEditor({
           animation: embed-spin 1s linear infinite;
         }
         @keyframes embed-spin { to { transform: rotate(360deg); } }
+        /* 链接卡片（LinkCard NodeView）：独占一行的裸链接，元数据异步抓取，失败降级为普通链接 */
+        .doc-editor-content .link-card {
+          display: flex;
+          align-items: stretch;
+          gap: 10px;
+          margin: 8px 0;
+          padding: 8px 10px;
+          border: 1px solid var(--line-soft);
+          border-radius: 8px;
+          background: color-mix(in oklab, var(--ink) 2%, var(--paper));
+          user-select: none;
+          overflow: hidden;
+          transition: border-color 120ms ease, box-shadow 120ms ease;
+        }
+        .doc-editor-content .link-card:hover {
+          border-color: color-mix(in oklab, var(--primary) 45%, var(--line-soft));
+          box-shadow: 0 2px 8px color-mix(in oklab, var(--primary) 12%, transparent);
+        }
+        .doc-editor-content .link-card.is-loading {
+          opacity: 0.75;
+        }
+        .doc-editor-content .link-card .link-card-main {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          min-width: 0;
+          flex: 1;
+          cursor: pointer;
+        }
+        .doc-editor-content .link-card .link-card-icon {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          border-radius: 6px;
+          background: color-mix(in oklab, var(--ink) 6%, transparent);
+          flex: none;
+          overflow: hidden;
+        }
+        .doc-editor-content .link-card .link-card-icon img {
+          width: 18px;
+          height: 18px;
+          object-fit: contain;
+        }
+        .doc-editor-content .link-card .link-card-globe,
+        .doc-editor-content .link-card .link-card-spin {
+          width: 15px;
+          height: 15px;
+          color: var(--ink-muted);
+          flex: none;
+        }
+        .doc-editor-content .link-card .link-card-spin {
+          animation: embed-spin 1s linear infinite;
+        }
+        .doc-editor-content .link-card .link-card-text {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          min-width: 0;
+          flex: 1;
+        }
+        .doc-editor-content .link-card .link-card-title {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--ink);
+          line-height: 1.35;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .doc-editor-content .link-card .link-card-desc {
+          font-size: 11.5px;
+          color: var(--ink-muted);
+          line-height: 1.5;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .doc-editor-content .link-card .link-card-site {
+          font-size: 10px;
+          color: var(--ink-muted);
+          line-height: 1.2;
+          opacity: 0.85;
+        }
+        .doc-editor-content .link-card .link-card-open {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 24px;
+          flex: none;
+          color: var(--ink-muted);
+          opacity: 0;
+          transition: opacity 120ms ease, color 120ms ease;
+        }
+        .doc-editor-content .link-card:hover .link-card-open {
+          opacity: 1;
+        }
+        .doc-editor-content .link-card .link-card-open-icon {
+          width: 13px;
+          height: 13px;
+        }
+        .doc-editor-content .link-card .link-card-thumb {
+          display: inline-flex;
+          width: 72px;
+          align-self: stretch;
+          flex: none;
+          border-radius: 6px;
+          overflow: hidden;
+          background: color-mix(in oklab, var(--ink) 5%, transparent);
+        }
+        .doc-editor-content .link-card .link-card-thumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          display: block;
+        }
+        /* 抓取失败降级：与普通链接表现一致 */
+        .doc-editor-content .link-card-fallback {
+          margin: 8px 0;
+        }
         .doc-editor-content ul[data-type="taskList"] li {
           display: flex;
           align-items: flex-start;
@@ -3391,7 +3516,7 @@ export function DocEditor({
             display: block !important;
             padding: 24px;
             color: #111 !important;
-            font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
+            font-family: "Times New Roman", Times, 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', 'Liberation Serif', serif;
             font-size: 14px;
             line-height: 1.75;
           }
@@ -3667,11 +3792,18 @@ export function DocEditor({
           background: color-mix(in oklab, var(--primary) 10%, transparent);
         }
         .bob-columns-body {
+          display: block;
+        }
+        /* Tiptap v3 会在 [data-node-view-content] 内部再注入一层 contentDOM（div[data-node-view-content-react]），
+           各栏其实是这一层的子节点。flex 布局必须落在注入层上：若加在 .bob-columns-body 上，
+           注入层会成为唯一 flex 项、宽度按内容塌缩为 0，整块分栏退化成只剩工具条。
+           用 :not([data-bob-column]) 精确选中注入层（同时兼容无注入层的实现）。 */
+        .bob-columns-body > div:not([data-bob-column]) {
           display: flex;
           align-items: stretch;
           gap: 12px;
         }
-        .bob-columns-body > [data-bob-column] {
+        .bob-columns-body [data-bob-column] {
           flex: 1 1 0;
           min-width: 0;
           border: 1px solid var(--line);
@@ -3679,7 +3811,7 @@ export function DocEditor({
           padding: 6px 10px;
           background: color-mix(in oklab, var(--paper-soft) 45%, transparent);
         }
-        .bob-columns-body > [data-bob-column] > p:first-child {
+        .bob-columns-body [data-bob-column] > p:first-child {
           margin-top: 0;
         }
       `}</style>

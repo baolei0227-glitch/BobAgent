@@ -43,13 +43,14 @@ import { UsagePanel } from './UsagePanel';
 import { ToggleSwitch } from './ToggleSwitch';
 import {
   DEFAULT_NAMING,
-  ORDER_OPTIONS,
   PAD_OPTIONS,
   SEPARATOR_OPTIONS,
+  SLOTS,
   SLOT_LABELS,
   isDefaultNaming,
   normalizeNaming,
   previewName,
+  setSlotAt,
   todayStamp,
   type NameSlot,
   type NamingRule,
@@ -2626,26 +2627,28 @@ export function SettingsModal({
             <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Naming Rule</h4>
             <div className="mt-3 space-y-3">
               <div className="flex items-center justify-between gap-4">
-                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>字段顺序</span>
-                <select
-                  value={fileOrgNaming.order.join(',')}
-                  onChange={(e) => {
-                    const order = e.target.value.split(',') as NameSlot[];
-                    setFileOrgNaming((n) => ({ ...n, order }));
-                  }}
-                  className="rounded-lg border bg-transparent px-2 py-1.5 text-xs outline-none"
-                  style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
-                >
-                  {ORDER_OPTIONS.map((o) => (
-                    <option key={o.join(',')} value={o.join(',')}>
-                      {o.map((s) => SLOT_LABELS[s]).join(' + ')}
-                    </option>
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>Field Order</span>
+                <div className="flex items-center gap-1.5">
+                  {fileOrgNaming.order.map((slot, i) => (
+                    <select
+                      key={i}
+                      value={slot}
+                      onChange={(e) =>
+                        setFileOrgNaming((n) => ({ ...n, order: setSlotAt(n.order, i, e.target.value as NameSlot) }))
+                      }
+                      className="rounded-lg border bg-transparent px-2 py-1.5 text-xs outline-none"
+                      style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+                    >
+                      {SLOTS.map((s) => (
+                        <option key={s} value={s}>{SLOT_LABELS[s]}</option>
+                      ))}
+                    </select>
                   ))}
-                </select>
+                </div>
               </div>
 
               <div className="flex items-center justify-between gap-4">
-                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>分隔符</span>
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>Separator</span>
                 <select
                   value={fileOrgNaming.separator}
                   onChange={(e) => setFileOrgNaming((n) => ({ ...n, separator: e.target.value }))}
@@ -2654,14 +2657,14 @@ export function SettingsModal({
                 >
                   {SEPARATOR_OPTIONS.map((s) => (
                     <option key={s || 'none'} value={s}>
-                      {s === '' ? '无' : s === ' ' ? '空格' : s}
+                      {s === '' ? 'None' : s === ' ' ? 'Space' : s}
                     </option>
                   ))}
                 </select>
               </div>
 
               <div className="flex items-center justify-between gap-4">
-                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>版本号</span>
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>Version</span>
                 <select
                   value={String(fileOrgNaming.padVersion)}
                   onChange={(e) => setFileOrgNaming((n) => ({ ...n, padVersion: Number(e.target.value) }))}
@@ -2675,16 +2678,35 @@ export function SettingsModal({
               </div>
             </div>
 
-            {/* 所见即所得预览：用占位主题与当天日期拼一个示例名 */}
+            {/* 所见即所得预览：顺序 / 分隔符 / 版本号补零任一变化都立刻反映到下方结果 */}
             <div className="mt-3 rounded-lg px-3 py-2" style={{ backgroundColor: 'var(--paper-soft)' }}>
-              <span className="text-11" style={{ color: 'var(--ink-muted)' }}>预览</span>
-              <p className="mt-1 break-all font-mono text-xs" style={{ color: 'var(--ink-strong)' }}>
-                {previewName(fileOrgNaming, todayStamp())}
+              <span className="text-11" style={{ color: 'var(--ink-muted)' }}>Preview</span>
+
+              {/* 当前组合顺序（随下拉实时重排） */}
+              <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                {fileOrgNaming.order.map((slot, i) => (
+                  <span key={i} className="flex items-center gap-1">
+                    {i > 0 && (
+                      <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>+</span>
+                    )}
+                    <span
+                      className="rounded px-1.5 py-0.5 text-xs"
+                      style={{ backgroundColor: 'var(--paper)', border: '1px solid var(--line)', color: 'var(--ink-strong)' }}
+                    >
+                      {SLOT_LABELS[slot]}
+                    </span>
+                  </span>
+                ))}
+              </div>
+
+              {/* 组合后的文件名（用占位主题与当天日期实时拼出） */}
+              <p className="mt-2 break-all font-mono text-xs" style={{ color: 'var(--ink-strong)' }}>
+                {previewName(fileOrgNaming, todayStamp(), 'Lease Agreement')}
               </p>
             </div>
             {!isDefaultNaming(fileOrgNaming) && (
               <p className="mt-2 text-xs" style={{ color: 'var(--warn)' }}>
-                已偏离默认命名：此前按默认规则命名的同名主题文件不再计入版本号，会从 v01 重新开始。
+                Naming rule differs from the default: existing files named by the default rule no longer count toward version numbering, so numbering restarts at v01.
               </p>
             )}
           </div>

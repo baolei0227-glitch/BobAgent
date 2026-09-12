@@ -46,7 +46,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: [
       {
         modelId: 'deepseek-flash',
-        label: 'DeepSeek V4 Flash',
+        label: 'deepseek-flash',
         description: 'DeepSeek-V4.1-Flash · 1M Context · Agent & Coding',
         thinking: true,
         temperature: 1,
@@ -679,7 +679,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       },
       {
         modelId: 'deepseek-flash',
-        label: 'DeepSeek V4 Flash',
+        label: 'deepseek-flash',
         description: 'Agent Plan · 标准，1024k 超长上下文',
         thinking: true,
         temperature: 0.7,
@@ -765,7 +765,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       },
       {
         modelId: 'deepseek-flash',
-        label: 'DeepSeek V4 Flash',
+        label: 'deepseek-flash',
         description: 'Coding Plan · 标准，1024k 超长上下文',
         thinking: true,
         temperature: 0.7,

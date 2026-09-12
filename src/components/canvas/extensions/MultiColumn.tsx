@@ -41,7 +41,10 @@ export const BobColumn = Node.create({
     return [{ tag: 'div[data-bob-column]' }];
   },
   renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-bob-column': '' })];
+    // 末尾的 0 是 ProseMirror 的「内容孔洞」占位符，必须保留：
+    // 缺少它时 renderSpec 返回 contentDOM=undefined，prosemirror-view 会把该 div
+    // 设为 contenteditable=false 且不挂内容孔洞 → 栏内无法输入、子块也不渲染。
+    return ['div', mergeAttributes(HTMLAttributes, { 'data-bob-column': '' }), 0];
   },
 });
 
@@ -54,7 +57,8 @@ export const BobColumns = Node.create({
     return [{ tag: 'div[data-bob-columns]' }];
   },
   renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-bob-columns': '' })];
+    // 同上：0 为内容孔洞占位符（该节点走 React NodeView 渲染，但 getHTML/复制仍用 toDOM）
+    return ['div', mergeAttributes(HTMLAttributes, { 'data-bob-columns': '' }), 0];
   },
   addCommands() {
     return {
@@ -173,8 +177,8 @@ function BobColumnsView({ node, editor }: NodeViewProps) {
           ×
         </button>
       </div>
-      {/* NodeViewContent 自身即 .bob-columns-body（默认渲染为 div）：
-          直接作为各栏的父容器，保证 `.bob-columns-body > [data-bob-column]` 样式命中 */}
+      {/* NodeViewContent 渲染 .bob-columns-body，但 Tiptap v3 会在它内部再注入一层 contentDOM，
+          各栏是注入层的子节点。故 DocEditor 中的分栏 layout 样式作用在该注入层上（见 .bob-columns-body CSS）。 */}
       <NodeViewContent className="bob-columns-body" />
     </NodeViewWrapper>
   );

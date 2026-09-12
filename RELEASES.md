@@ -15,6 +15,54 @@
 ***
 ***
 
+## v0.5.401 (2026-09-12)
+
+### 优化
+
+* 模型选择器中 DeepSeek V4 Flash 的显示名统一改为 deepseek-flash（三处 preset 保持一致）
+* ⌘F 命令面板的功能图标行补上标星小程序快捷入口：与功能按钮同排展示、中间以竖线分隔，点击直接打开预览（功能入口自左侧栏迁回面板时遗漏此项）
+
+***
+
+## v0.5.400 (2026-09-12)
+
+### 新功能
+
+* 文档编辑器新增「链接卡片」：独占一行的裸链接渲染为卡片，异步抓取 og / twitter 元数据后展示站点图标、标题、描述与缩略图，抓取中显示域名占位、失败降级为普通链接；Markdown 源码仍为 [url](url)，不污染文档。新增 /api/link-preview 抓取接口（favicon 优先普通 icon 再 apple-touch-icon，og:image 绝对化，带超时与体积上限）
+
+### 优化
+
+* 全局字体改为衬线字体栈：--font-sans / --font-display 由 Apple 无衬线栈改为 Times New Roman 起头、宋体系（Songti SC / Source Han Serif SC / Noto Serif SC / SimSun）回落；分享页、Widget 渲染、屏幕 OCR 编辑器（含 canvas 文字）三处独立字体声明同步对齐。西文取 Times New Roman 而非 Georgia：后者默认旧式数字且不含 tnum，会让全 UI 的 tabular-nums 等宽对齐失效
+* 功能入口（Actions / Library / Tools / Mini Programs）自左侧栏迁回 ⌘F 面板，排在输入框下方，仅显图标、悬停提示名称；左侧栏移除按钮组与分割线，标星小程序并入该行
+* 文件自动整理命名默认形态改为「主题 + 版本号 + 日期」（如 房屋租赁合同v01_2026-09-12.pdf）；设置界面字段顺序由「六种全排列下拉」改为三个位置各自独立下拉，选中已占用字段时与其原位置互换，始终保证三字段各出现一次，标签改用英文（Field Order / Separator / Version）
+
+### 修复
+
+* 移除 globals.css 中写死的 body font-size: 14px：该裸样式输出顺序晚于 @layer base 的 html/body 字号，会把 body 钉死，导致界面文字不随字号档位缩放
+* 文件树保护系统目录：项目一级默认目录（homework / materials / attachments）与 homework 内系统目录（template、doc/sheet/slide/… 及旧版 Image 等）不再提供重命名 / 复制 / 删除，避免破坏产物结构
+* 重命名 homework 内文件或目录时同步迁移 homework/.ownership.json 归属清册（relFrom → relTo，目录按前缀整体迁移），归属不再因改名丢失
+* 文件树重命名失败改为显式提示（原为静默忽略，用户看不到失败原因）
+* 修正多栏扩展注释说明：Tiptap v3 会在 .bob-columns-body 内再注入一层 contentDOM，分栏 layout 样式作用于该注入层
+
+***
+
+## v0.5.399 (2026-09-12)
+
+### 新功能与优化
+
+* 文件自动整理命名规则可配置：新增 naming-rule.ts（纯函数、零依赖，设置界面与 organize CLI 共用同一实现），支持字段顺序（版本号 / 主题 / 日期）× 分隔符（下划线 / 连字符 / 空格 / 无）× 版本号补零位数；拼名与反解共用同一规则，改规则后版本累加仍有效
+* 字号类名全量统一为 Tailwind 短类（text-9 / text-10 / text-11，新增 text-31 刻度），`text-[Npx]` 任意值写法清零，覆盖 20 余个组件；样式不变，但类名可被 Tailwind 正常生成与排序
+* Draft 全局草稿改「做旧稿纸」配色：极淡暖米底 #f8f4e8 + 152° 微弱做旧渐变 + 暖褐描边，替代原冷灰底，在冷灰画布上透出一张旧稿纸
+* 分享卡改为无边框样式：去掉品牌色细边框、圆角、阴影与顶部横幅，只保留品牌头 + 问答 + 水印
+* 小红书卡移除批量保存下拉菜单，保存收敛到单一入口
+* 欢迎窗口图标资源更新
+
+### 修复
+
+* 修复本地文件面板「发送到当前节点」始终无目标：活跃节点 ref 改由 CanvasFlow 统一下发，与右侧文件面板共用同一份，并随焦点变化同步写入；原实现仅在画布点击时赋值，而点进节点输入栏的 click 被 stopPropagation 拦截，导致该功能不可用
+
+***
+
 ## v0.5.398 (2026-09-12)
 
 ### 新功能与优化

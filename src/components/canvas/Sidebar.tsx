@@ -1,13 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Folder,
   FolderOpen,
   Plus,
   Trash,
-  RefreshCw,
   FileText,
   FolderPlus,
   Upload,
@@ -24,6 +23,7 @@ import {
   MoreHorizontal,
   MoreVertical,
   Copy,
+  Share2,
   ChevronDown,
 } from 'lucide-react';
 import { WantedNoticeCenter } from './WantedNoticeCenter';
@@ -31,6 +31,7 @@ import { SkillManagerModal } from './SkillManagerModal';
 import { TrashDialog } from './TrashDialog';
 import { ProjectActivityLog } from './ProjectActivityLog';
 import { bus, BusEvents } from '@/lib/bus';
+import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { loadSettings, applyCustomTheme, applyFontScale } from '@/lib/settings';
 import type { MessageAttachment } from '@/lib/types';
@@ -82,6 +83,19 @@ const LEVEL_INDENT_CAP = 3; // 缩进封顶级数（更深层级不再右移）
 const levelIndent = (level: number) => Math.min(Math.max(level, 0), LEVEL_INDENT_CAP) * LEVEL_INDENT_STEP;
 /** Workspace 浮层最小宽度（保证 Finder 列式浏览可读） */
 const WORKSPACE_MIN_WIDTH = 560;
+/** 项目一级默认目录（homework / materials / attachments）：不提供重命名 / 复制 / 删除 */
+const DEFAULT_ROOT_DIRS = new Set(['homework', 'materials', 'attachments']);
+/** homework 内的系统目录：Image 为旧版图片产物目录，template 为模板填充工作区，
+ *  doc/sheet/slide/pdf/image/text/code/other 为旧版 kind 目录。不提供重命名 / 复制 / 删除。
+ *  隐藏系统目录（.ai-workspace/.crops/.evidence/.unpacks）以 . 开头，不会出现在文件树中。 */
+const HOMEWORK_SYSTEM_DIRS = new Set(['Image', 'image', 'template', 'doc', 'sheet', 'slide', 'pdf', 'text', 'code', 'other']);
+/** 路径是否位于 homework 的系统目录内（含其子目录，如 homework/template/set_000） */
+const isUnderHomeworkSystemDir = (rel: string): boolean => {
+  if (!rel.startsWith('homework/')) return false;
+  return HOMEWORK_SYSTEM_DIRS.has(rel.slice('homework/'.length).split('/')[0]);
+};
+/** 可否分享：分享链接仅支持 .md 文档（/api/share 服务端同样只接受 .md），文件夹不支持 */
+const isShareableDoc = (fileName: string, isDir: boolean): boolean => !isDir && /\.md$/i.test(fileName);
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -91,6 +105,8 @@ interface SidebarProps {
   onCollapsedChange?: (collapsed: boolean) => void;
   /** 发送文件到新建节点（由 CanvasFlow 提供，复用 LocalFileExplorer 的逻辑） */
   onCreateNodeWithFile?: (filePath: string, isDir: boolean) => Promise<{ nodeId: string; attachment: unknown } | null>;
+  /** 当前活跃节点（由 CanvasFlow 提供与本地文件面板共用的同一 ref），"发送到当前节点"据此判断可用性 */
+  activeNodeIdRef: RefObject<string | null>;
 }
 
 /** 文件图标映射：已知格式按映射显示，其余按真实扩展名显示（无扩展名兜底 FILE） */
@@ -148,7 +164,7 @@ function fileIcon(ext?: string): { color: string; label: string } {
   }
 }
 
-export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreateNodeWithFile }: SidebarProps) {
+export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreateNodeWithFile, activeNodeIdRef }: SidebarProps) {
   // 侧边栏仅保留浮层渲染（rail 视觉条已迁至 ⌘F 面板底部图标栏，2026-09-01）：
   // Workspace → 可拖动浮层（项目列表 + 文件树）
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -331,9 +347,9 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   // 重命名状态
   const [renaming, setRenaming] = useState<{ filePath: string; oldName: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
   const renameRef = useRef<HTMLInputElement>(null);
-  // 当前激活节点 ID（用于"发送到当前节点"）
-  const activeNodeIdRef = useRef<string | null>(null);
+  // 当前激活节点 ID（"发送到当前节点"）由 CanvasFlow 传入，与右侧本地文件面板共用同一 ref
   // 关闭右键菜单（点击任意位置）
   useEffect(() => {
     if (!ctxMenu) return;
@@ -416,9 +432,14 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       const data = await resp.json();
       if (data.success) {
         setRenaming(null);
+        setRenameError(null);
         if (currentId) loadProjectFilesRef.current?.(currentId);
+      } else {
+        setRenameError(data.error || '重命名失败');
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : '重命名失败');
+    }
   }, [renaming, renameValue, currentId]);
 
   // 删除文件/文件夹
@@ -736,12 +757,14 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     };
   }, [loadProjects]);
 
-  // Workspace 浮层打开时刷新当前项目文件树：关闭期间不接收 files-changed 推送，重开需拉取最新列表；
-  // 当前项目在右栏文件树恒为展开态，同时加入 expandedProjects 使其进入 SSE 文件变更刷新集合
+  // Workspace 浮层打开时刷新一次：关闭期间不接收 files-changed 推送，重开需拉取最新列表；
+  // 当前项目在右栏文件树恒为展开态，同时加入 expandedProjects 使其进入 SSE 文件变更刷新集合；
+  // 同步刷新「项目流水账」视图（logRefreshKey），保证文件/日志两个视图每次打开都是最新的
   useEffect(() => {
     if (workspaceOpen && currentId) {
       setExpandedProjects((prev) => (prev.has(currentId) ? prev : new Set(prev).add(currentId)));
       loadProjectFiles(currentId);
+      setLogRefreshKey((k) => k + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceOpen]);
@@ -1138,9 +1161,33 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     }
   }, [currentId]);
 
+  /** 分享文件（项目列式浏览 ⋮ 菜单）：生成局域网分享链接并复制到剪贴板（仅 .md 文档） */
+  const handleRowShare = useCallback(async (filePath: string, fileName: string, isDir: boolean) => {
+    setRowMenu(null);
+    if (!isShareableDoc(fileName, isDir)) {
+      showImageAiEditToast('Only Markdown documents can be shared', 'error');
+      return;
+    }
+    try {
+      const resp = await fetch('/api/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath, title: fileName }),
+      });
+      const data = await resp.json();
+      if (!data.success || !data.url) {
+        showImageAiEditToast(`Share failed: ${data.error ?? 'unknown'}`, 'error');
+        return;
+      }
+      await navigator.clipboard.writeText(data.url).catch(() => {});
+      showImageAiEditToast(`Share link copied: ${data.url}`);
+    } catch (err) {
+      showImageAiEditToast(`Share failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
+  }, []);
+
   /** 删除文件/文件夹（项目列式浏览 ⋮ 菜单）：按路径归属分流到对应后端清理逻辑 */
   const handleRowDelete = useCallback((menu: { filePath: string; fileName: string; isDir: boolean; rel: string }) => {
-    setRowMenu(null);
     const { filePath, fileName, isDir, rel } = menu;
     // homework：清理 .ownership.json 归属清册（根目录受保护）
     if (rel === 'homework') return;
@@ -1694,20 +1741,18 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                 );
               })}
             </div>
-            {/* 刷新当前项目文件列表 */}
-            {wsView === 'files' && currentId && (
-              <Button
-                type="button"
-                onClick={() => loadProjectFiles(currentId)}
-                variant="ghost"
-                tone="neutral"
-                size="icon-sm"
-                title="Refresh file list"
-                aria-label="Refresh file list"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${currentId && loadingFiles.has(currentId) ? 'animate-spin' : ''}`} />
-              </Button>
-            )}
+            {/* 回收站（2026-09-12 自左侧栏迁入，替代原刷新按钮）；打开 workspace 已自动刷新，无需手动刷新 */}
+            <Button
+              type="button"
+              onClick={() => window.dispatchEvent(new Event('trash-open'))}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Trash"
+              aria-label="Trash"
+            >
+              <Trash className="h-3.5 w-3.5" />
+            </Button>
             {/* 关闭浮层 */}
             <Button
               type="button"
@@ -1860,7 +1905,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                         )}
                                       </button>
                                     )}
-                                    {rowMenuButton(node, rel, true)}
+                                    {!DEFAULT_ROOT_DIRS.has(rel) && !isUnderHomeworkSystemDir(rel) && rowMenuButton(node, rel, true)}
                                   </div>
                                 );
                               }
@@ -2157,10 +2202,10 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         initialView="market"
       />
 
-      {/* 新建项目对话框 */}
-      {createDialogOpen && (
+      {/* 新建项目对话框（portal 到 body，避免被浮层祖先 z-40 stacking context 囚禁在画布 UI 层 z-[1500] 之下） */}
+      {createDialogOpen && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center"
+          className="fixed inset-0 z-[1600] flex items-center justify-center"
           style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
           onClick={() => !creating && setCreateDialogOpen(false)}
         >
@@ -2316,13 +2361,14 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {/* 编辑分类/标签对话框 */}
-      {editMetaProject && (
+      {/* 编辑分类/标签对话框（portal 到 body，避免被浮层祖先 z-40 stacking context 囚禁在画布 UI 层 z-[1500] 之下） */}
+      {editMetaProject && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center"
+          className="fixed inset-0 z-[1600] flex items-center justify-center"
           style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
           onClick={() => !savingMeta && setEditMetaProject(null)}
         >
@@ -2442,7 +2488,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* 节点回收站对话框 */}
@@ -2476,10 +2523,10 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         }}
       />
 
-      {/* 行内新建文件夹输入框 */}
-      {newFolderVisible && (
+      {/* 行内新建文件夹输入框（portal 到 body，避免被浮层祖先 z-40 stacking context 囚禁在画布 UI 层 z-[1500] 之下） */}
+      {newFolderVisible && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center"
+          className="fixed inset-0 z-[1600] flex items-center justify-center"
           style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
           onClick={() => setNewFolderVisible(false)}
         >
@@ -2543,13 +2590,14 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {/* 文件树右键菜单 */}
-      {ctxMenu && (
+      {/* 文件树右键菜单（portal 到 body，避免被浮层祖先 z-40 stacking context 囚禁在画布 UI 层 z-[1500] 之下） */}
+      {ctxMenu && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed z-[100] w-44 overflow-hidden rounded-xl shadow-2xl"
+          className="fixed z-[1600] w-44 overflow-hidden rounded-xl shadow-2xl"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 180),
             top: Math.min(ctxMenu.y, window.innerHeight - 220),
@@ -2587,6 +2635,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               setCtxMenu(null);
               setRenaming({ filePath: ctxMenu.filePath, oldName: ctxMenu.fileName });
               setRenameValue(ctxMenu.fileName);
+              setRenameError(null);
               setTimeout(() => renameRef.current?.focus(), 50);
             }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
@@ -2603,17 +2652,18 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
             <span className="flex-1">删除</span>
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {/* 列式浏览行 ⋮ 菜单（portal 到 body，避免被浮层 overflow-hidden 裁切） */}
+      {/* 列式浏览行 ⋮ 菜单（portal 到 body，避免被浮层 overflow-hidden 裁切；z-[1600] 需高于画布 UI 覆盖层 z-[1500] 否则点击被拦截） */}
       {rowMenu && typeof document !== 'undefined' && createPortal(
         <div
           data-row-menu
-          className="fixed z-[102] w-44 overflow-hidden rounded-xl shadow-2xl"
+          className="fixed z-[1600] w-44 overflow-hidden rounded-xl shadow-2xl"
           style={{
             left: Math.max(8, Math.min(rowMenu.x, window.innerWidth - 184)),
-            top: Math.min(rowMenu.y, window.innerHeight - 132),
+            top: Math.min(rowMenu.y, window.innerHeight - 168),
             border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
             backgroundColor: 'var(--popover)',
           }}
@@ -2624,6 +2674,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               setRowMenu(null);
               setRenaming({ filePath: rowMenu.filePath, oldName: rowMenu.fileName });
               setRenameValue(rowMenu.fileName);
+              setRenameError(null);
               setTimeout(() => renameRef.current?.focus(), 50);
             }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
@@ -2641,6 +2692,16 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             Copy
           </button>
           <button
+            onClick={() => handleRowShare(rowMenu.filePath, rowMenu.fileName, rowMenu.isDir)}
+            disabled={!isShareableDoc(rowMenu.fileName, rowMenu.isDir)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            style={{ color: isShareableDoc(rowMenu.fileName, rowMenu.isDir) ? 'var(--ink)' : 'var(--ink-muted)' }}
+            title={isShareableDoc(rowMenu.fileName, rowMenu.isDir) ? 'Copy a LAN share link to clipboard' : 'Only Markdown documents can be shared'}
+          >
+            <Share2 className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            Share
+          </button>
+          <button
             onClick={() => handleRowDelete(rowMenu)}
             disabled={rowMenu.rel === 'homework' || rowMenu.rel === 'materials'}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
@@ -2654,13 +2715,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         document.body,
       )}
 
-      {/* 重命名弹窗 */}
-      {renaming && (
+      {/* 重命名弹窗（portal 到 body：浮层祖先 z-40 会创建 stacking context，不 portal 会被画布 UI 层 z-[1500] 遮挡） */}
+      {renaming && typeof document !== 'undefined' && createPortal(
         <div
           data-ws-rename
-          className="fixed inset-0 z-[101] flex items-start justify-center pt-20"
+          className="fixed inset-0 z-[1600] flex items-start justify-center pt-20"
           style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
-          onClick={() => setRenaming(null)}
+          onClick={() => { setRenaming(null); setRenameError(null); }}
         >
           <div
             className="w-72 rounded-2xl p-4 shadow-2xl"
@@ -2674,10 +2735,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               ref={renameRef}
               type="text"
               value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
+              onChange={(e) => {
+                setRenameValue(e.target.value);
+                if (renameError) setRenameError(null);
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleRename();
-                if (e.key === 'Escape') setRenaming(null);
+                if (e.key === 'Escape') { setRenaming(null); setRenameError(null); }
               }}
               className="mb-3 w-full rounded-md border px-3 py-2 text-sm outline-none"
               style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
@@ -2691,12 +2755,17 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                 }
               }}
             />
+            {renameError && (
+              <p className="-mt-1 mb-3 text-xs" style={{ color: 'var(--destructive, #dc2626)' }}>
+                {renameError}
+              </p>
+            )}
             <div className="flex justify-end gap-2">
               <Button
                 variant="ghost"
                 tone="neutral"
                 size="sm"
-                onClick={() => setRenaming(null)}
+                onClick={() => { setRenaming(null); setRenameError(null); }}
               >
                 取消
               </Button>
@@ -2711,7 +2780,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

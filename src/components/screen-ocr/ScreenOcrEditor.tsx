@@ -121,7 +121,7 @@ function distToSegment(px: number, py: number, x1: number, y1: number, x2: numbe
 
 /** 命中检测：从后往前（后画的在上），返回命中的标注对象或 null */
 function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, py: number): Mark | null {
-  ctx.font = '600 16px -apple-system, "PingFang SC", sans-serif';
+  ctx.font = '600 16px "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif';
   ctx.textBaseline = 'top';
   for (let i = marks.length - 1; i >= 0; i--) {
     const m = marks[i];
@@ -259,7 +259,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     mc.height = canvas.height;
     const ctx = mc.getContext('2d')!;
     ctx.clearRect(0, 0, mc.width, mc.height);
-    ctx.font = '600 16px -apple-system, "PingFang SC", sans-serif';
+    ctx.font = '600 16px "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif';
     ctx.textBaseline = 'top';
     ctx.fillStyle = MARK_COLOR;
     const selId = selMarkIdRef.current;
@@ -1005,7 +1005,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
               fontSize: 16 * scale,
               fontWeight: 600,
               lineHeight: 1.3,
-              fontFamily: '-apple-system, "PingFang SC", sans-serif',
+              fontFamily: '"Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif',
               outline: 'none',
               resize: 'none',
               overflow: 'hidden',

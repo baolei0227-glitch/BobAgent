@@ -1367,7 +1367,13 @@ function CanvasFlowInner() {
     window.dispatchEvent(new CustomEvent('node-outcome-refresh', { detail: { node_id: srcMdId } }));
     return { ok: true };
   }, [confirmAsk, nodes]);
-  const lastActiveNodeIdRef = useRef<string | null>(null); // 当前活跃节点，用于全局文字选择
+  const lastActiveNodeIdRef = useRef<string | null>(null); // 当前活跃节点：文件面板"发送到当前节点"的投递目标
+  // 单焦点宿主下用户可见的会话即"当前节点"，随焦点同步写入 ref。
+  // 不能只依赖画布点击赋值：聚焦节点输入栏的 click 被 stopPropagation 拦截（见 ChatNodeKernel 输入栏），
+  // 用户点进输入框时并不会触发 onHostCanvasClick，导致"发送到当前节点"始终无目标。
+  useEffect(() => {
+    lastActiveNodeIdRef.current = focusedNodeId;
+  }, [focusedNodeId]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // 设置弹窗打开时聚焦的区块（由 open-settings 事件指定，如节点模型菜单 → 'chat'）
   const [settingsSection, setSettingsSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | undefined>(undefined);
@@ -1435,8 +1441,6 @@ function CanvasFlowInner() {
       setMdCreating(false);
     }
   };
-  // 标星小程序（与 SandboxPanel 共享数据源）：点击直接打开预览
-  const [starredApps, setStarredApps] = useStarredApps();
   // Draft：底部快捷发起（Chat 头像 + 可选名称 + 大输入框 → 在当前项目新建 Chat 会话自动执行）。
   // 草稿为全局持久状态（临时便签语义）：与项目无关，切换项目/关闭应用均不丢失，
   // 直到点击发送把内容送进"当前打开的项目"的新建会话（发送后仅清空草稿本体）。
@@ -1779,6 +1783,8 @@ function CanvasFlowInner() {
   }, [marketAgents]);
   const { appVersion, setAppVersion, updateStatus, setUpdateStatus, updateVersion, updateProgress, updateErrText } = useUpdateStatus();
   const [mailPending, setMailPending] = useMailPending();
+  // 标星小程序（与 SandboxPanel 共享数据源）：在 ⌘F 面板输入框下方与功能按钮同排展示，点击直接打开预览
+  const [starredApps] = useStarredApps();
   const [, setProviderConfigs] = useState<ProviderConfig[]>([]);
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
@@ -4216,7 +4222,7 @@ function CanvasFlowInner() {
     />
   );
 
-  // 原 ⌘F 底部栏固定功能按钮（迁入左侧边栏，icon+文字纵向排开）：Actions / Library / Tools
+  // 功能按钮（2026-09-12 从左侧栏迁回 ⌘F 面板）：渲染在 ⌘F 输入框下方，仅图标 + 悬停显示名称
   const navActions: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }> = [
     { key: 'store', label: 'Extensions Store', icon: <Sparkles className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('skill-store-open')) },
     { key: 'miniapps', label: 'Mini Programs', icon: <Boxes className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('sandbox-store-open')) },
@@ -4252,10 +4258,6 @@ function CanvasFlowInner() {
     { key: 'templates', label: 'Templates', onClick: () => window.dispatchEvent(new CustomEvent('open-template-panel', { detail: {} })) },
     { key: 'md', label: 'Markdown', onClick: () => void handleCreateSidebarMd(), disabled: mdCreating },
   ];
-  // 底部区细分割线（与既有窄栏风格一致）
-  const navDivider = (
-    <div className="mx-2 my-0.5" style={{ borderTop: '1px solid color-mix(in oklab, var(--line) 22%, transparent)' }} />
-  );
 
   return (
     <NodeReaderContext.Provider value={openReader}>
@@ -4325,70 +4327,48 @@ function CanvasFlowInner() {
             <div className="px-2 pb-0.5">
               <NavSearchBox />
             </div>
-            {/* 原 ⌘F 底部栏按钮（2026-09 迁入左栏）：icon + 文字，纵向排开；整体与项目名标题栏左侧对齐 */}
-            <div className="px-2">
-            {navDivider}
-            {navActions.map((act) =>
-              act.key === 'miniapps' ? (
-                /* Mini Programs 行尾嵌标星小程序图标（点击快速打开，不再占独立 Starred 区块） */
-                <div
-                  key={act.key}
-                  className="group flex w-full items-center rounded-lg py-0.5 pl-1.5 pr-0.5 transition-colors hover:bg-[var(--paper-hover)]"
-                >
-                  <button
-                    type="button"
-                    onClick={act.onClick}
-                    title={act.label}
-                    className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-13 font-medium disabled:cursor-default disabled:opacity-70"
-                    style={{ color: 'var(--ink-muted)' }}
-                  >
-                    {act.icon}
-                    <span className="min-w-0 flex-1 truncate">{act.label}</span>
-                  </button>
-                  {starredApps.length > 0 && (
-                    <div className="flex shrink-0 items-center gap-0.5">
-                      {starredApps.slice(0, 5).map((app) => (
-                        <button
-                          key={app.id}
-                          type="button"
-                          title={`${app.name} — open`}
-                          onClick={() =>
-                            window.dispatchEvent(new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }))
-                          }
-                          className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded bg-[var(--paper-soft)] text-9 font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
-                        >
-                          {app.name.charAt(0).toUpperCase()}
-                        </button>
-                      ))}
-                      {starredApps.length > 5 && (
-                        <button
-                          type="button"
-                          title="More starred apps — open store"
-                          onClick={() => window.dispatchEvent(new CustomEvent('sandbox-store-open'))}
-                          className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded text-9 font-medium transition-colors hover:brightness-95"
-                          style={{ backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)' }}
-                        >
-                          +{starredApps.length - 5}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ) : (
+            {/* 搜索框下方功能入口（2026-09-12）：原「项目下方工具条」除 Trash 外迁入此处，以图标+文字展示 */}
+            <div className="px-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setProjectBoardOpen(true)}
+                className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-13 font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)' }}
+              >
+                <LayoutGrid className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">Project board</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setLocalExplorerCollapsed((v) => !v)}
+                className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-13 font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)' }}
+              >
+                <Monitor className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">Local files</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void desktop.hippoBrowser.open()}
+                className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-13 font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)' }}
+              >
+                <Globe className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">Browser</span>
+              </button>
+              {quickTools.map((t) => (
                 <button
-                  key={act.key}
+                  key={t.key}
                   type="button"
-                  disabled={act.disabled}
-                  onClick={act.onClick}
-                  title={act.label}
+                  onClick={t.onClick}
+                  disabled={t.disabled}
                   className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-13 font-medium transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-default disabled:opacity-70"
                   style={{ color: 'var(--ink-muted)' }}
                 >
-                  {act.icon}
-                  <span className="min-w-0 flex-1 truncate">{act.label}</span>
+                  {quickToolIcon(t.key)}
+                  <span className="min-w-0 flex-1 truncate">{t.label}</span>
                 </button>
-              ),
-            )}
+              ))}
             </div>
             {/* 项目栏上方刻痕分隔（居中短痕，两端渐隐） */}
             <div aria-hidden className="flex justify-center pb-0.5 pt-2">
@@ -4411,19 +4391,6 @@ function CanvasFlowInner() {
                   </button>
                 </TooltipTrigger>
                 <TooltipContent side="right">Switch project</TooltipContent>
-              </Tooltip>
-              {/* 打开项目面板（移自项目下方工具行，置于新建项目按钮之前） */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => setProjectBoardOpen(true)}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                  >
-                    <LayoutGrid className="h-[13px] w-[13px] shrink-0" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top">Project board</TooltipContent>
               </Tooltip>
               {/* 新建项目（纯图标，位于新建会话按钮之前） */}
               <Tooltip>
@@ -4522,65 +4489,6 @@ function CanvasFlowInner() {
                   </>
                 )}
               </div>
-            </div>
-            {/* 快速工具（项目下方，仅图标）：Local files / Trash（右缘与项目栏对齐，悬停显示名称） */}
-            <div className="flex shrink-0 items-center gap-0 pl-[8.5px] pr-[8.5px] pb-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => setLocalExplorerCollapsed((v) => !v)}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                  >
-                    <Monitor className="h-[13px] w-[13px]" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Local files</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => window.dispatchEvent(new Event('trash-open'))}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                  >
-                    <Trash className="h-[13px] w-[13px]" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Trash</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => void desktop.hippoBrowser.open()}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                  >
-                    <Globe className="h-[13px] w-[13px]" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">Browser (⌘⇧B)</TooltipContent>
-              </Tooltip>
-              <span
-                className="mx-0.5 h-5 w-px shrink-0"
-                style={{ backgroundColor: 'color-mix(in oklab, var(--line) 30%, transparent)' }}
-              />
-              {quickTools.map((t) => (
-                <Tooltip key={t.key}>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={t.onClick}
-                      disabled={t.disabled}
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)] disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {quickToolIcon(t.key, 'h-[13px] w-[13px]')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">{t.label}</TooltipContent>
-                </Tooltip>
-              ))}
-
             </div>
             {/* 会话/任务树：链分组（含散落节点），点击切换到该节点（左内边距与项目图标对齐） */}
             <div className="min-h-0 flex-1 overflow-y-auto hide-scrollbar pl-[9.5px] pb-2 pr-1.5">
@@ -4824,12 +4732,14 @@ function CanvasFlowInner() {
               )}
             </div>
             {/* Draft（左侧栏最底部、品牌栏上方）：Chat 头像 + 可选名称 + 大输入框 → 新建 Chat 会话自动执行。
-                做旧纸笺配色：Draft 是"临时便签"性质的全局草稿，用低饱和旧米黄底色与正式会话输入区分 */}
+                做旧稿纸配色：Draft 是"临时便签"性质的全局草稿，用极淡暖米稿纸底 + 微弱做旧渐变，
+                与正式会话输入区分（冷灰画布上透出一张旧稿纸） */}
             <div
               className="mx-2 mb-1.5 mt-0.5 flex flex-col gap-1.5 rounded-lg border p-1.5"
               style={{
-                backgroundColor: 'var(--surface-muted)',
-                borderColor: 'var(--border)',
+                backgroundColor: '#f8f4e8',
+                backgroundImage: 'linear-gradient(152deg, rgba(255,255,255,0.55) 0%, rgba(198,172,112,0.09) 100%)',
+                borderColor: 'rgba(146,120,66,0.26)',
               }}
             >
               <div className="flex items-center gap-1.5">
@@ -5137,10 +5047,13 @@ function CanvasFlowInner() {
         />
 
         {/* ⌘F 统一面板：文件搜索 + WANTED 指令（原 GlobalSearch + TaskPanel）。
-            2026-09：底部图标栏按钮已全部迁入左侧边栏，⌘F 只保留搜索/指令输入 */}
+            2026-09-12：功能按钮（Extensions Store / Mini Programs / Agent Teams / Calendar / Bob Notes）
+            从左侧边栏迁回本面板，渲染在输入框下方，仅图标 + 悬停显示名称 */}
         <UnifiedPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}
+          actions={navActions}
+          starredApps={starredApps}
         />
 
         {/* 项目看板：全屏大视图（Workspace 标题看板按钮打开） */}
@@ -5196,6 +5109,7 @@ function CanvasFlowInner() {
             projectId={currentProjectId}
             onCollapsedChange={handleSidebarCollapsedChange}
             onCreateNodeWithFile={handleCreateNodeWithFile}
+            activeNodeIdRef={lastActiveNodeIdRef}
           />
         </div>
       </div>

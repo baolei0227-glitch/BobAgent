@@ -38,7 +38,7 @@ function buildPage(title: string, html: string): string {
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", Roboto, sans-serif;
+    font-family: "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif;
     font-size: 15px; line-height: 1.75; color: #1f2328;
     background: #f6f7f9;
   }

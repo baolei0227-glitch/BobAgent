@@ -357,6 +357,52 @@ function isHumanWritablePath(targetPath: string): boolean {
   return !protectedPaths.some(p => resolved === p || resolved.startsWith(p + sep));
 }
 
+/**
+ * 重命名后迁移 homework/.ownership.json 的归属条目（relFrom → relTo；目录按前缀整体迁移）。
+ * 仅在源与目标都位于某个项目的 homework/ 根内时生效；无清册或损坏时静默忽略。
+ */
+async function transferHomeworkOwnership(fromAbs: string, toAbs: string): Promise<void> {
+  const workspaceRoot = resolve(getProjectsDir());
+  // 从源路径的父目录向上找 homework 根（其父目录须位于 BobWorkspace 内，即 <project>/homework）
+  let dir = fromAbs.substring(0, fromAbs.lastIndexOf(sep));
+  let homeworkRoot: string | null = null;
+  while (dir.startsWith(workspaceRoot + sep)) {
+    if (dir.split(sep).pop() === 'homework') {
+      homeworkRoot = dir;
+      break;
+    }
+    const parent = dir.substring(0, dir.lastIndexOf(sep));
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (!homeworkRoot) return;
+  if (!(toAbs === homeworkRoot || toAbs.startsWith(homeworkRoot + sep))) return;
+
+  const relFrom = fromAbs.slice(homeworkRoot.length + 1);
+  const relTo = toAbs.slice(homeworkRoot.length + 1);
+  if (!relFrom || !relTo || relFrom.startsWith('.') || relTo.startsWith('.')) return;
+
+  const manifestPath = join(homeworkRoot, '.ownership.json');
+  try {
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as Record<string, string>;
+    const moves: Array<[string, string]> = [];
+    if (manifest[relFrom]) moves.push([relFrom, relTo]);
+    const prefix = `${relFrom}/`;
+    for (const key of Object.keys(manifest)) {
+      if (key.startsWith(prefix)) moves.push([key, `${relTo}/${key.slice(prefix.length)}`]);
+    }
+    if (moves.length === 0) return;
+
+    for (const [from, to] of moves) {
+      manifest[to] = manifest[from];
+      delete manifest[from];
+    }
+    const tmp = join(homeworkRoot, `.ownership.json.${process.pid}.${Date.now()}.tmp`);
+    await fs.writeFile(tmp, JSON.stringify(manifest, null, 2), 'utf-8');
+    await fs.rename(tmp, manifestPath);
+  } catch { /* 无清册或损坏时忽略 */ }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -393,6 +439,9 @@ export async function POST(request: NextRequest) {
       } catch { /* 目标不存在，可以 rename */ }
 
       await fs.rename(resolved, newPath);
+      // 归属清册维护：重命名项目 homework/ 内的文件时迁移 .ownership.json 条目，
+      // 否则该产物会丢失与原节点的归属关系（AI 的 rename_file 工具同样做归属转移）。
+      await transferHomeworkOwnership(resolved, newPath);
       return NextResponse.json({ success: true, newPath });
     }
 

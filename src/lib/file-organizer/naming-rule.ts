@@ -2,11 +2,11 @@
  * 命名规则 —— 纯函数、零依赖，设置界面与 tools/organize 共用同一份定义。
  *
  * 用户可在设置里按「受控选项」调整文件名形态：
- *   字段顺序（版本号 / 主题 / 日期的排列）× 分隔符（_ - 空格 无）× 版本号补零位数
+ *   字段顺序（主题 / 版本号 / 日期，三个位置各一个下拉，任选）× 分隔符（_ - 空格 无）× 版本号补零位数
  * 「拼名」与「反解」共用同一份规则：order 决定字段先后，其余选项只影响外观，
  * 因此无论怎么改都能从既有文件名读回「版本号 + 主题」，版本累加不会失效。
  *
- * 默认形态：v01房屋租赁合同_2026-09-12.pdf
+ * 默认形态：房屋租赁合同v01_2026-09-12.pdf
  *   版本号 = 同主题既有文件的最大序号 +1（新主题首份若文档自带版本标识则采纳）
  *   主题   = 模型输出，已清理非法字符
  *   日期   = 执行整理的当天（本地时区），由代码填
@@ -24,36 +24,39 @@ export interface NamingRule {
   padVersion: number;
 }
 
-/** 默认规则：与历史命名格式完全一致，保证老用户升级后产物名不变 */
+/** 默认规则：主题 + 版本号 + 日期 */
 export const DEFAULT_NAMING: NamingRule = {
-  order: ['version', 'topic', 'date'],
+  order: ['topic', 'version', 'date'],
   separator: '_',
   padVersion: 2,
 };
 
-/** 字段顺序可选值：六种全排列，默认项在首位 */
-export const ORDER_OPTIONS: NameSlot[][] = [
-  ['version', 'topic', 'date'],
-  ['topic', 'version', 'date'],
-  ['date', 'topic', 'version'],
-  ['date', 'version', 'topic'],
-  ['topic', 'date', 'version'],
-  ['version', 'date', 'topic'],
-];
+/** 三个字段的全集（设置界面每个位置的下拉选项） */
+export const SLOTS: NameSlot[] = ['version', 'topic', 'date'];
 
-/** 分隔符可选值（'' = 无分隔符，UI 上显示为「无」） */
+/** 把某个位置换成指定字段：该字段若已在别处，则与那个位置互换，始终保持三字段各一次 */
+export function setSlotAt(order: NameSlot[], index: number, slot: NameSlot): NameSlot[] {
+  const next = [...order];
+  const from = next.indexOf(slot);
+  if (from === -1) {
+    next[index] = slot;
+    return next;
+  }
+  [next[index], next[from]] = [next[from], next[index]];
+  return next;
+}
+
+/** 分隔符可选值（'' = 无分隔符，UI 上显示为「None」） */
 export const SEPARATOR_OPTIONS = ['_', '-', ' ', ''] as const;
 
 /** 版本号补零可选值 */
 export const PAD_OPTIONS = [2, 1, 3] as const;
 
 export const SLOT_LABELS: Record<NameSlot, string> = {
-  version: '版本号',
-  topic: '主题',
-  date: '日期',
+  version: 'Version',
+  topic: 'Topic',
+  date: 'Date',
 };
-
-const SLOTS: NameSlot[] = ['version', 'topic', 'date'];
 
 /** 归一化：缺省/非法字段回退默认值，保证拼名与反解永远拿到一份合法规则 */
 export function normalizeNaming(raw?: Partial<NamingRule> | null): NamingRule {

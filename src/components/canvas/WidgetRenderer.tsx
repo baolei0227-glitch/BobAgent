@@ -107,10 +107,10 @@ export const WIDGET_THEME: WidgetTokens = {
   lineColor: '#86868b',
   /** 数据图表系列色板（Apple 系统六色 + 品牌紫打头；LLM 可按内容主题在 option.color 中显式覆盖） */
   chartPalette: ['#4b3fe3', '#0071e3', '#32ADE6', '#34C759', '#FF9F0A', '#FF453A', '#AF52DE'],
-  /** 标题字体（Apple 风格无衬线） */
-  titleFont: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
+  /** 标题字体（全局衬线） */
+  titleFont: "'Times New Roman', Times, 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', 'Liberation Serif', serif",
   /** 正文字体 */
-  sansFont: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
+  sansFont: "'Times New Roman', Times, 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', 'Liberation Serif', serif",
 };
 
 /** 深色主题：dynamic-ui Neutral/Brand 暗色档 */

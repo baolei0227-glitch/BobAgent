@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
@@ -84,6 +84,10 @@ interface SearchHit {
 interface UnifiedPaletteProps {
   open: boolean;
   onClose: () => void;
+  /** 输入框下方功能入口（仅图标，悬停显示名称）：由宿主注入，保持面板不感知各功能面板的开关状态 */
+  actions?: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }>;
+  /** 标星小程序快捷图标（与功能入口同一行，之间用竖线隔开）：点击直接打开预览 */
+  starredApps?: Array<{ id: string; name: string }>;
 }
 
 /** 文件扩展名 → 图标颜色（与本地文件浏览器一致） */
@@ -115,7 +119,7 @@ function shortPath(p: string): string {
   return parts.slice(-3).join('/') || p;
 }
 
-export function UnifiedPalette({ open, onClose }: UnifiedPaletteProps) {
+export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedPaletteProps) {
   // ===== 输入（查找态 / 指令态共用） =====
   const [query, setQuery] = useState('');
   const [cursorPos, setCursorPos] = useState(0);
@@ -641,7 +645,10 @@ export function UnifiedPalette({ open, onClose }: UnifiedPaletteProps) {
         }}
       >
         {/* 输入行（指令/会话态与查找态共用） */}
-        <div className="flex shrink-0 items-center gap-2 px-4 py-3" style={{ borderBottom: searchMode ? '1px solid var(--line-soft)' : 'none' }}>
+        <div
+          className="flex shrink-0 items-center gap-2 px-4 py-3"
+          style={{ borderBottom: searchMode && !actions?.length ? '1px solid var(--line-soft)' : 'none' }}
+        >
           {sessionMode ? (
             <span
               className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-10 font-semibold uppercase"
@@ -685,6 +692,64 @@ export function UnifiedPalette({ open, onClose }: UnifiedPaletteProps) {
             ⌘F
           </kbd>
         </div>
+
+        {/* 功能入口图标行（2026-09-12 自左侧边栏迁入）：仅图标，悬停显示名称；
+            其后紧跟标星小程序快捷图标，两者之间用竖线隔开 */}
+        {((actions && actions.length > 0) || (starredApps && starredApps.length > 0)) && (
+          <div
+            className="flex shrink-0 items-center gap-0.5 px-3 pb-3"
+            style={{ borderBottom: searchMode ? '1px solid var(--line-soft)' : 'none' }}
+          >
+            {actions?.map((act) => (
+              <button
+                key={act.key}
+                type="button"
+                onClick={act.onClick}
+                disabled={act.disabled}
+                title={act.label}
+                aria-label={act.label}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                style={{ color: 'var(--ink-muted)' }}
+              >
+                {act.icon}
+              </button>
+            ))}
+            {/* 竖线分隔：功能按钮 / 标星小程序 */}
+            {actions && actions.length > 0 && starredApps && starredApps.length > 0 && (
+              <span
+                className="mx-1 h-5 w-px shrink-0"
+                style={{ backgroundColor: 'color-mix(in oklab, var(--line) 30%, transparent)' }}
+              />
+            )}
+            {/* 标星小程序（点击直接打开预览，最多显示 5 个，超出折叠为 +N 打开商店） */}
+            {starredApps?.slice(0, 5).map((app) => (
+              <button
+                key={app.id}
+                type="button"
+                title={`${app.name} — open`}
+                aria-label={app.name}
+                onClick={() =>
+                  window.dispatchEvent(new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }))
+                }
+                className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded bg-[var(--paper-soft)] text-9 font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
+              >
+                {app.name.charAt(0).toUpperCase()}
+              </button>
+            ))}
+            {starredApps && starredApps.length > 5 && (
+              <button
+                type="button"
+                title="More starred apps — open store"
+                aria-label="More starred mini programs"
+                onClick={() => window.dispatchEvent(new CustomEvent('sandbox-store-open'))}
+                className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded text-9 font-medium transition-colors hover:brightness-95"
+                style={{ backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)' }}
+              >
+                +{starredApps.length - 5}
+              </button>
+            )}
+          </div>
+        )}
 
         {/* 指令候选下拉（流式撑开面板，避免被 overflow-hidden 裁剪） */}
         {commandOpen && (
