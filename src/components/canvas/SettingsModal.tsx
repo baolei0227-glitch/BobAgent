@@ -41,6 +41,19 @@ import { TemplateLibraryModal } from './TemplateLibraryModal';
 import { WechatBindModal } from './WechatBindModal';
 import { UsagePanel } from './UsagePanel';
 import { ToggleSwitch } from './ToggleSwitch';
+import {
+  DEFAULT_NAMING,
+  ORDER_OPTIONS,
+  PAD_OPTIONS,
+  SEPARATOR_OPTIONS,
+  SLOT_LABELS,
+  isDefaultNaming,
+  normalizeNaming,
+  previewName,
+  todayStamp,
+  type NameSlot,
+  type NamingRule,
+} from '@/lib/file-organizer/naming-rule';
 import { desktop } from '@/lib/desktop-adapter';
 
 interface SettingsModalProps {
@@ -254,8 +267,8 @@ export function SettingsModal({
   const [testSuccess, setTestSuccess] = useState<Record<ProviderType, { msg: string; count: number } | null>>(() =>
     buildProviderRecord(() => null),
   );
-  const [saved, setSaved] = useState(false);
-  const [saving, setSaving] = useState(false);
+  // 保存状态：设置已改为「改动即自动保存」，无 Save 按钮（idle=无提示 / saving / saved / error）
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState('');
   // 单模型添加验证中（勾选 / Add 时的连接测试），驱动 spinner 与防重复点击
   const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
@@ -265,12 +278,14 @@ export function SettingsModal({
   const [browserClearBusy, setBrowserClearBusy] = useState(false);
   const [browserClearMsg, setBrowserClearMsg] = useState('');
   const [browserClearErr, setBrowserClearErr] = useState(false);
-  // 文件自动整理投递箱：本地编辑态，随 Save 一次落盘
+  // 文件自动整理投递箱：本地编辑态，改动后随自动保存落盘
   const [fileOrgEnabled, setFileOrgEnabled] = useState(false);
   const [fileOrgDir, setFileOrgDir] = useState('');
   const [fileOrgCategories, setFileOrgCategories] = useState<string[]>([]);
   const [fileOrgCategoryInput, setFileOrgCategoryInput] = useState('');
   const [fileOrgPickErr, setFileOrgPickErr] = useState('');
+  // 命名规则（受控选项：字段顺序 / 分隔符 / 版本号补零）
+  const [fileOrgNaming, setFileOrgNaming] = useState<NamingRule>(DEFAULT_NAMING);
 
   const handleClearBrowserCookies = useCallback(async () => {
     setBrowserClearBusy(true);
@@ -316,8 +331,12 @@ export function SettingsModal({
   const [searchConfig, setSearchConfig] = useState<SearchConfig>({ apiKey: '', baseUrl: '' });
   const [expandedModels, setExpandedModels] = useState<ModelDetailState>({});
 
-  // 脏标记：用户修改后未保存时为 true，保存后清除
-  const [isDirty, setIsDirty] = useState(false);
+  // 自动保存：debounce 计时器 + 「正在写盘」单飞标记（写盘期间不并发写同一 settings.json）
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savingRef = useRef(false);
+  const saveQueuedRef = useRef(false);
+  // 始终指向最新一次渲染的保存实现，供 debounce / 补写调用，避免闭包内表单值过期
+  const saveRef = useRef<() => Promise<void>>(async () => {});
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLoadingRef = useRef(true);
   // Theme → Keyboard Shortcuts（只读清单，可折叠，默认折叠）
@@ -455,6 +474,8 @@ export function SettingsModal({
   useEffect(() => {
     if (open) {
       const load = async () => {
+        // 整个回填过程都抑制自动保存：load 中间有 await，若中途解除抑制会把半加载的表单值写回盘
+        isLoadingRef.current = true;
         const settings: AppSettings = await migrateOldSettingsIfNeeded() || await loadSettings();
         setSearchConfig(settings.search);
 
@@ -486,7 +507,7 @@ export function SettingsModal({
         setFetchedModels(newFetched);
         setTestError(buildProviderRecord(() => ''));
         setTestSuccess(buildProviderRecord(() => null));
-        setSaved(false);
+        setSaveStatus('idle');
         // Model Pool 不再是左侧 section：外部 initialSection='chat'（如节点模型选择器入口）改为弹窗方式打开
         const initSection = initialSectionRef.current;
         if (initSection === 'chat') {
@@ -499,8 +520,6 @@ export function SettingsModal({
         const qps = await getQuickPrompts();
         setQuickPrompts(qps);
         setQpEditor(null);
-        setIsDirty(false);
-        isLoadingRef.current = true; // 加载期间抑制 dirty 监听
 
         if (settings.chatModel) {
           setSelectedChatModel(settings.chatModel.defaultModel || '');
@@ -546,6 +565,7 @@ export function SettingsModal({
         setFileOrgEnabled(fo.enabled === true);
         setFileOrgDir(fo.inboxDir ?? '');
         setFileOrgCategories(fo.categories ?? []);
+        setFileOrgNaming(normalizeNaming(fo.naming));
         setFileOrgCategoryInput('');
         setFileOrgPickErr('');
         try {
@@ -557,7 +577,7 @@ export function SettingsModal({
         } catch { /* 非 Electron 环境无 avatar API */ }
       };
       const apply = () => load().then(() => {
-        // 下一轮事件循环再解除抑制，确保上面所有 setState 批量完成后不再误触发 dirty
+        // 下一轮事件循环再解除抑制，确保上面所有 setState 批量完成后不会误触发自动保存
         setTimeout(() => { isLoadingRef.current = false; }, 0);
       });
       apply();
@@ -571,12 +591,20 @@ export function SettingsModal({
   }, [open]);
 
   // ===================== helpers =====================
-  // 脏标记监听：任一设置项变化时标记 dirty（加载期间抑制）
+  // 自动保存：依赖列表中的任一设置项变化后 debounce 500ms 落盘（加载/回填期间抑制）。
+  // 依赖列表即「纳入自动保存的字段清单」；每次重跑先清掉上一轮计时器，天然实现 debounce。
   useEffect(() => {
     if (isLoadingRef.current) return;
-    setIsDirty(true);
-    setSaved(false);
+    setSaveError('');
+    setSaveStatus('saving');
     if (savedTimerRef.current) { clearTimeout(savedTimerRef.current); savedTimerRef.current = null; }
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      void saveRef.current();
+    }, 500);
+    return () => {
+      if (autoSaveTimerRef.current) { clearTimeout(autoSaveTimerRef.current); autoSaveTimerRef.current = null; }
+    };
   }, [
     apiKeys, customBaseUrls, selectedModels, searchConfig,
     selectedChatModel, chatModelPool, chatAutoVisionOnImage,
@@ -588,12 +616,17 @@ export function SettingsModal({
     theme,
     thinkingPolicy,
     // 文件自动整理投递箱
-    fileOrgEnabled, fileOrgDir, fileOrgCategories,
+    fileOrgEnabled, fileOrgDir, fileOrgCategories, fileOrgNaming,
+    // 字体缩放（原先点击即独立落盘，现并入自动保存，避免与自动保存并发写同一 settings.json）
+    fontScale,
   ]);
 
-  // 组件卸载时清理定时器
+  // 组件卸载时清理定时器（本弹窗常驻挂载，关窗不卸载，故挂起的改动仍会落盘）
   useEffect(() => {
-    return () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); };
+    return () => {
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
   }, []);
 
   const resolveBaseUrl = (type: ProviderType): string => {
@@ -897,9 +930,11 @@ export function SettingsModal({
   };
 
   const handleSave = async () => {
-    setSaving(true);
+    // 单飞：写盘期间又有新改动时先记账，本次写完后补一轮，避免并发写同一 settings.json 互相覆盖
+    if (savingRef.current) { saveQueuedRef.current = true; return; }
+    savingRef.current = true;
+    setSaveStatus('saving');
     setSaveError('');
-    setSaved(false);
     try {
       const newConfigs: ProviderConfig[] = [];
       (Object.keys(apiKeys) as ProviderType[]).forEach((type) => {
@@ -990,6 +1025,7 @@ export function SettingsModal({
         modelOverrides,
         avatar: { mode: avatarMode, selected: avatarMode === 'fixed' ? avatarSelected : undefined },
         brandLogo: brandLogo || undefined,
+        fontScale,
         theme: 'warm',
         // 思考档位策略：显式写四值（缺省语义已由初始化时归一，确保开关与后端一致；harnessPure=true=纯固定档）
         thinking: {
@@ -1003,6 +1039,8 @@ export function SettingsModal({
           enabled: fileOrgEnabled,
           inboxDir: fileOrgDir.trim() || undefined,
           categories: fileOrgCategories,
+          // 默认规则不落盘：留空即默认，日后调整默认形态也能生效
+          naming: isDefaultNaming(fileOrgNaming) ? undefined : fileOrgNaming,
         },
       });
 
@@ -1012,18 +1050,30 @@ export function SettingsModal({
       window.dispatchEvent(new Event('provider-configs-changed'));
       // 主题变更：通知 sandbox 预览刷新注入的 CSS 变量
       window.dispatchEvent(new Event('theme-changed'));
-      setSaved(true);
-      setIsDirty(false);
+      setSaveStatus('saved');
       // 2.5s 后自动隐藏"Saved"提示
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-      savedTimerRef.current = setTimeout(() => setSaved(false), 2500);
+      savedTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2500);
     } catch (e) {
       console.error('Save settings error:', e);
       setSaveError(e instanceof Error ? e.message : 'Save failed');
+      setSaveStatus('error');
     } finally {
-      setSaving(false);
+      savingRef.current = false;
+      // 写盘期间积压的改动：重新走一轮 debounce，等最新表单值就绪后再落盘
+      if (saveQueuedRef.current) {
+        saveQueuedRef.current = false;
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = setTimeout(() => {
+          autoSaveTimerRef.current = null;
+          void saveRef.current();
+        }, 500);
+      }
     }
   };
+
+  // 保持 saveRef 指向最新一次渲染的保存实现（debounce / 补写均通过它调用，避免闭包过期）
+  useEffect(() => { saveRef.current = handleSave; });
 
   const paperInputStyle = {
     backgroundColor: 'var(--paper)',
@@ -1055,7 +1105,7 @@ export function SettingsModal({
           className="flex h-12 shrink-0 items-center justify-between border-b px-4"
           style={{ borderColor: 'var(--line-soft)' }}
         >
-          <DialogTitle className="text-[13px] font-semibold" style={{ color: 'var(--ink-strong)' }}>
+          <DialogTitle className="text-13 font-semibold" style={{ color: 'var(--ink-strong)' }}>
             Settings
           </DialogTitle>
           <button
@@ -1082,7 +1132,7 @@ export function SettingsModal({
           ];
           return (
             <div className="shrink-0 border-b px-4 py-2.5" style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--primary-soft)' }}>
-              <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+              <div className="mb-1.5 flex items-center gap-1.5 text-11 font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
                 <Zap className="h-3 w-3" /> Quick Start
               </div>
               <div className="flex flex-wrap items-center gap-1">
@@ -1280,7 +1330,7 @@ export function SettingsModal({
                 <div key={g.label} className="mb-1.5">
                   {/* 分组标题 */}
                   <div
-                    className="px-2.5 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider"
+                    className="px-2.5 pb-1 pt-2 text-11 font-semibold uppercase tracking-wider"
                     style={{ color: 'var(--ink-faint)' }}
                   >
                     {g.label}
@@ -1308,7 +1358,7 @@ export function SettingsModal({
                         >
                           {it.icon}
                         </span>
-                        <span className="flex-1 truncate text-[13px] font-medium">{it.label}</span>
+                        <span className="flex-1 truncate text-13 font-medium">{it.label}</span>
                       </button>
                     );
                   })}
@@ -1336,7 +1386,7 @@ export function SettingsModal({
                   </span>
                   <button
                     type="button"
-                    onClick={() => { setAvatarMode(avatarMode === 'random' ? 'fixed' : 'random'); setSaved(false); }}
+                    onClick={() => { setAvatarMode(avatarMode === 'random' ? 'fixed' : 'random'); }}
                     className="rounded px-1.5 py-0.5 text-xs font-medium transition-colors"
                     style={{
                       backgroundColor: avatarMode === 'fixed' ? 'var(--primary-soft)' : 'var(--paper-hover)',
@@ -1358,7 +1408,7 @@ export function SettingsModal({
                         <button
                           key={av.id}
                           type="button"
-                          onClick={() => { setAvatarMode('fixed'); setAvatarSelected(av.id); setSaved(false); }}
+                          onClick={() => { setAvatarMode('fixed'); setAvatarSelected(av.id); }}
                           className="overflow-hidden rounded-md border-2 transition-all"
                           style={{ width: 40, height: 40, borderColor: isSelected ? 'var(--primary)' : 'transparent', backgroundColor: '#fff' }}
                           title={av.name + (av.builtin ? ' (Built-in)' : ' (Custom)')}
@@ -1382,7 +1432,7 @@ export function SettingsModal({
                   <button
                     type="button"
                     disabled={!brandLogo}
-                    onClick={() => { setBrandLogo(''); setSaved(false); }}
+                    onClick={() => { setBrandLogo(''); }}
                     className="rounded px-1.5 py-0.5 text-xs font-medium transition-colors"
                     style={{
                       backgroundColor: brandLogo ? 'var(--paper-hover)' : 'var(--paper-soft)',
@@ -1397,7 +1447,7 @@ export function SettingsModal({
                   {/* 默认 Logo */}
                   <button
                     type="button"
-                    onClick={() => { setBrandLogo(''); setSaved(false); }}
+                    onClick={() => { setBrandLogo(''); }}
                     className="overflow-hidden rounded-md border-2 transition-all"
                     style={{ width: 40, height: 40, borderColor: !brandLogo ? 'var(--purple)' : 'transparent', backgroundColor: '#fff' }}
                     title="Default Logo"
@@ -1410,7 +1460,7 @@ export function SettingsModal({
                       <button
                         key={av.id}
                         type="button"
-                        onClick={() => { setBrandLogo(av.id); setSaved(false); }}
+                        onClick={() => { setBrandLogo(av.id); }}
                         className="overflow-hidden rounded-md border-2 transition-all"
                         style={{ width: 40, height: 40, borderColor: isSelected ? 'var(--purple)' : 'transparent', backgroundColor: '#fff' }}
                         title={av.name + (av.builtin ? ' (Built-in)' : ' (Custom)')}
@@ -1715,18 +1765,10 @@ export function SettingsModal({
                     <button
                       key={opt.id}
                       type="button"
-                      onClick={async () => {
+                      onClick={() => {
                         if (fontScale === opt.id) return;
                         setFontScale(opt.id);
                         applyFontScale(opt.id);
-                        try {
-                          await updateSettingsFields({ fontScale: opt.id });
-                          setSaved(true);
-                          setIsDirty(false);
-                        } catch {
-                          setIsDirty(true);
-                          setSaved(false);
-                        }
                       }}
                       className="flex flex-1 flex-col items-center gap-0.5 rounded-xl border-2 px-3 py-2.5 transition-all"
                       style={{
@@ -2278,11 +2320,11 @@ export function SettingsModal({
 
                       {/* ── Smart Model Routing（Auto 视觉优先；随主表单 Save 统一落盘）── */}
                       <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--line-soft)' }}>
-                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Smart Model Routing</div>
+                        <div className="mb-1 text-11 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Smart Model Routing</div>
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Prefer vision model when images are attached</div>
-                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>
                               When Auto model routing is on and the message context contains image attachments, pick a vision-capable model so images reach it directly as pixels instead of the OCR-description fallback.
                             </div>
                           </div>
@@ -2302,12 +2344,12 @@ export function SettingsModal({
 
                       {/* ── Thinking Policy（思考档位策略，高级；随主表单 Save 统一落盘）── */}
                       <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--line-soft)' }}>
-                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Thinking Policy</div>
+                        <div className="mb-1 text-11 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Thinking Policy</div>
                         {/* S2b：harnessPure = 纯 DSH 固定档总开关（默认 On）；Off = 启用下方执行轮降级 + C1 省 token */}
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Pure DSH tiers (harnessPure)</div>
-                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>
                               On = fixed reasoning tier every round (DSH native, no downgrade / no trivial-off). Off = legacy plugin behavior: tool-round downgrade + C1 skip-thinking to save tokens.
                             </div>
                           </div>
@@ -2326,7 +2368,7 @@ export function SettingsModal({
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Downgrade thinking during tool execution</div>
-                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — savings of reasoning tokens (applies only when Pure DSH tiers is Off).</div>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — savings of reasoning tokens (applies only when Pure DSH tiers is Off).</div>
                           </div>
                           <button
                             type="button"
@@ -2343,7 +2385,7 @@ export function SettingsModal({
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Skip thinking on trivial prompts</div>
-                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>No reasoning for greetings, acknowledgements and similar trivial turns.</div>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>No reasoning for greetings, acknowledgements and similar trivial turns.</div>
                           </div>
                           <button
                             type="button"
@@ -2360,7 +2402,7 @@ export function SettingsModal({
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>{'Inject <think> guide for non-V4 reasoning models'}</div>
-                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>DeepSeek V4 never receives the guide; this switch only affects non-V4 reasoning models.</div>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>DeepSeek V4 never receives the guide; this switch only affects non-V4 reasoning models.</div>
                           </div>
                           <button
                             type="button"
@@ -2578,6 +2620,74 @@ export function SettingsModal({
               />
             </div>
           </div>
+
+          {/* 命名规则（受控选项：顺序 / 分隔符 / 版本号补零，拼名与反解共用同一规则） */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Naming Rule</h4>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>字段顺序</span>
+                <select
+                  value={fileOrgNaming.order.join(',')}
+                  onChange={(e) => {
+                    const order = e.target.value.split(',') as NameSlot[];
+                    setFileOrgNaming((n) => ({ ...n, order }));
+                  }}
+                  className="rounded-lg border bg-transparent px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+                >
+                  {ORDER_OPTIONS.map((o) => (
+                    <option key={o.join(',')} value={o.join(',')}>
+                      {o.map((s) => SLOT_LABELS[s]).join(' + ')}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>分隔符</span>
+                <select
+                  value={fileOrgNaming.separator}
+                  onChange={(e) => setFileOrgNaming((n) => ({ ...n, separator: e.target.value }))}
+                  className="rounded-lg border bg-transparent px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+                >
+                  {SEPARATOR_OPTIONS.map((s) => (
+                    <option key={s || 'none'} value={s}>
+                      {s === '' ? '无' : s === ' ' ? '空格' : s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>版本号</span>
+                <select
+                  value={String(fileOrgNaming.padVersion)}
+                  onChange={(e) => setFileOrgNaming((n) => ({ ...n, padVersion: Number(e.target.value) }))}
+                  className="rounded-lg border bg-transparent px-2 py-1.5 text-xs outline-none"
+                  style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+                >
+                  {PAD_OPTIONS.map((p) => (
+                    <option key={p} value={String(p)}>{`v${'0'.repeat(p - 1)}1`}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* 所见即所得预览：用占位主题与当天日期拼一个示例名 */}
+            <div className="mt-3 rounded-lg px-3 py-2" style={{ backgroundColor: 'var(--paper-soft)' }}>
+              <span className="text-11" style={{ color: 'var(--ink-muted)' }}>预览</span>
+              <p className="mt-1 break-all font-mono text-xs" style={{ color: 'var(--ink-strong)' }}>
+                {previewName(fileOrgNaming, todayStamp())}
+              </p>
+            </div>
+            {!isDefaultNaming(fileOrgNaming) && (
+              <p className="mt-2 text-xs" style={{ color: 'var(--warn)' }}>
+                已偏离默认命名：此前按默认规则命名的同名主题文件不再计入版本号，会从 v01 重新开始。
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -2585,7 +2695,7 @@ export function SettingsModal({
       {activeSection === 'browser' && (
         <div className="px-6 py-5">
           {/* 面板标题 */}
-          <h2 className="text-[17px] font-semibold" style={{ color: 'var(--ink-strong)' }}>Hippo Browser</h2>
+          <h2 className="text-17 font-semibold" style={{ color: 'var(--ink-strong)' }}>Hippo Browser</h2>
 
           {/* 设置行分组容器：圆角卡片 + 发丝分隔线（左标签 / 右控件） */}
           <div
@@ -2593,7 +2703,7 @@ export function SettingsModal({
             style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}
           >
             <div className="flex items-center gap-4 px-4 py-3">
-              <div className="min-w-0 flex-1 text-[13px] font-medium" style={{ color: 'var(--ink)' }}>
+              <div className="min-w-0 flex-1 text-13 font-medium" style={{ color: 'var(--ink)' }}>
                 Cookies &amp; Site Data
               </div>
               <div className="flex shrink-0 items-center gap-3">
@@ -2617,10 +2727,10 @@ export function SettingsModal({
             <div className="border-t" style={{ borderColor: 'var(--line-soft)' }} />
 
             <div className="flex items-center gap-4 px-4 py-3">
-              <div className="min-w-0 flex-1 text-[13px] font-medium" style={{ color: 'var(--ink)' }}>
+              <div className="min-w-0 flex-1 text-13 font-medium" style={{ color: 'var(--ink)' }}>
                 Agent Default Behavior
               </div>
-              <span className="shrink-0 text-[13px]" style={{ color: 'var(--ink-muted)' }}>
+              <span className="shrink-0 text-13" style={{ color: 'var(--ink-muted)' }}>
                 Current tab
               </span>
             </div>
@@ -2864,52 +2974,34 @@ export function SettingsModal({
         >
           {saveError && (
             <div className="mr-auto min-w-0 max-w-[360px]">
-              <Callout variant="danger" size="sm" description={saveError} icon={<AlertCircle className="h-4 w-4" />} />
+              <Callout
+                variant="danger"
+                size="sm"
+                description={`${saveError}（改动将在下次修改时重试保存）`}
+                icon={<AlertCircle className="h-4 w-4" />}
+              />
             </div>
           )}
-          {saved && !saveError && (
+          {!saveError && saveStatus === 'saved' && (
             <div className="mr-auto min-w-0 max-w-[200px]">
               <Callout variant="success" size="sm" title="Saved" icon={<Check className="h-4 w-4" />} />
             </div>
           )}
-          {!saved && !saveError && isDirty && (
-            <div className="mr-auto min-w-0 max-w-[260px]">
-              <Callout
-                variant="warn"
-                size="sm"
-                description="Unsaved changes"
-                icon={<span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: 'var(--warn-solid)' }} />}
-              />
+          {!saveError && saveStatus === 'saving' && (
+            <div className="mr-auto flex items-center gap-1.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Saving…
             </div>
           )}
           <Button
             variant="ghost"
             tone="neutral"
             size="sm"
-            onClick={() => {
-              if (isDirty && !confirm('You have unsaved changes. Close anyway?')) return;
-              onOpenChange(false);
-            }}
+            onClick={() => onOpenChange(false)}
             className="text-sm"
             style={{ color: 'var(--ink-muted)' }}
           >
-            Cancel
-          </Button>
-          <Button
-            variant="solid"
-            tone="brand"
-            size="sm"
-            onClick={handleSave}
-            disabled={!isDirty && !saved}
-            loading={saving}
-            className="text-sm"
-          >
-            {saving ? (
-              <span className="flex items-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Saving...
-              </span>
-            ) : 'Save'}
+            Close
           </Button>
         </div>
         </TooltipProvider>

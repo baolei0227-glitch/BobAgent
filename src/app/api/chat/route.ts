@@ -722,7 +722,8 @@ export function detectSceneHints(text: string): Set<ToolScene> {
   const scenes = new Set<ToolScene>();
   if (!text) return scenes;
   // butler：事务域——记忆/待办/偏好/工作报告/日历（含复盘/习惯/计划等高频信号词；沿用 wanted 作为输入别名）
-  if (/wanted|记忆|待办|偏好|工作报告|日历|记住|查询|复盘|习惯|总结|计划|安排|清单|收藏|备忘|遗忘|便签|todo|notebook|preference|work.?report|calendar|reminder|daily.?report/i.test(text)) {
+  // 计费维护词（模型计费/单价/调价/新增模型）也归 butler：由管家用 get_model_price / set_model_price 落盘单价覆盖
+  if (/wanted|记忆|待办|偏好|工作报告|日历|记住|查询|复盘|习惯|总结|计划|安排|清单|收藏|备忘|遗忘|便签|todo|notebook|preference|work.?report|calendar|reminder|daily.?report|计费|单价|调价|改价|定价|按量计费|模型.*(计费|单价|价格|调价)|token.*(价|计费)/i.test(text)) {
     scenes.add('butler');
   }
   // legal：法律场景（含协议/起草/拟定等高频触发词，及刑事法核心术语）

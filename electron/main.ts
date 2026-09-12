@@ -1160,6 +1160,16 @@ function resolveSplashLogoDir(): string {
   return path.join(process.resourcesPath, 'splash-logos');
 }
 
+/** 欢迎窗口品牌图标（固定使用 public/welcome-icon.png）
+ *  - dev：读项目 public 目录
+ *  - 打包：读随包分发的 next-standalone/public 目录 */
+function resolveWelcomeLogoPath(): string {
+  if (isDev) {
+    return path.resolve(__dirname, '../../public/welcome-icon.png');
+  }
+  return path.join(process.resourcesPath, 'next-standalone/public/welcome-icon.png');
+}
+
 /** 欢迎窗口默认法条库（首次启动写入 law-quotes.json，此后以 JSON 文件为准） */
 const DEFAULT_LAW_QUOTES = [
   { text: '民事主体从事民事活动，不得违反法律，不得违背公序良俗。', source: '《中华人民共和国民法典》第八条' },
@@ -1259,7 +1269,7 @@ body {
 }
 .splash { width: 100%; max-width: 360px; padding: 28px 30px 32px; display: flex; flex-direction: column; align-items: center; gap: 22px; text-align: center; }
 .logo {
-  width: 104px; height: 104px; border-radius: 50%; background: var(--card); border: 1px solid var(--border);
+  width: 104px; height: 104px; border-radius: 24px; background: var(--card); border: 1px solid var(--border);
   display: flex; align-items: center; justify-content: center; overflow: hidden;
   animation: breathe 2.4s ease-in-out infinite;
 }
@@ -1297,37 +1307,20 @@ body {
 
 /**
  * 创建并显示启动欢迎窗口（独立小窗口）。
- * - logo：从南瓜表情包目录随机选一张（每次启动自动更换）
+ * - logo：固定使用 public/welcome-icon.png
  * - 动态加载按钮 + 一行随机民法典法条
  * - 主题颜色跟随系统深浅色（prefers-color-scheme）
  * - 资源缺失时返回 null（回退为直接等待主窗口，不影响启动）
  */
 async function createSplashWindow(): Promise<BrowserWindow | null> {
   try {
-    // 读取头像设置（mode: random/fixed），决定使用哪张头像
-    const settings = await readSettingsFromFile();
-    const avatarMode = settings.avatar?.mode ?? 'random';
-    const avatarSelected = settings.avatar?.selected;
-
-    const allAvatars = listAllAvatars();
-    if (allAvatars.length === 0) {
-      log('Splash skipped: no avatar files found');
+    // 欢迎窗口品牌图标：固定使用 public/welcome-icon.png
+    const logoPath = resolveWelcomeLogoPath();
+    if (!fs.existsSync(logoPath)) {
+      log('Splash skipped: welcome icon not found');
       return null;
     }
-
-    let logoDataUrl: string;
-    if (avatarMode === 'fixed' && avatarSelected) {
-      // 固定模式：使用用户选中的头像
-      const found = allAvatars.find((a: AvatarItem) => a.id === avatarSelected);
-      logoDataUrl = found
-        ? found.dataUrl
-        : allAvatars[0].dataUrl; // 选中的已被删除，回退第一张
-      log(`Splash avatar: fixed (${avatarSelected})`);
-    } else {
-      // 随机模式：从所有头像中随机选一张
-      logoDataUrl = allAvatars[Math.floor(Math.random() * allAvatars.length)].dataUrl;
-      log(`Splash avatar: random`);
-    }
+    const logoDataUrl = imageToDataUrl(logoPath);
 
     // 从 law-quotes.json 读取法条库（首次启动自动创建默认文件，用户可自由编辑维护）
     const lawQuotes = loadLawQuotes();
@@ -1350,7 +1343,10 @@ async function createSplashWindow(): Promise<BrowserWindow | null> {
         nodeIntegration: false,
       },
     });
-    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch((e) => {
+      log(`Splash loadURL failed (icon too large? data URL chars=${encodeURIComponent(html).length}): ${String(e)}`);
+      if (!win.isDestroyed()) win.destroy();
+    });
     win.once('ready-to-show', () => {
       if (!win.isDestroyed()) win.show();
     });

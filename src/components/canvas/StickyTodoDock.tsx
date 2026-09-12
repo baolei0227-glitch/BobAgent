@@ -307,7 +307,7 @@ function NoteCardEditor({
                     resetCourt();
                     setCourtOpen(true);
                   }}
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[9px] font-bold transition-colors hover:bg-black/10"
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded border text-9 font-bold transition-colors hover:bg-black/10"
                   style={{ color: 'rgba(23,23,23,.55)', borderColor: 'rgba(23,23,23,.25)' }}
                 >
                   C
@@ -337,7 +337,7 @@ function NoteCardEditor({
                         <button
                           type="button"
                           onClick={toggleSaveTemplateInput}
-                          className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-black/5"
+                          className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-11 font-medium transition-colors hover:bg-black/5"
                           style={{ color: '#333' }}
                         >
                           {savingMode ? '◂ back' : '＋ save as'}
@@ -374,7 +374,7 @@ function NoteCardEditor({
                       ) : (
                         <div className="max-h-56 overflow-y-auto p-1">
                           {templates.length === 0 ? (
-                            <p className="px-2 py-3 text-center text-[11px] leading-relaxed" style={{ color: '#999' }}>
+                            <p className="px-2 py-3 text-center text-11 leading-relaxed" style={{ color: '#999' }}>
                               No templates yet
                             </p>
                           ) : (
@@ -394,7 +394,7 @@ function NoteCardEditor({
                                 >
                                   <Layers size={11} className="shrink-0" style={{ color: '#888' }} />
                                   <span className="min-w-0 flex-1 truncate font-medium">{tpl.name}</span>
-                                  <span className="shrink-0 text-[10px]" style={{ color: '#999' }}>
+                                  <span className="shrink-0 text-10" style={{ color: '#999' }}>
                                     {tpl.lines.length} items
                                   </span>
                                 </button>

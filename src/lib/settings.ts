@@ -14,6 +14,8 @@
 import type { ProviderConfig, SearchConfig } from './types';
 import type { McpServerConfig } from './mcp/types';
 import { DEFAULT_MCP_SERVERS } from './mcp/types';
+// 命名规则（纯函数模块，前端/后端共用；不引 fs）→ 见 naming-rule.ts
+import type { NamingRule } from './file-organizer/naming-rule';
 // P4b-1 审批策略层：type-only import（approval.ts 为纯函数模块、不 import settings → 无循环依赖）
 import type { ApprovalStrategy } from './chat/approval';
 
@@ -217,7 +219,7 @@ export interface ThinkingSettings {
 }
 
 /** 文件自动整理（投递箱就地整理）：把文件丢进 inboxDir，
- *  工具只读文件首页内容 → 模型判定分类与主题 → 重命名为 {日期}_vNN_{主题}.ext 并移入分类子目录。
+ *  工具只读文件首页内容 → 模型判定分类与主题 → 按 naming 规则重命名并移入分类子目录。
  *  模型沿用 Role Assignment 里的 Task 模型，无需单独配置。 */
 export interface FileOrganizerSettings {
   /** 自动整理开关；undefined = 关闭 */
@@ -226,6 +228,28 @@ export interface FileOrganizerSettings {
   inboxDir?: string;
   /** 分类目录清单：模型只能从中择一，避免目录发散；空/缺省 = 使用内置默认分类 */
   categories?: string[];
+  /** 命名规则（字段顺序 / 分隔符 / 版本号补零）；缺省 = {版本号}{主题}_{日期} */
+  naming?: NamingRule;
+}
+
+/** 用户自定义模型单价覆盖（管家对话 / 手改 settings.json 维护）。
+ *  用于内置价格表未收录的新模型，或厂商调价 / 用户实付口径与预设不一致的情形。
+ *  优先级高于 presets.ts 静态价格表；未覆盖的模型仍走内置表。 */
+export interface ModelPriceOverride {
+  /** 缓存未命中·输入单价（/ 百万 tokens） */
+  input: number;
+  /** 输出单价（/ 百万 tokens） */
+  output: number;
+  /** 缓存命中单价（缺省 = input × 0.25） */
+  cacheHit?: number;
+  /** 空闲时段倍率（如 0.5 = 空闲半价）；不设 = 无分时定价 */
+  offPeak?: number;
+  /** 结算币种，缺省 usd */
+  currency?: 'usd' | 'cny';
+  /** 改价备注（来源/依据），便于事后对账 */
+  note?: string;
+  /** 最近一次更新时刻（ISO） */
+  updatedAt: string;
 }
 
 export interface AppSettings {
@@ -259,6 +283,9 @@ export interface AppSettings {
    *  用户/系统对自动分类的纠正，运行时优先于命名正则——解决"模型名不含关键词被误判"。
    *  取值即 /api/models 的 type 字段：'chat' | 'vision' | 'ocr' | 'audio' | 'embedding' | 'image-gen' | 'moderation' | 'rerank' | 'other' */
   modelOverrides?: Record<string, string>;
+  /** 用户自定义模型单价覆盖：key = "provider:modelId" 或裸 modelId；
+   *  运行时优先于 presets.ts 静态价格表（见 usage.ts resolveModelPrice）。 */
+  priceOverrides?: Record<string, ModelPriceOverride>;
   textPresets: TextPreset[];
   /** 便签 TODO 全局模板（跨项目共享）：名称 + 待办文本行 */
   stickyTemplates?: StickyTodoTemplate[];
@@ -501,6 +528,7 @@ export function defaultSettings(): AppSettings {
     stt: {},
     onlineOcr: {},
     modelOverrides: {},
+    priceOverrides: {},
     ui: { sidebarCollapsed: false },
     general: { language: 'zh-CN' },
     textPresets: [...DEFAULT_PRESETS],
@@ -564,7 +592,7 @@ export const THEME_OPTIONS: Array<{
 export const PRESET_THEME_VARIABLES: Record<string, Record<string, string>> = {
   warm: {
     '--background': '#f7f7f8',
-    '--canvas-bg': '#e6e6ec',
+    '--canvas-bg': '#e4e4ea',
     '--foreground': '#171717',
     '--card': '#f7f7f8',
     '--card-foreground': '#171717',

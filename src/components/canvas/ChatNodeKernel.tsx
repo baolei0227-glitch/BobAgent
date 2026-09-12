@@ -543,7 +543,7 @@ function TraceProcessSummary({
             </span>
           )}
           {failCount > 0 && (
-            <span className="shrink-0 text-[10px] font-bold leading-none" style={{ color: 'var(--danger)' }}>
+            <span className="shrink-0 text-10 font-bold leading-none" style={{ color: 'var(--danger)' }}>
               ✕ {failCount}
             </span>
           )}
@@ -620,7 +620,7 @@ function TraceProcessSummary({
                   <span className="think-dot" />
                 </span>
               ) : phase === 'error' ? (
-                <span className="shrink-0 text-[10px] font-bold leading-none" style={{ color: 'var(--danger)' }}>
+                <span className="shrink-0 text-10 font-bold leading-none" style={{ color: 'var(--danger)' }}>
                   ✕
                 </span>
               ) : null}
@@ -817,7 +817,7 @@ function TaskStepsPanel({
           type="button"
           onClick={onClose}
           title="Close steps panel"
-          className="cursor-pointer rounded px-1 text-[11px] transition-colors hover:bg-white/10"
+          className="cursor-pointer rounded px-1 text-11 transition-colors hover:bg-white/10"
           style={{ color: 'rgba(148,163,184,0.9)' }}
         >
           <X className="h-3 w-3" />
@@ -826,10 +826,10 @@ function TaskStepsPanel({
       {/* Goal */}
       {goal && (
         <div className="border-b px-2.5 py-1.5" style={{ borderColor: 'rgba(34,197,94,0.15)', backgroundColor: '#0d131c' }}>
-          <div className="text-[9px] font-semibold uppercase tracking-widest" style={{ color: 'rgba(148,163,184,0.6)' }}>
+          <div className="text-9 font-semibold uppercase tracking-widest" style={{ color: 'rgba(148,163,184,0.6)' }}>
             Goal
           </div>
-          <div className="mt-0.5 text-[11px] leading-snug" style={{ color: '#e2e8f0', wordBreak: 'break-word' }}>
+          <div className="mt-0.5 text-11 leading-snug" style={{ color: '#e2e8f0', wordBreak: 'break-word' }}>
             {goal}
           </div>
         </div>
@@ -851,7 +851,7 @@ function TaskStepsPanel({
               className="flex min-w-0 items-start gap-1.5 rounded px-1 py-0.5"
               style={{ color, backgroundColor: bg }}
             >
-              <span className="mt-[1px] flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[10px] leading-none">
+              <span className="mt-[1px] flex h-3.5 w-3.5 shrink-0 items-center justify-center text-10 leading-none">
                 {isDone ? (
                   <span style={{ color: '#34d399' }}>✓</span>
                 ) : isFailed ? (
@@ -862,7 +862,7 @@ function TaskStepsPanel({
                   <span style={{ color: 'rgba(148,163,184,0.4)' }}>{String(i + 1).padStart(2, '0')}</span>
                 )}
               </span>
-              <span className={cn('min-w-0 text-[11px] leading-snug', isCurrent && 'animate-pulse')} style={{ wordBreak: 'break-word' }}>
+              <span className={cn('min-w-0 text-11 leading-snug', isCurrent && 'animate-pulse')} style={{ wordBreak: 'break-word' }}>
                 {isCurrent && '▸ '}
                 {label}
               </span>
@@ -873,10 +873,10 @@ function TaskStepsPanel({
       {/* 当前步高亮条（独立于清单，便于一眼定位正在做什么） */}
       {currentIdx >= 0 && (
         <div className="border-t px-2.5 py-1" style={{ borderColor: 'rgba(34,197,94,0.2)', backgroundColor: '#0d131c' }}>
-          <div className="text-[9px] font-semibold uppercase tracking-widest" style={{ color: 'rgba(34,211,238,0.7)' }}>
+          <div className="text-9 font-semibold uppercase tracking-widest" style={{ color: 'rgba(34,211,238,0.7)' }}>
             Now
           </div>
-          <div className="mt-0.5 text-[11px] leading-snug animate-pulse" style={{ color: '#a5f3fc', wordBreak: 'break-word' }}>
+          <div className="mt-0.5 text-11 leading-snug animate-pulse" style={{ color: '#a5f3fc', wordBreak: 'break-word' }}>
             {steps[currentIdx].activeForm || steps[currentIdx].content}
           </div>
         </div>
@@ -961,8 +961,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
 
   // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）
   const isCoding = identity === 'coding';
-  // Kar（note 身份）
-  const isNote = identity === 'note';
   // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Butler→ClipboardList / 其余→Bot
   // 尺寸：chat 的 Bot 16px；coding/kar/butler 专属图标 15px（2026-09 视觉校准）
   const TitleIdentityIcon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> =
@@ -2240,40 +2238,50 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     return () => wrap.removeEventListener('wheel', onWheelCapture, { capture: true });
   }, []);
 
-  // ===== 左侧导航圆点：滚动联动高亮当前可视区域的 user 消息 =====
+  // ===== 左侧导航圆点：滚动 ↔ 高亮双向联动（滚动页面自动切圆点，点圆点跳转并高亮）=====
   const userMessages = useMemo(() => messages.filter((m) => m.role === 'user' && !m.system), [messages]);
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || userMessages.length < 2) return;
-    const onScroll = () => {
-      // 程序化滚动（点击圆点跳转）期间跳过重算：跳转时已显式 setActiveUserMsgId，
-      // 若在此时用启发式重算，会因目标消息滚到视口顶部后"底部未过 30% 线"而误判为下一条，
+    if (!el) return;
+    let raf = 0;
+    // 基准线取"容器顶部 + 32px"（覆盖容器 py-3 内边距与首条消息的间距）：
+    // 最后一条"顶边已越过基准线"的消息 = 当前占据视口顶部、正在阅读的那条。
+    // 用 getBoundingClientRect 而非 offsetTop：不依赖 offsetParent，父级多包一层布局也不会失准。
+    const computeActive = () => {
+      raf = 0;
+      // 程序化滚动（点击圆点跳转 / 自动跟底）期间跳过重算：跳转时已显式 setActiveUserMsgId，
+      // 若此时用启发式重算，会因目标消息尚未落位而误判为相邻项，
       // 导致从后往前点选需点两次才能高亮正确（与画布链导航"点击即高亮"语义对齐）。
       if (programmaticScrollRef.current) return;
-      const containerTop = el.scrollTop;
-      const viewportH = el.clientHeight;
-      // 找到第一个底部超过视口顶部 + 视口高度 30% 的 user 消息（即当前可见的问题）
+      const line = el.getBoundingClientRect().top + 32;
       let activeId: string | null = null;
       for (const m of userMessages) {
         const node = userMsgRefs.current.get(m.id);
         if (!node) continue;
-        const offsetTop = node.offsetTop;
-        // 消息底部位置（approx：offsetTop + 节点高度，取 offsetTop + 50 简化）
-        const msgBottom = offsetTop + (node.offsetHeight || 50);
-        if (msgBottom >= containerTop + viewportH * 0.3) {
-          activeId = m.id;
-          break;
-        }
+        if (node.getBoundingClientRect().top <= line) activeId = m.id;
+        else break; // 消息按文档顺序排列，顶边一旦超出基准线即可停止
       }
-      // 全部滚过视口上方 → 高亮最后一个
+      // 无任何消息越过基准线（如首条上方有较高的欢迎/引导块）→ 兜底第一条，
+      // 保证 scrollTop=0 时最上方圆点始终可高亮，不会"够不到"
       if (!activeId && userMessages.length > 0) {
-        activeId = userMessages[userMessages.length - 1].id;
+        activeId = userMessages[0].id;
       }
       setActiveUserMsgId(activeId);
     };
+    // rAF 节流：滚动高频触发时每帧最多重算一次
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(computeActive);
+    };
     el.addEventListener('scroll', onScroll, { passive: true });
-    onScroll(); // 初始化
-    return () => el.removeEventListener('scroll', onScroll);
+    // 容器/窗口尺寸变化（窗口缩放、节点宽度动画）会移动消息位置，重新校准
+    window.addEventListener('resize', onScroll);
+    computeActive(); // 初始化
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, [userMessages]);
 
   // 点击圆点 → 硬切定位到对应 user 消息（无动画）
@@ -5073,15 +5081,11 @@ ${rows.join('\n')}
             )}
           >
 
-            {/* 品牌标识头（标题栏南瓜图标 + BobWork）：AI 回复问题时出现在回答开头 */}
+            {/* 品牌标识头（AI 图标 + BobWork）：AI 回复问题时出现在回答开头 */}
             {msg.role === 'assistant' && (
               <div className="mb-1 flex shrink-0 items-center gap-1.5">
                 <img
-                  src={isNote
-                    ? '/pumpkin-love.png'
-                    : typeof data.sandboxAppId === 'string' && data.sandboxAppId
-                      ? '/pumpkin-coding.png'
-                      : '/pumpkin-confused.png'}
+                  src="/ai-icon.png"
                   alt="BobWork"
                   className="h-[18px] w-[18px] shrink-0 rounded-full object-cover"
                   draggable={false}
@@ -5833,7 +5837,7 @@ ${rows.join('\n')}
         {/* 引用标签 — 在输入框上方 */}
         {referenceTag && (
           <div className="mb-1.5 flex items-center gap-1.5 rounded-full px-2.5 py-1 w-fit" style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 8%, transparent)', border: '1px solid var(--primary-soft)' }}>
-            <img src="/pumpkin-icon.png" alt="" className="h-3.5 w-3.5 object-contain" />
+            <img src="/ai-icon.png" alt="" className="h-3.5 w-3.5 object-contain" />
             <span className="max-w-[200px] truncate text-xs" style={{ color: 'var(--danger)' }}>
               {referenceTag.text}
             </span>
@@ -6555,163 +6559,139 @@ ${rows.join('\n')}
                     backgroundColor: 'var(--popover)',
                   }}
                 >
-                  {(() => {
-                    const groups: Record<string, typeof availableModels> = {};
-                    for (const m of dropdownModels) {
-                      if (!groups[m.group]) groups[m.group] = [];
-                      groups[m.group].push(m);
-                    }
-                    const groupEntries = Object.entries(groups);
-                  return (
-                    <>
-                      {/* Auto 模式选项 */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleSelectModel(DEFAULT_MODEL_ID);
-                        }}
-                        className="flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors"
-                        style={{
-                          backgroundColor: modelId === DEFAULT_MODEL_ID ? 'var(--paper-soft)' : 'transparent',
-                          borderBottom: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
-                        }}
-                        onMouseEnter={(e) => {
-                          if (modelId !== DEFAULT_MODEL_ID) {
-                            e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
-                          }
-                        }}
-                        onMouseLeave={(e) => {
-                          if (modelId !== DEFAULT_MODEL_ID) {
-                            e.currentTarget.style.backgroundColor = 'transparent';
-                          }
-                        }}
+                  {/* Auto 模式选项 */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSelectModel(DEFAULT_MODEL_ID);
+                    }}
+                    className="flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors"
+                    style={{
+                      backgroundColor: modelId === DEFAULT_MODEL_ID ? 'var(--paper-soft)' : 'transparent',
+                      borderBottom: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
+                    }}
+                    onMouseEnter={(e) => {
+                      if (modelId !== DEFAULT_MODEL_ID) {
+                        e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (modelId !== DEFAULT_MODEL_ID) {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                      }
+                    }}
+                  >
+                    <div className="flex flex-1 flex-col">
+                      <span
+                        className="text-xs font-medium"
+                        style={{ color: 'var(--ink)' }}
                       >
-                        <div className="flex flex-1 flex-col">
+                        Auto
+                      </span>
+                    </div>
+                    {modelId === DEFAULT_MODEL_ID && (
+                      <Check
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                        style={{ color: 'var(--primary)' }}
+                      />
+                    )}
+                  </button>
+                  {/* 模型平铺列表：不再按供应商分类 */}
+                  {dropdownModels.map((m) => {
+                    const parsed = parseCustomModel(m.modelId);
+                    const providerType = parsed?.provider;
+                    const providerCfg = providerType
+                      ? providerConfigs.find((c) => c.type === providerType)
+                      : undefined;
+                    const presetBase = providerType
+                      ? getProviderPreset(providerType as ProviderType)?.baseUrl
+                      : '';
+                    const baseUrl = sanitizeBaseUrl(providerCfg?.baseUrl || presetBase || '');
+                    const isLocal = isLocalEndpointUrl(baseUrl);
+                    let statusBadge: string | null = null;
+                    if (parsed && !providerCfg) {
+                      statusBadge = 'Unconfigured';
+                    } else if (parsed && isLocal) {
+                      const h = localHealth[parsed.provider];
+                      if (h === 'down') statusBadge = 'Local offline';
+                      else if (h === 'checking') statusBadge = 'Checking…';
+                    }
+                    return (
+                    <button
+                      key={m.modelId}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSelectModel(m.modelId);
+                      }}
+                      className="flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors"
+                      style={{
+                        backgroundColor: m.modelId === modelId ? 'var(--paper-soft)' : 'transparent',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (m.modelId !== modelId) {
+                          e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (m.modelId !== modelId) {
+                          e.currentTarget.style.backgroundColor = 'transparent';
+                        }
+                      }}
+                    >
+                      <div className="flex flex-1 flex-col">
+                        <span
+                          className="truncate text-xs font-medium"
+                          style={{ color: 'var(--ink)' }}
+                        >
+                          {m.label}
+                        </span>
+                        {statusBadge && (
                           <span
-                            className="text-xs font-medium"
-                            style={{ color: 'var(--ink)' }}
-                          >
-                            Auto
-                          </span>
-                        </div>
-                        {modelId === DEFAULT_MODEL_ID && (
-                          <Check
-                            className="mt-0.5 h-3.5 w-3.5 shrink-0"
-                            style={{ color: 'var(--primary)' }}
-                          />
-                        )}
-                      </button>
-                      {groupEntries.length === 0 ? null : groupEntries.map(([groupName, models]) => (
-                        <div key={groupName}>
-                          <div
-                            className="px-2.5 py-1 text-xs font-semibold uppercase tracking-wide"
+                            className="mt-0.5 inline-flex w-fit items-center rounded px-1 py-px text-10 leading-none"
                             style={{
-                              color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)',
-                              backgroundColor: 'var(--paper-soft)',
+                              backgroundColor: 'color-mix(in oklab, var(--ink-faint) 14%, transparent)',
+                              color: statusBadge === 'Local offline'
+                                ? 'color-mix(in oklab, var(--danger) 80%, var(--ink-faint))'
+                                : 'var(--ink-faint)',
                             }}
                           >
-                            {groupName}
-                          </div>
-                          {models.map((m) => {
-                            const parsed = parseCustomModel(m.modelId);
-                            const providerType = parsed?.provider;
-                            const providerCfg = providerType
-                              ? providerConfigs.find((c) => c.type === providerType)
-                              : undefined;
-                            const presetBase = providerType
-                              ? getProviderPreset(providerType as ProviderType)?.baseUrl
-                              : '';
-                            const baseUrl = sanitizeBaseUrl(providerCfg?.baseUrl || presetBase || '');
-                            const isLocal = isLocalEndpointUrl(baseUrl);
-                            let statusBadge: string | null = null;
-                            if (parsed && !providerCfg) {
-                              statusBadge = 'Unconfigured';
-                            } else if (parsed && isLocal) {
-                              const h = localHealth[parsed.provider];
-                              if (h === 'down') statusBadge = 'Local offline';
-                              else if (h === 'checking') statusBadge = 'Checking…';
-                            }
-                            return (
-                            <button
-                              key={m.modelId}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleSelectModel(m.modelId);
-                              }}
-                              className="flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors"
-                              style={{
-                                backgroundColor: m.modelId === modelId ? 'var(--paper-soft)' : 'transparent',
-                              }}
-                              onMouseEnter={(e) => {
-                                if (m.modelId !== modelId) {
-                                  e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
-                                }
-                              }}
-                              onMouseLeave={(e) => {
-                                if (m.modelId !== modelId) {
-                                  e.currentTarget.style.backgroundColor = 'transparent';
-                                }
-                              }}
-                            >
-                              <div className="flex flex-1 flex-col">
-                                <span
-                                  className="truncate text-xs font-medium"
-                                  style={{ color: 'var(--ink)' }}
-                                >
-                                  {m.label}
-                                </span>
-                                {statusBadge && (
-                                  <span
-                                    className="mt-0.5 inline-flex w-fit items-center rounded px-1 py-px text-10 leading-none"
-                                    style={{
-                                      backgroundColor: 'color-mix(in oklab, var(--ink-faint) 14%, transparent)',
-                                      color: statusBadge === 'Local offline'
-                                        ? 'color-mix(in oklab, var(--danger) 80%, var(--ink-faint))'
-                                        : 'var(--ink-faint)',
-                                    }}
-                                  >
-                                    {statusBadge}
-                                  </span>
-                                )}
-                              </div>
-                              {m.modelId === modelId && (
-                                <Check
-                                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
-                                  style={{ color: 'var(--primary)' }}
-                                />
-                              )}
-                            </button>
-                            );
-                          })}
-                        </div>
-                      ))}
-                      {/* 模型配置入口：打开设置弹窗并聚焦到 Chat Models 区块 */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setModelMenuOpen(false);
-                          window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'roles' } }));
-                        }}
-                        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors"
-                        style={{
-                          borderTop: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
-                          backgroundColor: 'transparent',
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.backgroundColor = 'transparent';
-                        }}
-                      >
-                        <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
-                        <span className="text-xs font-medium" style={{ color: 'var(--ink)' }}>
-                          Model settings
-                        </span>
-                      </button>
-                    </>
-                  );
-                })()}
+                            {statusBadge}
+                          </span>
+                        )}
+                      </div>
+                      {m.modelId === modelId && (
+                        <Check
+                          className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                          style={{ color: 'var(--primary)' }}
+                        />
+                      )}
+                    </button>
+                    );
+                  })}
+                  {/* 模型配置入口：打开设置弹窗并聚焦到 Chat Models 区块 */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setModelMenuOpen(false);
+                      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'roles' } }));
+                    }}
+                    className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors"
+                    style={{
+                      borderTop: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
+                      backgroundColor: 'transparent',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = 'transparent';
+                    }}
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                    <span className="text-xs font-medium" style={{ color: 'var(--ink)' }}>
+                      Model settings
+                    </span>
+                  </button>
               </div>
           )}
         </div>
@@ -6854,7 +6834,7 @@ ${rows.join('\n')}
           confirmPending && 'confirm-breathing',
         )}
         style={{
-          // 2026-09-12 会话区改纯白：与灰色画布底 --canvas-bg(#e6e6ec) 拉开对比，凸显会话卡片
+          // 2026-09-12 会话区改纯白：与灰色画布底 --canvas-bg 拉开对比，凸显会话卡片
           background: '#fff',
           // 2026-09 口径：去除身份高亮边框——所有 agent 统一中性边框，不再按 coding/Kar/Butler 染色
           borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
@@ -7103,16 +7083,12 @@ ${rows.join('\n')}
                     style={{
                       width: isActive ? 10 : 8,
                       height: isActive ? 10 : 8,
-                      // 2026-09-10：从"融入底色的淡灰颗粒"改为直接用 ink 变量，
-                      // 之前 88% paper + 12% ink-faint 在亮纸色 (#f7f7f8) 上几乎看不见。
-                      // 激活态：ink-strong 深灰 + 主题色光晕，清晰锚定当前问题
-                      // 未激活态：ink-muted 直接灰，一眼看清还有哪些问题
-                      backgroundColor: isActive ? 'var(--ink-strong)' : 'var(--ink-muted)',
+                      // 未选中 = 淡灰圆点；选中 = 深灰圆点，均无外框/描边
+                      backgroundColor: isActive
+                        ? 'var(--ink-muted)'
+                        : 'color-mix(in oklab, var(--ink-muted) 30%, transparent)',
                       border: 'none',
-                      boxShadow: isActive
-                        ? '0 0 0 2px color-mix(in oklab, var(--primary) 40%, transparent), 0 0 6px color-mix(in oklab, var(--primary) 25%, transparent)'
-                        : 'none',
-                      opacity: isActive ? 1 : 0.55,
+                      boxShadow: 'none',
                     }}
                   />
                 </button>
@@ -7139,14 +7115,14 @@ ${rows.join('\n')}
               {/* 品牌行：图标 41px（37px 基础上再放大 10%≈40.7，取整 41），文字 BobWork */}
               <div className="flex shrink-0 items-center justify-center gap-[13px]">
                 <img
-                  src="/bobagent-logo.png"
+                  src="/ai-icon.png"
                   alt="BobWork"
                   draggable={false}
                   className="h-[41px] w-[41px] shrink-0 rounded-lg object-contain"
                   style={{ opacity: 0.95, transform: 'translateY(0.5px)' }}
                 />
                 <span
-                  className="text-[31px] font-semibold leading-none"
+                  className="text-31 font-semibold leading-none"
                   style={{ color: 'var(--ink-strong)' }}
                 >
                   {typedBrand}

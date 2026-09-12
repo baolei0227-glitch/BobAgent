@@ -32,6 +32,10 @@ export function normalizeCategories(raw?: readonly string[]): string[] {
   return out.length > 0 ? out : [...CATEGORIES];
 }
 
+/** 单次调用的输出上限：思考型模型的 reasoning 也吃这个额度，
+ *  给太小（如 300）会出现正文被挤空、JSON 解析失败而静默落 _待处理 */
+const MAX_TOKENS = 2000;
+
 /** 低于此置信度不猜，落 _待处理 */
 export const LOW_CONFIDENCE = 0.6;
 
@@ -165,7 +169,7 @@ async function callModel(
       body: JSON.stringify({
         model: cfg.model,
         temperature: 0.2,
-        max_tokens: 300,
+        max_tokens: MAX_TOKENS,
         messages: [
           { role: 'system', content: buildSystemPrompt(categories) },
           { role: 'user', content: userContent },
@@ -177,8 +181,15 @@ async function callModel(
       const err = await resp.text().catch(() => '');
       throw new Error(`HTTP ${resp.status} ${err.slice(0, 160)}`);
     }
-    const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data?.choices?.[0]?.message?.content || '';
+    const data = (await resp.json()) as {
+      choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+    };
+    const choice = data?.choices?.[0];
+    // 正文被思考过程挤空（额度用尽）→ 明确报错，避免静默落入 _待处理
+    if (choice?.finish_reason === 'length' && !choice.message?.content) {
+      throw new Error(`模型输出被截断（max_tokens=${MAX_TOKENS} 被思考过程占满）`);
+    }
+    const content = choice?.message?.content || '';
     const obj = extractJson(content);
     return obj ? normalizeInsight(obj, categories) : null;
   } finally {

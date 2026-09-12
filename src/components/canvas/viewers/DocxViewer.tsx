@@ -170,19 +170,10 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
 
-  /** 适应宽度：页面宽对齐可视区（留 36px 左右边距）。基准宽取页面 getBoundingClientRect（含 zoom 视觉值）/zoom 归一，
-   *  不用 scrollWidth——zoom 下 scrollWidth 测量不可靠 */
+  /** 适应宽度：页面宽度已由 CSS 强制撑满面板（section width:100%），没有固定页宽需要对齐，
+   *  等价于恢复 100% 缩放（避免按旧公式反复点击不断缩小） */
   const fitWidth = useCallback(() => {
-    const scroller = scrollRef.current;
-    const container = containerRef.current;
-    if (!scroller || !container) return;
-    const z = zoomRef.current;
-    const page = container.querySelector('section.docx');
-    const baseW = page
-      ? page.getBoundingClientRect().width / z
-      : container.scrollWidth / Math.max(z, 0.01);
-    if (baseW <= 0) return;
-    changeZoom((scroller.clientWidth - 72) / baseW);
+    changeZoom(1);
   }, [changeZoom]);
 
   /** 适应整页：宽/高两个方向都塞进可视区 */
@@ -1028,9 +1019,11 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
       .docx *::-moz-selection { background-color: color-mix(in oklab, var(--primary) 25%, transparent) !important; }
       .ai-sel-hl { background-color: color-mix(in oklab, var(--primary) 25%, transparent); border-radius: 2px; }
       /* 页面视觉：覆盖 docx-preview 默认灰色背景/厚重阴影，浅色衬托 + 柔和纸感阴影（多页纵向留白） */
-      /* 2026-09-12 压缩顶部留白：wrapper 上内边距 24px → 8px，正文尽量贴近工具栏 */
-      .docx-wrapper { background: transparent !important; padding: 8px 36px 4px !important; }
-      .docx-wrapper > section.docx { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 4px 16px rgba(0, 0, 0, 0.07) !important; border-radius: 2px !important; margin-bottom: 26px !important; }
+      /* 2026-09-12 与 md 正文顶部留白对齐：每页上边距压到 32px（原为 Word 页边距，约 96px），wrapper 上内边距归零 */
+      /* 2026-09-12 平铺预览面板：wrapper 左右内边距归零；页面宽度覆盖 docx-preview 写死的 inline width（Word 固定页宽），
+         改为撑满面板宽度，左右留白由 section 自身的页边距（padding-left/right）承担 */
+      .docx-wrapper { background: transparent !important; padding: 0 0 4px !important; }
+      .docx-wrapper > section.docx { width: 100% !important; max-width: 100% !important; padding-top: 32px !important; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 4px 16px rgba(0, 0, 0, 0.07) !important; border-radius: 2px !important; margin-bottom: 26px !important; }
       /* 修订标记：docx-preview 渲染为原生 <ins>/<del> 标签（renderChanges:true） */
       .docx ins { border-bottom: 2px solid #4b3fe3; color: #4b3fe3; text-decoration: none; }
       .docx del { color: #c00000; text-decoration: line-through; }
@@ -1569,15 +1562,16 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
       <div className="flex min-h-0 flex-1">
         <div
           ref={scrollRef}
-          className="relative min-w-0 flex-1 overflow-auto ai-canvas-scroll"
+          className="relative min-w-0 flex-1 overflow-auto ai-canvas-scroll hide-scrollbar"
           onMouseUp={onContainerMouseUp}
           onMouseDown={onContainerMouseDown}
           onScroll={onContainerScroll}
           style={{ backgroundColor: '#fff' }}
         >
-          {/* 不限宽：docx-preview page 为固定像素宽度，超宽文档由 scroller 的 overflow-auto 横向滚动，避免右侧裁切；wrapper 自带居中 */}
-          {/* 2026-09-12 压缩顶部留白：py-4 → py-1，配合 .docx-wrapper 上内边距压到最小 */}
-          <div className="px-4 py-1">
+          {/* 不限宽：页面宽度已由上方 CSS 撑满面板，无横向滚动；wrapper 自带居中 */}
+          {/* 2026-09-12 与 md 正文顶部留白对齐：顶部内边距归零，使「滚动区顶 → 首行文字」= wrapper 0 + 此处 0 + 页面上边距 32px */}
+          {/* 2026-09-12 平铺预览面板：去掉左右内边距，页面左右边缘与面板对齐 */}
+          <div className="pb-1">
             {loading && (
               <div className="flex flex-col items-center justify-center gap-3 py-16">
                 <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-r-transparent" style={{ color: 'var(--info)' }} />

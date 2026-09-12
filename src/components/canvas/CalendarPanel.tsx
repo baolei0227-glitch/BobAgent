@@ -24,6 +24,8 @@ import {
   ScrollText,
   MoreHorizontal,
   Check,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { Callout } from '@/components/ui/callout';
 import { Button } from '@/components/ui/button';
@@ -152,6 +154,8 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const [searchResults, setSearchResults] = useState<CalendarEvent[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
+  // 隐藏已完成事项（仅影响日历展示，不改变数据）
+  const [hideCompleted, setHideCompleted] = useState(false);
   // 面板宽度（左边缘可拖拽调整；默认 946px，受视口宽度约束）
   const [panelWidth, setPanelWidth] = useState(946);
   const resizingRef = useRef(false);
@@ -807,9 +811,10 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     }
   };
 
-  // 按日期分组事件
+  // 按日期分组事件（开启「隐藏已完成」时过滤掉 done，仅影响展示）
+  const visibleEvents = hideCompleted ? events.filter((ev) => ev.status !== 'done') : events;
   const eventsByDate: Map<string, CalendarEvent[]> = new Map();
-  for (const ev of events) {
+  for (const ev of visibleEvents) {
     const d = toLocalDateStr(new Date(ev.start_time));
     const arr = eventsByDate.get(d) || [];
     arr.push(ev);
@@ -821,7 +826,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   }
 
   const todayStr = toLocalDateStr(new Date());
-  const selectedDateEvents = events.filter((ev) => toLocalDateStr(new Date(ev.start_time)) === selectedDate)
+  const selectedDateEvents = visibleEvents.filter((ev) => toLocalDateStr(new Date(ev.start_time)) === selectedDate)
     .sort((a, b) => {
       // 完成/已取消事项自动沉底：scheduled → done → cancelled，组内保持原有时间序
       const statusRank = (s: string) => (s === 'scheduled' ? 0 : s === 'done' ? 1 : 2);
@@ -834,6 +839,10 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
 
   // 选中日期的展示标题
   const selectedDateLabel = new Date(selectedDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', weekday: 'short' });
+
+  // 同步状态文案（标题栏与 ⋯ 菜单共用）
+  const syncStatusText = syncMsg
+    || (syncAccounts.length ? `${syncAccounts.length} account${syncAccounts.length !== 1 ? 's' : ''}` : 'Not configured');
 
   // 周视图数据：当前周 7 天 + 标题
   const currentWeekStart = startOfWeek(date);
@@ -902,84 +911,6 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         />
       )}
 
-      {/* ===== 日历同步状态条（同步相关操作收进 ⋯ 菜单，只把状态留在主视觉） ===== */}
-      <div
-        className="flex shrink-0 items-center gap-2 border-b px-4 py-2"
-        style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}
-      >
-        <span className="text-11 font-medium" style={{ color: 'var(--ink-muted)' }}>Calendar Sync</span>
-        <span className="min-w-0 flex-1 truncate text-11" style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}>
-          {syncMsg || (syncAccounts.length ? `${syncAccounts.length} account${syncAccounts.length !== 1 ? 's' : ''}` : 'Not configured')}
-        </span>
-        {/* 账户连接方式徽章：右侧固定为 Mac，箭头反映实际数据流向（双向 ⇄ / 单向 ←） */}
-        {syncAccounts.map((a) => {
-          const twoWay = a.provider === 'caldav' && !a.read_only;
-          return (
-            <span
-              key={a.account_id}
-              className="hidden shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-10 font-medium sm:inline-flex"
-              style={{
-                backgroundColor: twoWay ? 'var(--success-soft)' : 'var(--info-soft)',
-                color: twoWay ? 'var(--success)' : 'var(--info)',
-              }}
-              title={twoWay ? 'Two-way sync: BobWork ⇄ Mac Calendar' : 'One-way: Mac Calendar → BobWork (pull only)'}
-            >
-              {a.name}
-              <span className="opacity-80">{twoWay ? '⇄ Mac' : '← Mac'}</span>
-            </span>
-          );
-        })}
-        <Button
-          onClick={runSync}
-          disabled={syncing}
-          loading={syncing}
-          variant="ghost"
-          tone="neutral"
-          size="icon-sm"
-          title="Sync now"
-          aria-label="Sync now"
-        >
-          {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-        </Button>
-        <div className="relative" ref={syncMenuRef}>
-          <Button
-            onClick={() => setShowSyncMenu((v) => !v)}
-            variant="ghost"
-            tone="neutral"
-            size="icon-sm"
-            title="Sync options"
-            aria-label="Sync options"
-            aria-expanded={showSyncMenu}
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
-          {showSyncMenu && (
-            <div
-              className="absolute right-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-lg border py-1"
-              style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', boxShadow: 'var(--shadow-lg)' }}
-            >
-              {([
-                { key: 'import', label: 'Import .ics', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => fileInputRef.current?.click() },
-                { key: 'export', label: 'Export .ics', icon: <Download className="h-3.5 w-3.5" />, onClick: () => handleExport() },
-                ...(feedUrl ? [{ key: 'subscribe', label: 'Subscribe', icon: <Link2 className="h-3.5 w-3.5" />, onClick: () => setShowSubscribeModal(true) }] : []),
-                { key: 'accounts', label: 'Accounts', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => setShowAccountModal(true) },
-                { key: 'logs', label: 'Sync logs', icon: <ScrollText className="h-3.5 w-3.5" />, onClick: () => setShowSyncLogs((v) => !v) },
-              ]).map((item) => (
-                <button
-                  key={item.key}
-                  onClick={() => { setShowSyncMenu(false); item.onClick(); }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-11 transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink)' }}
-                >
-                  <span style={{ color: 'var(--ink-muted)' }}>{item.icon}</span>
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* 同步日志（由 ⋯ 菜单的 Sync logs 展开） */}
       {showSyncLogs && (
         <div className="max-h-32 shrink-0 overflow-y-auto border-b px-4 py-1.5" style={{ borderColor: 'var(--line-soft)' }}>
@@ -1006,23 +937,80 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         }}
       />
 
-      {/* 工具栏：视图切换 + 导航/跳转 + 搜索 */}
-      <div className="flex shrink-0 flex-col gap-2 px-4 py-2">
-        <div className="flex items-center justify-between">
-          {/* 月/周视图切换 */}
-          <div className="flex items-center gap-0.5 rounded-md border p-0.5" style={{ borderColor: 'var(--line-soft)' }}>
-            {(['month', 'week'] as const).map((v) => (
-              <Button
-                key={v}
-                onClick={() => setView(v)}
-                variant={view === v ? 'solid' : 'ghost'}
-                tone={view === v ? 'brand' : 'neutral'}
-                size="micro"
-                className="px-2 py-0.5 text-xs"
+      {/* 工具栏：视图切换 + 搜索 + 同步 + 导航/跳转（单行标题栏） */}
+      <div className="shrink-0 px-4 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
+            {/* 月/周视图切换 — 复用 Model usage 的滑动开关式分段控件 */}
+            <div
+              className="relative flex h-6 w-[104px] shrink-0 items-center rounded-md p-0.5"
+              style={{ backgroundColor: 'color-mix(in oklab, var(--line) 20%, transparent)' }}
+              role="group"
+              aria-label="Calendar view"
+            >
+              {/* 圆角矩形滑动开关 */}
+              <span
+                aria-hidden
+                className="absolute bottom-0.5 top-0.5 rounded border transition-transform duration-200"
+                style={{
+                  left: 2,
+                  width: 'calc(50% - 2px)',
+                  backgroundColor: 'var(--paper)',
+                  borderColor: 'var(--line)',
+                  transform: view === 'week' ? 'translateX(100%)' : 'translateX(0)',
+                  boxShadow: '0 1px 2px rgb(0 0 0 / 0.08)',
+                }}
+              />
+              {(['month', 'week'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setView(v)}
+                  aria-pressed={view === v}
+                  className="relative z-10 h-full flex-1 rounded text-11 font-medium transition-colors"
+                  style={{ color: view === v ? 'var(--ink)' : 'var(--ink-muted)' }}
+                >
+                  {v === 'month' ? 'Month' : 'Week'}
+                </button>
+              ))}
+            </div>
+
+            {/* 隐藏已完成事项：仅切换展示，不修改数据 */}
+            <Button
+              onClick={() => setHideCompleted((v) => !v)}
+              variant={hideCompleted ? 'soft' : 'ghost'}
+              tone={hideCompleted ? 'brand' : 'neutral'}
+              size="icon-sm"
+              aria-pressed={hideCompleted}
+              title={hideCompleted ? 'Show completed events' : 'Hide completed events'}
+              aria-label={hideCompleted ? 'Show completed events' : 'Hide completed events'}
+            >
+              {hideCompleted ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </Button>
+          </div>
+
+          {/* 关键词搜索（并入标题栏：居中自适应，窄面板自动收窄） */}
+          <div className="relative min-w-[110px] max-w-[260px] flex-1">
+            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" style={{ color: 'var(--ink-faint)' }} />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runSearch(searchQuery); }}
+              placeholder="Search events…"
+              className="w-full rounded-md border py-1.5 pl-7 pr-7 text-xs outline-none transition-colors focus:border-[var(--primary)]"
+              style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+            />
+            {searchQuery && (
+              <button
+                onClick={() => { setSearchQuery(''); setSearchResults(null); }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity hover:opacity-70"
+                style={{ color: 'var(--ink-faint)' }}
+                title="Clear"
               >
-                {v === 'month' ? 'Month' : 'Week'}
-              </Button>
-            ))}
+                <X className="h-3 w-3" />
+              </button>
+            )}
           </div>
 
           {/* 导航 + 标题跳转 + Today */}
@@ -1057,7 +1045,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               <button
                 onClick={() => setShowMonthPicker(true)}
                 title="Jump to month"
-                className="rounded px-1 py-0.5 text-sm font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                className="max-w-[120px] truncate rounded px-1 py-0.5 text-sm font-medium transition-colors hover:bg-[var(--paper-hover)]"
                 style={{ color: 'var(--ink)' }}
               >
                 {view === 'week' ? weekLabel : `${date.toLocaleString('default', { month: 'long' })} ${year}`}
@@ -1080,31 +1068,94 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             >
               <ChevronRight className="h-4 w-4" />
             </Button>
-          </div>
-        </div>
 
-        {/* 关键词搜索 */}
-        <div className="relative">
-          <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" style={{ color: 'var(--ink-faint)' }} />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') runSearch(searchQuery); }}
-            placeholder="Search events…"
-            className="w-full rounded-md border py-1.5 pl-7 pr-7 text-xs outline-none transition-colors focus:border-[var(--primary)]"
-            style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
-          />
-          {searchQuery && (
-            <button
-              onClick={() => { setSearchQuery(''); setSearchResults(null); }}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity hover:opacity-70"
-              style={{ color: 'var(--ink-faint)' }}
-              title="Clear"
+            {/* 同步：状态 + 立即同步 + 选项菜单（并入标题栏；窄面板下状态文案收起，见 Sync now 的 title 与 ⋯ 菜单） */}
+            <span className="mx-0.5 h-4 w-px shrink-0" style={{ backgroundColor: 'var(--line-soft)' }} />
+            {panelWidth >= 760 && (
+              <span
+                className="max-w-[150px] shrink-0 truncate text-11"
+                style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}
+                title={syncStatusText}
+              >
+                {syncStatusText}
+              </span>
+            )}
+            <Button
+              onClick={runSync}
+              disabled={syncing}
+              loading={syncing}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title={`Sync now — ${syncStatusText}`}
+              aria-label="Sync now"
             >
-              <X className="h-3 w-3" />
-            </button>
-          )}
+              {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            </Button>
+            <div className="relative" ref={syncMenuRef}>
+              <Button
+                onClick={() => setShowSyncMenu((v) => !v)}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
+                title="Sync options"
+                aria-label="Sync options"
+                aria-expanded={showSyncMenu}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+              {showSyncMenu && (
+                <div
+                  className="absolute right-0 top-full z-30 mt-1 w-48 overflow-hidden rounded-lg border py-1"
+                  style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', boxShadow: 'var(--shadow-lg)' }}
+                >
+                  {/* 状态头部：同步状态 + 账户流向徽章（窄面板下从标题栏收起，信息在此查看） */}
+                  <div className="border-b px-3 pb-1.5 pt-1" style={{ borderColor: 'var(--line-soft)' }}>
+                    <div className="text-10 font-medium uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Calendar Sync</div>
+                    <div className="mt-0.5 text-11" style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}>{syncStatusText}</div>
+                    {syncAccounts.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {syncAccounts.map((a) => {
+                          const twoWay = a.provider === 'caldav' && !a.read_only;
+                          return (
+                            <span
+                              key={a.account_id}
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-10 font-medium"
+                              style={{
+                                backgroundColor: twoWay ? 'var(--success-soft)' : 'var(--info-soft)',
+                                color: twoWay ? 'var(--success)' : 'var(--info)',
+                              }}
+                              title={twoWay ? 'Two-way sync: BobWork ⇄ Mac Calendar' : 'One-way: Mac Calendar → BobWork (pull only)'}
+                            >
+                              {a.name}
+                              <span className="opacity-80">{twoWay ? '⇄ Mac' : '← Mac'}</span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  {([
+                    { key: 'import', label: 'Import .ics', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => fileInputRef.current?.click() },
+                    { key: 'export', label: 'Export .ics', icon: <Download className="h-3.5 w-3.5" />, onClick: () => handleExport() },
+                    ...(feedUrl ? [{ key: 'subscribe', label: 'Subscribe', icon: <Link2 className="h-3.5 w-3.5" />, onClick: () => setShowSubscribeModal(true) }] : []),
+                    { key: 'accounts', label: 'Accounts', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => setShowAccountModal(true) },
+                    { key: 'logs', label: 'Sync logs', icon: <ScrollText className="h-3.5 w-3.5" />, onClick: () => setShowSyncLogs((v) => !v) },
+                  ]).map((item) => (
+                    <button
+                      key={item.key}
+                      onClick={() => { setShowSyncMenu(false); item.onClick(); }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-11 transition-colors hover:bg-[var(--paper-hover)]"
+                      style={{ color: 'var(--ink)' }}
+                    >
+                      <span style={{ color: 'var(--ink-muted)' }}>{item.icon}</span>
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1461,11 +1512,6 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                             </span>
                           )}
                         </div>
-                        {ev.description && (
-                          <div className="truncate text-xs" style={{ color: 'var(--ink-faint)' }}>
-                            {ev.description}
-                          </div>
-                        )}
                         {ev.location && (
                           <div className="flex items-center gap-1 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>
                             <MapPin size={9} style={{ flexShrink: 0 }} />

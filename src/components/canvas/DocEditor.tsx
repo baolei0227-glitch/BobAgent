@@ -2515,14 +2515,20 @@ export function DocEditor({
   })();
 
   // 右键菜单行（工具并入插入行 → 三段图标行）：
-  // 第一行：撤销/重做 + H1-H3 + 加粗斜体删除线行内码；第二行：其余段落命令；第三行：插入+工具
+  // 第一行：撤销/重做 + H1-H3 + 加粗斜体删除线；第二行：其余段落命令（行内代码紧跟代码块右侧）；第三行：插入+工具
   const ctxShort = (id: string) => (id.includes(':') ? id.slice(id.indexOf(':') + 1) : id);
   const fmtItems = ctxGroups[0]?.items ?? [];
   const blkItems = ctxGroups[1]?.items ?? [];
   const hItems = blkItems.filter((c) => ['h1', 'h2', 'h3'].includes(ctxShort(c.id)));
   const blkRest = blkItems.filter((c) => !['h1', 'h2', 'h3'].includes(ctxShort(c.id)));
+  // 行内代码（Format:code）从第一行移出，插到第二行“代码块”右侧
+  const inlineCode = fmtItems.find((c) => ctxShort(c.id) === 'code');
+  if (inlineCode) {
+    const at = blkRest.findIndex((c) => ctxShort(c.id) === 'codeblock');
+    blkRest.splice(at >= 0 ? at + 1 : blkRest.length, 0, inlineCode);
+  }
   const ctxRows: { key: string; items: PaletteCommand[] }[] = [
-    { key: 'fmt', items: [...fmtItems.slice(0, 2), ...hItems, ...fmtItems.slice(2)] },
+    { key: 'fmt', items: [...fmtItems.slice(0, 2), ...hItems, ...fmtItems.slice(2).filter((c) => ctxShort(c.id) !== 'code')] },
     { key: 'blk', items: blkRest },
     { key: 'ins-tools', items: [...(ctxGroups[2]?.items ?? []), ...(ctxGroups[3]?.items ?? [])] },
   ];
@@ -2733,11 +2739,11 @@ export function DocEditor({
             >
               <ListTree className="h-3.5 w-3.5" />
             </button>
-            {/* 目录弹窗：点击目录项硬切到对应章节 */}
+            {/* 目录弹窗：灰色底；点击目录项硬切到对应章节且保持展开，仅在点击弹窗/按钮以外区域时收起 */}
             {showToc && headings.length > 0 && (
               <div
                 className="mt-1 w-64 max-h-[60vh] overflow-y-auto rounded-lg border py-2 shadow-xl ai-canvas-scroll"
-                style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}
+                style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}
               >
                 <div className="px-3 pb-1.5 text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>
                   Outline
@@ -2748,7 +2754,7 @@ export function DocEditor({
                     <button
                       key={h.pos}
                       onClick={() => {
-                        setShowToc(false);
+                        // 点击目录项只做硬切跳转，不收起弹窗（保持展开以连续翻阅章节）
                         scrollToHeading(h.pos);
                       }}
                       title={h.text}

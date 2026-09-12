@@ -40,6 +40,8 @@ export interface GraphNodeInfo {
   sandboxAppId?: string;
   /** 节点消息数（会话列表用：0 = 空会话 / 尚未执行任务，可从会话区隐藏） */
   messageCount?: number;
+  /** 会话创建时间（ISO，来自 .md frontmatter created_at）：左栏会话列表"最新在上"排序用 */
+  createdAt?: string;
 }
 
 export interface GraphEdgeInfo {

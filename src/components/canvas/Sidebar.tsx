@@ -22,11 +22,14 @@ import {
   X,
   Star,
   MoreHorizontal,
+  MoreVertical,
+  Copy,
   ChevronDown,
 } from 'lucide-react';
 import { WantedNoticeCenter } from './WantedNoticeCenter';
 import { SkillManagerModal } from './SkillManagerModal';
 import { TrashDialog } from './TrashDialog';
+import { ProjectActivityLog } from './ProjectActivityLog';
 import { bus, BusEvents } from '@/lib/bus';
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { loadSettings, applyCustomTheme, applyFontScale } from '@/lib/settings';
@@ -154,6 +157,10 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   const [wsPos, setWsPos] = useState<{ x: number; y: number }>({ x: 52, y: 96 });
   // 浮层宽度（右缘拖动调宽，会话内记忆）
   const [wsWidth, setWsWidth] = useState(700);
+  // 浮层视图：files=文件树（Finder 列式）/ log=项目流水账
+  const [wsView, setWsView] = useState<'files' | 'log'>('files');
+  // 流水账刷新信号（项目内文件变更时自增，触发日志面板重新拉取）
+  const [logRefreshKey, setLogRefreshKey] = useState(0);
   // 拖动/调宽期间读取最新值用 ref 镜像（避免重建事件监听）
   const wsPosRef = useRef(wsPos);
   useEffect(() => {
@@ -180,6 +187,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         if (el.closest('[data-bob-sidebar-rail]')) return; // rail 按钮（重新点击切换）不关闭
         if (el.closest('[data-material-menu]')) return; // materials 操作菜单同样 portal 到 body：点击菜单项不关闭浮层
         if (el.closest('[data-ws-switch]')) return; // 标题栏项目切换下拉 portal 到 body：点击项不关闭浮层
+        if (el.closest('[data-row-menu], [data-ws-rename]')) return; // 文件行 ⋮ 菜单 / 重命名弹窗：点击不关闭浮层
       }
       setWorkspaceOpen(false);
     };
@@ -318,6 +326,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
 
   // 右键菜单状态（文件树）
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; filePath: string; fileName: string; isDir: boolean } | null>(null);
+  // 列式浏览行 ⋮ 菜单状态（重命名 / 复制 / 删除）；rel 为项目相对路径，用于区分 homework / materials
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; filePath: string; fileName: string; isDir: boolean; rel: string } | null>(null);
   // 重命名状态
   const [renaming, setRenaming] = useState<{ filePath: string; oldName: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -331,6 +341,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [ctxMenu]);
+  // 关闭行 ⋮ 菜单（点击任意位置）
+  useEffect(() => {
+    if (!rowMenu) return;
+    const close = () => setRowMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [rowMenu]);
 
   // 发送附件到指定节点（复用 LocalFileExplorer 的事件机制）
   const sendAttachmentToNode = useCallback((nodeId: string, attachment: MessageAttachment) => {
@@ -705,6 +722,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     const onChanged = () => loadProjects();
     const onFilesChanged = () => {
       if (!workspaceOpenRef.current) return; // 浮层关闭时无需刷新（重开时另有刷新兜底）
+      setLogRefreshKey((k) => k + 1);
       for (const pid of expandedProjectsRef.current) {
         loadProjectFiles(pid);
       }
@@ -747,6 +765,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       for (const pid of expandedProjects) {
         loadProjectFiles(pid);
       }
+      setLogRefreshKey((k) => k + 1);
     };
     window.addEventListener('project-files-changed', handler);
     return () => window.removeEventListener('project-files-changed', handler);
@@ -907,12 +926,18 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       if (t.closest('[data-ws-switch]')) return;
       close();
     };
+    // 浮层内部列表自身滚动（列表较长时可滚动）不应关闭浮层，仅外部容器滚动才关闭
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t instanceof HTMLElement && t.closest('[data-ws-switch]')) return;
+      close();
+    };
     document.addEventListener('mousedown', onDocDown);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', onScroll, true);
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
     return () => {
       document.removeEventListener('mousedown', onDocDown);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
     };
   }, [wsSwitchAnchor]);
@@ -1092,6 +1117,45 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       console.error('删除失败:', err);
     }
   }, [currentId]);
+
+  /** 复制文件/文件夹（项目列式浏览 ⋮ 菜单）：后端递归复制，自动生成 "xxx 的副本" 名称 */
+  const handleRowCopy = useCallback(async (filePath: string) => {
+    setRowMenu(null);
+    try {
+      const resp = await fetch('/api/local-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'copy', sourcePath: filePath }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        if (currentId) loadProjectFilesRef.current?.(currentId);
+      } else {
+        console.error('复制失败:', data.error);
+      }
+    } catch (err) {
+      console.error('复制失败:', err);
+    }
+  }, [currentId]);
+
+  /** 删除文件/文件夹（项目列式浏览 ⋮ 菜单）：按路径归属分流到对应后端清理逻辑 */
+  const handleRowDelete = useCallback((menu: { filePath: string; fileName: string; isDir: boolean; rel: string }) => {
+    setRowMenu(null);
+    const { filePath, fileName, isDir, rel } = menu;
+    // homework：清理 .ownership.json 归属清册（根目录受保护）
+    if (rel === 'homework') return;
+    if (rel.startsWith('homework/')) {
+      void handleDeleteHomeworkFile(filePath);
+      return;
+    }
+    // materials：走 materials API（根目录受保护）
+    if (rel === 'materials') return;
+    if (rel.startsWith('materials/')) {
+      void handleDeleteMaterial(rel.replace(/^materials\//, ''), isDir);
+      return;
+    }
+    void handleDelete(filePath, fileName);
+  }, [handleDeleteHomeworkFile, handleDeleteMaterial, handleDelete]);
 
   /** 递归渲染文件树 */
   const renderFileTree = (nodes: FileNode[], depth: number, parentPath: string, projId: string) => {
@@ -1527,7 +1591,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             })()}
             {/* 上下文操作（作用于当前打开的文件夹；仅 materials 下目录时可用） */}
             {(() => {
-              if (!currentId || wsOpenPath.length === 0) return null;
+              if (wsView !== 'files' || !currentId || wsOpenPath.length === 0) return null;
               const roots = projectFiles.get(currentId) || [];
               if (roots.length === 0) return null;
               let node: FileNode | null = null;
@@ -1604,8 +1668,34 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               );
             })()}
             <div className="flex-1" />
+            {/* 视图切换：文件（Finder 列式）/ 日志（项目流水账） */}
+            <div
+              className="flex shrink-0 items-center gap-0.5 rounded-md p-0.5"
+              style={{ backgroundColor: 'var(--paper-soft)' }}
+            >
+              {([['files', '文件'], ['log', '日志']] as const).map(([key, label]) => {
+                const active = wsView === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setWsView(key)}
+                    className="rounded px-1.5 py-0.5 text-xs transition-colors"
+                    style={{
+                      backgroundColor: active ? 'var(--paper)' : 'transparent',
+                      color: active ? 'var(--ink)' : 'var(--ink-muted)',
+                      fontWeight: active ? 500 : 400,
+                      boxShadow: active ? '0 1px 2px color-mix(in srgb, var(--ink) 12%, transparent)' : 'none',
+                    }}
+                    title={key === 'files' ? '文件树' : '项目流水账'}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
             {/* 刷新当前项目文件列表 */}
-            {currentId && (
+            {wsView === 'files' && currentId && (
               <Button
                 type="button"
                 onClick={() => loadProjectFiles(currentId)}
@@ -1632,7 +1722,19 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             </Button>
           </div>
 
-          {/* 主体：Finder 列式浏览（当前项目与切换已入标题栏） */}
+          {/* 主体（日志视图）：项目流水账，按日期分组 */}
+          {wsView === 'log' && (
+            currentId ? (
+              <ProjectActivityLog projectId={currentId} refreshKey={logRefreshKey} />
+            ) : (
+              <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-sm" style={{ color: 'var(--ink-muted)' }}>
+                暂无项目
+              </div>
+            )
+          )}
+
+          {/* 主体（文件视图）：Finder 列式浏览（当前项目与切换已入标题栏） */}
+          {wsView === 'files' && (
           <div className="flex min-h-0 flex-1">
             {(() => {
               const currentProject = projects.find((p) => p.id === currentId) || null;
@@ -1689,6 +1791,32 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                               );
                             }
 
+                            // 行 ⋮ 按钮：以按钮右下角为锚点打开操作菜单（重命名 / 复制 / 删除）
+                            const openRowMenu = (e: React.MouseEvent<HTMLButtonElement>, node: FileNode, rel: string, isDir: boolean) => {
+                              e.stopPropagation();
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setRowMenu({
+                                x: rect.right - 176, // 菜单宽 176px：右对齐按钮，向左展开以免超出右缘
+                                y: rect.bottom + 4,
+                                filePath: `${currentProject.path}/${rel}`,
+                                fileName: node.name,
+                                isDir,
+                                rel,
+                              });
+                            };
+                            const rowMenuButton = (node: FileNode, rel: string, isDir: boolean) => (
+                              <button
+                                type="button"
+                                onClick={(e) => openRowMenu(e, node, rel, isDir)}
+                                className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-hover)] hover:opacity-100 group-hover:opacity-100"
+                                style={{ color: 'var(--ink-muted)' }}
+                                title="More actions"
+                                aria-label="More actions"
+                              >
+                                <MoreVertical className="h-3.5 w-3.5" />
+                              </button>
+                            );
+
                             const renderRow = (c: number, node: FileNode, prefix: string[]) => {
                               const rel = node.rel ?? (prefix.length ? [...prefix, node.name].join('/') : node.name);
                               const isUnderMaterials = rel === 'materials' || rel.startsWith('materials/');
@@ -1732,6 +1860,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                         )}
                                       </button>
                                     )}
+                                    {rowMenuButton(node, rel, true)}
                                   </div>
                                 );
                               }
@@ -1763,6 +1892,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                       <Trash className="h-3 w-3" />
                                     </button>
                                   )}
+                                  {rowMenuButton(node, rel, false)}
                                 </div>
                               );
                             };
@@ -1805,6 +1935,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               );
             })()}
           </div>
+          )}
 
           </div>
 
@@ -1890,7 +2021,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               <div className="max-h-[calc(50vh-16px)] overflow-y-auto">
                 {starredList.length > 0 && (
                   <div className="mt-1">
-                    <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-faint)' }}>
+                    <div className="px-3 py-1 text-11 font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-faint)' }}>
                       Starred
                     </div>
                     {starredList.map((p) => row(p))}
@@ -1901,7 +2032,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                 )}
                 {otherList.length > 0 && (
                   <div className="mt-1">
-                    <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-faint)' }}>
+                    <div className="px-3 py-1 text-11 font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-faint)' }}>
                       Projects
                     </div>
                     {otherList.map((p) => row(p))}
@@ -2475,9 +2606,58 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         </div>
       )}
 
+      {/* 列式浏览行 ⋮ 菜单（portal 到 body，避免被浮层 overflow-hidden 裁切） */}
+      {rowMenu && typeof document !== 'undefined' && createPortal(
+        <div
+          data-row-menu
+          className="fixed z-[102] w-44 overflow-hidden rounded-xl shadow-2xl"
+          style={{
+            left: Math.max(8, Math.min(rowMenu.x, window.innerWidth - 184)),
+            top: Math.min(rowMenu.y, window.innerHeight - 132),
+            border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
+            backgroundColor: 'var(--popover)',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              setRowMenu(null);
+              setRenaming({ filePath: rowMenu.filePath, oldName: rowMenu.fileName });
+              setRenameValue(rowMenu.fileName);
+              setTimeout(() => renameRef.current?.focus(), 50);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink)' }}
+          >
+            <Pencil className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            Rename
+          </button>
+          <button
+            onClick={() => handleRowCopy(rowMenu.filePath)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink)' }}
+          >
+            <Copy className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            Copy
+          </button>
+          <button
+            onClick={() => handleRowDelete(rowMenu)}
+            disabled={rowMenu.rel === 'homework' || rowMenu.rel === 'materials'}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            style={{ color: rowMenu.rel === 'homework' || rowMenu.rel === 'materials' ? 'var(--ink-muted)' : 'var(--danger)' }}
+            title={rowMenu.rel === 'homework' || rowMenu.rel === 'materials' ? 'Root directories cannot be deleted' : undefined}
+          >
+            <Trash className="h-3.5 w-3.5" style={{ color: rowMenu.rel === 'homework' || rowMenu.rel === 'materials' ? 'var(--ink-muted)' : 'var(--danger)' }} />
+            Delete
+          </button>
+        </div>,
+        document.body,
+      )}
+
       {/* 重命名弹窗 */}
       {renaming && (
         <div
+          data-ws-rename
           className="fixed inset-0 z-[101] flex items-start justify-center pt-20"
           style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
           onClick={() => setRenaming(null)}

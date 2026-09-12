@@ -1,9 +1,10 @@
 /**
- * Agent 工具系统 — butler 场景（记忆/偏好 · 待办 · 日程 · 便签 · 计划树）
- * butler 场景工具（15 个）的定义与 executor：
+ * Agent 工具系统 — butler 场景（记忆/偏好 · 待办 · 日程 · 便签 · 计划树 · 模型计费）
+ * butler 场景工具（17 个）的定义与 executor：
  *   - 事务域：read_todo / remember_preference / read_preferences / delete_preference / update_preference /
  *             query_schedule / create_scheduled_todo / query_todos / todo_update / todo_delete / create_sticky_note
  *   - 计划树：project_plan_start / project_plan_view / project_plan_add_steps / project_plan_step_status
+ *   - 模型计费：get_model_price / set_model_price（对话维护单价覆盖，新增模型 / 厂商调价）
  * 依赖方向单向：import shared.ts 的公共助手（getProjectRootPath），
  * 仅以 import type 依赖 index.ts 的类型（编译期擦除），不产生运行时循环依赖。
  */
@@ -15,6 +16,8 @@ import { initDb } from '@/lib/db';
 import { join } from 'path';
 import { PROJECT_DB_FILENAME } from '@/lib/app-root';
 import { getProjectRootPath } from './shared';
+import type { ProviderConfig } from '@/lib/types';
+import type { ModelPriceOverride } from '@/lib/settings';
 import type { Tool } from './index';
 
 /** read_todo 工具 —（已合并，DB shim）。从 events 表按 scope='all' 查询，
@@ -883,6 +886,215 @@ async function toolProjectPlanStepStatus(args: Record<string, unknown>): Promise
   }
 }
 
+// ===== 模型计费：管家对话维护单价覆盖（新增模型 / 厂商调价 → 计费链路自动采纳） =====
+
+/** 取模型引用中的裸 modelId（"provider:modelId" → "modelId"） */
+function bareModelId(ref: string): string {
+  return ref.includes(':') ? ref.slice(ref.lastIndexOf(':') + 1) : ref;
+}
+
+/** 在覆盖表中按裸 modelId 查找（兼容 "provider:modelId" 与裸 key 两种写法） */
+function findOverrideEntry(
+  overrides: Record<string, ModelPriceOverride>,
+  ref: string,
+): { key: string; value: ModelPriceOverride } | null {
+  const bare = bareModelId(ref);
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v && bareModelId(k) === bare) return { key: k, value: v };
+  }
+  return null;
+}
+
+/** 归一化覆盖表 key：能匹配到已配置厂商 → "provider:modelId"，否则原样保留 */
+function normalizeModelKey(modelRaw: string, providers: ProviderConfig[]): string {
+  if (modelRaw.includes(':')) return modelRaw;
+  for (const p of providers) {
+    if ((p.selectedModels ?? []).some((m) => m.modelId === modelRaw)) return `${p.type}:${modelRaw}`;
+  }
+  return modelRaw;
+}
+
+function fmtOverrideLine(key: string, v: ModelPriceOverride): string {
+  const parts = [`input ${v.input}`, `output ${v.output}`];
+  if (v.cacheHit != null) parts.push(`cacheHit ${v.cacheHit}`);
+  if (v.offPeak != null) parts.push(`offPeak ×${v.offPeak}`);
+  return `- ${key}: ${parts.join(' · ')} ${v.currency ?? 'usd'}/1M tokens${v.note ? ` · ${v.note}` : ''} · 更新于 ${v.updatedAt}`;
+}
+
+/** get_model_price 工具：查询模型当前生效单价（覆盖价优先），或列出全部覆盖价与已配置模型定价。
+ *  只读；用于「这个模型现在按什么价计费 / 哪些模型还没定价」。 */
+async function toolGetModelPrice(args: Record<string, unknown>): Promise<string> {
+  try {
+    const { readSettingsFromFile } = await import('@/lib/settings-server');
+    const { resolveModelPriceInfo, invalidatePriceOverrides, ensurePriceOverridesLoaded } =
+      await import('@/lib/usage');
+    const s = await readSettingsFromFile();
+    // 强制与磁盘一致（覆盖价可能刚由 set_model_price 写入）
+    invalidatePriceOverrides();
+    await ensurePriceOverridesLoaded();
+    const overrides = s.priceOverrides ?? {};
+    const providers: ProviderConfig[] = s.providers ?? [];
+    const modelRef = typeof args.model === 'string' ? args.model.trim() : '';
+
+    if (modelRef) {
+      const info = resolveModelPriceInfo(modelRef);
+      const entry = findOverrideEntry(overrides, modelRef);
+      const bare = bareModelId(modelRef);
+      if (!info) {
+        return JSON.stringify({
+          model: modelRef,
+          priced: false,
+          source: null,
+          override: null,
+          message: `模型「${bare}」当前未定价（内置价格表无记录，也无用户覆盖价）。其用量成本记为 NULL，面板显示“未定价”。可用 set_model_price 写入单价。`,
+        }, null, 2);
+      }
+      return JSON.stringify({
+        model: modelRef,
+        priced: true,
+        source: info.source,
+        unit: 'per 1M tokens',
+        price: info.price,
+        override: entry ? { key: entry.key, ...entry.value } : null,
+        message: info.source === 'override'
+          ? `「${bare}」当前走用户覆盖价（input ${info.price.input} / output ${info.price.output} ${info.price.currency}/1M）。`
+          : `「${bare}」当前走内置价格表、未被覆盖（input ${info.price.input} / output ${info.price.output} ${info.price.currency}/1M）。`,
+      }, null, 2);
+    }
+
+    const entries = Object.entries(overrides).filter(([, v]) => v) as Array<[string, ModelPriceOverride]>;
+    const lines: string[] = ['# 模型单价总览', ''];
+    lines.push(`## 用户覆盖价（${entries.length} 条 · 优先于内置价格表）`);
+    if (entries.length === 0) {
+      lines.push('(暂无；所有模型走内置价格表。可用 set_model_price 新增/调整。)');
+    } else {
+      for (const [k, v] of entries) lines.push(fmtOverrideLine(k, v));
+    }
+    lines.push('');
+    lines.push('## 已配置模型当前生效价');
+    let total = 0;
+    let unpriced = 0;
+    for (const p of providers) {
+      for (const sel of p.selectedModels ?? []) {
+        total++;
+        const ref = `${p.type}:${sel.modelId}`;
+        const info = resolveModelPriceInfo(ref);
+        if (!info) {
+          unpriced++;
+          lines.push(`- ${ref} → ⚠️ 未定价`);
+        } else {
+          lines.push(`- ${ref} → ${info.source === 'override' ? '覆盖价' : '内置表'}: input ${info.price.input} / output ${info.price.output} ${info.price.currency}/1M`);
+        }
+      }
+    }
+    if (total === 0) lines.push('(模型池为空，或尚未配置任何模型)');
+    lines.push('');
+    lines.push(
+      unpriced > 0
+        ? `提示：${unpriced}/${total} 个已配置模型未定价，其用量成本记 NULL（面板显示“未定价”）。可用 set_model_price 补价。`
+        : `全部 ${total} 个已配置模型均有定价。`,
+    );
+    const out = lines.join('\n');
+    return out.length > 5000 ? out.slice(0, 4997) + '...' : out;
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** set_model_price 工具：写入/清除某模型的用户覆盖单价（.settings.json 的 priceOverrides）。
+ *  改后立即对新产生的用量生效；历史记录不改写。单价必须由用户提供或经核实，禁止编造。 */
+async function toolSetModelPrice(args: Record<string, unknown>): Promise<string> {
+  try {
+    const modelRaw = String(args.model ?? '').trim();
+    if (!modelRaw) return JSON.stringify({ ok: false, error: 'model 必填（"provider:modelId" 或裸 modelId）' });
+    const remove = args.remove === true;
+
+    const input = Number(args.input);
+    const output = Number(args.output);
+    if (!remove) {
+      if (!Number.isFinite(input) || input < 0) return JSON.stringify({ ok: false, error: 'input 必填且为非负数（缓存未命中输入价，每百万 token）' });
+      if (!Number.isFinite(output) || output < 0) return JSON.stringify({ ok: false, error: 'output 必填且为非负数（输出价，每百万 token）' });
+    }
+    let cacheHit: number | undefined;
+    if (args.cacheHit != null && args.cacheHit !== '') {
+      cacheHit = Number(args.cacheHit);
+      if (!Number.isFinite(cacheHit) || cacheHit < 0) return JSON.stringify({ ok: false, error: 'cacheHit 必须为非负数' });
+    }
+    let offPeak: number | undefined;
+    if (args.offPeak != null && args.offPeak !== '') {
+      offPeak = Number(args.offPeak);
+      if (!Number.isFinite(offPeak) || offPeak <= 0) return JSON.stringify({ ok: false, error: 'offPeak 必须为正数（空闲时段倍率，如 0.5）' });
+    }
+    const currency = args.currency === 'cny' ? 'cny' : args.currency === 'usd' ? 'usd' : undefined;
+    const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim() : undefined;
+
+    const { readSettingsFromFile, writeSettingsToFile } = await import('@/lib/settings-server');
+    const { invalidatePriceOverrides } = await import('@/lib/usage');
+    const s = await readSettingsFromFile();
+    const overrides: Record<string, ModelPriceOverride> = s.priceOverrides ?? (s.priceOverrides = {});
+    const key = normalizeModelKey(modelRaw, s.providers ?? []);
+    const bare = bareModelId(key);
+
+    if (remove) {
+      const existing = findOverrideEntry(overrides, key);
+      if (!existing) {
+        return JSON.stringify({ ok: true, removed: false, key, message: `「${bare}」本就没有覆盖价，无需清除。` });
+      }
+      delete overrides[existing.key];
+      await writeSettingsToFile(s);
+      invalidatePriceOverrides();
+      return JSON.stringify({
+        ok: true,
+        removed: true,
+        key: existing.key,
+        message: `已清除「${bare}」的覆盖价，此后回退内置价格表（内置表也无 → 未定价）。`,
+      }, null, 2);
+    }
+
+    // 同名不同 key 的旧条目一并清理，避免双条歧义
+    const dup = findOverrideEntry(overrides, key);
+    if (dup && dup.key !== key) delete overrides[dup.key];
+    const prev = overrides[key] ?? null;
+
+    overrides[key] = {
+      input,
+      output,
+      ...(cacheHit != null ? { cacheHit } : {}),
+      ...(offPeak != null ? { offPeak } : {}),
+      ...(currency ? { currency } : {}),
+      ...(note ? { note } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    await writeSettingsToFile(s);
+    invalidatePriceOverrides();
+
+    // 提示：该模型既不在模型池里、也不在内置价格表中（可能是尚未接入的新模型）
+    let warning: string | undefined;
+    const inPool = (s.providers ?? []).some((p) => (p.selectedModels ?? []).some((m) => m.modelId === bare));
+    if (!inPool) {
+      const { PROVIDER_PRESETS } = await import('@/lib/providers/presets');
+      const inPreset = PROVIDER_PRESETS.some((p) => p.models.some((m) => m.modelId === bare));
+      if (!inPreset) warning = `注意：模型「${bare}」当前不在已配置模型池、也不在内置价格表中。单价已保存，待该模型接入并产生用量后即按此价计费。`;
+    }
+
+    return JSON.stringify({
+      ok: true,
+      key,
+      model: bare,
+      price: overrides[key],
+      previous: prev,
+      ...(warning ? { warning } : {}),
+      message: `已更新「${bare}」单价：input ${input} / output ${output} ${currency ?? 'usd'} 每百万 token${offPeak != null ? `，空闲时段 ×${offPeak}` : ''}。此后产生的用量按新价估算成本；历史记录不变。`,
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      hint: '若提示 version 相关错误，说明 .settings.json 版本缺失或被破坏（防覆盖保护），需先在设置界面正常保存一次。',
+    }, null, 2);
+  }
+}
+
 /** butler 场景工具定义（由 tools/index.ts 聚合进 toolDefs） */
 export const butlerToolDefs: Tool[] = [
   {
@@ -1209,5 +1421,70 @@ export const butlerToolDefs: Tool[] = [
     category: '系统',
     execute: toolProjectPlanStepStatus,
     maxOutput: 800,
+  },
+  {
+    name: 'get_model_price',
+    description:
+      'Read the effective billing price of a model (per 1M tokens): a user override (.settings.json priceOverrides, maintained via set_model_price) takes precedence over the built-in price table; if neither has it, the model is "unpriced" and its cost is recorded as NULL. Pass model ("provider:modelId" or bare modelId) to query one model; omit model to list all user overrides plus every configured model with its current price — use that to spot configured-but-unpriced models. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          description: 'Optional model reference, e.g. "deepseek:deepseek-v4-flash" or bare "deepseek-v4-flash". Omit to list all overrides and configured models.',
+        },
+      },
+      required: [],
+    },
+    category: '配置',
+    execute: toolGetModelPrice,
+    maxOutput: 5000,
+  },
+  {
+    name: 'set_model_price',
+    description:
+      'Set or update the user override price of a model (per 1M tokens). Use when a vendor changes prices, or when a NEW model is added that the built-in price table does not know. Writes .settings.json priceOverrides; takes effect immediately for usage recorded afterwards (historical records are NOT rewritten). Provide input (cache-miss input price) and output price; optional cacheHit (cache-read price, default input × 0.25), offPeak (idle-hour multiplier e.g. 0.5), currency (usd default | cny), note (source/basis for later reconciliation). Pass remove=true to clear an override and fall back to the built-in table. CRITICAL: never invent or guess prices — only call with numbers the user explicitly gave, or that you verified from the vendor\'s official page; if a number is missing or uncertain, ASK the user first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          description: 'Model reference: "provider:modelId" or bare modelId (auto-prefixed with the configured provider when found). Required.',
+        },
+        input: {
+          type: 'number',
+          description: 'Cache-miss input price per 1M tokens. Required unless remove=true.',
+        },
+        output: {
+          type: 'number',
+          description: 'Output price per 1M tokens. Required unless remove=true.',
+        },
+        cacheHit: {
+          type: 'number',
+          description: 'Optional cache-read (cache-hit) price per 1M tokens. Omitted → input × 0.25.',
+        },
+        offPeak: {
+          type: 'number',
+          description: 'Optional idle-hour discount multiplier, e.g. 0.5 for off-peak half price. Omit for flat pricing.',
+        },
+        currency: {
+          type: 'string',
+          enum: ['usd', 'cny'],
+          description: 'Billing currency. Default usd.',
+        },
+        note: {
+          type: 'string',
+          description: 'Optional note, e.g. vendor page URL / effective date, for later reconciliation.',
+        },
+        remove: {
+          type: 'boolean',
+          description: 'Clear the override and fall back to the built-in price table. Default false.',
+        },
+      },
+      required: ['model'],
+    },
+    category: '配置',
+    execute: toolSetModelPrice,
+    maxOutput: 1500,
   },
 ];

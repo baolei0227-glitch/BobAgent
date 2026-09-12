@@ -19,12 +19,14 @@ import {
   type ResolvedModel,
 } from './model';
 import {
+  DEFAULT_NAMING,
   buildTargetName,
   formatVersion,
   resolveVersionIndex,
   safeDirName,
   shouldSkip,
   type MoveRecord,
+  type NamingRule,
 } from './naming';
 
 /** 新写入的文件需静置多久才处理（毫秒），避免读到写一半的文件 */
@@ -43,11 +45,23 @@ export interface Plan {
   note: string;
 }
 
-/** 主题兜底：解析失败/低置信度时用原文件名当主题 */
+/**
+ * 主题兜底：解析失败/低置信度时用原文件名当主题。
+ * 先剥掉文件名里的日期、版本标识与旧版命名残留，只留核心词，
+ * 使兜底结果同样符合当前命名规范。
+ */
 export function topicFromFileName(name: string): string {
-  const base = name.slice(0, name.length - extname(name).length)
-    .replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '')
-    .replace(/\s+/g, '')
+  const base = name
+    .slice(0, name.length - extname(name).length)
+    // 日期（2026-09-12 / 20260815 / 2026.08.15，连同紧邻的分隔符）
+    .replace(/[_\- ]*(19|20)\d{2}[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?!\d)/g, '')
+    // 版本标识（v01 / V2 / 合同v03；要求前面不是拉丁字母，避免误伤 Officev15 这类词）
+    .replace(/^v\s*\d{1,2}(?![0-9])/i, '')
+    .replace(/([^A-Za-z0-9])v\s*\d{1,2}(?![0-9])/gi, '$1')
+    // 中文版本标识（第3版 / 第三版）
+    .replace(/[_\- ]*第?\s*[0-9一二三四五六七八九十]+\s*版/g, '')
+    .replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '') // 文件名非法字符
+    .replace(/[\s_\-]+/g, '') // 分隔符残留
     .slice(0, 40);
   return base || '未命名';
 }
@@ -71,7 +85,7 @@ async function isSettled(filePath: string): Promise<boolean> {
   }
 }
 
-/** 规划单个文件的去向（不落盘） */
+/** 规划单个文件的去向（不落盘）；naming = 设置里的命名规则（缺省用默认形态） */
 export async function planOne(
   root: string,
   name: string,
@@ -79,6 +93,7 @@ export async function planOne(
   categories: readonly string[],
   modelCache: Map<string, ResolvedModel | null>,
   override?: string,
+  naming: NamingRule = DEFAULT_NAMING,
 ): Promise<Plan> {
   const from = join(root, name);
   const ext = extname(name).toLowerCase();
@@ -114,8 +129,8 @@ export async function planOne(
   const confidence = insight?.confidence ?? 0;
 
   const targetDir = join(root, safeDirName(category));
-  const versionIndex = await resolveVersionIndex(targetDir, topic, docVersion);
-  const targetName = await buildTargetName(targetDir, stamp, topic, ext, versionIndex);
+  const versionIndex = await resolveVersionIndex(targetDir, topic, docVersion, naming);
+  const targetName = await buildTargetName(targetDir, stamp, topic, ext, versionIndex, naming);
 
   return {
     from,
@@ -123,7 +138,7 @@ export async function planOne(
     targetName,
     category,
     topic,
-    version: formatVersion(versionIndex),
+    version: formatVersion(versionIndex, naming.padVersion),
     confidence,
     modelName: model?.model ?? '',
     note,
@@ -148,6 +163,8 @@ export async function scanAndPlan(opts: {
   model?: string;
   /** 是否等待文件写入静置（监听模式需要，手动执行不需要） */
   settle?: boolean;
+  /** 命名规则；缺省 = 默认 {版本号}{主题}_{日期} */
+  naming?: NamingRule;
 }): Promise<Planned> {
   const files = await listFiles(opts.root);
   const modelCache = new Map<string, ResolvedModel | null>();
@@ -158,7 +175,7 @@ export async function scanAndPlan(opts: {
       writing.push(name);
       continue;
     }
-    plans.push(await planOne(opts.root, name, opts.stamp, opts.categories, modelCache, opts.model));
+    plans.push(await planOne(opts.root, name, opts.stamp, opts.categories, modelCache, opts.model, opts.naming));
   }
   return { plans, total: files.length, writing };
 }

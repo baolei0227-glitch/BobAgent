@@ -29,7 +29,7 @@ import {
 import { bus, BusEvents } from '@/lib/bus';
 import type { MessageAttachment } from '@/lib/types';
 import { isBrowserDoc, isPreviewable } from './viewers/registry';
-import { TooltipProvider } from '@/components/ui/tooltip';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { FileName } from './FileName';
 
@@ -692,11 +692,20 @@ export function LocalFileExplorer({
           <FileIcon className="h-4 w-4 shrink-0" style={{ color: fileExtColor(item.extension) }} />
         )}
 
-        <FileName
-          name={item.name}
-          className="flex-1 text-sm"
-          style={{ color: isDir ? 'var(--ink-muted)' : 'var(--ink)' }}
-        />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="flex min-w-0 flex-1">
+              <FileName
+                name={item.name}
+                className="w-full min-w-0 text-sm"
+                style={{ color: isDir ? 'var(--ink-muted)' : 'var(--ink)' }}
+              />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="right" className="max-w-[360px] break-all">
+            {item.name}
+          </TooltipContent>
+        </Tooltip>
 
         {isSearchResult && src && (
           <span
@@ -791,7 +800,7 @@ export function LocalFileExplorer({
       data-canvas-ui="overlay"
       style={{
         width: 258,
-        // 2026-09-12 本地文件面板改纯白：与预览面板一致，与灰色画布底 --canvas-bg(#e6e6ec) 拉开对比
+        // 2026-09-12 本地文件面板改纯白：与预览面板一致，与灰色画布底 --canvas-bg 拉开对比
         borderRadius: 12,
         border: '1px solid',
         borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',

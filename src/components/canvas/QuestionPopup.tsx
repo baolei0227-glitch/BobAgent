@@ -437,7 +437,7 @@ export default function QuestionPopup({
                         e.currentTarget.style.boxShadow = 'none';
                       }}
                     />
-                    <p className="mt-1 text-right text-[10px]" style={{ color: 'var(--ink-muted)' }}>
+                    <p className="mt-1 text-right text-10" style={{ color: 'var(--ink-muted)' }}>
                       {supplement.length}/{SUPPLEMENT_MAX}
                     </p>
                   </div>

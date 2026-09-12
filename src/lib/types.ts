@@ -259,6 +259,8 @@ export type AiChatNodeData = {
   modelId?: string;
   thinkingLevel?: ThinkingLevel;
   nodeMdId?: string;  // .md 文件持久化 ID（UUID），首次对话时生成
+  /** 会话创建时间（ISO，来自 .md frontmatter created_at）：左栏会话列表"最新在上"排序用 */
+  createdAt?: string;
   /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
   sandboxAppId?: string;
   /** 已压缩对话轮次数（memory_compacted_until）：请求时跳过已压缩历史，交由压缩记忆+成果块兜底 */

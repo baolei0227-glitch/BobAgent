@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Share2, ClipboardCopy, Check, X, Download, Loader2, ImageDown, Pencil } from 'lucide-react';
+import { Share2, Check, X, Loader2, ImageDown, Copy, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toPng } from 'html-to-image';
 import { XhsPanel } from './XhsCard';
@@ -84,9 +84,9 @@ function ShareContent({ content }: { content: string }) {
 }
 
 /**
- * BrandCard — 带品牌外框的分享卡（预览与导出共用同一结构）：
- * 品牌色细边框 + 顶部品牌横幅 + 品牌头（logo + BobWork + 模型徽章 + 时间戳）
- * + Question / Answer + 底部 "Share via BobWork" 水印。
+ * BrandCard — 无边框分享卡（预览与导出共用同一结构）：
+ * 品牌头（logo + BobWork + 模型徽章 + 时间戳）+ Question / Answer
+ * + 底部 "Share via BobWork" 水印。
  */
 function BrandCard({
   brandLogo,
@@ -114,14 +114,8 @@ function BrandCard({
         backgroundColor: 'var(--panel-bg)',
         color: 'var(--ink-strong)',
         fontFamily: "ui-sans-serif, system-ui, 'SF Pro', 'PingFang SC', sans-serif",
-        border: '1px solid color-mix(in oklab, var(--primary) 35%, transparent)',
-        borderRadius: 14,
-        overflow: 'hidden',
-        boxShadow: '0 4px 24px rgba(0, 0, 0, 0.08)',
       }}
     >
-      {/* 顶部品牌色横幅 */}
-      <div style={{ height: 8, backgroundColor: 'var(--primary)' }} />
       <div style={{ padding: 20 }}>
         <div
           style={{
@@ -254,7 +248,6 @@ function BrandCard({
 }
 
 export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter, open, onClose }: ShareCardProps) {
-  const [copied, setCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [copyingImage, setCopyingImage] = useState(false);
   const [copiedImg, setCopiedImg] = useState(false);
@@ -304,17 +297,6 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
     })();
     return () => { cancelled = true; };
   }, []);
-
-  const handleCopyText = useCallback(async () => {
-    const text = [editQ, editA].filter(Boolean).join('\n\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard 不可用时静默忽略 */
-    }
-  }, [editQ, editA]);
 
   /** 捕获品牌卡 PNG：刷新水印时间 → 等待 React 重渲染 → html-to-image 序列化导出卡。
    *  实测教训：html-to-image 会把原节点（fixed left:-9999 离屏容器）的定位样式复制到克隆体，
@@ -422,17 +404,37 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
               </span>
             )}
           </div>
-          <Button
-            type="button"
-            onClick={onClose}
-            variant="ghost"
-            tone="neutral"
-            size="icon-sm"
-            className="flex-shrink-0"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            {/* Edit toggle：编辑/完成双态，置于标题栏右侧 */}
+            {answer && (
+              <button
+                type="button"
+                onClick={() => setEditing((v) => !v)}
+                title={editing ? 'Done editing' : 'Edit content'}
+                aria-label={editing ? 'Done editing' : 'Edit content'}
+                className="flex items-center justify-center rounded-md p-2 transition-colors hover:opacity-90"
+                style={{
+                  border: editing
+                    ? '1px solid var(--primary)'
+                    : '1px solid color-mix(in oklab, var(--primary) 45%, transparent)',
+                  color: editing ? 'var(--primary)' : 'var(--ink-strong)',
+                }}
+              >
+                {editing ? <Check className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+              </button>
+            )}
+            <Button
+              type="button"
+              onClick={onClose}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              className="flex-shrink-0"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </DialogHeader>
         <DialogDescription className="sr-only">Share content preview</DialogDescription>
 
@@ -496,23 +498,8 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
               tone="brand"
               size="icon-lg"
             >
-              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageDown className="h-4 w-4" />}
             </Button>
-            {/* Edit toggle：编辑/完成双态，豁免保留 */}
-            <button
-              type="button"
-              onClick={() => setEditing((v) => !v)}
-              title={editing ? 'Done editing' : 'Edit content'}
-              className="flex items-center justify-center rounded-md p-2 transition-colors hover:opacity-90"
-              style={{
-                border: editing
-                  ? '1px solid var(--primary)'
-                  : '1px solid color-mix(in oklab, var(--primary) 45%, transparent)',
-                color: editing ? 'var(--primary)' : 'var(--ink-strong)',
-              }}
-            >
-              {editing ? <Check className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
-            </button>
             <Button
               type="button"
               onClick={handleCopyImage}
@@ -522,7 +509,7 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
               tone="brand"
               size="icon-lg"
             >
-              {copyingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : copiedImg ? <Check className="h-4 w-4" /> : <ImageDown className="h-4 w-4" />}
+              {copyingImage ? <Loader2 className="h-4 w-4 animate-spin" /> : copiedImg ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
             </Button>
             <Button
               type="button"
@@ -531,18 +518,9 @@ export function ShareCard({ question, answer, timestamp, modelLabel, levelLetter
               variant="outline"
               tone="brand"
               size="icon-lg"
+              className="h-10 w-10"
             >
-              <XhsIcon size={16} />
-            </Button>
-            <Button
-              type="button"
-              onClick={handleCopyText}
-              title={copied ? 'Copied' : 'Copy text'}
-              variant="solid"
-              tone="brand"
-              size="icon-lg"
-            >
-              {copied ? <Check className="h-4 w-4" /> : <ClipboardCopy className="h-4 w-4" />}
+              <XhsIcon size={24} />
             </Button>
           </div>
         )}

@@ -10,7 +10,7 @@
  * 选项：
  *   --apply          真正执行（默认只预览，绝不动文件）
  *   --watch          常驻监听，放入文件即自动整理（等价于 --apply + 监听）
- *   --undo           按 _整理日志.json 回滚
+ *   --undo           按 .整理日志.json 回滚（兼容读取旧名 _整理日志.json）
  *   --model <p:m>    指定模型，如 deepseek:deepseek-flash
  *   --help
  *
@@ -22,7 +22,16 @@ import { isAbsolute, join, resolve } from 'path';
 
 import { CATEGORIES, normalizeCategories } from './model';
 import { readSettingsFromFile } from '@/lib/settings-server';
-import { LOG_NAME, appendLog, todayStamp, undo, type MoveRecord } from './naming';
+import {
+  LOG_NAME,
+  appendLog,
+  normalizeNaming,
+  previewName,
+  todayStamp,
+  undo,
+  type MoveRecord,
+  type NamingRule,
+} from './naming';
 import { SETTLE_MS, commitPlan, scanAndPlan } from './core';
 
 /** 监听模式的事件防抖窗口（毫秒） */
@@ -56,10 +65,11 @@ interface ParsedArgs {
   model?: string;
 }
 
-/** 本次运行的全部入参：目录与分类清单均已解析完成 */
+/** 本次运行的全部入参：目录、分类清单与命名规则均已解析完成 */
 interface Args extends ParsedArgs {
   root: string;
   categories: string[];
+  naming: NamingRule;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -98,7 +108,8 @@ function printHelp(): void {
   --model <p:m>    指定模型，如 deepseek:deepseek-flash
 
 目录缺省时读取设置的「File Organizer → 投递箱目录」。
-命名规则：{日期}_{版本号}_{主题}.{扩展名}   如 2026-09-12_v01_房屋租赁合同.pdf
+命名规则：默认 {版本号}{主题}_{日期}.{扩展名}   如 v01房屋租赁合同_2026-09-12.pdf
+          字段顺序 / 分隔符 / 版本号补零可在设置中自定义
 分类枚举：内置默认 ${CATEGORIES.join(' / ')}（可在设置中自定义）`);
 }
 
@@ -114,6 +125,7 @@ async function runOnce(args: Args, settle: boolean): Promise<number> {
     stamp,
     model,
     settle,
+    naming: args.naming,
   });
   if (total === 0) {
     console.log(`（${root} 下没有待整理的文件）`);
@@ -121,7 +133,8 @@ async function runOnce(args: Args, settle: boolean): Promise<number> {
   }
 
   console.log(`\n目录：${root}`);
-  console.log(`日期：${stamp}　模式：${apply ? '执行' : '预览（不改动任何文件）'}\n`);
+  console.log(`日期：${stamp}　模式：${apply ? '执行' : '预览（不改动任何文件）'}`);
+  console.log(`命名：${previewName(args.naming, stamp)}\n`);
   for (const name of writing) console.log(`· 跳过（文件仍在写入）：${name}`);
 
   const rows: string[][] = [];
@@ -201,7 +214,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const root = isAbsolute(rootRaw) ? rootRaw : resolve(process.cwd(), rootRaw);
-  const args: Args = { ...parsed, root, categories: normalizeCategories(fileOrg.categories) };
+  const args: Args = {
+    ...parsed,
+    root,
+    categories: normalizeCategories(fileOrg.categories),
+    naming: normalizeNaming(fileOrg.naming),
+  };
 
   const st = await fs.stat(args.root).catch(() => null);
   if (!st?.isDirectory()) {

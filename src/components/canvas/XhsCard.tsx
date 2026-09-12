@@ -5,7 +5,7 @@ import type { ChangeEvent, CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { toPng } from 'html-to-image';
 import {
-  Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardCopy, Copy, FileDown, Loader2, Shuffle, Sparkles, Upload, Wand2, X,
+  Check, ChevronLeft, ChevronRight, ClipboardCopy, Copy, FileDown, Loader2, Shuffle, Sparkles, Upload, Wand2, X,
 } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
@@ -1133,8 +1133,6 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
   /** 自动生成插画提示词：loading 中 / 错误信息 */
   const [promptLoading, setPromptLoading] = useState(false);
   const [promptError, setPromptError] = useState('');
-  /** 批量保存下拉菜单（Save as files / Save as ZIP） */
-  const [saveMenuOpen, setSaveMenuOpen] = useState(false);
   /** 导出溢出提示（自动检测，仅提示不阻断） */
   const [overflowMsg, setOverflowMsg] = useState('');
   const [busy, setBusy] = useState<'copy' | 'download' | 'all' | null>(null);
@@ -1151,14 +1149,6 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
   const total = pages.length;
 
   useEffect(() => { setMounted(true); }, []);
-
-  // 点击外部关闭批量保存下拉菜单
-  useEffect(() => {
-    if (!saveMenuOpen) return;
-    const onDown = () => setSaveMenuOpen(false);
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [saveMenuOpen]);
 
   // 品牌标识：默认 /bobwork-logo.png；设置自定义 brandLogo 时从头像池匹配 dataUrl（与 Sidebar 一致）
   useEffect(() => {
@@ -1680,9 +1670,6 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
     }
   }, [busy, total, collectPageImages, warnOverflow]);
 
-  /** 批量下载（逐张保存到文件夹） */
-  const handleDownloadAll = useCallback(() => saveAllPages('files'), [saveAllPages]);
-
   /** 批量下载（打包 zip） */
   const handleDownloadZip = useCallback(() => saveAllPages('zip'), [saveAllPages]);
 
@@ -1769,64 +1756,26 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
               </DialogTitle>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              {/* 全部页保存：双层页图标 + 页数角标（与单页 Save 区分）；右侧 chevron 融合进按钮内，展开 files/zip 选项 */}
+              {/* 全部页保存：一键打包 ZIP；双层页图标 + 页数角标（与单页 Save 区分） */}
               {total > 1 && (
                 <div className="relative">
-                  {/* 页数角标：悬浮于整个拆分按钮右上角 */}
+                  {/* 页数角标：悬浮于按钮右上角 */}
                   <span
                     className="absolute -right-0.5 -top-0.5 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-9 font-bold"
                     style={{ backgroundColor: 'var(--primary)', color: '#fff' }}
                   >
                     {total}
                   </span>
-                  <div className="flex h-7 items-stretch overflow-hidden rounded-md border transition-colors hover:bg-black/5" style={{ borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)' }}>
-                    <button
-                      type="button"
-                      onClick={handleDownloadAll}
-                      disabled={!!busy}
-                      title={`Save all pages as files (${total})`}
-                      className="flex h-7 w-6 items-center justify-center disabled:opacity-50"
-                      style={{ color: 'var(--ink-muted)' }}
-                    >
-                      {busy === 'all' ? <Loader2 className="h-4 w-4 animate-spin" /> : flash === 'download' ? <Check className="h-4 w-4" style={{ color: 'var(--primary)' }} /> : <Copy className="h-4 w-4" />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSaveMenuOpen((v) => !v)}
-                      disabled={!!busy}
-                      title="Save all options"
-                      className="flex h-7 w-4 items-center justify-center border-l transition-colors disabled:opacity-50"
-                      style={{ color: 'var(--ink-muted)', borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)' }}
-                    >
-                      <ChevronDown className="h-3 w-3" />
-                    </button>
-                  </div>
-                  {saveMenuOpen && (
-                    <div
-                      className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-md border shadow-lg"
-                      style={{ borderColor: 'color-mix(in oklab, var(--line) 60%, transparent)', backgroundColor: 'var(--panel-bg)' }}
-                      onMouseDown={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => { setSaveMenuOpen(false); handleDownloadAll(); }}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium transition-colors hover:bg-black/5"
-                        style={{ color: 'var(--ink-strong)' }}
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                        Save as files
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setSaveMenuOpen(false); handleDownloadZip(); }}
-                        className="flex w-full items-center gap-2 border-t px-3 py-2 text-xs font-medium transition-colors hover:bg-black/5"
-                        style={{ color: 'var(--ink-strong)', borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)' }}
-                      >
-                        <FileDown className="h-3.5 w-3.5" />
-                        Save as ZIP
-                      </button>
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    onClick={handleDownloadZip}
+                    disabled={!!busy}
+                    title={`Download all pages as ZIP (${total})`}
+                    className="flex h-7 w-7 items-center justify-center rounded-md border transition-colors hover:bg-black/5 disabled:opacity-50"
+                    style={{ borderColor: 'color-mix(in oklab, var(--line) 40%, transparent)', color: 'var(--ink-muted)' }}
+                  >
+                    {busy === 'all' ? <Loader2 className="h-4 w-4 animate-spin" /> : flash === 'download' ? <Check className="h-4 w-4" style={{ color: 'var(--primary)' }} /> : <Copy className="h-4 w-4" />}
+                  </button>
                 </div>
               )}
               {/* 单页保存：单页文档 + 下载 */}

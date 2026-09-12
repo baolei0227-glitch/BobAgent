@@ -12,7 +12,7 @@ import { basename, isAbsolute, resolve } from 'path';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { SETTLE_MS, commitPlan, scanAndPlan } from '../../../tools/organize/core';
 import { normalizeCategories } from '../../../tools/organize/model';
-import { appendLog, todayStamp, type MoveRecord } from '../../../tools/organize/naming';
+import { appendLog, normalizeNaming, todayStamp, type MoveRecord } from '../../../tools/organize/naming';
 
 /** 监听事件防抖窗口（毫秒） */
 const DEBOUNCE_MS = 2500;
@@ -120,6 +120,7 @@ async function tick(): Promise<void> {
       categories: normalizeCategories(fo.categories),
       stamp: todayStamp(),
       settle: true,
+      naming: normalizeNaming(fo.naming),
     });
     if (total === 0) return;
 

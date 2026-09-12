@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore, type ReactNode } from 'react';
-import { PanelRightOpen, PanelRightClose, RectangleHorizontal, RectangleVertical, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Sparkles, Boxes, Users, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Sparkles, Boxes, Users, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil } from 'lucide-react';
 import type { HostNode, HostEdge, NodeHostValue } from './node-host';
 import { NodeHostContext } from './node-host';
 import {
@@ -85,12 +85,10 @@ import { HippoCapsule } from '@/components/hippo-browser/HippoCapsule';
 // 面板宽度由固定两档（580/960）改为可在 [PANEL_W_MIN, 可用上限] 之间自由拖拽，
 // 并随窗口/左栏/文件面板动态收敛，避免小窗口下被中间对话面板卡死而无法打开。
 const PANEL_W_MIN = 320; // 面板最小宽度（px）
-const PANEL_W_DEFAULT = 600; // 无持久化记录时的默认宽度（从 720 收窄到 600，避免初始就挤爆对话区）
-const PANEL_W_PRESET_NARROW = 480; // 竖屏（窄）快捷档位（从 580 收窄）
-const PANEL_W_PRESET_WIDE = 800; // 横屏（宽）快捷档位（从 960 收窄）
+const PANEL_W_DEFAULT = 800; // 无持久化记录时的默认宽度（已去除窄档，统一用加宽后的宽度）
 const PANEL_W_ABS_MAX = 2560; // 绝对上限（放宽到 2560 以支持 4K 超宽屏；再大就是多屏拼接，无意义）
-const PANEL_W_PERSIST_KEY = 'bobwork.ui.panel.width.v2'; // 持久化 key（v2：重置旧宽值，让新默认/档位生效）
-const PANEL_W_PERSIST_KEY_V1 = 'bobwork.ui.panel.width'; // 旧 key（启动时清理，避免遗留宽值干扰）
+const PANEL_W_PERSIST_KEY = 'bobwork.ui.panel.width.v3'; // 持久化 key（v3：去除窄档后重置旧宽值，让 800 默认宽度生效）
+const PANEL_W_PERSIST_STALE_KEYS = ['bobwork.ui.panel.width', 'bobwork.ui.panel.width.v2']; // 旧 key（启动时清理，避免遗留宽值干扰）
 const PANEL_CONVERSATION_MIN = 160; // 为中间对话区保留的最小宽度（从 200 下调到 160，既放宽面板又不至于挤爆对话区；窄屏模式下会自动提升到 480 保护画布舒适宽度）
 
 // 注册统一文件来源（Step 2）：模块加载时注册，幂等
@@ -188,6 +186,8 @@ function restoredNodeToFlowNode(
     title: string;
     model?: string;
     summary?: string;
+    /** 会话创建时间（frontmatter）：左栏会话列表"最新在上"排序用 */
+    created_at?: string;
     conversations: Array<{ question: string; answer: string; questionTime: string; answerTime: string; modelId?: string; thinkingLevel?: string; reasoning?: string; processNarration?: string; toolCalls?: ChatMessage['toolCalls']; outputFiles?: ChatMessage['outputFiles'] }>;
     enabledMcpIds?: string[];
     selectedSkills?: string[];
@@ -255,6 +255,7 @@ function restoredNodeToFlowNode(
       modelId: nodeData.model || DEFAULT_MODEL_ID,
       thinkingLevel: DEFAULT_THINKING_LEVEL,
       nodeMdId: nodeData.node_id,
+      createdAt: nodeData.created_at,
       ...(nodeData.enabledMcpIds !== undefined ? { enabledMcpIds: nodeData.enabledMcpIds } : {}),
       ...(nodeData.selectedSkills !== undefined ? { selectedSkills: nodeData.selectedSkills } : {}),
       ...(nodeData.sandbox_app_id ? { sandboxAppId: nodeData.sandbox_app_id } : {}),
@@ -356,6 +357,9 @@ function restoredAgentTeamsToFlowNode(
 }
 
 
+/** 置顶标签：这些插件面板的标签固定在标签栏最前面（先于会话/文件/沙盒标签） */
+const PINNED_PANEL_PLUGIN_IDS = new Set(['bob-mind-mcp']);
+
 /** 统一悬浮面板：所有文档以标签页形式组织在单一可拖拽面板中 */
 function UnifiedReaderPanel({
   openReaderIds,
@@ -366,7 +370,6 @@ function UnifiedReaderPanel({
   collapsed,
   panelWidth,
   onToggleCollapse,
-  onToggleWide,
   onSelectTab,
   onCloseNodeTab,
   onCloseFileTab,
@@ -374,6 +377,7 @@ function UnifiedReaderPanel({
   onCloseTemplateTab,
   pluginPanels,
   onClosePluginTab,
+  openPluginIds,
   templateInitialScene,
   currentProjectId,
   outcomeModeTabIds,
@@ -400,6 +404,8 @@ function UnifiedReaderPanel({
   panelWidth: number;
   /** 插件面板注册表（服务端 /api/plugin-panels 下发，驱动通用插件 Tab 与标签名/图标） */
   pluginPanels: PluginPanelEntry[];
+  /** 已打开的插件面板 id（按打开顺序）：常驻标签栏，切走仅 display 隐藏，iframe 不重建 */
+  openPluginIds: string[];
   onSelectTab: (type: 'node' | 'file' | 'sandbox' | 'template' | 'plugin', id: string) => void;
   onCloseNodeTab: (nodeMdId: string) => void;
   onCloseFileTab: (tabId: string) => void;
@@ -409,8 +415,6 @@ function UnifiedReaderPanel({
   /** 打开模板 tab 时预选的场景名（AI 扫描到模板字段后跳转时携带） */
   templateInitialScene?: string;
   onToggleCollapse: () => void;
-  /** 切换竖屏/横屏（宽窄） */
-  onToggleWide: () => void;
   currentProjectId: string;
   /** 成果块模式打开的 tab ID 集合 */
   outcomeModeTabIds: Set<string>;
@@ -423,8 +427,6 @@ function UnifiedReaderPanel({
 }) {
   // 面板宽度：由父组件传入的 panelWidth 控制，可在最小宽度与可用上限之间自由缩放
   const PANEL_W = panelWidth;
-  // 便捷档位图标判定：宽度 ≥ 宽窄两档中值视为"宽屏"，用于宽窄切换按钮的图形/文案
-  const panelWide = panelWidth >= (PANEL_W_PRESET_NARROW + PANEL_W_PRESET_WIDE) / 2;
 
   // 拖拽 handle：左边缘可拖，改变面板宽度
   const dragStartRef = useRef<{ mouseX: number; width: number } | null>(null);
@@ -539,21 +541,27 @@ function UnifiedReaderPanel({
     onSelectTab(type, id);
   };
 
-  // 当前激活的插件面板注册条目（通用插件 Tab 的标签名/图标/挂载参数）
-  const activePluginEntry = activePanelTab?.type === 'plugin'
-    ? pluginPanels.find((p) => p.pluginId === activePanelTab.id)
-    : undefined;
-
   // 合并所有 tabs（模板/插件面板为单例 tab，始终存在但仅在 activePanelTab 指向时才显示）
-  const allTabs = useMemo(() => [
-    ...openReaderIds.map(id => ({ id, type: 'node' as const, label: readerTitles[id] || '...' })),
-    ...fileTabs.map(t => ({ id: t.id, type: 'file' as const, label: t.fileName })),
-    ...sandboxTabs.map(t => ({ id: t.id, type: 'sandbox' as const, label: t.name })),
-    ...(templatePanelMounted ? [{ id: 'template', type: 'template' as const, label: 'Templates' }] : []),
-    ...(activePanelTab?.type === 'plugin'
-      ? [{ id: activePanelTab.id, type: 'plugin' as const, label: activePluginEntry?.name || activePanelTab.id }]
-      : []),
-  ], [openReaderIds, fileTabs, sandboxTabs, readerTitles, activePanelTab, activePluginEntry, templatePanelMounted]);
+  // 置顶组：Templates 与置顶插件（Bob-Mind）固定排在标签栏最前面，避免被会话/文件标签挤到末尾
+  const allTabs = useMemo(() => {
+    // 打开过的插件面板常驻标签栏（按打开顺序），切到其它标签也不消失
+    const pluginTabs = openPluginIds.map((id) => ({
+      id,
+      type: 'plugin' as const,
+      label: pluginPanels.find((p) => p.pluginId === id)?.name || id,
+    }));
+    const pinnedTabs = [
+      ...(templatePanelMounted ? [{ id: 'template', type: 'template' as const, label: 'Templates' }] : []),
+      ...pluginTabs.filter(t => PINNED_PANEL_PLUGIN_IDS.has(t.id)),
+    ];
+    return [
+      ...pinnedTabs,
+      ...pluginTabs.filter(t => !PINNED_PANEL_PLUGIN_IDS.has(t.id)),
+      ...openReaderIds.map(id => ({ id, type: 'node' as const, label: readerTitles[id] || '...' })),
+      ...fileTabs.map(t => ({ id: t.id, type: 'file' as const, label: t.fileName })),
+      ...sandboxTabs.map(t => ({ id: t.id, type: 'sandbox' as const, label: t.name })),
+    ];
+  }, [openReaderIds, fileTabs, sandboxTabs, readerTitles, openPluginIds, pluginPanels, templatePanelMounted]);
 
   // 计算可容纳的标签数量：预留 "…" 按钮宽度，按估算宽度逐个累加（面板尺寸/标签变化时重算）
   useLayoutEffect(() => {
@@ -622,7 +630,7 @@ function UnifiedReaderPanel({
       style={{
         width: PANEL_W,
         zIndex: 50,
-        // 2026-09-12 预览面板改纯白：与灰色画布底 --canvas-bg(#e6e6ec) 拉开对比
+        // 2026-09-12 预览面板改纯白：与灰色画布底 --canvas-bg 拉开对比
         borderRadius: 12,
         overflow: 'hidden',
         border: '1px solid',
@@ -676,16 +684,6 @@ function UnifiedReaderPanel({
           title="Collapse preview panel"
         >
           <PanelRightClose className="h-3.5 w-3.5" />
-        </button>
-
-        {/* 竖屏/横屏（宽窄）切换：放大 = 增加面板宽度 */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onToggleWide(); }}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--ink-muted)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          title={panelWide ? 'Switch to portrait (narrower)' : 'Switch to landscape (wider)'}
-        >
-          {panelWide ? <RectangleVertical className="h-3.5 w-3.5" /> : <RectangleHorizontal className="h-3.5 w-3.5" />}
         </button>
 
         {/* 标签列表：容器不滚动，放不下的标签收进 "…" 下拉菜单 */}
@@ -880,16 +878,26 @@ function UnifiedReaderPanel({
           </div>
         )}
         {/* 插件面板（注册表驱动）：内嵌插件自带 Web UI——serve 先探测就绪，static 直载宿主代理。
-            每次切到该 tab 重新挂载 = 重新探测 + 重新加载 iframe */}
-        {activePluginEntry && (
-          <div className="h-full w-full">
-            <PluginPanelFrame
-              name={activePluginEntry.name}
-              src={activePluginEntry.src}
-              probeUrl={activePluginEntry.probeUrl}
-            />
-          </div>
-        )}
+            惰性挂载 + display 显隐切换：切走 tab 时保持挂载，iframe 不重建（Bob-Mind 面板状态不丢） */}
+        {openPluginIds.map((pluginId) => {
+          const entry = pluginPanels.find((p) => p.pluginId === pluginId);
+          if (!entry) return null;
+          const isActive = activePanelTab?.type === 'plugin' && activePanelTab.id === pluginId;
+          return (
+            <div
+              key={pluginId}
+              data-plugin-panel={pluginId}
+              className="h-full w-full"
+              style={{ display: isActive ? undefined : 'none' }}
+            >
+              <PluginPanelFrame
+                name={entry.name}
+                src={entry.src}
+                probeUrl={entry.probeUrl}
+              />
+            </div>
+          );
+        })}
       </div>
 
       {/* 标签悬停提示：完整文件名 */}
@@ -908,6 +916,24 @@ function UnifiedReaderPanel({
       )}
     </div>
   );
+}
+
+/**
+ * 探测插件面板是否有「未保存改动」：插件可暴露 GET <src>/api/project → { ok, dirty }（如 bob-mind）。
+ * 不支持该约定（404/静态面板/超时）一律按无改动处理，不阻塞关闭。
+ */
+async function fetchPluginDirty(src: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    const r = await fetch(new URL('/api/project', src).toString(), { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!r.ok) return false;
+    const d = (await r.json()) as { ok?: boolean; dirty?: boolean };
+    return d?.ok === true && d.dirty === true;
+  } catch {
+    return false;
+  }
 }
 
 /** 左列/工具条圆形小图标按钮（2026-09 布局重构后复用） */
@@ -948,6 +974,15 @@ function CanvasFlowInner() {
   const nodeIdCounter = useRef(0);
   // 画布 wrapper 引用：用于计算真实可视宽度（扣除 overlay）
   const wrapperRef = useRef<HTMLDivElement>(null);
+  // wrapper 节点的 state 镜像：workspace 挂载前 wrapperRef.current 恒为 null，
+  // 若只在挂载前的 effect 里 observe(Ref.current)，该 effect 不会因 DOM 出现而重跑 →
+  // ResizeObserver 永远没挂上 → 右 dock 加宽（打开预览标签）时不再广播可视宽度，
+  // 会话卡片保持原宽被面板覆盖。用回调 ref 同步 state，让广播 effect 随挂载重跑。
+  const [wrapperEl, setWrapperEl] = useState<HTMLDivElement | null>(null);
+  const attachWrapper = useCallback((el: HTMLDivElement | null) => {
+    wrapperRef.current = el;
+    setWrapperEl(el);
+  }, []);
   // 侧边栏当前宽度 ref（2026-09 布局重构后恒为 0：左列常驻，不参与画布宽度计算）
   const sidebarWidthRef = useRef(0);
   // 画布真实可视宽度：wrapper 宽度即对话可视宽度（右 dock 为并列列，不在 wrapper 内）。
@@ -1041,6 +1076,7 @@ function CanvasFlowInner() {
         type: (n.type as FlowAiNodeType) || 'aiChat',
         sandboxAppId: (n.data as { sandboxAppId?: string } | undefined)?.sandboxAppId,
         messageCount: ((n.data as { messages?: unknown[] } | undefined)?.messages?.length) || 0,
+        createdAt: (n.data as { createdAt?: string } | undefined)?.createdAt,
       })),
       edges: hostEdges.map((e) => ({
         id: e.id,
@@ -1251,8 +1287,24 @@ function CanvasFlowInner() {
 
   // 单焦点左侧节点圆点列数据：研究节点按链顺序分组展平；未入链的独立研究节点排尾组。
   // 不再隐藏空会话（messageCount=0）节点——即使尚未执行任务也保留在侧边栏。
+  // 排序：按"组内最新创建的会话时间"降序 → 新增加的会话始终排在最上面。
   const focusRail = useMemo(() => {
     type Dot = { id: string; title: string; isNote: boolean; sandboxAppId?: string; identity?: string };
+    // 创建时间（ms）：取自 .md frontmatter created_at；
+    // 本地刚新建、尚未重载 frontmatter 的节点无 createdAt → 按"最新"（+∞）处理，保证新建会话即时置顶
+    const createdMs = new Map<string, number>();
+    for (const n of graphSnap.nodes) {
+      const t = n.createdAt ? Date.parse(n.createdAt) : NaN;
+      createdMs.set(n.id, Number.isFinite(t) ? t : Number.POSITIVE_INFINITY);
+    }
+    const timeOf = (id: string) => createdMs.get(id) ?? 0;
+    const dotOf = (n: (typeof graphSnap.nodes)[number]): Dot => ({
+      id: n.id,
+      title: n.title,
+      isNote: n.type === 'agent-note',
+      sandboxAppId: n.sandboxAppId,
+      identity: agentIdentityFromNodeType(n.type),
+    });
     const groups: Array<{ key: string; dots: Dot[] }> = [];
     const seen = new Set<string>();
     for (const chain of canvasChains) {
@@ -1260,31 +1312,27 @@ function CanvasFlowInner() {
         .map((id) => graphSnap.nodes.find((n) => n.id === id))
         .filter((n): n is NonNullable<(typeof graphSnap.nodes)[number]> => !!n && isFocusableResearch(n.type));
       if (items.length === 0) continue;
-      const dots: Dot[] = items.map((n) => ({
-        id: n.id,
-        title: n.title,
-        isNote: n.type === 'agent-note',
-        sandboxAppId: n.sandboxAppId,
-        identity: agentIdentityFromNodeType(n.type),
-      }));
+      const dots: Dot[] = items.map(dotOf);
       for (const d of dots) seen.add(d.id);
       groups.push({ key: chain.rootId, dots });
     }
     const strayDots = graphSnap.nodes
       .filter((n) => isFocusableResearch(n.type) && !seen.has(n.id))
-      .map((n): Dot => ({
-        id: n.id,
-        title: n.title,
-        isNote: n.type === 'agent-note',
-        sandboxAppId: n.sandboxAppId,
-        identity: agentIdentityFromNodeType(n.type),
-      }));
+      .map(dotOf)
+      .sort((a, b) => timeOf(b.id) - timeOf(a.id));
     if (strayDots.length > 0) groups.push({ key: '__strays__', dots: strayDots });
+    // 组间降序（组键 = 组内最新会话时间）；时间相同保持原有链序（Array.sort 稳定）
+    const groupNewest = (g: { dots: Dot[] }) => g.dots.reduce((mx, d) => Math.max(mx, timeOf(d.id)), 0);
+    groups.sort((a, b) => {
+      const ta = groupNewest(a);
+      const tb = groupNewest(b);
+      return ta === tb ? 0 : tb > ta ? 1 : -1;
+    });
     return groups;
   }, [canvasChains, graphSnap.nodes]);
 
   // 应用内置确认弹窗（macOS 风格英文文案）
-  const { ask: confirmAsk, render: confirmRender } = useConfirm();
+  const { ask: confirmAsk, askChoices: confirmAskChoices, render: confirmRender } = useConfirm();
 
   // 锁定上游节点：校验未通过时由用户自主决定是否强制锁定（确认后跳过校验继续建边）
   const lockUpstreamNode = useCallback(async (srcMdId: string): Promise<{ ok: boolean; error?: string }> => {
@@ -1453,8 +1501,8 @@ function CanvasFlowInner() {
   const [panelWidth, setPanelWidthRaw] = useState<number>(() => {
     if (typeof window === 'undefined') return PANEL_W_DEFAULT;
     try {
-      // 清理 v1 旧 key，让新默认值/档位生效
-      window.localStorage.removeItem(PANEL_W_PERSIST_KEY_V1);
+      // 清理旧 key，让去除窄档后的新默认宽度生效
+      for (const k of PANEL_W_PERSIST_STALE_KEYS) window.localStorage.removeItem(k);
       const stored = Number(window.localStorage.getItem(PANEL_W_PERSIST_KEY));
       if (Number.isFinite(stored) && stored > 0) {
         return Math.min(Math.max(stored, PANEL_W_MIN), PANEL_W_ABS_MAX);
@@ -1465,7 +1513,6 @@ function CanvasFlowInner() {
   // 拖拽 handle 松手时需要读最新面板宽度：用 ref 避免闭包拿到旧值
   const panelWidthRef = useRef(panelWidth);
   useEffect(() => { panelWidthRef.current = panelWidth; }, [panelWidth]);
-  const panelWide = panelWidth >= (PANEL_W_PRESET_NARROW + PANEL_W_PRESET_WIDE) / 2;
 
   // 本地文件夹面板：默认折叠（隐藏侧栏列表，让出画布空间）。
   // localStorage: bobwork.ui.localExplorer.collapsed
@@ -1500,6 +1547,7 @@ function CanvasFlowInner() {
   // 面板折叠/宽窄切换/本地面板挂载状态变化时重跑（ResizeObserver 需重挂到最新的元素上）；
   // 依赖 focusedNodeId：单焦点切换后新挂载节点需要立刻拿到当前面板宽度（否则新节点
   // 收不到已发生的广播 → 不按已打开面板收窄）。
+  // 依赖 wrapperEl：workspace 挂载晚于本 effect 首次执行，必须等 wrapper 出现后再挂 RO。
   useEffect(() => {
     const broadcast = () => {
       window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
@@ -1507,8 +1555,7 @@ function CanvasFlowInner() {
     broadcast();
     // 观察对话容器（wrapper）尺寸：右 dock 折叠/展开会改变 wrapper 宽度
     const ro = new ResizeObserver(broadcast);
-    const target = wrapperRef.current;
-    if (target) ro.observe(target);
+    if (wrapperEl) ro.observe(wrapperEl);
     let raf = 0;
     const onResize = () => {
       cancelAnimationFrame(raf);
@@ -1520,7 +1567,7 @@ function CanvasFlowInner() {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
     };
-  }, [computeVisibleCanvasWidth, panelCollapsed, panelWidth, localExplorerCollapsed, focusedNodeId]);
+  }, [computeVisibleCanvasWidth, wrapperEl, panelCollapsed, panelWidth, localExplorerCollapsed, focusedNodeId]);
   // 侧边栏折叠状态：折叠时 Sidebar 渲染 56px rail（悬浮 overlay），NodeMap 依据该状态左移避开面板
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -1568,14 +1615,6 @@ function CanvasFlowInner() {
   const setPanelWidthLive = useCallback((w: number) => {
     setPanelWidthRaw((prev) => clampPanelWidth(w));
   }, [clampPanelWidth]);
-
-  // 宽窄快捷档位：点击时在窄/宽两档间切换（仍受可用上限收敛）
-  const togglePanelWide = useCallback(() => {
-    const target = panelWide ? PANEL_W_PRESET_NARROW : PANEL_W_PRESET_WIDE;
-    const next = clampPanelWidth(target);
-    setPanelWidthLive(next);
-    persistPanelWidth(next);
-  }, [panelWide, setPanelWidthLive, clampPanelWidth, persistPanelWidth]);
 
   // 窗口尺寸/左栏/文件面板变化 + 面板展开时，把面板宽度收敛到当前可用上限（防止溢出裁切）
   // 用 useLayoutEffect 确保 paint 前同步收敛，避免"面板先以旧宽度闪出一帧再收缩"的视觉 bug
@@ -1752,6 +1791,9 @@ function CanvasFlowInner() {
     void desktop.hippoBrowser.collapse();
   }, [activePanelTab?.type, activePanelTab?.id]);
   const [pluginPanels, setPluginPanels] = usePluginPanels();
+  // 插件面板（Bob-Mind 等）惰性挂载：打开过的插件面板保持挂载并常驻标签栏，
+  // 切到文件/会话标签时仅 display 隐藏，避免 iframe 被卸载重建（重建后面板回到初始状态）
+  const [openPluginIds, setOpenPluginIds] = useState<string[]>([]);
   // 模板插件 tab：打开时预选的场景名（AI 扫描到模板字段后跳转携带）
   const [templateInitialScene, setTemplateInitialScene] = useState<string | undefined>(undefined);
   // Dev 守卫：预览面板展开时检测容器高度，若 <50px 说明 CSS 布局断裂（如 h-full/self-stretch 遗漏），提前预警
@@ -2649,16 +2691,42 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('open-template-panel', handler);
   }, [openTemplateTab]);
 
-  // 插件面板 tab（注册表驱动，每个插件一个单例）：在右侧预览面板打开
+  // 插件面板 tab（注册表驱动，每个插件一个单例）：在右侧预览面板打开；打开后常驻标签栏
   const openPluginPanel = useCallback((pluginId: string) => {
     if (!pluginPanels.some((p) => p.pluginId === pluginId)) return;
+    setOpenPluginIds((prev) => (prev.includes(pluginId) ? prev : [...prev, pluginId]));
     setActivePanelTab({ type: 'plugin', id: pluginId });
     setPanelCollapsed(false);
   }, [pluginPanels]);
 
-  const closePluginPanel = useCallback(() => {
+  const closePluginPanel = useCallback(async (pluginId: string) => {
+    // 插件有未保存到项目的改动时先询问：保存 / 不保存 / 取消（取消则不关闭）
+    const entry = pluginPanels.find((p) => p.pluginId === pluginId);
+    if (entry?.src && (await fetchPluginDirty(entry.src))) {
+      const choice = await confirmAskChoices({
+        title: 'Unsaved changes',
+        message: `${entry.name} has changes that haven't been saved to the current project. Save before closing?`,
+        // 取消由 ConfirmDialog 自带的 Cancel 提供（避免重复按钮）
+        choices: [
+          { label: 'Save', value: 'save' },
+          { label: "Don't Save", value: 'discard', danger: true },
+        ],
+      });
+      // 仅 save / discard 继续关闭；其余（Cancel 按钮、Esc、点遮罩）一律取消。
+      // 注意：ConfirmDialog 的取消路径 askChoices 实际 resolve 的是 false（非 null），故用白名单判断。
+      if (choice !== 'save' && choice !== 'discard') return;
+      if (choice === 'save') {
+        try {
+          await fetch(new URL('/api/project/save', entry.src).toString(), { method: 'POST' });
+        } catch {
+          // 保存失败仍继续关闭，避免面板卡住（插件侧已 toast 提示）
+        }
+      }
+    }
+    // 退出常驻：从标签栏移除并卸载对应 iframe
+    setOpenPluginIds((prev) => prev.filter((id) => id !== pluginId));
     setActivePanelTab((prev) => {
-      if (prev?.type !== 'plugin') return prev;
+      if (prev?.type !== 'plugin' || prev.id !== pluginId) return prev;
       if (fileTabs.length > 0) {
         setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
       } else if (sandboxTabs.length > 0) {
@@ -2671,7 +2739,7 @@ function CanvasFlowInner() {
       }
       return prev;
     });
-  }, [fileTabs, sandboxTabs, openReaderIds]);
+  }, [fileTabs, sandboxTabs, openReaderIds, pluginPanels, confirmAskChoices]);
 
   // 订阅 open-plugin-panel：左侧快捷入口 / 其它 UI 派发，打开对应插件面板 tab
   useEffect(() => {
@@ -4137,9 +4205,9 @@ function CanvasFlowInner() {
       onCloseTemplateTab={closeTemplateTab}
       pluginPanels={pluginPanels}
       onClosePluginTab={closePluginPanel}
+      openPluginIds={openPluginIds}
       templateInitialScene={templateInitialScene}
       onToggleCollapse={handleTogglePanel}
-      onToggleWide={togglePanelWide}
       currentProjectId={currentProjectId}
       outcomeModeTabIds={outcomeModeTabIds}
       sandboxRefreshTick={sandboxRefreshTick}
@@ -4203,9 +4271,12 @@ function CanvasFlowInner() {
         // 长文档会把面板撑到视口底部之外（"文档出现在画布下方 + 界面可滑动"），此处兜底裁剪。
         <div className="relative flex h-screen w-screen overflow-hidden">
           {/* 顶部拖拽区域：absolute 覆盖在画布之上（z-30，低于悬浮面板 z-40）。
-              这样三块面板的 top-[8px] 直接相对窗口顶部，mac 红绿灯覆盖在左侧面板左上角 */}
+              这样三块面板的 top-[8px] 直接相对窗口顶部，mac 红绿灯覆盖在左侧面板左上角。
+              高度必须 ≤ 8px（= 会话卡片标题栏 py-2 的上内边距）：
+              中栏会话卡片顶到窗口顶部，卡片仅 z-[1] 低于本层，若本层更高会吃掉
+              标题栏按钮的点击热区（表现为"只能点击图标下方"）。 */}
           <div
-            className="absolute inset-x-0 top-0 z-[30] h-6 select-none"
+            className="absolute inset-x-0 top-0 z-[30] h-2 select-none"
             style={{
               WebkitAppRegion: 'drag',
               WebkitUserSelect: 'none',
@@ -4268,7 +4339,7 @@ function CanvasFlowInner() {
                     type="button"
                     onClick={act.onClick}
                     title={act.label}
-                    className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-[13px] font-medium disabled:cursor-default disabled:opacity-70"
+                    className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-13 font-medium disabled:cursor-default disabled:opacity-70"
                     style={{ color: 'var(--ink-muted)' }}
                   >
                     {act.icon}
@@ -4284,7 +4355,7 @@ function CanvasFlowInner() {
                           onClick={() =>
                             window.dispatchEvent(new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }))
                           }
-                          className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded bg-[var(--paper-soft)] text-[9px] font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
+                          className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded bg-[var(--paper-soft)] text-9 font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
                         >
                           {app.name.charAt(0).toUpperCase()}
                         </button>
@@ -4294,7 +4365,7 @@ function CanvasFlowInner() {
                           type="button"
                           title="More starred apps — open store"
                           onClick={() => window.dispatchEvent(new CustomEvent('sandbox-store-open'))}
-                          className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded text-[9px] font-medium transition-colors hover:brightness-95"
+                          className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded text-9 font-medium transition-colors hover:brightness-95"
                           style={{ backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)' }}
                         >
                           +{starredApps.length - 5}
@@ -4310,7 +4381,7 @@ function CanvasFlowInner() {
                   disabled={act.disabled}
                   onClick={act.onClick}
                   title={act.label}
-                  className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[13px] font-medium transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-default disabled:opacity-70"
+                  className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-13 font-medium transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-default disabled:opacity-70"
                   style={{ color: 'var(--ink-muted)' }}
                 >
                   {act.icon}
@@ -4334,7 +4405,7 @@ function CanvasFlowInner() {
                     style={{ cursor: 'pointer' }}
                   >
                     <Folder className="h-4 w-4 shrink-0" style={{ color: 'var(--primary)' }} />
-                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium" style={{ color: 'var(--ink-strong)' }}>
+                    <span className="min-w-0 flex-1 truncate text-13 font-medium" style={{ color: 'var(--ink-strong)' }}>
                       {currentProjectTitle || 'Project'}
                     </span>
                   </button>
@@ -4579,7 +4650,7 @@ function CanvasFlowInner() {
                               />
                             )}
                             {group.dots.length > 1 && (
-                              <span className="shrink-0 text-[11px]" style={{ color: 'var(--ink-faint)' }}>{group.dots.length - 1}</span>
+                              <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>{group.dots.length - 1}</span>
                             )}
                           </button>
                         )}
@@ -4899,7 +4970,7 @@ function CanvasFlowInner() {
                       });
                     }
                   }}
-                  className="flex shrink-0 items-center gap-1 rounded-lg px-1 py-1 text-[11px] transition-colors hover:bg-[var(--paper-hover)]"
+                  className="flex shrink-0 items-center gap-1 rounded-lg px-1 py-1 text-11 transition-colors hover:bg-[var(--paper-hover)]"
                   style={{
                     color:
                       updateStatus === 'available' || updateStatus === 'downloading' ? 'var(--primary)'
@@ -4966,7 +5037,7 @@ function CanvasFlowInner() {
                   <Mail className="h-4 w-4" />
                   {mailPending > 0 && (
                     <span
-                      className="absolute -right-0.5 -top-0.5 flex min-w-[14px] items-center justify-center rounded-full px-1 text-[9px] font-semibold"
+                      className="absolute -right-0.5 -top-0.5 flex min-w-[14px] items-center justify-center rounded-full px-1 text-9 font-semibold"
                       style={{ backgroundColor: 'var(--danger)', color: '#fff', lineHeight: '14px' }}
                     >
                       {mailPending > 99 ? '99+' : mailPending}
@@ -4996,7 +5067,7 @@ function CanvasFlowInner() {
 
           {/* 画布区域：承载当前聚焦会话（TraeWork 式单会话宿主，画布交互已移除） */}
           <div
-            ref={wrapperRef}
+            ref={attachWrapper}
             className="relative min-w-0 flex-1 overflow-hidden"
             onClick={onHostCanvasClick}
             data-host-canvas

@@ -177,7 +177,7 @@ export function NavSearchBox() {
             )}
             {sections.map((sec) => (
               <div key={sec.key}>
-                <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>
+                <div className="px-3 pb-0.5 pt-1.5 text-10 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>
                   {sec.label}
                 </div>
                 {sec.items.map((item) => {
@@ -199,7 +199,7 @@ export function NavSearchBox() {
                       }}
                     >
                       <span className="truncate text-xs font-medium">{item.name}</span>
-                      <span className="truncate text-[10px]" style={{ color: 'var(--ink-muted)' }}>
+                      <span className="truncate text-10" style={{ color: 'var(--ink-muted)' }}>
                         {shortPath(item.path)}
                       </span>
                     </button>

@@ -58,7 +58,7 @@ export function WelcomeScreen({ onCreateProject }: WelcomeScreenProps) {
         className="w-full max-w-lg"
         icon={
           <img
-            src="/bobwork-logo.png"
+            src="/welcome-icon.png"
             alt="BobWork"
             className="h-full w-full rounded-[inherit] object-contain p-1"
             draggable={false}

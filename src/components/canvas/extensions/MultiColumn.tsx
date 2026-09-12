@@ -173,9 +173,9 @@ function BobColumnsView({ node, editor }: NodeViewProps) {
           ×
         </button>
       </div>
-      <div className="bob-columns-body">
-        <NodeViewContent />
-      </div>
+      {/* NodeViewContent 自身即 .bob-columns-body（默认渲染为 div）：
+          直接作为各栏的父容器，保证 `.bob-columns-body > [data-bob-column]` 样式命中 */}
+      <NodeViewContent className="bob-columns-body" />
     </NodeViewWrapper>
   );
 }

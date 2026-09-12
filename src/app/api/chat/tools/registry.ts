@@ -55,6 +55,11 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   project_plan_view: ['butler'],
   project_plan_add_steps: ['butler'],
   project_plan_step_status: ['butler'],
+  // ---- butler 模型计费（对话维护单价覆盖：新增模型 / 厂商调价；改价只影响此后产生的用量）----
+  // 只读查询 get_model_price 与写入 set_model_price 同归 butler；
+  // 普通 chat 说"某模型改价了/新增了某模型，更新计费"时由 detectSceneHints 命中 butler 注入。
+  get_model_price: ['butler'],
+  set_model_price: ['butler'],
 
   // ---- 节点树/画布结构依赖（画布节点对话 nodeId 存在才暴露）----
   read_upstream_node: ['node'],

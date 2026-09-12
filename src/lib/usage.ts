@@ -12,8 +12,8 @@
  *   - 迁移：各项目 .project.db 中历史 usage_log（2026-09-04 之前）一次性导入全局账本，幂等去重
  *
  * 成本口径：
- *   - 单价唯一权威来源 = PROVIDER_PRESETS 静态价格表（$ / 百万 token）
- *   - 价格缺失（自定义模型无 spec）→ est_cost 存 NULL，聚合端显示"未定价"，绝不瞎算
+ *   - 单价来源按优先级：用户覆盖（.settings.json 的 priceOverrides，管家对话维护）> PROVIDER_PRESETS 静态价格表
+ *   - 两处都缺失（自定义模型无 spec）→ est_cost 存 NULL，聚合端显示"未定价"，绝不瞎算
  *   - 前缀缓存命中按 input 价 × CACHE_READ_RATIO 折扣估算（各家折扣不同，常量可校准）
  */
 
@@ -21,6 +21,7 @@ import { join } from 'path';
 import { resolveAppRoot, USAGE_DB_FILENAME, resolveProjectDbPath } from '@/lib/app-root';
 import { readConfig } from '@/lib/project/project-manager';
 import { PROVIDER_PRESETS } from '@/lib/providers/presets';
+import type { ModelPriceOverride } from '@/lib/settings';
 
 /** 用量来源标识：宿主对话 | 宿主非 chat 直连 | 插件（OCR / notes） */
 export type UsageSource = 'chat' | 'host-other' | 'ocr' | 'notes';
@@ -296,21 +297,82 @@ export interface ModelPrice {
   currency: 'usd' | 'cny';
 }
 
-/** 从静态价格表解析模型单价（/ 百万 token）。
- *   providerModelId 形如 "provider:modelId" 或裸 modelId，均按 modelId 段匹配。 */
-export function resolveModelPrice(modelRef: string): ModelPrice | null {
+/** 单价来源：override = 用户改过（管家对话 / settings.json）；preset = 内置价格表 */
+export type ModelPriceSource = 'override' | 'preset';
+
+export interface ResolvedModelPrice {
+  price: ModelPrice;
+  source: ModelPriceSource;
+}
+
+// ---- 用户覆盖价缓存：读 settings.json 有成本，按 TTL 惰性加载 ----
+let _priceOverrides: Record<string, ModelPriceOverride> = {};
+let _priceOverridesAt = 0;
+const PRICE_OVERRIDES_TTL_MS = 30_000;
+
+/** 覆盖价写盘后调用：下一次计费立即生效，无需等 TTL 过期 */
+export function invalidatePriceOverrides(): void {
+  _priceOverridesAt = 0;
+}
+
+/** 确保覆盖表已加载（计费前 / 管家读取单价前调用） */
+export async function ensurePriceOverridesLoaded(): Promise<void> {
+  if (Date.now() - _priceOverridesAt < PRICE_OVERRIDES_TTL_MS) return;
+  _priceOverridesAt = Date.now();
+  try {
+    const { readSettingsFromFile } = await import('@/lib/settings-server');
+    const s = await readSettingsFromFile();
+    _priceOverrides = { ...(s.priceOverrides ?? {}) };
+  } catch {
+    _priceOverrides = {};
+  }
+}
+
+/** 覆盖表按 "provider:modelId" 与裸 modelId 双口径匹配（忽略空/非法条目） */
+function findOverride(bare: string): ModelPriceOverride | undefined {
+  for (const [k, v] of Object.entries(_priceOverrides)) {
+    if (!v || typeof v.input !== 'number' || typeof v.output !== 'number') continue;
+    const keyBare = k.includes(':') ? k.slice(k.lastIndexOf(':') + 1) : k;
+    if (keyBare === bare) return v;
+  }
+  return undefined;
+}
+
+/** 解析模型单价（/ 百万 token）并标注来源：用户覆盖 > 内置价格表。
+ *  modelRef 形如 "provider:modelId" 或裸 modelId，均按 modelId 段匹配。 */
+export function resolveModelPriceInfo(modelRef: string): ResolvedModelPrice | null {
   if (!modelRef) return null;
   const bare = modelRef.includes(':') ? modelRef.slice(modelRef.lastIndexOf(':') + 1) : modelRef;
+
+  const override = findOverride(bare);
+  if (override) {
+    return {
+      source: 'override',
+      price: {
+        input: override.input,
+        output: override.output,
+        cacheHit: override.cacheHit,
+        offPeak: override.offPeak,
+        currency: override.currency ?? 'usd',
+      },
+    };
+  }
+
   for (const preset of PROVIDER_PRESETS) {
     for (const m of preset.models) {
       if (m.modelId === modelRef || m.modelId === bare) {
         const p = m.spec?.pricePerMillionTokens;
         if (!p) return null;
-        return { currency: 'usd', ...p };
+        return { source: 'preset', price: { currency: 'usd', ...p } };
       }
     }
   }
   return null;
+}
+
+/** 从价格表（覆盖优先）解析模型单价；无价返回 null */
+export function resolveModelPrice(modelRef: string): ModelPrice | null {
+  return resolveModelPriceInfo(modelRef)?.price ?? null;
 }
 
 /** 是否处于"高峰时段"（北京时间 周一~周五 09:00–12:00、14:00–18:00；其余为空闲时段）。
@@ -351,6 +413,8 @@ export async function recordTaskUsage(input: RecordUsageInput): Promise<void> {
   const id = crypto.randomUUID().slice(0, 24);
   const now = new Date().toISOString();
   const total = usage.promptTokens + usage.completionTokens;
+  // 覆盖价惰性加载（管家改价后立即生效）；estimateCost 为同步查表，须先确保覆盖表就绪
+  await ensurePriceOverridesLoaded();
   // 按任务完成时刻判定分时价（DeepSeek 高峰/空闲）；币种随模型价格表
   const cost = estimateCost(model, usage, new Date(now));
   const currency = resolveModelPrice(model)?.currency ?? 'usd';

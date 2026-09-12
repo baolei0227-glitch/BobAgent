@@ -1,19 +1,40 @@
 /**
  * 命名与落盘规则 —— 全部确定性逻辑，不经过模型。
  *
- * 命名模板：{日期}_{版本号}_{主题}.{扩展名}
- *   日期   = 执行整理的当天（本地时区），由代码填
+ * 命名形态由「受控选项」规则决定（见 @/lib/file-organizer/naming-rule）：
+ *   字段顺序（版本号 / 主题 / 日期）× 分隔符 × 版本号补零位数，
+ *   默认 {版本号}{主题}_{日期}.{扩展名}   如 v01房屋租赁合同_2026-09-12.pdf
  *   版本号 = 同主题既有文件的最大序号 +1（新主题首份若文档自带版本标识则采纳）
  *   主题   = 模型输出，已清理非法字符
+ *   日期   = 执行整理的当天（本地时区），由代码填
+ *
+ * 拼名与反解共用同一份规则（composeName / parseName），改规则不会让版本累加失效。
  */
 import { promises as fs } from 'fs';
 import { extname, join } from 'path';
 
-/** 整理日志文件名（放在被整理目录根部，供 --undo 回滚） */
-export const LOG_NAME = '_整理日志.json';
+import {
+  DEFAULT_NAMING,
+  composeName,
+  parseName,
+  type NamingRule,
+} from '@/lib/file-organizer/naming-rule';
 
-/** 文件名模板解析：YYYY-MM-DD_vNN_主题 */
-const NAME_RE = /^\d{4}-\d{2}-\d{2}_v(\d{1,2})_(.+)$/;
+export {
+  DEFAULT_NAMING,
+  formatVersion,
+  normalizeNaming,
+  previewName,
+  todayStamp,
+  type NameSlot,
+  type NamingRule,
+} from '@/lib/file-organizer/naming-rule';
+
+/** 整理日志文件名（放在被整理目录根部，供 --undo 回滚）；前缀点 = 默认隐藏，不在文件夹里露出 */
+export const LOG_NAME = '.整理日志.json';
+
+/** 旧版日志文件名（无隐藏前缀）；仅用于兼容读取历史日志 */
+export const LEGACY_LOG_NAME = '_整理日志.json';
 
 export interface MoveRecord {
   at: string;
@@ -31,22 +52,18 @@ export interface OrganizeLog {
   entries: MoveRecord[];
 }
 
-/** 本地时区的 YYYY-MM-DD */
-export function todayStamp(d = new Date()): string {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
 /**
  * 计算版本号序号：
  *   1) 目录内同主题既有文件的最大序号 +1；
  *   2) 若为同主题首份（序号 1）且文档自带版本标识，采纳文档标识；
  *   3) 其余情况用序号。
+ * 只认当前命名规则的文件名——改规则后旧名文件不再计入同主题。
  */
 export async function resolveVersionIndex(
   dir: string,
   topic: string,
   docVersion: string | null,
+  rule: NamingRule = DEFAULT_NAMING,
 ): Promise<number> {
   let max = 0;
   let entries: string[] = [];
@@ -56,8 +73,8 @@ export async function resolveVersionIndex(
     /* 目录不可读按空处理 */
   }
   for (const name of entries) {
-    const m = NAME_RE.exec(name.slice(0, name.length - extname(name).length));
-    if (m && m[2] === topic) max = Math.max(max, Number(m[1]) || 0);
+    const parsed = parseName(name.slice(0, name.length - extname(name).length), rule);
+    if (parsed && parsed.topic === topic) max = Math.max(max, parsed.version);
   }
   const next = max + 1;
   if (next === 1 && docVersion) {
@@ -67,22 +84,18 @@ export async function resolveVersionIndex(
   return next;
 }
 
-/** 组装文件名（含重名兜底：同主题同版本已存在时追加 -2/-3） */
-export function formatVersion(n: number): string {
-  return `v${String(n).padStart(2, '0')}`;
-}
-
+/** 组装文件名（含重名兜底：同主题同版本已存在时给主题追加 -2/-3） */
 export async function buildTargetName(
   dir: string,
   stamp: string,
   topic: string,
   ext: string,
   versionIndex: number,
+  rule: NamingRule = DEFAULT_NAMING,
 ): Promise<string> {
-  const ver = formatVersion(versionIndex);
   for (let i = 1; i < 100; i++) {
     const suffix = i === 1 ? '' : `-${i}`;
-    const name = `${stamp}_${ver}_${topic}${suffix}${ext}`;
+    const name = `${composeName(rule, stamp, `${topic}${suffix}`, versionIndex)}${ext}`;
     try {
       await fs.access(join(dir, name));
     } catch {
@@ -99,14 +112,36 @@ export function safeDirName(name: string): string {
 
 /* ==================== 整理日志（回滚依据） ==================== */
 
-export async function readLog(root: string): Promise<OrganizeLog> {
-  try {
-    const raw = await fs.readFile(join(root, LOG_NAME), 'utf-8');
-    const parsed = JSON.parse(raw) as OrganizeLog;
-    return Array.isArray(parsed?.entries) ? { version: 1, entries: parsed.entries } : { version: 1, entries: [] };
-  } catch {
-    return { version: 1, entries: [] };
+/** 读取日志原文：优先新文件名，缺失时回退旧文件名（历史日志兼容） */
+async function readLogRaw(root: string): Promise<OrganizeLog | null> {
+  for (const name of [LOG_NAME, LEGACY_LOG_NAME]) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(join(root, name), 'utf-8');
+    } catch {
+      continue; // 该文件名不存在 → 试下一个
+    }
+    try {
+      const parsed = JSON.parse(raw) as OrganizeLog;
+      return Array.isArray(parsed?.entries) ? { version: 1, entries: parsed.entries } : { version: 1, entries: [] };
+    } catch {
+      return { version: 1, entries: [] }; // 文件在但内容损坏 → 不再回退旧文件，避免复活陈旧记录
+    }
   }
+  return null;
+}
+
+/** 新旧日志已合并落盘后，删掉旧文件，避免文件夹里残留两份 */
+async function removeLegacyLog(root: string): Promise<void> {
+  try {
+    await fs.unlink(join(root, LEGACY_LOG_NAME));
+  } catch {
+    /* 旧文件不存在则忽略 */
+  }
+}
+
+export async function readLog(root: string): Promise<OrganizeLog> {
+  return (await readLogRaw(root)) ?? { version: 1, entries: [] };
 }
 
 export async function appendLog(root: string, records: MoveRecord[]): Promise<void> {
@@ -114,6 +149,7 @@ export async function appendLog(root: string, records: MoveRecord[]): Promise<vo
   const log = await readLog(root);
   log.entries.push(...records);
   await fs.writeFile(join(root, LOG_NAME), JSON.stringify(log, null, 2), 'utf-8');
+  await removeLegacyLog(root); // 历史记录已并入新文件
 }
 
 /**
@@ -147,10 +183,11 @@ export async function undo(root: string): Promise<{ restored: number; skipped: n
     JSON.stringify({ version: 1, entries: remain.reverse() } satisfies OrganizeLog, null, 2),
     'utf-8',
   );
+  await removeLegacyLog(root); // 回滚结果已写入新文件
   return { restored, skipped };
 }
 
 /** 是否应当跳过（隐藏文件、日志、本工具产物） */
 export function shouldSkip(name: string): boolean {
-  return name.startsWith('.') || name === LOG_NAME || name === 'node_modules';
+  return name.startsWith('.') || name === LOG_NAME || name === LEGACY_LOG_NAME || name === 'node_modules';
 }
