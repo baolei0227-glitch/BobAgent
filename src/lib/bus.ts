@@ -109,8 +109,6 @@ export interface WantedNoticeItem {
   status?: string;
   priority?: string;
   allDay?: boolean;
-  /** 命中的主题标签（空数组 = 归入 Other） */
-  tags: string[];
   /** 日报分区：today=今日待办 / overdue=已过期待办（非日报项无此字段） */
   section?: 'today' | 'overdue';
   /** 笔记正文（kind === 'notes' 时携带，供笔记列表邮件逐条展示） */

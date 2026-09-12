@@ -13,7 +13,7 @@ test('open local files dock member, measure conversation width', async ({ page }
       return {
         inner: window.innerWidth,
         navW: w(document.querySelector('aside')),
-        rf: w(document.querySelector('div.react-flow')),
+        rf: w(document.querySelector('div.react-flow__pane')),
         chat: w(document.querySelector('.ai-node-wrapper')),
         rw: w(document.querySelector('[data-reader-panel-wrapper]')),
         explorer: w(document.querySelector('[data-local-explorer-wrapper]')),

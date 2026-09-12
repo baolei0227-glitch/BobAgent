@@ -29,6 +29,8 @@ export interface TaskModelSettings {
   baseUrl?: string;
   /** Auto 模式任务类型智能选模开关（默认开；关 = 静态首选池首项，等同服务端 resolveMainChat 语义） */
   auto?: boolean;
+  /** Auto 模式「上下文带图片附件 → 优先选视觉模型」开关（默认开；关 = 即使带图也不为视觉模型加权） */
+  autoVisionOnImage?: boolean;
   /** 候选池：该角色可用模型（多选，默认取候选池首个 defaultModel 为首选）；运行时首选不可用时按序回退 */
   pool?: Array<{ provider: string; modelId: string }>;
 }
@@ -214,6 +216,18 @@ export interface ThinkingSettings {
   injectThinkGuide?: boolean;
 }
 
+/** 文件自动整理（投递箱就地整理）：把文件丢进 inboxDir，
+ *  工具只读文件首页内容 → 模型判定分类与主题 → 重命名为 {日期}_vNN_{主题}.ext 并移入分类子目录。
+ *  模型沿用 Role Assignment 里的 Task 模型，无需单独配置。 */
+export interface FileOrganizerSettings {
+  /** 自动整理开关；undefined = 关闭 */
+  enabled?: boolean;
+  /** 投递箱目录（绝对路径）；空 = 未配置 */
+  inboxDir?: string;
+  /** 分类目录清单：模型只能从中择一，避免目录发散；空/缺省 = 使用内置默认分类 */
+  categories?: string[];
+}
+
 export interface AppSettings {
   version: number;
   providers: ProviderConfig[];
@@ -226,7 +240,7 @@ export interface AppSettings {
   chatModel?: TaskModelSettings & {
     pool?: Array<{ provider: string; modelId: string }>;
   };
-  /** Agent 专属默认模型（P3-3b）：key = AGENT_PROFILES id（chat/coding/planner/…）；
+  /** Agent 专属默认模型（P3-3b）：key = AGENT_PROFILES id（chat/coding/butler/…）；
    *  服务端兜底解析时按请求 identity 优先于此配置的 pool，其次 chatModel。UI 暂无编辑入口。 */
   agentModels?: Record<string, TaskModelSettings>;
   /** 笔记编译/回看模型配置：笔记系统已拆分为 bob-notes-mcp 插件（插件域 config.json 自持大脑模型），
@@ -268,7 +282,12 @@ export interface AppSettings {
   xhsBrush?: string;
   /** 全局截图 OCR（Cmd+Shift+O）功能开关；undefined = 启用。
    *  enabled=false 时热键回退内置截屏链路（不使用 BobWorkCapture 助手）。 */
-  screenOcr?: { enabled?: boolean };
+  screenOcr?: {
+    enabled?: boolean;
+    /** OCR 引擎：auto = bob-ocr-mcp 优先、失败降级本地 Swift Vision（默认）；
+     *  mcp = 仅 bob-ocr-mcp（不可用则报错不降级）；local = 仅本地 Swift Vision。 */
+    engine?: 'auto' | 'mcp' | 'local';
+  };
   /** ⌘F 自定义快捷入口（用户自建插件/工作流一键入口） */
   quickLaunchers?: QuickLauncher[];
   /** 已启用的技能名集合（Agent 级，key='default' 的全局默认池）；undefined = 从未配置，走系统默认技能 */
@@ -304,6 +323,8 @@ export interface AppSettings {
     /** P4b 扩展：per-agent 覆盖（key = AGENT_PROFILES id），命中优先于 defaultStrategy */
     perAgent?: Record<string, ApprovalStrategy>;
   };
+  /** 文件自动整理投递箱（目录 / 开关 / 分类清单） */
+  fileOrganizer?: FileOrganizerSettings;
 }
 
 /** 图像生成/编辑模型名的通用判定正则（从 Model Pool 绑定模型中兜底识别图像模型）。
@@ -490,7 +511,7 @@ export function defaultSettings(): AppSettings {
     mcpServers: [...DEFAULT_MCP_SERVERS],
     avatar: { mode: 'random' },
     confirmTools: [...DEFAULT_CONFIRM_TOOLS],
-    screenOcr: { enabled: true },
+    screenOcr: { enabled: true, engine: 'auto' },
     quickLaunchers: [],
     theme: 'warm',
     fontScale: 'l',
@@ -499,6 +520,8 @@ export function defaultSettings(): AppSettings {
     thinking: { harnessPure: true, downgradeOnExecution: true, trivialPromptOff: true, injectThinkGuide: true },
     // P4b-1：审批策略默认 allow_scope —— 与现网行为逐位一致（仅 confirmTools 名单内需确认）
     approval: { defaultStrategy: 'allow_scope' },
+    // 文件自动整理：默认关闭、未配置投递箱；分类清单留空 = 用内置默认分类
+    fileOrganizer: { enabled: false, inboxDir: '', categories: [] },
   };
 }
 

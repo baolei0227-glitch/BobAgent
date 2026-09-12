@@ -185,7 +185,6 @@ export async function scanDueEventReminders(): Promise<number> {
               status: ev.status,
               priority: ev.priority,
               allDay: ev.all_day === 1,
-              tags: [],
             }];
             const isOverdue = now >= startMs;
             const title = isOverdue ? `⚠️ ${ev.title}` : `⏰ ${ev.title}`;

@@ -353,7 +353,7 @@ export class ContextRuntime {
         `当用户同意接入 AI（情形 1 或情形 2 用户确认后），你必须按以下步骤执行模型选择流程：\n` +
         `  1. 立即调用 list_configured_models 工具（无需参数），获取用户已配置的模型池；\n` +
         `  2. 将返回的可用模型以易读列表呈现给用户，格式示例：\n` +
-        `     "你已配置以下可用模型：\\n  • DeepSeek: deepseek-v4-flash（快速对话）\\n  • Qwen: qwen-max（长文本理解）\\n  • Zhipu GLM: glm-4-flash（轻量快速）\\n请选择一个模型（回复模型名即可），或回复 'auto' 让系统自动选择。"\n` +
+        `     "你已配置以下可用模型：\\n  • DeepSeek: deepseek-flash（快速对话）\\n  • Qwen: qwen-max（长文本理解）\\n  • Zhipu GLM: glm-4-flash（轻量快速）\\n请选择一个模型（回复模型名即可），或回复 'auto' 让系统自动选择。"\n` +
         `     - 如果模型池为空（返回 empty: true），告知用户："当前还没有配置任何模型，请先在 Manage Models 中添加厂商 API Key 并勾选模型，然后告诉我继续。"\n` +
         `     - 等待用户选择后再生成代码，不要跳过此步。\n` +
         `  3. 根据用户选择的模型，在小程序 UI 中添加一个模型选择按钮（下拉菜单或胶囊切换），具体规范：\n` +

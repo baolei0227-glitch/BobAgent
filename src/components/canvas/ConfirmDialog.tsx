@@ -23,21 +23,22 @@ export interface ConfirmDialogOptions {
   message: string;
   confirmLabel?: string; // default 'Delete'
   cancelLabel?: string; // default 'Cancel'
-  /** 可选锚点（如对话输入框顶部中心）：传入时在锚点上方弹出，否则视口居中 */
-  anchor?: { x: number; y: number } | null;
+  /** 可选锚点（如对话输入框顶部中心）：传入时在锚点上方弹出并等宽于 anchor.w，否则视口居中 */
+  anchor?: { x: number; y: number; w?: number } | null;
   /** 可选：传多个选项按钮（二选一/多选），此时忽略 confirmLabel/cancelLabel，取消仍可用 */
   choices?: ConfirmDialogChoice[];
 }
 
-/** 锚点定位：弹窗在锚点上方居中（水平钳制在视口内；锚点过靠上时改到下方显示） */
-function computeAnchorStyle(anchor: { x: number; y: number }): CSSProperties {
-  const cardW = 400;
+/** 锚点定位：弹窗在锚点上方居中且与输入框等宽（w 缺省回退 400；水平钳制在视口内；锚点过靠上时改到下方显示） */
+function computeAnchorStyle(anchor: { x: number; y: number; w?: number }): CSSProperties {
+  const cardW = anchor.w ?? 400;
   const vw = window.innerWidth;
   const left = Math.max(8, Math.min(anchor.x - cardW / 2, vw - cardW - 8));
   const showBelow = anchor.y < 340;
   return {
     position: 'fixed',
     left,
+    width: cardW,
     top: showBelow ? anchor.y + 12 : anchor.y - 12,
     transform: showBelow ? undefined : 'translateY(-100%)',
   };
@@ -68,7 +69,8 @@ export function ConfirmDialog({
   return createPortal(
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center"
-      style={{ backgroundColor: 'rgba(0,0,0,0.35)' }}
+      // 锚点模式（输入框上方弹出）：遮罩透明，不遮挡正文；仍拦截画布点击 + 点击空白关闭
+      style={{ backgroundColor: options.anchor ? 'transparent' : 'rgba(0,0,0,0.35)' }}
       onClick={onCancel}
     >
       <div

@@ -6,7 +6,7 @@
  *   画布 BobbyNode 仅用于：观察实时进度、授权管理（弹窗 + 复选框）、查看调用历史。
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import { useNodeHost } from './node-host';
 import { X, ShieldCheck, History, ChevronDown, ChevronRight } from 'lucide-react';
 import { NodeCardHeader } from './NodeCardHeader';
 import { useConfirm } from './ConfirmDialog';
@@ -50,7 +50,7 @@ function BobbyNodeInner({ id, data, selected }: {
   data: BobbyNodeData;
   selected?: boolean;
 }) {
-  const { setNodes, setEdges, getNode } = useReactFlow();
+  const nodeHost = useNodeHost();
   const { ask: confirmAsk, askChoices, render: confirmRender } = useConfirm();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [lastUpdated, setLastUpdated] = useState('');
@@ -186,25 +186,15 @@ function BobbyNodeInner({ id, data, selected }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGrant]);
 
-  // 删除节点
+  // 删除节点（宿主统一负责后端档案删除 + 本地移除节点/关联边）
   const handleDelete = useCallback(async () => {
     const ok = await confirmAsk({
       title: 'Delete Node?',
       message: 'Deleting "Bobby node" will permanently remove this node.\nThis action cannot be undone.',
     });
     if (!ok) return;
-    const node = getNode(id);
-    const nodeMdId = (node?.data as BobbyNodeData | undefined)?.nodeMdId || id;
-    fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete', node_id: nodeMdId }),
-    })
-      .then((r) => { if (!r.ok) console.error('Bobby node delete failed:', r.status); })
-      .catch((err) => console.error('Bobby node delete request error:', err));
-    setNodes((nds) => nds.filter((n) => n.id !== id));
-    setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id));
-  }, [id, getNode, setNodes, setEdges, confirmAsk]);
+    nodeHost.deleteNodeWithEdges(id);
+  }, [id, nodeHost, confirmAsk]);
 
   // 授权软件
   const doGrant = useCallback(async (target?: string) => {

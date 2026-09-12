@@ -11,7 +11,7 @@
  * （box-shadow 暗角技巧，无需重绘画布）。无第三方依赖，UI 文案英文，配色走主题变量。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Move, Undo2, Redo2, RotateCcw, Check, X, ScanText, Copy, Loader2, ArrowUpRight, Type } from 'lucide-react';
 
 /** 马赛克工具图标：4×4 像素块、对角填充（像素化/模糊语义，lucide 无对应图标故自绘） */
@@ -50,6 +50,14 @@ export interface ScreenOcrEditorProps {
 
 type Tool = 'select' | 'mosaic' | 'arrow' | 'text';
 type Sel = { x: number; y: number; w: number; h: number };
+
+/** 可移动标注对象：文字 / 箭头（对象化：可点选、拖动、删除；渲染在独立覆盖层 canvas） */
+type Mark =
+  | { kind: 'text'; id: number; x: number; y: number; value: string }
+  | { kind: 'arrow'; id: number; x1: number; y1: number; x2: number; y2: number };
+
+/** 撤销/重做快照：主画布（原图+马赛克）像素 + 标注对象列表 */
+type Snap = { img: ImageData; marks: Mark[] };
 
 /** 标注色（微信截图箭头/文字默认红） */
 const MARK_COLOR = '#ff5252';
@@ -100,8 +108,34 @@ function drawArrow(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: nu
   ctx.fill();
 }
 
-/** 8 向缩放手柄定义 */
-const HANDLES: { id: string; style: React.CSSProperties }[] = [
+/** 点到线段距离（箭头命中检测） */
+function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * dx + (py - y1) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+/** 命中检测：从后往前（后画的在上），返回命中的标注对象或 null */
+function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, py: number): Mark | null {
+  ctx.font = '600 16px -apple-system, "PingFang SC", sans-serif';
+  ctx.textBaseline = 'top';
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const m = marks[i];
+    if (m.kind === 'text') {
+      const w = ctx.measureText(m.value).width;
+      if (px >= m.x - 3 && px <= m.x + w + 3 && py >= m.y - 3 && py <= m.y + 19) return m;
+    } else {
+      if (distToSegment(px, py, m.x1, m.y1, m.x2, m.y2) <= 8) return m;
+    }
+  }
+  return null;
+}
+
+/** 8 向缩放手柄定义 */const HANDLES: { id: string; style: React.CSSProperties }[] = [
   { id: 'nw', style: { left: -4, top: -4, cursor: 'nwse-resize' } },
   { id: 'n', style: { left: '50%', top: -4, marginLeft: -4, cursor: 'ns-resize' } },
   { id: 'ne', style: { right: -4, top: -4, cursor: 'nesw-resize' } },
@@ -147,16 +181,33 @@ function clampMove(s: Sel, cw: number, ch: number): Sel {
 export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelection = 'none' }: ScreenOcrEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  /** 标注覆盖层（文字/箭头对象画在此透明 canvas，叠在主画布上） */
+  const markCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const originalRef = useRef<HTMLImageElement | null>(null);
-  const undoRef = useRef<ImageData[]>([]);
-  const redoRef = useRef<ImageData[]>([]);
+  const undoRef = useRef<Snap[]>([]);
+  const redoRef = useRef<Snap[]>([]);
+  /** 文字/箭头对象列表（ref 与 state 同步，供指针事件内读取） */
+  const [marks, setMarks] = useState<Mark[]>([]);
+  const marksRef = useRef<Mark[]>([]);
+  const markIdRef = useRef(1);
+  /** 当前选中的标注对象 id（select 点选；Delete 删除） */
+  const [selMarkId, setSelMarkId] = useState<number | null>(null);
+  const selMarkIdRef = useRef<number | null>(null);
+  const setMarksBoth = useCallback((m: Mark[]) => {
+    marksRef.current = m;
+    setMarks(m);
+  }, []);
+  const setSelMarkIdBoth = useCallback((id: number | null) => {
+    selMarkIdRef.current = id;
+    setSelMarkId(id);
+  }, []);
   /** 选区（图像像素坐标）；selRef 与 state 同步，供指针事件内读取 */
   const selRef = useRef<Sel | null>(null);
   const [sel, setSel] = useState<Sel | null>(null);
   const [tool, setTool] = useState<Tool>('select');
   const [phase, setPhase] = useState<'idle' | 'edit'>('idle');
   const [dragging, setDragging] = useState(false);
-  const [dragMode, setDragMode] = useState<null | 'select' | 'move' | 'resize' | 'mosaic' | 'arrow'>(null);
+  const [dragMode, setDragMode] = useState<null | 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'markMove'>(null);
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
   const [scale, setScale] = useState(1);
   const [canUndo, setCanUndo] = useState(false);
@@ -166,17 +217,20 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
   /** 文字工具：进行中的输入草稿（图像坐标） */
   const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string } | null>(null);
   const textDraftRef = useRef<{ x: number; y: number; value: string } | null>(null);
+  /** 文字输入框最近一次挂载时间戳（挂载初期误失焦保护用） */
+  const textMountTs = useRef(0);
   const dragRef = useRef<{
-    mode: 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | null;
+    mode: 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'markMove' | null;
     handle?: string;
     startX: number;
     startY: number;
     curX: number;
     curY: number;
     sel0: Sel;
+    /** 标注对象拖动：被拖对象 id 与命中时原坐标（用于偏移） */
+    markId?: number;
+    markFrom?: Mark;
   }>({ mode: null, startX: 0, startY: 0, curX: 0, curY: 0, sel0: { x: 0, y: 0, w: 0, h: 0 } });
-  /** 箭头拖拽预览用的画面快照 */
-  const arrowSnapRef = useRef<HTMLCanvasElement | null>(null);
 
   const setSelBoth = useCallback((s: Sel | null) => {
     selRef.current = s;
@@ -196,6 +250,53 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
   const getCanvas = useCallback(() => canvasRef.current, []);
   const getCtx = useCallback(() => getCanvas()!.getContext('2d')!, [getCanvas]);
 
+  /** 重绘标注覆盖层（文字/箭头对象 + 选中高亮）。主画布不动（只承载原图+马赛克） */
+  const redrawMarks = useCallback(() => {
+    const mc = markCanvasRef.current;
+    const canvas = canvasRef.current;
+    if (!mc || !canvas) return;
+    mc.width = canvas.width;
+    mc.height = canvas.height;
+    const ctx = mc.getContext('2d')!;
+    ctx.clearRect(0, 0, mc.width, mc.height);
+    ctx.font = '600 16px -apple-system, "PingFang SC", sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = MARK_COLOR;
+    const selId = selMarkIdRef.current;
+    for (const m of marksRef.current) {
+      if (m.kind === 'text') {
+        ctx.fillText(m.value, m.x, m.y);
+        if (m.id === selId) {
+          const w = ctx.measureText(m.value).width;
+          ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = 'rgba(75,63,227,0.95)';
+          ctx.lineWidth = 1.2;
+          ctx.strokeRect(m.x - 2, m.y - 2, w + 4, 18);
+          ctx.setLineDash([]);
+        }
+      } else {
+        drawArrow(ctx, m.x1, m.y1, m.x2, m.y2);
+        if (m.id === selId) {
+          ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = 'rgba(75,63,227,0.95)';
+          ctx.lineWidth = 1.2;
+          ctx.strokeRect(
+            Math.min(m.x1, m.x2) - 5,
+            Math.min(m.y1, m.y2) - 5,
+            Math.abs(m.x2 - m.x1) + 10,
+            Math.abs(m.y2 - m.y1) + 10,
+          );
+          ctx.setLineDash([]);
+        }
+      }
+    }
+  }, []);
+
+  /** 标注对象/选中态变化 → 重绘覆盖层（兜底，防某操作路径漏重绘） */
+  useEffect(() => {
+    redrawMarks();
+  }, [marks, selMarkId, redrawMarks]);
+
   /** client 坐标 → 图像像素坐标 */
   const toImagePos = useCallback(
     (clientX: number, clientY: number) => {
@@ -214,12 +315,22 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
       getCtx().drawImage(img, 0, 0);
+      // 标注覆盖层同步尺寸（透明，叠主画布上）
+      const mc = markCanvasRef.current;
+      if (mc) {
+        mc.width = img.naturalWidth;
+        mc.height = img.naturalHeight;
+      }
       setNat({ w: img.naturalWidth, h: img.naturalHeight });
-      // fit 缩放：铺满窗口（不预留边距，消除 Retina 下四周黑边；工具条/按钮均 fixed 浮动覆盖）
+      // 缩放基准：微信式「原尺寸」= 图片物理像素 1:1 映射到屏幕物理像素。
+      // screencapture 输出物理像素（Retina 2x），故原尺寸的 CSS 尺寸 = naturalWidth / devicePixelRatio。
+      // 仅在图片超出窗口时缩小适配（fit），不再封顶 1 —— 封顶 1 会让选区小图（region 模式）
+      // 以物理像素当 CSS 像素渲染，Retina 下被放大 devicePixelRatio 倍。
+      const dpr = window.devicePixelRatio || 1;
       const sc = Math.min(
+        1 / dpr,
         window.innerWidth / img.naturalWidth,
         window.innerHeight / img.naturalHeight,
-        1,
       );
       setScale(sc);
       // 原生选区已完成（region 模式）：整图直接全选区，进入编辑态立即出工具条（微信式）
@@ -231,31 +342,34 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     img.src = dataUrl;
   }, [dataUrl, getCanvas, getCtx, initialSelection, setSelBoth]);
 
-  /** 把当前画面压入撤销栈（操作前调用），清空重做栈 */
+  /** 把当前画面（主画布像素 + 标注对象）压入撤销栈，清空重做栈 */
   const pushUndo = useCallback(() => {
     const canvas = getCanvas()!;
-    undoRef.current.push(getCtx().getImageData(0, 0, canvas.width, canvas.height));
+    undoRef.current.push({ img: getCtx().getImageData(0, 0, canvas.width, canvas.height), marks: marksRef.current.slice() });
     if (undoRef.current.length > MAX_HISTORY) undoRef.current.shift();
     redoRef.current = [];
     refreshStates();
   }, [getCanvas, getCtx, refreshStates]);
 
-  /** 恢复一份快照（需先按快照尺寸重置 canvas） */
+  /** 恢复一份快照（主画布像素 + 标注对象 → 重绘覆盖层） */
   const restoreSnapshot = useCallback(
-    (snap: ImageData) => {
+    (snap: Snap) => {
       const canvas = getCanvas()!;
-      canvas.width = snap.width;
-      canvas.height = snap.height;
-      getCtx().putImageData(snap, 0, 0);
+      canvas.width = snap.img.width;
+      canvas.height = snap.img.height;
+      getCtx().putImageData(snap.img, 0, 0);
+      setMarksBoth(snap.marks);
+      setSelMarkIdBoth(null);
+      redrawMarks();
     },
-    [getCanvas, getCtx],
+    [getCanvas, getCtx, setMarksBoth, setSelMarkIdBoth, redrawMarks],
   );
 
   const undo = useCallback(() => {
     const prev = undoRef.current.pop();
     if (!prev) return;
     const canvas = getCanvas()!;
-    redoRef.current.push(getCtx().getImageData(0, 0, canvas.width, canvas.height));
+    redoRef.current.push({ img: getCtx().getImageData(0, 0, canvas.width, canvas.height), marks: marksRef.current.slice() });
     restoreSnapshot(prev);
     refreshStates();
   }, [getCanvas, getCtx, restoreSnapshot, refreshStates]);
@@ -264,7 +378,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     const next = redoRef.current.pop();
     if (!next) return;
     const canvas = getCanvas()!;
-    undoRef.current.push(getCtx().getImageData(0, 0, canvas.width, canvas.height));
+    undoRef.current.push({ img: getCtx().getImageData(0, 0, canvas.width, canvas.height), marks: marksRef.current.slice() });
     restoreSnapshot(next);
     refreshStates();
   }, [getCanvas, getCtx, restoreSnapshot, refreshStates]);
@@ -278,25 +392,27 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
     getCtx().drawImage(img, 0, 0);
+    setMarksBoth([]);
+    setSelMarkIdBoth(null);
+    redrawMarks();
     refreshStates();
-  }, [getCanvas, getCtx, pushUndo, refreshStates]);
+  }, [getCanvas, getCtx, pushUndo, setMarksBoth, setSelMarkIdBoth, redrawMarks, refreshStates]);
 
   /** 提交文字草稿：把文本画到内容画布（空文本直接丢弃） */
   const commitTextDraft = useCallback(
     (d: { x: number; y: number; value: string }) => {
       setTextDraftBoth(null);
       const v = d.value.trim();
-      if (!v) return;
+      if (!v) {
+        redrawMarks();
+        return;
+      }
+      // 对象化：文字入标注列表（渲染在覆盖层），可点选/拖动/删除
       pushUndo();
-      const ctx = getCtx();
-      ctx.save();
-      ctx.font = '600 16px -apple-system, "PingFang SC", sans-serif';
-      ctx.fillStyle = MARK_COLOR;
-      ctx.textBaseline = 'top';
-      ctx.fillText(v, d.x, d.y);
-      ctx.restore();
+      setMarksBoth([...marksRef.current, { kind: 'text', id: markIdRef.current++, x: Math.round(d.x), y: Math.round(d.y), value: v }]);
+      redrawMarks();
     },
-    [setTextDraftBoth, pushUndo, getCtx],
+    [setTextDraftBoth, redrawMarks, pushUndo, setMarksBoth],
   );
 
   /** 切换工具：若有未提交的文字草稿先落定（防残留输入框/状态混乱） */
@@ -362,23 +478,18 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       if (e.button !== 0) return;
       e.currentTarget.setPointerCapture(e.pointerId);
       const pos = toImagePos(e.clientX, e.clientY);
+      // 临时诊断：文字工具点击是否到达、换算坐标是否有效
       // 文字：提交进行中的草稿（如有）→ 在点击处开新输入框（不进入拖拽）
       if (tool === 'text') {
         if (textDraftRef.current) commitTextDraft(textDraftRef.current);
         setTextDraftBoth({ x: pos.x, y: pos.y, value: '' });
         return;
       }
-      // 箭头：快照画面 → 拖拽预览 → 松开落定（一次箭头一个撤销步）
+      // 箭头：拖拽预览（画标注层）→ 松开落定（对象化，一次箭头一个撤销步）
       if (tool === 'arrow') {
-        const canvas = getCanvas()!;
-        const snap = document.createElement('canvas');
-        snap.width = canvas.width;
-        snap.height = canvas.height;
-        snap.getContext('2d')!.drawImage(canvas, 0, 0);
-        arrowSnapRef.current = snap;
+        setSelMarkIdBoth(null);
         dragRef.current = { mode: 'arrow', startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y, sel0: { x: 0, y: 0, w: 0, h: 0 } };
         setDragMode('arrow');
-        pushUndo();
         setDragging(true);
         return;
       }
@@ -390,6 +501,33 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         paintMosaicAt(pos.x, pos.y);
         setDragging(true);
         return;
+      }
+      // select：优先命中标注对象（文字/箭头）→ 选中并拖动；未命中才走选区逻辑
+      if (tool === 'select') {
+        const mc = markCanvasRef.current;
+        if (mc) {
+          const hit = hitTestMark(mc.getContext('2d')!, marksRef.current, pos.x, pos.y);
+          if (hit) {
+            if (selMarkIdRef.current !== hit.id) setSelMarkIdBoth(hit.id);
+            redrawMarks();
+            // 拖动前压栈（含对象快照）→ 一次撤销步撤销整段移动
+            pushUndo();
+            dragRef.current = {
+              mode: 'markMove',
+              markId: hit.id,
+              markFrom: hit,
+              startX: pos.x,
+              startY: pos.y,
+              curX: pos.x,
+              curY: pos.y,
+              sel0: selRef.current ?? { x: 0, y: 0, w: 0, h: 0 },
+            };
+            setDragMode('markMove');
+            setDragging(true);
+            return;
+          }
+          setSelMarkIdBoth(null);
+        }
       }
       // select：点击选区内 → 移动选区；选区外 → 重新拉框
       const s = selRef.current;
@@ -404,7 +542,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       setSelBoth({ x: pos.x, y: pos.y, w: 0, h: 0 });
       setDragging(true);
     },
-    [toImagePos, tool, phase, pushUndo, paintMosaicAt, setSelBoth, commitTextDraft, setTextDraftBoth, getCanvas],
+    [toImagePos, tool, phase, pushUndo, paintMosaicAt, setSelBoth, commitTextDraft, setTextDraftBoth, redrawMarks, setSelMarkIdBoth],
   );
 
   const onPointerMove = useCallback(
@@ -428,22 +566,42 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       } else if (d.mode === 'mosaic') {
         paintMosaicAt(pos.x, pos.y);
       } else if (d.mode === 'arrow') {
-        // 预览：快照 + 当前箭头
-        const snap = arrowSnapRef.current;
-        if (!snap) return;
-        const ctx = getCtx();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(snap, 0, 0);
-        drawArrow(ctx, d.startX, d.startY, pos.x, pos.y);
+        // 预览：标注层重绘 marks + 拖拽中的箭头
+        redrawMarks();
+        const mc = markCanvasRef.current;
+        if (mc) drawArrow(mc.getContext('2d')!, d.startX, d.startY, pos.x, pos.y);
+      } else if (d.mode === 'markMove') {
+        // 拖动标注对象：按命中时原坐标 + 偏移更新
+        const from = d.markFrom;
+        if (from) {
+          const dx = pos.x - d.startX;
+          const dy = pos.y - d.startY;
+          setMarksBoth(
+            marksRef.current.map((m) => {
+              if (m.id !== d.markId) return m;
+              if (m.kind === 'text' && from.kind === 'text')
+                return { ...m, x: Math.max(0, Math.round(from.x + dx)), y: Math.max(0, Math.round(from.y + dy)) };
+              if (m.kind === 'arrow' && from.kind === 'arrow')
+                return {
+                  ...m,
+                  x1: Math.max(0, Math.round(from.x1 + dx)),
+                  y1: Math.max(0, Math.round(from.y1 + dy)),
+                  x2: Math.max(0, Math.round(from.x2 + dx)),
+                  y2: Math.max(0, Math.round(from.y2 + dy)),
+                };
+              return m;
+            }),
+          );
+          redrawMarks();
+        }
       }
     },
-    [toImagePos, getCanvas, getCtx, paintMosaicAt, setSelBoth],
+    [toImagePos, getCanvas, paintMosaicAt, setSelBoth, redrawMarks, setMarksBoth],
   );
 
   /** 复位拖拽状态（指针取消/丢失兜底，防止 dragging 卡死导致工具条不弹） */
   const resetDrag = useCallback(() => {
     dragRef.current = { mode: null, startX: 0, startY: 0, curX: 0, curY: 0, sel0: { x: 0, y: 0, w: 0, h: 0 } };
-    arrowSnapRef.current = null;
     setDragMode(null);
     setDragging(false);
   }, []);
@@ -454,9 +612,12 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     if (d.mode === 'select') {
       const s = selRef.current;
       if (s && s.w >= MIN_SEL && s.h >= MIN_SEL) setPhase('edit');
+    } else if (d.mode === 'arrow' || d.mode === 'markMove') {
+      // 取消未落定操作：清预览、恢复原标注层
+      redrawMarks();
     }
     resetDrag();
-  }, [resetDrag]);
+  }, [resetDrag, redrawMarks]);
 
   const onPointerUp = useCallback(() => {
     const d = dragRef.current;
@@ -469,18 +630,21 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         setSelBoth(null);
       }
     } else if (d.mode === 'arrow') {
-      // 落定箭头：未形成有效线段则恢复快照（撤销这次 pushUndo 的效果由快照覆盖）
-      const snap = arrowSnapRef.current;
-      arrowSnapRef.current = null;
-      if (snap && Math.hypot(d.curX - d.startX, d.curY - d.startY) < 6) {
-        const canvas = getCanvas()!;
-        const ctx = getCtx();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(snap, 0, 0);
+      // 落定箭头（对象化）：有效线段 → 入标注列表 + 一次撤销步；过短则丢弃（清预览）
+      if (Math.hypot(d.curX - d.startX, d.curY - d.startY) >= 6) {
+        pushUndo();
+        setMarksBoth([
+          ...marksRef.current,
+          { kind: 'arrow', id: markIdRef.current++, x1: Math.round(d.startX), y1: Math.round(d.startY), x2: Math.round(d.curX), y2: Math.round(d.curY) },
+        ]);
       }
+      redrawMarks();
+    } else if (d.mode === 'markMove') {
+      // 标注对象拖动结束：pushUndo 已在按下时记录拖动前状态（撤销一次移动）
+      setSelMarkIdBoth(d.markId ?? null);
     }
     resetDrag();
-  }, [setSelBoth, getCanvas, getCtx, resetDrag]);
+  }, [setSelBoth, pushUndo, setMarksBoth, redrawMarks, setSelMarkIdBoth, resetDrag]);
 
   /** 缩放手柄按下（阻止冒泡到画布），捕获指针以便移出元素后继续 */
   const onHandleDown = useCallback(
@@ -511,6 +675,14 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         e.preventDefault();
         e.stopImmediatePropagation();
         redo();
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selMarkIdRef.current) {
+        // 删除选中的标注对象（文字/箭头）
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        pushUndo();
+        setMarksBoth(marksRef.current.filter((m) => m.id !== selMarkIdRef.current));
+        setSelMarkIdBoth(null);
+        redrawMarks();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -519,12 +691,18 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
           setTextDraftBoth(null);
           return;
         }
+        // 有选中标注对象：先取消选中（再按 Esc 才退出）
+        if (selMarkIdRef.current) {
+          setSelMarkIdBoth(null);
+          redrawMarks();
+          return;
+        }
         onCancel();
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [undo, redo, onCancel, setTextDraftBoth]);
+  }, [undo, redo, onCancel, setTextDraftBoth, pushUndo, setMarksBoth, setSelMarkIdBoth, redrawMarks]);
 
   /** 按选区裁剪内容画布 → dataUrl（选区无效返回 null；输出带圆角，透明角） */
   const cropToDataUrl = useCallback((): string | null => {
@@ -549,9 +727,24 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       ctx.rect(0, 0, w, h);
     }
     ctx.clip();
+    // 合成：主画布（原图+马赛克）→ 标注覆盖层（文字/箭头）
     ctx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+    const mc = markCanvasRef.current;
+    if (mc) {
+      // 临时去除选中高亮（虚线框只用于编辑定位，不应进导出/OCR 图）
+      const selId = selMarkIdRef.current;
+      if (selId != null) {
+        selMarkIdRef.current = null;
+        redrawMarks();
+      }
+      ctx.drawImage(mc, x, y, w, h, 0, 0, w, h);
+      if (selId != null) {
+        selMarkIdRef.current = selId;
+        redrawMarks();
+      }
+    }
     return out.toDataURL('image/png');
-  }, [getCanvas]);
+  }, [getCanvas, redrawMarks]);
 
   /** ✓：复制选区图片（父层处理剪贴板） */
   const handleDone = useCallback(() => {
@@ -584,6 +777,15 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
 
   // 浮动工具条位置：选区下方居中，越界翻转到上方，再钳制到窗口内。
   // 图像框在根容器中居中（flex center），窗口坐标可直接由 nat*scale 几何推导，无需读 DOM。
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const [toolbarW, setToolbarW] = useState(TOOLBAR_W);
+  // 工具条实测宽度（内容随工具/撤销态变化：✕✓、OCR 按钮等），渲染后测量更新
+  useLayoutEffect(() => {
+    if (toolbarRef.current) {
+      const w = toolbarRef.current.clientWidth;
+      if (w > 0) setToolbarW(w);
+    }
+  }, [tool, sel, dragging, canUndo, canRedo, phase, textDraft]);
   const barPos = (() => {
     if (!sel || !nat) return { left: 12, top: 12 };
     const boxW = nat.w * scale;
@@ -593,8 +795,9 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     const sw = sel.w * scale;
     const sh = sel.h * scale;
     const barH = 44;
-    let left = sx + sw / 2 - TOOLBAR_W / 2;
-    left = Math.max(8, Math.min(left, window.innerWidth - TOOLBAR_W - 8));
+    const tw = toolbarW;
+    let left = sx + sw / 2 - tw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
     let top = sy + sh + 14;
     if (top + barH > window.innerHeight - 8) top = sy - 14 - barH;
     if (top < 8) top = 8;
@@ -606,7 +809,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     if (!sel || !nat) return { left: 12, top: 12, width: 300 };
     const W = 300;
     const barH = 44;
-    let left = barPos.left + TOOLBAR_W / 2 - W / 2;
+    let left = barPos.left + toolbarW / 2 - W / 2;
     left = Math.max(8, Math.min(left, window.innerWidth - W - 8));
     let top = barPos.top + barH + 8;
     if (top + 300 > window.innerHeight - 8) top = barPos.top - 8 - 300;
@@ -658,70 +861,6 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         touchAction: 'none',
       }}
     >
-      {/* 顶部引导条：明确当前是截图编辑模式（防误以为界面卡死）；pointerEvents none 不挡操作 */}
-      <div
-        style={{
-          position: 'fixed',
-          top: 16,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 30,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '9px 18px',
-          borderRadius: 999,
-          background: 'rgba(28,28,30,0.9)',
-          color: '#fff',
-          fontSize: '0.866667rem',
-          fontWeight: 500,
-          boxShadow: '0 8px 30px rgba(0,0,0,0.35)',
-          pointerEvents: 'none',
-          whiteSpace: 'nowrap',
-          fontFamily: 'var(--font-sans)',
-        }}
-      >
-        <span
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            background: '#ffd60a',
-            display: 'inline-block',
-            flexShrink: 0,
-          }}
-        />
-        截图编辑中 · 拖选/调整选区 → ✓ 复制 ｜ To Text 识别 ｜ Esc 或 ✕ 退出
-      </div>
-
-      {/* 工具模式提示（选中非 select 工具时，明确当前模式与下一步） */}
-      {tool !== 'select' && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 58,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 30,
-            padding: '6px 14px',
-            borderRadius: 999,
-            background: 'rgba(75,63,227,0.92)',
-            color: '#fff',
-            fontSize: '0.8rem',
-            fontWeight: 500,
-            pointerEvents: 'none',
-            whiteSpace: 'nowrap',
-            fontFamily: 'var(--font-sans)',
-          }}
-        >
-          {tool === 'text'
-            ? '文字模式：点击图像放置文字（Enter 落定）'
-            : tool === 'mosaic'
-              ? '马赛克：按住涂抹要打码的区域'
-              : '箭头：按住拖拽画箭头（指向标注）'}
-        </div>
-      )}
-
       {/* 图像框（内容画布 + 选区覆盖层） */}
       <div
         ref={boxRef}
@@ -740,6 +879,18 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
             display: 'block',
             width: nat ? nat.w * scale : undefined,
             height: nat ? nat.h * scale : undefined,
+          }}
+        />
+        {/* 标注覆盖层（文字/箭头对象，透明叠主画布上；事件统一走 boxRef 命中检测） */}
+        <canvas
+          ref={markCanvasRef}
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: nat ? nat.w * scale : undefined,
+            height: nat ? nat.h * scale : undefined,
+            pointerEvents: 'none',
           }}
         />
 
@@ -815,11 +966,23 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         {/* 文字工具：输入草稿（点击处输入，Enter/失焦落定） */}
         {textDraft && (
           <textarea
-            autoFocus
             value={textDraft.value}
+            ref={(el) => {
+              if (el) {
+                textMountTs.current = Date.now();
+                // 挂载后聚焦（覆盖窗口可能刚激活，延迟一拍确保成为 key window 后聚焦有效）
+                requestAnimationFrame(() => {
+                  try {
+                    el.focus();
+                  } catch { /* ignore */ }
+                });
+              }
+            }}
             onPointerDown={(e) => e.stopPropagation()}
             onChange={(e) => setTextDraftBoth({ ...textDraft, value: e.target.value })}
             onBlur={() => {
+              // 挂载初期误失焦保护：窗口激活竞态导致的瞬失焦不落定（否则输入框刚出现就消失）
+              if (Date.now() - textMountTs.current < 400) return;
               if (textDraftRef.current) commitTextDraft(textDraftRef.current);
             }}
             onKeyDown={(e) => {
@@ -856,6 +1019,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         {/* 浮动工具条（松开鼠标后弹出，选区下方居中） */}
         {phase === 'edit' && sel && !dragging && (
           <div
+            ref={toolbarRef}
             onPointerDown={(e) => e.stopPropagation()}
             style={{
               position: 'fixed',
@@ -913,55 +1077,52 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
             <button style={toolBtn(false, !canUndo && !canRedo)} onClick={reset} disabled={!canUndo && !canRedo} title="Reset edits">
               <RotateCcw className="h-4 w-4" />
             </button>
+            <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.18)', margin: '0 6px' }} />
+            {/* ✕ 放弃 / ✓ 确认复制（随选区工具条，操作就近；不再固定悬浮在屏幕右下角） */}
+            <button
+              onClick={onCancel}
+              title="Cancel (Esc)"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 34,
+                height: 30,
+                borderRadius: 8,
+                border: 'none',
+                background: 'transparent',
+                color: 'rgba(255,255,255,0.9)',
+                cursor: 'pointer',
+                transition: 'background 0.12s',
+              }}
+              onPointerEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.12)')}
+              onPointerLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <button
+              onClick={handleDone}
+              disabled={!sel || sel.w < MIN_SEL || sel.h < MIN_SEL}
+              title="Confirm & copy (✓)"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 34,
+                height: 30,
+                borderRadius: 8,
+                border: 'none',
+                background: '#21c45d',
+                color: '#fff',
+                cursor: sel && sel.w >= MIN_SEL && sel.h >= MIN_SEL ? 'pointer' : 'not-allowed',
+                opacity: sel && sel.w >= MIN_SEL && sel.h >= MIN_SEL ? 1 : 0.45,
+                transition: 'opacity 0.12s',
+              }}
+            >
+              <Check className="h-4 w-4" />
+            </button>
           </div>
         )}
-      </div>
-
-      {/* 右下角：X 放弃 / ✓ 确认（微信截图式）——阻止 pointer 冒泡，避免触发下方选区拖选 */}
-      <div
-        onPointerDown={(e) => e.stopPropagation()}
-        style={{ position: 'fixed', right: 24, bottom: 24, display: 'flex', gap: 10, zIndex: 20 }}
-      >
-        <button
-          onClick={onCancel}
-          title="Cancel (Esc)"
-          style={{
-            width: 44,
-            height: 44,
-            borderRadius: '50%',
-            border: 'none',
-            background: 'rgba(28,28,30,0.92)',
-            color: '#fff',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            boxShadow: '0 8px 30px rgba(0,0,0,0.4)',
-          }}
-        >
-          <X className="h-5 w-5" />
-        </button>
-        <button
-          onClick={handleDone}
-          disabled={!sel || sel.w < MIN_SEL || sel.h < MIN_SEL}
-          title="Confirm & OCR"
-          style={{
-            width: 44,
-            height: 44,
-            borderRadius: '50%',
-            border: 'none',
-            background: '#21c45d',
-            color: '#fff',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: sel && sel.w >= MIN_SEL && sel.h >= MIN_SEL ? 'pointer' : 'not-allowed',
-            opacity: sel && sel.w >= MIN_SEL && sel.h >= MIN_SEL ? 1 : 0.45,
-            boxShadow: '0 8px 30px rgba(33,196,93,0.35)',
-          }}
-        >
-          <Check className="h-5 w-5" />
-        </button>
       </div>
 
       {/* OCR 侧面板：吸附在工具条下方，白色面板（可编辑、可复制） */}

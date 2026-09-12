@@ -45,9 +45,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.deepseek.com',
     models: [
       {
-        modelId: 'deepseek-v4-flash',
+        modelId: 'deepseek-flash',
         label: 'DeepSeek V4 Flash',
-        description: '284B MoE · 1M Context · Agent & Coding',
+        description: 'DeepSeek-V4.1-Flash · 1M Context · Agent & Coding',
         thinking: true,
         temperature: 1,
         spec: {
@@ -55,7 +55,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
           strengths: ['Fast response', 'Strong code generation', 'Agent capability', '1M context', 'Supports thinking mode'],
           weaknesses: ['Weaker than Pro on complex reasoning'],
           useCases: ['Daily conversation', 'Code writing', 'Agent tasks', 'Translation', 'Long document analysis'],
-          pricePerMillionTokens: { input: 3.0, output: 9.0, cacheHit: 0.1, offPeak: 0.5, currency: 'cny' },
+          // 官方价格（deepseek-flash = V4.1-Flash，按百万 tokens，¥）：
+          //   高峰: 输入(缓存未命中)2 / 输出8 / 输入(缓存命中)0.04
+          //   空闲 = 高峰 × 0.5（输入1 / 输出4 / 缓存命中0.02）。
+          //   旧 id deepseek-v4-flash / deepseek-v4-flash-vision-exp 仍可调，DeepSeek 路由到 V4.1-Flash 并按此 Flash 价计费。
+          pricePerMillionTokens: { input: 2.0, output: 8.0, cacheHit: 0.04, offPeak: 0.5, currency: 'cny' },
           contextWindow: 1000000,
         },
       },
@@ -674,7 +678,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         },
       },
       {
-        modelId: 'deepseek-v4-flash',
+        modelId: 'deepseek-flash',
         label: 'DeepSeek V4 Flash',
         description: 'Agent Plan · 标准，1024k 超长上下文',
         thinking: true,
@@ -760,7 +764,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         },
       },
       {
-        modelId: 'deepseek-v4-flash',
+        modelId: 'deepseek-flash',
         label: 'DeepSeek V4 Flash',
         description: 'Coding Plan · 标准，1024k 超长上下文',
         thinking: true,

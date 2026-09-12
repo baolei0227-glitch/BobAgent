@@ -1,5 +1,6 @@
 import nextTs from 'eslint-config-next/typescript';
 import nextVitals from 'eslint-config-next/core-web-vitals';
+import importPlugin from 'eslint-plugin-import';
 import { defineConfig, globalIgnores } from 'eslint/config';
 
 const syntaxRules = [
@@ -23,6 +24,7 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   {
+    plugins: { import: importPlugin },
     rules: {
       'import/no-cycle': ['error', { ignoreExternal: true }],
       'react-hooks/set-state-in-effect': 'off',

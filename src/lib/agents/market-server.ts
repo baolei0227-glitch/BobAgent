@@ -32,8 +32,8 @@ const ID_RE = /^[a-z][a-z0-9-]{0,47}$/;
 
 /** 允许在 manifest 中声明的场景白名单（与 tools.ts ToolScene 对齐；未知场景会在转换时丢弃并告警） */
 export const ALLOWED_AGENT_SCENES: readonly string[] = [
-  'general', 'coding', 'wanted', 'legal', 'node', 'audio', 'skill', 'design',
-  'ocr', 'admin', 'office', 'browser', 'company', 'team', 'local', 'notebook', 'planner',
+  'general', 'coding', 'butler', 'legal', 'node', 'audio', 'skill', 'design',
+  'ocr', 'admin', 'office', 'browser', 'company', 'team', 'local', 'notebook',
 ];
 
 export interface AgentPackageManifest {
@@ -197,7 +197,7 @@ export async function installAgentPackage(id: string): Promise<AgentPackageManif
   const official = OFFICIAL_PACKAGE_BY_ID.get(id);
   let manifest: AgentPackageManifest;
   if (official) {
-    // 官方包（Kar/Planner 等迁市场者）：把 profiles 里的权威 prompt 物化为本地 agent.json
+    // 官方包（Kar/Butler 等迁市场者）：把 profiles 里的权威 prompt 物化为本地 agent.json
     manifest = official;
     await fsp.mkdir(destDir, { recursive: true });
     await fsp.writeFile(path.join(destDir, AGENT_FILE), JSON.stringify(manifest, null, 2), 'utf-8');

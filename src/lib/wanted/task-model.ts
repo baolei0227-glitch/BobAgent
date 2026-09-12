@@ -1,5 +1,5 @@
 /**
- * Wanted 模型解析：任务/成果块系列 API 共用。
+ * 任务/成果块模型解析：任务与成果块系列 API 共用。
  *
  * 分层回退：
  *   resolveTaskModel（通用任务层）：taskModel → 主对话(pool → 旧式直配) → 兜底厂商

@@ -145,6 +145,8 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
   const [saving, setSaving] = useState(false);
   // 转 Markdown 进行中（一键转 MD 按钮）
   const [converting, setConverting] = useState(false);
+  /** 外部程序打开进行中（Open 图标按钮 loading 反馈） */
+  const [opening, setOpening] = useState(false);
 
   // 修订计划（chatnode 提交 → 轮询 → 自动逐条应用）
   const appliedVersionRef = useRef(0);
@@ -930,17 +932,27 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
   // 打开前比对 mtime：文件在保存后被外部程序改写过（修订标记可能已被剥掉）则先确认
   const handleOpenExternal = useCallback(async () => {
     if (!savedPath && !fileInfo.full_path) return;
+    if (opening) return;
+    setOpening(true);
     try {
+      // 本会话尚未保存过：直接以原稿路径为打开对象（磁盘原文即当前内容，无需落盘）
       let target = savedPath;
       let baseMtime = savedMtime;
+      if (!target && fileInfo.full_path) {
+        target = fileInfo.full_path;
+        baseMtime = originalMtime;
+      }
+      // 存在未保存修订：先落盘再打开（保存被冲突阻止时中断，避免打开过时副本）
       if (dirty && !saving) {
         const saved = await handleSave();
-        if (saved?.path) {
-          target = saved.path;
-          baseMtime = saved.mtime;
-        }
+        if (!saved?.path) return;
+        target = saved.path;
+        baseMtime = saved.mtime;
       }
-      if (!target) return;
+      if (!target) {
+        onErrorRef.current('无法用外部程序打开：没有可打开的本地文件路径');
+        return;
+      }
       const resp = await fetch('/api/local-files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -955,8 +967,10 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
       if (!opened?.success) throw new Error(opened?.error || '打开失败');
     } catch (e) {
       onErrorRef.current(e instanceof Error ? e.message : '打开失败');
+    } finally {
+      setOpening(false);
     }
-  }, [dirty, saving, handleSave, savedPath, savedMtime, fileInfo.full_path]);
+  }, [dirty, saving, handleSave, savedPath, savedMtime, originalMtime, fileInfo.full_path, opening]);
 
   // ---- 一键转 Markdown：把当前文档（含已应用的修订）转成 .md 存入 homework，并发布 file.open 在 md 编辑器中打开 ----
   // mammoth 对 w:ins 内正文照常输出、忽略 w:del 的 delText，转出内容等价于「接受全部修订」后的文本；
@@ -1034,17 +1048,8 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
   const toolbar = (
     <div
       className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b px-4 py-2"
-      style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}
+      style={{ borderColor: 'var(--line)', backgroundColor: '#fff' }}
     >
-      <Button
-        onClick={reloadOriginal}
-        variant="ghost"
-        tone="neutral"
-        size="sm"
-        title="Reload original file (discard unsaved revisions)"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" /> Reload
-      </Button>
       <span className="truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>{docName}</span>
       <span className="truncate text-xs" style={{ color: 'var(--ink-muted)' }} title={writeBlocked ?? savedPath ?? undefined}>
         {writeBlocked
@@ -1074,26 +1079,29 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
         {/* 修订模式开关：on=修改以修订标记呈现；off=直接改原文 */}
         <button
           onClick={() => setTrackMode(!trackMode)}
-          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+          aria-pressed={trackMode}
+          aria-label={trackMode ? 'Turn track changes off' : 'Turn track changes on'}
+          className="flex h-7 w-7 items-center justify-center rounded-md transition-colors"
           style={trackMode
             ? { backgroundColor: 'var(--primary)', color: '#fff' }
             : { backgroundColor: 'color-mix(in oklab, var(--popover) 92%, transparent)', color: 'var(--ink-muted)', border: '1px solid var(--line)' }}
           title={trackMode ? 'Track Changes ON — edits become revisions (w:ins/w:del)' : 'Track Changes OFF — edits modify the text directly'}
         >
-          <GitCompareArrows className="h-3 w-3" /> Track Changes
+          <GitCompareArrows className="h-3.5 w-3.5" />
         </button>
         {/* 整篇 AI 修订：选报告 → 全篇按报告逐条落修订（不依赖选中文字） */}
         <div ref={reportPickerRef} className="relative">
           <button
             onClick={toggleReportPicker}
             disabled={auditBusy}
-            className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+            aria-label="AI whole-document revision"
+            className="flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-50"
             style={reportPickerOpen
               ? { backgroundColor: 'var(--primary)', color: '#fff' }
               : { backgroundColor: 'color-mix(in oklab, var(--popover) 92%, transparent)', color: 'var(--primary-strong)', border: '1px solid color-mix(in oklab, var(--primary) 35%, transparent)' }}
-            title="AI 整篇修订 — 选择一份审核报告（如分析结果.md），AI 按报告对整篇文档逐条落修订"
+            title="AI whole-document revision — pick an audit report; AI applies every item to the whole document"
           >
-            {auditBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />} AI 整篇修订
+            {auditBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
           </button>
           {reportPickerOpen && (
             <div
@@ -1200,33 +1208,38 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
         {/* 修订面板 */}
         <button
           onClick={() => setPanelOpen(!panelOpen)}
-          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+          aria-pressed={panelOpen}
+          aria-label="Toggle revision panel"
+          className="flex h-7 w-7 items-center justify-center rounded-md transition-colors"
           style={panelOpen
             ? { backgroundColor: 'var(--primary)', color: '#fff' }
             : { backgroundColor: 'color-mix(in oklab, var(--popover) 92%, transparent)', color: 'var(--ink)', border: '1px solid var(--line)' }}
-          title="Show revision panel"
+          title={`Revisions${revisions.length > 0 ? ` (${revisions.length})` : ''} — show/hide revision panel`}
         >
-          <FileDiff className="h-3 w-3" /> Revisions{revisions.length > 0 ? ` (${revisions.length})` : ''}
+          <FileDiff className="h-3.5 w-3.5" />
         </button>
         {/* 保存 */}
         <button
           onClick={() => void handleSave()}
           disabled={!dirty || saving}
-          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
+          aria-label="Save revisions"
+          className="flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-50"
           style={{ backgroundColor: dirty ? 'var(--primary)' : 'var(--line)', color: dirty ? '#fff' : 'var(--ink-muted)' }}
           title="Save revisions to homework (auto-saved on changes)"
         >
-          {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
         </button>
         {(fileInfo.full_path || savedPath) && (
           <Button
             onClick={() => void handleOpenExternal()}
+            disabled={opening}
             variant="outline"
             tone="info"
-            size="sm"
+            size="icon"
+            aria-label="Open in external program"
             title="Open a temp copy with local default program (WPS saves won't touch the revised file)"
           >
-            <ExternalLink className="h-3 w-3" /> Open
+            {opening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
           </Button>
         )}
         <Button
@@ -1235,10 +1248,22 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
           loading={converting}
           variant="outline"
           tone="success"
-          size="sm"
+          size="icon"
+          aria-label="Convert to Markdown"
           title="Convert to Markdown (with applied revisions), save to homework and open in the MD editor"
         >
-          {converting ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileText className="h-3 w-3" />} 转 MD
+          {converting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
+        </Button>
+        {/* 放弃当前修订并重新载入原稿（破坏性，置于操作末尾防误触） */}
+        <Button
+          onClick={reloadOriginal}
+          variant="ghost"
+          tone="neutral"
+          size="icon"
+          aria-label="Reload original file"
+          title="Reload original file (discard unsaved revisions)"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
         </Button>
       </div>
     </div>

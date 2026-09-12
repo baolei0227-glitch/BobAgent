@@ -2,12 +2,12 @@
 
 // 独立批注气泡：批注模式下选中文字时弹出，输入批注意见并添加（不经过 AI Edit 面板）
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { type Editor } from '@tiptap/react';
 import { BubbleMenu } from '@tiptap/react/menus';
 import { PluginKey } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
-import { MessageSquarePlus, Loader2, Wand2, MessageSquareText, MessageSquare, X } from 'lucide-react';
+import { Loader2, MessageSquareText, Bot, Sparkles } from 'lucide-react';
 import { ANNOTATION_INTENTS, type AnnotationIntent } from '../MdAnnotationPanel';
 
 /** 临时选区高亮 key：气泡编辑期间（编辑器失焦、原生选区高亮消失）用 Decoration 保持文字高亮；
@@ -20,55 +20,67 @@ interface AnnotationBubbleProps {
   onAdd: (quote: string, content: string, from: number, to: number, intent: AnnotationIntent | '') => void;
   /** 划词引用：把选中段落挂到目标节点输入框上方引用标签（target: current=当前活跃节点 / new=新建节点），等用户补写问题后发送 */
   onAsk?: (quote: string, target: 'current' | 'new') => void;
+  /** AI 直接修订：把选中文字按意见+风格直接改写进稿（不挂批注，可回退）。返回 null=成功，否则为失败原因。 */
+  onDirectRevise?: (quote: string, content: string, from: number, to: number, intent: AnnotationIntent | '') => Promise<string | null>;
   /** 是否存在当前活跃节点（无则「Ask current」禁用置灰） */
   canAskCurrent?: boolean;
 }
 
-export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false }: AnnotationBubbleProps) {
+export function AnnotationBubble({ editor, onAdd, onAsk, onDirectRevise, canAskCurrent = false }: AnnotationBubbleProps) {
   const [text, setText] = useState('');
   const [intent, setIntent] = useState<AnnotationIntent | ''>('');
-  const [quote, setQuote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // AI 直接修订进行中（独立于添加批注的 submitting，各自按钮显示自己的 spinner）
+  const [directing, setDirecting] = useState(false);
+  // AI 直接修订失败提示（模型未配置/网络/跑偏校验不过等）
+  const [editError, setEditError] = useState<string | null>(null);
   // 记录上次气泡定位的选区：选区变化 → 重置未提交输入（用户改选新文字时清空旧批注意见）
   const lastSelRef = useRef<{ from: number; to: number } | null>(null);
 
-  /** 气泡显示：记录引用文字 + 临时高亮当前选区（textarea autoFocus 使编辑器失焦，原生选区高亮会消失） */
+  /** 气泡显示：临时高亮当前选区（textarea autoFocus 使编辑器失焦，原生选区高亮会消失） */
   const showTempHighlight = useCallback(() => {
     const { from, to, empty } = editor.state.selection;
     if (empty) return;
     const q = editor.state.doc.textBetween(from, to, '\n').trim();
     if (!q) return;
-    setQuote(q);
     // 选区变了（用户划了另一段文字）：清空上次未提交的输入
     if (!lastSelRef.current || lastSelRef.current.from !== from || lastSelRef.current.to !== to) {
       setText('');
       setIntent('');
+      setEditError(null);
     }
     lastSelRef.current = { from, to };
     const set = DecorationSet.create(editor.state.doc, [Decoration.inline(from, to, { class: 'md-annotation-sel-temp' })]);
     editor.view.dispatch(editor.state.tr.setMeta(mdSelTempKey, set));
   }, [editor]);
 
-  /** 气泡隐藏：清除引用与未提交输入 + 移除临时高亮（批注黄高亮由批注 Decoration 持续） */
+  // 气泡保持显示期间重新划选另一段文字 → 同步刷新临时高亮。
+  // 否则新选区的临时高亮缺失，点击风格/输入框（编辑器失焦、原生选区高亮消失）时正文高亮就"不见了"。
+  useEffect(() => {
+    if (!editor) return;
+    const onSelectionUpdate = () => {
+      const { empty } = editor.state.selection;
+      if (empty) return;
+      showTempHighlight();
+    };
+    editor.on('selectionUpdate', onSelectionUpdate);
+    return () => {
+      editor.off('selectionUpdate', onSelectionUpdate);
+    };
+  }, [editor, showTempHighlight]);
+
+  /** 气泡隐藏：清除未提交输入 + 移除临时高亮（批注黄高亮由批注 Decoration 持续） */
   const hideTempHighlight = useCallback(() => {
-    setQuote('');
     setText('');
     setIntent('');
+    setEditError(null);
     lastSelRef.current = null;
     editor.view.dispatch(editor.state.tr.setMeta(mdSelTempKey, DecorationSet.empty));
   }, [editor]);
 
-  /** 手动关闭气泡：清空输入并折叠选区（气泡随选区变空而收起） */
-  const closeBubble = () => {
-    setText('');
-    setIntent('');
-    const { from } = editor.state.selection;
-    editor.chain().focus().setTextSelection(from).run();
-  };
-
   /** 提交批注：添加后收起气泡（批注黄高亮由批注 Decoration 持续保持，不依赖选区） */
   const submit = () => {
-    if (!text.trim() || submitting) return;
+    if (!text.trim() || submitting || directing) return;
     // 用气泡显示时锁定的选区（lastSel），而非当前 selection——textarea autoFocus 使编辑器
     // 失焦，当前 selection 可能已收缩/偏移（"划词 5 字变 3 字"的根因）。quote 与 from/to 同源，
     // 保证批注卡片显示的文字与高亮/定位范围一致。
@@ -99,6 +111,31 @@ export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false }
     onAsk(quoteText, target);
   };
 
+  /** AI 直接修订：把选中文字按意见+风格直接改写进稿（不挂批注）；成功则清空输入并收起气泡，失败保留输入可重试 */
+  const directRevise = async () => {
+    if (!onDirectRevise || !text.trim() || submitting || directing) return;
+    const locked = lastSelRef.current;
+    if (!locked) return;
+    const { from, to } = locked;
+    const quote = editor.state.doc.textBetween(from, to, '\n').trim();
+    if (!quote) return;
+    setDirecting(true);
+    setEditError(null);
+    try {
+      const err = await onDirectRevise(quote, text.trim(), from, to, intent);
+      if (err === null) {
+        setText('');
+        setIntent('');
+        editor.chain().focus().setTextSelection(from).run();
+      } else {
+        // 失败原因直接展示（模型未配置 / 网络 / 跑偏校验 / 定位失败等）
+        setEditError(err || 'AI 修订失败，请重试');
+      }
+    } finally {
+      setDirecting(false);
+    }
+  };
+
   return (
     <BubbleMenu
       editor={editor}
@@ -110,7 +147,11 @@ export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false }
       }}
       options={{
         placement: 'bottom',
-        offset: 8,
+        offset: 10,
+        // 禁用自动翻转：始终显示在选中文字下方，不翻到上方遮挡选中文字
+        flip: false,
+        // 底部空间不足时平移保持在视口内（不向上翻转）
+        shift: { padding: 8 },
         onShow: showTempHighlight,
         onHide: hideTempHighlight,
       }}
@@ -123,66 +164,11 @@ export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false }
           boxShadow: '0 12px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08)',
         }}
       >
-        {/* 引用预览：被选中的文字 */}
-        {quote && (
-          <div
-            className="flex items-start gap-2 border-b px-3 py-2"
-            style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper-soft)' }}
-          >
-            <span
-              className="mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded"
-              style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)' }}
-            >
-              <MessageSquarePlus className="h-2.5 w-2.5" style={{ color: 'var(--primary)' }} />
-            </span>
-            <p
-              className="m-0 flex-1 text-11 leading-relaxed"
-              style={{
-                color: 'var(--ink-muted)',
-                display: '-webkit-box',
-                WebkitLineClamp: 2,
-                WebkitBoxOrient: 'vertical',
-                overflow: 'hidden',
-              }}
-              title={quote}
-            >
-              &ldquo;{quote}&rdquo;
-            </p>
-            <button
-              onClick={closeBubble}
-              className="flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ color: 'var(--ink-faint)' }}
-              title="关闭气泡（可重新划词批注）"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </div>
-        )}
-
         {/* 输入区 */}
         <div className="px-3 pt-2">
-          {/* 修改意图 chips：结构化批注意见，AI 按意图执行 + 前端按意图校验达成度 */}
-          <div className="mb-1.5 flex flex-wrap gap-1">
-            {ANNOTATION_INTENTS.map((it) => (
-              <button
-                key={it.id}
-                type="button"
-                onClick={() => setIntent((cur) => (cur === it.id ? '' : it.id))}
-                className="flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-9 font-medium transition-colors"
-                style={{
-                  backgroundColor: intent === it.id ? 'var(--primary)' : 'var(--paper-hover)',
-                  color: intent === it.id ? 'var(--primary-foreground)' : 'var(--ink-muted)',
-                }}
-                title={it.prefix}
-              >
-                {intent === it.id && <Wand2 className="h-2 w-2" />}
-                {it.label}
-              </button>
-            ))}
-          </div>
           <textarea
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => { setText(e.target.value); setEditError(null); }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -203,52 +189,73 @@ export function AnnotationBubble({ editor, onAdd, onAsk, canAskCurrent = false }
           />
         </div>
 
-        {/* 底部操作栏：字数 + 划词引用/添加批注 按钮 */}
-        <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-          <span
-            className="text-10 tabular-nums"
-            style={{ color: text.length > 0 ? 'var(--ink-muted)' : 'var(--ink-faint)' }}
-          >
-            {text.length}
-          </span>
+        {/* 底部操作栏：划词引用 / 添加批注 */}
+        <div className="flex items-center gap-2 px-3 pb-1.5 pt-0.5">
           <span style={{ flex: 1 }} />
           {onAsk && (
-            <>
-              <button
-                onClick={() => askNow('current')}
-                disabled={!canAskCurrent}
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed"
-                style={{
-                  color: canAskCurrent ? 'var(--primary)' : 'var(--ink-faint)',
-                  opacity: canAskCurrent ? 1 : 0.55,
-                }}
-                title={canAskCurrent ? '引用到当前节点提问' : 'No active node — click a node on the canvas first'}
-              >
-                <MessageSquare className="h-3.5 w-3.5" />
-              </button>
-              <button
-                onClick={() => askNow('new')}
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--primary)' }}
-                title="引用到新建节点提问"
-              >
-                <MessageSquarePlus className="h-3.5 w-3.5" />
-              </button>
-            </>
+            <button
+              onClick={() => askNow('current')}
+              disabled={!canAskCurrent}
+              className="flex h-6 w-6 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed"
+              style={{
+                color: canAskCurrent ? 'var(--primary)' : 'var(--ink-faint)',
+                opacity: canAskCurrent ? 1 : 0.55,
+              }}
+              title={canAskCurrent ? '发送到当前会话' : '无当前会话 — 请先在画布选中节点'}
+            >
+              <Bot className="h-[15px] w-[15px]" />
+            </button>
           )}
           <button
-            disabled={!text.trim() || submitting}
-            onClick={submit}
-            className="flex h-6 items-center justify-center rounded-md px-2 transition-all disabled:opacity-40"
+            type="button"
+            onClick={() => void directRevise()}
+            disabled={!onDirectRevise || !text.trim() || submitting || directing}
+            className="flex h-6 items-center justify-center rounded-md px-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
             style={{
-              backgroundColor: text.trim() && !submitting ? 'var(--primary)' : 'var(--paper-hover)',
-              color: text.trim() && !submitting ? 'var(--primary-foreground)' : 'var(--ink-muted)',
-              boxShadow: text.trim() && !submitting ? '0 2px 8px color-mix(in oklab, var(--primary) 35%, transparent)' : 'none',
+              color: onDirectRevise && text.trim() && !submitting && !directing ? 'var(--primary)' : 'var(--ink-muted)',
+            }}
+            title="AI 直接修订（不挂批注，按意见直接改稿，可回退）"
+          >
+            {directing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+          </button>
+          <button
+            disabled={!text.trim() || submitting || directing}
+            onClick={submit}
+            className="flex h-6 items-center justify-center rounded-md px-2 transition-colors disabled:opacity-40"
+            style={{
+              color: text.trim() && !submitting && !directing ? 'var(--primary)' : 'var(--ink-muted)',
             }}
             title="添加批注"
           >
             {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageSquareText className="h-3.5 w-3.5" />}
           </button>
+        </div>
+
+        {/* AI 修订失败提示 */}
+        {editError && (
+          <div className="px-3 pb-1.5 text-10" style={{ color: 'var(--danger)' }}>{editError}</div>
+        )}
+
+        {/* 风格快捷选择：两排网格横排展示在功能按钮下方，点击即选中 / 再点取消 */}
+        <div className="grid grid-cols-3 gap-1 border-t px-3 pb-2 pt-1.5" style={{ borderColor: 'var(--line-soft)' }}>
+          {ANNOTATION_INTENTS.filter((it) => it.id !== 'auto' && it.id !== 'custom').map((it) => {
+            const on = intent === it.id;
+            return (
+              <button
+                key={it.id}
+                type="button"
+                onClick={() => setIntent((cur) => (cur === it.id ? '' : it.id))}
+                title={it.prefix || it.label}
+                className="flex h-5 items-center justify-center whitespace-nowrap rounded px-1 text-10 transition-colors"
+                style={{
+                  backgroundColor: on ? 'var(--primary)' : 'var(--paper-hover)',
+                  color: on ? 'var(--primary-foreground)' : 'var(--ink-muted)',
+                }}
+              >
+                {it.label}
+              </button>
+            );
+          })}
         </div>
       </div>
     </BubbleMenu>

@@ -202,3 +202,53 @@ export async function readTodoIndexFile(projectDir: string): Promise<StickyTodoI
     return null;
   }
 }
+
+/**
+ * 列出项目便签中「未入日历的未完成行」（供 Butler 待办查询 /todo check、query_todos 合并展示）。
+ * 需读主文档 sticky-notes.json（todo-index 不含行级日历锚点，无法排除已入日历的行）。
+ * 语义与前端 parseTodoLines 一致：`- [x]` 跳过、`- [ ]` 为待办、普通非空行也算未完成；
+ * 行已带事件锚点（lineEventIds）或 lineCalendared=true 视为已入日历 → 跳过，避免与日历事件重复展示。
+ * 返回去重后的行文本（按出现顺序）。
+ */
+export async function listUncalendaredOpenRows(projectDir: string): Promise<string[]> {
+  const fs = require('fs/promises') as typeof import('fs/promises');
+  let raw: string;
+  try {
+    raw = await fs.readFile(join(projectDir, 'sticky-notes', 'sticky-notes.json'), 'utf-8');
+  } catch {
+    return [];
+  }
+  let data: { notes?: unknown };
+  try {
+    data = JSON.parse(raw) as { notes?: unknown };
+  } catch {
+    return [];
+  }
+  const notes = Array.isArray(data?.notes) ? (data.notes as Array<Record<string, unknown>>) : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const n of notes) {
+    const pages = Array.isArray(n.pages) ? (n.pages as Array<Record<string, unknown>>) : [];
+    for (const p of pages) {
+      if (p.kind === 'note') continue;
+      const content = typeof p.content === 'string' ? p.content : '';
+      const rows = content.split('\n');
+      const cal = Array.isArray(p.lineCalendared) ? (p.lineCalendared as unknown[]).map(Boolean) : [];
+      const evs = Array.isArray(p.lineEventIds) ? (p.lineEventIds as unknown[][]) : [];
+      for (let i = 0; i < rows.length; i++) {
+        if (isBlankTodoRow(rows[i])) continue;
+        const m = rows[i].match(/^-\s*\[( |x)\]\s*(.*)$/);
+        const done = m ? m[1] === 'x' : false;
+        if (done) continue;
+        const anchored = Array.isArray(evs[i]) && (evs[i] as string[]).length > 0;
+        const flagged = cal[i] === true;
+        if (anchored || flagged) continue;
+        const text = (m ? m[2] : rows[i]).trim();
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        out.push(text);
+      }
+    }
+  }
+  return out;
+}

@@ -9,7 +9,7 @@ import { isAllDynamicSceneChange, isDynamicSceneTool } from '@/lib/runtime/tools
  * 并被 CacheGuard 豁免判定误报为异常漂移（cacheguard.jsonl 曾累积 50+ 次误报）。
  */
 describe('tool layer: SCENED_TOOLS 场景门控工具归 ondemand（修复前默认 core 误锚点）', () => {
-  const scenedPlannerTodo = [
+  const scenedButlerTodo = [
     'query_schedule',
     'query_todos',
     'create_scheduled_todo',
@@ -21,7 +21,7 @@ describe('tool layer: SCENED_TOOLS 场景门控工具归 ondemand（修复前默
     'project_plan_step_status',
   ];
 
-  it.each(scenedPlannerTodo)('%s 有场景门控 → ondemand（不进 core 锚点段）', (name) => {
+  it.each(scenedButlerTodo)('%s 有场景门控 → ondemand（不进 core 锚点段）', (name) => {
     expect(getToolLayer(name)).toBe('ondemand');
   });
 

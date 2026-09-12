@@ -90,7 +90,7 @@ export interface TraceWindowMeta {
   usage?: unknown;
   contextMeter?: unknown;
   doneAt?: number;
-  /** 交互帧保留（type → 帧值）：coding_phase / questions_request / planner_confirm /
+  /** 交互帧保留（type → 帧值）：coding_phase / questions_request / butler_confirm /
    *  tool_confirm / login_required / grant_required —— 独立保留，供 P5a-2 渲染"待确认/待提问"标记 */
   interactions?: Record<string, unknown>;
   /** P5b-1 历史 replay：用户提问原文（user/message.content；turn/start.userInput 兜底） */
@@ -300,7 +300,7 @@ export function pushWindowFrame(state: TraceWindowState, ev: TraceWindowEvent | 
     }
     case 'coding_phase':
     case 'questions_request':
-    case 'planner_confirm':
+    case 'butler_confirm':
     case 'tool_confirm':
     case 'login_required':
     case 'grant_required': {

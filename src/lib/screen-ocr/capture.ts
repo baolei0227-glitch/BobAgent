@@ -46,12 +46,14 @@ export async function captureRegionAndOcr(): Promise<ScreenOcrResult> {
     return { ok: false, error: shot.error };
   }
   try {
-    // OCR（bob-ocr-mcp 优先 → 本地 Swift Vision 兜底）
+    // OCR（引擎按 settings.screenOcr.engine 选择：auto = bob-ocr-mcp 优先 → 本地 Swift Vision 兜底）
     const text = await ocrRecognize(shot.path!);
     if (!text.trim()) {
       return { ok: false, error: '选区内未识别到文字（可能选中了空白区域或纯图片）。' };
     }
     return { ok: true, text: text.trim() };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'OCR 识别失败。' };
   } finally {
     cleanupShotFile(shot.path!);
   }
@@ -124,8 +126,19 @@ export function cleanupShotFile(filePath: string): void {
   }
 }
 
-/** 图片路径 → 识别文本：bob-ocr-mcp 优先，失败降级本地 Swift Vision */
+/** 图片路径 → 识别文本：引擎按 settings.screenOcr.engine 选择 */
 export async function ocrRecognize(imagePath: string): Promise<string> {
+  const engine = await readScreenOcrEngine();
+  if (engine === 'local') {
+    return ocrImageLocalSwift(imagePath);
+  }
+  if (engine === 'mcp') {
+    // 仅 bob-ocr-mcp：不可用/失败即抛错（不降级本地 Swift Vision）
+    const viaMcp = await ocrImageViaMcp(imagePath).catch(() => null);
+    if (viaMcp !== null) return viaMcp;
+    throw new Error('OCR 引擎已设为 MCP，但 bob-ocr-mcp 不可用（请确认插件常驻服务在线且已在 MCP 设置中启用）。');
+  }
+  // auto（默认）：bob-ocr-mcp 优先，失败降级本地 Swift Vision
   try {
     const viaMcp = await ocrImageViaMcp(imagePath);
     if (viaMcp !== null) return viaMcp;
@@ -134,6 +147,18 @@ export async function ocrRecognize(imagePath: string): Promise<string> {
     console.warn('[screen-ocr] bob-ocr-mcp 调用失败，降级本地 Swift Vision:', e instanceof Error ? e.message : e);
   }
   return ocrImageLocalSwift(imagePath);
+}
+
+/** 读取截图 OCR 引擎开关（settings.screenOcr.engine；缺省 auto） */
+async function readScreenOcrEngine(): Promise<'auto' | 'mcp' | 'local'> {
+  try {
+    const { readSettingsFromFile } = await import('../settings-server');
+    const settings = await readSettingsFromFile();
+    const engine = (settings as { screenOcr?: { engine?: unknown } }).screenOcr?.engine;
+    return engine === 'mcp' || engine === 'local' ? engine : 'auto';
+  } catch {
+    return 'auto';
+  }
 }
 
 // ==================== 引擎 A：bob-ocr-mcp（ocr.recognize） ====================

@@ -1488,7 +1488,7 @@ export const ImageAiEditor = forwardRef<ImageGenApiRef, ImageAiEditorProps>(func
                 }}
                 onPointerUp={endDrag}
                 onPointerCancel={endDrag}
-                className="max-h-full max-w-full rounded-lg object-contain shadow-2xl block"
+                className="max-h-[calc(100vh-96px)] max-w-full rounded-lg object-contain shadow-2xl block"
                 style={{
                   touchAction: 'none',
                   cursor:

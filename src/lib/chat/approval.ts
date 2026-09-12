@@ -6,9 +6,9 @@
  * 由 settings.approval.defaultStrategy 开启，见 settings.ts）。
  *
  * 边界说明（本层不处理，均属其它层）：
- *   1. planner 结构化卡（planner 身份 + PLANNER_CARD_TOOLS 的可编辑确认卡片）视为强于 confirm 的
+ *   1. butler 结构化卡（butler 身份 + BUTLER_CARD_TOOLS 的可编辑确认卡片）视为强于 confirm 的
  *      人工审批 —— 卡片本身带用户可见、可编辑、可拒绝的确认 UI，任何 strategy 均保留该流程，
- *      不落入本层判定（route handleToolConfirm 先判 usesPlannerCard → 'noop' 交还卡片流程）。
+ *      不落入本层判定（route handleToolConfirm 先判 usesButlerCard → 'noop' 交还卡片流程）。
  *   2. .local-roots 路径授权是 scope gate，前置于工具执行（run_command / execute_script 等的
  *      个人目录读写拦截 readableError），未经授权路径仍由原 readableError 拒绝 —— 与本层正交，
  *      本层不重复判定路径。
@@ -130,8 +130,8 @@ export function isWriteKindTool(name: string): boolean {
  *    写类判定 —— 现网名单外工具一律自动放行）；
  *  - ask：inConfirmList → 'request'；写类 → 'request'；否则 'allow'；
  *  - never：inConfirmList 或 写类 → 'deny'；否则 'allow'。
- * 边界（不属本层，见文件头注释）：planner 结构化卡 / .local-roots 路径授权 gate 均在调用方先判，
- * 本函数不感知；调用方（handleToolConfirm）对 planner 覆盖工具不 consult 本函数。
+ * 边界（不属本层，见文件头注释）：butler 结构化卡 / .local-roots 路径授权 gate 均在调用方先判，
+ * 本函数不感知；调用方（handleToolConfirm）对 butler 覆盖工具不 consult 本函数。
  */
 export function decideToolApproval(input: ApprovalDecisionInput): ToolApprovalVerdict {
   const { name, inConfirmList, strategy } = input;

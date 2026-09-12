@@ -48,6 +48,7 @@ const SKILL_SCENES: Record<string, SkillScene[]> = {
   'intern-lawyer': ['legal'],
   'legal-drafter': ['legal'],
   'legal-statute-search': ['legal'],
+  'bob-contract-review': ['legal'],
   // video（视频处理：录屏切页等；专属 scene 与文档/图片识别场景隔离，避免 OCR/PDF 请求误加载）
   'video-split': ['video'],
   // office 办公文档

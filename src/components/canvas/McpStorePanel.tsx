@@ -74,7 +74,7 @@ const SYS_COLORS: Record<string, string> = {
 };
 
 /** Add Custom 可选场景词（点击自动追加到名称，供服务端按启发式自动标注场景后注入） */
-const SCENE_CHIPS = ['legal', 'ocr', 'coding', 'wanted', 'design', 'audio'];
+const SCENE_CHIPS = ['legal', 'ocr', 'coding', 'butler', 'design', 'audio'];
 
 /* ===== Screenshot OCR（静态插件卡）：启用开关 + BobWork Capture 授权检测 直接落在卡片上 ===== */
 
@@ -88,6 +88,14 @@ const OCR_PERM_META: Record<OcrPerm, { label: string; color: string }> = {
   checking: { label: 'Checking…', color: 'var(--ink-muted)' },
 };
 
+/** 截图 OCR 引擎三态（settings.screenOcr.engine） */
+type ScreenOcrEngine = 'auto' | 'mcp' | 'local';
+const OCR_ENGINE_OPTIONS: Array<{ value: ScreenOcrEngine; label: string; hint: string }> = [
+  { value: 'auto', label: 'Auto', hint: 'bob-ocr-mcp first, fall back to local Swift Vision' },
+  { value: 'mcp', label: 'MCP', hint: 'bob-ocr-mcp only' },
+  { value: 'local', label: 'Local', hint: 'local Swift Vision only' },
+];
+
 /**
  * Screenshot OCR 插件卡（⌘⇧O 截图 OCR）。
  * 静态 bundled 卡：无 mcp 服务实例——启停读写 settings.screenOcr.enabled；
@@ -95,16 +103,21 @@ const OCR_PERM_META: Record<OcrPerm, { label: string; color: string }> = {
  */
 function ScreenshotOcrCard() {
   const [enabled, setEnabled] = useState(true);
+  const [engine, setEngine] = useState<ScreenOcrEngine>('auto');
   const [perm, setPerm] = useState<OcrPerm>('checking');
 
-  // 读功能开关（settings.screenOcr.enabled；undefined = 默认启用）
+  // 读功能开关 + 引擎（settings.screenOcr；undefined = 默认启用 / auto）
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const s = await loadSettings();
-        if (!cancelled) setEnabled(s.screenOcr?.enabled !== false);
-      } catch { /* 读取失败保持默认启用 */ }
+        if (!cancelled) {
+          setEnabled(s.screenOcr?.enabled !== false);
+          const e = s.screenOcr?.engine;
+          setEngine(e === 'mcp' || e === 'local' ? e : 'auto');
+        }
+      } catch { /* 读取失败保持默认启用 / auto */ }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -127,8 +140,24 @@ function ScreenshotOcrCard() {
   const toggleEnabled = async () => {
     const next = !enabled;
     setEnabled(next);
+    await persistScreenOcr({ enabled: next });
+  };
+
+  const changeEngine = async (next: ScreenOcrEngine) => {
+    setEngine(next);
+    await persistScreenOcr({ engine: next });
+  };
+
+  // 写完整 screenOcr 对象（updateSettingsFields 为浅合并，缺省补全避免丢另一字段）
+  const persistScreenOcr = async (patch: Partial<{ enabled: boolean; engine: ScreenOcrEngine }>) => {
     try {
-      await updateSettingsFields({ screenOcr: { enabled: next } });
+      const s = await loadSettings();
+      const cur = s.screenOcr ?? {};
+      const base = {
+        enabled: cur.enabled !== false,
+        engine: (cur.engine === 'mcp' || cur.engine === 'local' ? cur.engine : 'auto') as ScreenOcrEngine,
+      };
+      await updateSettingsFields({ screenOcr: { ...base, ...patch } });
     } catch { /* 保存失败保持本地状态 */ }
   };
 
@@ -189,6 +218,35 @@ function ScreenshotOcrCard() {
             onChange={() => void toggleEnabled()}
             title={enabled ? 'Disable screenshot OCR' : 'Enable screenshot OCR'}
           />
+        </div>
+      </div>
+
+      {/* OCR 引擎切换（三态；disabled 时置灰不可点） */}
+      <div className="mt-2 flex items-center gap-2">
+        <span className="text-10 font-medium uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>OCR Engine</span>
+        <div
+          className="ml-auto inline-flex items-center gap-0.5 rounded-full p-0.5"
+          style={{ backgroundColor: 'var(--paper-hover)' }}
+        >
+          {OCR_ENGINE_OPTIONS.map((o) => {
+            const active = engine === o.value;
+            return (
+              <button
+                key={o.value}
+                type="button"
+                disabled={!enabled}
+                onClick={() => void changeEngine(o.value)}
+                title={o.hint}
+                className="rounded-full px-2 py-0.5 text-10 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                style={{
+                  backgroundColor: active ? 'var(--primary-soft)' : 'transparent',
+                  color: active ? 'var(--primary-strong)' : 'var(--ink-muted)',
+                }}
+              >
+                {o.label}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -422,9 +480,9 @@ export function McpStorePanel() {
       if (isOn) {
         // 移除尾部 `-keyword`
         const cut = low === keyword ? prev.length - keyword.length : prev.length - keyword.length - 1;
-        return prev.slice(0, cut).replace(/(-(?:legal|ocr|coding|wanted|design|audio))+$/g, '').trimEnd();
+        return prev.slice(0, cut).replace(/(-(?:legal|ocr|coding|butler|design|audio))+$/g, '').trimEnd();
       }
-      const base = prev.replace(/(-(?:legal|ocr|coding|wanted|design|audio))+$/g, '').trimEnd();
+      const base = prev.replace(/(-(?:legal|ocr|coding|butler|design|audio))+$/g, '').trimEnd();
       return base ? `${base}-${keyword}` : keyword;
     });
   };

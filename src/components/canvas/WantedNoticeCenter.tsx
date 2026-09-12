@@ -480,15 +480,13 @@ function InspectDetail({ body }: { body: string }) {
   );
 }
 
-/** 搜索匹配：标题 / 正文 / 待办项标题与标签任一命中（空串 = 全匹配） */
+/** 搜索匹配：标题 / 正文 / 待办项标题任一命中（空串 = 全匹配） */
 function matchesQuery(n: Notice, q: string): boolean {
   const query = q.trim().toLowerCase();
   if (!query) return true;
   if (n.title.toLowerCase().includes(query)) return true;
   if (n.body.toLowerCase().includes(query)) return true;
-  return (n.items ?? []).some(
-    (it) => it.title.toLowerCase().includes(query) || it.tags.some((t) => t.toLowerCase().includes(query)),
-  );
+  return (n.items ?? []).some((it) => it.title.toLowerCase().includes(query));
 }
 
 /** 可见条目计数：chat 线程折叠后只显示根邮件 → 同线程多轮只计 1，非线程邮件各计 1（与列表实际展示一致） */
@@ -540,25 +538,6 @@ function ItemsTable({ items, onToggle, onDelete }: {
               </td>
               <td style={{ padding: '6px 8px', color: 'var(--ink)', verticalAlign: 'top' }}>
                 <span style={{ wordBreak: 'break-word' }}>{it.title}</span>
-                {it.tags.length > 0 && (
-                  <span style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 3 }}>
-                    {it.tags.map((t) => (
-                      <span
-                        key={t}
-                        style={{
-                          fontSize: '0.6rem',
-                          lineHeight: '13px',
-                          padding: '0 5px',
-                          borderRadius: 999,
-                          backgroundColor: 'var(--primary-soft)',
-                          color: 'var(--primary)',
-                        }}
-                      >
-                        {t}
-                      </span>
-                    ))}
-                  </span>
-                )}
               </td>
               <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap', verticalAlign: 'top' }}>
                 {badge ? (
@@ -663,25 +642,6 @@ function NotesTable({ items, onDelete }: {
                 {it.content}
               </div>
             ) : null}
-            {it.tags.length > 0 && (
-              <span style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 4 }}>
-                {it.tags.map((t) => (
-                  <span
-                    key={t}
-                    style={{
-                      fontSize: '0.6rem',
-                      lineHeight: '13px',
-                      padding: '0 5px',
-                      borderRadius: 999,
-                      backgroundColor: 'var(--primary-soft)',
-                      color: 'var(--primary)',
-                    }}
-                  >
-                    {t}
-                  </span>
-                ))}
-              </span>
-            )}
           </div>
           <button
             onClick={() => onDelete(it)}
@@ -724,7 +684,6 @@ function DailyReportDetail({ items, onToggle, onDelete, onCompleteToday }: {
   const isPending = (it: WantedNoticeItem) => it.status !== 'done' && it.status !== 'cancelled';
   const todayPending = today.filter(isPending).length;
   const overduePending = overdue.filter(isPending).length;
-  const tagCount = new Set(items.flatMap((it) => it.tags)).size;
   return (
     <>
       {/* 顶部统计卡 */}
@@ -732,7 +691,6 @@ function DailyReportDetail({ items, onToggle, onDelete, onCompleteToday }: {
         {[
           { label: 'Today', value: today.length, sub: `${todayPending} pending` },
           { label: 'Overdue', value: overdue.length, sub: `${overduePending} pending` },
-          { label: 'Tags', value: tagCount, sub: 'topics' },
         ].map((s) => (
           <div
             key={s.label}

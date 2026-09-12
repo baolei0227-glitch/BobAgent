@@ -8,7 +8,7 @@ import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Che
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, ToolCallPhase, MessageAttachment, OutputFileItem, SkillDetail } from '@/lib/types';
 import QuestionPopup, { stripQuestionsBlock, type QuestionItem, type AnswerEntry } from './QuestionPopup';
-import { PlannerConfirmModal, type PlannerConfirmState } from './PlannerConfirmModal';
+import { ButlerConfirmModal, type ButlerConfirmState } from './ButlerConfirmModal';
 import LoginDialog from './LoginDialog';
 import { StreamingMarkdown } from './HtmlRenderer';
 import { bus, BusEvents } from '@/lib/bus';
@@ -284,21 +284,9 @@ function AttachmentChips({ attachments, role }: { attachments: MessageAttachment
   );
 }
 
-/** 从回答内容中提取 <!-- TITLE: xxx --> 格式的标题建议 */
-function extractTitleSuggestion(content: string): { title: string | null; cleanContent: string } {
-  const titleMatch = content.match(/<!--\s*TITLE:\s*(.+?)\s*-->/i);
-  if (titleMatch) {
-    const title = titleMatch[1].trim();
-    const cleanContent = content.replace(/<!--\s*TITLE:\s*.+?\s*-->/i, '').trim();
-    return { title, cleanContent };
-  }
-  return { title: null, cleanContent: content };
-}
-
 /**
- * 即时标题（发出即命名，0 token 规则层）：从用户首条消息提取简短标题。
+ * 兜底标题（规则层，0 token）：小模型命名失败/超时时，从用户首条消息提取简短标题。
  * 取首个非空行 → 剥离常见祈使引导词（请/帮我/麻烦…）→ 空白归一 → 截断 ≤20 字符。
- * 回答结束后若主模型给出 <!-- TITLE --> 注释，再由精修逻辑替换为更优标题。
  */
 function deriveInstantTitle(text: string): string {
   const firstLine = text
@@ -908,11 +896,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     },
     [nodeHost],
   );
-  /** 读单个节点（position 等；data 按 AiChatNodeData 断言） */
-  const getNode = useCallback(
-    (nodeId: string): KernelNode | undefined => nodeHost.readNode(nodeId) as KernelNode | undefined,
-    [nodeHost],
-  );
   const getNodes = useCallback(
     (): KernelNode[] => nodeHost.readNodes() as KernelNode[],
     [nodeHost],
@@ -944,8 +927,8 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
 
   // 应用内置确认弹窗（macOS 风格英文文案）
   const { ask: confirmAsk, render: confirmRender } = useConfirm();
-  // Planner 结构化确认卡片（排程创建/修改/删除的可编辑确认，挂在节点层）
-  const [plannerConfirm, setPlannerConfirm] = useState<PlannerConfirmState | null>(null);
+  // Butler 结构化确认卡片（排程创建/修改/删除的可编辑确认，挂在节点层）
+  const [butlerConfirm, setButlerConfirm] = useState<ButlerConfirmState | null>(null);
 
   // 展开态尺寸常量（壳列分离阅读宽度方案）：
   // 高度 = calc(100vh - 20px)，与右侧悬浮面板（预览/本地文件）同高（容器 top/bottom 各 10px）；
@@ -955,8 +938,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // 居中保证行长舒适（中文约 45 字）；宽代码块经 .wide breakout 越出到正文列宽，兼顾可读性。
   // 外壳宽度额外受画布可视区（扣除侧边栏/右侧预览面板）约束，避免展开节点被面板遮挡。
   const EXPANDED_HEIGHT_CSS = 'calc(100vh - 6px)';
-  /** 展开高度像素值（居中/重叠解析事件用）：与面板同高对齐 = 视口高度 − 上下边距 6px */
-  const expandedHeightPx = () => Math.max(window.innerHeight - 6, 200);
   // 2026-09 布局重构：对话区自由拉伸填满容器（TraeWork 式），不再设 792px 外壳上限。
   // 外壳宽 = 画布可视宽（wrapper，已扣除左栏/右 dock），窄窗口随容器自动收缩
   const expandedShellW = (visible: number | null): number => {
@@ -978,30 +959,21 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     return () => window.removeEventListener('canvas-visible-width', onVisible);
   }, []);
 
-  // 画布居中：桥接到 CanvasFlow 的 graphGateway.setCenter（基于 wrapperRef 真实可视区手动计算）。
-  // 原生 useReactFlow().setCenter 在 Sidebar/预览面板挤压布局下有中心偏移，展开后节点会偏离页面中央。
-  const recenterCanvas = useCallback((x: number, y: number, opts?: { zoom?: number; duration?: number }) => {
-    window.dispatchEvent(
-      new CustomEvent('canvas-center-request', {
-        detail: { x, y, zoom: opts?.zoom, duration: opts?.duration },
-      }),
-    );
-  }, []);
   // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）
   const isCoding = identity === 'coding';
   // Kar（note 身份）
   const isNote = identity === 'note';
-  // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Planner→ClipboardList / 其余→Bot
-  // 尺寸：chat 的 Bot 16px；coding/kar/planner 专属图标 15px（2026-09 视觉校准）
+  // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Butler→ClipboardList / 其余→Bot
+  // 尺寸：chat 的 Bot 16px；coding/kar/butler 专属图标 15px（2026-09 视觉校准）
   const TitleIdentityIcon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> =
     identity === 'coding'
       ? Terminal
       : identity === 'note'
         ? FileText
-        : identity === 'planner'
+        : identity === 'butler'
           ? ClipboardList
           : Bot;
-  const isBotTitleIcon = identity !== 'coding' && identity !== 'note' && identity !== 'planner';
+  const isBotTitleIcon = identity !== 'coding' && identity !== 'note' && identity !== 'butler';
 
   // AI Coding 专项任务循环状态（改码→预览自检→测试→完成）：由服务端 coding_phase SSE 驱动
   const [codingPhase, setCodingPhase] = useState<CodingPhase>('idle');
@@ -1052,52 +1024,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // 300ms transition 持续跟随 → "整个节点在闪"。固定宽度后节点尺寸完全稳定。
   const nodeWidth = `${expandedShellW(visibleCanvasW)}px`;
   const nodeHeight = EXPANDED_HEIGHT_CSS;
-
-  // 会话面板中心的预测（节点恒为大面板形态，宽高固定；供聚焦时把视图中心平移到该节点）
-  const getExpandedCenter = useCallback((): { x: number; y: number } | null => {
-    const node = getNode(id);
-    if (!node) return null;
-    // 与 nodeWidth/nodeHeight 实际尺寸严格对齐，避免中心偏差
-    const h = expandedHeightPx();
-    const w = expandedShellW(visibleCanvasW);
-    return { x: node.position.x + w / 2, y: node.position.y + h / 2 };
-  }, [getNode, id, visibleCanvasW]);
-
-  // 可视区变化（预览面板开合/宽窄切换/侧边栏折叠/窗口 resize/单焦点切换后首收）时，
-  // 宽度已自适应收窄，但画布平移不会自动跟随——节点停在旧中心会右缘压进面板。故可视宽
-  // 变化时同步向左重居中（重新居中到新可视区中央，即面板左侧区域）。
-  // 首次收到（prev===null）也执行：单焦点切换后新挂载节点以 null 起步，须在拿到面板当前
-  // 宽度后立即让位，否则不按已打开的面板收窄/左移。值不变或抖动（<8px）跳过。
-  const prevVisibleCanvasWRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (visibleCanvasW === null) return;
-    const prev = prevVisibleCanvasWRef.current;
-    prevVisibleCanvasWRef.current = visibleCanvasW;
-    if (prev !== null && prev === visibleCanvasW) return;
-    if (prev !== null && Math.abs(prev - visibleCanvasW) < 8) return; // 抖动过滤
-    const center = getExpandedCenter();
-    if (center) recenterCanvas(center.x, center.y, { zoom: 1 });
-  }, [visibleCanvasW, getExpandedCenter, recenterCanvas, id]);
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { node_id?: string; recenter?: boolean };
-      if (!detail?.node_id) return;
-      if (detail.node_id === id) {
-        if (detail.recenter) {
-          // 仅居中：保持当前缩放级别，把视图中心移到该节点
-          const center = getExpandedCenter();
-          if (center) recenterCanvas(center.x, center.y, { duration: 300 });
-          return;
-        }
-        // 聚焦切换：节点恒为大面板，把画布视图中心移到该节点（100% 缩放，与聚焦一致）
-        const center = getExpandedCenter();
-        // 瞬时居中（无 duration）：与放大按钮一致，避免动画被聚焦重渲染中断导致原地跳动
-        if (center) recenterCanvas(center.x, center.y, { zoom: 1 });
-      }
-    };
-    window.addEventListener('node-expand-request', handler);
-    return () => window.removeEventListener('node-expand-request', handler);
-  }, [id, getExpandedCenter, recenterCanvas]);
 
   // 新建节点后自动聚焦输入框（CanvasFlow 创建流程广播）：ChatGPT 式「点新建即打字」
   useEffect(() => {
@@ -1530,10 +1456,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // 复制反馈：图标短暂变 ✓（不显示 "Copied" 文案），弹窗保持不消失；~900ms 后图标复原可再次复制
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
-  // 标题双击编辑：chat / coding / kar 统一支持（双击标题 → 输入框 → Enter/失焦保存 → Esc 取消）
-  const [titleEditing, setTitleEditing] = useState(false);
-  const [titleDraft, setTitleDraft] = useState('');
-  const titleInputRef = useRef<HTMLInputElement>(null);
   // 待发送链接材料（粘贴 URL 自动识别，发送时提示 AI 用 web_fetch 访问）
   const [pendingLinks, setPendingLinks] = useState<{ url: string }[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
@@ -1617,63 +1539,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     <T extends Record<string, unknown>>(body: T): T =>
       (typeof data.projectId === 'string' && data.projectId ? { ...body, project_id: data.projectId } : body),
     [data.projectId],
-  );
-
-  // 标题双击编辑：chat / coding / kar 统一。双击标题进入编辑 → Enter/失焦保存 → Esc 取消
-  const startTitleEdit = useCallback(() => {
-    if (persisting || isStreaming) return;
-    setTitleDraft(typeof data.title === 'string' ? data.title : '');
-    setTitleEditing(true);
-    setTimeout(() => titleInputRef.current?.select(), 0);
-  }, [data.title, persisting, isStreaming]);
-
-  const cancelTitleEdit = useCallback(() => {
-    setTitleEditing(false);
-    setTitleDraft('');
-  }, []);
-
-  const commitTitleEdit = useCallback(async () => {
-    const next = (titleDraft || '').trim();
-    setTitleEditing(false);
-    setTitleDraft('');
-    if (!currentMdId || !next || next === data.title) return;
-    if (next.length > 60) return;
-    try {
-      const resp = await fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(withProjectId({
-          action: 'rename_title',
-          node_id: currentMdId,
-          new_title: next,
-        })),
-      });
-      const renameData = await resp.json();
-      if (renameData.success && renameData.title && mountedRef.current) {
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, title: renameData.title } }
-              : n,
-          ),
-        );
-      }
-    } catch {
-      // 改名失败不阻断（标题保留原值）
-    }
-  }, [titleDraft, currentMdId, data.title, withProjectId, setNodes, id]);
-
-  const onTitleInputKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        void commitTitleEdit();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        cancelTitleEdit();
-      }
-    },
-    [commitTitleEdit, cancelTitleEdit],
   );
 
   // 归档功能已移除（2026-09）：会话只保留删除，不再支持归档/恢复
@@ -2110,10 +1975,10 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     const r = el.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top, w: r.width };
   }, []);
-  /** Planner 确认卡片锚点：卡片到来时取一次输入框位置并固定，避免挂起期间画布平移/缩放导致卡片跳动 */
-  const plannerAnchor = useMemo(
-    () => (plannerConfirm ? inputAnchor() : null),
-    [plannerConfirm, inputAnchor],
+  /** Butler 确认卡片锚点：卡片到来时取一次输入框位置并固定，避免挂起期间画布平移/缩放导致卡片跳动 */
+  const butlerAnchor = useMemo(
+    () => (butlerConfirm ? inputAnchor() : null),
+    [butlerConfirm, inputAnchor],
   );
   const mountedRef = useRef(true);
   const modelMenuRef = useRef<HTMLDivElement>(null);
@@ -2682,7 +2547,7 @@ ${rows.join('\n')}
         }
         const anchor = sel?.anchorNode?.parentElement;
         // 关键：必须校验选区属于【本实例】的消息区（scrollRef 内）。
-        // 画布上每个 chat 类节点（chat/coding/Kar/Planner…）都在 window 挂了本监听，
+        // 画布上每个 chat 类节点（chat/coding/Kar/Butler…）都在 window 挂了本监听，
         // 若只查 anchor.closest('[data-msg-node]')，任何实例都会命中"别处选区"的 data-msg-node，
         // 各自在同一坐标弹出自己的划词窗 → 重叠成一层；点某层"复制"变宽后，
         // 底下其它层的操作窗就露出来 = 用户看到的"两个弹窗"。
@@ -3398,10 +3263,6 @@ ${rows.join('\n')}
     traceWindowRef.current = createTraceWindow();
     // P5b-1 历史 replay：新一轮发送时退出回放态，回到 live 轨迹
     setReplay(null);
-    // 即时命名标记：本轮发送瞬间是否已用规则标题命名过（回答结束后 refine 时参考，
-    // 避免把更优的即时标题降级回"用户首条消息截断"）
-    let instantNamed = false;
-
     // 已锁定则自动解锁，允许用户继续追问
     if (data.nodeMdId && outcomeStatus === 'locked') {
       setOutcomeStatus('draft');
@@ -3817,10 +3678,11 @@ ${rows.join('\n')}
     }
 
     // ============================================================
-    // 即时命名（发出即命名，0 token 规则层）：用户发出首条消息的瞬间，先用规则从消息里
-    // 提取标题落盘（rename_title），让节点立刻有名字——长任务期间不再一直显示 "AI Chat"。
+    // 首轮智能命名（小模型）：用户发出首条消息后，异步调用专用小模型端点
+    // （/api/nodes/suggest-title，内部走 resolveTaskModel 的小模型角色）生成简短标题并落盘。
+    // 主模型不参与命名（系统提示词已移除 <!-- TITLE --> 注释约定），避免被长规则压掉。
     // 触发条件：非续写 + 标题仍为默认占位 + 节点文件已存在 + 首条对话（无历史 user 消息）。
-    // 回答结束后若主模型给出 <!-- TITLE --> 注释，下方 refine 会用更优标题替换它。
+    // 不 await：命名与主对话并行，不拖慢回答首字延迟；小模型失败时回退规则标题。
     // ============================================================
     if (
       !isContinuation
@@ -3829,33 +3691,48 @@ ${rows.join('\n')}
       && !messages.some((m) => !m.system && m.role === 'user')
       && userInput.trim()
     ) {
-      const instantTitle = deriveInstantTitle(userInput);
-      if (instantTitle) {
+      const nodeIdForNaming = currentMdId;
+      void (async () => {
+        let nextTitle = '';
         try {
-          const instantResp = await fetch('/api/nodes', {
+          const titleResp = await fetch('/api/nodes/suggest-title', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: userInput }),
+          });
+          const titleData = await titleResp.json();
+          if (titleData?.success && typeof titleData.title === 'string') {
+            nextTitle = titleData.title.trim();
+          }
+        } catch {
+          // 小模型不可用 → 走下方规则标题兜底
+        }
+        if (!nextTitle) nextTitle = deriveInstantTitle(userInput);
+        if (!nextTitle || !nodeIdForNaming) return;
+        try {
+          const renameResp = await fetch('/api/nodes', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(withProjectId({
               action: 'rename_title',
-              node_id: currentMdId,
-              new_title: instantTitle,
+              node_id: nodeIdForNaming,
+              new_title: nextTitle,
             })),
           });
-          const instantData = await instantResp.json();
-          if (instantData.success && instantData.title && mountedRef.current) {
-            instantNamed = true;
+          const renameData = await renameResp.json();
+          if (renameData.success && renameData.title && mountedRef.current) {
             setNodes((nds) =>
               nds.map((n) =>
                 n.id === id
-                  ? { ...n, data: { ...n.data, title: instantData.title } }
+                  ? { ...n, data: { ...n.data, title: renameData.title } }
                   : n,
               ),
             );
           }
         } catch {
-          // 即时命名失败不影响主流程：标题保持占位，回答结束后仍走下方 refine 兜底
+          // 命名失败不影响主流程：标题保持占位
         }
-      }
+      })();
     }
 
     try {
@@ -4014,11 +3891,11 @@ ${rows.join('\n')}
                   setConfirmPending(false);
                 })();
               }
-              if (parsed.planner_confirm) {
-                // Planner 结构化确认卡片：排程创建/改/删在真正执行前先让用户确认（可编辑字段）
-                const pc = parsed.planner_confirm as PlannerConfirmState;
+              if (parsed.butler_confirm) {
+                // Butler 结构化确认卡片：排程创建/改/删在真正执行前先让用户确认（可编辑字段）
+                const pc = parsed.butler_confirm as ButlerConfirmState;
                 if (mountedRef.current && pc?.confirmId && pc?.card) {
-                  setPlannerConfirm({ confirmId: pc.confirmId, name: pc.name, card: pc.card, timeoutSec: pc.timeoutSec });
+                  setButlerConfirm({ confirmId: pc.confirmId, name: pc.name, card: pc.card, timeoutSec: pc.timeoutSec });
                 }
               }
               if (parsed.coding_phase) {
@@ -4459,8 +4336,7 @@ ${rows.join('\n')}
           // 分离 think 和干净的回答内容
           const { content: answerWithoutMood } = parseThink(assistantContent);
 
-          // 从回答中提取标题建议
-          const { title: suggestedTitle, cleanContent: cleanAnswer } = extractTitleSuggestion(answerWithoutMood);
+          const cleanAnswer = answerWithoutMood;
 
           console.log('[AiChatNode:save] assistantContent 长度:', assistantContent.length, '前200字:', assistantContent.slice(0, 200));
           console.log('[AiChatNode:save] answerWithoutMood 长度:', answerWithoutMood.length, '前200字:', answerWithoutMood.slice(0, 200));
@@ -4661,47 +4537,7 @@ ${rows.join('\n')}
             }
           }
 
-          // 2. 更新节点标题（仅当标题为默认值时，即首次对话后自动命名）
-          //    续写模式跳过：标题已在首轮设置过
-          if (appendSuccess && !isContinuation && data.title === 'AI Chat') {
-            // 标题来源优先级：1) 模型输出的 TITLE 注释  2) 用户首条消息截断
-            // 若发送瞬间已即时命名成功（instantNamed）且模型未给出 TITLE 注释，
-            // 则保留即时标题，不再用首条消息截断降级覆盖（即时标题已剥离祈使前缀、更精炼）。
-            const hasSuggested = !!(suggestedTitle && suggestedTitle.length > 2 && suggestedTitle.length <= 50);
-            const finalTitle = hasSuggested
-              ? suggestedTitle
-              : (instantNamed
-                  ? null
-                  : userInput.replace(/\n/g, ' ').trim().slice(0, 20) || null);
-
-            if (finalTitle) {
-              try {
-                const renameResp = await fetch('/api/nodes', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(withProjectId({
-                    action: 'rename_title',
-                    node_id: currentMdId,
-                    new_title: finalTitle,
-                  })),
-                });
-                const renameData = await renameResp.json();
-                if (renameData.success && renameData.title && mountedRef.current) {
-                  setNodes((nds) =>
-                    nds.map((n) =>
-                      n.id === id
-                        ? { ...n, data: { ...n.data, title: renameData.title } }
-                        : n,
-                    ),
-                  );
-                }
-              } catch {
-                // 标题更新失败不影响主流程
-              }
-            }
-          }
-
-          // 3. 生成消息摘要（写入 .md 文件后，调用 summarize API 生成智能摘要）
+          // 2. 生成消息摘要（写入 .md 文件后，调用 summarize API 生成智能摘要）
           if (appendSuccess && mountedRef.current && cleanAnswer) {
             // 先显示截断摘要，后续用 AI 摘要覆盖
             const quickSummary = cleanAnswer.replace(/\n/g, ' ').trim().slice(0, 100);
@@ -6920,7 +6756,7 @@ ${rows.join('\n')}
 );
 
   return (
-    <div className="relative">
+    <div className="relative flex min-h-0 w-full h-full flex-col">
       {/* 划词操作窗：消息内容中选中文字后弹出。
           用 createPortal 挂到 body：React Flow 节点 wrapper 带 transform，直接渲染在节点内会使
           fixed 定位相对节点而非视口，导致弹窗远离高亮文字（经典 transform 包含块陷阱）。 */}
@@ -6992,7 +6828,7 @@ ${rows.join('\n')}
     <div
       ref={nodeWrapperRef}
       className={cn(
-        'ai-node-wrapper group relative cursor-default transition-[height] duration-300 ease-in-out',
+        'ai-node-wrapper group relative flex-1 min-h-0 cursor-default transition-[height] duration-300 ease-in-out',
         // 大面板自身建立横向裁剪：固定宽度下防止内容（如思考标签行的
         // shrink-0 不换行标签）抬升导致节点被内容撑宽
         // ai-node-expanded 标记类供 globals.css 壳列分离样式命中（正文列限宽 720px 居中 + 宽内容 breakout）
@@ -7000,7 +6836,7 @@ ${rows.join('\n')}
       )}
       style={{
         width: nodeWidth,
-        height: nodeHeight,
+        height: '100%',
         // 实际外壳宽度透传给 globals.css：--wide-bleed 按真实壳宽计算，
         // 避免节点被可视区上限压缩后代码块 breakout 仍按壳宽上限外扩导致右缘被裁
         ['--bob-shell-w' as string]: nodeWidth,
@@ -7018,16 +6854,17 @@ ${rows.join('\n')}
           confirmPending && 'confirm-breathing',
         )}
         style={{
-          // 极淡的顶部受光渐变（模拟光源），增强大面板的立体感知
-          background: 'linear-gradient(180deg, color-mix(in srgb, #fff 7%, var(--paper)) 0%, var(--paper) 38%)',
-          // 2026-09 口径：去除身份高亮边框——所有 agent 统一中性边框，不再按 coding/Kar/Planner 染色
+          // 2026-09-11 统一淡灰底：卡片底改 --paper-soft(#efeff2)，比画布 --canvas-bg(#e6e6ec) 略亮一层
+          background: 'linear-gradient(180deg, color-mix(in srgb, #fff 4%, var(--paper-soft)) 0%, var(--paper-soft) 38%)',
+          // 2026-09 口径：去除身份高亮边框——所有 agent 统一中性边框，不再按 coding/Kar/Butler 染色
           borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
-          // inset 顶部受光高光（投影与光晕由 wrapper 外阴影层提供，overflow 裁剪不掉）
-          boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 18%, transparent)',
+          // inset 高光减弱（淡灰底上原 18% 白光太突兀）
+          boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent)',
         }}
       >
       {/* Header — Phase 2: 统一 NodeCardHeader 三段式骨架（左锚点 + 标题 + 右操作组） */}
       <NodeCardHeader
+        divider={false}
         leftAnchor={
           <>
             {/* AI Coding 专项任务循环状态徽标（改码→预览自检→测试→完成） */}
@@ -7050,33 +6887,9 @@ ${rows.join('\n')}
               className={cn('shrink-0', isBotTitleIcon ? 'h-4 w-4' : 'h-[15px] w-[15px]')}
               style={{ color: 'var(--ink-muted)' }}
             />
-            {titleEditing ? (
-              <input
-                ref={titleInputRef}
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onKeyDown={onTitleInputKeyDown}
-                onBlur={() => void commitTitleEdit()}
-                onClick={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => e.stopPropagation()}
-                maxLength={60}
-                className="w-full min-w-0 rounded border bg-transparent px-1 text-base font-semibold outline-none"
-                style={{ borderColor: 'color-mix(in oklab, var(--accent) 55%, transparent)', color: 'var(--ink)' }}
-                data-nodrag
-                aria-label="Rename node"
-              />
-            ) : (
-              <span
-                className="inline-block max-w-full cursor-text truncate"
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  startTitleEdit();
-                }}
-                title="Double-click to rename"
-              >
-                {data.title}
-              </span>
-            )}
+            <span className="inline-block max-w-full truncate">
+              {data.title}
+            </span>
           </span>
         }
         rightActions={
@@ -7290,18 +7103,16 @@ ${rows.join('\n')}
                     style={{
                       width: isActive ? 10 : 8,
                       height: isActive ? 10 : 8,
-                      // 与画布节点链导航圆点配色方式保持一致：
-                      // 激活态 = 节点底色(paper) + 浓淡灰(ink-muted) + 一丝主题色 → 接近深灰
-                      // 未激活态 = 节点底色 + 淡灰(ink-faint) + 极弱主题色 → 淡灰颗粒
-                      backgroundColor: isActive
-                        ? 'color-mix(in oklab, color-mix(in oklab, var(--paper) 65%, var(--ink-muted) 28%) 93%, var(--primary) 7%)'
-                        : 'color-mix(in oklab, color-mix(in oklab, var(--paper) 88%, var(--ink-faint) 12%) 93%, var(--primary) 7%)',
+                      // 2026-09-10：从"融入底色的淡灰颗粒"改为直接用 ink 变量，
+                      // 之前 88% paper + 12% ink-faint 在亮纸色 (#f7f7f8) 上几乎看不见。
+                      // 激活态：ink-strong 深灰 + 主题色光晕，清晰锚定当前问题
+                      // 未激活态：ink-muted 直接灰，一眼看清还有哪些问题
+                      backgroundColor: isActive ? 'var(--ink-strong)' : 'var(--ink-muted)',
                       border: 'none',
                       boxShadow: isActive
-                        // 激活态：淡灰投影为主，主题色光晕极弱
-                        ? '0 0 5px color-mix(in oklab, var(--ink-muted) 30%, transparent), 0 0 10px 3px color-mix(in oklab, var(--primary) 8%, transparent)'
-                        // 未激活态：几乎融入节点底色的淡灰投影
-                        : '0 0 5px 2px color-mix(in oklab, var(--ink-faint) 8%, transparent), 0 0 10px 3px color-mix(in oklab, var(--ink-faint) 4%, transparent)',
+                        ? '0 0 0 2px color-mix(in oklab, var(--primary) 40%, transparent), 0 0 6px color-mix(in oklab, var(--primary) 25%, transparent)'
+                        : 'none',
+                      opacity: isActive ? 1 : 0.55,
                     }}
                   />
                 </button>
@@ -7496,12 +7307,12 @@ ${rows.join('\n')}
         />
       )}
 
-      {/* Planner 结构化确认卡片（创建/修改/删除排程）；锚定输入框上方 + 透明遮罩，不遮挡正文 */}
-      {plannerConfirm && (
-        <PlannerConfirmModal
-          pending={plannerConfirm}
-          anchor={plannerAnchor}
-          onClose={() => setPlannerConfirm(null)}
+      {/* Butler 结构化确认卡片（创建/修改/删除排程）；锚定输入框上方 + 透明遮罩，不遮挡正文 */}
+      {butlerConfirm && (
+        <ButlerConfirmModal
+          pending={butlerConfirm}
+          anchor={butlerAnchor}
+          onClose={() => setButlerConfirm(null)}
         />
       )}
 

@@ -50,7 +50,7 @@ export interface RecordUsageInput {
   taskId?: string;
   /** 画布节点 id（无项目/临时问答时为 undefined） */
   nodeId?: string;
-  /** 完整模型引用，形如 "deepseek:deepseek-v4-flash" */
+  /** 完整模型引用，形如 "deepseek:deepseek-flash" */
   model: string;
   /** agent 画像 id：chat | coding */
   agent?: string;

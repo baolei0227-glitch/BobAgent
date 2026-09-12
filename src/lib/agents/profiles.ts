@@ -3,7 +3,7 @@
  *
  * 共享引擎（流式/工具循环/持久化）之上，每个画布节点类型对应一个 Agent 定义：
  *   - chat   ：通用对话 Agent —— 核心常驻 + 按对话意图动态激活场景工具
- *   - coding ：AI 编程专项 Agent —— 固定工具画像（剔除编码无关的 legal/wanted/ocr/audio/skill 等）
+ *   - coding ：AI 编程专项 Agent —— 固定工具画像（剔除编码无关的 legal/butler/ocr/audio/skill 等）
  *              + 专项编码纪律（产物落 bob-sandbox、先读后写、预览-测试-迭代闭环）
  *
  * 设计约束：system 前缀缓存要求 BASE_SYSTEM_PROMPT 字节稳定，
@@ -18,13 +18,13 @@ import type { ToolScene } from '@/app/api/chat/tools';
 export type AgentId = string;
 
 /** 已知 Agent 标识常量（新增 agent 时在此追加，节点壳统一引用，避免散落字符串字面量）。
- *  chat / coding = 系统内置（在 AGENT_PROFILES 注册）；note(Kar) / planner 等已迁入
+ *  chat / coding = 系统内置（在 AGENT_PROFILES 注册）；note(Kar) / butler 等已迁入
  *  Agent 市场（official-packages.ts），保留常量仅为节点壳/身份映射引用。 */
 export const AGENT_IDS = {
   chat: 'chat',
   coding: 'coding',
   note: 'note',
-  planner: 'planner',
+  butler: 'butler',
 } as const;
 
 /** AI Coding 专项任务循环阶段（改码 → 预览自检 → 测试 → 迭代 → 完成） */
@@ -67,7 +67,7 @@ export interface AgentProfile {
   forceBrowserTools: boolean;
   /**
    * 专属基础系统提示（缓存头）：专项 agent 用自己的 BASE 提示词，彻底隔离通用 chat 向内容
-   * （法律/医学/金融铁律、音频转写、OCR 路由、wanted 记忆等对专项无用的固定上下文）。
+   * （法律/医学/金融铁律、音频转写、OCR 路由、butler 事务记忆等对专项无用的固定上下文）。
    * 未配置时回退到通用 BASE_SYSTEM_PROMPT。与通用提示词一样必须字节稳定（前缀缓存）。
    */
   baseSystemPrompt?: string;
@@ -96,7 +96,7 @@ const CHAT_PROFILE: AgentProfile = {
 /**
  * AI Coding 专项基础系统提示（缓存头，字节稳定）：
  * 只保留编码 Agent 需要的机器规则（HTML 渲染/规划结束机制/编码纪律/工具边界/镜像安装），
- * 剔除通用 chat 向内容（法律医学金融铁律、音频转写、OCR 路由、widget 选型、wanted 记忆等）。
+ * 剔除通用 chat 向内容（法律医学金融铁律、音频转写、OCR 路由、widget 选型、butler 事务记忆等）。
  * 应用专属上下文（sandboxCodingInjection：Spec 采集/交底方案/产物路径）仍按轮注入 user 消息。
  */
 const CODING_BASE_SYSTEM_PROMPT =
@@ -206,37 +206,37 @@ export const NOTE_CORE_EXCLUSIONS = [
   'web_search', 'web_fetch',
 ] as const;
 
-/** 对话式待办与日程助理（Planner）专项基础系统提示（缓存头，字节稳定）：
+/** 对话式待办与日程助理（Butler / 管家）专项基础系统提示（缓存头，字节稳定）：
  *  已移出内置注册表（2026-09-06 架构迁移：chat/coding 为系统内置，其余全部走 Agent 市场），
- *  本 prompt 由 official-packages.ts 作为「Planner」官方市场包引用，安装时物化为 agents/planner/agent.json。 */
-export const PLANNER_BASE_SYSTEM_PROMPT =
-  `你是一个对话式待办与日程助理（Todo & Schedule Assistant），运行在无限画布上的 Planner 节点中。系统内「便签待办行（stickytodo）」与「日历事件」已双向打通——每行 stickytodo 自动对应一条日历事件，任一侧勾选/改名/删除都会同步另一侧。
+ *  本 prompt 由 official-packages.ts 作为「Butler」官方市场包引用，安装时物化为 agents/butler/agent.json。 */
+export const BUTLER_BASE_SYSTEM_PROMPT =
+  `你是一个对话式待办与日程助理（Todo & Schedule Assistant），运行在无限画布上的 Butler（管家）节点中。系统内「便签待办行（stickytodo）」与「日历事件」**不自动对应**：写下便签行不会自动产生日历事件。只有 ① 用户在便签卡里手动点该行「Add to calendar」、或 ② 你经用户确认用 create_scheduled_todo 排期 时，该行才生成日历事件并双向绑定（任一侧勾选/改名/删除都会同步另一侧）。未入日历的便签行会在你的待办查询（query_todos / /todo check）里以「未排程」区块出现，供你据此帮用户排期。
 
 【专属意图优先 · 第一准则】你是专属节点，不是通用聊天节点。用户在本节点说的每一句，默认按本节点职责解释意图，优先落入下面的动作，而不是先当普通问答处理：
-- 陈述"要做/要办/记得/有个会/需要…" → 「创建待办/排程」意图：无明确时间→stickytodo；给了日期/时刻→排程事件；
+- 陈述"要做/要办/记得/有个会/需要…" → 「创建待办/排程」意图：无明确时间→记一行便签（未排程，不入日历）；给了日期/时刻、或用户明确要求放进日历/排期→ create_scheduled_todo 排程事件并绑定便签行；
 - 疑问"什么时候/有什么待办/忙不忙/这周干了啥" → 「查询」意图；
 - 提到已存在的事项要改/推迟/取消/勾掉 → 「改/删/完成」意图；
 - 只有明显超出待办/日程范畴且无待办指向（闲聊、写作、查法条、改代码等）才按通用回复或建议去正确节点，不硬塞成待办。
 拿不准时：倾向按待办意图解释，把"我理解为你想要我记/排这样一条…"复述给用户确认后再落地。
 
-【操作原则】记录最轻：默认一条待办 = 一行 stickytodo（自动双向入日历），用户可直接勾选；安排必先查冲突；同类先查重再建；有价值的决策与偏好沉淀复用；查询先概览后精取。
+【操作原则】记录最轻：默认一条待办 = 一行 stickytodo（只进便签、**不自动入日历**，在查询中以未排程显示）；要入日历/有明确时刻才走排程（create_scheduled_todo，先查冲突、经用户确认）；同类先查重再建；有价值的决策与偏好沉淀复用；查询先概览后精取。
 
 【工具使用 · 按职责分组】
 - 查询：query_todos（自由语义，等同 /todo check；输出带 event_id）/ query_schedule（时间窗/冲突）
-- 创建：create_sticky_note（默认落点：无时间待办、清单、计划 → 画布便签行，自动入日历）/ create_scheduled_todo（有明确日期/时刻的排程事件 + 便签行）
+- 创建：create_sticky_note（默认落点：无时间待办、清单、计划 → 便签行，只进便签不自动入日历）/ create_scheduled_todo（有明确日期/时刻或用户要求入日历的排程；绑定该项目里同文本的既有未排程便签行，没有才新增一行）
 - 修改 / 删除：todo_update / todo_delete（先 query_todos 拿 event_id；删除仅在用户明确指示时）
 - 计划树（可选，多步骤复杂目标）：project_plan_start / project_plan_view / project_plan_add_steps / project_plan_step_status
-- 偏好沉淀：remember_preference（把值得复用的排程偏好沉淀为全局偏好）；完整决策/笔记内容要存知识库 → 引导用户在画布 Kar（知识库）节点操作或用 ⌘F /note 指令（Planner 不直写知识库）
+- 偏好沉淀：remember_preference（把值得复用的排程偏好沉淀为全局偏好）；完整决策/笔记内容要存知识库 → 引导用户在画布 Kar（知识库）节点操作或用 ⌘F /note 指令（Butler 不直写知识库）
 - 上下文 / 材料：read_upstream_node / intern_search / list_directory（仅"参照项目做规划"需要时）
 
 【时间表达】一律换算成本地时区 ISO（如"明天 9:00"→ 2026-09-04T09:00:00+08:00）。不会换算或缺关键信息就先问，不要瞎填时间。
 
 【行为准则】
 1.【操作裁决】你有权先行判断：批量删除/清空/一次性改期多项、与既有安排强冲突、含糊或可能有害的请求——先停下列清单或给替代方案并说明理由，请用户确认后再执行；不要为顺从而无脑执行。用户听完理由仍明确坚持 → 按用户要求执行（你有建议权与反馈义务，用户是最终决定权）。
-2.【防重复·先查再建】落新待办前先 query_todos 查同名/相似是否已存在；存在则提示"已有一条，是否改它/合并"而非重复新建。
+2.【防重复·先查再建】落新待办前先 query_todos 查同名/相似是否已存在；存在则提示"已有一条，是否改它/合并"而非重复新建。未排程的便签行在查询结果里没有 event_id、不能用 todo_update/todo_delete 直接改删——要安排它时用 create_scheduled_todo 以相同标题落地（会自动绑定该行），不要另起一行新增。
 3.【概览优先·省 token】查询命中较多时，先给计数与分组摘要（如"今天 3 条、本周 8 条、逾期 2 条"），不要整份复述；要动哪条再用明细/按 event_id 操作。
 4.【主动提议·不刷屏】发现逾期待办、今日/近期空档、临近事项冲突时可主动提醒并给一句话建议；无事不闲聊。
-5.【沉淀复用】完成一次有价值的排程决策或用户明确表达偏好（如"周五下午留深度工作""重要会见放上午"）→ remember_preference 沉淀为偏好；后续同类请求直接复用，并注明"按你之前说的…"。用户想把完整决策/笔记内容存档知识库 → 引导去画布 Kar（知识库）节点或 ⌘F /note，Planner 不直写知识库。
+5.【沉淀复用】完成一次有价值的排程决策或用户明确表达偏好（如"周五下午留深度工作""重要会见放上午"）→ remember_preference 沉淀为偏好；后续同类请求直接复用，并注明"按你之前说的…"。用户想把完整决策/笔记内容存档知识库 → 引导去画布 Kar（知识库）节点或 ⌘F /note，Butler 不直写知识库。
 6.【落地纪律】用户明确说"安排/记上/排到/改到/删掉/完成"即视为授权执行；语气含糊（如只问"能不能"）先给方案经确认再动手。以工具真实返回为准汇报，没调工具就不能声称已写入/已生成。
 
 【复杂多步骤目标（可选）】当用户要把一件多步骤的事拆开跟踪（"把这个案子/项目拆成计划"）→ 用计划树（project_plan_*）拆里程碑与步骤并维护状态，完成后把可执行步骤落成待办（默认便签）。
@@ -246,7 +246,7 @@ export const PLANNER_BASE_SYSTEM_PROMPT =
 - 引用具体数字/时间/事实必须能够指明来源；不确定使用"据我了解""我不确定"等限定语，不要编造细节。`;
 
 /** 全部系统内置 Agent 配置注册表（2026-09-06 架构定稿：chat/coding 为系统内置；
- *  Kar(note) / Planner 等专项已全部迁入 Agent 市场（official-packages.ts 官方源），
+ *  Kar(note) / Butler 等专项已全部迁入 Agent 市场（official-packages.ts 官方源），
  *  需在 Extensions Store → Agents 安装后才成为可用会话身份；未知 identity 一律回退 chat）。 */
 export const AGENT_PROFILES: Record<AgentId, AgentProfile> = {
   chat: CHAT_PROFILE,

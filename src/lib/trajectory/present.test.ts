@@ -218,7 +218,7 @@ describe('pushWindowFrame / finishWindow：事件窗口状态机', () => {
       { coding_phase: { phase: 'running', tool: 'write_file' }, nodeId: 'n1' },
       { tool_confirm: { confirmId: 'c9', name: 'run_command', timeoutSec: 600 }, nodeId: 'n1' },
       { questions_request: { requestId: 'q1', questions: [{ id: 'q' }] }, nodeId: 'n1' },
-      { planner_confirm: { confirmId: 'p1', name: 'calendar' }, nodeId: 'n1' },
+      { butler_confirm: { confirmId: 'p1', name: 'calendar' }, nodeId: 'n1' },
       { login_required: { requestId: 'l1', siteName: 'x' }, nodeId: 'n1' },
       { grant_required: { target: 'browser' }, nodeId: 'n1' },
     ]);
@@ -226,7 +226,7 @@ describe('pushWindowFrame / finishWindow：事件窗口状态机', () => {
     expect(w.meta.interactions!.coding_phase).toEqual({ phase: 'running', tool: 'write_file' });
     expect(w.meta.interactions!.tool_confirm).toMatchObject({ confirmId: 'c9' });
     expect(w.meta.interactions!.questions_request).toMatchObject({ requestId: 'q1' });
-    expect(w.meta.interactions!.planner_confirm).toMatchObject({ confirmId: 'p1' });
+    expect(w.meta.interactions!.butler_confirm).toMatchObject({ confirmId: 'p1' });
     expect(w.meta.interactions!.login_required).toMatchObject({ requestId: 'l1' });
     expect(w.meta.interactions!.grant_required).toEqual({ target: 'browser' });
     expect(w.spans).toHaveLength(1);

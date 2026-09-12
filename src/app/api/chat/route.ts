@@ -26,6 +26,7 @@ import { getCurrentProject, getProjectById, listProjects, type ProjectConfig } f
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { DEFAULT_CONFIRM_TOOLS } from '@/lib/settings';
 import { isVisionModel } from '@/lib/model-tags';
+import { isDeclaredVisionModel } from '@/lib/model-capabilities';
 // P4b-1 审批策略层：tool_confirm 名单判定后走 decideToolApproval（纯函数裁决，见 approval.ts）
 import { decideToolApproval } from '@/lib/chat/approval';
 import { createPendingConfirm, CONFIRM_TIMEOUT_MS, type ConfirmResult } from '@/lib/chat/confirm-pending';
@@ -39,10 +40,10 @@ assertConsultContract();
 // Phase 2 策略层抽取：思考档位决策收敛到纯函数模块（S2a 后统一 reasoning_effort 词表，默认行为=纯固定档）
 import { effortForLevel, executionDowngrade, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
 
-// ── Planner 结构化确认卡片（排程创建/修改/删除走可编辑确认，而非直接执行）──
-const PLANNER_CARD_TOOLS = new Set(['create_scheduled_todo', 'todo_update', 'todo_delete']);
+// ── Butler 结构化确认卡片（排程创建/修改/删除走可编辑确认，而非直接执行）──
+const BUTLER_CARD_TOOLS = new Set(['create_scheduled_todo', 'todo_update', 'todo_delete']);
 
-type PlannerCard = {
+type ButlerCard = {
   tool: string;
   mode: 'create' | 'update' | 'delete';
   event_id: string | null;
@@ -94,10 +95,10 @@ async function nearbyConflicts(
 }
 
 /** 把工具参数转成结构化卡片；构建失败（如待改/删事件不存在）返回 null（跳过卡片直接执行） */
-async function buildPlannerCard(
+async function buildButlerCard(
   toolName: string,
   args: Record<string, unknown> | null,
-): Promise<PlannerCard | null> {
+): Promise<ButlerCard | null> {
   try {
     const str = (v: unknown): string => (typeof v === 'string' ? v : '');
     const numArr = (v: unknown): number[] =>
@@ -523,9 +524,11 @@ async function diffHomeworkFiles(
 // （K2-S1 工具面 service 抽取，行为不变：CacheGuard 前缀守卫整体迁至 src/lib/runtime/tools.ts，
 //  module 级可变状态随迁、进程内共享语义不变；guardToolsPrefix 由 buildAndSortToolDefs 调用）
 
-/** BASE_SYSTEM_PROMPT —— 缓存头（version 冻结，当前 v8）：基础系统提示（不包含思考指令）。
+/** BASE_SYSTEM_PROMPT —— 缓存头（version 冻结，当前 v9）：基础系统提示（不包含思考指令）。
  *  本段字节一旦上线即冻结；任何修改必须整体递增版本号（v3→v4…），否则 DeepSeek 前缀缓存整段失效一次。
  *  动态/低频变化内容一律走 prependDynamicContext 注入 user 消息，禁止写进本段。
+ *  v9（2026-09-12）：移除「对话标题（可选）<!-- TITLE -->」整段——会话标题改由小模型端点
+ *    （/api/nodes/suggest-title，走 resolveTaskModel）生成，主模型不再参与命名，避免该可选注释被长规则压掉。
  *  v8（2026-09-09）：微观口径收紧——① 统一「按需自动加载」与「缺工具走 search_capabilities」两处口径（原「说出意图会随本轮注入」与后文矛盾）；② OutputFile 铁律排除 .evidence/ 原始数据与 .ai-workspace/ 临时文件；③ 理顺 search_capabilities 与 check_mcp_gaps 主从（先查能力，仅提示依赖外部 MCP 时才查配置）。
  *  v7（2026-09-09）：① 存储平铺规则补显式豁免——homework/.evidence/（证据层）与 .ai-workspace/（中间产物）按专属结构留存、不受平铺限制、证据层绝不静默删除；② 理顺按需能力触发口径——意图驱动是宿主自动感知机制，缺工具/不确定时唯一确定性动作是 search_capabilities，砍「自然语言撞大运」歧义。
  *  v6（2026-09-09）：移除「--- 专业内容准确性铁律 ---」整段（法律/医学/金融/通用引用/音频转写，约 -390 token）——
@@ -587,10 +590,6 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - 当用户请求涉及某技能领域且该技能已在「可用技能目录」列出 → **先调用 \`load_skill("技能名")\` 加载该技能的完整操作指令，再严格按其执行**；目录中未列出的技能 = 未下载，直接引导用户去下载，不要 load_skill 不存在或未下载的技能。
 - 用户已手动勾选强制注入的技能会直接给出完整指令（见「已触发技能」段落），此时不要再调用 load_skill。
 
-
-对话标题（可选）：仅当本轮对话主题明确、值得命名时，在回答最末尾用以下格式补一个标题建议；简短问答/单点答复可省略。
-<!-- TITLE: 简短标题（不超过20字） -->
-标题应简洁概括核心主题，只放在最后这一处，正文不重复标题内容。
 
 工具使用说明（tools 参数中的工具按需加载，只调用 tools 参数里实际存在的工具名，不要调用未列出的工具）：
 - 核心常驻工具：文件/编辑（read_file、write_file、edit_code、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、网页（web_search、web_fetch）、附件/材料（read_attachment、read_material）、规划/结束（todo_write、finish_task）、提问（ask_user_questions）、偏好（read_preferences）、技能（load_skill、read_skill_resource）
@@ -722,9 +721,9 @@ function extractLastUserContent(messages: ChatMessage[]): string {
 export function detectSceneHints(text: string): Set<ToolScene> {
   const scenes = new Set<ToolScene>();
   if (!text) return scenes;
-  // wanted：记忆/待办/偏好/工作报告/日历（含复盘/习惯/计划等高频信号词）
+  // butler：事务域——记忆/待办/偏好/工作报告/日历（含复盘/习惯/计划等高频信号词；沿用 wanted 作为输入别名）
   if (/wanted|记忆|待办|偏好|工作报告|日历|记住|查询|复盘|习惯|总结|计划|安排|清单|收藏|备忘|遗忘|便签|todo|notebook|preference|work.?report|calendar|reminder|daily.?report/i.test(text)) {
-    scenes.add('wanted');
+    scenes.add('butler');
   }
   // legal：法律场景（含协议/起草/拟定等高频触发词，及刑事法核心术语）
   // 补执行/金钱债务领域词（执行款清偿顺序、先本后息/先息后本、加倍迟延履行利息等提问
@@ -806,7 +805,7 @@ const CAPABILITY_CATALOG: CapabilityEntry[] = [
   { scene: 'legal', name: '法律检索/咨询', keywords: ['法律', '法条', '合同', '诉讼', '律师', '法规', '判例', '文书', '起诉', '司法', '执行', '清偿', '本金', '利息', '债权', '迟延履行', '加倍', '抵充'], description: '法条检索、判例查询、文书起草（含防幻觉约束）', triggerPhrase: '"查一下相关法条"' },
   { scene: 'audio', name: '音频转写', keywords: ['音频', '录音', '转写', '语音', '字幕', '听写'], description: '真实音频转写，禁止凭元数据编造', triggerPhrase: '"转写这段录音"' },
   { scene: 'ocr', name: '图片/PDF 文字识别', keywords: ['识别', '扫描', 'ocr', '图片文字', 'pdf文字', '票据', '证件', '文字识别'], description: '印刷体识别 + 手写复核', triggerPhrase: '"识别这张扫描件"' },
-  { scene: 'wanted', name: '记忆/待办/偏好', keywords: ['记忆', '待办', '偏好', '笔记', '日历', '提醒', '便签', '收藏', '备忘'], description: '全局长期记忆、项目待办、用户偏好', triggerPhrase: '"记住这个偏好"' },
+  { scene: 'butler', name: '记忆/待办/偏好', keywords: ['记忆', '待办', '偏好', '笔记', '日历', '提醒', '便签', '收藏', '备忘'], description: '全局长期记忆、项目待办、用户偏好', triggerPhrase: '"记住这个偏好"' },
   { scene: 'design', name: '界面主题/前端', keywords: ['主题', '配色', '前端', '界面', 'ui', '美化', '网页', '页面'], description: '读取真实主题 CSS 变量，前端/页面生成', triggerPhrase: '"按当前主题配色做页面"' },
   { scene: 'skill', name: '技能检索/安装', keywords: ['技能', 'skill', '安装技能', '能力缺口', '技能库'], description: '受控技能库检索与安装', triggerPhrase: '"有没有能做 PPT 的技能"' },
   { scene: 'office', name: 'Word 模板', keywords: ['word', 'docx', '模板', '文档模板', '占位符', '合同模板'], description: 'Word 模板批量填充/占位符扫描', triggerPhrase: '"批量填写 Word 模板"' },
@@ -944,7 +943,7 @@ registerTakeover({
 // 调用点注入最小服务面）完成全部副作用；本注册为模块级单次、不持 route 闭包（多请求并发安全）。
 // 行为等价：questions_request 载荷字段 / 20s tool_call_update(running) 心跳时序 / answers 回灌文本 /
 // eventLog·tool_result·遥测 / 循环 continue 语义逐位一致（原 if 分支体见 git 历史 3812-3878）。
-// planner_confirm / tool_confirm / login / grant 后续复用同一 host-pending 形态（各自注册新 kind）。
+// butler_confirm / tool_confirm / login / grant 后续复用同一 host-pending 形态（各自注册新 kind）。
 async function handleAskUserQuestions(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
   // ① 归一化 questions（与原 if 内联同语义：结构异常元素兜底为自增 id / 空问题 / 空选项 / allowCustom 默认开）
   const pendingQuestions: PendingQuestionItem[] = (
@@ -1018,25 +1017,25 @@ registerHostTakeover({
 // host-pending 形态：send / 挂起容器 / 20s 心跳 / 回灌 / 循环 continue 均经 ctx 服务面完成；本注册
 // 模块级单条、不持 route 闭包。与 ask_user 的差异：判定名单（confirmTools）是运行期配置、无法绑定
 // 固定工具名 → 注册条目 match 恒 true（工具名恒咨询），名单与身份由宿主在咨询点经 ctx 注入，handler
-// 内判定：名单外 / planner 结构化卡片已覆盖（identity==='planner' 且属 PLANNER_CARD_TOOLS）→ 'noop'
-// 照常通用执行。咨询点物理位置保持在 planner 卡片段之后（route 工具轮 ①.4 之后原 if 位置，见
-// handleAskUserQuestions 上方同轮咨询点），planner 先判的顺序约束由宿主保证。
+// 内判定：名单外 / butler 结构化卡片已覆盖（identity==='butler' 且属 BUTLER_CARD_TOOLS）→ 'noop'
+// 照常通用执行。咨询点物理位置保持在 butler 卡片段之后（route 工具轮 ①.4 之后原 if 位置，见
+// handleAskUserQuestions 上方同轮咨询点），butler 先判的顺序约束由宿主保证。
 // 行为等价：tool_confirm 载荷字段（confirmId/name/arguments/timeoutSec）/ 心跳时序 / denied·timeout
 // 区分措辞 / tool_result(error)·落账三连 / 循环 continue 语义逐位一致（原 if 分支体见 git 历史
 // 4045-4106）；approved 不回灌编辑参数 → 'handled_fallback' 回落本轮通用执行（与迁移前一致：前端
 // 通用确认只回传 approved，服务端原样忽略 edited，args 不覆盖）。
 async function handleToolConfirm(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
-  // ① P4b-1 名单判定 + 审批策略裁决（默认档与迁移前 if 条件逐位一致：名单内 且 未被 planner
+  // ① P4b-1 名单判定 + 审批策略裁决（默认档与迁移前 if 条件逐位一致：名单内 且 未被 butler
   //    结构化卡片覆盖才弹通用确认、名单外一律 'noop' 放行）。顺序约束：
-  //      a) planner 结构化卡覆盖最先判定并 'noop' 保留 —— planner 卡（用户可见可编辑确认 UI）视为
+  //      a) butler 结构化卡覆盖最先判定并 'noop' 保留 —— butler 卡（用户可见可编辑确认 UI）视为
   //         强于 confirm 的人工审批，任何 strategy 均不拦截（见 approval.ts 文件头边界说明）；
   //      b) 其余工具走 decideToolApproval（纯函数，approval.ts）：'request' → 原挂起确认流程
   //         （② 起不变）；'allow' → 'noop' 通用执行（同现状名单外，allow_scope 下不 consult 写类）；
   //         'deny'（仅 never 档，名单内或写类）→ SSE tool_result(error) + 落账 + 'handled_continue'。
   //    ctx.approvalStrategy 未注入（undefined）= 兜底 'allow_scope'（向后兼容，行为同现网）。
   const confirmTools = ctx.confirmTools ?? [];
-  const usesPlannerCard = ctx.identity === 'planner' && PLANNER_CARD_TOOLS.has(ctx.name);
-  if (usesPlannerCard) return 'noop';
+  const usesButlerCard = ctx.identity === 'butler' && BUTLER_CARD_TOOLS.has(ctx.name);
+  if (usesButlerCard) return 'noop';
   const approvalStrategy = ctx.approvalStrategy ?? 'allow_scope';
   const approval = decideToolApproval({
     name: ctx.name,
@@ -1122,32 +1121,32 @@ registerHostTakeover({
   handle: handleToolConfirm,
 });
 
-// ── P4a-3-3 迁移 planner 卡片，行为不变 ──
-// 挂起型第三类：planner 专属节点（identity==='planner'）的排程 创建/改/删（PLANNER_CARD_TOOLS =
-// create_scheduled_todo / todo_update / todo_delete）→ 先弹结构化可编辑确认卡片（buildPlannerCard
+// ── P4a-3-3 迁移 butler 卡片，行为不变 ──
+// 挂起型第三类：butler 专属节点（identity==='butler'）的排程 创建/改/删（BUTLER_CARD_TOOLS =
+// create_scheduled_todo / todo_update / todo_delete）→ 先弹结构化可编辑确认卡片（buildButlerCard
 // 预填字段 + 冲突提示），用户可改字段后确认才真正执行；拒绝/超时按未执行处理。与 tool_confirm 同
 // host-pending 形态（send / createPendingConfirm 挂起容器 / 20s 心跳 / 回灌 / 循环 continue 均经
 // ctx 服务面完成）；本注册模块级单条、不持 route 闭包。与 tool_confirm 的差异：approved 后用户
 // 编辑过的参数（edited.toolArgs）要覆盖本轮执行参数 —— ctx.setExecArgs 写回通道由宿主注入
 // （route 闭包内 let parsedArgs/execArgs），handler 据此把新参数交给宿主回落通用执行时生效。
-// 判定：非 planner 身份 / 工具不在 PLANNER_CARD_TOOLS / 卡片构建失败（无 event 等）→ 'noop' 交还
+// 判定：非 butler 身份 / 工具不在 BUTLER_CARD_TOOLS / 卡片构建失败（无 event 等）→ 'noop' 交还
 // 宿主走 tool_confirm/通用执行（与迁移前 if(card) 不进入同语义）。咨询点物理位置保持在 tool_confirm
-// 之前（route 工具轮 ①.4 原 if 位置），planner 先判的顺序约束由宿主保证。
-// 行为等价：planner_confirm 载荷字段（confirmId/name/card/timeoutSec，card 即 buildPlannerCard 产出）
+// 之前（route 工具轮 ①.4 原 if 位置），butler 先判的顺序约束由宿主保证。
+// 行为等价：butler_confirm 载荷字段（confirmId/name/card/timeoutSec，card 即 buildButlerCard 产出）
 // / 心跳时序 / denied·timeout 区分措辞 / tool_result(error)·落账三连 / 循环 continue 语义 /
 // approved+edited.toolArgs 覆盖路径逐位一致（原 if 分支体见 git 历史 4049-4116）。
-async function handlePlannerCard(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
-  // ① 身份 + 工具名单判定（与迁移前 if 条件逐位一致：planner 专属节点的排程 创建/改/删 才走卡片）
-  if (ctx.identity !== 'planner' || !PLANNER_CARD_TOOLS.has(ctx.name)) return 'noop';
-  // ② 卡片构建（buildPlannerCard：create 由参数预填；update/delete 拉库内事件行 + 冲突提示）；
+async function handleButlerCard(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // ① 身份 + 工具名单判定（与迁移前 if 条件逐位一致：butler 专属节点的排程 创建/改/删 才走卡片）
+  if (ctx.identity !== 'butler' || !BUTLER_CARD_TOOLS.has(ctx.name)) return 'noop';
+  // ② 卡片构建（buildButlerCard：create 由参数预填；update/delete 拉库内事件行 + 冲突提示）；
   //    构建失败（缺 event_id / 库内无此事件 / 异常）→ 不弹卡，交还宿主（noop）走下方 tool_confirm
-  //    consult —— 与迁移前 if(card) 不进入、随后 tool_confirm 的 usesPlannerCard 覆盖判定等价。
-  const card = await buildPlannerCard(ctx.name, ctx.args);
+  //    consult —— 与迁移前 if(card) 不进入、随后 tool_confirm 的 usesButlerCard 覆盖判定等价。
+  const card = await buildButlerCard(ctx.name, ctx.args);
   if (!card) return 'noop';
-  // ③ 登记挂起项 + SSE planner_confirm（载荷字段与原分支一致：confirmId/name/card/timeoutSec）
+  // ③ 登记挂起项 + SSE butler_confirm（载荷字段与原分支一致：confirmId/name/card/timeoutSec）
   const { confirmId, promise } = createPendingConfirm(ctx.name, ctx.execArgs ?? '', ctx.nodeId);
   ctx.send({
-    planner_confirm: {
+    butler_confirm: {
       confirmId,
       name: ctx.name,
       card,
@@ -1201,11 +1200,11 @@ async function handlePlannerCard(ctx: HostTakeoverContext): Promise<HostTakeover
   return 'handled_fallback';
 }
 registerHostTakeover({
-  kind: 'planner_confirm',
+  kind: 'butler_confirm',
   phase: 'pre',
-  name: '*', // 名单是固定集（PLANNER_CARD_TOOLS）+ 身份（planner）判定 → 恒咨询，判定在 handler 内
+  name: '*', // 名单是固定集（BUTLER_CARD_TOOLS）+ 身份（butler）判定 → 恒咨询，判定在 handler 内
   match: () => true,
-  handle: handlePlannerCard,
+  handle: handleButlerCard,
 });
 
 // ── P4a-3-4 迁移 login/grant，行为不变 ──
@@ -1224,7 +1223,7 @@ registerHostTakeover({
 // mode 注入为 exec 前 pre 改写、browser.login 不在 P4a-2a args_transform 节点参数注入名单
 // （NODE_PARAM_INJECT_TOOLS）内 → 以 args_transform 形态注册第二条目（按名匹配，互不重叠），
 // 咨询点复用既有 takeoverOfKind(toolName,'args_transform') 位置 —— 不触碰既有名单条目逻辑；
-// 与原内联 if 的等价性：browser.login 的 execArgs 无其它 pre 改写叠加（不在 planner 卡名单 /
+// 与原内联 if 的等价性：browser.login 的 execArgs 无其它 pre 改写叠加（不在 butler 卡名单 /
 // node 注入名单），注入输入恒为 tc.function.arguments、位置仍在 executeTool 前，行为逐位一致。
 registerTakeover({
   kind: 'args_transform',
@@ -1747,7 +1746,10 @@ function verifyNoteReadClaims(
  *  与模型池/API 标注同源（model-tags.isVisionModel），并排除 ocr 专用转录模型
  *  （qwen-vl-ocr 等只能走 OCR 工具转录，不能作为对话看图模型）。 */
 function chatModelSupportsVision(modelId?: string): boolean {
-  return isVisionModel(modelId || '');
+  // 两种口径取或：名字正则（model-tags）∪ 模型池能力注册表（supports_vision 等厂商声明）。
+  // 二者对齐后，deepseek-v4.1-flash 这类「名字无视觉字样但厂商声明多模态」的模型也能直连，
+  // 不会因正则漏判而错误降级为 bob-ocr 描述注入。
+  return isVisionModel(modelId || '') || isDeclaredVisionModel(modelId || '');
 }
 
 /** Vision Bridge：自动检测图片附件，用视觉模型描述后注入文本 */
@@ -3185,7 +3187,7 @@ export async function POST(request: NextRequest) {
       // L1 静态（节点类型）：
       //   - coding：AI Coding 节点（sandboxCodingInjection 非空）→ 放行 design 场景，
       //     coding 提示要求先调用 get_current_theme 获取真实主题色值
-      //   - wanted：沙盒模式（wanted Node 聊天）→ 放行 read_todo/read_notebook/preferences/calendar
+      //   - butler：沙盒模式（事务 Node 聊天）→ 放行 read_todo/read_notebook/preferences/calendar
       //   - node：画布节点对话（nodeId 存在）→ 放行 read_upstream_node/read_manifest/intern_search/draw（节点树/画布结构依赖工具）
       // L2 动态（对话意图）：最后用户消息明确提到对应场景关键词（或附件类型）时，才放行该场景专属工具；
       //   未涉及该场景则专属工具对模型不可见，避免误调用
@@ -3194,7 +3196,7 @@ export async function POST(request: NextRequest) {
         activeScenes.add('coding');
         activeScenes.add('design');
       }
-      if (sandbox) activeScenes.add('wanted');
+      if (sandbox) activeScenes.add('butler');
       if (nodeId) activeScenes.add('node');
       try {
         const sceneHintText = extractLastUserContent(messagesWithNodeBridge);
@@ -4106,45 +4108,45 @@ export async function POST(request: NextRequest) {
                 // 执行参数（intern_search 需注入 current_node_id，见下）
                 let execArgs = tc.function.arguments;
 
-                // ①.4 P4a-3-3 迁移 planner 卡片，行为不变：planner 结构化确认卡片已从 route if 分支
-                //     收敛为注册式 host-pending 分发（tool-pipeline.ts）。判定（identity==='planner' &&
-                //     PLANNER_CARD_TOOLS）+ 卡片构建（buildPlannerCard）+ planner_confirm SSE 载荷 /
+                // ①.4 P4a-3-3 迁移 butler 卡片，行为不变：butler 结构化确认卡片已从 route if 分支
+                //     收敛为注册式 host-pending 分发（tool-pipeline.ts）。判定（identity==='butler' &&
+                //     BUTLER_CARD_TOOLS）+ 卡片构建（buildButlerCard）+ butler_confirm SSE 载荷 /
                 //     20s 心跳 / denied·timeout 措辞 / 落账三连 / continue 语义均在注册 handler
-                //     （handlePlannerCard，见模块级注册）内逐位复刻。本咨询点特有职责：
+                //     （handleButlerCard，见模块级注册）内逐位复刻。本咨询点特有职责：
                 //       a) 把身份（identity）+ 挂起登记用原始参数串（execArgs）+ 结果落账
                 //          commitToolError 注入 ctx；setExecArgs 写回通道绑定本轮 let parsedArgs /
                 //          execArgs —— approved + edited.toolArgs 覆盖后回落通用执行即用新参数
                 //          （等价迁移前「parsedArgs = editedArgs; execArgs = JSON.stringify」覆盖路径）；
                 //       b) verdict 流控：'handled_continue'（denied/timeout）→ continue；
-                //          'handled_fallback'（approved）→ planner 卡已接管确认 → 跳过下方 tool_confirm
-                //          consult（等价迁移前 consult 后 usesPlannerCard → noop 的照常执行，且避免
-                //          重复弹窗）；'noop'（非 planner 身份/名单外/卡片构建失败）→ 照常进入
+                //          'handled_fallback'（approved）→ butler 卡已接管确认 → 跳过下方 tool_confirm
+                //          consult（等价迁移前 consult 后 usesButlerCard → noop 的照常执行，且避免
+                //          重复弹窗）；'noop'（非 butler 身份/名单外/卡片构建失败）→ 照常进入
                 //          tool_confirm consult。
-                //     咨询点物理位置保持在 tool_confirm（①.5）之前 —— planner 先判的顺序约束不因迁移改变。
-                // K3 hook: planner_confirm (consult seq #3 · before_execute_running)
-                const plannerTakeover = hostTakeoverFor(toolName, 'planner_confirm', 'pre');
+                //     咨询点物理位置保持在 tool_confirm（①.5）之前 —— butler 先判的顺序约束不因迁移改变。
+                // K3 hook: butler_confirm (consult seq #3 · before_execute_running)
+                const butlerTakeover = hostTakeoverFor(toolName, 'butler_confirm', 'pre');
                 // 编辑覆盖中间通道：approved + edited.toolArgs 时 handler 经 ctx.setExecArgs 写入，
                 // handle() 返回后再同步应用到本轮 parsedArgs / execArgs（避免在异步闭包内改写捕获
                 // 变量导致后续类型收窄失效）
-                let plannerEditedExecArgs: string | null = null;
-                let plannerCardCovered = false;
-                if (plannerTakeover) {
+                let butlerEditedExecArgs: string | null = null;
+                let butlerCardCovered = false;
+                if (butlerTakeover) {
                   // 本轮参数快照（denied/timeout 时与 parsedArgs 同引用；落账/ctx.args 均用快照，
                   // 与 tool_confirm 咨询点 confirmToolArgs 同构 —— 嵌套闭包内读取捕获 let 会退回
                   // 声明类型，快照 const 保持收窄）
-                  const plannerCardArgs = parsedArgs;
-                  const plannerVerdict = await plannerTakeover.handle({
+                  const butlerCardArgs = parsedArgs;
+                  const butlerVerdict = await butlerTakeover.handle({
                     name: toolName,
-                    args: plannerCardArgs,
+                    args: butlerCardArgs,
                     nodeId,
                     send,
                     spanId: toolSpanId,
                     startAt: toolStartAt,
-                    // 请求作用域注入：身份（planner 专属判定）+ 挂起登记用原始参数串 + 编辑覆盖写回通道
+                    // 请求作用域注入：身份（butler 专属判定）+ 挂起登记用原始参数串 + 编辑覆盖写回通道
                     identity,
                     execArgs,
                     setExecArgs: (raw) => {
-                      plannerEditedExecArgs = raw;
+                      butlerEditedExecArgs = raw;
                     },
                     // 结果落账：approved 走 handled_fallback 落回下方通用执行（executeTool 成功落账在
                     // 通用路径完成，commitToolResult 仅为 ctx 接口必填、本 handler 不调用）；
@@ -4153,7 +4155,7 @@ export async function POST(request: NextRequest) {
                     commitToolResult: (resultText) => {
                       kctx.allToolCalls.push({
                         toolName,
-                        arguments: plannerCardArgs,
+                        arguments: butlerCardArgs,
                         result: resultText,
                         durationMs: 0,
                         success: true,
@@ -4166,7 +4168,7 @@ export async function POST(request: NextRequest) {
                     commitToolError: (resultText) => {
                       kctx.allToolCalls.push({
                         toolName,
-                        arguments: plannerCardArgs,
+                        arguments: butlerCardArgs,
                         result: resultText,
                         durationMs: 0,
                         success: false,
@@ -4177,37 +4179,37 @@ export async function POST(request: NextRequest) {
                     },
                   });
                   // denied/timeout 已由宿主处理（error 回灌 + 落账）→ 跳过下方通用执行逻辑
-                  if (plannerVerdict === 'handled_continue') continue;
+                  if (butlerVerdict === 'handled_continue') continue;
                   // approved（handled_fallback）：先用用户编辑后的参数覆盖本轮执行参数（等价迁移前
                   // 「parsedArgs = editedArgs; execArgs = JSON.stringify(parsedArgs)」路径），再标记卡已
                   // 接管确认 → 跳过 tool_confirm consult、回落通用执行
-                  if (plannerVerdict === 'handled_fallback') {
-                    if (plannerEditedExecArgs !== null) {
-                      parsedArgs = JSON.parse(plannerEditedExecArgs) as Record<string, unknown>;
-                      execArgs = plannerEditedExecArgs;
+                  if (butlerVerdict === 'handled_fallback') {
+                    if (butlerEditedExecArgs !== null) {
+                      parsedArgs = JSON.parse(butlerEditedExecArgs) as Record<string, unknown>;
+                      execArgs = butlerEditedExecArgs;
                     }
-                    plannerCardCovered = true;
+                    butlerCardCovered = true;
                   }
                 }
 
                 // ①.5 P4a-3-2 迁移：tool_confirm（需手动确认名单通用确认）已从 route if 分支收敛为
                 //     注册式 host-pending 分发（tool-pipeline.ts，行为不变）。咨询点物理位置保持
-                //     在 planner 结构化卡片段（①.4）之后 —— planner 先判的顺序约束不因迁移改变：
-                //     planner 卡已覆盖的排程工具（identity==='planner' 且属 PLANNER_CARD_TOOLS）不重复
+                //     在 butler 结构化卡片段（①.4）之后 —— butler 先判的顺序约束不因迁移改变：
+                //     butler 卡已覆盖的排程工具（identity==='butler' 且属 BUTLER_CARD_TOOLS）不重复
                 //     弹通用确认、名单外工具不接管，均由注册 handler（handleToolConfirm，见模块级注册）
                 //     依据 ctx 注入的 identity + confirmTools（settingsForTools.confirmTools ??
                 //     DEFAULT_CONFIRM_TOOLS，运行期配置不可由模块级 handler 持有）判定后返回 'noop'；
                 //     denied/timeout 的 SSE tool_result(error)·措辞区分·落账三连·循环 continue 亦在
                 //     handler 内逐位复刻（'handled_continue'）；approved → 'handled_fallback' 回落下方
                 //     通用执行（args 原样，通用确认不回灌编辑参数，与迁移前一致）。
-                //     衔接（P4a-3-3）：planner consult（①.4）verdict === 'handled_fallback'（approved，
+                //     衔接（P4a-3-3）：butler consult（①.4）verdict === 'handled_fallback'（approved，
                 //     args 可能已经 setExecArgs 覆盖）→ 卡已接管确认，直接跳过本 consult（等价迁移前
-                //     consult 后 usesPlannerCard → noop 的照常执行，无任何副作用差异）；仅 planner
-                //     verdict === 'noop'（含卡片构建失败 → usesPlannerCard 冗余判定在 handleToolConfirm
-                //     内保留，保证仍不弹通用确认）或 planner 未命中时本 consult 才执行。
-                // K3 hook: tool_confirm (consult seq #4 · before_execute_running；planner 卡覆盖后跳过)
+                //     consult 后 usesButlerCard → noop 的照常执行，无任何副作用差异）；仅 butler
+                //     verdict === 'noop'（含卡片构建失败 → usesButlerCard 冗余判定在 handleToolConfirm
+                //     内保留，保证仍不弹通用确认）或 butler 未命中时本 consult 才执行。
+                // K3 hook: tool_confirm (consult seq #4 · before_execute_running；butler 卡覆盖后跳过)
                 const confirmTakeover = hostTakeoverFor(toolName, 'tool_confirm', 'pre');
-                if (confirmTakeover && !plannerCardCovered) {
+                if (confirmTakeover && !butlerCardCovered) {
                   const confirmToolArgs = parsedArgs;
                   const confirmVerdict = await confirmTakeover.handle({
                     name: toolName,
@@ -4216,7 +4218,7 @@ export async function POST(request: NextRequest) {
                     send,
                     spanId: toolSpanId,
                     startAt: toolStartAt,
-                    // 请求作用域注入：身份（planner 卡覆盖判定）+ 当前生效手动确认名单 + 审批策略
+                    // 请求作用域注入：身份（butler 卡覆盖判定）+ 当前生效手动确认名单 + 审批策略
                     // （P4b-1：settings.approval?.defaultStrategy ?? 'allow_scope'，默认档与现网
                     // 逐位一致）+ 挂起登记用原始参数串
                     identity,
@@ -4257,7 +4259,7 @@ export async function POST(request: NextRequest) {
                   });
                   // denied/timeout 已由宿主处理（error 回灌 + 落账）→ 跳过下方通用执行逻辑
                   if (confirmVerdict === 'handled_continue') continue;
-                  // approved（handled_fallback）→ 继续本轮通用执行；noop（名单外/planner 卡覆盖）→ 照常执行
+                  // approved（handled_fallback）→ 继续本轮通用执行；noop（名单外/butler 卡覆盖）→ 照常执行
                 }
 
                 // ② 执行前：phase=running（单独发一条"更新"事件，前端接收到替换 pending）

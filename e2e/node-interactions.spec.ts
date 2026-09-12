@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * e2e 用例 2 & 4：节点交互安全网
- *   - 用例 4：新建便签（覆盖 sticky-notes 交互）
- *   - 用例 2：发送文件到当前节点附件（覆盖 add-attachment 链路）
+ * e2e 用例 2：节点交互安全网
+ *   - 发送文件到当前节点附件（覆盖 add-attachment 链路）
+ *   - （用例 4「新建便签」已随 2026-09 便签入口移除而下线）
  */
 const TEST_ROOT = '/Users/baolei/Desktop/BobWork/projects';
 
@@ -20,17 +20,6 @@ async function restoreRoots(request: import('@playwright/test').APIRequestContex
 }
 
 test.describe('节点交互', () => {
-  test('新建便签：点击添加便签后出现便签编辑区', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
-
-    const before = await page.locator('.sticky-paper').count();
-    await page.getByTitle('添加便签').first().click();
-    await page.waitForTimeout(800);
-
-    await expect(page.locator('.sticky-paper')).toHaveCount(before + 1);
-  });
-
   test('发送文件到当前节点附件', async ({ page, request }) => {
     const originalRoots = await backupRoots(request);
     try {

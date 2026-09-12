@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
@@ -12,20 +12,11 @@ import {
   Briefcase,
   Zap,
   Mic,
-  Plus,
-  Boxes,
-  Users,
-  Gauge,
-  Settings,
-  Sparkles,
-  NotebookText,
-  BrainCircuit,
 } from 'lucide-react';
 
 import { bus, BusEvents, type ChatMessage, type WantedNoticeItem, type WantedNoticePayload } from '@/lib/bus';
 import { desktop } from '@/lib/desktop-adapter';
-import { Button } from '@/components/ui/button';
-import { isPreviewable } from './viewers/registry';
+import { isBrowserDoc, isPreviewable } from './viewers/registry';
 import { FileName } from './FileName';
 import {
   type WantedCommand,
@@ -40,7 +31,6 @@ import {
 import type { SummarizedTask } from '@/lib/wanted/executor';
 import type { WikiEntryWithContent } from '@/lib/mcp/notes-types';
 import type { ScheduleEvent } from '@/lib/wanted/schedule';
-import { loadStarredApps, subscribeStarred, type StarredApp } from '@/lib/sandbox-starred';
 
 /**
  * ⌘F 统一面板（Raycast 式）
@@ -94,14 +84,6 @@ interface SearchHit {
 interface UnifiedPaletteProps {
   open: boolean;
   onClose: () => void;
-  /** 笔记库面板 */
-  onOpenNotes?: () => void;
-  /** 设置面板 */
-  onOpenSettings?: () => void;
-  /** 当前打开的研究会话节点（画布主焦点）；MD 按钮归属兜底来源 */
-  focusedNodeId?: string | null;
-  /** 当前项目 id（配合 focusedNodeId 归属标记） */
-  projectId?: string | null;
 }
 
 /** 文件扩展名 → 图标颜色（与本地文件浏览器一致） */
@@ -133,77 +115,7 @@ function shortPath(p: string): string {
   return parts.slice(-3).join('/') || p;
 }
 
-/** 底部图标栏单个图标按钮：hover 高亮 + 自绘英文标题气泡（不依赖系统原生 title） */
-function IconBarBtn({ title, onClick, children }: {
-  title: string;
-  onClick?: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Button
-      type="button"
-      onClick={onClick}
-      variant="ghost"
-      tone="neutral"
-      size="icon-lg"
-      aria-label={title}
-      className="group relative"
-    >
-      {children}
-      <span
-        className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border px-2 py-1 text-11 font-medium opacity-0 shadow-lg transition-opacity duration-100 group-hover:opacity-100 group-focus-visible:opacity-100"
-        style={{ backgroundColor: 'var(--popover)', borderColor: 'var(--line)', color: 'var(--ink)' }}
-      >
-        {title}
-      </span>
-    </Button>
-  );
-}
-
-export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, focusedNodeId, projectId }: UnifiedPaletteProps) {
-  // ===== NodeMap 最近聚焦节点（供「MD」为该节点创建 homework Markdown 文档） =====
-  const [focusedNode, setFocusedNode] = useState<{ nodeId: string | null; projectId?: string | null }>({ nodeId: null });
-  const [mdCreating, setMdCreating] = useState(false);
-  useEffect(() => {
-    const onFocus = (e: Event) => {
-      const d = ((e as CustomEvent).detail ?? {}) as { nodeId?: string | null; projectId?: string | null };
-      setFocusedNode({ nodeId: d.nodeId ?? null, projectId: d.projectId ?? null });
-    };
-    window.addEventListener('map-node-focused', onFocus);
-    return () => window.removeEventListener('map-node-focused', onFocus);
-  }, []);
-  const handleCreateFocusedMd = async () => {
-    // 归属节点：优先「当前打开的会话」（画布主焦点 focusedNodeId），其次 NodeMap 最近聚焦节点 focusedNode
-    const targetNodeId = focusedNodeId ?? focusedNode.nodeId;
-    const targetProjectId = projectId ?? focusedNode.projectId;
-    if (mdCreating) return;
-    if (!targetNodeId) {
-      window.alert('请先打开一个会话节点，再点击 MD 创建 Markdown 文档。');
-      return;
-    }
-    setMdCreating(true);
-    try {
-      const body: Record<string, unknown> = { action: 'create_homework_md', node_id: targetNodeId };
-      if (targetProjectId) body.project_id = targetProjectId;
-      const resp = await fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      if (!data.success) {
-        window.alert(data.error || 'Create MD file failed');
-        return;
-      }
-      bus.publish(BusEvents.fileOpen, { source: 'project', path: data.path, name: data.name });
-      onClose();
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Create MD file failed');
-    } finally {
-      setMdCreating(false);
-    }
-  };
-
+export function UnifiedPalette({ open, onClose }: UnifiedPaletteProps) {
   // ===== 输入（查找态 / 指令态共用） =====
   const [query, setQuery] = useState('');
   const [cursorPos, setCursorPos] = useState(0);
@@ -229,67 +141,6 @@ export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, foc
   const [nodeMode, setNodeMode] = useState(false);
   const [meetingMode, setMeetingMode] = useState(false);
   const activeChatThreadIdRef = useRef<string | null>(null);
-
-  // ===== 底部图标栏：标星小程序（与 SandboxPanel 共享，点击直接打开预览） =====
-  const [starredApps, setStarredApps] = useState<StarredApp[]>(() => loadStarredApps());
-  useEffect(() => subscribeStarred(setStarredApps), []);
-
-  // ===== My Quick：用户自建快捷入口（存储于 /api/quick-launch） =====
-  interface QuickLauncherItem { id: string; label: string; agent: string; prompt: string }
-  const [quickLaunchers, setQuickLaunchers] = useState<QuickLauncherItem[]>([]);
-  const [quickFormOpen, setQuickFormOpen] = useState(false);
-  const [quickLabel, setQuickLabel] = useState('');
-  const [quickAgent, setQuickAgent] = useState('chat');
-  const [quickPrompt, setQuickPrompt] = useState('');
-  const [quickSaving, setQuickSaving] = useState(false);
-  const loadQuick = useCallback(async () => {
-    try {
-      const r = await fetch('/api/quick-launch');
-      const d = (await r.json()) as { quickLaunchers?: QuickLauncherItem[] };
-      if (Array.isArray(d.quickLaunchers)) setQuickLaunchers(d.quickLaunchers);
-    } catch { /* 忽略 */ }
-  }, []);
-  useEffect(() => {
-    void loadQuick();
-  }, [loadQuick, open]);
-
-  const addQuick = async () => {
-    const label = quickLabel.trim();
-    if (!label) return;
-    setQuickSaving(true);
-    try {
-      const r = await fetch('/api/quick-launch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add', label, agent: quickAgent.trim() || 'chat', prompt: quickPrompt.trim() }),
-      });
-      const d = (await r.json()) as { success?: boolean; error?: string };
-      if (!r.ok || !d.success) {
-        window.alert(d.error || 'Failed to add quick launcher');
-        return;
-      }
-      setQuickLabel('');
-      setQuickPrompt('');
-      setQuickAgent('chat');
-      setQuickFormOpen(false);
-      await loadQuick();
-    } catch {
-      window.alert('Failed to add quick launcher');
-    } finally {
-      setQuickSaving(false);
-    }
-  };
-
-  const removeQuick = async (id: string) => {
-    try {
-      await fetch('/api/quick-launch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'remove', id }),
-      });
-      await loadQuick();
-    } catch { /* 忽略 */ }
-  };
 
   // 形态判定：/ 开头 → 指令态；Node/会议激活 → 会话态；否则 → 查找态
   const commandMode = hasCommandIntent(query);
@@ -412,7 +263,7 @@ export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, foc
       await openProject(item.projectId);
       return;
     }
-    if (isPreviewable(item.extension)) {
+    if (isPreviewable(item.extension) || isBrowserDoc(item.name)) {
       bus.publish(BusEvents.fileOpen, { source: 'local', path: item.path, name: item.name });
     } else {
       void desktop.openFile(item.path);
@@ -583,7 +434,6 @@ export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, foc
               content: n.content,
               time: n.date || (n.updatedAt || '').slice(0, 10) || '',
               startMs: n.updatedAt ? Date.parse(n.updatedAt) || Date.now() : Date.now(),
-              tags: n.tags,
             }));
           } else if (result.command === 'check' && Array.isArray(result.events)) {
             items = result.events
@@ -597,7 +447,6 @@ export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, foc
                 status: ev.status,
                 priority: ev.priority,
                 allDay: !!ev.all_day,
-                tags: [],
               }));
           }
           // 查询签名：同一查询重复执行时生成"本轮新邮件"而非复用旧邮件
@@ -836,168 +685,6 @@ export function UnifiedPalette({ open, onClose, onOpenNotes, onOpenSettings, foc
             ⌘F
           </kbd>
         </div>
-
-        {/* 底部图标栏（多组）：Actions / Library / Quick / Focus(New·T·MD·Calendar) / Starred */}
-        <div
-          className="flex shrink-0 flex-wrap items-center gap-1.5 border-t px-4 py-3"
-          style={{ borderColor: 'var(--line-soft)' }}
-        >
-          {/* ── 组1 Actions：设置 / Extensions Store ── */}
-          {onOpenSettings && (
-            <IconBarBtn title="Settings" onClick={() => { onOpenSettings(); onClose(); }}>
-              <Settings className="h-4 w-4" />
-            </IconBarBtn>
-          )}
-          <IconBarBtn title="Extensions Store" onClick={() => { window.dispatchEvent(new CustomEvent('skill-store-open')); onClose(); }}>
-            <Sparkles className="h-4 w-4" />
-          </IconBarBtn>
-          <div className="mx-1 h-5 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
-
-          {/* ── 组2 Library：Bob-Mind / 笔记 / 方案 / 小程序 / 团队 ── */}
-          <IconBarBtn title="Bob-Mind" onClick={() => { window.dispatchEvent(new CustomEvent('open-bob-mind-panel')); onClose(); }}>
-            <BrainCircuit className="h-4 w-4" />
-          </IconBarBtn>
-          {onOpenNotes && (
-            <IconBarBtn title="Notes" onClick={() => { onOpenNotes(); onClose(); }}>
-              <NotebookText className="h-4 w-4" />
-            </IconBarBtn>
-          )}
-          <IconBarBtn title="Mini Program Store" onClick={() => { window.dispatchEvent(new CustomEvent('sandbox-store-open')); onClose(); }}>
-            <Boxes className="h-4 w-4" />
-          </IconBarBtn>
-          <IconBarBtn title="Agent Teams" onClick={() => { window.dispatchEvent(new CustomEvent('team-panel-open')); onClose(); }}>
-            <Users className="h-4 w-4" />
-          </IconBarBtn>
-          <IconBarBtn title="Model Usage" onClick={() => { window.dispatchEvent(new CustomEvent('usage-panel-open')); onClose(); }}>
-            <Gauge className="h-4 w-4" />
-          </IconBarBtn>
-
-          {/* My Quick：用户自建快捷入口（阶段①：存储与展示） */}
-          {(quickLaunchers.length > 0 || quickFormOpen) && (
-            <>
-              <div className="mx-1 h-5 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
-              {quickLaunchers.map((q) => (
-                <span key={q.id} className="group relative">
-                  <IconBarBtn
-                    title={`${q.label}${q.agent ? ` · ${q.agent}` : ''}${q.prompt ? ` — ${q.prompt}` : ''}`}
-                    onClick={() => {
-                      window.dispatchEvent(new CustomEvent('quick-launch-open', { detail: { label: q.label, agent: q.agent, prompt: q.prompt } }));
-                      onClose();
-                    }}
-                  >
-                    <span
-                      className="flex h-4 w-4 items-center justify-center rounded text-10 font-semibold shadow-sm"
-                      style={{
-                        backgroundColor: 'var(--primary-strong)',
-                        color: '#fff',
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
-                      }}
-                    >
-                      {q.label.charAt(0).toUpperCase()}
-                    </span>
-                  </IconBarBtn>
-                  <button
-                    type="button"
-                    onClick={() => void removeQuick(q.id)}
-                    className="absolute -right-1 -top-1 hidden h-3.5 w-3.5 items-center justify-center rounded-full group-hover:flex"
-                    style={{ backgroundColor: 'var(--danger)', color: '#fff' }}
-                    title={`Remove ${q.label}`}
-                  >
-                    <X className="h-2 w-2" />
-                  </button>
-                </span>
-              ))}
-              <IconBarBtn
-                title={quickFormOpen ? 'Close add form' : 'Add quick launcher'}
-                onClick={() => { setQuickFormOpen((v) => !v); }}
-              >
-                <Plus className="h-4 w-4" />
-              </IconBarBtn>
-            </>
-          )}
-
-          {/* ── 组4 Tools：New project / T（模板面板）/ MD ── */}
-          <div className="mx-1 h-5 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
-          <IconBarBtn title="New project" onClick={() => { window.dispatchEvent(new Event('create-project-open')); onClose(); }}>
-            <Plus className="h-4 w-4" />
-          </IconBarBtn>
-          <IconBarBtn title="Templates" onClick={() => { window.dispatchEvent(new CustomEvent('open-template-panel', { detail: {} })); onClose(); }}>
-            <span className="text-11 font-bold leading-none">T</span>
-          </IconBarBtn>
-          <IconBarBtn title="Markdown" onClick={() => void handleCreateFocusedMd()}>
-            {mdCreating ? <Loader2 className="h-3 w-3 animate-spin" /> : <span className="text-10 font-bold leading-none">MD</span>}
-          </IconBarBtn>
-
-          {/* ── 组5 Starred：标星小程序（点击直接打开预览） ── */}
-          {starredApps.length > 0 && (
-            <>
-              <div className="mx-1 h-5 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
-              {starredApps.map((app) => (
-                <IconBarBtn
-                  key={app.id}
-                  title={app.name}
-                  onClick={() => {
-                    window.dispatchEvent(new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }));
-                    onClose();
-                  }}
-                >
-                  <span
-                    className="flex h-4 w-4 items-center justify-center rounded text-10 font-semibold shadow-sm"
-                    style={{
-                      backgroundColor: 'var(--primary)',
-                      color: 'var(--primary-foreground)',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
-                    }}
-                  >
-                    {app.name.charAt(0).toUpperCase()}
-                  </span>
-                </IconBarBtn>
-              ))}
-            </>
-          )}
-        </div>
-
-        {/* My Quick 添加表单 */}
-        {quickFormOpen && (
-          <div className="flex shrink-0 items-center gap-1.5 px-3 pb-2" style={{ backgroundColor: 'var(--paper)' }}>
-            <input
-              value={quickLabel}
-              onChange={(e) => setQuickLabel(e.target.value)}
-              placeholder="Label (e.g. DeepSeek Harness)"
-              className="w-40 rounded-md border px-2 py-1 text-xs outline-none"
-              style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
-            />
-            <select
-              value={quickAgent}
-              onChange={(e) => setQuickAgent(e.target.value)}
-              className="rounded-md border px-1.5 py-1 text-xs outline-none"
-              style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
-              title="Target agent type"
-            >
-              <option value="chat">chat</option>
-              <option value="coding">coding</option>
-            </select>
-            <input
-              value={quickPrompt}
-              onChange={(e) => setQuickPrompt(e.target.value)}
-              placeholder="Preset prompt (optional)"
-              className="min-w-0 flex-1 rounded-md border px-2 py-1 text-xs outline-none"
-              style={{ borderColor: 'var(--line)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
-              onKeyDown={(e) => { if (e.key === 'Enter') void addQuick(); }}
-            />
-            <Button
-              type="button"
-              disabled={quickSaving || !quickLabel.trim()}
-              loading={quickSaving}
-              onClick={() => void addQuick()}
-              variant="solid"
-              tone="brand"
-              size="sm"
-            >
-              {quickSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
-            </Button>
-          </div>
-        )}
 
         {/* 指令候选下拉（流式撑开面板，避免被 overflow-hidden 裁剪） */}
         {commandOpen && (

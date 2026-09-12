@@ -209,9 +209,6 @@ importers:
       '@types/turndown':
         specifier: ^5.0.6
         version: 5.0.6
-      '@xyflow/react':
-        specifier: ^12.11.2
-        version: 12.11.2(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(immer@9.0.21)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       adm-zip:
         specifier: ^0.6.0
         version: 0.6.0
@@ -229,7 +226,7 @@ importers:
         version: 1.1.1(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       coze-coding-dev-sdk:
         specifier: ^0.7.24
-        version: 0.7.24(@aws-sdk/credential-provider-node@3.972.2)(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
+        version: 0.7.24(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
       date-fns:
         specifier: ^4.1.0
         version: 4.1.0
@@ -286,7 +283,7 @@ importers:
         version: 0.4.6(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       openai:
         specifier: ^6.49.0
-        version: 6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6)
+        version: 6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6)
       pdf-parse:
         specifier: ^2.4.5
         version: 2.4.5
@@ -342,7 +339,7 @@ importers:
         specifier: ^11.0.5
         version: 11.0.5
       unified-renderer:
-        specifier: file:/Users/baolei/Desktop/BobAgent/assets/unified-renderer
+        specifier: file:../assets/unified-renderer
         version: file:../assets/unified-renderer
       vaul:
         specifier: ^1.1.2
@@ -401,7 +398,7 @@ importers:
         version: 43.2.0
       electron-builder:
         specifier: ^26.15.3
-        version: 26.15.3(electron-builder-squirrel-windows@26.15.3)
+        version: 26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3))
       eslint:
         specifier: ^9
         version: 9.39.2(jiti@1.21.7)
@@ -428,10 +425,10 @@ importers:
         version: 38.0.0(stylelint@16.26.1(typescript@5.9.3))
       tailwindcss:
         specifier: '3'
-        version: 3.4.19(tsx@4.21.0)
+        version: 3.4.19(tsx@4.21.0)(yaml@1.10.2)
       tsup:
         specifier: ^8.3.5
-        version: 8.5.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(typescript@5.9.3)
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(typescript@5.9.3)(yaml@1.10.2)
       tsx:
         specifier: ^4.19.2
         version: 4.21.0
@@ -440,7 +437,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^4.1.11
-        version: 4.1.11(@types/node@20.19.30)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0))
+        version: 4.1.11(@types/node@20.19.30)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2))
 
 packages:
 
@@ -3784,22 +3781,6 @@ packages:
   '@xtuc/long@4.2.2':
     resolution: {integrity: sha512-NuHqBY1PB/D8xU6s/thBgOAiAP7HOYDQ32+BFZILJ8ivkUkAHQnWfn6WhL79Owj1qmUnoN/YPhktdIoucipkAQ==}
 
-  '@xyflow/react@12.11.2':
-    resolution: {integrity: sha512-eLAlDWJfWnQEhJwGMjlWdAXO9eYllKpliUmPQlAmOLxz6mExXuzMVDUKLMquixgkrtmMFFtug3jGKmYYld12cA==}
-    peerDependencies:
-      '@types/react': '>=17'
-      '@types/react-dom': '>=17'
-      react: '>=17'
-      react-dom: '>=17'
-    peerDependenciesMeta:
-      '@types/react':
-        optional: true
-      '@types/react-dom':
-        optional: true
-
-  '@xyflow/system@0.0.79':
-    resolution: {integrity: sha512-czLyOh91NF0hIzbNzwi8I6GlqG23BHh2435OddfI6uiaLH3xdrdygO93gqgH1Bv9mhy8XPFQJOBn1FTq4LvEWA==}
-
   abbrev@4.0.0:
     resolution: {integrity: sha512-a1wflyaL0tHtJSmLSOVybYhy22vRih4eduhhrkcjgrWGnRfrZtovJ2FRjxuTtkkj47O/baf0R86QU5OuYpz8fA==}
     engines: {node: ^20.17.0 || >=22.9.0}
@@ -4242,9 +4223,6 @@ packages:
 
   class-variance-authority@0.7.1:
     resolution: {integrity: sha512-Ka+9Trutv7G8M6WT6SeiRWz792K5qEqIGEGzXKhAE6xOWAY6pPH8U+9IY3oCMv6kqTmLsv7Xh/2w2RigkePMsg==}
-
-  classcat@5.0.5:
-    resolution: {integrity: sha512-JhZUT7JFcQy/EzW605k/ktHtncoo9vnyW/2GspNYwFlN1C/WmjuV/xtS04e9SOkL2sTdw0VAZ2UGCcQ9lR6p6w==}
 
   cli-cursor@5.0.0:
     resolution: {integrity: sha512-aCj4O5wKyszjMmDT4tZj93kxyydN/K5zPWSCe6/0AV/AA1pqe5ZBIw0a2ZfPQV7lL5/yb5HsUreJ6UFAF1tEQw==}
@@ -8761,21 +8739,6 @@ packages:
   zrender@6.1.0:
     resolution: {integrity: sha512-oEGMDB6pOP2S6OwRR4PdVv610zrjnA3Bh+JnSG12fYJlBKjtNAoEb5fSUoCOOINlH96I2fU38/A2UpRKs67xYQ==}
 
-  zustand@4.5.7:
-    resolution: {integrity: sha512-CHOUy7mu3lbD6o6LJLfllpjkzhHXSBlX8B9+qPddUsIfeF5S/UZ5q0kmCsnRqT1UHFQZchNFDDzMbQsuesHWlw==}
-    engines: {node: '>=12.7.0'}
-    peerDependencies:
-      '@types/react': '>=16.8'
-      immer: '>=9.0.6'
-      react: '>=16.8'
-    peerDependenciesMeta:
-      '@types/react':
-        optional: true
-      immer:
-        optional: true
-      react:
-        optional: true
-
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
@@ -10307,12 +10270,12 @@ snapshots:
       elkjs: 0.11.1
       entities: 7.0.1
 
-  '@langchain/core@1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)':
+  '@langchain/core@1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@standard-schema/spec': 1.1.0
       js-tiktoken: 1.0.21
-      langsmith: 0.8.7(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
+      langsmith: 0.8.7(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
       mustache: 4.2.0
       p-queue: 6.6.2
       zod: 4.3.6
@@ -10323,11 +10286,11 @@ snapshots:
       - openai
       - ws
 
-  '@langchain/openai@1.5.5(@aws-sdk/credential-provider-node@3.972.2)(@langchain/core@1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2))(ws@8.21.2)':
+  '@langchain/openai@1.5.5(@aws-sdk/credential-provider-node@3.972.2)(@langchain/core@1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2))(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)':
     dependencies:
-      '@langchain/core': 1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
+      '@langchain/core': 1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
       js-tiktoken: 1.0.21
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6)
+      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6)
       zod: 4.3.6
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -12587,14 +12550,14 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.1
 
-  '@vitest/mocker@4.1.11(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0))':
+  '@vitest/mocker@4.1.11(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2))':
     dependencies:
       '@vitest/spy': 4.1.11
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
       msw: 2.12.7(@types/node@20.19.30)(typescript@5.9.3)
-      vite: 8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)
+      vite: 8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2)
 
   '@vitest/pretty-format@4.1.11':
     dependencies:
@@ -12702,31 +12665,6 @@ snapshots:
 
   '@xtuc/long@4.2.2': {}
 
-  '@xyflow/react@12.11.2(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(immer@9.0.21)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)':
-    dependencies:
-      '@xyflow/system': 0.0.79
-      classcat: 5.0.5
-      react: 19.2.3
-      react-dom: 19.2.3(react@19.2.3)
-      zustand: 4.5.7(@types/react@19.2.10)(immer@9.0.21)(react@19.2.3)
-    optionalDependencies:
-      '@types/react': 19.2.10
-      '@types/react-dom': 19.2.3(@types/react@19.2.10)
-    transitivePeerDependencies:
-      - immer
-
-  '@xyflow/system@0.0.79':
-    dependencies:
-      '@types/d3-drag': 3.0.7
-      '@types/d3-interpolate': 3.0.4
-      '@types/d3-selection': 3.0.11
-      '@types/d3-transition': 3.0.9
-      '@types/d3-zoom': 3.0.8
-      d3-drag: 3.0.0
-      d3-interpolate: 3.0.1
-      d3-selection: 3.0.0
-      d3-zoom: 3.0.0
-
   abbrev@4.0.0: {}
 
   accepts@2.0.0:
@@ -12810,7 +12748,7 @@ snapshots:
       normalize-path: 3.0.0
       picomatch: 2.3.1
 
-  app-builder-lib@26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3):
+  app-builder-lib@26.15.3(dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)))(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)):
     dependencies:
       '@electron/asar': 3.4.1
       '@electron/fuses': 1.8.0
@@ -12831,7 +12769,7 @@ snapshots:
       chromium-pickle-js: 0.2.0
       ci-info: 4.3.1
       debug: 4.4.3
-      dmg-builder: 26.15.3(electron-builder-squirrel-windows@26.15.3)
+      dmg-builder: 26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3))
       dotenv: 16.6.1
       dotenv-expand: 11.0.7
       ejs: 3.1.10
@@ -13224,8 +13162,6 @@ snapshots:
     dependencies:
       clsx: 2.1.1
 
-  classcat@5.0.5: {}
-
   cli-cursor@5.0.0:
     dependencies:
       restore-cursor: 5.1.0
@@ -13354,10 +13290,10 @@ snapshots:
     optionalDependencies:
       typescript: 5.9.3
 
-  coze-coding-dev-sdk@0.7.24(@aws-sdk/credential-provider-node@3.972.2)(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2):
+  coze-coding-dev-sdk@0.7.24(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2):
     dependencies:
-      '@langchain/core': 1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
-      '@langchain/openai': 1.5.5(@aws-sdk/credential-provider-node@3.972.2)(@langchain/core@1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2))(ws@8.21.2)
+      '@langchain/core': 1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2)
+      '@langchain/openai': 1.5.5(@aws-sdk/credential-provider-node@3.972.2)(@langchain/core@1.2.3(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2))(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)
       '@supabase/supabase-js': 2.95.3
       axios: 1.18.1
       pg: 8.17.2
@@ -13725,9 +13661,9 @@ snapshots:
 
   dlv@1.1.3: {}
 
-  dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3):
+  dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)):
     dependencies:
-      app-builder-lib: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      app-builder-lib: 26.15.3(dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)))(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3))
       builder-util: 26.15.3
       fs-extra: 10.1.0
       js-yaml: 4.1.1
@@ -13805,21 +13741,21 @@ snapshots:
 
   electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3):
     dependencies:
-      app-builder-lib: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      app-builder-lib: 26.15.3(dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)))(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3))
       builder-util: 26.15.3
       electron-winstaller: 5.4.0
     transitivePeerDependencies:
       - dmg-builder
       - supports-color
 
-  electron-builder@26.15.3(electron-builder-squirrel-windows@26.15.3):
+  electron-builder@26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)):
     dependencies:
-      app-builder-lib: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      app-builder-lib: 26.15.3(dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3)))(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3))
       builder-util: 26.15.3
       builder-util-runtime: 9.7.0
       chalk: 4.1.2
       ci-info: 4.4.0
-      dmg-builder: 26.15.3(electron-builder-squirrel-windows@26.15.3)
+      dmg-builder: 26.15.3(electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3))
       fs-extra: 10.1.0
       lazy-val: 1.0.5
       simple-update-notifier: 2.0.0
@@ -14117,7 +14053,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-module-utils@2.12.1(@typescript-eslint/parser@8.54.0(eslint@9.39.2(jiti@1.21.7))(typescript@5.9.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.2(jiti@1.21.7)):
+  eslint-module-utils@2.12.1(@typescript-eslint/parser@8.54.0(eslint@9.39.2(jiti@1.21.7))(typescript@5.9.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0)(eslint@9.39.2(jiti@1.21.7)))(eslint@9.39.2(jiti@1.21.7)):
     dependencies:
       debug: 3.2.7
     optionalDependencies:
@@ -14139,7 +14075,7 @@ snapshots:
       doctrine: 2.1.0
       eslint: 9.39.2(jiti@1.21.7)
       eslint-import-resolver-node: 0.3.9
-      eslint-module-utils: 2.12.1(@typescript-eslint/parser@8.54.0(eslint@9.39.2(jiti@1.21.7))(typescript@5.9.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.2(jiti@1.21.7))
+      eslint-module-utils: 2.12.1(@typescript-eslint/parser@8.54.0(eslint@9.39.2(jiti@1.21.7))(typescript@5.9.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0)(eslint@9.39.2(jiti@1.21.7)))(eslint@9.39.2(jiti@1.21.7))
       hasown: 2.0.2
       is-core-module: 2.16.1
       is-glob: 4.0.3
@@ -15384,11 +15320,11 @@ snapshots:
 
   known-css-properties@0.37.0: {}
 
-  langsmith@0.8.7(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2):
+  langsmith@0.8.7(openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6))(ws@8.21.2):
     dependencies:
       p-queue: 6.6.2
     optionalDependencies:
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6)
+      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6)
       ws: 8.21.2
 
   language-subtag-registry@0.3.23: {}
@@ -16225,9 +16161,11 @@ snapshots:
       is-docker: 2.2.1
       is-wsl: 2.2.0
 
-  openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(ws@8.21.2)(zod@4.3.6):
+  openai@6.49.0(@aws-sdk/credential-provider-node@3.972.2)(@smithy/hash-node@4.2.8)(@smithy/signature-v4@5.3.8)(ws@8.21.2)(zod@4.3.6):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.2
+      '@smithy/hash-node': 4.2.8
+      '@smithy/signature-v4': 5.3.8
       ws: 8.21.2
       zod: 4.3.6
 
@@ -16480,13 +16418,14 @@ snapshots:
       camelcase-css: 2.0.1
       postcss: 8.5.24
 
-  postcss-load-config@6.0.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0):
+  postcss-load-config@6.0.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(yaml@1.10.2):
     dependencies:
       lilconfig: 3.1.3
     optionalDependencies:
       jiti: 1.21.7
       postcss: 8.5.24
       tsx: 4.21.0
+      yaml: 1.10.2
 
   postcss-nested@6.2.0(postcss@8.5.24):
     dependencies:
@@ -17665,7 +17604,7 @@ snapshots:
 
   tailwind-merge@2.6.0: {}
 
-  tailwindcss@3.4.19(tsx@4.21.0):
+  tailwindcss@3.4.19(tsx@4.21.0)(yaml@1.10.2):
     dependencies:
       '@alloc/quick-lru': 5.2.0
       arg: 5.0.2
@@ -17684,7 +17623,7 @@ snapshots:
       postcss: 8.5.24
       postcss-import: 15.1.0(postcss@8.5.24)
       postcss-js: 4.1.0(postcss@8.5.24)
-      postcss-load-config: 6.0.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)
+      postcss-load-config: 6.0.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(yaml@1.10.2)
       postcss-nested: 6.2.0(postcss@8.5.24)
       postcss-selector-parser: 6.1.4
       resolve: 1.22.11
@@ -17863,7 +17802,7 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  tsup@8.5.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(typescript@5.9.3):
+  tsup@8.5.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(typescript@5.9.3)(yaml@1.10.2):
     dependencies:
       bundle-require: 5.1.0(esbuild@0.27.3)
       cac: 6.7.14
@@ -17874,7 +17813,7 @@ snapshots:
       fix-dts-default-cjs-exports: 1.0.1
       joycon: 3.1.1
       picocolors: 1.1.1
-      postcss-load-config: 6.0.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)
+      postcss-load-config: 6.0.1(jiti@1.21.7)(postcss@8.5.24)(tsx@4.21.0)(yaml@1.10.2)
       resolve-from: 5.0.0
       rollup: 4.59.0
       source-map: 0.7.6
@@ -18176,7 +18115,7 @@ snapshots:
       d3-time: 3.1.0
       d3-timer: 3.0.1
 
-  vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0):
+  vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -18190,11 +18129,12 @@ snapshots:
       jiti: 1.21.7
       terser: 5.49.0
       tsx: 4.21.0
+      yaml: 1.10.2
 
-  vitest@4.1.11(@types/node@20.19.30)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)):
+  vitest@4.1.11(@types/node@20.19.30)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2)):
     dependencies:
       '@vitest/expect': 4.1.11
-      '@vitest/mocker': 4.1.11(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0))
+      '@vitest/mocker': 4.1.11(msw@2.12.7(@types/node@20.19.30)(typescript@5.9.3))(vite@8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2))
       '@vitest/pretty-format': 4.1.11
       '@vitest/runner': 4.1.11
       '@vitest/snapshot': 4.1.11
@@ -18211,7 +18151,7 @@ snapshots:
       tinyexec: 1.0.2
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.1
-      vite: 8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)
+      vite: 8.2.2(@types/node@20.19.30)(esbuild@0.27.3)(jiti@1.21.7)(terser@5.49.0)(tsx@4.21.0)(yaml@1.10.2)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 20.19.30
@@ -18526,13 +18466,5 @@ snapshots:
   zrender@6.1.0:
     dependencies:
       tslib: 2.3.0
-
-  zustand@4.5.7(@types/react@19.2.10)(immer@9.0.21)(react@19.2.3):
-    dependencies:
-      use-sync-external-store: 1.6.0(react@19.2.3)
-    optionalDependencies:
-      '@types/react': 19.2.10
-      immer: 9.0.21
-      react: 19.2.3
 
   zwitch@2.0.4: {}

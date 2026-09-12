@@ -60,6 +60,23 @@ export interface McpServerConfig {
   builtin?: boolean;
   /** 预置服务的 API Key 授权方案 */
   authScheme?: McpAuthScheme;
+  /**
+   * 插件面板声明：该 MCP 服务自带可视化界面，启用后可出现在宿主右侧预览面板（插件面板注册表数据源）。
+   * 写在预置（MCP_PRESETS）上 = 出厂随包面板；写在实例配置上 = 自定义/市场插件自带面板。
+   */
+  panel?: PluginPanelDecl;
+}
+
+/** 插件自带界面（Web 面板）声明 */
+export interface PluginPanelDecl {
+  /** 托管形态：serve = 插件自起本地网页（宿主 iframe 内嵌，先探测 statusPath 就绪）；static = 随包静态目录（宿主 /api/plugin-panel/<id> 代理，零端口） */
+  mode: 'serve' | 'static';
+  /** serve: 页面基址（无结尾斜杠），如 http://127.0.0.1:9482 */
+  url?: string;
+  /** serve: 就绪探测端点（相对 url），如 /api/status */
+  statusPath?: string;
+  /** static: 随包静态目录，相对插件包目录（如 panel）；绝对路径也可直接用 */
+  staticRoot?: string;
 }
 
 /** MCP 工具信息（从 MCP server 发现的工具） */
@@ -152,6 +169,27 @@ export const MCP_PRESETS: McpServerConfig[] = [
     },
   },
   {
+    id: 'coze',
+    name: 'Coze (扣子)',
+    // 随包分发的本地 MCP 插件（扣子 OpenAPI 桥，api.coze.cn）：args 用 {BUNDLED}: 占位符，
+    // server 端（settings-server.ts）按运行环境解析为绝对路径（同 bob-team-mcp 等）。
+    // 提供 list_spaces / list_bots / list_workflows / chat_bot / run_workflow 五个工具：
+    // 在 BobWork 里对话扣子上已发布为「API 服务」的 bot、运行其工作流（推理在扣子云端）。
+    // PAT 由面板 authScheme 配置（env COZE_API_TOKEN，密文存 settings，spawn 时解密注入）。
+    transport: 'stdio',
+    command: 'node',
+    args: ['{BUNDLED}:coze-mcp/dist/cli.js'],
+    timeout: 300, // bot 对话需轮询 retrieve（最长约 4 分钟），工作流同步运行可能数十秒
+    enabled: false, // 需 PAT；market 安装后默认启用，未填有效 PAT 时连接失败自动自愈重试（设置面板可关闭）
+    authScheme: {
+      placement: { kind: 'env', key: 'COZE_API_TOKEN' },
+      placeholder: 'Paste your Coze Personal Access Token',
+      signupUrl: 'https://www.coze.cn/open/pat',
+      description:
+        'Coze MCP 需要 Personal Access Token（PAT）才能调用扣子 API。创建 PAT 时勾选 chat / getChat / listMessage / listWorkspace / listBot / listWorkflow / run 权限；要对话的 bot 需先「发布为 API 服务」。',
+    },
+  },
+  {
     id: 'bob-browser-mcp',
     name: 'Bob Browser',
     // 桥以常驻模式运行（bob-browser-mcp --serve，端口 9473），单实例锁会拒绝第二个 stdio 实例，
@@ -219,6 +257,8 @@ export const MCP_PRESETS: McpServerConfig[] = [
     args: ['{BUNDLED}:bob-notes-mcp/dist/cli.js', '--serve'],
     timeout: 300, // ingest 编译（插件大脑模型长推理）可能达分钟级
     enabled: true,
+    // 自带 Web 面板（--serve 默认 9480）：宿主右侧预览面板通用插件 Tab 的内嵌入口（注册表数据源）
+    panel: { mode: 'serve', url: 'http://127.0.0.1:9480', statusPath: '/api/status' },
     // 工具不注入普通 chat 节点（避免与宿主已有的 read_notebook 等别名工具重复）；
     // 仅宿主 /api/notebook 门面经 mcpManager 转发调用（同 /api/team 模式）。
     exposeToChatNodes: false,
@@ -236,6 +276,8 @@ export const MCP_PRESETS: McpServerConfig[] = [
     args: ['{BUNDLED}:bob-mind-mcp/dist/cli.js', '--serve'],
     timeout: 120,
     enabled: true,
+    // 自带 Web 面板（--serve 默认 9482）：宿主右侧预览面板通用插件 Tab 的内嵌入口（注册表数据源）
+    panel: { mode: 'serve', url: 'http://127.0.0.1:9482', statusPath: '/api/status' },
     // 工具随场景注入 chat（MCP_SERVER_SCENES 标注 general），AI 可直接读写 Bob-Mind
   },
 ];
@@ -248,7 +290,7 @@ export const SYSTEM_MCP_IDS: string[] = ['team', 'bob-preview-mcp', 'bob-notes-m
  * 以工具形式供节点强制启用/按需注入的外部 MCP 服务；
  * Plugins 类（Notes/OCR/Preview/Teams/Browser/Bobby）由各自面板/节点/服务入口管理，不进节点下拉。
  */
-export const NODE_MCP_TOOL_IDS: ReadonlySet<string> = new Set(['github', 'notion', 'context7', 'pkulaw', 'tianyancha']);
+export const NODE_MCP_TOOL_IDS: ReadonlySet<string> = new Set(['github', 'notion', 'context7', 'pkulaw', 'tianyancha', 'coze']);
 
 /**
  * 出厂默认装配：仅系统服务随 BobWork 自带。

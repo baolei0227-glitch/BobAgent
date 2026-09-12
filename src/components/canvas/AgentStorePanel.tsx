@@ -47,7 +47,7 @@ const SCENE_FILTERS: { key: string; label: string }[] = [
   { key: 'notebook', label: 'Notes' },
   { key: 'node', label: 'Node' },
   { key: 'general', label: 'General' },
-  { key: 'planner', label: 'Planner' },
+  { key: 'butler', label: 'Butler' },
 ];
 
 const sceneLabel = (key: string) => SCENE_FILTERS.find((f) => f.key === key)?.label ?? key;

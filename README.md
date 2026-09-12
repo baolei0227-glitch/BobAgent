@@ -1,12 +1,14 @@
 # BobWork
 
-AI 知识画布桌面应用。基于 [Next.js 16](https://nextjs.org) + [React Flow](https://reactflow.dev) + [shadcn/ui](https://ui.shadcn.com) 构建。
+AI 会话工作台桌面应用。基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 构建（画布为宿主自绘的单焦点会话布局，不依赖第三方画布库）。
+
+> **视觉规范**：唯一真源为 [`THEME-GUIDE.md`](./THEME-GUIDE.md)（Purple 单一品牌色）。旧的暖色宣纸方案 `DESIGN.md` 已废弃，归档于 [`docs/DESIGN.deprecated.md`](./docs/DESIGN.deprecated.md)。
 
 ## 核心概念
 
-BobWork 是一个**无限画布 + AI 对话节点**系统：
-- 在可无限缩放、平移的画布上创建 AI 对话节点
-- 节点之间用连线建立知识网络，上游节点的摘要自动注入下游上下文
+BobWork 是一个 **AI 会话工作台**（单焦点会话布局）：
+- 左侧会话树管理多项目节点，同一时刻聚焦一个会话节点，以全宽阅读面板呈现
+- 节点之间用连线建立知识网络（NodeMap 关系图管理），上游节点的摘要自动注入下游上下文
 - 每个节点独立配置 AI 模型、思考深度、技能
 - 所有数据本地存储（`~/BobWork/`），支持多项目管理
 
@@ -58,20 +60,18 @@ src/
 │   └── layout.tsx             # 根布局
 ├── components/
 │   ├── canvas/                # 画布核心组件
-│   │   ├── CanvasFlow.tsx     # 主画布（React Flow）
-│   │   ├── AiChatNode.tsx     # AI 对话节点
-│   │   ├── HtmlReader.tsx     # Markdown 阅读器
+│   │   ├── CanvasFlow.tsx     # 单焦点会话宿主（自绘画布层）
+│   │   ├── ChatNode.tsx       # AI 对话节点
+│   │   ├── UnifiedViewer.tsx  # 统一文件/文档查看器
 │   │   ├── HtmlRenderer.tsx   # HTML/Markdown 渲染器
 │   │   ├── Sidebar.tsx        # 侧边栏（项目/文件/WANTED）
 │   │   ├── CalendarPanel.tsx  # 日历面板
-│   │   ├── TaskPanel.tsx      # WANTED 任务面板
+│   │   ├── UnifiedPalette.tsx # ⌘F 统一面板（文件搜索 + WANTED 指令）
+│   │   ├── WantedNoticeCenter.tsx # WANTED 通知中心（收件箱）
 │   │   ├── SettingsModal.tsx  # 设置面板
 │   │   ├── SkillManagerModal.tsx # 技能管理器
-│   │   ├── ProjectArchiveDialog.tsx # 项目归档确认
-│   │   ├── TextEditPopup.tsx  # 文本编辑弹窗
-│   │   ├── TextSelectionActions.tsx # 选中文字按钮组
-│   │   ├── TemplateEditor.tsx # 工作流模板编辑器
-│   │   └── TemplateApplyDialog.tsx # 模板应用对话框
+│   │   ├── TemplateLibraryModal.tsx # 工作流模板库
+│   │   └── TemplateFillDialog.tsx # 模板填充对话框
 │   └── ui/                    # shadcn/ui 基础组件
 ├── lib/                       # 核心库
 │   ├── db/                    # SQLite 数据库操作
@@ -99,9 +99,9 @@ src/
 
 ## 核心功能
 
-### 画布交互
-- 无限缩放/平移画布（仅空白区域触发，防误触机制）
-- React Flow 节点拖拽、连线、框选
+### 画布与会话
+- 单焦点会话宿主（同一时刻一个研究节点），节点经 NodeMap 关系图连线/导航
+- 每个会话节点以全宽阅读面板呈现，链式上下文自动注入下游
 - 工作流模板的创建、保存与应用
 
 ### AI 对话
@@ -155,7 +155,7 @@ http://127.0.0.1:<bridge-port>/mcp?token=<bridge-token>
 ## 技术栈
 
 - **框架**: Next.js 16 (App Router)
-- **画布**: @xyflow/react (React Flow)
+- **画布**: 宿主自绘（单焦点会话 + 世界层绝对定位，无第三方画布库）
 - **UI**: shadcn/ui (Radix UI) + Tailwind CSS v4
 - **数据库**: better-sqlite3
 - **MCP**: @modelcontextprotocol/sdk

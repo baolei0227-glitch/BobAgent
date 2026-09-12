@@ -2,7 +2,7 @@
  * P4a 三段化骨架 —— 工具轮宿主接管（takeover）注册表与场景激活统一执行。
  *
  * 背景：对话内核（src/app/api/chat/route.ts）的工具轮里，宿主对若干工具以 if-else 特判
- * "接管"执行（search_capabilities / load_skill 法律联动 / ask_user_questions / planner 卡片 /
+ * "接管"执行（search_capabilities / load_skill 法律联动 / ask_user_questions / butler 卡片 /
  * confirm 名单 / login / 参数注入 / 结果压缩 …），其中两个"场景激活类"接管各自重复了
  * 「判定命中场景 → 会话内 sticky → 触发工具集重建」的同构代码。本文件把这类接管收敛为
  * 「注册（registerTakeover）→ 按名 + 时机匹配（takeoverFor）→ 场景激活语义统一执行
@@ -36,8 +36,8 @@
  *     确认弹窗挂起。与 ask_user 的差异：判定名单不绑定固定工具名（注册条目 match 恒 true、工具名
  *     恒咨询，名单随 ctx.confirmTools 注入，handler 内判 noop）；verdict 三分 —— 'handled_continue'
  *     （denied/timeout：宿主 continue 跳过通用执行）/ 'handled_fallback'（approved：回落本轮通用
- *     执行，args 原样）/ 'noop'（名单外 或 planner 结构化卡片已覆盖）。consult 点物理位置必须
- *     保持在 planner 卡片段之后（顺序约束：planner 先判），由宿主保证。
+ *     执行，args 原样）/ 'noop'（名单外 或 butler 结构化卡片已覆盖）。consult 点物理位置必须
+ *     保持在 butler 卡片段之后（顺序约束：butler 先判），由宿主保证。
  * P4a-3-4：login（browser.login 挂起型接管，含 exec 前 mode 注入与 exec 后 loginRequired 判定 /
  *   login_fill 代填）与 grant（bobby grantRequired → SSE grant_required 旁路）复用同一 host-pending
  *   形态（各自注册新 kind，见文件尾「P4a-3 挂起型接管注册表」）。
@@ -68,8 +68,8 @@ import type { ApprovalStrategy } from './approval';
  *     见文件尾「P4a-3 挂起型接管注册表」）；
  *   - tool_confirm：挂起型 —— 需手动确认名单（confirmTools）工具执行前弹通用确认（P4a-3-2，
  *     判定名单为运行期配置 → 注册条目 match 恒 true、工具名恒咨询，名单经 ctx 注入后判 noop）；
- *   - planner_confirm：挂起型 —— planner 专属节点的排程 创建/改/删（identity==='planner' 且属
- *     PLANNER_CARD_TOOLS）弹结构化可编辑确认卡片（P4a-3-3，注册条目 match 恒 true、身份+名单在
+ *   - butler_confirm：挂起型 —— butler 专属节点的排程 创建/改/删（identity==='butler' 且属
+ *     BUTLER_CARD_TOOLS）弹结构化可编辑确认卡片（P4a-3-3，注册条目 match 恒 true、身份+名单在
  *     handler 内判 noop）；approved 且用户编辑过卡片 → 经 ctx.setExecArgs 覆盖执行参数后
  *     'handled_fallback' 回落宿主通用执行（新参数生效）。
  *   - login：挂起型（P4a-3-4，phase post）—— browser.login 工具执行返回 loginRequired →
@@ -87,7 +87,7 @@ export type ToolTakeoverKind =
   | 'result_compact'
   | 'ask_user'
   | 'tool_confirm'
-  | 'planner_confirm'
+  | 'butler_confirm'
   | 'login'
   | 'grant';
 
@@ -98,10 +98,10 @@ export type ToolTakeoverPhase = 'pre' | 'post';
 // K3-1 咨询链顺序契约 —— hook 边界显式化（行为零变化：仅枚举 + 单测断言 + route 注释编号）。
 // route.ts 工具轮（接口面盘点 §1.2 的 r16「每 tool 子流程」）内 9 个接管咨询点有物理硬顺序
 // （§1.2「咨询点顺序（硬性，跨 kind）」）：
-//   ask_user(pre) → search_capabilities(pre 全接管) → planner_confirm(pre) →
+//   ask_user(pre) → search_capabilities(pre 全接管) → butler_confirm(pre) →
 //   tool_confirm(pre) → [tool_call_update running] → args_transform(pre) →
 //   [keepalive/bobby/team] → executeTool → grant(post) → login(post) →
-//   load_skill(post 联动) → tool_result → result_compact(post)；planner 卡覆盖后跳过 tool_confirm。
+//   load_skill(post 联动) → tool_result → result_compact(post)；butler 卡覆盖后跳过 tool_confirm。
 // 本段把该顺序固化为可枚举常量 TOOL_CONSULT_SEQUENCE：新增/移动咨询点必须同步
 //   ① 本序列（含 consultPoint 稳定名）② route.ts 咨询点旁「K3 hook … (consult seq #N)」
 //   注释编号 ③ tool-pipeline.test.ts 顺序断言 —— 顺序防护由单测承担，route 不加运行时开销。
@@ -146,16 +146,16 @@ export const TOOL_CONSULT_SEQUENCE = [
     note: 'search_capabilities pre-execute 全接管（能力目录检索命中即替代 executeTool）——与 #8 load_skill 同 kind 不同 phase/咨询点，故分别列出',
   },
   {
-    kind: 'planner_confirm',
+    kind: 'butler_confirm',
     phase: 'pre',
     consultPoint: 'before_execute_running',
-    note: 'planner 结构化可编辑确认卡（挂起型 pre；approved 回落通用执行）——物理位置在 tool_confirm 之前，planner 先判',
+    note: 'butler 结构化可编辑确认卡（挂起型 pre；approved 回落通用执行）——物理位置在 tool_confirm 之前，butler 先判',
   },
   {
     kind: 'tool_confirm',
     phase: 'pre',
     consultPoint: 'before_execute_running',
-    note: '需手动确认名单通用确认（挂起型 pre）——planner 卡覆盖（planner_confirm approved）后跳过本点',
+    note: '需手动确认名单通用确认（挂起型 pre）——butler 卡覆盖（butler_confirm approved）后跳过本点',
   },
   {
     kind: 'args_transform',
@@ -200,7 +200,7 @@ export const TOOL_CONSULT_SEQUENCE = [
 export function assertConsultContract(): void {
   const KINDS: readonly ToolTakeoverKind[] = [
     'scenario_activate', 'args_transform', 'result_compact',
-    'ask_user', 'tool_confirm', 'planner_confirm', 'login', 'grant',
+    'ask_user', 'tool_confirm', 'butler_confirm', 'login', 'grant',
   ];
   const PHASES: readonly string[] = ['pre', 'post'];
   const POINTS: readonly string[] = [
@@ -397,7 +397,7 @@ export function applyScenarioActivation(
 // 定义，不产 SSE。
 // 本轮迁移 ask_user（ask_user_questions 结构化提问，P4a-3-1）与 tool_confirm（需手动确认名单
 // 通用确认，P4a-3-2，注册条目 match 恒 true 恒咨询、名单经 ctx 注入判 noop）；P4a-3-3 迁移
-// planner_confirm（planner 结构化可编辑确认卡片）；P4a-3-4 迁移 login（browser.login 挂起型接管）
+// butler_confirm（butler 结构化可编辑确认卡片）；P4a-3-4 迁移 login（browser.login 挂起型接管）
 // 与 grant（bobby grantRequired SSE 旁路）。均走同一形态、各自注册新 kind，同一 consult/dispatch 模式。
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -429,10 +429,10 @@ export interface HostTakeoverContext {
   /** 结果落账：按宿主原 if 分支同序写入 allToolCalls + 对话历史 + eventLog.TOOL_RESULT
    *  （round / taskId / tool_call_id / pageUrl 等请求态在宿主闭包内绑定；本类为 done 成功回灌） */
   commitToolResult(resultText: string): void;
-  // ── 以下为确认类挂起型接管（tool_confirm，P4a-3-2 / planner_confirm，P4a-3-3）注入的请求
+  // ── 以下为确认类挂起型接管（tool_confirm，P4a-3-2 / butler_confirm，P4a-3-3）注入的请求
   //    作用域/可选能力（均选填，ask_user 等既有挂起型不读即不注入，向后兼容不破坏既有 kind API）──
-  /** 宿主身份标识（route 会话 identity：'planner' / 普通 agent 等；确认类 handler 据此判定
-   *  planner 结构化卡片覆盖 —— tool_confirm 对 planner 卡已覆盖的排程工具不重复弹通用确认） */
+  /** 宿主身份标识（route 会话 identity：'butler' / 普通 agent 等；确认类 handler 据此判定
+   *  butler 结构化卡片覆盖 —— tool_confirm 对 butler 卡已覆盖的排程工具不重复弹通用确认） */
   readonly identity?: string;
   /** 当前生效的「需手动确认名单」（route 的 settingsForTools.confirmTools ?? DEFAULT_CONFIRM_TOOLS；
    *  名单为运行期配置、模块级 handler 无法持有 → 随咨询注入；名单外工具 handler 判 'noop'） */
@@ -441,12 +441,12 @@ export interface HostTakeoverContext {
    *  'allow_scope' 在 tool_confirm 咨询点随 ctx 注入；handler 在名单判定后走 decideToolApproval：
    *  'request' → 原挂起确认；'allow' → noop 通用执行；'deny' → SSE tool_result(error) + 落账 +
    *  continue）。未注入（undefined）= 兜底按现网 allow_scope 语义（名单外一律放行）——
-   *  向后兼容不破坏既有 kind API。planner 结构化卡覆盖判定仍在 handler 内先于本策略执行。 */
+   *  向后兼容不破坏既有 kind API。butler 结构化卡覆盖判定仍在 handler 内先于本策略执行。 */
   readonly approvalStrategy?: ApprovalStrategy;
   /** exec 前原始参数字符串（tc.function.arguments；确认类挂起登记 createPendingConfirm 第二参，
-   *  与 ctx.args 的已解析对象解耦；planner 卡编辑后亦可能已更新） */
+   *  与 ctx.args 的已解析对象解耦；butler 卡编辑后亦可能已更新） */
   readonly execArgs?: string;
-  /** 宿主侧可变执行参数写入通道（planner_confirm，P4a-3-3）：approved 且用户编辑过卡片时，
+  /** 宿主侧可变执行参数写入通道（butler_confirm，P4a-3-3）：approved 且用户编辑过卡片时，
    *  handler 把编辑后的完整参数字符串（JSON，由 edited.toolArgs 序列化）经此交回宿主 —— 宿主
    *  须同步更新本轮实际执行将用的参数串与解析对象（route 闭包内 let parsedArgs/execArgs），随后
    *  handler 以 'handled_fallback' 回落通用执行时即用新参数。只读挂起型（ask_user / tool_confirm
@@ -454,7 +454,7 @@ export interface HostTakeoverContext {
   readonly setExecArgs?: (raw: string) => void;
   /** 结果落账（error 变体）：按宿主原 if 分支同序写入 allToolCalls（success:false / phase:'error'，
    *  与 commitToolResult 不同：不含 pageUrl 字段）+ 对话历史 + eventLog.TOOL_RESULT。
-   *  供确认类接管（tool_confirm / planner_confirm）的 denied/timeout 分支使用。 */
+   *  供确认类接管（tool_confirm / butler_confirm）的 denied/timeout 分支使用。 */
   readonly commitToolError?: (resultText: string) => void;
   // ── 以下为 post 挂起型接管（login，P4a-3-4 / grant，P4a-3-4）注入的字段（均选填，pre 挂起型
   //    不读即不注入，向后兼容不破坏既有 kind API）──
@@ -467,7 +467,7 @@ export interface HostTakeoverContext {
   /** 宿主侧可变执行结果写回通道（login，P4a-3-4）：browser.login_fill 代填 / 失败 / 超时三分支构造的
    *  新 execResult 经此交回宿主 —— 宿主在 handle() 返回后覆盖本轮 execResult（let），随后照常落入
    *  通用落账路径（等价迁移前分支体对 execResult 的直接改写：result/durationMs/success 语义一致）。
-   *  只读挂起型（ask_user / tool_confirm / planner_confirm）不注入即不读。 */
+   *  只读挂起型（ask_user / tool_confirm / butler_confirm）不注入即不读。 */
   readonly setExecResult?: (result: {
     result: string;
     durationMs: number;
@@ -504,7 +504,7 @@ export function registerHostTakeover(handler: HostTakeover): void {
 
 /**
  * 按 name + kind（+ 可选 phase）返回首个命中挂起型 handler（priority 降序；同 priority 保持
- * 注册顺序）。kind 前置过滤：planner_confirm / tool_confirm / login / grant 各自注册独立 kind，
+ * 注册顺序）。kind 前置过滤：butler_confirm / tool_confirm / login / grant 各自注册独立 kind，
  * 同工具名跨 kind 条目互不顶替（consult 点按家族精确查询，不等同 takeoverFor 的"事后判 kind"）。
  */
 export function hostTakeoverFor(

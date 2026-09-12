@@ -84,7 +84,7 @@ function fmtCost(n: number | null, currency: 'usd' | 'cny'): string {
   if (n < 0.01) return `${sym}${n.toFixed(4)}`;
   return `${sym}${n.toFixed(2)}`;
 }
-/** 完整模型引用 "deepseek:deepseek-v4-flash" → 可读名 + 厂商前缀 */
+/** 完整模型引用 "deepseek:deepseek-flash" → 可读名 + 厂商前缀 */
 function splitModel(ref: string): { vendor: string; name: string } {
   const idx = ref.lastIndexOf(':');
   return idx > 0 ? { vendor: ref.slice(0, idx), name: ref.slice(idx + 1) } : { vendor: '', name: ref };

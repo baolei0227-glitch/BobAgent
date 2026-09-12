@@ -28,6 +28,8 @@
  *     返回后在 JS 侧用 Date 精确过滤，规避 SQLite 字符串比较在跨时区偏移下的边缘误差
  */
 
+import { listUncalendaredOpenRows } from '@/lib/sticky-todo';
+
 /** 解析后的查询条件（rangeStart/rangeEnd 为 UTC ISO 字符串；overdue 优先） */
 export interface ScheduleQuery {
   /** 展示标签，如 "Today (08/07)"、"8/1 - 8/7"、"Overdue"、"All past todos" */
@@ -391,7 +393,9 @@ export async function querySchedule(
     });
   }
 
-  return { ok: true, reply: formatScheduleReply(query, events), events };
+  const stickyBlock = await buildOpenStickyBlock(query);
+  const reply = formatScheduleReply(query, events);
+  return { ok: true, reply: stickyBlock ? `${reply}\n\n${stickyBlock}` : reply, events };
 }
 
 /**
@@ -486,6 +490,40 @@ function fmtTime(iso: string): string {
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return iso;
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * 汇总当前激活项目里「未入日历」的未完成便签行（StickyTodo 不自动入日历后，Butler 待办查询仍能看到它们）。
+ * overdue / scope=global 不合并（无日期语义 / 非项目便签）。只影响 reply 文本，events 数组保持不变（结构化消费方不受影响）。
+ */
+async function buildOpenStickyBlock(query: ScheduleQuery): Promise<string | null> {
+  if (query.scope === 'global' || query.overdue) return null;
+  let project: { path: string };
+  try {
+    project = await (await import('@/lib/project/project-manager')).getCurrentProject();
+  } catch {
+    return null;
+  }
+  let rows: string[];
+  try {
+    rows = await listUncalendaredOpenRows(project.path);
+  } catch {
+    return null;
+  }
+  if (rows.length === 0) return null;
+  const kw = typeof query.keyword === 'string' ? query.keyword.trim().toLowerCase() : '';
+  let matched = rows;
+  if (kw) {
+    matched = rows.filter((t) => t.toLowerCase().includes(kw));
+    if (matched.length === 0) return null;
+  }
+  const MAX = 30;
+  const shown = matched.slice(0, MAX);
+  const more = matched.length > MAX ? `\n… and ${matched.length - MAX} more` : '';
+  const head = kw
+    ? '🧷 Sticky matches (not scheduled yet):'
+    : '🧷 Sticky to-dos (not scheduled yet):';
+  return `${head}\n${shown.map((t) => `- ${t}`).join('\n')}${more}`;
 }
 
 /** 组织回复文本（通知中心正文）；超过 30 条截断，避免消息过长 */

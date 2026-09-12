@@ -155,6 +155,11 @@ export const desktop = {
       const unsub = raw()?.screenOcr?.onCaptured?.(callback);
       return typeof unsub === 'function' ? unsub : () => {};
     },
+    /** 监听：覆盖编辑窗口收到新的待编辑截图（常驻窗口复用，免重载） */
+    onNewShot(callback: (payload: { dataUrl: string; mode?: 'region' | 'full' }) => void): () => void {
+      const unsub = raw()?.screenOcr?.onNewShot?.(callback);
+      return typeof unsub === 'function' ? unsub : () => {};
+    },
     /** 取消编辑（主进程清理临时截图） */
     cancelEdit(): void {
       raw()?.screenOcr?.cancelEdit?.();
@@ -171,6 +176,14 @@ export const desktop = {
     ocrRegion(dataUrl: string): Promise<{ ok: boolean; text?: string; error?: string }> {
       return raw()?.screenOcr?.ocrRegion?.(dataUrl) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
     },
+    /** 覆盖编辑窗口：拉取当前待编辑截图 */
+    getEditorShot(): Promise<{ dataUrl: string; mode?: 'region' | 'full' } | null> {
+      return raw()?.screenOcr?.getEditorShot?.() ?? Promise.resolve(null);
+    },
+    /** 覆盖编辑窗口：编辑结束，关闭窗口 */
+    closeEditor(): void {
+      raw()?.screenOcr?.closeEditor?.();
+    },
     /** 查询 BobWorkCapture 屏幕录制授权状态（设置面板用；非桌面环境返回 missing） */
     getPermissionStatus(): Promise<{ status: 'granted' | 'denied' | 'unknown' | 'missing'; error?: string }> {
       return raw()?.screenOcr?.getPermissionStatus?.() ?? Promise.resolve({ status: 'missing' });
@@ -178,6 +191,84 @@ export const desktop = {
     /** 一键打开 系统设置 → 屏幕录制（设置面板用） */
     openPermissions(): Promise<{ success: boolean }> {
       return raw()?.screenOcr?.openPermissions?.() ?? Promise.resolve({ success: false });
+    },
+  },
+
+  // ---- Hippo Browser 侧边栏（Cmd+Shift+B）----
+  hippoBrowser: {
+    open(): Promise<unknown> {
+      return raw()?.hippoBrowser?.open?.() ?? Promise.resolve(null);
+    },
+    close(): Promise<unknown> {
+      return raw()?.hippoBrowser?.close?.() ?? Promise.resolve(null);
+    },
+    toggle(): Promise<unknown> {
+      return raw()?.hippoBrowser?.toggle?.() ?? Promise.resolve(null);
+    },
+    navigate(url: string): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.navigate?.(url) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    back(): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.back?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    forward(): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.forward?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    reload(): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.reload?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    stop(): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.stop?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    extract(): Promise<{
+      ok: boolean;
+      ready?: boolean;
+      markdown?: string;
+      text?: string;
+      title?: string;
+      url?: string;
+      error?: string;
+    }> {
+      return raw()?.hippoBrowser?.extract?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    capture(opts?: { fullPage?: boolean }): Promise<{ ok: boolean; dataUrl?: string; error?: string }> {
+      return raw()?.hippoBrowser?.capture?.(opts) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    getState(): Promise<unknown> {
+      return raw()?.hippoBrowser?.getState?.() ?? Promise.resolve(null);
+    },
+    openExternal(): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.openExternal?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    /** 清除 Hippo Browser 存储的全部站点数据（Cookies + localStorage 等），用于重置登录态 */
+    clearCookies(): Promise<{ ok: boolean; clearedCount?: number; error?: string }> {
+      return raw()?.hippoBrowser?.clearCookies?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    /** 方案 A：上报浏览器锚点矩形（预览面板内容区）。null = 退出嵌入模式 */
+    setAnchor(anchor: { x: number; y: number; width: number; height: number } | null): Promise<unknown> {
+      return raw()?.hippoBrowser?.setAnchor?.(anchor) ?? Promise.resolve(null);
+    },
+    /** 收起/恢复胶囊态（收起=隐藏窗口，主窗口正中显示呼吸灯胶囊按钮） */
+    capsuleToggle(): Promise<unknown> {
+      return raw()?.hippoBrowser?.capsuleToggle?.() ?? Promise.resolve(null);
+    },
+    /** 查询当前是否处于胶囊态 */
+    getCapsule(): Promise<boolean> {
+      return raw()?.hippoBrowser?.getCapsule?.() ?? Promise.resolve(false);
+    },
+    /** 订阅胶囊态变更（true=收起显示胶囊，false=恢复隐藏）；返回取消订阅函数 */
+    onCapsule(callback: (capsule: boolean) => void): () => void {
+      const unsub = raw()?.hippoBrowser?.onCapsule?.(callback);
+      return typeof unsub === 'function' ? unsub : () => {};
+    },
+    /** 切换固定在前端（always-on-top） */
+    toggleTop(): Promise<unknown> {
+      return raw()?.hippoBrowser?.toggleTop?.() ?? Promise.resolve(null);
+    },
+    /** 订阅侧边栏状态（visible/url/title/loading/可前进后退）；返回取消订阅函数 */
+    onState(callback: (state: unknown) => void): () => void {
+      const unsub = raw()?.hippoBrowser?.onState?.(callback);
+      return typeof unsub === 'function' ? unsub : () => {};
     },
   },
 };

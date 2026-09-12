@@ -97,7 +97,7 @@ test('settings: 四面板切换 / 厂商tab / 角色联动 / 图标 / 架构图 
 
   await page.goto('/');
   await page.waitForLoadState('networkidle');
-  await page.waitForSelector('.react-flow', { timeout: 20000 });
+  await page.waitForSelector('.react-flow__pane', { timeout: 20000 });
   // dev 模式下 Next.js Dev Tools 浮动按钮会覆盖侧边栏底部，隐藏以免拦截点击
   await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
 

@@ -17,7 +17,6 @@ import { randomBytes } from 'crypto';
 import { join } from 'path';
 import { resolveAppRoot } from '@/lib/app-root';
 import { querySchedule, type ScheduleQuery, type ScheduleEvent } from '@/lib/wanted/schedule';
-import { assignTopicTags, type TaggedTodo } from '@/lib/wanted/tagging';
 import type { WantedNoticeItem } from '@/lib/bus';
 
 const APP_ROOT = resolveAppRoot();
@@ -65,25 +64,30 @@ function fmtDateShort(iso: string): string {
   return `${months[d.getMonth()]} ${d.getDate()}`;
 }
 
-function eventLine(ev: ScheduleEvent, tagNote?: string): string {
+function eventLine(ev: ScheduleEvent): string {
   const time = ev.all_day
     ? `${fmtDate(ev.start_time)} All-day`
     : `${fmtDateTime(ev.start_time)}${ev.end_time ? ` - ${fmtTime(ev.end_time)}` : ''}`;
   const prio = ev.priority === 'high' ? ' (high)' : ev.priority === 'low' ? ' (low)' : '';
   const mark = ev.status === 'done' ? ' [done]' : ev.status === 'cancelled' ? ' [cancelled]' : '';
-  // 微信纯文本场景：命中标签的待办行尾标注（通知中心用结构化 items 渲染标签栏）
-  const tag = tagNote ? ` [${tagNote}]` : '';
-  return `- ${time}  ${ev.title}${prio}${mark}${tag}`;
+  return `- ${time}  ${ev.title}${prio}${mark}`;
 }
 
-/** 报告文本末尾的标签摘要（命中 ≥2 条的主题标签，按覆盖条数降序） */
-function tagSummaryLine(tags: string[], todos: TaggedTodo[]): string {
-  if (tags.length === 0) return '';
-  const count = new Map<string, number>();
-  for (const t of todos) {
-    for (const tag of t.tags) count.set(tag, (count.get(tag) ?? 0) + 1);
-  }
-  return `\n🏷 Tags: ${tags.map((t) => `${t}(${count.get(t) ?? 0})`).join(', ')}`;
+/** 待办事件 → 结构化通知项（供通知中心渲染待办表格） */
+function toNoticeItem(ev: ScheduleEvent): WantedNoticeItem {
+  const d = new Date(ev.start_time);
+  const startMs = Number.isFinite(d.getTime()) ? d.getTime() : 0;
+  return {
+    key: ev.event_id || `${ev.start_time}-${ev.title}`,
+    title: ev.title,
+    time: ev.all_day
+      ? `${fmtDate(ev.start_time)} All-day`
+      : `${fmtDate(ev.start_time)} ${fmtTime(ev.start_time)}`,
+    startMs,
+    status: ev.status,
+    priority: ev.priority,
+    allDay: ev.all_day,
+  };
 }
 
 function fmtDateTime(iso: string): string {
@@ -98,7 +102,7 @@ async function fetchEvents(query: ScheduleQuery, baseUrl: string): Promise<Sched
   return res.events;
 }
 
-/** Morning 报告：文本（今日 + 已过期）与结构化待办（带主题标签 + today/overdue 分区） */
+/** Morning 报告：文本（今日 + 已过期）与结构化待办（today/overdue 分区） */
 async function buildMorningReport(baseUrl: string): Promise<{ text: string; items: WantedNoticeItem[] }> {
   const today = dayRange(0);
   const [todayEvents, overdue] = await Promise.all([
@@ -109,30 +113,26 @@ async function buildMorningReport(baseUrl: string): Promise<{ text: string; item
   // 已过期列表剔除"今天开始"的事件（已结束的今日会议会同时出现在 Today，避免重复）
   const todayStartMs = new Date(today.start).getTime();
   const overdueOnly = overdue.filter((ev) => new Date(ev.start_time).getTime() < todayStartMs);
-  // 全部待办参与标签提取（跨 today/overdue 共现），todos 顺序与 all 一致
   const all = [...todayEvents, ...overdueOnly];
-  const { tags, todos } = assignTopicTags(all);
-  const tagNotes = todos.map((t) => t.tags.join('/'));
   // 结构化待办带分区标记：前 todayEvents.length 条 = 今日，其余 = 已过期
-  const items: WantedNoticeItem[] = todos.map((t, i) => ({
-    ...t,
+  const items: WantedNoticeItem[] = all.map((ev, i) => ({
+    ...toNoticeItem(ev),
     section: i < todayEvents.length ? 'today' : 'overdue',
   }));
   const lines: string[] = [`🌅 Morning Report — ${dateLabel}`];
   if (todayEvents.length > 0) {
     lines.push(`\n📋 Today (${todayEvents.length}):`);
-    lines.push(...todayEvents.map((ev, i) => eventLine(ev, tagNotes[i])));
+    lines.push(...todayEvents.map((ev) => eventLine(ev)));
   } else {
     lines.push('\n📋 Today: no events');
   }
   if (overdueOnly.length > 0) {
     lines.push(`\n⏰ Overdue (${overdueOnly.length}):`);
-    lines.push(...overdueOnly.map((ev, i) => eventLine(ev, tagNotes[todayEvents.length + i])));
+    lines.push(...overdueOnly.map((ev) => eventLine(ev)));
   } else {
     lines.push('\n⏰ Overdue: none');
   }
   lines.push(`\n—— ${todayEvents.length} today, ${overdueOnly.length} overdue`);
-  lines.push(tagSummaryLine(tags, todos));
   return { text: lines.join('\n'), items };
 }
 

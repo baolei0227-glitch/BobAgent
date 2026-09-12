@@ -1,10 +1,10 @@
 /**
  * K3-1 工具轮咨询链 hook 边界显式化单测：TOOL_CONSULT_SEQUENCE 顺序 / 值合法性 / 冲突 /
  * 注册表覆盖对齐断言。顺序契约源 = 接口面盘点 §1.2「咨询点顺序（硬性，跨 kind）」：
- *   ask_user(pre) → search_capabilities(pre 全接管) → planner_confirm(pre) → tool_confirm(pre)
+ *   ask_user(pre) → search_capabilities(pre 全接管) → butler_confirm(pre) → tool_confirm(pre)
  *   → [tool_call_update running] → args_transform(pre) → [keepalive/bobby/team] → executeTool
  *   → grant(post) → login(post) → load_skill(post 联动) → tool_result → result_compact(post)；
- *   planner 卡覆盖后跳过 tool_confirm。
+ *   butler 卡覆盖后跳过 tool_confirm。
  * 本测试是顺序契约的唯一防护（route.ts 咨询点旁仅注释编号、不加运行时检查）；新增/移动咨询点
  * 必须同步 TOOL_CONSULT_SEQUENCE + route 注释编号 + 本文件（顺序断言本体见「顺序与清单一致」）。
  */
@@ -34,7 +34,7 @@ const ALL_REGISTRABLE_KINDS: readonly ToolTakeoverKind[] = [
   'result_compact', // post（#9）
   'ask_user', // pre（#1）
   'tool_confirm', // pre（#4）
-  'planner_confirm', // pre（#3）
+  'butler_confirm', // pre（#3）
   'login', // post（#7）
   'grant', // post（#6）
 ];
@@ -43,8 +43,8 @@ const ALL_REGISTRABLE_KINDS: readonly ToolTakeoverKind[] = [
 const EXPECTED_ORDER: ReadonlyArray<readonly [ToolTakeoverKind, ToolTakeoverPhase, string]> = [
   ['ask_user', 'pre', 'before_execute_running'], // #1 咨询链最顶端（pending 帧后、running 前）
   ['scenario_activate', 'pre', 'before_execute_running'], // #2 search_capabilities pre 全接管
-  ['planner_confirm', 'pre', 'before_execute_running'], // #3 planner 卡（先于 tool_confirm）
-  ['tool_confirm', 'pre', 'before_execute_running'], // #4 通用确认（planner 卡覆盖后跳过）
+  ['butler_confirm', 'pre', 'before_execute_running'], // #3 butler 卡（先于 tool_confirm）
+  ['tool_confirm', 'pre', 'before_execute_running'], // #4 通用确认（butler 卡覆盖后跳过）
   ['args_transform', 'pre', 'before_execute'], // #5 running 后、executeTool 前参数注入
   ['grant', 'post', 'after_execute'], // #6 grantRequired SSE 旁路
   ['login', 'post', 'after_execute'], // #7 loginRequired 挂起

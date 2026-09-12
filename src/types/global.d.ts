@@ -1,4 +1,4 @@
-import type { ParseApi, UpdateApi, SettingsApi, ScreenOcrApi } from '../../electron/preload';
+import type { ParseApi, UpdateApi, SettingsApi, ScreenOcrApi, HippoBrowserApi } from '../../electron/preload';
 import type { MessageAttachment } from '../../lib/types';
 
 declare global {
@@ -8,10 +8,11 @@ declare global {
       update: UpdateApi;
       settings: SettingsApi;
       screenOcr: ScreenOcrApi;
+      hippoBrowser: HippoBrowserApi;
       getPathForFile: (file: File) => string;
       openDevTools: () => Promise<void>;
       openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
-      openHtml: (content: string, filename?: string) => Promise<{ success: boolean; error?: string; path?: string }>;
+      openHtml: (content: string, filename?: string) => Promise<{ success: boolean; error?: string; path?: string; hippo?: boolean }>;
       showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
       selectDirectory: () => Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>;
       getHomeDir: () => string;

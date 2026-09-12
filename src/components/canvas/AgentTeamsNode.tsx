@@ -10,7 +10,7 @@
  * 数据源：/api/team（GET 状态 + 团队列表；POST 转调 team_* 工具），2s 轮询。
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useReactFlow } from '@xyflow/react';
+import { useNodeHost } from './node-host';
 import { X, CheckCircle2, XCircle, Users, ListTodo } from 'lucide-react';
 import { NodeCardHeader } from './NodeCardHeader';
 import { useConfirm } from './ConfirmDialog';
@@ -62,7 +62,7 @@ function AgentTeamsNodeInner({ id, data, selected }: {
   data: AgentTeamsNodeData;
   selected?: boolean;
 }) {
-  const { setNodes, setEdges, getNode } = useReactFlow();
+  const nodeHost = useNodeHost();
   const { ask: confirmAsk, render: confirmRender } = useConfirm();
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -164,25 +164,15 @@ function AgentTeamsNodeInner({ id, data, selected }: {
     }
   }, [confirmAsk, loadStatus]);
 
-  // 删除节点
+  // 删除节点（宿主统一负责后端档案删除 + 本地移除节点/关联边）
   const handleDelete = useCallback(async () => {
     const ok = await confirmAsk({
       title: 'Delete Node?',
       message: 'Deleting "Agent Teams" will permanently remove this node.\nThis action cannot be undone.',
     });
     if (!ok) return;
-    const node = getNode(id);
-    const nodeMdId = (node?.data as AgentTeamsNodeData | undefined)?.nodeMdId || id;
-    fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete', node_id: nodeMdId }),
-    })
-      .then((r) => { if (!r.ok) console.error('AgentTeams node delete failed:', r.status); })
-      .catch((err) => console.error('AgentTeams node delete request error:', err));
-    setNodes((nds) => nds.filter((n) => n.id !== id));
-    setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id));
-  }, [id, getNode, setNodes, setEdges, confirmAsk]);
+    nodeHost.deleteNodeWithEdges(id);
+  }, [id, nodeHost, confirmAsk]);
 
   const running = team?.status === 'running' || team?.tasks?.some((t) => t.status === 'running' || t.status === 'claimed');
   const hasDraft = team && (team.status === 'planning' || team.status === 'approved');

@@ -25,7 +25,7 @@ export interface SandboxChatMessage {
 export interface SandboxChatParams {
   /** 发起调用的小程序 appId（客户端脚本自动注入，服务端据此鉴权） */
   appId: string;
-  /** 模型标识，格式 provider:modelId（如 deepseek:deepseek-v4-flash）；
+  /** 模型标识，格式 provider:modelId（如 deepseek:deepseek-flash）；
    *  缺省时走 Auto 模式：系统自动从已配置厂商的勾选模型池里选可用模型 */
   model?: string;
   messages: SandboxChatMessage[];

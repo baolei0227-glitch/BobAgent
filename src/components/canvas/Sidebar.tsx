@@ -1,13 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Folder,
   FolderOpen,
   Plus,
   Trash,
-  Check,
   RefreshCw,
   FileText,
   FolderPlus,
@@ -19,11 +18,11 @@ import {
   PlusCircle,
   Pencil,
   ExternalLink,
-  LayoutGrid,
   StickyNote,
   X,
   Star,
   MoreHorizontal,
+  ChevronDown,
 } from 'lucide-react';
 import { WantedNoticeCenter } from './WantedNoticeCenter';
 import { SkillManagerModal } from './SkillManagerModal';
@@ -34,7 +33,6 @@ import { loadSettings, applyCustomTheme, applyFontScale } from '@/lib/settings';
 import type { MessageAttachment } from '@/lib/types';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { cn } from '@/lib/utils';
-import { TooltipProvider } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { FileName } from './FileName';
 
@@ -63,6 +61,8 @@ interface FileNode {
   /** 相对项目根的真实路径（如 homework/template/template-fill 运行目录 set_000 下的 xx.docx）；
    *  template 解压目录摊平展示时，名称链不再含中间目录，需据此解析真实路径 */
   rel?: string;
+  /** 会话标题（attachments/ 下节点附件目录：后端按 node 短 id 关联 notes-memory 填充） */
+  title?: string;
 }
 
 /** homework/ 按 kind 类别分组的输出文件（来自 list_files 的 homework_kind_groups） */
@@ -77,6 +77,8 @@ const LEVEL_INDENT_STEP = 6; // 每级缩进 px
 const LEVEL_INDENT_CAP = 3; // 缩进封顶级数（更深层级不再右移）
 /** 层级缩进（封顶） */
 const levelIndent = (level: number) => Math.min(Math.max(level, 0), LEVEL_INDENT_CAP) * LEVEL_INDENT_STEP;
+/** Workspace 浮层最小宽度（保证 Finder 列式浏览可读） */
+const WORKSPACE_MIN_WIDTH = 560;
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -86,8 +88,6 @@ interface SidebarProps {
   onCollapsedChange?: (collapsed: boolean) => void;
   /** 发送文件到新建节点（由 CanvasFlow 提供，复用 LocalFileExplorer 的逻辑） */
   onCreateNodeWithFile?: (filePath: string, isDir: boolean) => Promise<{ nodeId: string; attachment: unknown } | null>;
-  /** 打开项目看板（画布大视图，总览所有项目；Workspace 浮层内使用） */
-  onOpenProjectBoard?: () => void;
 }
 
 /** 文件图标映射：已知格式按映射显示，其余按真实扩展名显示（无扩展名兜底 FILE） */
@@ -145,13 +145,26 @@ function fileIcon(ext?: string): { color: string; label: string } {
   }
 }
 
-export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreateNodeWithFile, onOpenProjectBoard }: SidebarProps) {
+export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreateNodeWithFile }: SidebarProps) {
   // 侧边栏仅保留浮层渲染（rail 视觉条已迁至 ⌘F 面板底部图标栏，2026-09-01）：
   // Workspace → 可拖动浮层（项目列表 + 文件树）
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
   // 浮层位置（初始贴左缘；拖动标题栏可移动，会话内记忆）
   const [wsPos, setWsPos] = useState<{ x: number; y: number }>({ x: 52, y: 96 });
+  // 浮层宽度（右缘拖动调宽，会话内记忆）
+  const [wsWidth, setWsWidth] = useState(700);
+  // 拖动/调宽期间读取最新值用 ref 镜像（避免重建事件监听）
+  const wsPosRef = useRef(wsPos);
+  useEffect(() => {
+    wsPosRef.current = wsPos;
+  }, [wsPos]);
+  const wsWidthRef = useRef(wsWidth);
+  useEffect(() => {
+    wsWidthRef.current = wsWidth;
+  }, [wsWidth]);
+  // 右栏 Finder 列式浏览路径（openPath[i] = 第 i 层选中的目录名）
+  const [wsOpenPath, setWsOpenPath] = useState<string[]>([]);
   // 无 rail 视觉条：通知父级布局按"折叠态"处理（NodeMap / 预览面板偏移保持折叠值）
   useEffect(() => {
     onCollapsedChange?.(true);
@@ -165,8 +178,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         const el = t as Element;
         if (el.closest('[data-bob-sidebar-popover]')) return; // 浮层内部点击不关闭
         if (el.closest('[data-bob-sidebar-rail]')) return; // rail 按钮（重新点击切换）不关闭
-        if (el.closest('[data-quick-switch]')) return; // 项目切换下拉 portal 到 body（浮层 DOM 之外）：点击项须先完成切换，不在此关闭浮层
         if (el.closest('[data-material-menu]')) return; // materials 操作菜单同样 portal 到 body：点击菜单项不关闭浮层
+        if (el.closest('[data-ws-switch]')) return; // 标题栏项目切换下拉 portal 到 body：点击项不关闭浮层
       }
       setWorkspaceOpen(false);
     };
@@ -209,6 +222,24 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     window.addEventListener('pointerup', up);
   }, [wsPos]);
 
+  // 浮层宽度调整：拖动右缘调宽（会话内记忆，不随拖移位置而复位）
+  const startResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = wsWidthRef.current;
+    const move = (ev: PointerEvent) => {
+      const maxW = Math.max(WORKSPACE_MIN_WIDTH, window.innerWidth - wsPosRef.current.x - 16);
+      const nw = Math.min(Math.max(startW + ev.clientX - startX, WORKSPACE_MIN_WIDTH), maxW);
+      setWsWidth(nw);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }, []);
+
   // BobMail 受控状态：入口图标统一在 ⌘F 面板底部图标栏，弹层由 WantedNoticeCenter 受控渲染
   const [wantedOpen, setWantedOpen] = useState(false);
   const [wantedAnchor, setWantedAnchor] = useState<DOMRect | null>(null);
@@ -250,6 +281,10 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
 
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [currentId, setCurrentId] = useState<string>('');
+  // 切换当前项目后，右栏 Finder 列式浏览回到根列
+  useEffect(() => {
+    setWsOpenPath([]);
+  }, [currentId]);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectCategory, setNewProjectCategory] = useState('');
@@ -596,10 +631,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   const [homeworkOpenGroups, setHomeworkOpenGroups] = useState<Set<string>>(new Set());
   // 已执行过"默认展开"的项目 id（防止后续刷新/重开浮层覆盖用户手动折叠状态）
   const defaultHomeworkExpandedRef = useRef<Set<string>>(new Set());
-  // Workspace 区块折叠状态（与 Bob Items / Bob Sandbox 同级标题样式）
-  const [projectsOpen, setProjectsOpen] = useState(true);
-  // 快速切换下拉（当前项目行 ▾）：展示全部活跃项目
-  const [quickSwitchOpen, setQuickSwitchOpen] = useState(false);
 
   // 项目标星（localStorage 持久化，仅前端；置顶分组展示在 Workspace 浮层顶部）
   const [starredProjects, setStarredProjects] = useState<Set<string>>(() => {
@@ -687,11 +718,27 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     };
   }, [loadProjects]);
 
-  // Workspace 浮层打开时刷新当前项目文件树：关闭期间不接收 files-changed 推送，重开需拉取最新列表
+  // Workspace 浮层打开时刷新当前项目文件树：关闭期间不接收 files-changed 推送，重开需拉取最新列表；
+  // 当前项目在右栏文件树恒为展开态，同时加入 expandedProjects 使其进入 SSE 文件变更刷新集合
   useEffect(() => {
-    if (workspaceOpen && currentId) loadProjectFiles(currentId);
+    if (workspaceOpen && currentId) {
+      setExpandedProjects((prev) => (prev.has(currentId) ? prev : new Set(prev).add(currentId)));
+      loadProjectFiles(currentId);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceOpen]);
+
+  // 打开 Workspace 且尚未下钻时：自动展开根列第一个目录（文件树加载完成后触发一次）
+  useEffect(() => {
+    if (!workspaceOpen || !currentId) return;
+    const roots = projectFiles.get(currentId) || [];
+    if (roots.length === 0) return;
+    if (wsOpenPath.length > 0) return; // 已下钻/用户已操作则不干预
+    const firstDir = roots.find((r) => r.type === 'directory');
+    if (!firstDir) return;
+    setWsOpenPath([firstDir.name]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceOpen, projectFiles, currentId]);
 
   // 监听 AI 工具文件变更，自动刷新文件树
   useEffect(() => {
@@ -750,18 +797,15 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       });
       const data = await resp.json();
       if (data.success) {
-        await fetch('/api/projects', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'switch', project_id: data.project.id }),
-        });
         setCreateDialogOpen(false);
         setNewProjectName('');
         setNewProjectCategory('');
         setNewProjectNote('');
         setNewProjectTag1('');
         setNewProjectTag2('');
-        window.location.reload();
+        // 无刷新直达新项目（复用切换流程，广播 bobagent:project-switched 由 CanvasFlow 重载画布）。
+        // 不再 window.location.reload()，避免触发启动自动打开项目看板（"跳到项目面板"）。
+        await handleSwitch(data.project.id);
       } else {
         alert(data.error || 'Failed to create project');
       }
@@ -771,7 +815,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     } finally {
       setCreating(false);
     }
-  }, [newProjectName, newProjectCategory, newProjectNote, newProjectTag1, newProjectTag2]);
+  }, [newProjectName, newProjectCategory, newProjectNote, newProjectTag1, newProjectTag2, handleSwitch]);
 
   // 打开编辑分类/标签/备注弹窗
   const openEditMeta = useCallback((p: ProjectInfo) => {
@@ -812,23 +856,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     }
   }, [editMetaProject, editMetaCategory, editMetaTags, editMetaNote, loadProjects]);
 
-  /** 切换项目展开/折叠 */
-  const toggleProjectExpand = useCallback(async (projectId: string) => {
-    setExpandedProjects((prev) => {
-      const next = new Set(prev);
-      if (next.has(projectId)) {
-        next.delete(projectId);
-        return next;
-      }
-      // 展开时始终重新加载文件树
-      loadProjectFiles(projectId);
-      next.add(projectId);
-      return next;
-    });
-  }, []);
-
-  // 快速切换下拉（Workspace 标题栏项目图标）：锚点位置（fixed 定位菜单用）
-  const [quickSwitchAnchor, setQuickSwitchAnchor] = useState<{ top: number; right: number } | null>(null);
   // materials 目录行「⋯」操作菜单：锚点位置 + 当前行上下文（菜单项操作跟随上下文执行）
   const [materialMenu, setMaterialMenu] = useState<{
     top: number;
@@ -838,18 +865,19 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     materialsRelPath: string;
     folderName: string;
   } | null>(null);
+  // 标题栏项目切换下拉锚点（全部项目：标星置顶、横线分隔）
+  const [wsSwitchAnchor, setWsSwitchAnchor] = useState<{ top: number; right: number } | null>(null);
 
-  /** 点击项目图标：toggle 快速切换下拉（菜单右对齐按钮渲染） */
-  const toggleQuickSwitch = useCallback((e: React.MouseEvent) => {
+  /** 点击标题栏项目名称/文件夹图标：toggle 项目切换下拉 */
+  const toggleWsSwitch = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    if (quickSwitchOpen) {
-      setQuickSwitchOpen(false);
+    if (wsSwitchAnchor) {
+      setWsSwitchAnchor(null);
       return;
     }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setQuickSwitchAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-    setQuickSwitchOpen(true);
-  }, [quickSwitchOpen]);
+    setWsSwitchAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+  }, [wsSwitchAnchor]);
 
   // 点击 materials 菜单外部 / Esc / 滚动 → 关闭
   useEffect(() => {
@@ -870,18 +898,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     };
   }, [materialMenu]);
 
-  // 浮层关闭时同步关闭 materials 菜单（菜单 portal 独立渲染，不随浮层卸载）
+  // 点击项目切换下拉外部 / Esc / 滚动 → 关闭
   useEffect(() => {
-    if (!workspaceOpen) setMaterialMenu(null);
-  }, [workspaceOpen]);
-
-  // 点击快速切换下拉外部 / Esc / 滚动 → 关闭
-  useEffect(() => {
-    if (!quickSwitchOpen) return;
-    const close = () => setQuickSwitchOpen(false);
+    if (!wsSwitchAnchor) return;
+    const close = () => setWsSwitchAnchor(null);
     const onDocDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement;
-      if (t.closest('[data-quick-switch]')) return;
+      if (t.closest('[data-ws-switch]')) return;
       close();
     };
     document.addEventListener('mousedown', onDocDown);
@@ -892,7 +915,15 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
     };
-  }, [quickSwitchOpen]);
+  }, [wsSwitchAnchor]);
+
+  // 浮层关闭时同步关闭 materials 菜单 / 项目切换下拉（portal 独立渲染，不随浮层卸载）
+  useEffect(() => {
+    if (!workspaceOpen) {
+      setMaterialMenu(null);
+      setWsSwitchAnchor(null);
+    }
+  }, [workspaceOpen]);
 
   /** 加载项目文件树 */
   const loadProjectFiles = async (pid: string) => {
@@ -1397,6 +1428,10 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     );
   };
 
+  // 旧行内展开树渲染已被右栏 Finder 列式浏览取代（保留函数体待后续清理，标记使用以免误报）
+  void renderFileTree;
+  void renderProjectKindGroups;
+
   return (
     <>
       {/* 侧边条 rail 已移除（2026-09-01）：全部按钮迁至 ⌘F 面板底部图标栏；
@@ -1407,343 +1442,474 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       {workspaceOpen && typeof document !== 'undefined' && createPortal(
         <div
           data-bob-sidebar-popover
-          className="fixed z-[60] flex flex-col overflow-hidden rounded-xl border font-sans"
+          className="fixed z-[60] flex flex-col overflow-hidden rounded-xl border"
           style={{
             left: wsPos.x,
             top: wsPos.y,
-            width: 406,
+            width: wsWidth,
+            height: 'min(56vh, calc(100vh - 40px))',
             maxHeight: 'calc(100vh - 40px)',
             backgroundColor: 'var(--paper)',
             borderColor: 'color-mix(in oklab, var(--line) 35%, transparent)',
             boxShadow: '0 12px 32px color-mix(in srgb, var(--ink) 22%, transparent)',
           }}
         >
-          <div className="min-h-0 flex-1 overflow-y-auto py-2">
-          {/* Workspace 区块标题（浮层标题栏兼拖动把手；点击行内按钮不触发拖动） */}
+          <div className="flex h-full min-h-0 flex-col">
+          {/* 标题栏（拖动把手）：Workspace · 当前项目（文件夹图标/名称 → 下拉切换项目） */}
           <div
-            className="cursor-move select-none px-2 py-1"
-            style={{ WebkitUserSelect: 'none' }}
+            className="flex shrink-0 cursor-move select-none items-center gap-1.5 border-b px-2 py-1.5"
+            style={{ borderColor: 'var(--line-soft)', WebkitUserSelect: 'none' }}
             onPointerDown={(e) => startDrag(e)}
           >
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => setProjectsOpen(!projectsOpen)}
-                className="flex min-w-0 flex-1 items-center gap-1.5 px-1 py-1 text-left"
-              >
-                <span className="truncate text-base font-semibold" style={{ color: 'var(--ink)' }}>
-                  Workspace
-                </span>
-              </button>
-              {/* 项目切换（下拉选择项目）：原项目行 ▾ 移至 Workspace 标题栏，换为项目图标 */}
-              <Button
-                type="button"
-                onClick={(e) => toggleQuickSwitch(e)}
-                variant="ghost"
-                tone="neutral"
-                size="icon-sm"
-                title="Switch project"
-                aria-label="Switch project"
-              >
-                <FolderOpen className="h-3.5 w-3.5" />
-              </Button>
-              {/* 刷新当前项目文件列表 */}
-              {currentId && (
-                <Button
-                  type="button"
-                  onClick={() => loadProjectFiles(currentId)}
-                  variant="ghost"
-                  tone="neutral"
-                  size="icon-sm"
-                  title="Refresh file list"
-                  aria-label="Refresh file list"
-                >
-                  <RefreshCw className={`h-3.5 w-3.5 ${currentId && loadingFiles.has(currentId) ? 'animate-spin' : ''}`} />
-                </Button>
-              )}
-              {/* 关闭浮层（最右侧） */}
-              <Button
-                type="button"
-                onClick={() => setWorkspaceOpen(false)}
-                variant="ghost"
-                tone="neutral"
-                size="icon-sm"
-                className="ml-auto"
-                title="Close"
-                aria-label="Close"
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          </div>
-
-          {projectsOpen && (
-          <>
-          {/* 标星项目分组（置顶）：行内星标 + 点击切换；取消标星后回到普通列表 */}
-          {(() => {
-            const starredList = projects.filter((p) => starredProjects.has(p.id) && p.id !== currentId);
-            if (starredList.length === 0) return null;
-            return (
-              <div className="mx-1.5 mb-1">
-                <div className="flex items-center gap-1 px-1 py-1">
-                  <Star className="h-3 w-3" style={{ color: 'var(--warn)', fill: 'var(--warn)' }} />
-                  <span className="text-xs font-semibold" style={{ color: 'var(--ink-muted)' }}>
-                    Starred
-                  </span>
-                </div>
-                {starredList.map((p) => (
-                  <div key={p.id} className="group relative flex items-center rounded-md transition-colors" style={{ paddingLeft: 16 }}>
-                    <button
-                      onClick={() => handleSwitch(p.id)}
-                      className="flex flex-1 min-w-0 items-center gap-2 truncate rounded-md px-1.5 py-1.5 text-left text-sm"
-                      title={`Switch to ${p.name}`}
-                    >
-                      <FolderOpen className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--primary)' }} />
-                      <span className="min-w-0 flex-1 truncate font-medium" style={{ color: 'var(--ink)' }}>
-                        {p.name}
-                      </span>
-                      {p.category && (
-                        <span
-                          className="shrink-0 rounded px-1.5 py-px text-10 leading-4 font-medium"
-                          style={{
-                            backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)',
-                            color: 'var(--primary)',
-                          }}
-                        >
-                          {p.category}
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); toggleProjectStar(p.id); }}
-                      title="Unstar"
-                      className="flex-shrink-0 rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
-                      style={{ color: 'var(--warn)' }}
-                    >
-                      <Star className="h-3.5 w-3.5" style={{ fill: 'var(--warn)' }} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-          {/* 当前项目（唯一展示：聚焦当前活跃项目；切换走 Workspace 标题栏项目图标下拉 / 项目看板） */}
-          {(() => {
-            const currentProject = projects.find((p) => p.id === currentId);
-            if (!currentProject) {
-              /* 空状态：无活跃项目 → 新建项目引导 */
+            <span className="shrink-0 pl-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+              Workspace
+            </span>
+            <span style={{ width: 1, height: 16, backgroundColor: 'var(--line-soft)' }} />
+            {(() => {
+              const cp = projects.find((p) => p.id === currentId) || null;
               return (
-                <div className="mx-1.5 mb-1 rounded-md border border-dashed px-3 py-4 text-center" style={{ borderColor: 'var(--line)' }}>
-                  <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
-                    No active project
-                  </div>
-                  <div className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                    Create a project to get started
-                  </div>
+                <button
+                  type="button"
+                  onClick={(e) => toggleWsSwitch(e)}
+                  className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                  title={cp ? `Switch project (${cp.name})` : 'No active project'}
+                >
+                  <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: cp ? 'var(--primary)' : 'var(--ink-muted)' }} />
+                  <span className="max-w-[220px] truncate font-medium" style={{ color: cp ? 'var(--ink)' : 'var(--ink-muted)' }}>
+                    {cp ? cp.name : 'No project'}
+                  </span>
+                  <ChevronDown className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-faint)' }} />
+                </button>
+              );
+            })()}
+            {(() => {
+              const cp = projects.find((p) => p.id === currentId);
+              if (!cp) return null;
+              return (
+                <>
+                  {cp.category && (
+                    <span
+                      className="shrink-0 rounded px-1.5 py-px text-10 leading-4 font-medium"
+                      style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)', color: 'var(--primary)' }}
+                    >
+                      {cp.category}
+                    </span>
+                  )}
+                  {cp.note && (
+                    <Button
+                      type="button"
+                      onClick={() => openEditMeta(cp)}
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-sm"
+                      title={cp.note}
+                    >
+                      <StickyNote className="h-3 w-3" />
+                    </Button>
+                  )}
+                  {isDesktop() && cp.path && (
+                    <Button
+                      type="button"
+                      onClick={async () => {
+                        const res = await desktop.openFile(cp.path);
+                        if (!res.success && res.error) console.error('打开文件夹失败:', res.error);
+                      }}
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-sm"
+                      title="Open in Finder"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </Button>
+                  )}
+                </>
+              );
+            })()}
+            {/* 上下文操作（作用于当前打开的文件夹；仅 materials 下目录时可用） */}
+            {(() => {
+              if (!currentId || wsOpenPath.length === 0) return null;
+              const roots = projectFiles.get(currentId) || [];
+              if (roots.length === 0) return null;
+              let node: FileNode | null = null;
+              let arr = roots;
+              for (const nm of wsOpenPath) {
+                const f = arr.find((x) => x.type === 'directory' && x.name === nm);
+                if (!f) { node = null; break; }
+                node = f;
+                arr = f.children ?? [];
+              }
+              if (!node) return null;
+              const rel = node.rel ?? wsOpenPath.join('/');
+              if (rel !== 'materials' && !rel.startsWith('materials/')) return null;
+              const matRel = rel.replace(/^materials\/?/, '');
+              const isRoot = rel === 'materials';
+              return (
+                <>
+                  <span style={{ width: 1, height: 16, backgroundColor: 'var(--line-soft)' }} />
                   <Button
                     type="button"
-                    onClick={() => setCreateDialogOpen(true)}
-                    variant="solid"
-                    tone="brand"
-                    size="sm"
-                    className="mt-2"
+                    variant="ghost"
+                    tone="neutral"
+                    size="icon-sm"
+                    title="Upload file to this folder"
+                    onClick={() => {
+                      setUploadTargetFolder(matRel);
+                      setTimeout(() => uploadInputRef.current?.click(), 50);
+                    }}
                   >
-                    <Plus className="h-3.5 w-3.5" />
-                    New project
+                    <Upload className="h-3.5 w-3.5" />
                   </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    tone="neutral"
+                    size="icon-sm"
+                    title="Upload folder"
+                    onClick={() => {
+                      setUploadTargetFolder(matRel);
+                      setTimeout(() => uploadFolderInputRef.current?.click(), 50);
+                    }}
+                  >
+                    <FolderUp className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    tone="neutral"
+                    size="icon-sm"
+                    title="New subfolder"
+                    onClick={() => {
+                      setNewFolderParent(matRel);
+                      setNewFolderName('');
+                      setNewFolderVisible(true);
+                    }}
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                  </Button>
+                  {!isRoot && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      tone="neutral"
+                      size="icon-sm"
+                      title="Delete folder"
+                      onClick={() => {
+                        if (confirm(`Delete folder "${node?.name}" and all its contents?`)) handleDeleteMaterial(matRel, true);
+                      }}
+                    >
+                      <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
+                    </Button>
+                  )}
+                </>
+              );
+            })()}
+            <div className="flex-1" />
+            {/* 刷新当前项目文件列表 */}
+            {currentId && (
+              <Button
+                type="button"
+                onClick={() => loadProjectFiles(currentId)}
+                variant="ghost"
+                tone="neutral"
+                size="icon-sm"
+                title="Refresh file list"
+                aria-label="Refresh file list"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${currentId && loadingFiles.has(currentId) ? 'animate-spin' : ''}`} />
+              </Button>
+            )}
+            {/* 关闭浮层 */}
+            <Button
+              type="button"
+              onClick={() => setWorkspaceOpen(false)}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Close"
+              aria-label="Close"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+
+          {/* 主体：Finder 列式浏览（当前项目与切换已入标题栏） */}
+          <div className="flex min-h-0 flex-1">
+            {(() => {
+              const currentProject = projects.find((p) => p.id === currentId) || null;
+              return (
+                <>
+
+                  {/* ── 右栏：当前项目文件树 ── */}
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    {!currentProject ? (
+                      <div className="flex flex-1 items-center justify-center p-4">
+                        <div className="w-full rounded-md border border-dashed px-3 py-5 text-center" style={{ borderColor: 'var(--line)' }}>
+                          <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
+                            No active project
+                          </div>
+                          <div className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                            Create a project to get started
+                          </div>
+                          <Button
+                            type="button"
+                            onClick={() => setCreateDialogOpen(true)}
+                            variant="solid"
+                            tone="brand"
+                            size="sm"
+                            className="mt-2"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            New project
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Finder 列式浏览：每列显示一层内容，点目录推入右侧新列 */}
+                        <div className="flex min-h-0 flex-1 overflow-x-auto">
+                          {(() => {
+                            const roots = projectFiles.get(currentProject.id) || [];
+                            const isLoading = loadingFiles.has(currentProject.id) && roots.length === 0;
+                            const childrenAt = (prefix: string[]): FileNode[] => {
+                              let arr = roots;
+                              for (const nm of prefix) {
+                                const d = arr.find((x) => x.type === 'directory' && x.name === nm);
+                                if (!d || !d.children) return [];
+                                arr = d.children;
+                              }
+                              return arr;
+                            };
+                            const totalCols = 1 + wsOpenPath.length;
+
+                            if (roots.length === 0) {
+                              return (
+                                <div className="flex w-full items-center justify-center py-6 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                  {isLoading ? 'Loading...' : 'Empty'}
+                                </div>
+                              );
+                            }
+
+                            const renderRow = (c: number, node: FileNode, prefix: string[]) => {
+                              const rel = node.rel ?? (prefix.length ? [...prefix, node.name].join('/') : node.name);
+                              const isUnderMaterials = rel === 'materials' || rel.startsWith('materials/');
+                              const materialsRel = rel.startsWith('materials') ? rel.replace(/^materials\/?/, '') : '';
+                              if (node.type === 'directory') {
+                                const isOpen = wsOpenPath[c] === node.name;
+                                const authed = isMaterialsAuthed(currentProject.id);
+                                return (
+                                  <div key={node.name} className="group relative flex items-center rounded-md pr-1" style={isOpen ? { backgroundColor: 'color-mix(in oklab, var(--primary) 9%, transparent)' } : undefined}>
+                                    <button
+                                      type="button"
+                                      onClick={() => setWsOpenPath((prev) => [...prev.slice(0, c), node.name])}
+                                      className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                      title={node.title || node.name}
+                                    >
+                                      {isOpen ? (
+                                        <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                                      ) : (
+                                        <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                                      )}
+                                      <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--ink)' }}>
+                                        {node.title || node.name}
+                                      </span>
+                                    </button>
+                                    {isUnderMaterials && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          toggleMaterialsAuth(currentProject.id);
+                                        }}
+                                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
+                                        style={{ color: authed ? 'var(--success)' : 'var(--ink-muted)' }}
+                                        title={authed ? 'AI read/write authorized, click to revoke' : 'Authorize AI read/write for this directory (@ mentions, file tools)'}
+                                        aria-label={authed ? 'Revoke AI access' : 'Authorize AI access'}
+                                      >
+                                        {authed ? (
+                                          <ShieldCheck className="h-3 w-3" />
+                                        ) : (
+                                          <Shield className="h-3 w-3" />
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              }
+                              const fic = fileIcon(node.extension);
+                              return (
+                                <div key={node.name} className="group relative flex items-center rounded-md pr-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => bus.publish(BusEvents.fileOpen, { source: 'project', path: rel, name: node.name })}
+                                    className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                    title={node.name}
+                                  >
+                                    <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fic.color }} />
+                                    <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--ink)' }}>
+                                      {node.name}
+                                    </span>
+                                  </button>
+                                  {isUnderMaterials && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (confirm(`Delete file "${node.name}"?`)) handleDeleteMaterial(materialsRel, false);
+                                      }}
+                                      className="hidden shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--danger-soft)] group-hover:block"
+                                      style={{ color: 'var(--danger)' }}
+                                      title="Delete"
+                                    >
+                                      <Trash className="h-3 w-3" />
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            };
+
+                            const columns: ReactNode[] = [];
+                            for (let c = 0; c < totalCols; c++) {
+                              const prefix = wsOpenPath.slice(0, c);
+                              const children = childrenAt(prefix);
+                              columns.push(
+                                <div
+                                  key={c}
+                                  className={cn(
+                                    'flex flex-col border-r last:border-r-0',
+                                    c === 0 ? 'w-[140px] shrink-0' : 'min-w-[160px] flex-1',
+                                  )}
+                                  style={{
+                                    borderColor: 'var(--line-soft)',
+                                    ...(c === 0 ? { backgroundColor: 'var(--paper-soft)' } : {}),
+                                  }}
+                                >
+                                  <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+                                    {children.length === 0 ? (
+                                      <div className="px-2 py-3 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                        Empty
+                                      </div>
+                                    ) : (
+                                      children.map((ch) => renderRow(c, ch, prefix))
+                                    )}
+                                  </div>
+                                </div>,
+                              );
+                            }
+                            return columns;
+                          })()}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+
+          </div>
+
+          {/* 右缘调宽把手（拖动调宽） */}
+          <div
+            data-ws-resize
+            onPointerDown={(e) => startResize(e)}
+            className="absolute inset-y-0 right-0 z-20 w-1.5 cursor-col-resize touch-none select-none"
+            style={{ transition: 'background-color 0.15s ease' }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--primary) 25%, transparent)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+            title="Drag to resize"
+            aria-label="Drag to resize"
+          />
+        </div>,
+        document.body,
+      )}
+
+      {/* 标题栏项目切换下拉（portal 挂 body）：全部项目，标星置顶 + 横线分隔 */}
+      {wsSwitchAnchor && typeof document !== 'undefined' && createPortal(
+        <div
+          data-ws-switch
+          className="fixed z-[500] max-h-[50vh] w-72 overflow-hidden rounded-lg border py-1 shadow-xl"
+          style={{ top: wsSwitchAnchor.top, right: wsSwitchAnchor.right, backgroundColor: 'var(--popover)', borderColor: 'var(--line)' }}
+        >
+          {(() => {
+            const starredList = projects.filter((p) => starredProjects.has(p.id));
+            const otherList = projects.filter((p) => !starredProjects.has(p.id));
+            const row = (p: ProjectInfo) => {
+              const isCur = p.id === currentId;
+              const starred = starredProjects.has(p.id);
+              return (
+                <div key={p.id} className="flex items-center pr-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isCur) handleSwitch(p.id);
+                      setWsSwitchAnchor(null);
+                    }}
+                    className={cn(
+                      'flex min-w-0 flex-1 items-center gap-2 truncate px-3 py-1.5 text-left text-13 transition-colors hover:bg-[var(--paper-hover)]',
+                      isCur && 'opacity-90',
+                    )}
+                    style={{ color: 'var(--ink)' }}
+                    title={isCur ? 'Current project' : `Switch to ${p.name}`}
+                  >
+                    {isCur ? (
+                      <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                    ) : (
+                      <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                    )}
+                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                    {isCur && (
+                      <span
+                        className="shrink-0 rounded px-1.5 py-px text-10 font-semibold uppercase"
+                        style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)', color: 'var(--primary)' }}
+                      >
+                        Active
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); toggleProjectStar(p.id); }}
+                    title={starred ? 'Unstar' : 'Star'}
+                    aria-label={starred ? 'Unstar' : 'Star'}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ color: starred ? 'var(--warn)' : 'var(--ink-faint)' }}
+                  >
+                    <Star className="h-3 w-3" style={{ fill: starred ? 'var(--warn)' : 'transparent' }} />
+                  </button>
+                </div>
+              );
+            };
+            if (projects.length === 0) {
+              return (
+                <div className="px-3 py-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  No projects
                 </div>
               );
             }
-            const isExpanded = expandedProjects.has(currentProject.id);
-            const isLoading = loadingFiles.has(currentProject.id);
-            const files = projectFiles.get(currentProject.id) || [];
-
             return (
-            <>
-            <TooltipProvider delayDuration={0}>
-            <div className="mx-1.5 mb-1">
-              {/* 当前项目行 */}
-              <div
-                className="group relative flex items-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ paddingLeft: 16 }}
-              >
-                {/* 项目名称（点击展开/折叠文件树；加载中在名称后显示 spinner） */}
-                <button
-                  onClick={() => toggleProjectExpand(currentProject.id)}
-                  className="flex flex-1 items-center gap-2 truncate rounded-md px-1.5 py-1.5 text-left text-sm"
-                  title="Toggle file tree"
-                >
-                  <FolderOpen className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--primary)' }} />
-                  <>
-                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                        <span className="truncate font-medium" style={{ color: 'var(--ink)' }}>
-                          {currentProject.name}
-                        </span>
-                        {/* 备注便签图标（有备注时显示；悬停看全文，点击打开编辑） */}
-                        {currentProject.note && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openEditMeta(currentProject);
-                            }}
-                            className="shrink-0 rounded p-px transition-colors hover:bg-[var(--paper-hover)]"
-                            title={currentProject.note}
-                            style={{ color: 'var(--primary)' }}
-                          >
-                            <StickyNote className="h-3 w-3" />
-                          </button>
-                        )}
-                        {/* 分类 chip（创建时选择） */}
-                        {currentProject.category && (
-                          <span
-                            className="shrink-0 rounded px-1.5 py-px text-10 leading-4 font-medium"
-                            style={{
-                              backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)',
-                              color: 'var(--primary)',
-                            }}
-                          >
-                            {currentProject.category}
-                          </span>
-                        )}
-                        {/* 自定义标签（最多 2 个） */}
-                        {currentProject.tags && currentProject.tags.length > 0 && (
-                          <span className="flex min-w-0 items-center gap-1">
-                            {currentProject.tags.slice(0, PROJECT_TAG_LIMIT).map((t) => (
-                              <span
-                                key={t}
-                                className="shrink-0 rounded px-1.5 py-px text-10 leading-4"
-                                style={{
-                                  backgroundColor: 'color-mix(in oklab, var(--ink) 8%, transparent)',
-                                  color: 'var(--ink-muted)',
-                                }}
-                              >
-                                {t}
-                              </span>
-                            ))}
-                          </span>
-                        )}
-                        {isLoading && <RefreshCw className="h-3 w-3 shrink-0 animate-spin" style={{ color: 'var(--ink-muted)' }} />}
-                      </span>
-                    </>
-                </button>
-
-                {/* 标星当前项目（常显：星标置顶分组 + 切换入口） */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleProjectStar(currentProject.id);
-                  }}
-                  className="flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: starredProjects.has(currentProject.id) ? 'var(--warn)' : 'var(--ink-muted)' }}
-                  title={starredProjects.has(currentProject.id) ? 'Unstar' : 'Star'}
-                >
-                  <Star
-                    className="h-3.5 w-3.5"
-                    style={{ fill: starredProjects.has(currentProject.id) ? 'var(--warn)' : 'transparent' }}
-                  />
-                </button>
-
-                {/* 在 Finder 中打开（桌面环境） */}
-                {isDesktop() && currentProject.path && (
-                  <button
-                    type="button"
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      const res = await desktop.openFile(currentProject.path);
-                      if (!res.success && res.error) console.error('打开文件夹失败:', res.error);
-                    }}
-                    className="hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)] group-hover:block"
-                    style={{ color: 'var(--info)' }}
-                    title="Open in Finder"
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </button>
-                )}
-
-                </div>
-
-              {/* 文件树（homework 目录内含 AI 节点目录） */}
-              {isExpanded && (
-                <div className="mt-0.5">
-                  {files.length > 0 ? (
-                    <div>{renderFileTree(files, 0, currentProject.id, currentProject.id)}</div>
-                  ) : isLoading ? (
-                    <div className="py-2 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
-                      Loading...
+              <div className="max-h-[calc(50vh-16px)] overflow-y-auto">
+                {starredList.length > 0 && (
+                  <div className="mt-1">
+                    <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-faint)' }}>
+                      Starred
                     </div>
-                  ) : (
-                    <div className="py-2 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
-                      Empty
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-            </TooltipProvider>
-
-            {/* 快速切换下拉菜单（Portal 挂 body，避免被侧边栏 overflow 裁切） */}
-            {typeof document !== 'undefined' && quickSwitchOpen && quickSwitchAnchor && createPortal(
-              <div
-                data-quick-switch
-                className="fixed z-[500] w-60 overflow-hidden rounded-lg border py-1 shadow-xl"
-                style={{ top: quickSwitchAnchor.top, right: quickSwitchAnchor.right, backgroundColor: 'var(--popover)', borderColor: 'var(--line)' }}
-              >
-                {projects.length > 0 ? (
-                  projects.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        setQuickSwitchOpen(false);
-                        if (p.id !== currentId) handleSwitch(p.id);
-                      }}
-                      className={cn(
-                        'flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors hover:bg-[var(--paper-hover)]',
-                        p.id === currentId && 'opacity-60',
-                      )}
-                      style={{ color: 'var(--ink)' }}
-                    >
-                      {p.id === currentId ? (
-                        <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
-                      ) : (
-                        <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                      )}
-                      <span className="truncate">{p.name}</span>
-                      {p.id === currentId && (
-                        <Check className="ml-auto h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
-                      )}
-                    </button>
-                  ))
-                ) : (
-                  <div className="px-3 py-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                    No projects
+                    {starredList.map((p) => row(p))}
                   </div>
                 )}
-                <div className="my-1 h-px" style={{ backgroundColor: 'var(--line)' }} />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQuickSwitchOpen(false);
-                    onOpenProjectBoard?.();
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--primary-strong)' }}
-                >
-                  <LayoutGrid className="h-3.5 w-3.5 shrink-0" />
-                  All projects…
-                </button>
-              </div>,
-              document.body,
-            )}
-            </>
+                {starredList.length > 0 && otherList.length > 0 && (
+                  <div className="my-1 h-px" style={{ backgroundColor: 'var(--line)' }} />
+                )}
+                {otherList.length > 0 && (
+                  <div className="mt-1">
+                    <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-faint)' }}>
+                      Projects
+                    </div>
+                    {otherList.map((p) => row(p))}
+                  </div>
+                )}
+              </div>
             );
           })()}
-          </>)}
-
-          </div>
         </div>,
         document.body,
       )}
@@ -1868,7 +2034,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           onClick={() => !creating && setCreateDialogOpen(false)}
         >
           <div
-            className="rounded-2xl p-6 shadow-xl font-sans"
+            className="rounded-2xl p-6 shadow-xl"
             style={{
               border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
               backgroundColor: 'var(--popover)',
@@ -2030,7 +2196,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           onClick={() => !savingMeta && setEditMetaProject(null)}
         >
           <div
-            className="rounded-2xl p-6 shadow-xl font-sans"
+            className="rounded-2xl p-6 shadow-xl"
             style={{
               border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
               backgroundColor: 'var(--popover)',
@@ -2187,7 +2353,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           onClick={() => setNewFolderVisible(false)}
         >
           <div
-            className="rounded-2xl p-5 shadow-xl font-sans"
+            className="rounded-2xl p-5 shadow-xl"
             style={{
               border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
               backgroundColor: 'var(--popover)',

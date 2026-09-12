@@ -1,6 +1,6 @@
 {
   "name": "bob-work",
-  "version": "0.5.353",
+  "version": "0.5.392",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {
@@ -92,7 +92,6 @@
     "@tiptap/starter-kit": "^3.29.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/turndown": "^5.0.6",
-    "@xyflow/react": "^12.11.2",
     "adm-zip": "^0.6.0",
     "better-sqlite3": "^13.0.1",
     "class-variance-authority": "^0.7.1",
@@ -136,7 +135,7 @@
     "tsdav": "^2.3.1",
     "turndown": "^7.2.4",
     "unified": "^11.0.5",
-    "unified-renderer": "file:/Users/baolei/Desktop/BobAgent/assets/unified-renderer",
+    "unified-renderer": "file:../assets/unified-renderer",
     "vaul": "^1.1.2",
     "ws": "^8.21.2",
     "xlsx": "^0.18.5",
@@ -234,7 +233,7 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://gitcode.com/baolei89/BobAgent/releases/download/latest"
+        "url": "https://gitcode.com/baolei89/BobWork/releases/download/latest"
       }
     ]
   }

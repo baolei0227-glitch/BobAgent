@@ -21,13 +21,10 @@ const CODE_EXTS = new Set([
 ]);
 
 export const viewerRegistry: ViewerRenderer[] = [
-  { id: 'image',  test: (_e, i) => i.type === 'image',         load: () => import('./ImageViewer').then((m) => m.ImageViewer) },
-  { id: 'pdf',    test: (e) => e === 'pdf',                    load: () => import('./PdfCanvasViewer').then((m) => m.PdfCanvasViewer) },
   { id: 'docx',   test: (e) => ['docx', 'doc'].includes(e),    load: () => import('./DocxViewer').then((m) => m.DocxViewer) },
   { id: 'xlsx',   test: (e) => ['xlsx', 'xls'].includes(e),    load: () => import('./XlsxViewer').then((m) => m.XlsxViewer) },
   { id: 'binary', test: (_e, i) => i.type === 'binary',        load: () => import('./BinaryViewer').then((m) => m.BinaryViewer) },
   { id: 'md',     test: (e) => e === 'md',                     load: () => import('./MdViewer').then((m) => m.MdViewer) },
-  { id: 'html',   test: (e) => e === 'html',                   load: () => import('./HtmlViewer').then((m) => m.HtmlViewer) },
   { id: 'code',   test: (e, i) => !!i.content && CODE_EXTS.has(`.${e}`), load: () => import('./CodeViewer').then((m) => m.CodeViewer) },
   { id: 'text',   test: () => true,                            load: () => import('./TextViewer').then((m) => m.TextViewer) },
 ];
@@ -35,6 +32,12 @@ export const viewerRegistry: ViewerRenderer[] = [
 /** 按扩展名 + 文件信息匹配渲染器（找不到返回 null，由调度层兜底） */
 export function matchRenderer(ext: string, fileInfo: FileInfo): ViewerRenderer | null {
   return viewerRegistry.find((r) => r.test(ext, fileInfo)) ?? null;
+}
+
+/** 文档类（浏览器处理）：html/pdf/图片 —— 不走预览面板/系统默认应用，file.open → Hippo Browser（主进程重定向查看页） */
+const BROWSER_DOC_RE = /\.(html?|pdf|png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+export function isBrowserDoc(name?: string): boolean {
+  return name ? BROWSER_DOC_RE.test(name) : false;
 }
 
 /**

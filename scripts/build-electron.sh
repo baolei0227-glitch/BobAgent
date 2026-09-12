@@ -10,10 +10,10 @@ APP_NAME="BobWork"
 APP_DIR="$PROJECT_DIR/release/$APP_NAME.app"
 
 echo "==> Step 1/4: Building Next.js (standalone)..."
-NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=2048" pnpm next build
+NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=2048" npx next build
 
 echo "==> Step 2/4: Compiling Electron main process..."
-pnpm tsup electron/main.ts electron/preload.ts \
+npx tsup electron/main.ts electron/preload.ts \
   --format cjs \
   --platform node \
   --target node20 \
@@ -114,12 +114,23 @@ fi
 
 # Replace standalone's node_modules with a SYMLINK to project node_modules
 # This is fast (instant) and guarantees all deps are available
-rm -rf "$APP_DIR/Contents/Resources/next-standalone/node_modules"
-ln -s "$PROJECT_DIR/node_modules" "$APP_DIR/Contents/Resources/next-standalone/node_modules"
+# 注意：rm 可能被环境安全策略（safe-delete）拦截 → 容错继续 + ln -sfn 强制覆盖
+if [ ! -L "$APP_DIR/Contents/Resources/next-standalone/node_modules" ]; then
+  rm -rf "$APP_DIR/Contents/Resources/next-standalone/node_modules" 2>/dev/null || true
+fi
+ln -sfn "$PROJECT_DIR/node_modules" "$APP_DIR/Contents/Resources/next-standalone/node_modules"
 
 # Copy static assets and public folder
+mkdir -p "$APP_DIR/Contents/Resources/next-standalone/.next"
 cp -R "$PROJECT_DIR/.next/static" "$APP_DIR/Contents/Resources/next-standalone/.next/static"
 cp -R "$PROJECT_DIR/public" "$APP_DIR/Contents/Resources/next-standalone/public"
+# 校验：static 缺失会导致前端 JS 全 404（页面 SSR-only、覆盖窗口卡加载），缺失即中止
+_STATIC_CHUNKS="$APP_DIR/Contents/Resources/next-standalone/.next/static/chunks"
+if [ ! -d "$_STATIC_CHUNKS" ] || [ -z "$(ls -A "$_STATIC_CHUNKS" 2>/dev/null)" ]; then
+  echo "❌ ERROR: static chunks 拷贝失败/为空（$_STATIC_CHUNKS），中止打包"
+  exit 1
+fi
+echo "✅ static 资源已就绪: $(ls "$_STATIC_CHUNKS" | wc -l | tr -d ' ') chunks"
 # 内置技能（assets/skills）随包分发：打包版 cwd 为 next-standalone，loader 读取 ./assets/skills
 cp -R "$PROJECT_DIR/assets/skills" "$APP_DIR/Contents/Resources/next-standalone/assets/skills"
 
@@ -193,6 +204,9 @@ rm -f "$APP_DIR/Contents/Resources/electron.icns" 2>/dev/null
 
 echo "==> Step 4/4: Code signing..."
 xattr -cr "$APP_DIR" 2>/dev/null || true
+# 防中断兜底：可执行文件已 mv 为 BobWork，确保 Info.plist 的 CFBundleExecutable 指向正确
+# （否则 LaunchServices open 报 "executable is missing"）
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable BobWork" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
 # 固定本地证书签名：签名恒定，屏幕录制授权跨版本保留（避免每次重打包后重新授权）。
 # 证书缺失时回退 ad-hoc 保证构建可用（但授权将随重打包失效，需重新授权）。
 if codesign --force --deep --sign "BobWork Local Signing" "$APP_DIR" 2>&1; then

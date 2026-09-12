@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import type { StickyNote, StickyNotePage } from '@/app/api/sticky-notes/route';
-import { AlarmClock } from 'lucide-react';
+import { AlarmClock, Plus, Loader2, Check, AlertCircle } from 'lucide-react';
 
 /**
  * 画布便签层（Canvas Sticky Notes）
@@ -106,11 +106,6 @@ export function hydratePages(note: StickyNote): { pages: StickyNotePage[]; activ
   return { pages: [p], activePageId: p.id };
 }
 
-/** 侧栏折叠状态（默认折叠） */
-export function getSidebarCollapsed(note: StickyNote): boolean {
-  return typeof note.sidebarCollapsed === 'boolean' ? note.sidebarCollapsed : true;
-}
-
 /* ────────────────────────────────────────────────────────────
  * 空行归一化（客户端版，语义与 lib/sticky-todo 服务端版本一致）
  * 空行（纯空白 / `- [ ] `/`- [x] `）不是待办：保存前剔除并同步对齐行级日历元数据。
@@ -170,8 +165,12 @@ type TodoLineItemProps = {
   onEnter: () => void;
   onBackspaceEmpty: () => boolean;
   onToggle: () => void;
-  /** 该行待办已自动入日历（与日历事件双向联动）→ 行尾显示只读闹钟标识 */
+  /** 该行是否已加入日历（与日历事件双向联动）→ 行尾显示只读闹钟标识 */
   calendared?: boolean;
+  /** 手动「Add to calendar」：仅未入日历且未完成、宿主提供该能力时显示行尾按钮 */
+  onAddToCalendar?: () => void;
+  /** 手动加入日历的瞬时状态：busy=进行中 / done=成功 / error=失败（失败保留可重试） */
+  addState?: 'busy' | 'done' | 'error' | null;
 };
 
 export const TodoLineItem = memo(
@@ -185,6 +184,8 @@ export const TodoLineItem = memo(
     onBackspaceEmpty,
     onToggle,
     calendared,
+    onAddToCalendar,
+    addState,
   }: TodoLineItemProps) {
     return (
       <div className="group flex items-start gap-2">
@@ -249,16 +250,56 @@ export const TodoLineItem = memo(
         >
           {text}
         </div>
-        {/* 行尾：已自动入日历的只读标识（非按钮，无手动操作） */}
-        {calendared && (
+        {/* 行尾：已入日历 → 只读闹钟；未入日历且有宿主支持 → 手动「Add to calendar」按钮 */}
+        {calendared && addState !== 'busy' && (
           <span
-            title="Synced to calendar"
+            title="Added to calendar"
             className="mt-[3px] flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-[4px]"
             style={{ color: '#1e7d34', opacity: 0.75 }}
             onPointerDown={(e) => e.stopPropagation()}
           >
             <AlarmClock size={11} strokeWidth={2} />
           </span>
+        )}
+        {!calendared && !done && onAddToCalendar && (
+          <button
+            type="button"
+            title={
+              addState === 'error'
+                ? 'Failed — click to retry'
+                : addState === 'busy'
+                  ? 'Adding…'
+                  : 'Add to calendar'
+            }
+            disabled={addState === 'busy'}
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (addState !== 'busy') onAddToCalendar();
+            }}
+            className={`mt-[3px] flex h-[15px] w-[15px] shrink-0 cursor-pointer items-center justify-center rounded-[4px] transition-colors hover:bg-black/10 ${
+              addState === 'busy' || addState === 'error' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            }`}
+            style={{
+              color:
+                addState === 'done'
+                  ? '#1e7d34'
+                  : addState === 'error'
+                    ? '#c62828'
+                    : 'rgba(23,23,23,.45)',
+            }}
+          >
+            {addState === 'busy' ? (
+              <Loader2 size={11} strokeWidth={2} className="animate-spin" />
+            ) : addState === 'done' ? (
+              <Check size={11} strokeWidth={2.4} />
+            ) : addState === 'error' ? (
+              <AlertCircle size={11} strokeWidth={2} />
+            ) : (
+              <Plus size={11} strokeWidth={2.4} />
+            )}
+          </button>
         )}
       </div>
     );
@@ -268,5 +309,6 @@ export const TodoLineItem = memo(
     prev.done === next.done &&
     prev.color === next.color &&
     prev.accent === next.accent &&
-    prev.calendared === next.calendared,
+    prev.calendared === next.calendared &&
+    prev.addState === next.addState,
 );

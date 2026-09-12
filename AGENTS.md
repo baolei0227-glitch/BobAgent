@@ -16,13 +16,14 @@
 ├── src/
 │   ├── app/
 │   │   ├── api/chat/route.ts  # SSE 流式 AI 对话 API
-│   │   ├── globals.css        # 全局样式 (含 React Flow 暗色主题)
+│   │   ├── globals.css        # 全局样式
 │   │   ├── layout.tsx         # 根布局 (dark 模式)
 │   │   └── page.tsx           # 主页 (CanvasFlow)
 │   ├── components/
 │   │   ├── canvas/
-│   │   │   ├── AiChatNode.tsx   # AI 对话节点组件 (含引导标识)
-│   │   │   └── CanvasFlow.tsx   # React Flow 无限画布主组件
+│   │   │   ├── ChatNodeKernel.tsx # AI 会话节点统一内核（所有 agent 共用）
+│   │   │   ├── node-host.ts       # 单焦点宿主节点注入通道（NodeHostContext）
+│   │   │   └── CanvasFlow.tsx     # 单焦点会话宿主（自绘画布层，无第三方画布库）
 │   │   └── ui/                  # Shadcn UI 组件库
 │   ├── hooks/                   # 自定义 Hooks
 │   ├── lib/
@@ -36,7 +37,7 @@
 
 ### 核心依赖
 
-- `@xyflow/react` (v12): 无限画布引擎，提供 pan/zoom、自定义节点、边连接
+- 画布: 宿主自绘（单焦点会话 + 世界层绝对定位）；关系图由 NodeMap（力导向自布局）承担
 - `coze-coding-dev-sdk`: LLM SDK，用于后端 AI 流式对话
 - `lucide-react`: 图标库
 

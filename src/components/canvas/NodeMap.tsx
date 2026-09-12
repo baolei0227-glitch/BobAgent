@@ -1,11 +1,49 @@
 'use client';
 
 import { useState, useMemo, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore } from 'react';
-import type { CSSProperties } from 'react';
-import { MapPinned as MapIcon, Pin, Inbox, RefreshCw, Download, AlertCircle, ArrowDownCircle } from 'lucide-react';
-import { getBezierPath, Position } from '@xyflow/react';
+import { MapPinned as MapIcon, Pin, Inbox } from 'lucide-react';
 import type { GraphGateway, NodeKind } from '@/lib/graph/graph-gateway';
 import { computeForceLayout } from '@/lib/graph/nodemap-layout';
+
+/** 锚点方位常量（语义同旧 React Flow 的 Position，仅用于锚点与曲线控制点方向） */
+const Position = { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' } as const;
+type Position = (typeof Position)[keyof typeof Position];
+
+/** 三次贝塞尔控制点：沿锚点方位偏移 curvature × 轴向距离（等价旧 getBezierPath 的 withCurvature 规则） */
+function bezierControl(
+  pos: Position,
+  x1: number, y1: number,
+  x2: number, y2: number,
+  curvature: number,
+): { x: number; y: number } {
+  switch (pos) {
+    case Position.Left: return { x: x1 - Math.abs(x2 - x1) * curvature, y: y1 };
+    case Position.Right: return { x: x1 + Math.abs(x2 - x1) * curvature, y: y1 };
+    case Position.Top: return { x: x1, y: y1 - Math.abs(y2 - y1) * curvature };
+    case Position.Bottom: return { x: x1, y: y1 + Math.abs(y2 - y1) * curvature };
+  }
+}
+
+/** 自实现平滑贝塞尔连线（替代旧 getBezierPath）：
+ *  @returns [pathD, midX, midY] —— SVG path 与 t=0.5 处中点（旧实现 labelX/labelY 供命中判定/把手） */
+function smoothBezierPath(opts: {
+  sourceX: number;
+  sourceY: number;
+  sourcePosition: Position;
+  targetX: number;
+  targetY: number;
+  targetPosition: Position;
+  curvature?: number;
+}): [string, number, number] {
+  const curvature = opts.curvature ?? 0.25;
+  const c1 = bezierControl(opts.sourcePosition, opts.sourceX, opts.sourceY, opts.targetX, opts.targetY, curvature);
+  const c2 = bezierControl(opts.targetPosition, opts.targetX, opts.targetY, opts.sourceX, opts.sourceY, curvature);
+  const d = `M${opts.sourceX},${opts.sourceY} C ${c1.x},${c1.y} ${c2.x},${c2.y} ${opts.targetX},${opts.targetY}`;
+  // 三次贝塞尔 t=0.5：P = (P0 + 3P1 + 3P2 + P3)/8
+  const midX = (opts.sourceX + 3 * c1.x + 3 * c2.x + opts.targetX) / 8;
+  const midY = (opts.sourceY + 3 * c1.y + 3 * c2.y + opts.targetY) / 8;
+  return [d, midX, midY];
+}
 
 /** 单焦点画布：可被桌面"单节点 + 导航圆点"收纳的 AI 研究节点类型（与 CanvasFlow isFocusableResearch 同口径） */
 function isFocusFlowType(type?: string): boolean {
@@ -20,6 +58,10 @@ const CARD_MAX = 16;
 
 /** 连接把手离开圆点的间距：把手落在圆点外缘，避免与圆点重叠、可独立抓取 */
 const HANDLE_GAP = 8;
+
+/** 建边吸附半径增量（屏幕像素）：拖线端点进入"目标圆点半径 + 该增量"范围内即吸附锁定目标，
+ *  端点收拢到目标中心并点亮高亮环——不必精确定位到卡片上，接近即磁吸 */
+const CONNECT_SNAP_PX = 10;
 
 /** 迷你连线中点拖断判定阈值（屏幕像素）：地图空间小，比画布 30px 更灵敏 */
 const EDGE_DRAG_THRESHOLD_PX = 12;
@@ -126,69 +168,6 @@ function EdgeHandle({ disconnected, show, midX, midY, onDisconnect, onReconnect,
   );
 }
 
-/** 更新状态图标按钮（原 rail 底部更新入口，2026-09-01 迁移至 NodeMap）：
- *  按状态渲染对应图标，点击派发 update-action 由 Sidebar 执行具体动作 */
-function StatusIconBtn({ status, updateInfo }: {
-  status: string;
-  updateInfo: { version?: string; progress?: number; error?: string; install?: { stage?: string; message?: string; percent?: number } | null };
-}) {
-  const act = (action: string) => window.dispatchEvent(new CustomEvent('update-action', { detail: { action } }));
-  const base: CSSProperties = {
-    width: 36,
-    height: 36,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 9,
-    border: '1px solid var(--line)',
-    boxShadow: '0 2px 6px rgba(0,0,0,0.10)',
-    cursor: 'pointer',
-  };
-  if (status === 'checking') {
-    return (
-      <button type="button" style={{ ...base, backgroundColor: 'var(--paper)', color: 'var(--primary)' }} title="Checking for updates…">
-        <RefreshCw className="h-4 w-4 animate-spin" />
-      </button>
-    );
-  }
-  if (status === 'available') {
-    return (
-      <button type="button" onClick={() => act('download')} style={{ ...base, backgroundColor: 'var(--primary)', color: 'var(--primary-foreground)' }} title={`v${updateInfo.version} available — click to download`}>
-        <Download className="h-4 w-4" />
-      </button>
-    );
-  }
-  if (status === 'downloading') {
-    return (
-      <button type="button" style={{ ...base, backgroundColor: 'var(--paper)', color: 'var(--primary)' }} title={`Downloading v${updateInfo.version} — ${Math.round(updateInfo.progress ?? 0)}%`}>
-        <RefreshCw className="h-4 w-4 animate-spin" />
-      </button>
-    );
-  }
-  if (status === 'downloaded') {
-    return (
-      <button type="button" onClick={() => act('install')} style={{ ...base, backgroundColor: 'var(--primary-strong)', color: 'var(--primary-foreground)' }} title={`v${updateInfo.version} ready — click to install`}>
-        <ArrowDownCircle className="h-4 w-4" />
-      </button>
-    );
-  }
-  if (status === 'installing') {
-    return (
-      <button type="button" style={{ ...base, backgroundColor: 'var(--primary-strong)', color: 'var(--primary-foreground)' }} title={updateInfo.install?.message || updateInfo.error || 'Installing…'}>
-        <RefreshCw className="h-4 w-4 animate-spin" />
-      </button>
-    );
-  }
-  if (status === 'error') {
-    return (
-      <button type="button" onClick={() => act('check')} style={{ ...base, backgroundColor: 'var(--paper)', color: 'var(--danger)' }} title={updateInfo.error || 'Update error — click to retry'}>
-        <AlertCircle className="h-4 w-4" />
-      </button>
-    );
-  }
-  return null;
-}
-
 /** 节点地图 — 小圆点形式展示全部节点，并绘制节点间连线
  *  画布数据访问全部通过 gateway（GraphGateway 统一对接端口，太空舱理念），
  *  不直接触碰 ReactFlow store / window 事件总线。
@@ -212,30 +191,16 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
   // 常驻状态提示（原左侧 rail 底部，2026-09-01 迁移至 NodeMap）：
   // - BobMail 未读角标（Sidebar bobmail-pending 广播）
   const [wantedPending, setWantedPending] = useState(0);
-  // - 应用更新状态（Sidebar 保留更新逻辑，广播 update-status-changed）
-  const [updateInfo, setUpdateInfo] = useState<{
-    status: string;
-    version?: string;
-    progress?: number;
-    error?: string;
-    install?: { stage?: string; message?: string; percent?: number } | null;
-  }>({ status: 'idle' });
   useEffect(() => {
     const onPending = (e: Event) => {
       const d = (e as CustomEvent).detail as { pending?: number } | undefined;
       if (typeof d?.pending === 'number') setWantedPending(d.pending);
     };
-    const onUpdate = (e: Event) => {
-      const d = (e as CustomEvent).detail as typeof updateInfo | undefined;
-      if (d) setUpdateInfo(d);
-    };
     window.addEventListener('bobmail-pending', onPending);
-    window.addEventListener('update-status-changed', onUpdate);
     // 挂载时主动拉取 BobMail 未读数（Sidebar 已广播过，确保早期打开能拿到）
     window.dispatchEvent(new Event('bobmail-pending-request'));
     return () => {
       window.removeEventListener('bobmail-pending', onPending);
-      window.removeEventListener('update-status-changed', onUpdate);
     };
   }, []);
   // 当前通过 NodeMap 聚焦放大的节点 id
@@ -250,9 +215,6 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
   }, [focusedNodeId]);
   // 缩略图自身缩放倍率：固定最大档（2x），不再提供两档切换按钮（放大看局部布局）
   const mapZoom = 2;
-  // 画布缩放锁定（2026-09-03 起恒定开启：NodeMap 缩放按钮已移除，不再提供解锁入口）。
-  // 锁定时 zoom 固定 100%，滚轮转为平移；CanvasFlow 默认同为锁定态，二者保持一致。
-  const zoomLocked = true;
 
   // ———— 拖拽建边（新连线）：卡片右侧连接锚点拖到另一张卡片松手即建边 ————
   //  connectFrom：当前拖出的源卡片 id；connectPos：指针在面板 local 坐标（临时线端点）；
@@ -314,13 +276,12 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     if (collapsed) setHighlightNodeId(null);
   }, [collapsed]);
 
-  // 订阅画布快照：节点/边/视口变化时自动重渲染（gateway 内部按引用比较过滤无关更新）
-  const { nodes, edges, viewport } = useSyncExternalStore(
+  // 订阅画布快照：节点/边变化时自动重渲染（gateway 内部按引用比较过滤无关更新）
+  const { nodes, edges } = useSyncExternalStore(
     gateway.subscribe,
     gateway.getSnapshot,
     gateway.getSnapshot,
   );
-  const { x: vpX, y: vpY, zoom: vpZoom } = viewport;
 
   // 订阅节点执行状态：流式执行中/结束分别携带 executing=true/false（驱动执行中琥珀呼吸灯）
   useEffect(() => {
@@ -350,13 +311,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [collapsed, pinned]);
 
-  // 缩放锁定时：若画布 zoom 偏离 1（如锁定前残留或 RF 内部重置），自动拉回 100%，
-  // 保持 x/y 不变——只纠正 zoom，不移动视口位置。
-  useEffect(() => {
-    if (!zoomLocked) return;
-    if (Math.abs(vpZoom - 1) < 0.001) return;
-    gateway.setViewport({ x: vpX, y: vpY, zoom: 1 });
-  }, [zoomLocked, vpZoom, vpX, vpY, gateway]);
+  // 画布 zoom 恒 1（单焦点宿主 2026-09）：旧"zoom 偏离 1 时拉回"的 setViewport 死逻辑已移除。
 
   // 锚定增量排版：以"节点结构签名"为键缓存上次落定位置。
   // ① 纯边增删（拉线/断边）不改动节点集合 → 复用缓存位置，圆圈位置不变化（解决"拉线后位置会变化"）；
@@ -403,8 +358,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
       const p = effective[n.id];
       if (!p) continue;
       let kind: NodeKind = 'chat';
-      if (n.type === 'imageGen') kind = 'imageGen';
-      else if (n.sandboxAppId) kind = 'coding';
+      if (n.sandboxAppId) kind = 'coding';
       list.push({ id: n.id, cx: p.cx, cy: p.cy, name: n.title, kind });
       centerMap[n.id] = { cx: p.cx, cy: p.cy };
     }
@@ -462,19 +416,25 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     const r = mapPaneRef.current?.getBoundingClientRect();
     return r ? { x: e.clientX - r.left, y: e.clientY - r.top } : null;
   }, []);
-  // 命中判定：指针位置命中的目标卡片（排除源卡片与归档卡片），覆盖式取最上层
+  // 命中判定（建边吸附）：指针 local 坐标 → 命中的目标卡片（排除源卡片与归档卡片）。
+  // 圆形命中 + CONNECT_SNAP_PX 磁吸增量：接近目标卡片即"吸住"，取距离最近者避免重叠误判。
   const hitCardAtLocal = useCallback((lx: number, ly: number): string | null => {
     const from = connectStateRef.current?.from;
     if (!from) return null;
-    let hit: string | null = null;
+    let best: string | null = null;
+    let bestD = Infinity;
+    const hitR = Math.max(cardSize, 14) / 2 + CONNECT_SNAP_PX;
     for (const d of dots) {
       if (d.id === from) continue;
-      const half = Math.max(cardSize, 14) / 2;
       const cx = toMapX(d.cx);
       const cy = toMapY(d.cy);
-      if (lx >= cx - half && lx <= cx + half && ly >= cy - half && ly <= cy + half) hit = d.id;
+      const dist = Math.hypot(lx - cx, ly - cy);
+      if (dist <= hitR && dist < bestD) {
+        bestD = dist;
+        best = d.id;
+      }
     }
-    return hit;
+    return best;
   }, [dots, cardSize, toMapX, toMapY]);
   // 面板级 hover 命中：鼠标 local 坐标 → 最近圆点（阈值覆盖圆点 + 左右拖拽点，
   // 保证"圆点 ↔ 拖拽点"往返不闪退）。面板级兜底，规避子按钮在父容器 pointer-events-none
@@ -523,9 +483,9 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
         sx = sx0 - half; sy = sy0; tx = tx0 + half; ty = ty0;
         sourcePosition = Position.Left; targetPosition = Position.Right;
       }
-      // 取贝塞尔真实中点（labelX/labelY）作为命中折线的中间顶点，
+      // 取贝塞尔真实中点（mx/my）作为命中折线的中间顶点，
       // 让中点"断开"把手始终落在命中区域内，避免线↔把手往返时闪退
-      const [, mx, my] = getBezierPath({
+      const [, mx, my] = smoothBezierPath({
         sourceX: sx, sourceY: sy, sourcePosition,
         targetX: tx, targetY: ty, targetPosition,
         curvature: 0.25,
@@ -581,16 +541,23 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
       // 合成指针（自动化/测试）无 active pointer 时捕获会抛错，忽略即可
     }
   }, [toPaneLocal]);
-  // 拖线移动：更新端点 + 命中目标
+  // 拖线移动：更新端点 + 命中目标。
+  // 吸附：命中目标卡片（含磁吸半径）时端点收拢到目标中心（视觉"被吸住"），
+  // 移出磁吸半径恢复跟随指针。
   const moveConnect = useCallback((e: React.PointerEvent) => {
     if (!connectStateRef.current) return;
     const p = toPaneLocal(e);
     if (!p) return;
-    setConnectPos(p);
     const t = hitCardAtLocal(p.x, p.y);
     connectTargetRef.current = t;
     setConnectTarget(t);
-  }, [toPaneLocal, hitCardAtLocal]);
+    if (t) {
+      const td = dots.find((d) => d.id === t);
+      setConnectPos(td ? { x: toMapX(td.cx), y: toMapY(td.cy) } : p);
+    } else {
+      setConnectPos(p);
+    }
+  }, [toPaneLocal, hitCardAtLocal, dots, toMapX, toMapY]);
   // 松手：命中目标卡片则派发建边请求（画布 onConnect 全流程），无论成败都清连接态
   const finishConnect = useCallback(() => {
     const from = connectStateRef.current?.from ?? null;
@@ -685,11 +652,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
       {/* 状态提示栈（原左侧 rail 底部按钮，2026-09-01 迁移至 NodeMap 上方）：
           仅保留应用更新状态；BobMail 未读角标直接落在 NodeMap 的 MapIcon 上，
           打开入口在展开面板标题栏内。 */}
-      <div className="flex flex-col items-end gap-1.5">
-        {updateInfo.status !== 'idle' && updateInfo.status !== 'no-update' && (
-          <StatusIconBtn status={updateInfo.status} updateInfo={updateInfo} />
-        )}
-      </div>
+      <div className="flex flex-col items-end gap-1.5"></div>
 
       {/* 聚焦圆点的红色光晕呼吸动画 */}
       <style>{`
@@ -711,26 +674,9 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
             backgroundColor: 'var(--paper)',
             border: '1px solid var(--line)',
           }}
-          title={`Node Map (${nodes.length})${wantedPending > 0 ? ` — ${wantedPending} unread notifications` : ''}`}
+          title={`Node Map (${nodes.length})`}
         >
           <MapIcon className="h-4 w-4" style={{ color: 'var(--ink-muted)' }} />
-          {wantedPending > 0 && (
-            <span
-              role="button"
-              onClick={(e) => {
-                // 点击角标直接打开 BobMail；stopPropagation 避免触发外层按钮的展开行为
-                e.stopPropagation();
-                window.dispatchEvent(new CustomEvent('bobmail-toggle', {
-                  detail: { anchor: (e.currentTarget as HTMLSpanElement).getBoundingClientRect() },
-                }));
-              }}
-              title={`Notifications (BobMail) — ${wantedPending} unread`}
-              className="absolute -right-0.5 -top-0.5 flex h-[14px] min-w-[14px] cursor-pointer items-center justify-center rounded-full px-1 text-8 font-bold leading-none transition-opacity hover:opacity-80"
-              style={{ backgroundColor: 'var(--danger)', color: '#fff' }}
-            >
-              {wantedPending > 99 ? '99+' : wantedPending}
-            </span>
-          )}
         </button>
       ) : (
         <div
@@ -864,7 +810,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                   sourcePosition = Position.Left;
                   targetPosition = Position.Right;
                 }
-                const [d, labelX, labelY] = getBezierPath({
+                const [d, labelX, labelY] = smoothBezierPath({
                   sourceX: sx, sourceY: sy, sourcePosition,
                   targetX: tx, targetY: ty, targetPosition,
                   curvature: 0.25,
@@ -958,6 +904,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                 >
                   <button
                     className="absolute flex items-center justify-center"
+                    data-nodemap-dot={dot.id}
                     style={{
                       width: hit,
                       height: hit,
@@ -1042,6 +989,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                       <button
                         key={`connect-${dot.id}-${s.id}`}
                         className="absolute flex items-center justify-center rounded-full"
+                        data-nodemap-connect={dot.id}
+                        data-side={s.id}
                         style={{
                           width: 12,
                           height: 12,
@@ -1120,21 +1069,32 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                   style={{ width: containerW, height: containerH, zIndex: 3 }}
                 >
                   {tDot && (
-                    <rect
-                      x={toMapX(tDot.cx) - th / 2}
-                      y={toMapY(tDot.cy) - th / 2}
-                      width={th}
-                      height={th}
-                      rx={th / 2} // 目标圆点圆形高亮
-                      fill="none"
-                      stroke="var(--primary)"
-                      strokeWidth={1.5}
-                      strokeDasharray="3 2"
-                    />
+                    <g>
+                      <rect
+                        x={toMapX(tDot.cx) - th / 2}
+                        y={toMapY(tDot.cy) - th / 2}
+                        width={th}
+                        height={th}
+                        rx={th / 2} // 目标圆点圆形高亮（吸附点亮：柔和填充示意"即将连接"）
+                        fill="color-mix(in oklab, var(--primary) 12%, transparent)"
+                        stroke="var(--primary)"
+                        strokeWidth={1.5}
+                        strokeDasharray="3 2"
+                      />
+                      {/* 目标吸附中心锚点：端点收拢后与其重合 */}
+                      <circle cx={toMapX(tDot.cx)} cy={toMapY(tDot.cy)} r={2.5} fill="var(--primary)" />
+                    </g>
                   )}
                   {/* 拖线用 --primary（--primary-soft 在浅色面板上近白隐形）；目标高亮框已为主色虚线 */}
                   <line x1={sx} y1={sy} x2={connectPos.x} y2={connectPos.y} stroke="var(--primary)" strokeWidth={1.5} strokeDasharray="4 3" strokeLinecap="round" />
-                  <circle cx={connectPos.x} cy={connectPos.y} r={3} fill="var(--primary)" />
+                  <circle
+                    cx={connectPos.x}
+                    cy={connectPos.y}
+                    r={connectTarget ? 4.5 : 3}
+                    fill="var(--primary)"
+                    stroke="var(--paper)"
+                    strokeWidth={connectTarget ? 1.5 : 0}
+                  />
                 </svg>
               );
             })()}

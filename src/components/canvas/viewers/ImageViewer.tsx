@@ -107,7 +107,7 @@ function RotatableSlide({ slide, offset, rect }: RenderSlideProps) {
 }
 
 /** 图片渲染器：yarl 内嵌（多图缩略图 / 缩放 / 旋转 / 标注 / 下载），可切换全屏 */
-export function ImageViewer({ fileInfo, slides, initialIndex, source, projectId }: ViewerRenderProps) {
+export function ImageViewer({ fileInfo, slides, initialIndex, source, projectId, onAiEditOverride }: ViewerRenderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // false = 内嵌在容器内；true = 挂到 document.body 全屏
   const [fullscreen, setFullscreen] = useState(false);
@@ -204,16 +204,7 @@ export function ImageViewer({ fileInfo, slides, initialIndex, source, projectId 
               <AnnotateButton key="annotate" onAnnotate={(i) => setAnnotateIndex(i)} />,
               <AiEditButton
                 key="ai-edit"
-                onAiEdit={(i) => {
-                  const slide = mySlides[i];
-                  if (!slide) return;
-                  // 不在预览内就地编辑：派发事件，由画布创建预载该图的 Image Gen 节点进行编辑
-                  window.dispatchEvent(
-                    new CustomEvent('open-imagegen-editor', {
-                      detail: { dataUrl: slide.src, fileName: slide.alt || fileInfo.name },
-                    }),
-                  );
-                }}
+                onAiEdit={(i) => onAiEditOverride?.(i)}
               />,
               <button
                 key="toggle-fullscreen"

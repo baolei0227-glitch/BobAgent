@@ -86,7 +86,7 @@ export async function settingsFileExists(): Promise<boolean> {
 const BUNDLED_PREFIX = '{BUNDLED}:';
 
 /** 定位随包分发的本地 MCP 插件入口（多环境候选，均缺失时回退 cwd 候选） */
-function bundledPluginPath(rel: string): string {
+export function bundledPluginPath(rel: string): string {
   const candidates: string[] = [];
   // Electron 主进程：GUI 应用 cwd 常为 /（resolve(cwd, rel) 会产出无意义的根路径），
   // 必须优先按资源目录定位，否则坏值经 IPC 返回渲染进程、随保存写回，永久污染占位符

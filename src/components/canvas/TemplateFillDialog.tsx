@@ -37,6 +37,7 @@ export function TemplateFillPanel({
   onClose,
   onGenerated,
   embedded,
+  onDeleteTemplate,
 }: {
   scene: string;
   templates: FillTemplateItem[];
@@ -45,6 +46,8 @@ export function TemplateFillPanel({
   onGenerated?: (summary: string, files?: { file: string; size: number; path: string }[]) => void;
   /** 嵌入模式（预览面板内）：隐藏弹窗式 X/Close 按钮，高度自适应容器 */
   embedded?: boolean;
+  /** 可选：删除某个模板（预览面板模板管理用；独立弹窗不传则隐藏删除按钮） */
+  onDeleteTemplate?: (file: string) => void;
 }) {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   /** 「Update Fields」时的勾选快照：字段列重建为快照模板的字段并集；null = 未手动更新，字段列 = 全量模板并集 */
@@ -513,24 +516,40 @@ export function TemplateFillPanel({
                 Bob Items ({checked.size}/{templates.length})
               </label>
             </div>
-            <div className="mt-1 flex flex-wrap gap-1.5">
+            <div className="mt-1 flex flex-wrap items-center gap-1.5">
               {templates.map((t) => {
                 const on = checked.has(t.file);
                 return (
-                  <button
+                  <div
                     key={t.file}
-                    type="button"
-                    onClick={() => toggleTemplate(t.file)}
-                    className="rounded-md border px-2 py-1 text-xs transition-colors flex items-center gap-1"
+                    className="flex items-center rounded-md border transition-colors"
                     style={{
                       borderColor: on ? 'var(--primary)' : 'var(--line)',
                       backgroundColor: on ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
-                      color: on ? 'var(--primary)' : 'var(--ink-muted)',
                     }}
                   >
-                    {on ? <Check className="h-3 w-3" /> : <FileText className="h-3 w-3" />}
-                    {t.file}
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => toggleTemplate(t.file)}
+                      className="flex items-center gap-1 px-2 py-1 text-xs"
+                      style={{ color: on ? 'var(--primary)' : 'var(--ink-muted)' }}
+                    >
+                      {on ? <Check className="h-3 w-3" /> : <FileText className="h-3 w-3" />}
+                      {t.file}
+                    </button>
+                    {onDeleteTemplate && (
+                      <button
+                        type="button"
+                        onClick={() => onDeleteTemplate(t.file)}
+                        className="mr-1 rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
+                        title={`Delete ${t.file}`}
+                        aria-label={`Delete ${t.file}`}
+                        style={{ color: 'var(--danger)' }}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </div>

@@ -126,7 +126,7 @@ function diffToolFingerprints(prev: Map<string, string>, cur: Map<string, string
  *  2026-08-30 起普通对话改为「核心常驻 + 动态场景（sticky）」，ondemand/MCP 工具
  *  按意图激活/不激活导致工具集增减属预期行为——CacheGuard 应豁免此类变化，
  *  只对 core 内置 / 自定义工具的异常漂移告警，避免每会话首次激活刷屏误导诊断。
- *  2026-09-09 语义随 getToolLayer 修复扩展：SCENED_TOOLS 场景门控内置工具（planner/
+ *  2026-09-09 语义随 getToolLayer 修复扩展：SCENED_TOOLS 场景门控内置工具（butler/
  *  wanted/todo 系）也归 ondemand → 一并豁免（此前默认 core 被误判异常漂移）。
  *  导出供单测回归锁定豁免边界。 */
 export function isDynamicSceneTool(name: string): boolean {

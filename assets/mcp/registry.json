@@ -132,5 +132,16 @@
     "vetted": true,
     "auth": true,
     "kind": "mcp"
+  },
+  {
+    "id": "coze",
+    "name": "Coze (扣子)",
+    "description": "Chat with your Coze bots (published as an API service) and run your Coze workflows from BobWork. Requires a Coze Personal Access Token (PAT).",
+    "group": "download",
+    "category": "AI Agents",
+    "risk": "normal",
+    "vetted": true,
+    "auth": true,
+    "kind": "mcp"
   }
 ]

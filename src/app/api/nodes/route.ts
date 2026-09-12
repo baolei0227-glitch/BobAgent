@@ -51,7 +51,7 @@ async function withProjectContext<T>(handler: () => Promise<T>): Promise<T> {
   }
 }
 
-/** 成果块提取模型解析：统一复用 Wanted 模型解析（分层回退：chatModel → pool → taskModel → providers） */
+/** 成果块提取模型解析：统一复用任务/成果块模型解析（分层回退：chatModel → pool → taskModel → providers） */
 
 /** 将节点标记为 stale（R-10：直接下游失效标记，UI 显示告警但不阻断使用） */
 async function markStale(nodeId: string, projectPath: string): Promise<void> {

@@ -5,7 +5,8 @@
  *  - 色块显示在会话标题栏右侧操作组、成果块（FileCheck）旁；每个色块 = 一张便签
  *  - 点击色块在标题栏下方展开"完整便签卡"（分页/模板/开庭/颜色全功能，见 NoteCardEditor）
  *  - 色块旁的图钉 = 固定：点亮后展开卡不随"点击别处"自动收起；熄灭则点击空白即收
- *  - 数据仍走 /api/sticky-notes（项目私有、每项目 ≤3、行级自动入日历 + lineEventIds 回填）
+ *  - 数据仍走 /api/sticky-notes（项目私有、每项目 ≤3）；StickyTodo 行**不自动入日历**（2026-09-08 起），
+ *    用户点某行「Add to calendar」才生成项目日历事件并回填 lineEventIds（该行变闹钟标识）
  *
  * 布局层说明：色块簇作为 fragment 渲染在 NodeCardHeader 的 rightActions 内；
  * 展开的便签卡以 portal（document.body + fixed）挂在标题栏正下方，避开节点 overflow 裁剪。
@@ -15,13 +16,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, X, Pin, Check, Layers, ClipboardList } from 'lucide-react';
-import type { StickyNote, StickyNotePage } from '@/app/api/sticky-notes/route';
+import type { StickyNote } from '@/app/api/sticky-notes/route';
 import { Button } from '@/components/ui/button';
 import { loadSettings, saveSettings, type StickyTodoTemplate } from '@/lib/settings';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { useCurrentProjectId } from '@/lib/current-project';
+import { localDateTimeToIso } from '@/lib/utils';
 import {
-  NOTE_COLORS,
   NOTE_COLOR_SWATCH,
   COLOR_BG,
   COLOR_TEXT,
@@ -30,24 +31,13 @@ import {
   parseTodoLines,
   serializeTodoLines,
   hydratePages,
-  getSidebarCollapsed,
-  newPageId,
   isLineCalendared,
   TodoLineItem,
   cleanTodoPages,
   type NoteSaveState,
 } from './CanvasStickyNotes';
 
-const CARD_W = 372; // 展开卡宽度（含留白）；展开侧边栏时整体仍保持此宽度，内部左右分区
-const SIDEBAR_W = 104;
-
-/** 颜色 tooltip 英文名（全局 UI 文案英文约定） */
-const COLOR_LABELS_EN: Record<string, string> = {
-  yellow: 'Yellow',
-  blue: 'Blue',
-  green: 'Green',
-  pink: 'Pink',
-};
+const CARD_W = 372; // 展开卡宽度（含留白）
 
 function isAllDone(content: string): boolean {
   const lines = parseTodoLines(content);
@@ -61,16 +51,17 @@ export type StickyTodoOps = {
   addLine: (noteId: string, afterIndex: number) => number;
   removeLine: (noteId: string, index: number) => boolean;
   toggle: (noteId: string, index: number) => void;
-  switchPage: (noteId: string, targetPageId: string) => void;
-  addPage: (noteId: string) => void;
-  deletePage: (noteId: string, pageId: string) => void;
-  renamePage: (noteId: string, pageId: string, value: string) => void;
-  changeColor: (noteId: string, color: string) => void;
-  toggleSidebar: (noteId: string) => void;
   onTitleInput: (noteId: string, value: string) => void;
   commitTitle: (noteId: string) => void;
   deleteNote: (noteId: string) => void;
-  submitCourt: (noteId: string, text: string) => void;
+  /** 手动把某行未入日历的待办加入日历（默认时段、项目作用域）；成功 true（事件锚点已回填） */
+  addToCalendar: (noteId: string, pageId: string, lineIndex: number, text: string) => Promise<boolean>;
+  /** 提交开庭/事项：追加一行待办并**按所选时间**直接建日历事件绑定该行；成功 true */
+  submitCourt: (
+    noteId: string,
+    text: string,
+    schedule?: { start_time?: string; end_time?: string; reminder_minutes?: number[] },
+  ) => Promise<boolean>;
   saveTemplate: (noteId: string, name: string) => Promise<void>;
   applyTemplate: (noteId: string, tpl: StickyTodoTemplate) => void;
   deleteTemplate: (tpl: StickyTodoTemplate) => void;
@@ -88,29 +79,30 @@ function NoteCardEditor({
   saveState?: NoteSaveState;
   ops: StickyTodoOps;
 }) {
-  const { pages, activePageId } = hydratePages(note);
-  const activePage = pages.find((p) => p.id === activePageId) ?? pages[0];
-  const content = activePage?.content ?? '';
+  const page = hydratePages(note).pages[0];
+  const content = page?.content ?? '';
   const allDone = isAllDone(content);
   const todoLines = parseTodoLines(content);
-  const sidebarCollapsed = getSidebarCollapsed(note);
 
   const textColor = COLOR_TEXT[note.color] || COLOR_TEXT.yellow;
   const accent = COLOR_ACCENT[note.color] || COLOR_ACCENT.yellow;
   const borderColor = COLOR_BORDER[note.color] || COLOR_BORDER.yellow;
 
   const [editingTitle, setEditingTitle] = useState(false);
-  const [renamingPageId, setRenamingPageId] = useState<string | null>(null);
-  const [pageRenameDraft, setPageRenameDraft] = useState('');
   const [courtOpen, setCourtOpen] = useState(false);
-  const [courtDate, setCourtDate] = useState('');
+  const [courtMatter, setCourtMatter] = useState(''); // 事项（待办主题）
+  const [courtDate, setCourtDate] = useState('');     // YYYY-MM-DD（date picker）
+  const [courtTime, setCourtTime] = useState('');     // HH:MM（time picker，可空）
   const [courtName, setCourtName] = useState('');
   const [courtRoom, setCourtRoom] = useState('');
   const [courtAddr, setCourtAddr] = useState('');
+  const [courtSaving, setCourtSaving] = useState(false);
   const [tplOpen, setTplOpen] = useState(false);
   const [savingMode, setSavingMode] = useState(false);
   const [tplName, setTplName] = useState('');
   const [templates, setTemplates] = useState<StickyTodoTemplate[]>([]);
+  /** 每行「Add to calendar」瞬时状态（key = `${pageId}:${lineIndex}`；busy/error，成功即撤销） */
+  const [addStates, setAddStates] = useState<Record<string, 'busy' | 'error'>>({});
 
   const linesContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -139,6 +131,29 @@ function NoteCardEditor({
     return removed;
   };
 
+  /** 手动入日历：行文本可能是最近键入、尚未防抖落盘的最新值，随请求一并带给服务端 */
+  const handleAddToCalendar = async (lineIndex: number, textRaw: string) => {
+    const text = (textRaw || '').trim();
+    if (!text) return;
+    const addKey = `${page.id}:${lineIndex}`;
+    if (addStates[addKey] === 'busy') return;
+    setAddStates((p) => ({ ...p, [addKey]: 'busy' }));
+    try {
+      const ok = await ops.addToCalendar(note.id, page.id, lineIndex, text);
+      if (ok) {
+        setAddStates((p) => {
+          const n = { ...p };
+          delete n[addKey];
+          return n;
+        });
+      } else {
+        setAddStates((p) => ({ ...p, [addKey]: 'error' }));
+      }
+    } catch {
+      setAddStates((p) => ({ ...p, [addKey]: 'error' }));
+    }
+  };
+
   const openApplyTemplate = () => {
     void loadSettings().then((s) => setTemplates(s.stickyTemplates ?? []));
     setTplOpen((v) => !v);
@@ -160,16 +175,48 @@ function NoteCardEditor({
     ops.deleteNote(note.id);
   };
 
-  const submitCourt = () => {
-    const date = courtDate.trim();
-    const name = courtName.trim();
-    if (!date || !name) return;
-    ops.submitCourt(note.id, `${date} 在${name}的第${courtRoom.trim()}法庭开庭。地址：${courtAddr.trim()}`);
-    setCourtOpen(false);
+  const resetCourt = () => {
+    setCourtMatter('');
     setCourtDate('');
+    setCourtTime('');
     setCourtName('');
     setCourtRoom('');
     setCourtAddr('');
+  };
+
+  /** 提交开庭：追加一行待办（事项/法院信息，**不含日期**——日期时间只作为该行日历事件的开始时间），
+   *  按所选日期/时间建日历事件绑定该行 */
+  const submitCourt = async () => {
+    const dateStr = courtDate.trim();
+    const name = courtName.trim();
+    if (!dateStr || !name) return;
+    const matter = courtMatter.trim();
+    const room = courtRoom.trim();
+    const addr = courtAddr.trim();
+    const timeStr = courtTime.trim();
+    const text = `${matter ? `${matter} ` : ''}在${name}${room ? `的第${room}法庭` : ''}开庭${addr ? `。地址：${addr}` : ''}`;
+    const startTime = localDateTimeToIso(dateStr, timeStr);
+    if (!startTime) {
+      showImageAiEditToast('Invalid hearing date/time.', 'error');
+      return;
+    }
+    setCourtSaving(true);
+    try {
+      const ok = await ops.submitCourt(note.id, text, {
+        start_time: startTime,
+        reminder_minutes: [30],
+      });
+      if (ok) {
+        resetCourt();
+        setCourtOpen(false);
+      } else {
+        showImageAiEditToast('Failed to schedule court hearing.', 'error');
+      }
+    } catch {
+      showImageAiEditToast('Failed to schedule court hearing.', 'error');
+    } finally {
+      setCourtSaving(false);
+    }
   };
 
   return (
@@ -195,119 +242,6 @@ function NoteCardEditor({
           }}
         />
         <div className="relative flex min-h-0 flex-1">
-          {/* Pages sidebar — collapsible（默认折叠，可持久化） */}
-          {!sidebarCollapsed && (
-            <div
-              className="flex shrink-0 flex-col border-r py-2"
-              style={{ width: SIDEBAR_W, borderColor: 'rgba(23,23,23,.1)', background: 'rgba(0,0,0,.02)' }}
-            >
-              <div className="flex items-center justify-between px-1 pb-1">
-                <span className="px-0.5 text-[11px] font-semibold tracking-tight" style={{ color: textColor, opacity: 0.7 }}>
-                  Pages
-                </span>
-                <button
-                  type="button"
-                  title="New page"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    ops.addPage(note.id);
-                  }}
-                  className="flex h-4 w-4 items-center justify-center rounded transition-colors hover:bg-black/10"
-                  style={{ color: textColor, opacity: 0.7 }}
-                >
-                  <Plus size={11} strokeWidth={2.2} />
-                </button>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-[3px] overflow-y-auto pr-0.5" style={{ scrollbarWidth: 'thin' }}>
-                {pages.map((p, idx) => {
-                  const active = p.id === activePageId;
-                  const isRenaming = renamingPageId === p.id;
-                  return (
-                    <div
-                      key={p.id}
-                      className="group relative cursor-pointer rounded-md transition-colors"
-                      style={{ background: active ? `${accent}22` : 'transparent' }}
-                      onClick={() => ops.switchPage(note.id, p.id)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        setRenamingPageId(p.id);
-                        setPageRenameDraft(p.title || '');
-                      }}
-                    >
-                      {isRenaming ? (
-                        <input
-                          autoFocus
-                          value={pageRenameDraft}
-                          onChange={(e) => setPageRenameDraft(e.target.value)}
-                          onBlur={() => {
-                            ops.renamePage(note.id, p.id, pageRenameDraft);
-                            setRenamingPageId(null);
-                          }}
-                          onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === 'Enter') {
-                              ops.renamePage(note.id, p.id, pageRenameDraft);
-                              setRenamingPageId(null);
-                            }
-                            if (e.key === 'Escape') setRenamingPageId(null);
-                          }}
-                          className="w-full rounded bg-white/60 px-[5px] py-[3px] text-[11.5px] font-semibold leading-[1.3] outline-none"
-                          style={{ color: textColor }}
-                        />
-                      ) : (
-                        <span
-                          className="block w-full truncate px-[5px] py-[3px] text-[11.5px] leading-[1.3]"
-                          style={{
-                            color: textColor,
-                            fontWeight: active ? 600 : 400,
-                            opacity: active ? 1 : 0.8,
-                            paddingRight: pages.length > 1 ? 20 : 5,
-                          }}
-                        >
-                          {p.title?.trim() || `P${idx + 1}`}
-                        </span>
-                      )}
-                      {!isRenaming && pages.length > 1 && (
-                        <button
-                          type="button"
-                          title="Delete page"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            ops.deletePage(note.id, p.id);
-                          }}
-                          className="absolute right-[3px] top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center rounded opacity-0 transition-opacity hover:bg-black/10 group-hover:opacity-100"
-                          style={{ color: textColor }}
-                        >
-                          <X size={10.5} strokeWidth={2} />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              {/* 颜色色块 */}
-              <div className="mt-1 flex items-center gap-1 border-t px-0.5 pt-1.5" style={{ borderColor: 'rgba(23,23,23,.1)' }}>
-                {NOTE_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    title={COLOR_LABELS_EN[c] || c}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      ops.changeColor(note.id, c);
-                    }}
-                    className="aspect-square min-w-0 flex-1 rounded-full border transition-transform hover:scale-110"
-                    style={{
-                      background: NOTE_COLOR_SWATCH[c],
-                      borderColor: note.color === c ? accent : 'rgba(23,23,23,.18)',
-                      boxShadow: note.color === c ? `0 0 0 1.5px ${accent}` : undefined,
-                    }}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Content pane */}
           <div className="relative flex min-w-0 flex-1 flex-col" style={{ padding: '10px 12px 12px' }}>
             {/* Title bar */}
@@ -315,15 +249,6 @@ function NoteCardEditor({
               className="mb-2 flex items-center gap-1 rounded-md border-b px-1 py-1"
               style={{ borderColor: 'rgba(23,23,23,.08)', background: `color-mix(in srgb, ${accent} 9%, transparent)` }}
             >
-              <button
-                type="button"
-                title={sidebarCollapsed ? 'Show pages' : 'Hide pages'}
-                onClick={() => ops.toggleSidebar(note.id)}
-                className="flex shrink-0 cursor-pointer items-center rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide transition-opacity hover:opacity-80"
-                style={{ backgroundColor: 'rgba(13,88,46,.16)', color: 'rgba(13,88,46,.92)' }}
-              >
-                TODO
-              </button>
               <div className="flex min-w-0 flex-1 items-center gap-1">
                 {editingTitle ? (
                   <input
@@ -379,6 +304,7 @@ function NoteCardEditor({
                   type="button"
                   title="Court hearing"
                   onClick={() => {
+                    resetCourt();
                     setCourtOpen(true);
                   }}
                   className="flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[9px] font-bold transition-colors hover:bg-black/10"
@@ -513,7 +439,7 @@ function NoteCardEditor({
             >
               {todoLines.map((line, i) => (
                 <TodoLineItem
-                  key={`${note.id}:${activePageId}:${i}`}
+                  key={`${note.id}:${page.id}:${i}`}
                   text={line.text}
                   done={line.done}
                   color={textColor}
@@ -523,7 +449,13 @@ function NoteCardEditor({
                   onEnter={() => handleEnter(i)}
                   onBackspaceEmpty={() => handleBackspace(i)}
                   onToggle={() => ops.toggle(note.id, i)}
-                  calendared={isLineCalendared(activePage, i)}
+                  calendared={isLineCalendared(page, i)}
+                  addState={addStates[`${page.id}:${i}`] ?? null}
+                  onAddToCalendar={
+                    !line.done && !isLineCalendared(page, i)
+                      ? () => void handleAddToCalendar(i, line.text)
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -536,47 +468,100 @@ function NoteCardEditor({
         <div
           className="fixed inset-0 z-[4000] flex items-center justify-center p-6"
           style={{ background: 'rgba(0,0,0,0.4)' }}
-          onClick={() => setCourtOpen(false)}
+          onClick={() => {
+            resetCourt();
+            setCourtOpen(false);
+          }}
         >
           <div
-            className="w-[360px] max-w-full space-y-3 rounded-xl border p-4 shadow-2xl"
+            className="w-[372px] max-w-full space-y-3 rounded-xl border p-4 shadow-2xl"
             style={{ background: 'var(--paper, #fff)', borderColor: 'var(--border)' }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
               Court hearing
             </div>
-            {(
-              [
-                ['Date', courtDate, setCourtDate, '2026/8/30 9:00'],
-                ['Court', courtName, setCourtName, 'Court name'],
-                ['Courtroom', courtRoom, setCourtRoom, 'No.'],
-                ['Address', courtAddr, setCourtAddr, 'Address'],
-              ] as const
-            ).map(([label, value, setter, placeholder]) => (
-              <label key={label} className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                <span className="w-20 shrink-0">{label}</span>
-                <input
-                  value={value}
-                  onChange={(e) => setter(e.target.value)}
-                  placeholder={placeholder}
-                  className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
-                  style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
-                />
-              </label>
-            ))}
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Todo</span>
+              <input
+                value={courtMatter}
+                onChange={(e) => setCourtMatter(e.target.value)}
+                placeholder="What to do (e.g. 合同纠纷一审开庭)"
+                autoFocus
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Date</span>
+              <input
+                type="date"
+                value={courtDate}
+                onChange={(e) => setCourtDate(e.target.value)}
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Time</span>
+              <input
+                type="time"
+                value={courtTime}
+                onChange={(e) => setCourtTime(e.target.value)}
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Court</span>
+              <input
+                value={courtName}
+                onChange={(e) => setCourtName(e.target.value)}
+                placeholder="Court name"
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Courtroom</span>
+              <input
+                value={courtRoom}
+                onChange={(e) => setCourtRoom(e.target.value)}
+                placeholder="No."
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Address</span>
+              <input
+                value={courtAddr}
+                onChange={(e) => setCourtAddr(e.target.value)}
+                placeholder="Address"
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
             <div className="flex justify-end gap-2 pt-1">
-              <Button variant="soft" tone="neutral" size="md" onClick={() => setCourtOpen(false)}>
+              <Button
+                variant="soft"
+                tone="neutral"
+                size="md"
+                onClick={() => {
+                  resetCourt();
+                  setCourtOpen(false);
+                }}
+              >
                 Cancel
               </Button>
               <Button
                 variant="solid"
                 tone="brand"
                 size="md"
-                onClick={submitCourt}
-                disabled={!courtDate.trim() || !courtName.trim()}
+                onClick={() => void submitCourt()}
+                disabled={courtSaving || !courtDate.trim() || !courtName.trim()}
               >
-                OK
+                {courtSaving ? 'Saving…' : 'OK'}
               </Button>
             </div>
           </div>
@@ -697,31 +682,32 @@ export default function StickyTodoDock() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 落盘（update）：服务端 reconcile 会回写带 lineEventIds 的 note → 仅按 pageId 回填锚点，不整体覆盖 */
+  /** 把服务端回写的 note 按 pageId 合并锚点（lineEventIds / lineCalendared）进本地状态，不整体覆盖本地内容 */
+  const adoptServerNote = useCallback((serverNote: StickyNote) => {
+    if (!serverNote || !Array.isArray(serverNote.pages)) return;
+    const serverPages = serverNote.pages;
+    setNotes((prev) =>
+      prev.map((n) => {
+        if (n.id !== serverNote.id) return n;
+        const localPages = Array.isArray(n.pages) ? n.pages : [];
+        const mergedPages = localPages.map((p) => {
+          const sp = serverPages.find((x) => x.id === p.id);
+          if (!sp) return p;
+          return { ...p, lineEventIds: sp.lineEventIds, lineCalendared: sp.lineCalendared };
+        });
+        const haveIds = new Set(mergedPages.map((p) => p.id));
+        for (const sp of serverPages) {
+          if (!haveIds.has(sp.id)) mergedPages.push(sp);
+        }
+        return { ...n, pages: mergedPages };
+      }),
+    );
+  }, []);
+
+  /** 落盘（update）：服务端会同步已入日历行并回写带 lineEventIds 的 note → 仅按 pageId 回填锚点，不整体覆盖 */
   const saveNote = useCallback((id: string, patch: Partial<StickyNote>) => {
     const pid = projectIdRef.current;
     if (!pid) return;
-    const adopt = (d: { success?: boolean; note?: StickyNote }) => {
-      if (d?.success && d.note && Array.isArray(d.note.pages)) {
-        const serverPages = d.note.pages;
-        setNotes((prev) =>
-          prev.map((n) => {
-            if (n.id !== d.note!.id) return n;
-            const localPages = Array.isArray(n.pages) ? n.pages : [];
-            const mergedPages = localPages.map((p) => {
-              const sp = serverPages.find((x) => x.id === p.id);
-              if (!sp) return p;
-              return { ...p, lineEventIds: sp.lineEventIds, lineCalendared: sp.lineCalendared };
-            });
-            const haveIds = new Set(mergedPages.map((p) => p.id));
-            for (const sp of serverPages) {
-              if (!haveIds.has(sp.id)) mergedPages.push(sp);
-            }
-            return { ...n, pages: mergedPages };
-          }),
-        );
-      }
-    };
     // 空行不是待办：落盘前统一剔除空待办行并重排行级锚点（与服务端 writeNotes 归一化一致）
     const notePatch: Partial<StickyNote> = { ...patch };
     if (Array.isArray(notePatch.pages)) notePatch.pages = cleanTodoPages(notePatch.pages);
@@ -734,7 +720,7 @@ export default function StickyTodoDock() {
       .then((r) => r.json().catch(() => ({ success: false })))
       .then((d) => {
         if (d?.success) {
-          adopt(d);
+          if (d.note) adoptServerNote(d.note);
           setSaveStates((prev) => ({ ...prev, [id]: 'saved' }));
           const prevT = savedFlashRef.current.get(id);
           if (prevT) clearTimeout(prevT);
@@ -754,7 +740,7 @@ export default function StickyTodoDock() {
         }
       })
       .catch(() => setSaveStates((prev) => ({ ...prev, [id]: 'error' })));
-  }, []);
+  }, [adoptServerNote]);
 
   const applyNote = useCallback(
     (noteId: string, builder: (note: StickyNote) => Partial<StickyNote>) => {
@@ -793,19 +779,18 @@ export default function StickyTodoDock() {
     [applyNote, saveNote],
   );
 
-  /* ---- 行/页/标题/颜色等编辑操作（语义与旧画布便签一致） ---- */
+  /* ---- 行/标题等编辑操作（语义与旧画布便签一致） ---- */
 
   const onTodoText = useCallback(
     (noteId: string, index: number, newText: string) => {
       debounceNote(noteId, (note) => {
-        const { pages, activePageId } = hydratePages(note);
-        const p = pages.find((x) => x.id === activePageId)!;
+        const { pages } = hydratePages(note);
+        const p = pages[0];
         const lines = parseTodoLines(p.content);
         while (lines.length <= index) lines.push({ done: false, text: '' });
         lines[index].text = newText;
         return {
-          pages: pages.map((x) => (x.id === activePageId ? { ...x, content: serializeTodoLines(lines) } : x)),
-          activePageId,
+          pages: pages.map((x, xi) => (xi === 0 ? { ...x, content: serializeTodoLines(lines) } : x)),
         };
       });
     },
@@ -818,8 +803,8 @@ export default function StickyTodoDock() {
     (noteId: string, afterIndex: number): number => {
       const note = notesRef.current.find((n) => n.id === noteId);
       if (!note) return afterIndex + 1;
-      const { pages, activePageId } = hydratePages(note);
-      const p = pages.find((x) => x.id === activePageId)!;
+      const { pages } = hydratePages(note);
+      const p = pages[0];
       const lines = parseTodoLines(p.content);
       lines.splice(afterIndex + 1, 0, { done: false, text: '' });
       const cal = Array.isArray(p.lineCalendared) ? [...p.lineCalendared] : undefined;
@@ -832,8 +817,8 @@ export default function StickyTodoDock() {
           n.id === noteId
             ? {
                 ...n,
-                pages: pages.map((x) =>
-                  x.id === activePageId
+                pages: pages.map((x, xi) =>
+                  xi === 0
                     ? {
                         ...x,
                         content: serializeTodoLines(lines),
@@ -842,7 +827,6 @@ export default function StickyTodoDock() {
                       }
                     : x,
                 ),
-                activePageId,
               }
             : n,
         ),
@@ -850,7 +834,6 @@ export default function StickyTodoDock() {
       setContentRev((r) => r + 1);
       return afterIndex + 1;
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
@@ -858,8 +841,8 @@ export default function StickyTodoDock() {
     (noteId: string, index: number): boolean => {
       const note = notesRef.current.find((n) => n.id === noteId);
       if (!note) return false;
-      const { pages, activePageId } = hydratePages(note);
-      const p = pages.find((x) => x.id === activePageId)!;
+      const { pages } = hydratePages(note);
+      const p = pages[0];
       const lines = parseTodoLines(p.content);
       if (lines.length <= 1) return false;
       lines.splice(index, 1);
@@ -868,39 +851,24 @@ export default function StickyTodoDock() {
       const evIds = Array.isArray(p.lineEventIds) ? p.lineEventIds.map((x) => [...x]) : undefined;
       if (evIds) evIds.splice(index, 1);
       clearSaveTimer();
+      const patchedPages = pages.map((x, xi) =>
+        xi === 0
+          ? {
+              ...x,
+              content: serializeTodoLines(lines),
+              ...(cal ? { lineCalendared: cal } : {}),
+              ...(evIds ? { lineEventIds: evIds } : {}),
+            }
+          : x,
+      );
       setNotes((prev) =>
         prev.map((n) => {
           if (n.id !== noteId) return n;
-          return {
-            ...n,
-            pages: pages.map((x) =>
-              x.id === activePageId
-                ? {
-                    ...x,
-                    content: serializeTodoLines(lines),
-                    ...(cal ? { lineCalendared: cal } : {}),
-                    ...(evIds ? { lineEventIds: evIds } : {}),
-                  }
-                : x,
-            ),
-            activePageId,
-          };
+          return { ...n, pages: patchedPages };
         }),
       );
       setContentRev((r) => r + 1);
-      saveNote(noteId, {
-        pages: pages.map((x) =>
-          x.id === activePageId
-            ? {
-                ...x,
-                content: serializeTodoLines(lines),
-                ...(cal ? { lineCalendared: cal } : {}),
-                ...(evIds ? { lineEventIds: evIds } : {}),
-              }
-            : x,
-        ),
-        activePageId,
-      });
+      saveNote(noteId, { pages: patchedPages });
       return true;
     },
     [saveNote],
@@ -909,8 +877,8 @@ export default function StickyTodoDock() {
   const toggle = useCallback(
     (noteId: string, index: number) => {
       flushNote(noteId, (note) => {
-        const { pages, activePageId } = hydratePages(note);
-        const p = pages.find((x) => x.id === activePageId)!;
+        const { pages } = hydratePages(note);
+        const p = pages[0];
         const lines = parseTodoLines(p.content);
         if (index >= lines.length) return {};
         const nowDone = !lines[index].done;
@@ -928,8 +896,8 @@ export default function StickyTodoDock() {
           evIds.push(entry);
         }
         return {
-          pages: pages.map((x) =>
-            x.id === activePageId
+          pages: pages.map((x, xi) =>
+            xi === 0
               ? {
                   ...x,
                   content: serializeTodoLines(lines),
@@ -938,75 +906,8 @@ export default function StickyTodoDock() {
                 }
               : x,
           ),
-          activePageId,
         };
       });
-    },
-    [flushNote],
-  );
-
-  const switchPage = useCallback(
-    (noteId: string, targetPageId: string) => {
-      const note = notesRef.current.find((n) => n.id === noteId);
-      if (!note) return;
-      const { pages } = hydratePages(note);
-      if (!pages.some((p) => p.id === targetPageId) || note.activePageId === targetPageId) return;
-      flushNote(noteId, () => ({ activePageId: targetPageId }));
-    },
-    [flushNote],
-  );
-
-  const addPage = useCallback(
-    (noteId: string) => {
-      flushNote(noteId, (note) => {
-        const { pages } = hydratePages(note);
-        const newP: StickyNotePage = { id: newPageId(), title: `P${pages.length + 1}`, content: '', kind: 'todo' };
-        return { pages: [...pages, newP], activePageId: newP.id };
-      });
-    },
-    [flushNote],
-  );
-
-  const deletePage = useCallback(
-    (noteId: string, pageId: string) => {
-      const note = notesRef.current.find((n) => n.id === noteId);
-      if (!note) return;
-      const { pages, activePageId } = hydratePages(note);
-      if (pages.length <= 1) return;
-      const cur = pages.find((p) => p.id === pageId);
-      if (!cur) return;
-      if (!window.confirm(`Delete page "${cur.title}"?`)) return;
-      const pages2 = pages.filter((p) => p.id !== pageId);
-      const nextActive = pageId === activePageId ? pages2[0].id : activePageId;
-      flushNote(noteId, () => ({ pages: pages2, activePageId: nextActive }));
-    },
-    [flushNote],
-  );
-
-  const renamePage = useCallback(
-    (noteId: string, pageId: string, value: string) => {
-      flushNote(noteId, (note) => {
-        const { pages } = hydratePages(note);
-        const idx = pages.findIndex((p) => p.id === pageId);
-        const finalTitle = value.trim() || `P${idx + 1}`;
-        return { pages: pages.map((p) => (p.id === pageId ? { ...p, title: finalTitle } : p)) };
-      });
-    },
-    [flushNote],
-  );
-
-  const changeColor = useCallback(
-    (noteId: string, color: string) => {
-      flushNote(noteId, () => ({ color }));
-    },
-    [flushNote],
-  );
-
-  const toggleSidebar = useCallback(
-    (noteId: string) => {
-      const note = notesRef.current.find((n) => n.id === noteId);
-      if (!note) return;
-      flushNote(noteId, () => ({ sidebarCollapsed: !getSidebarCollapsed(note) }));
     },
     [flushNote],
   );
@@ -1049,28 +950,150 @@ export default function StickyTodoDock() {
     setExpandedId((cur) => (cur === noteId ? null : cur));
   }, []);
 
-  const submitCourt = useCallback(
-    (noteId: string, text: string) => {
-      flushNote(noteId, (note) => {
-        const { pages, activePageId } = hydratePages(note);
-        const p = pages.find((x) => x.id === activePageId);
-        if (!p) return {};
-        const lines = parseTodoLines(p.content);
-        while (lines.length > 0 && !lines[lines.length - 1].text.trim()) lines.pop();
-        lines.push({ done: false, text });
-        const cal = Array.isArray(p.lineCalendared) ? [...p.lineCalendared] : [];
-        while (cal.length < lines.length) cal.push(false);
-        const evIds = Array.isArray(p.lineEventIds) ? p.lineEventIds.map((x) => [...x]) : [];
-        while (evIds.length < lines.length) evIds.push([]);
-        return {
-          pages: pages.map((x) =>
-            x.id === activePageId ? { ...x, content: serializeTodoLines(lines), lineCalendared: cal, lineEventIds: evIds } : x,
-          ),
-          activePageId,
-        };
-      });
+  /** 手动把某行待办加入日历（action add_to_calendar，单事务：最新行文本 + 建事件 + 写回锚点）。
+   *  成功 → 采用服务端回填的 lineEventIds（行变闹钟），并广播画布/日历面板刷新 */
+  const addToCalendar = useCallback(
+    async (noteId: string, pageId: string, lineIndex: number, text: string): Promise<boolean> => {
+      const pid = projectIdRef.current;
+      const note = notesRef.current.find((n) => n.id === noteId);
+      if (!pid || !note) return false;
+      const { pages } = hydratePages(note);
+      const page = pages.find((p) => p.id === pageId);
+      if (!page) return false;
+      const lines = parseTodoLines(page.content);
+      // 空行占位（Enter 后未输入即点加日历）不是待办：先按落盘语义清理对齐，再定位目标行的清理后下标，
+      // 避免本地未落盘空行导致 line_index 与服务端行序错位/越界
+      let cleanIndex = -1;
+      let keptBefore = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].text.trim()) continue;
+        if (i === lineIndex) {
+          cleanIndex = keptBefore;
+          break;
+        }
+        keptBefore++;
+      }
+      if (cleanIndex < 0) return false;
+      const cleanPage = cleanTodoPages([page])[0];
+      const cleanLines = parseTodoLines(cleanPage.content);
+      if (cleanIndex >= cleanLines.length) return false;
+      const pagesPatch = cleanTodoPages(
+        pages.map((p) => (p.id === pageId ? cleanPage : p)),
+      );
+      clearSaveTimer(); // 行文本防抖落盘由本请求一并携带，避免其后的旧快照写覆盖锚点
+      try {
+        const resp = await fetch('/api/sticky-notes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'add_to_calendar',
+            project_id: pid,
+            note: { id: noteId, pages: pagesPatch },
+            page_id: pageId,
+            line_index: cleanIndex,
+            text,
+          }),
+        });
+        const d = await resp.json().catch(() => ({ success: false }));
+        if (d?.success) {
+          if (d.note) {
+            adoptServerNote(d.note);
+            setContentRev((r) => r + 1);
+          }
+          window.dispatchEvent(new CustomEvent('sticky-notes-changed'));
+          window.dispatchEvent(new CustomEvent('calendar-events-changed'));
+          return true;
+        }
+        return false;
+      } catch {
+        return false;
+      }
     },
-    [flushNote],
+    [adoptServerNote],
+  );
+
+  /** 开庭 C 提交：在活动页追加一行待办，并按所选日期/时间建日历事件绑定该行（单事务 action add_to_calendar） */
+  const submitCourt = useCallback(
+    async (
+      noteId: string,
+      text: string,
+      schedule?: { start_time?: string; end_time?: string; reminder_minutes?: number[] },
+    ): Promise<boolean> => {
+      const pid = projectIdRef.current;
+      const note = notesRef.current.find((n) => n.id === noteId);
+      if (!pid || !note) return false;
+      const { pages } = hydratePages(note);
+      const page = pages[0];
+      if (!page) return false;
+      const cleanPage = cleanTodoPages([page])[0];
+      const baseLines = parseTodoLines(cleanPage.content);
+      const lineIndex = baseLines.length;
+      const lines = [...baseLines, { done: false, text }];
+      const evs = cleanPage.lineEventIds
+        ? cleanPage.lineEventIds.map((x) => [...x])
+        : baseLines.map(() => [] as string[]);
+      const calArr = cleanPage.lineCalendared
+        ? [...cleanPage.lineCalendared]
+        : baseLines.map(() => false);
+      evs.push([]);
+      calArr.push(true);
+      const content = serializeTodoLines(lines);
+      const pagesPatch = pages.map((x, xi) =>
+        xi === 0 ? { ...cleanPage, content, lineEventIds: evs, lineCalendared: calArr } : x,
+      );
+      clearSaveTimer();
+      try {
+        const resp = await fetch('/api/sticky-notes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'add_to_calendar',
+            project_id: pid,
+            note: { id: noteId, pages: pagesPatch },
+            page_id: page.id,
+            line_index: lineIndex,
+            text,
+            start_time: schedule?.start_time ?? null,
+            end_time: schedule?.end_time ?? null,
+            reminder_minutes: schedule?.reminder_minutes,
+          }),
+        });
+        const d = (await resp.json().catch(() => ({ success: false }))) as {
+          success?: boolean;
+          note?: StickyNote;
+        };
+        if (d?.success) {
+          if (d.note) {
+            // 用服务端回写的目标页（含追加行 + 事件锚点）替换本地对应页，其它页/标题保持不变
+            const serverPages = d.note.pages ?? [];
+            const sp = serverPages.find((x) => x.id === page.id);
+            if (sp) {
+              setNotes((prev) =>
+                prev.map((n) => {
+                  if (n.id !== noteId || !Array.isArray(n.pages)) return n;
+                  return {
+                    ...n,
+                    pages: n.pages.map((p) =>
+                      p.id === page.id
+                        ? { ...p, content: sp.content, lineEventIds: sp.lineEventIds, lineCalendared: sp.lineCalendared }
+                        : p,
+                    ),
+                  };
+                }),
+              );
+              setContentRev((r) => r + 1);
+            }
+          }
+          window.dispatchEvent(new CustomEvent('sticky-notes-changed'));
+          window.dispatchEvent(new CustomEvent('calendar-events-changed'));
+          return true;
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    [],
   );
 
   const saveTemplate = useCallback(
@@ -1078,8 +1101,8 @@ export default function StickyTodoDock() {
       const trimmed = name.trim();
       const note = notesRef.current.find((n) => n.id === noteId);
       if (!trimmed || !note) return;
-      const { pages, activePageId } = hydratePages(note);
-      const p = pages.find((x) => x.id === activePageId);
+      const { pages } = hydratePages(note);
+      const p = pages[0];
       if (!p) return;
       const lines = parseTodoLines(p.content)
         .map((l) => l.text.trim())
@@ -1102,11 +1125,10 @@ export default function StickyTodoDock() {
   const applyTemplate = useCallback(
     (noteId: string, tpl: StickyTodoTemplate) => {
       flushNote(noteId, (note) => {
-        const { pages, activePageId } = hydratePages(note);
+        const { pages } = hydratePages(note);
         const content = tpl.lines.length > 0 ? tpl.lines.map((t) => `- [ ] ${t}`).join('\n') : '- [ ] ';
         return {
-          pages: pages.map((x) => (x.id === activePageId ? { ...x, content } : x)),
-          activePageId,
+          pages: pages.map((x, xi) => (xi === 0 ? { ...x, content } : x)),
         };
       });
     },
@@ -1126,15 +1148,10 @@ export default function StickyTodoDock() {
       addLine,
       removeLine,
       toggle,
-      switchPage,
-      addPage,
-      deletePage,
-      renamePage,
-      changeColor,
-      toggleSidebar,
       onTitleInput,
       commitTitle,
       deleteNote,
+      addToCalendar,
       submitCourt,
       saveTemplate,
       applyTemplate,
@@ -1145,15 +1162,10 @@ export default function StickyTodoDock() {
       addLine,
       removeLine,
       toggle,
-      switchPage,
-      addPage,
-      deletePage,
-      renamePage,
-      changeColor,
-      toggleSidebar,
       onTitleInput,
       commitTitle,
       deleteNote,
+      addToCalendar,
       submitCourt,
       saveTemplate,
       applyTemplate,
@@ -1163,7 +1175,7 @@ export default function StickyTodoDock() {
 
   // 展示顺序：未完成在前、全部完成沉底（与旧便签层一致）
   const sortedNotes = useMemo(() => {
-    const activeContentOf = (n: StickyNote) => hydratePages(n).pages.find((p) => p.id === hydratePages(n).activePageId)?.content ?? '';
+    const activeContentOf = (n: StickyNote) => hydratePages(n).pages[0]?.content ?? '';
     return [...notes].sort((a, b) => {
       const aDone = isAllDone(activeContentOf(a));
       const bDone = isAllDone(activeContentOf(b));
@@ -1185,7 +1197,7 @@ export default function StickyTodoDock() {
       >
         {sortedNotes.map((n) => {
           const active = expandedId === n.id;
-          const done = isAllDone(hydratePages(n).pages.find((p) => p.id === hydratePages(n).activePageId)?.content ?? '');
+          const done = isAllDone(hydratePages(n).pages[0]?.content ?? '');
           return (
             <button
               key={n.id}

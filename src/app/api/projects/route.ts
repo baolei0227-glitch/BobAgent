@@ -65,6 +65,8 @@ interface FileNode {
   extension?: string;
   /** 相对扫描根目录（项目根）的路径，如 homework/报告.md；树形摊平后仍可据此解析真实路径 */
   rel: string;
+  /** 会话标题（attachments/ 下节点附件目录：由短 id 关联 notes-memory node 元数据填充，仅展示用） */
+  title?: string;
 }
 
 /** 递归扫描目录，返回文件树（最大深度5层，跳过隐藏文件、node_modules 和 .db）。
@@ -241,7 +243,11 @@ async function scanHomeworkByKind(projectPath: string): Promise<{
   return { groups };
 }
 
-/** 从项目 Sticky 待办文本解析未来最近的开庭日期（支持 YYYY/M/D 或 YYYY年M月D日 ...开庭），返回 YYYY-MM-DD */
+/** 从项目 Sticky 待办解析未来最近的开庭日期，返回 YYYY-MM-DD。
+ *  日期来源（二选一，取更早）：
+ *   1. 该行绑定的日历事件开始时间（lineEventIds → events 表；2026-09-08 起行内不再写日期，日期存事件）
+ *   2. 行文本里固定格式日期（YYYY/M/D 或 YYYY年M月D日 …开庭，兼容老数据）
+ */
 async function scanHearingDate(projectDir: string): Promise<string | null> {
   try {
     const raw = await fs.readFile(join(projectDir, 'sticky-notes', 'sticky-notes.json'), 'utf-8');
@@ -250,26 +256,57 @@ async function scanHearingDate(projectDir: string): Promise<string | null> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     let best: Date | null = null;
+    const addCandidate = (d: Date) => {
+      if (Number.isNaN(d.getTime()) || d < today) return;
+      if (!best || d < best) best = d;
+    };
+    // 事件表按需懒加载（无开庭行/无锚点时零开销）
+    const { getCalendarDb, getEvent } = await import('@/lib/db');
+    const db = await getCalendarDb();
     for (const n of notes) {
       const pages = Array.isArray(n.pages) ? n.pages : [];
       for (const pg of pages) {
         if (pg.kind === 'note') continue;
         const content = typeof pg.content === 'string' ? pg.content : '';
-        for (const line of content.split('\n')) {
+        const rows = content.split('\n');
+        const evsArr = Array.isArray(pg.lineEventIds) ? (pg.lineEventIds as unknown[][]) : [];
+        for (let i = 0; i < rows.length; i++) {
+          const line = rows[i];
           if (!line.includes('开庭')) continue;
           // 已勾选完成的待办行（- [x] …）不再计入开庭提醒，与 todo-index 未完成统计口径一致
           if (/^\s*-\s*\[x\]/i.test(line)) continue;
+          // 1) 锚点事件优先：行已入日历 → 用事件开始时间（行文本不含日期时也能识别）
+          const anchors = evsArr[i];
+          if (Array.isArray(anchors)) {
+            let usedEvent = false;
+            for (const id of anchors as string[]) {
+              if (!id) continue;
+              try {
+                const row = await getEvent(db, id);
+                if (row?.status === 'scheduled' && row.start_time) {
+                  const dt = new Date(row.start_time);
+                  if (Number.isFinite(dt.getTime())) {
+                    addCandidate(new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()));
+                    usedEvent = true;
+                  }
+                }
+              } catch {
+                /* 单条事件读取失败忽略 */
+              }
+            }
+            if (usedEvent) continue;
+          }
+          // 2) 行文本固定格式日期（老数据兜底）
           const m = line.match(/(\d{4})[/年](\d{1,2})[/月](\d{1,2})日?/);
           if (!m) continue;
-          const d = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
-          if (Number.isNaN(d.getTime()) || d < today) continue;
-          if (!best || d < best) best = d;
+          addCandidate(new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10)));
         }
       }
     }
     if (!best) return null;
+    const b = best as Date;
     const pad = (x: number) => String(x).padStart(2, '0');
-    return `${best.getFullYear()}-${pad(best.getMonth() + 1)}-${pad(best.getDate())}`;
+    return `${b.getFullYear()}-${pad(b.getMonth() + 1)}-${pad(b.getDate())}`;
   } catch {
     return null;
   }
@@ -303,6 +340,8 @@ export async function GET(request: NextRequest) {
         const buffer = await fs.readFile(fullPath);
         const ext = extname(fullPath).toLowerCase();
         const mimeMap: Record<string, string> = {
+          '.html': 'text/html; charset=utf-8',
+          '.htm': 'text/html; charset=utf-8',
           '.pdf': 'application/pdf',
           '.png': 'image/png',
           '.jpg': 'image/jpeg',
@@ -605,6 +644,28 @@ export async function POST(request: NextRequest) {
       const tree = flattenTemplateTree(await scanDirectory(project.path));
       // homework/ 按 kind 类别分组的输出文件，供侧边栏按类别展示（不再按节点分组）
       const { groups } = await scanHomeworkByKind(project.path);
+      // attachments/<shortId>_<type>/ 会话附件目录：短 id 关联 notes-memory 的 node 标题，
+      // 前端展示时以会话标题代替机器目录名（原名仅作路径标识，不展示给人）
+      const titleByShort = new Map<string, string>();
+      const nodeMeta = await parseNodeMeta(join(project.path, 'notes-memory'));
+      for (const [nid, meta] of nodeMeta) {
+        const short = nid.slice(0, 4);
+        if (meta.title && !titleByShort.has(short)) titleByShort.set(short, meta.title);
+      }
+      const attachSessionTitles = (nodes: FileNode[]) => {
+        for (const n of nodes) {
+          if (n.type !== 'directory') continue;
+          if (n.rel === 'attachments') {
+            for (const ch of n.children ?? []) {
+              if (ch.type !== 'directory') continue;
+              const title = titleByShort.get(ch.name.split('_')[0]);
+              if (title) ch.title = title;
+            }
+          }
+          if (n.children) attachSessionTitles(n.children);
+        }
+      };
+      attachSessionTitles(tree);
       return NextResponse.json({ success: true, files: tree, project_path: project.path, homework_kind_groups: groups });
     }
 

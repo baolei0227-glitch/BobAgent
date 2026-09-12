@@ -4,7 +4,7 @@ import { rankPoolForTaskType, type PoolItem } from './task-model';
 const pool = [
   { provider: 'moonshot', modelId: 'kimi-k2' },
   { provider: 'zhipu', modelId: 'glm-4.5' },
-  { provider: 'deepseek', modelId: 'deepseek-v4-flash' },
+  { provider: 'deepseek', modelId: 'deepseek-flash' },
 ];
 
 describe('task-model rankPoolForTaskType (P3-3b2)', () => {
@@ -12,7 +12,7 @@ describe('task-model rankPoolForTaskType (P3-3b2)', () => {
     const ranked = rankPoolForTaskType(pool, '请分析这份合同的法律风险与违约责任');
     expect(ranked[0].modelId).toMatch(/k2|v4|reason|think/i);
     const iK2 = ranked.findIndex((x) => x.modelId === 'kimi-k2');
-    const iV4 = ranked.findIndex((x) => x.modelId === 'deepseek-v4-flash');
+    const iV4 = ranked.findIndex((x) => x.modelId === 'deepseek-flash');
     const iGlm = ranked.findIndex((x) => x.modelId === 'glm-4.5');
     // 同分保持池序；思考模型应在 glm（无 hint）之前
     expect(Math.min(iK2, iV4)).toBeLessThan(iGlm);

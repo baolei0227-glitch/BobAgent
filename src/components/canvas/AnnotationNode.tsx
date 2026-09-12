@@ -8,21 +8,21 @@
  *     随画布便签移除停用），自动跟随包围盒。
  *   - 仅作视觉分组批注：零 AI、无连线 Handle、不参与排版/NodeMap/簇联动（CanvasFlow 侧过滤）。
  *   - 顶部批注栏：双击编辑文字（update_annotation 持久化）、删除按钮（不影响卡片）。
- *   - 交互边界：框体视觉层 pointer-events:none（不挡下方卡片点击/拖拽），
- *     仅顶部批注栏可交互（拖动节点 = 联动移动内部卡片，由 CanvasFlow onNodeDrag 处理）。
+ *   - 交互边界：框体视觉层 pointer-events:none（不挡下方卡片点击），
+ *     仅顶部批注栏可交互（双击编辑文字 / 删除按钮）。
  */
 import { memo, useCallback, useState } from 'react';
-import { NodeProps, useReactFlow } from '@xyflow/react';
+import { useNodeHost } from './node-host';
 import { X, PenLine } from 'lucide-react';
 import type { AiChatNodeData } from '@/lib/types';
 
-function AnnotationNodeInner({ id, data, selected }: NodeProps) {
+function AnnotationNodeInner({ id, data, selected }: { id: string; data: AiChatNodeData; selected?: boolean }) {
+  const nodeHost = useNodeHost();
   const nodeData = data as AiChatNodeData;
   const nodeMdId = nodeData.nodeMdId || id;
   const text = typeof nodeData.annotationText === 'string' ? nodeData.annotationText : '';
   const w = typeof nodeData.annotationWidth === 'number' ? nodeData.annotationWidth : 200;
   const h = typeof nodeData.annotationHeight === 'number' ? nodeData.annotationHeight : 120;
-  const { deleteElements } = useReactFlow();
 
   const [displayText, setDisplayText] = useState(text);
   const [editing, setEditing] = useState(false);
@@ -48,15 +48,10 @@ function AnnotationNodeInner({ id, data, selected }: NodeProps) {
     [nodeMdId],
   );
 
-  // 删除批注框：仅删框节点，不影响被包裹的卡片
+  // 删除批注框：仅删框节点，不影响被包裹的卡片（宿主统一处理后端删除 + 本地移除）
   const handleDelete = useCallback(() => {
-    fetch('/api/nodes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete', node_id: nodeMdId }),
-    }).catch((e) => console.warn('[annotation] 删除后端失败:', String(e)));
-    deleteElements({ nodes: [{ id }] });
-  }, [id, nodeMdId, deleteElements]);
+    nodeHost.deleteNodeWithEdges(id);
+  }, [id, nodeHost]);
 
   return (
     <div

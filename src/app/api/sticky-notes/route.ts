@@ -3,7 +3,7 @@ import { join } from 'path';
 import { getCurrentProject, getProjectById } from '@/lib/project/project-manager';
 import { writeTodoIndexFile, readTodoIndexFile, buildTodoIndex, MAX_TODO_NOTES, pickTodoNoteColor, normalizeStickyNote } from '@/lib/sticky-todo';
 import { migrateStickyNotePages } from '@/lib/sticky-notes-migrate';
-import { reconcileStickyNoteEvents, cancelNoteEvents } from '@/lib/sticky-calendar-sync';
+import { reconcileStickyNoteEvents, cancelNoteEvents, addStickyLineToCalendar } from '@/lib/sticky-calendar-sync';
 
 /**
  * 画布便签（Sticky Notes）— 项目级纯私有便利贴
@@ -88,6 +88,35 @@ async function resolveProjectName(projectId?: string): Promise<string> {
 /** 默认标题：项目名（不自动追加创建日期；项目名自带的后缀日期保持原样） */
 function defaultTitle(projectName: string): string {
   return projectName;
+}
+
+/** 把 update 类 patch 合并到既有便签（update 与 add_to_calendar 共用同一语义） */
+function mergeNotePatch(base: StickyNote, note: Partial<StickyNote>): StickyNote {
+  return {
+    ...base,
+    ...(typeof note.x === 'number' ? { x: note.x } : {}),
+    ...(typeof note.y === 'number' ? { y: note.y } : {}),
+    ...(typeof note.color === 'string' ? { color: note.color } : {}),
+    ...(typeof note.title === 'string' ? { title: note.title } : {}),
+    ...(typeof note.width === 'number' ? { width: note.width } : {}),
+    ...(typeof note.height === 'number' ? { height: note.height } : {}),
+    ...(typeof note.sidebarCollapsed === 'boolean'
+      ? { sidebarCollapsed: note.sidebarCollapsed }
+      : {}),
+    ...(typeof note.z === 'number' ? { z: note.z } : {}),
+    ...(Array.isArray(note.pages) ? { pages: note.pages } : {}),
+    ...(typeof note.activePageId === 'string' ? { activePageId: note.activePageId } : {}),
+    // 兼容旧 content patch：找到 activePage 把内容写进去
+    ...(typeof note.content === 'string' && base.pages && base.activePageId
+      ? {
+          pages: base.pages.map((p) =>
+            p.id === base.activePageId ? { ...p, content: note.content! } : p,
+          ),
+        }
+      : {}),
+    content: undefined,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 async function readNotes(projectDir: string): Promise<StickyNote[]> {
@@ -337,17 +366,10 @@ export async function POST(req: NextRequest) {
         z: topZ + 1,
       };
       notes.push(created);
-      // 前向打通：新建便签的待办行自动入日历（创建事件并写回 lineEventIds；失败不阻断便签落盘）
-      let persisted: StickyNote = created;
-      try {
-        const effProjectId = projectId || (await getCurrentProject()).id;
-        persisted = await reconcileStickyNoteEvents(effProjectId, created);
-        notes[notes.length - 1] = persisted;
-      } catch (e) {
-        console.error('[sticky-notes] create 自动入日历失败:', e);
-      }
+      // StickyTodo 不自动入日历（2026-09-08 起）：新建便签的行保持纯便签、无事件锚点；
+      // 入日历只在用户手动「Add to calendar」或 Butler 排程时发生
       await writeNotes(dir, notes);
-      return NextResponse.json({ success: true, note: persisted });
+      return NextResponse.json({ success: true, note: created });
     }
 
     if (action === 'update') {
@@ -360,44 +382,73 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: 'note not found' }, { status: 404 });
       }
       const base = notes[idx];
-      const updated: StickyNote = {
-        ...base,
-        ...(typeof note.x === 'number' ? { x: note.x } : {}),
-        ...(typeof note.y === 'number' ? { y: note.y } : {}),
-        ...(typeof note.color === 'string' ? { color: note.color } : {}),
-        ...(typeof note.title === 'string' ? { title: note.title } : {}),
-        ...(typeof note.width === 'number' ? { width: note.width } : {}),
-        ...(typeof note.height === 'number' ? { height: note.height } : {}),
-        ...(typeof note.sidebarCollapsed === 'boolean'
-          ? { sidebarCollapsed: note.sidebarCollapsed }
-          : {}),
-        ...(typeof note.z === 'number' ? { z: note.z } : {}),
-        ...(Array.isArray(note.pages) ? { pages: note.pages } : {}),
-        ...(typeof note.activePageId === 'string' ? { activePageId: note.activePageId } : {}),
-        // 兼容旧 content patch：找到 activePage 把内容写进去
-        ...(typeof note.content === 'string' && base.pages && base.activePageId
-          ? {
-              pages: base.pages.map((p) =>
-                p.id === base.activePageId ? { ...p, content: note.content! } : p,
-              ),
-            }
-          : {}),
-        content: undefined,
-        updatedAt: new Date().toISOString(),
-      };
       const prevNote = notes[idx];
-      const nextNote = upgradeNotePages(updated);
-      // 前向打通：便签行增删改/勾选 → 自动同步日历事件（增量 reconcile；失败不阻断便签落盘）
+      const nextNote = upgradeNotePages(mergeNotePatch(base, note as Partial<StickyNote>));
+      // 同步已入日历的行（改文本→改事件标题、勾选→完成、删行→取消）；未入日历的行不建事件（不自动入日历）
       let persisted: StickyNote = nextNote;
       try {
         const effProjectId = projectId || (await getCurrentProject()).id;
         persisted = await reconcileStickyNoteEvents(effProjectId, nextNote, prevNote);
       } catch (e) {
-        console.error('[sticky-notes] update 自动同步日历失败:', e);
+        console.error('[sticky-notes] update 同步日历失败:', e);
       }
       notes[idx] = persisted;
       await writeNotes(dir, notes);
       return NextResponse.json({ success: true, note: persisted });
+    }
+
+    if (action === 'add_to_calendar') {
+      const noteId =
+        typeof body.note_id === 'string'
+          ? body.note_id
+          : (body.note as Partial<StickyNote> | undefined)?.id;
+      const pageId = typeof body.page_id === 'string' ? body.page_id : '';
+      const lineIndex = Number(body.line_index);
+      if (typeof noteId !== 'string' || !noteId || !pageId || !Number.isInteger(lineIndex) || lineIndex < 0) {
+        return NextResponse.json({ success: false, error: 'note_id / page_id / line_index required' }, { status: 400 });
+      }
+      const idx = notes.findIndex((n) => n.id === noteId);
+      if (idx < 0) {
+        return NextResponse.json({ success: false, error: 'note not found' }, { status: 404 });
+      }
+      // 手动入日历：先把调用方带来的最新行文本合并进便签（StickyTodoDock 行文本走防抖落盘，
+      // 点击时可能尚未保存），再在该行建事件并写回锚点 —— 单事务内完成，避免「先存文本再建事件」竞态
+      const merged = upgradeNotePages(
+        mergeNotePatch(notes[idx], (body.note ?? {}) as Partial<StickyNote>),
+      );
+      const effProjectId = projectId || (await getCurrentProject()).id;
+      const text = typeof body.text === 'string' ? body.text : undefined;
+      const startTime = typeof body.start_time === 'string' && body.start_time.trim() ? body.start_time.trim() : null;
+      const endTime = typeof body.end_time === 'string' && body.end_time.trim() ? body.end_time.trim() : null;
+      const reminderRaw = body.reminder_minutes;
+      const reminderMinutes =
+        Array.isArray(reminderRaw) && reminderRaw.every((x) => typeof x === 'number')
+          ? (reminderRaw as number[])
+          : undefined;
+      const { note: persisted } = await addStickyLineToCalendar(
+        effProjectId,
+        merged,
+        pageId,
+        lineIndex,
+        text,
+        { start_time: startTime, end_time: endTime, reminder_minutes: reminderMinutes },
+      );
+      notes[idx] = persisted;
+      await writeNotes(dir, notes);
+      // 即改即推：新事件立即同步到远端日历（与 /api/calendar/events 新建路径一致，免等轮询）
+      try {
+        const { syncAllAccounts } = await import('@/lib/calendar/sync-runner');
+        void syncAllAccounts().catch((e) =>
+          console.error('[sticky-notes] add_to_calendar 远端同步失败:', e),
+        );
+      } catch {
+        /* 远端同步失败不阻断手动入日历成功返回 */
+      }
+      return NextResponse.json({
+        success: true,
+        note: persisted,
+        event_ids: persisted.pages?.find((p) => p.id === pageId)?.lineEventIds?.[lineIndex] ?? [],
+      });
     }
 
     if (action === 'delete') {

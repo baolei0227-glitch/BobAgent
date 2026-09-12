@@ -125,36 +125,13 @@ export const BRIDGE_ACTIONS: BridgeActionDef[] = [
   },
   {
     action: 'graphGetSnapshot',
-    description: 'Read canvas snapshot: nodes, edges, viewport (requires read)',
+    description: 'Read canvas snapshot: nodes, edges (requires read)',
     returns: 'GraphSnapshot',
-  },
-  {
-    action: 'graphGetViewport',
-    description: 'Read current canvas viewport { x, y, zoom } (requires read)',
-    returns: 'ViewportState',
   },
   {
     action: 'graphExpandNode',
     description: 'Expand a node container (requires control)',
     params: ['nodeId:string'],
-    returns: '{ ok: true }',
-  },
-  {
-    action: 'graphSetViewport',
-    description: 'Set canvas viewport (requires control)',
-    params: ['viewport:{ x, y, zoom }'],
-    returns: '{ ok: true }',
-  },
-  {
-    action: 'graphFitView',
-    description: 'Fit view to all nodes (requires control)',
-    params: ['padding?:number'],
-    returns: '{ ok: true }',
-  },
-  {
-    action: 'graphZoomBy',
-    description: 'Zoom canvas by delta (requires control)',
-    params: ['delta:number'],
     returns: '{ ok: true }',
   },
   {

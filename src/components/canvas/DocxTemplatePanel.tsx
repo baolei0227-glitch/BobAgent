@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, RefreshCw, Loader2, Plus, Check, ChevronDown, FolderOpen, Sparkles } from 'lucide-react';
+import { FileText, RefreshCw, Loader2, Plus, Check, ChevronDown, FolderOpen, Sparkles, Pencil, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { TemplateFillPanel, type FillTemplateItem } from './TemplateFillDialog';
 
@@ -34,6 +34,10 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
   const [sceneMenuOpen, setSceneMenuOpen] = useState(false);
   const sceneMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 场景管理：重命名 / 删除（对齐模板库管理弹窗）
+  const [renamingScene, setRenamingScene] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [confirmDeleteScene, setConfirmDeleteScene] = useState<string | null>(null);
 
   const loadScenes = useCallback(async () => {
     setLoading(true);
@@ -130,7 +134,91 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
       .map((t) => ({ file: t.name, fields: t.fields }));
   }, [scenes, scene]);
 
-  const sceneOptions = scenes.filter((s) => s.templates.some((t) => t.fields.length > 0));
+  // 场景管理操作：重命名 / 删除场景 / 删除单个模板（复用 /api/skills/templates）
+  const handleStartRename = (name: string) => {
+    setRenamingScene(name);
+    setRenameValue(name);
+  };
+
+  const handleRenameSceneSubmit = async () => {
+    if (!renamingScene) return;
+    const newName = renameValue.trim();
+    if (!newName || newName === renamingScene) {
+      setRenamingScene(null);
+      return;
+    }
+    try {
+      const resp = await fetch('/api/skills/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'rename_scene', scene: renamingScene, newScene: newName }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        setScene((cur) => (cur === renamingScene ? newName : cur));
+        setMsg(`Scene renamed to "${newName}"`);
+        setMsgError(false);
+        await loadScenes();
+      } else {
+        setMsg(data.error || 'Rename failed');
+        setMsgError(true);
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Rename failed');
+      setMsgError(true);
+    } finally {
+      setRenamingScene(null);
+    }
+  };
+
+  const handleDeleteSceneSubmit = async () => {
+    if (!confirmDeleteScene) return;
+    try {
+      const resp = await fetch('/api/skills/templates', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scene: confirmDeleteScene }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        setMsg(`Scene "${confirmDeleteScene}" deleted`);
+        setMsgError(false);
+        setScene((cur) => (cur === confirmDeleteScene ? '' : cur));
+        await loadScenes();
+      } else {
+        setMsg(data.error || 'Delete failed');
+        setMsgError(true);
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Delete failed');
+      setMsgError(true);
+    } finally {
+      setConfirmDeleteScene(null);
+    }
+  };
+
+  const handleDeleteTemplate = async (file: string) => {
+    if (!scene) return;
+    try {
+      const resp = await fetch('/api/skills/templates', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scene, filename: file }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        setMsg(`Deleted "${scene}/${file}"`);
+        setMsgError(false);
+        await loadScenes();
+      } else {
+        setMsg(data.error || 'Delete failed');
+        setMsgError(true);
+      }
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Delete failed');
+      setMsgError(true);
+    }
+  };
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -188,31 +276,90 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
             </Button>
             {sceneMenuOpen && (
               <div
-                className="absolute right-0 z-50 mt-1 max-h-56 w-56 overflow-y-auto rounded-lg border shadow-lg"
+                className="absolute right-0 z-50 mt-1 max-h-72 w-64 overflow-y-auto rounded-lg border shadow-lg"
                 style={{ backgroundColor: 'var(--popover)', borderColor: 'var(--line)' }}
               >
                 <div className="px-2.5 py-1.5 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>
-                  Scenes ({sceneOptions.length})
+                  Scenes ({scenes.length})
                 </div>
-                {sceneOptions.length === 0 ? (
+                {scenes.length === 0 ? (
                   <div className="px-2.5 py-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                    No scenes with fillable templates yet
+                    No scenes yet — type a new name above
                   </div>
-                ) : sceneOptions.map((s) => (
-                  <button
-                    key={s.name}
-                    type="button"
-                    onClick={() => { setScene(s.name); setSceneMenuOpen(false); setMsg(''); }}
-                    className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-soft)]"
-                    style={{ color: scene === s.name ? 'var(--primary)' : 'var(--ink)' }}
-                  >
-                    {scene === s.name && <Check className="h-3 w-3 shrink-0" />}
-                    <span className="min-w-0 flex-1 truncate">{s.name}</span>
-                    <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>
-                      {s.templates.filter((t) => t.fields.length > 0).length}
-                    </span>
-                  </button>
+                ) : scenes.map((s) => (
+                  <div key={s.name} className="px-1 py-0.5">
+                    {renamingScene === s.name ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRenameSceneSubmit();
+                          if (e.key === 'Escape') setRenamingScene(null);
+                        }}
+                        onBlur={handleRenameSceneSubmit}
+                        placeholder="New scene name"
+                        className="w-full rounded border px-2 py-1 text-xs outline-none"
+                        style={{ borderColor: 'var(--input-border)', backgroundColor: 'var(--input-bg)', color: 'var(--ink)' }}
+                      />
+                    ) : confirmDeleteScene === s.name ? (
+                      <div className="flex items-center gap-1 px-1.5 py-1 text-xs">
+                        <span style={{ color: 'var(--ink)' }}>Delete &amp; its files?</span>
+                        <Button
+                          type="button"
+                          onClick={() => setConfirmDeleteScene(null)}
+                          variant="ghost"
+                          tone="neutral"
+                          size="micro"
+                          className="ml-auto"
+                        >Cancel</Button>
+                        <Button
+                          type="button"
+                          onClick={handleDeleteSceneSubmit}
+                          variant="solid"
+                          tone="danger"
+                          size="micro"
+                        >Delete</Button>
+                      </div>
+                    ) : (
+                      <div className="group flex items-center gap-0.5 rounded px-1.5 py-1 hover:bg-[var(--paper-soft)]">
+                        <button
+                          type="button"
+                          onClick={() => { setScene(s.name); setSceneMenuOpen(false); setMsg(''); }}
+                          className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs"
+                          style={{ color: scene === s.name ? 'var(--primary)' : 'var(--ink)' }}
+                        >
+                          {scene === s.name && <Check className="h-3 w-3 shrink-0" />}
+                          <span className="truncate">{s.name}</span>
+                          <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>
+                            {s.templates.filter((t) => t.fields.length > 0).length} fillable
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          title="Rename scene"
+                          onClick={() => handleStartRename(s.name)}
+                          className="hidden shrink-0 rounded p-0.5 transition-colors group-hover:block hover:bg-[var(--paper-hover)]"
+                          style={{ color: 'var(--ink-muted)' }}
+                        ><Pencil className="h-3 w-3" /></button>
+                        <button
+                          type="button"
+                          title="Delete scene"
+                          onClick={() => setConfirmDeleteScene(s.name)}
+                          className="hidden shrink-0 rounded p-0.5 transition-colors group-hover:block hover:bg-[var(--paper-hover)]"
+                          style={{ color: 'var(--danger)' }}
+                        ><Trash2 className="h-3 w-3" /></button>
+                      </div>
+                    )}
+                  </div>
                 ))}
+                <div
+                  className="flex cursor-pointer items-center gap-1 border-t px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--paper-soft)]"
+                  style={{ borderColor: 'var(--line)', color: 'var(--brand)' }}
+                  onClick={() => { setSceneMenuOpen(false); setRenamingScene(null); }}
+                >
+                  <Plus className="h-3 w-3" /> New scene…
+                </div>
               </div>
             )}
           </div>
@@ -257,7 +404,7 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
       {/* Body：字段填写 + 生成 + 结果（TemplateFillPanel，零 AI） */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {scene && currentTemplates.length > 0 ? (
-          <TemplateFillPanel scene={scene} templates={currentTemplates} onClose={() => {}} embedded />
+          <TemplateFillPanel scene={scene} templates={currentTemplates} onClose={() => {}} embedded onDeleteTemplate={handleDeleteTemplate} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-10 text-center">
             <Sparkles className="h-6 w-6" style={{ color: 'var(--ink-faint)' }} />

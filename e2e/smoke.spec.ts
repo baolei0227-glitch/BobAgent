@@ -14,8 +14,8 @@ test('smoke: 页面可加载并渲染画布', async ({ page }) => {
   await page.goto('/');
   await page.waitForLoadState('networkidle');
 
-  // 等待 React Flow 画布出现
-  await page.waitForSelector('.react-flow', { timeout: 20000 }).catch(() => {});
+  // 等待宿主画布 pane 出现（2026-09 宿主重构：自绘 pane + 世界层，保留 react-flow__pane/node 兼容 class）
+  await page.waitForSelector('.react-flow__pane', { timeout: 20000 }).catch(() => {});
 
   // 输出关键结构（用于后续选择器编写）
   const bodyText = (await page.locator('body').innerText()).slice(0, 1500);
@@ -23,9 +23,9 @@ test('smoke: 页面可加载并渲染画布', async ({ page }) => {
   console.log(bodyText);
   console.log('=== END ===');
 
-  const flowCount = await page.locator('.react-flow').count();
+  const flowCount = await page.locator('.react-flow__pane').count();
   const buttonCount = await page.locator('button').count();
-  console.log(`react-flow: ${flowCount}, buttons: ${buttonCount}`);
+  console.log(`host-pane: ${flowCount}, buttons: ${buttonCount}`);
 
   // 截图供人工检查
   await page.screenshot({ path: 'e2e/artifacts/smoke.png', fullPage: false }).catch(() => {});

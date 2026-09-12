@@ -5,7 +5,7 @@
  * 生产模式下从打包资源中启动 Next.js 服务；开发模式下连接 pnpm dev。
  */
 
-import { app, BrowserWindow, shell, ipcMain, Notification, dialog, session, nativeTheme, globalShortcut, systemPreferences, clipboard, nativeImage } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, Notification, dialog, session, nativeTheme, globalShortcut, systemPreferences, clipboard, nativeImage, screen } from 'electron';
 import { spawn, spawnSync, execFile, execFileSync, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import { autoUpdater } from 'electron-updater';
 import { readSettingsFromFile, writeSettingsToFile, settingsFileExists } from '../src/lib/settings-server';
 import { captureRegionToFile, cleanupShotFile, ocrRecognize, ensureScreenRecordingPermission as checkScreenRecordingPermission, requestScreenRecordingPermission, buildScreenPermissionError } from '../src/lib/screen-ocr/capture';
+import { setupHippoBrowser, openHtmlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener } from './hippo-browser';
 
 let nextServerProc: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -28,7 +29,9 @@ let appQuitting = false;
 const standaloneDir = path.join(process.resourcesPath, 'next-standalone');
 const isDev = !fs.existsSync(standaloneDir);
 
-const PORT = isDev ? 3000 : 8321;
+const PORT = isDev
+  ? Number(process.env.BOB_DEV_PORT || process.env.PORT) || 3000
+  : 8321;
 const SERVER_URL = `http://localhost:${PORT}`;
 
 /** 日志写入文件（生产模式诊断用） */
@@ -534,6 +537,91 @@ function cleanupPendingShot(): void {
   pendingShotPath = null;
 }
 
+/** 截图编辑覆盖窗口（微信式）：截图后在独立全屏窗口内编辑，不切走 BobWork 主界面 */
+let ocrEditorWindow: BrowserWindow | null = null;
+/** 待编辑截图：覆盖窗口页挂载后主动拉取（避免 send 时序竞争） */
+let pendingEditorShot: { dataUrl: string; mode: 'region' | 'full' } | null = null;
+
+/** 创建/复用截图编辑覆盖窗口（透明置顶、覆盖光标所在显示器）；失败返回 null（调用方回退主窗口编辑）。
+ *  窗口常驻复用：编辑完成仅 hide 不销毁，下次截图直接 show + 下发新截图，
+ *  省去每次新建窗口 + 重新加载 Next 页面（消除"截图→出现编辑画面"的卡顿）。 */
+function openScreenOcrEditorWindow(dataUrl: string, mode: 'region' | 'full'): BrowserWindow | null {
+  try {
+    if (ocrEditorWindow && !ocrEditorWindow.isDestroyed() && !ocrEditorWindow.webContents.isCrashed()) {
+      // 复用常驻窗口：移到光标所在显示器 → 显示 → 下发新截图
+      pendingEditorShot = { dataUrl, mode };
+      try {
+        const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+        ocrEditorWindow.setBounds(display.bounds);
+      } catch { /* ignore */ }
+      ocrEditorWindow.show();
+      ocrEditorWindow.focus();
+      try { app.focus({ steal: true }); } catch { /* ignore */ }
+      try { ocrEditorWindow.webContents.focus(); } catch { /* ignore */ }
+      // 兼容新旧前端：先尝试直发（新前端监听 new-shot），同时 reload 兜底——
+      // 旧前端无 new-shot 监听，reload 后页面经 getEditorShot 拉取最新截图（pending 已更新）。
+      try { ocrEditorWindow.webContents.send('screen-ocr:new-shot', { dataUrl, mode }); } catch { /* ignore */ }
+      if (ocrEditorWindow && !ocrEditorWindow.isDestroyed()) ocrEditorWindow.webContents.reload();
+      return ocrEditorWindow;
+    }
+    if (ocrEditorWindow && !ocrEditorWindow.isDestroyed()) ocrEditorWindow.close();
+    pendingEditorShot = { dataUrl, mode };
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    ocrEditorWindow = new BrowserWindow({
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      hasShadow: false,
+      alwaysOnTop: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+    ocrEditorWindow.setAlwaysOnTop(true, 'screen-saver');
+    ocrEditorWindow.on('closed', () => {
+      ocrEditorWindow = null;
+      pendingEditorShot = null;
+    });
+    // 覆盖窗口 console 转发（排查编辑器交互问题；主窗口日志同前缀文件）
+    ocrEditorWindow.webContents.on('console-message', (_e, level, message) => {
+      try {
+        fs.appendFileSync(path.join(os.homedir(), '.bobwork-renderer.log'), `[OCR-WIN:${level}] ${message}\n`);
+      } catch { /* ignore */ }
+    });
+    ocrEditorWindow.webContents.on('render-process-gone', (_e, details) => {
+      try {
+        fs.appendFileSync(path.join(os.homedir(), '.bobwork-renderer.log'), `[OCR-WIN:gone] ${JSON.stringify(details)}\n`);
+      } catch { /* ignore */ }
+    });
+    ocrEditorWindow.loadURL(`${SERVER_URL}/ocr-editor`);
+    ocrEditorWindow.show();
+    ocrEditorWindow.focus();
+    // 覆盖窗口需键盘焦点（文字输入框 / Esc 退出）：截图时 BobWork 可能在后台，
+    // 必须把应用强制激活为前台，否则 textarea 无法聚焦输入
+    try { app.focus({ steal: true }); } catch { /* ignore */ }
+    try { ocrEditorWindow.webContents.focus(); } catch { /* ignore */ }
+    return ocrEditorWindow;
+  } catch (e) {
+    log(`创建截图编辑覆盖窗口失败，回退主窗口编辑: ${e instanceof Error ? e.message : String(e)}`);
+    ocrEditorWindow = null;
+    pendingEditorShot = null;
+    return null;
+  }
+}
+
 /** 读取图片文件为 data URL（供下发渲染层编辑面板） */
 async function fileToDataUrl(filePath: string): Promise<string> {
   const ext = path.extname(filePath).toLowerCase();
@@ -819,12 +907,12 @@ function resolveCaptureHelperApp(): string | null {
 async function captureRegionViaHelper(helperApp: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }> {
   const staging = path.join(os.homedir(), 'Library', 'Caches', 'bobwork-capture');
   const jsonFile = path.join(staging, 'result.json');
-  const shotFile = path.join(staging, 'shot.png');
+  const shotFile = path.join(staging, 'shot.jpg');
 
   // 上一轮编辑面板若仍在处理同一固定目录的暂存截图，先挪到独立临时路径，避免被本次清理覆盖
   if (pendingShotPath && path.dirname(pendingShotPath) === staging) {
     try {
-      const keep = path.join(os.tmpdir(), `bobwork-edit-${Date.now()}.png`);
+      const keep = path.join(os.tmpdir(), `bobwork-edit-${Date.now()}${path.extname(pendingShotPath)}`);
       fs.copyFileSync(pendingShotPath, keep);
       pendingShotPath = keep;
     } catch { /* ignore */ }
@@ -832,6 +920,8 @@ async function captureRegionViaHelper(helperApp: string): Promise<{ ok: boolean;
   // 清理上一次残留，保证轮询到的是本次结果
   try { fs.rmSync(jsonFile, { force: true }); } catch { /* ignore */ }
   try { fs.rmSync(shotFile, { force: true }); } catch { /* ignore */ }
+  // 微信式：整屏捕获（JPEG，快）→ 前端覆盖窗口全屏显示原位画面并拖选；不再用 -i 原生选区
+  try { fs.writeFileSync(path.join(staging, 'request.json'), JSON.stringify({ action: 'fullscreen' })); } catch { /* ignore */ }
 
   const launched = await new Promise<boolean>((resolve) => {
     execFile('/usr/bin/open', [helperApp], { timeout: 10_000 }, (err) => resolve(!err));
@@ -899,8 +989,8 @@ async function handleGlobalScreenOcr(): Promise<void> {
     if (useHelper) {
       // 插件助手：独立 .app 拥有稳定屏幕录制授权，首次使用弹窗归因「BobWork Capture」，
       // 授权一次即永久生效，不受 BobWork 重建/更新影响。
-      // 注意：不隐藏主窗口——-i 原生选区蒙版直接覆盖当前界面（微信式，"当前界面直接蒙版"），
-      // 用户可直接拖选 BobWork 界面内容；选区图包含 BobWork 自身属正常（微信同款行为）。
+      // 微信式：助手做整屏捕获（无交互，秒回 JPEG）→ 编辑覆盖窗口全屏显示原屏画面，
+      // 选区由前端覆盖层蒙版拖选完成（画面保持原屏幕位置，无需 -i 原生选区）。
       shot = await captureRegionViaHelper(helperApp);
       if (!shot.ok && shot.error === 'SCREEN_PERMISSION_DENIED') {
         // 自动恢复：TCC 条目失配（重签后「已勾选仍失败」）时反复勾选无效，
@@ -932,16 +1022,20 @@ async function handleGlobalScreenOcr(): Promise<void> {
       mainWindow.webContents.send('screen-ocr:error', { message: shot.error ?? '截图失败' });
       return;
     }
-    // 进入编辑阶段：记录待处理文件，把截图下发渲染层弹编辑面板。
-    // mode：region = 助手 -i 原生选区已完成（编辑面板初始全选区，直接标注）；
-    //        full = 内置链路整屏截图（编辑面板需用户自行拖选）。
+    // 进入编辑阶段：记录待处理文件。
+    // 微信式：截图一律为整屏画面（helper fullscreen 或内置全屏均同）→ mode 'full'，
+    // 编辑覆盖窗口全屏显示（画面即原屏幕位置，无需居中），前端覆盖层变暗蒙版 → 用户拖选选区 → 标注。
     pendingShotPath = shot.path ?? null;
     const dataUrl = await fileToDataUrl(shot.path!);
-    // 恢复/聚焦主窗口，让用户看到编辑面板
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-    mainWindow.webContents.send('screen-ocr:captured', { dataUrl, mode: useHelper ? 'region' : 'full' });
+    const mode = 'full' as 'full';
+    const edWin = openScreenOcrEditorWindow(dataUrl, mode);
+    if (!edWin) {
+      // 覆盖窗口创建失败兜底：回退主窗口内编辑（ScreenOcrHost 渲染编辑面板）
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      mainWindow.webContents.send('screen-ocr:captured', { dataUrl, mode });
+    }
   } catch (e) {
     log(`Screen OCR error: ${e instanceof Error ? e.message : String(e)}`);
     mainWindow?.webContents.send('screen-ocr:error', {
@@ -993,6 +1087,16 @@ function setupGlobalScreenOcr(): void {
   ipcMain.on('screen-ocr:cancel-edit', cleanupPendingShot);
   // 编辑面板确认（✓）：清理暂存截图，避免 shot.png/result.json 残留
   ipcMain.on('screen-ocr:finish-edit', cleanupPendingShot);
+  // 覆盖编辑窗口：页面挂载后主动拉取待编辑截图（幂等：取一次即清）
+  ipcMain.handle('screen-ocr:get-editor-shot', () => {
+    const shot = pendingEditorShot;
+    pendingEditorShot = null;
+    return shot;
+  });
+  // 覆盖编辑窗口：编辑完成/取消，隐藏窗口（常驻复用，下次截图免重建/免重载页面）
+  ipcMain.on('screen-ocr:close-editor', () => {
+    if (ocrEditorWindow && !ocrEditorWindow.isDestroyed()) ocrEditorWindow.hide();
+  });
 
   // 设置面板：查询 BobWorkCapture 屏幕录制授权状态（助手 check 模式自报，不弹窗不截图）
   ipcMain.handle('screen-ocr:permission-status', async () => {
@@ -2193,12 +2297,15 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 将 HTML 内容写入系统临时目录后用默认浏览器打开（HTML 预览 → 打开到外部浏览器）
+  // 将 HTML 内容写入系统临时目录后预览：Hippo Browser（侧边栏）可用时应用内展示，否则退回系统默认浏览器
   ipcMain.handle('shell:openHtml', async (_event, content: string, filename?: string) => {
     try {
       const name = (filename && /\.html?$/i.test(filename) ? filename : 'preview.html').replace(/[\\/:*?"<>|]/g, '_');
       const filePath = path.join(os.tmpdir(), `bobwork-${Date.now()}-${name}`);
       fs.writeFileSync(filePath, content, 'utf-8');
+      if (isHippoReady() && openHtmlInHippo(filePath)) {
+        return { success: true, path: filePath, hippo: true };
+      }
       const result = await shell.openPath(filePath);
       if (result) return { success: false, error: result };
       return { success: true, path: filePath };
@@ -2358,6 +2465,19 @@ app.whenReady().then(async () => {
   // 启动即预装/升级截图助手：版本变化时自动重装，并在重装后自动请求一次屏幕录制授权恢复
   // （更新后首次启动 BobWork 即完成，无需等用户按快捷键才发现要授权）
   try { resolveCaptureHelperApp(); } catch { /* 安装失败留待快捷键触发时重试 */ }
+  // Hippo Browser 独立窗口（Cmd+Shift+B 唤起）
+  setupHippoBrowser();
+  // 浏览器收起为胶囊时，转发到主窗口渲染层（居中呼吸灯胶囊按钮）
+  setMainWindowCapsuleListener((capsule) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('hippo-browser:capsule', capsule);
+      }
+    } catch { /* 主窗口未就绪或已销毁时忽略 */ }
+  });
+  try {
+    globalShortcut.register('CommandOrControl+Shift+B', () => toggleWindow());
+  } catch { /* 快捷键注册失败不阻断启动 */ }
 
   // 主页面加载兜底：即使 server 已就绪，loadURL 后页面可能因
   // SSR/React hydration 挂起、静态资源死锁、扩展注入异常等 never paint，
@@ -2437,6 +2557,7 @@ app.whenReady().then(async () => {
       mainWindow.show();
     } else {
       mainWindow = createWindow();
+      if (!isHippoReady()) setupHippoBrowser();
       mainWindow.loadURL(SERVER_URL);
       mainWindow.once('ready-to-show', () => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();

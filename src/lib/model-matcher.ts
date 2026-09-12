@@ -214,7 +214,7 @@ export function selectBestModel(
 
     // 复杂度分层（score 相等时的决胜）：复杂任务（推理/分析/创作/长文）偏好更强模型（输入单价更高=旗舰），
     // 日常任务（对话/翻译/通用/编码）偏好更快更便宜的模型。
-    // 背景：deepseek-v4-flash 与 v4-pro 的能力标注高度重叠 → 多数任务 score 全等，
+    // 背景：deepseek-flash 与 v4-pro 的能力标注高度重叠 → 多数任务 score 全等，
     //   若无此分层，稳定排序会永远选中数组中的第一个模型（v4-flash），Auto 形同虚设。
     const price = model.spec?.pricePerMillionTokens?.input ?? 1;
     const complex = ['reasoning', 'analysis', 'creative', 'long-context'].includes(taskAnalysis.type);

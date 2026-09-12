@@ -218,12 +218,13 @@ export function MdAnnotationPanel({
         className="flex shrink-0 items-center gap-1 px-3 py-2"
         style={{ borderBottom: '1px solid var(--line)', backgroundColor: 'var(--paper-soft)' }}
       >
-        <div className="flex shrink-0 items-center gap-0.5 rounded-md p-0.5" style={{ backgroundColor: 'var(--paper)' }}>
+        <div className="flex shrink-0 items-center gap-0.5 rounded-md p-0.5" style={{ backgroundColor: 'var(--paper-hover)', boxShadow: 'inset 0 1px 2px rgba(23,23,23,0.06)' }}>
           <button
             onClick={() => onViewChange('annotations')}
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-10 font-medium transition-colors"
             style={{
-              backgroundColor: view === 'annotations' ? 'var(--paper-hover)' : 'transparent',
+              backgroundColor: view === 'annotations' ? 'var(--paper)' : 'transparent',
+              boxShadow: view === 'annotations' ? '0 1px 2px rgba(23,23,23,0.1)' : 'none',
               color: view === 'annotations' ? 'var(--primary)' : 'var(--ink-muted)',
             }}
             title="Annotations view"
@@ -235,7 +236,8 @@ export function MdAnnotationPanel({
             onClick={() => onViewChange('revisions')}
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-10 font-medium transition-colors"
             style={{
-              backgroundColor: view === 'revisions' ? 'var(--paper-hover)' : 'transparent',
+              backgroundColor: view === 'revisions' ? 'var(--paper)' : 'transparent',
+              boxShadow: view === 'revisions' ? '0 1px 2px rgba(23,23,23,0.1)' : 'none',
               color: view === 'revisions' ? 'var(--primary)' : 'var(--ink-muted)',
             }}
             title="Revisions view（修订前 → 修订后）"
@@ -268,8 +270,8 @@ export function MdAnnotationPanel({
             onClick={onRevise}
             disabled={revising}
             loading={revising}
-            variant="solid"
-            tone="brand"
+            variant="soft"
+            tone="neutral"
             size="xs"
             className="flex-1"
             title="按批注意见逐条修改（AI 结合上下文修改批注内容，结果进修订面板可回退）"

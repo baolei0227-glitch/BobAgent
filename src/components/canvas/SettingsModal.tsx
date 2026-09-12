@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState, useRef, useMemo } from 'react';
-import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, RefreshCw, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge } from 'lucide-react';
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge, Globe, FolderOpen } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -38,10 +38,11 @@ import {
 } from '@/lib/settings';
 import { inferModelSpec } from '@/lib/model-matcher';
 import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normalizeVendorName } from '@/lib/model-tags';
-import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { TemplateLibraryModal } from './TemplateLibraryModal';
 import { WechatBindModal } from './WechatBindModal';
 import { UsagePanel } from './UsagePanel';
+import { ToggleSwitch } from './ToggleSwitch';
+import { desktop } from '@/lib/desktop-adapter';
 
 interface SettingsModalProps {
   open: boolean;
@@ -218,19 +219,6 @@ function friendlyModelFetchError(status: number, raw: string, provider: string):
 
 /** 厂商徽标配色（模型大融合：千问/DashScope 聚合的多家厂商）已移至 lib/types.ts 统一导出 */
 
-/** 设置弹窗标题跟随当前标签页（历史遗留：曾是固定 "Model Providers"，与角色派发等模块并列显得误导） */
-const SECTION_TITLES: Record<string, string> = {
-  chat: 'Model Pool',
-  roles: 'Role Assignment',
-  icons: 'Icons & Avatars',
-  theme: 'Theme & Appearance',
-  diagram: 'Architecture',
-  quickprompts: 'Quick Prompts',
-  templates: 'Templates',
-  wechat: 'WeChat Bind',
-  usage: 'Model Usage',
-};
-
 export function SettingsModal({
   open,
   onOpenChange,
@@ -273,26 +261,57 @@ export function SettingsModal({
   // 单模型添加验证中（勾选 / Add 时的连接测试），驱动 spinner 与防重复点击
   const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
   // 统一导航：左栏目录选中项，右栏显示对应面板
-  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'usage'>('roles');
+  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'usage' | 'browser' | 'fileorganizer'>('roles');
+  // Hippo Browser：清除 Cookies 按钮状态
+  const [browserClearBusy, setBrowserClearBusy] = useState(false);
+  const [browserClearMsg, setBrowserClearMsg] = useState('');
+  const [browserClearErr, setBrowserClearErr] = useState(false);
+  // 文件自动整理投递箱：本地编辑态，随 Save 一次落盘
+  const [fileOrgEnabled, setFileOrgEnabled] = useState(false);
+  const [fileOrgDir, setFileOrgDir] = useState('');
+  const [fileOrgCategories, setFileOrgCategories] = useState<string[]>([]);
+  const [fileOrgCategoryInput, setFileOrgCategoryInput] = useState('');
+  const [fileOrgPickErr, setFileOrgPickErr] = useState('');
+
+  const handleClearBrowserCookies = useCallback(async () => {
+    setBrowserClearBusy(true);
+    setBrowserClearMsg('');
+    setBrowserClearErr(false);
+    try {
+      const r = await desktop.hippoBrowser.clearCookies();
+      if (r.ok) {
+        setBrowserClearErr(false);
+        setBrowserClearMsg(`已清除 Hippo Browser 的站点数据${typeof r.clearedCount === 'number' ? `（含 ${r.clearedCount} 条 Cookie）` : ''}`);
+      } else {
+        setBrowserClearErr(true);
+        setBrowserClearMsg(r.error || '清除失败');
+      }
+    } catch (e) {
+      setBrowserClearErr(true);
+      setBrowserClearMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowserClearBusy(false);
+    }
+  }, []);
+
+  /** 选择投递箱目录（Electron 原生目录对话框；浏览器环境不可用） */
+  const handlePickInboxDir = useCallback(async () => {
+    setFileOrgPickErr('');
+    try {
+      const r = await desktop.selectDirectory();
+      if (r.canceled) return;
+      if (!r.success || !r.path) {
+        setFileOrgPickErr(r.error || '无法打开目录选择器（仅桌面端可用）');
+        return;
+      }
+      setFileOrgDir(r.path);
+    } catch (e) {
+      setFileOrgPickErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
   // Model Pool 以独立弹窗方式打开（从 Role Assignment 的按钮进入，左侧导航不再包含该项）
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
   // 默认保存目录已固定为内置 BobWorkspace（~/BobWork/BobWorkspace），不提供自定义存储位置
-  // 手动检查更新状态（设置面板标题栏常驻入口）
-  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'no-update' | 'error'>('idle');
-  const [updateVersion, setUpdateVersion] = useState<string>('');
-  useEffect(() => {
-    if (!isDesktop()) return;
-    const unsubs = [
-      desktop.update.onChecking(() => setUpdateStatus('checking')),
-      desktop.update.onAvailable((info) => {
-        setUpdateVersion(info?.version || '');
-        setUpdateStatus('available');
-      }),
-      desktop.update.onNotAvailable(() => setUpdateStatus('no-update')),
-      desktop.update.onError(() => setUpdateStatus('error')),
-    ];
-    return () => unsubs.forEach((fn) => fn());
-  }, []);
   // 架构图全屏放大
   const [diagramZoom, setDiagramZoom] = useState(false);
   const [searchConfig, setSearchConfig] = useState<SearchConfig>({ apiKey: '', baseUrl: '' });
@@ -369,6 +388,8 @@ export function SettingsModal({
   // - chatModelPool：主对话候选池（多个模型，自动并入厂商勾选，进入节点模型选择）
   const [selectedChatModel, setSelectedChatModel] = useState<string>('');
   const [chatModelPool, setChatModelPool] = useState<Array<{ provider: string; modelId: string }>>([]);
+  // Auto 模式「带图 → 优先视觉模型」开关（缺省开；true 对齐后端 isVisionModel 直连语义）
+  const [chatAutoVisionOnImage, setChatAutoVisionOnImage] = useState<boolean>(true);
 
   // STT
   const [sttProvider, setSttProvider] = useState<'doubao-stream' | 'doubao' | 'dashscope' | 'siliconflow' | 'openai' | 'bobmultimodal'>('doubao-stream');
@@ -485,6 +506,7 @@ export function SettingsModal({
         if (settings.chatModel) {
           setSelectedChatModel(settings.chatModel.defaultModel || '');
           setChatModelPool(settings.chatModel.pool || []);
+          setChatAutoVisionOnImage(settings.chatModel?.autoVisionOnImage !== false);
         }
         // 思考档位策略：settings.thinking 字段缺省均视为 true（与后端消费语义一致）
         const thinkingCfg = settings.thinking ?? {};
@@ -507,7 +529,7 @@ export function SettingsModal({
           setImageEditSelectedModels(settings.imageEdit.selectedModels?.filter((s) => s.trim()) || []);
           setImagePool(settings.imageEdit.pool?.length ? settings.imageEdit.pool : (settings.imageEdit.model ? [{ provider: settings.imageEdit.provider || 'doubao', modelId: settings.imageEdit.model }] : []));
         }
-        // 任务模型 / 成果块模型（Wanted 系列，分别单传给通用任务层与成果块专属层）
+        // 任务模型 / 成果块模型（分别单传给通用任务层与成果块专属层）
         if (settings.taskModel) {
           setTaskModelPool(settings.taskModel.pool?.length ? settings.taskModel.pool : (settings.taskModel.defaultModel ? [{ provider: (settings.taskModel.defaultProvider as string) || '', modelId: settings.taskModel.defaultModel }] : []));
         }
@@ -520,6 +542,13 @@ export function SettingsModal({
         setBrandLogo(settings.brandLogo ?? '');
         setTheme(settings.theme ?? 'warm');
         setFontScale(settings.fontScale ?? 'l');
+        // 文件自动整理投递箱
+        const fo = settings.fileOrganizer ?? {};
+        setFileOrgEnabled(fo.enabled === true);
+        setFileOrgDir(fo.inboxDir ?? '');
+        setFileOrgCategories(fo.categories ?? []);
+        setFileOrgCategoryInput('');
+        setFileOrgPickErr('');
         try {
           const api = (window as unknown as { api: { avatar: { list: () => Promise<Array<{ id: string; name: string; dataUrl: string; builtin: boolean }>> } } }).api;
           if (api?.avatar) {
@@ -551,7 +580,7 @@ export function SettingsModal({
     if (savedTimerRef.current) { clearTimeout(savedTimerRef.current); savedTimerRef.current = null; }
   }, [
     apiKeys, customBaseUrls, selectedModels, searchConfig,
-    selectedChatModel, chatModelPool,
+    selectedChatModel, chatModelPool, chatAutoVisionOnImage,
     sttProvider, sttModel, sttPool,
     imageEditProvider, imageEditModel, imageEditSelectedModels, imagePool,
     taskModelPool, outcomeModelPool,
@@ -559,6 +588,8 @@ export function SettingsModal({
     avatarMode, avatarSelected, brandLogo,
     theme,
     thinkingPolicy,
+    // 文件自动整理投递箱
+    fileOrgEnabled, fileOrgDir, fileOrgCategories,
   ]);
 
   // 组件卸载时清理定时器
@@ -938,6 +969,7 @@ export function SettingsModal({
           defaultModel: selectedChatModel || chatModelPool[0]?.modelId || '',
           apiKey: chatRole?.apiKey ?? '',
           baseUrl: chatRole?.baseUrl ?? '',
+          autoVisionOnImage: chatAutoVisionOnImage,
           pool: chatModelPool,
         },
         // 笔记专属模型已随笔记系统拆分到 bob-notes-mcp 插件域，宿主不再写 notesModel
@@ -966,6 +998,12 @@ export function SettingsModal({
           downgradeOnExecution: thinkingPolicy.downgradeOnExecution,
           trivialPromptOff: thinkingPolicy.trivialPromptOff,
           injectThinkGuide: thinkingPolicy.injectThinkGuide,
+        },
+        // 文件自动整理投递箱（分类清单为空 = 用内置默认分类）
+        fileOrganizer: {
+          enabled: fileOrgEnabled,
+          inboxDir: fileOrgDir.trim() || undefined,
+          categories: fileOrgCategories,
         },
       });
 
@@ -1010,46 +1048,9 @@ export function SettingsModal({
       >
         <TooltipProvider delayDuration={150}>
         <DialogHeader className="px-6 pt-6 pb-3">
-          <div className="flex items-center justify-between gap-2">
-            {/* 左侧高亮已指示当前区块，顶栏不再显示标题（sr-only 保留无障碍语义） */}
-            <DialogTitle className="sr-only" style={{ color: 'var(--ink)' }}>
-              {SECTION_TITLES[activeSection] ?? 'Settings'}
-            </DialogTitle>
-            {isDesktop() && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (updateStatus === 'checking') return;
-                  setUpdateStatus('checking');
-                  desktop.update.check().then((r) => {
-                    if (r && !r.success) {
-                      setUpdateStatus('error');
-                      setTimeout(() => setUpdateStatus('idle'), 3000);
-                    }
-                  }).catch(() => {
-                    setUpdateStatus('error');
-                    setTimeout(() => setUpdateStatus('idle'), 3000);
-                  });
-                }}
-                title={updateStatus === 'checking' ? 'Checking for updates…' : 'Check for updates'}
-                className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)', border: '1px solid var(--line)' }}
-              >
-                {updateStatus === 'checking' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3.5 w-3.5" />
-                )}
-                <span>
-                  {updateStatus === 'checking' && 'Checking…'}
-                  {updateStatus === 'available' && `v${updateVersion} available`}
-                  {updateStatus === 'no-update' && 'Up to date'}
-                  {updateStatus === 'error' && 'Check failed'}
-                  {updateStatus === 'idle' && 'Check for updates'}
-                </span>
-              </button>
-            )}
-          </div>
+          <DialogTitle className="flex items-center text-base font-semibold" style={{ color: 'var(--ink)' }}>
+            Settings
+          </DialogTitle>
         </DialogHeader>
 
         {/* ===== P0 首次设置向导：三步动线引导条（首次设置完成即隐藏，不再显示"Setup complete"提示） ===== */}
@@ -1170,7 +1171,7 @@ export function SettingsModal({
                   items: [
                     {
                       id: 'theme',
-                      label: 'Theme & Appearance',
+                      label: 'Appearance',
                       icon: <Palette className="h-3.5 w-3.5" />,
                       keywords: ['color', 'skin', 'dark', 'light', 'appearance'],
                     },
@@ -1207,6 +1208,18 @@ export function SettingsModal({
                       label: 'WeChat Bind',
                       icon: <MessageCircle className="h-3.5 w-3.5" />,
                       keywords: ['wechat', 'bind', 'qr', 'weixin', '微信'],
+                    },
+                    {
+                      id: 'browser',
+                      label: 'Hippo Browser',
+                      icon: <Globe className="h-3.5 w-3.5" />,
+                      keywords: ['browser', 'Hippo Browser', 'cookie', 'cookies', '站点数据', '登录态', '侧边栏浏览器'],
+                    },
+                    {
+                      id: 'fileorganizer',
+                      label: 'File Organizer',
+                      icon: <FolderOpen className="h-3.5 w-3.5" />,
+                      keywords: ['file', 'folder', 'inbox', 'organize', 'rename', 'archive', '文件整理', '投递箱', '归档', '分类', '命名', '自动整理'],
                     },
                   ],
                 },
@@ -1775,8 +1788,7 @@ export function SettingsModal({
                 { id: 'crew-chat', title: 'Chat', icon: <MessageSquare className="h-4 w-4" /> },
                 { id: 'crew-coding', title: 'Coding', icon: <Wrench className="h-4 w-4" /> },
                 { id: 'crew-kar', title: 'Kar', icon: <BookOpen className="h-4 w-4" /> },
-                { id: 'crew-planner', title: 'Planner', icon: <ClipboardCheck className="h-4 w-4" /> },
-                { id: 'crew-imagegen', title: 'ImageGen', icon: <Image className="h-4 w-4" /> },
+                { id: 'crew-butler', title: 'Butler', icon: <ClipboardCheck className="h-4 w-4" /> },
               ];
               const crewPos = crew.map((_, i) => ({
                 x: coreRect.x + 28 + i * 150,
@@ -2007,7 +2019,7 @@ export function SettingsModal({
                           No models in {label} pool yet. Add models below.
                         </p>
                       ) : (
-                        <div className="mb-2 flex flex-wrap gap-1.5">
+                        <div className="mb-2 grid grid-cols-2 gap-1.5">
                           {pool.map((item) => {
                             const preset = PROVIDER_PRESETS.find((p) => p.type === item.provider as ProviderType);
                             return (
@@ -2019,11 +2031,11 @@ export function SettingsModal({
                                 onDismiss={() => {
                                   setPool(pool.filter((p) => !(p.provider === item.provider && p.modelId === item.modelId)));
                                 }}
-                                className="w-full sm:w-auto sm:max-w-[280px] !justify-normal"
+                                className="w-full rounded-md"
                                 title={`Remove ${item.modelId} from pool`}
                                 label={
-                                  <span className="flex min-w-0 items-center gap-1.5">
-                                    <span className="min-w-0 flex-1 truncate text-sm font-medium" style={{ color: 'var(--ink)' }}>
+                                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                                    <span className="min-w-0 flex-1 truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>
                                       {item.modelId}
                                     </span>
                                     <Badge variant="primary" size="sm" label={preset?.label || item.provider} />
@@ -2141,28 +2153,30 @@ export function SettingsModal({
                           No models in chat pool yet. Add models below — they will be auto-checked in their provider and appear in every node's model selector.
                         </p>
                       ) : (
-                        <div className="mb-2 space-y-1">
+                        <div className="mb-2 grid grid-cols-2 gap-1.5">
                           {chatModelPool.map((item) => {
                             const preset = PROVIDER_PRESETS.find((p) => p.type === item.provider as ProviderType);
                             return (
-                              <div key={`${item.provider}-${item.modelId}`} className="flex items-center gap-2 rounded-md px-2 py-1" style={{ backgroundColor: 'var(--paper-hover)' }}>
-                                <span className="flex-1 truncate text-sm font-medium" style={{ color: 'var(--ink)' }}>{item.modelId}</span>
-                                <span className="shrink-0 rounded px-1 py-px text-xs" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
-                                  {preset?.label || item.provider}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setChatModelPool((prev) => prev.filter((p) => !(p.provider === item.provider && p.modelId === item.modelId)));
-                                    if (selectedChatModel === item.modelId) setSelectedChatModel('');
-                                  }}
-                                  title="Remove from pool"
-                                  className="shrink-0 text-sm transition-colors hover:opacity-70"
-                                  style={{ color: 'var(--ink-muted)' }}
-                                >
-                                  <X className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
+                              <Chip
+                                key={`${item.provider}-${item.modelId}`}
+                                variant="paper"
+                                size="md"
+                                dismissible
+                                onDismiss={() => {
+                                  setChatModelPool((prev) => prev.filter((p) => !(p.provider === item.provider && p.modelId === item.modelId)));
+                                  if (selectedChatModel === item.modelId) setSelectedChatModel('');
+                                }}
+                                title={`Remove ${item.modelId} from pool`}
+                                className="w-full rounded-md"
+                                label={
+                                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                                    <span className="min-w-0 flex-1 truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>
+                                      {item.modelId}
+                                    </span>
+                                    <Badge variant="primary" size="sm" label={preset?.label || item.provider} />
+                                  </span>
+                                }
+                              />
                             );
                           })}
                         </div>
@@ -2210,6 +2224,30 @@ export function SettingsModal({
                             });
                           })()}
                         </select>
+                      </div>
+
+                      {/* ── Smart Model Routing（Auto 视觉优先；随主表单 Save 统一落盘）── */}
+                      <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--line-soft)' }}>
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Smart Model Routing</div>
+                        <div className="flex items-center justify-between gap-3 py-1.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Prefer vision model when images are attached</div>
+                            <div className="text-[11px] leading-snug" style={{ color: 'var(--ink-muted)' }}>
+                              When Auto model routing is on and the message context contains image attachments, pick a vision-capable model so images reach it directly as pixels instead of the OCR-description fallback.
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setChatAutoVisionOnImage((v) => !v)}
+                            className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors"
+                            style={{
+                              backgroundColor: chatAutoVisionOnImage ? 'var(--primary-soft)' : 'var(--paper-hover)',
+                              color: chatAutoVisionOnImage ? 'var(--primary-strong)' : 'var(--ink-muted)',
+                            }}
+                          >
+                            {chatAutoVisionOnImage ? 'On' : 'Off'}
+                          </button>
+                        </div>
                       </div>
 
                       {/* ── Thinking Policy（思考档位策略，高级；随主表单 Save 统一落盘）── */}
@@ -2416,6 +2454,159 @@ export function SettingsModal({
         <UsagePanel embedded onClose={() => setActiveSection('roles')} />
       )}
 
+      {/* ============ File Organizer（文件自动整理投递箱） ============ */}
+      {activeSection === 'fileorganizer' && (
+        <div className="space-y-6 p-6">
+          <div>
+            <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>File Organizer</h3>
+            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              投递箱：把文件丢进指定文件夹后，BobWork 只读取文件首页内容，由 Task 模型判定分类与主题，
+              重命名为 <code>{'{日期}_vNN_{主题}.{扩展名}'}</code>（日期取整理当天）并移入对应分类子目录。
+              模型沿用 Role Assignment 里的 Task 模型，无需单独配置。
+            </p>
+          </div>
+
+          {/* 开关 */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>启用自动整理</h4>
+                <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+                  File Organizer 总开关。整理时会读取下面的投递箱目录与分类清单；
+                  关闭后不执行整理。
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={fileOrgEnabled}
+                onChange={() => setFileOrgEnabled((v) => !v)}
+                title={fileOrgEnabled ? '已启用' : '已停用'}
+              />
+            </div>
+          </div>
+
+          {/* 投递箱目录 */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>投递箱目录</h4>
+            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              就地整理：分类子目录直接建在该文件夹内，不额外产生归档根目录。
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <Input
+                value={fileOrgDir}
+                onChange={(e) => setFileOrgDir(e.target.value)}
+                placeholder="尚未选择文件夹"
+              />
+              <Button variant="outline" size="sm" onClick={handlePickInboxDir} className="shrink-0">
+                <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+                选择文件夹
+              </Button>
+            </div>
+            <div className="mt-2 min-h-4">
+              {fileOrgPickErr && (
+                <p className="text-xs" style={{ color: 'var(--danger)' }}>{fileOrgPickErr}</p>
+              )}
+            </div>
+          </div>
+
+          {/* 分类目录清单 */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>分类目录</h4>
+            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              模型只能从下列分类中择一，保证目录不发散。留空则使用内置默认分类
+              （合同协议 / 票据凭证 / 证件资质 / 报表数据 / 学习资料 / 项目文档 / 其他）。
+            </p>
+            {fileOrgCategories.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {fileOrgCategories.map((c) => (
+                  <Chip
+                    key={c}
+                    variant="paper"
+                    size="sm"
+                    dismissible
+                    onDismiss={() => setFileOrgCategories((prev) => prev.filter((x) => x !== c))}
+                    label={c}
+                  />
+                ))}
+              </div>
+            )}
+            <div className="mt-3">
+              <Input
+                value={fileOrgCategoryInput}
+                onChange={(e) => setFileOrgCategoryInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return;
+                  const v = fileOrgCategoryInput.trim();
+                  if (!v) return;
+                  setFileOrgCategories((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                  setFileOrgCategoryInput('');
+                }}
+                placeholder="输入分类名后回车添加"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============ Hippo Browser ============ */}
+      {activeSection === 'browser' && (
+        <div className="space-y-6 p-6">
+          <div>
+            <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>Hippo Browser</h3>
+            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              BobWork 内置的网页浏览器（预览面板的 Browser Tab），使用独立的持久化会话（persist:hippo-browser），
+              登录态与主窗口隔离并可自动记住——这是它能"扫码一次复用"的原因。
+            </p>
+          </div>
+
+          {/* Cookies */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Cookies</h4>
+                </div>
+                <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+                  Hippo Browser 默认像普通浏览器一样保存并发送网站 Cookie（登录态持久化的基础）。
+                  下方可**清除**已保存的 Cookie 与站点数据——用于换账号、清脏会话或隐私不留痕。
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={browserClearBusy}
+                    onClick={handleClearBrowserCookies}
+                  >
+                    {browserClearBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Trash className="mr-1.5 h-3.5 w-3.5" />}
+                    清除 Cookies 与站点数据
+                  </Button>
+                </div>
+                <div className="mt-2 min-h-4">
+                  {browserClearMsg && (
+                    <p className="text-xs" style={{ color: browserClearErr ? 'var(--danger)' : 'var(--success, var(--primary))' }}>
+                      {browserClearMsg}
+                    </p>
+                  )}
+                </div>
+                <p className="mt-2 text-[11px] leading-relaxed" style={{ color: 'var(--ink-faint)' }}>
+                  注：清除后当前已登录的网站会退出，下次访问需重新登录。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Agent 默认行为（占位说明：当前为单标签页，暂不提供多标签切换） */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4 opacity-70">
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Agent 默认行为</h4>
+            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+              打开网页时：当前标签页操作 ·
+              <span className="ml-1 text-[11px]">（Hippo Browser 当前为单标签页，暂不支持"每次新开标签页"；多标签支持已在规划中）</span>
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Templates / WeChat Bind 等：直接在右侧面板内嵌显示（不再弹窗） */}
+
       {/* Model Pool（Manage Models）：从 Role Assignment 的按钮以独立弹窗方式打开（左侧导航不包含该项） */}
       <Dialog open={modelPoolOpen} onOpenChange={setModelPoolOpen}>
         <DialogContent className="flex flex-col gap-0 p-0" style={{ width: '60rem', maxWidth: '60rem', height: '70vh' }}>
@@ -2595,7 +2786,7 @@ export function SettingsModal({
                       <div className="flex items-center gap-2">
                         <Input
                           type="text"
-                          placeholder="e.g. deepseek-v4-flash"
+                          placeholder="e.g. deepseek:deepseek-flash"
                           value={newModelIdInput}
                           onChange={(e) => setNewModelIdInput(e.target.value)}
                           onKeyDown={(e) => { if (e.key === 'Enter' && newModelIdInput.trim() && !verifyingModelId) { e.preventDefault(); testAndAddModel(selectedChatProvider); } }}

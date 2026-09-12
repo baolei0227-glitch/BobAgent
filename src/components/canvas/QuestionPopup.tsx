@@ -35,6 +35,8 @@ interface QuestionPopupProps {
   onExpire?: () => void;
   /** 胶囊模式：只渲染右下角悬浮胶囊 */
   minimized?: boolean;
+  /** 停靠模式：无遮罩、不 portal，卡片占满容器宽度；由宿主在输入框位置渲染以替代输入框（不遮挡正文） */
+  docked?: boolean;
 }
 
 /**
@@ -60,6 +62,7 @@ export default function QuestionPopup({
   onRestore,
   onExpire,
   minimized = false,
+  docked = false,
 }: QuestionPopupProps) {
   const total = questions.length; // step === total 即末页「补充说明」
   const [answers, setAnswers] = useState<AnswerEntry[]>(() =>
@@ -181,7 +184,7 @@ export default function QuestionPopup({
   const surfaceBg = 'var(--popover)';
   const cardBg = 'var(--popover)';
 
-  const countdownText = countdown != null && countdown > 0 ? ` · 剩余 ${formatCountdown(countdown)}` : '';
+  const countdownText = countdown != null && countdown > 0 ? ` · ${formatCountdown(countdown)} left` : '';
 
   // 胶囊模式：弹窗被最小化，右下角常驻提醒；点击胶囊继续作答，× 为显式跳过
   if (minimized) {
@@ -204,7 +207,7 @@ export default function QuestionPopup({
       >
         <button
           onClick={onRestore}
-          title="继续回答"
+          title="Continue answering"
           className="flex items-center gap-2 text-xs font-semibold text-white"
         >
           <span className="relative flex h-2 w-2">
@@ -215,12 +218,12 @@ export default function QuestionPopup({
             <span className="relative inline-flex h-2 w-2 rounded-full" style={{ backgroundColor: '#fff' }} />
           </span>
           <MessageSquare className="h-3.5 w-3.5" />
-          {unanswered > 0 ? `${unanswered} 题待回答` : '待提交'}
+          {unanswered > 0 ? `${unanswered} question${unanswered > 1 ? 's' : ''} to answer` : 'Ready to submit'}
           {countdownText && <span className="font-normal opacity-80">{countdownText.replace(' · ', '')}</span>}
         </button>
         <button
           onClick={onSkip}
-          title="跳过并按未回答继续生成"
+          title="Skip and continue without answers"
           className="flex h-6 w-6 items-center justify-center rounded-full transition-colors"
           style={{ backgroundColor: 'rgba(255,255,255,0.18)' }}
         >
@@ -231,43 +234,9 @@ export default function QuestionPopup({
     );
   }
 
-  // 通过 portal 渲染到 body：脱离 React Flow 节点 DOM（节点带 transform，会导致 fixed 遮罩
-  // 只覆盖节点区域，且事件冒泡链经过画布 pane/节点，双指滑动/拖拽会误触发节点拖拽或画布平移）
-  return createPortal(
-    <div
-      data-canvas-ui="overlay"
-      className="fixed inset-0 z-[2000] flex items-center justify-center transition-opacity duration-200"
-      style={{
-        backgroundColor: 'rgba(15, 23, 42, 0.45)',
-        backdropFilter: 'blur(2px)',
-        opacity: visible ? 1 : 0,
-        // 未可见（后台标签 rAF 未触发期间）时不拦截画布事件，避免"隐形遮罩冻住画布"
-        pointerEvents: visible ? 'auto' : 'none',
-      }}
-      onWheel={stopWheel}
-      onMouseDown={stopCanvasEvent}
-      onMouseUp={stopCanvasEvent}
-      onMouseMove={stopCanvasEvent}
-      onPointerDown={stopCanvasEvent}
-      onPointerMove={stopCanvasEvent}
-      onTouchStart={stopTouch}
-      onTouchMove={stopTouch}
-      onTouchEnd={stopTouch}
-      onClick={stopCanvasEvent}
-    >
-      <div
-        className="relative mx-4 w-full max-w-md overflow-hidden transition-all duration-300"
-        style={{
-          opacity: visible ? 1 : 0,
-          transform: visible ? 'translateY(0) scale(1)' : 'translateY(16px) scale(0.96)',
-        }}
-        onWheel={stopWheel}
-        onMouseDown={stopCanvasEvent}
-        onMouseUp={stopCanvasEvent}
-        onMouseMove={stopCanvasEvent}
-        onPointerDown={stopCanvasEvent}
-        onPointerMove={stopCanvasEvent}
-      >
+  // 卡片主体（渐变条 + 内容卡片）：全屏遮罩版与停靠版共享，避免双份维护
+  const cardBody = (
+    <>
         {/* 顶部渐变装饰条 */}
         <div
           className="h-1.5 w-full rounded-t-2xl"
@@ -294,15 +263,17 @@ export default function QuestionPopup({
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold tracking-tight" style={{ color: 'var(--ink)' }}>
-                AI 想确认以下信息
+                AI needs to confirm the following
               </p>
               <p className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-                {step < total ? `第 ${step + 1}/${total} 题${countdownText}` : `最后一步：补充说明${countdownText}`}
+                {step < total
+                  ? `Question ${step + 1} of ${total}${countdownText}`
+                  : `Last step: Additional details${countdownText}`}
               </p>
             </div>
             <button
               onClick={onClose}
-              title="最小化到悬浮球，稍后继续回答"
+              title="Minimize to a floating pill and continue later"
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors"
               style={{ backgroundColor: 'var(--paper-soft)' }}
             >
@@ -316,7 +287,7 @@ export default function QuestionPopup({
               <button
                 key={q.id}
                 onClick={() => goTo(i)}
-                title={`第 ${i + 1} 题`}
+                title={`Question ${i + 1}`}
                 className="h-1.5 rounded-full transition-all duration-200"
                 style={{
                   width: i === step ? 18 : 6,
@@ -326,7 +297,7 @@ export default function QuestionPopup({
             ))}
             <button
               onClick={() => goTo(total)}
-              title="补充说明"
+              title="Additional details"
               className="h-1.5 rounded-full transition-all duration-200"
               style={{
                 width: step === total ? 18 : 6,
@@ -397,7 +368,7 @@ export default function QuestionPopup({
                       <textarea
                         value={answers[step]?.custom || ''}
                         onChange={(e) => handleCustomChange(step, e.target.value)}
-                        placeholder="或输入你自己的答案..."
+                        placeholder="Or type your own answer..."
                         rows={2}
                         className="w-full resize-none rounded-lg border px-3.5 py-2.5 text-xs transition-all duration-150 focus:outline-none"
                         style={{
@@ -435,18 +406,18 @@ export default function QuestionPopup({
                       +
                     </span>
                     <p className="text-sm font-medium leading-snug pt-px" style={{ color: 'var(--ink)' }}>
-                      补充说明（可选）
+                      Additional details (optional)
                     </p>
                   </div>
                   <p className="ml-7 mb-3 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                    还有想补充的背景、约束或偏好？没有可直接提交。
+                    Anything else to add — background, constraints, or preferences? Leave blank if not.
                   </p>
                   <div className="ml-7">
                     <textarea
                       value={supplement}
                       maxLength={SUPPLEMENT_MAX}
                       onChange={(e) => setSupplement(e.target.value)}
-                      placeholder="例如：优先控制成本；不要改动线上数据；放到下周再执行……"
+                      placeholder="e.g. Prioritize cost; don't touch production data; postpone to next week..."
                       rows={4}
                       className="w-full resize-none rounded-lg border px-3.5 py-2.5 text-xs transition-all duration-150 focus:outline-none"
                       style={{
@@ -483,22 +454,22 @@ export default function QuestionPopup({
             <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
               {step < total
                 ? allAnswered
-                  ? '已全部回答，可前往提交'
-                  : `还有 ${total - answeredCount} 题待回答`
+                  ? 'All answered, ready to submit'
+                  : `${total - answeredCount} question${total - answeredCount === 1 ? '' : 's'} to go`
                 : allAnswered
-                  ? '已全部回答，可以提交'
-                  : `还有 ${total - answeredCount} 题未回答`}
+                  ? 'All answered, ready to submit'
+                  : `${total - answeredCount} question${total - answeredCount === 1 ? '' : 's'} unanswered`}
             </span>
             <div className="flex items-center gap-2">
               <button
                 onClick={onSkip}
-                title="放弃回答，AI 将按未回答继续生成"
+                title="Discard answers; AI will continue without them"
                 className="rounded-lg px-3.5 py-2 text-xs font-medium transition-colors"
                 style={{ color: 'var(--ink-muted)' }}
                 onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--paper-soft)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
               >
-                跳过
+                Skip
               </button>
               {step > 0 && (
                 <button
@@ -507,7 +478,7 @@ export default function QuestionPopup({
                   style={{ color: 'var(--ink)', border: '1.5px solid var(--paper-soft)' }}
                 >
                   <ChevronLeft className="h-3.5 w-3.5" />
-                  上一题
+                  Previous
                 </button>
               )}
               {step < total ? (
@@ -520,7 +491,7 @@ export default function QuestionPopup({
                     border: `1.5px solid ${accentBorder}`,
                   }}
                 >
-                  {step === total - 1 ? '下一步' : '下一题'}
+                  {step === total - 1 ? 'Next step' : 'Next question'}
                   <ChevronRight className="h-3.5 w-3.5" />
                 </button>
               ) : (
@@ -537,12 +508,80 @@ export default function QuestionPopup({
                   }}
                 >
                   <ArrowUpCircle className="h-3.5 w-3.5" />
-                  提交
+                  Submit
                 </button>
               )}
             </div>
           </div>
         </div>
+    </>
+  );
+
+  // 停靠模式：无遮罩、不 portal，渲染在文档流中——宿主在输入框位置条件渲染以替代输入框，
+  // 不遮挡正文。卡片位于 React Flow 节点内，仍需阻止滚轮/拖拽/触摸事件冒泡到画布。
+  if (docked) {
+    return (
+      <div
+        data-canvas-ui="overlay"
+        className="relative max-h-[60vh] w-full overflow-y-auto overflow-x-hidden rounded-2xl shadow-[0_12px_36px_-14px_rgba(0,0,0,0.22)] transition-all duration-300"
+        style={{
+          opacity: visible ? 1 : 0,
+          transform: visible ? 'translateY(0)' : 'translateY(10px)',
+        }}
+        onWheel={stopWheel}
+        onMouseDown={stopCanvasEvent}
+        onMouseUp={stopCanvasEvent}
+        onMouseMove={stopCanvasEvent}
+        onPointerDown={stopCanvasEvent}
+        onPointerMove={stopCanvasEvent}
+        onTouchStart={stopTouch}
+        onTouchMove={stopTouch}
+        onTouchEnd={stopTouch}
+        onClick={stopCanvasEvent}
+      >
+        {cardBody}
+      </div>
+    );
+  }
+
+  // 通过 portal 渲染到 body：脱离 React Flow 节点 DOM（节点带 transform，会导致 fixed 遮罩
+  // 只覆盖节点区域，且事件冒泡链经过画布 pane/节点，双指滑动/拖拽会误触发节点拖拽或画布平移）
+  return createPortal(
+    <div
+      data-canvas-ui="overlay"
+      className="fixed inset-0 z-[2000] flex items-center justify-center transition-opacity duration-200"
+      style={{
+        backgroundColor: 'rgba(15, 23, 42, 0.45)',
+        backdropFilter: 'blur(2px)',
+        opacity: visible ? 1 : 0,
+        // 未可见（后台标签 rAF 未触发期间）时不拦截画布事件，避免"隐形遮罩冻住画布"
+        pointerEvents: visible ? 'auto' : 'none',
+      }}
+      onWheel={stopWheel}
+      onMouseDown={stopCanvasEvent}
+      onMouseUp={stopCanvasEvent}
+      onMouseMove={stopCanvasEvent}
+      onPointerDown={stopCanvasEvent}
+      onPointerMove={stopCanvasEvent}
+      onTouchStart={stopTouch}
+      onTouchMove={stopTouch}
+      onTouchEnd={stopTouch}
+      onClick={stopCanvasEvent}
+    >
+      <div
+        className="relative mx-4 w-full max-w-md overflow-hidden transition-all duration-300"
+        style={{
+          opacity: visible ? 1 : 0,
+          transform: visible ? 'translateY(0) scale(1)' : 'translateY(16px) scale(0.96)',
+        }}
+        onWheel={stopWheel}
+        onMouseDown={stopCanvasEvent}
+        onMouseUp={stopCanvasEvent}
+        onMouseMove={stopCanvasEvent}
+        onPointerDown={stopCanvasEvent}
+        onPointerMove={stopCanvasEvent}
+      >
+        {cardBody}
       </div>
     </div>,
     document.body,

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Loader2, X, Trash2, Save, Upload, ImageOff,
   AlignLeft, AlignCenter, AlignRight,
-  Palette, Type, Pilcrow, FileText, FileCode, Lock,
+  Palette, Type, Pilcrow, FileText, Lock,
 } from 'lucide-react';
 import type { DocxExportConfig } from '@/lib/md-to-docx';
 import { Button } from '@/components/ui/button';
@@ -306,17 +306,10 @@ export interface ExportDocxDialogProps {
   open: boolean;
   onClose: () => void;
   onExport: (config: DocxExportConfig, fileName: string) => Promise<void>;
-  /** HTML 导出（自包含 HTML 文件下载） */
-  onExportHtml: (fileName: string) => Promise<void>;
-  /** PDF 导出（Electron printToPDF → 文件下载） */
-  onExportPdf: (fileName: string) => Promise<void>;
   defaultFileName: string;
 }
 
-type ExportFormat = 'docx' | 'html' | 'pdf';
-
-export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExportPdf, defaultFileName }: ExportDocxDialogProps) {
-  const [format, setFormat] = useState<ExportFormat>('docx');
+export function ExportDocxDialog({ open, onClose, onExport, defaultFileName }: ExportDocxDialogProps) {
   const [presets, setPresets] = useState<DocxPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
   const [config, setConfig] = useState<DocxExportConfig>({ ...DEFAULT_DOCX_CONFIG });
@@ -331,7 +324,6 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
   // Init: load presets + last used
   useEffect(() => {
     if (!open) return;
-    setFormat('docx');
     const loaded = loadPresets();
     setPresets(loaded);
     const lastId = loadLastPresetId();
@@ -438,14 +430,8 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
     setError(null);
     try {
       const name = fileName.trim() || defaultFileName || 'export';
-      if (format === 'docx') {
-        saveLastPresetId(selectedPresetId || presets[0]?.id || '');
-        await onExport(config, name);
-      } else if (format === 'html') {
-        await onExportHtml(name);
-      } else {
-        await onExportPdf(name);
-      }
+      saveLastPresetId(selectedPresetId || presets[0]?.id || '');
+      await onExport(config, name);
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -491,20 +477,9 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
             className="flex items-center justify-between px-5 py-3.5"
             style={{ borderBottom: '1px solid var(--line)' }}
           >
-            <div className="flex items-center gap-3">
-              <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
-                Export
-              </h2>
-              <SegmentedControl
-                value={format}
-                onChange={(v) => setFormat(v as ExportFormat)}
-                options={[
-                  { label: 'DOCX', value: 'docx' },
-                  { label: 'HTML', value: 'html' },
-                  { label: 'PDF', value: 'pdf' },
-                ]}
-              />
-            </div>
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+              Export Word
+            </h2>
             <Button
               onClick={onClose}
               disabled={exporting}
@@ -519,8 +494,6 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
 
           {/* Body */}
           <div className="px-4 py-3.5 space-y-3 max-h-[72vh] overflow-y-auto">
-            {format === 'docx' && (
-            <>
             {/* ── Preset ─────────────────────────────────────── */}
             <Section icon={<Palette className="h-3.5 w-3.5" />} title="Preset">
               <div className="flex flex-wrap gap-1.5">
@@ -918,36 +891,6 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
                 </div>
               )}
             </Section>
-            </>
-            )}
-
-            {/* ── HTML / PDF 说明 ─────────────────────────────── */}
-            {format !== 'docx' && (
-              <div
-                className="rounded-xl px-3.5 py-3"
-                style={{
-                  backgroundColor: 'color-mix(in oklab, var(--ink) 2.5%, transparent)',
-                  border: '1px solid color-mix(in oklab, var(--line) 60%, transparent)',
-                }}
-              >
-                <div className="flex items-center gap-1.5 mb-1.5">
-                  <span style={{ color: 'var(--ink-muted)' }}>
-                    {format === 'html' ? <FileCode className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />}
-                  </span>
-                  <span
-                    className="text-11 font-semibold uppercase tracking-wide"
-                    style={{ color: 'var(--ink-muted)' }}
-                  >
-                    {format === 'html' ? 'HTML' : 'PDF'}
-                  </span>
-                </div>
-                <p className="text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-                  {format === 'html'
-                    ? '自包含 HTML 文件：内联排版样式，可直接用浏览器打开或分享。'
-                    : 'PDF 文件：A4 页面、2cm 页边距，随正文内容自动分页。'}
-                </p>
-              </div>
-            )}
 
             {/* ── File Name ──────────────────────────────────── */}
             <Section icon={<FileText className="h-3.5 w-3.5" />} title="File Name">
@@ -966,7 +909,7 @@ export function ExportDocxDialog({ open, onClose, onExport, onExportHtml, onExpo
                   className="text-xs font-medium"
                   style={{ color: 'var(--ink-muted)' }}
                 >
-                  .{format}
+                  .docx
                 </span>
               </div>
             </Section>

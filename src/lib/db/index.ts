@@ -52,7 +52,7 @@ export interface EventRow {
   source_node_id: string | null;  // 关联的画布节点 ID
   source_raw: string | null;      // 原始粘贴文本（备注）
   /** 反向引用来源（JSON 字符串，如 {"kind":"sticky","noteId":"sn-xxx","pageId":"pg-xxx"}）：
-   *  便签待办行自动入日历时写入，供日历侧变更（改标题/勾选/删除）反向落回便签行 */
+   *  便签行被手动「Add to calendar」或 Butler 排程入日历时写入，供日历侧变更（改标题/勾选/删除）反向落回便签行 */
   source_ref: string | null;
   notified_at: string | null;     // 到期提醒「已通知」时间（null = 未提醒；已由多通知时间取代，保留兼容）
   /** 提前提醒分钟数配置（JSON 数组，如 [30, 1440] = 开始前 30 分钟 + 1 天；空数组/空 = 默认 [30]） */
@@ -565,7 +565,7 @@ export interface CreateEventData {
   scope?: 'project' | 'global';  // 默认 'project'；'global' = 全局待办（project_id 设为 '__global__'）
   source_node_id?: string;
   source_raw?: string;
-  /** 反向引用来源（JSON 字符串；便签待办行自动入日历的锚点，供日历侧反向联动） */
+  /** 反向引用来源（JSON 字符串；便签行手动入日历 / Butler 排程时写入的锚点，供日历侧反向联动） */
   source_ref?: string;
   /** 提前提醒分钟数（如 [30] = 开始前 30 分钟；多个则每个时间点各提醒一次；缺省默认 [30]） */
   reminder_minutes?: number[];

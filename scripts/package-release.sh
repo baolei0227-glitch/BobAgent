@@ -97,6 +97,17 @@ mkdir -p "$OUTPUT_DIR"
 # 改为直接重定向到日志文件，同时在 stderr 输出关键进度
 exec > "$LOG_FILE" 2>&1
 
+# ---------- 0.5 清理旧更新下载缓存（防止 bob-updater 无限膨胀）----------
+# electron-updater 每次下载的安装包都留在 ~/Library/Caches/bob-updater/{downloads,pending}，
+# 从不自动清理，数十个版本累积可达数百 MB~GB（2026-09-11 实测 739M）。
+# 该缓存仅含旧版本安装包，删除后下次更新会重新下载，无副作用。
+UPDATER_CACHE_DIR="$HOME/Library/Caches/bob-updater"
+if [ -d "$UPDATER_CACHE_DIR" ]; then
+  log "清理旧更新下载缓存 ($UPDATER_CACHE_DIR) ..."
+  rm -rf "$UPDATER_CACHE_DIR"/downloads/* "$UPDATER_CACHE_DIR"/pending/* 2>/dev/null || true
+  ok "更新下载缓存已清理（剩余 $(du -sh "$UPDATER_CACHE_DIR" 2>/dev/null | awk '{print $1}')）"
+fi
+
 log "============================================"
 log "BobWork v$VERSION Release Build"
 log "Arch: $ARCH"
@@ -195,6 +206,8 @@ EOF
 log "组装 Next.js standalone build ..."
 mkdir -p "$STAGING/next-standalone"
 cp -R "$PROJECT_DIR/.next/standalone/." "$STAGING/next-standalone/"
+# 清理误入 standalone 的构建残留/备份（.next.bak-*/.next.old-*/release 曾分别把 462M/1.8G/363M 打进安装包）
+find "$STAGING/next-standalone" -maxdepth 1 \( -name '.next.bak-*' -o -name '.next.old-*' -o -name 'release' \) -exec rm -rf {} + 2>/dev/null || true
 # Next.js 16 standalone 输出到 <项目目录名>/ 子目录（如 projects/），检测并提升一层
 if [ ! -f "$STAGING/next-standalone/server.js" ] && [ -f "$STAGING/next-standalone/projects/server.js" ]; then
   cp -R "$STAGING/next-standalone/projects/." "$STAGING/next-standalone/"
@@ -366,6 +379,23 @@ if [ -d "$MIND_MCP_DIR" ]; then
   fi
 else
   warn "bob-mind-mcp 目录不存在，Bob-Mind 功能不可用"
+fi
+# 内置 coze-mcp（扣子 OpenAPI 桥 MCP）：构建 + 复制 dist/package.json。
+#   cli.js 为 esbuild 单文件 bundle（已内联 @modelcontextprotocol/sdk），无需运行时安装依赖；
+#   预置配置里 {BUNDLED}:coze-mcp/dist/cli.js 在 server 读取 settings 时按 cwd 解析。
+COZE_MCP_DIR="$PROJECT_DIR/../coze-mcp"
+if [ -d "$COZE_MCP_DIR" ]; then
+  log "内置 coze-mcp（Coze · 扣子）..."
+  if ! (cd "$COZE_MCP_DIR" && npm run build >/dev/null 2>&1); then
+    warn "coze-mcp 构建失败，Coze 功能将不可用"
+  else
+    mkdir -p "$STAGING/next-standalone/coze-mcp"
+    cp -R "$COZE_MCP_DIR/dist" "$STAGING/next-standalone/coze-mcp/dist"
+    cp "$COZE_MCP_DIR/package.json" "$STAGING/next-standalone/coze-mcp/package.json"
+    ok "coze-mcp 已内置 ($(du -sh "$STAGING/next-standalone/coze-mcp" | awk '{print $1}'))"
+  fi
+else
+  warn "coze-mcp 目录不存在，Coze 功能不可用"
 fi
 ok "Next.js standalone 准备完成（node_modules: $(du -sh "$STAGING/next-standalone/node_modules" 2>/dev/null | awk '{print $1}')）"
 

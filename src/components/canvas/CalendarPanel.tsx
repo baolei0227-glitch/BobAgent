@@ -18,11 +18,16 @@ import {
   XCircle,
   RefreshCw,
   Upload,
+  Download,
+  Link2,
+  Settings2,
+  ScrollText,
+  MoreHorizontal,
   Check,
 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Callout } from '@/components/ui/callout';
 import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/empty-state';
 import NodeCardHeader from './NodeCardHeader';
 
 /** 前端事件结构 */
@@ -84,6 +89,50 @@ function startOfWeek(d: Date): Date {
 /** 预设色板 */
 const PRESET_COLORS = ['#F59E0B', '#EF4444', '#3B82F6', '#10B981', '#8B5CF6', '#EC4899', '#14B8A6', '#64748B'];
 
+/** 周视图时间轴：每小时行高（px）与小时刻度 */
+const HOUR_HEIGHT = 44;
+const HOURS = Array.from({ length: 24 }, (_, h) => h);
+
+/** 事件底色：用 color-mix 生成半透明底色。
+ *  兼容 hex / CSS 变量 / 任意颜色，避免 `颜色 + '18'` 这种拼接在非 hex 值上产生非法 CSS 而底色失效。 */
+function eventTint(color: string | null | undefined, pct: number): string {
+  const base = color && color.trim() ? color : 'var(--primary)';
+  return `color-mix(in oklab, ${base} ${pct}%, transparent)`;
+}
+
+/** 事件文字样式：分类色交由左侧色条表达，文字统一中性色；完成/取消沉为灰 + 删除线 */
+function eventTextStyle(status: CalendarEvent['status']): React.CSSProperties {
+  const finished = status === 'done' || status === 'cancelled';
+  return {
+    color: finished ? 'var(--ink-faint)' : 'var(--ink)',
+    textDecoration: finished ? 'line-through' : 'none',
+  };
+}
+
+/** 分类色条取色：scheduled 用事件自身颜色，完成/取消统一灰 */
+function eventBarColor(ev: CalendarEvent): string {
+  return ev.status === 'scheduled' ? (ev.color || 'var(--primary)') : 'var(--ink-faint)';
+}
+
+/** 取 HH:mm */
+function hhmm(iso: string): string {
+  return new Date(iso).toTimeString().slice(0, 5);
+}
+
+/** 事件在一天内的起始分钟 */
+function startMinutesOf(iso: string): number {
+  const d = new Date(iso);
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/** 事件持续分钟（缺 end / 跨天 / 异常值均做钳制，保证时间轴方块不溢出当天） */
+function durationMinutesOf(ev: CalendarEvent, startMin: number): number {
+  if (!ev.end_time) return 60;
+  const raw = Math.round((new Date(ev.end_time).getTime() - new Date(ev.start_time).getTime()) / 60_000);
+  if (!Number.isFinite(raw) || raw <= 0) return 60;
+  return Math.min(raw, 24 * 60 - startMin);
+}
+
 export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const [date, setDate] = useState(() => new Date());
   const panelRef = useRef<HTMLDivElement>(null);
@@ -103,6 +152,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const [searchResults, setSearchResults] = useState<CalendarEvent[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
+  // 面板宽度（左边缘可拖拽调整；默认 946px，受视口宽度约束）
+  const [panelWidth, setPanelWidth] = useState(946);
+  const resizingRef = useRef(false);
+  // 同步操作菜单：Import / Export / Subscribe / Accounts / Logs 收进 ⋯，避免抢日历主视觉
+  const [showSyncMenu, setShowSyncMenu] = useState(false);
+  const syncMenuRef = useRef<HTMLDivElement>(null);
+  // 周视图当前时刻指示线（客户端挂载后每分钟刷新，避免 SSR 水合不一致）
+  const [now, setNow] = useState<Date | null>(null);
+  const weekScrollRef = useRef<HTMLDivElement>(null);
 
   // 新建/编辑表单
   const [formTitle, setFormTitle] = useState('');
@@ -505,6 +563,50 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     return () => window.removeEventListener('pointerdown', onPointerDown);
   }, [onClose]);
 
+  // 左边缘拖拽调整面板宽度
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!resizingRef.current) return;
+      const next = window.innerWidth - e.clientX;
+      setPanelWidth(Math.min(Math.max(next, 560), Math.min(window.innerWidth - 40, 1400)));
+    };
+    const onUp = () => {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
+
+  // 同步菜单：点击菜单外收起
+  useEffect(() => {
+    if (!showSyncMenu) return;
+    const onDown = (e: PointerEvent) => {
+      if (syncMenuRef.current && !syncMenuRef.current.contains(e.target as Node)) setShowSyncMenu(false);
+    };
+    window.addEventListener('pointerdown', onDown);
+    return () => window.removeEventListener('pointerdown', onDown);
+  }, [showSyncMenu]);
+
+  // 当前时刻（周视图红线）：每分钟刷新
+  useEffect(() => {
+    setNow(new Date());
+    const timer = setInterval(() => setNow(new Date()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 周视图默认滚到 08:00 附近，避免一进来就停在 00:00
+  useEffect(() => {
+    if (view !== 'week' || searchResults !== null || !weekScrollRef.current) return;
+    weekScrollRef.current.scrollTop = 8 * HOUR_HEIGHT - 8;
+  }, [view, date, searchResults]);
+
   // 打开新建弹窗（指定日期）
   const openCreate = (dateStr: string) => {
     // 非当天（或当天深夜新建导致整点跨天）默认 09:00 - 10:00；
@@ -745,14 +847,28 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
       ref={panelRef}
       className="fixed right-0 top-0 z-[51] flex h-full flex-col overflow-hidden"
       style={{
-        width: '946px',
+        width: `${panelWidth}px`,
+        maxWidth: 'calc(100vw - 40px)',
         backgroundColor: 'var(--paper)',
         borderLeft: '1px solid var(--line)',
-        boxShadow: '-12px 0 32px rgba(0, 0, 0, 0.06)',
+        boxShadow: 'var(--shadow-lg)',
         fontFamily: "var(--font-sans)",
         WebkitAppRegion: 'no-drag',
+        animation: 'fade-in 200ms var(--ease-base)',
       } as React.CSSProperties}
     >
+      {/* 左边缘拖拽手柄：调整面板宽度 */}
+      <div
+        className="absolute left-0 top-0 z-20 h-full w-1.5 cursor-col-resize transition-colors hover:bg-[var(--primary-soft)]"
+        onPointerDown={(e) => {
+          e.preventDefault();
+          resizingRef.current = true;
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none';
+        }}
+        title="Drag to resize"
+        aria-hidden
+      />
       {/* 头部 — Phase 3：NodeCardHeader 统一三段式布局 */}
       <NodeCardHeader
         leftAnchor={
@@ -786,106 +902,96 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         />
       )}
 
-      {/* ===== 日历同步状态条 ===== */}
-      <div className="flex shrink-0 flex-col border-b px-4 py-2" style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}>
-        <div className="flex items-center gap-2">
-          <span className="text-11 font-medium" style={{ color: 'var(--ink-muted)' }}>Calendar Sync</span>
-          <span className="flex-1 truncate text-11" style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}>
-            {syncMsg || (syncAccounts.length ? '' : 'Not configured')}
-          </span>
-          <Button
-            onClick={runSync}
-            disabled={syncing}
-            loading={syncing}
-            variant="soft"
-            tone="brand"
-            size="xs"
-            title="Sync now"
-          >
-            {syncing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-            Sync now
-          </Button>
-        </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {/* 账户连接方式徽章：右侧固定为 Mac，箭头反映实际数据流向（双向 ⇄ / 单向 ←） */}
-          {syncAccounts.map((a) => {
-            const twoWay = a.provider === 'caldav' && !a.read_only;
-            return (
-              <span
-                key={a.account_id}
-                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-10 font-medium"
-                style={{
-                  backgroundColor: twoWay ? 'var(--success-soft)' : 'var(--info-soft)',
-                  color: twoWay ? 'var(--success)' : 'var(--info)',
-                }}
-                title={twoWay ? 'Two-way sync: BobWork ⇄ Mac Calendar' : 'One-way: Mac Calendar → BobWork (pull only)'}
-              >
-                {a.name}
-                <span className="opacity-80">{twoWay ? '⇄ Mac' : '← Mac'}</span>
-              </span>
-            );
-          })}
-          <Button
-            onClick={() => fileInputRef.current?.click()}
-            variant="outline"
-            tone="neutral"
-            size="xs"
-            title="Import .ics from system calendar"
-          >
-            Import .ics
-          </Button>
-          <Button
-            onClick={handleExport}
-            disabled={syncing}
-            variant="outline"
-            tone="neutral"
-            size="xs"
-            title="Export events as .ics"
-          >
-            Export .ics
-          </Button>
-          {feedUrl && (
-            <Button
-              onClick={() => setShowSubscribeModal(true)}
-              variant="outline"
-              tone="brand"
-              size="xs"
-              title="Apple Calendar subscription link"
+      {/* ===== 日历同步状态条（同步相关操作收进 ⋯ 菜单，只把状态留在主视觉） ===== */}
+      <div
+        className="flex shrink-0 items-center gap-2 border-b px-4 py-2"
+        style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}
+      >
+        <span className="text-11 font-medium" style={{ color: 'var(--ink-muted)' }}>Calendar Sync</span>
+        <span className="min-w-0 flex-1 truncate text-11" style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}>
+          {syncMsg || (syncAccounts.length ? `${syncAccounts.length} account${syncAccounts.length !== 1 ? 's' : ''}` : 'Not configured')}
+        </span>
+        {/* 账户连接方式徽章：右侧固定为 Mac，箭头反映实际数据流向（双向 ⇄ / 单向 ←） */}
+        {syncAccounts.map((a) => {
+          const twoWay = a.provider === 'caldav' && !a.read_only;
+          return (
+            <span
+              key={a.account_id}
+              className="hidden shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-10 font-medium sm:inline-flex"
+              style={{
+                backgroundColor: twoWay ? 'var(--success-soft)' : 'var(--info-soft)',
+                color: twoWay ? 'var(--success)' : 'var(--info)',
+              }}
+              title={twoWay ? 'Two-way sync: BobWork ⇄ Mac Calendar' : 'One-way: Mac Calendar → BobWork (pull only)'}
             >
-              Subscribe
-            </Button>
+              {a.name}
+              <span className="opacity-80">{twoWay ? '⇄ Mac' : '← Mac'}</span>
+            </span>
+          );
+        })}
+        <Button
+          onClick={runSync}
+          disabled={syncing}
+          loading={syncing}
+          variant="ghost"
+          tone="neutral"
+          size="icon-sm"
+          title="Sync now"
+          aria-label="Sync now"
+        >
+          {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+        <div className="relative" ref={syncMenuRef}>
+          <Button
+            onClick={() => setShowSyncMenu((v) => !v)}
+            variant="ghost"
+            tone="neutral"
+            size="icon-sm"
+            title="Sync options"
+            aria-label="Sync options"
+            aria-expanded={showSyncMenu}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+          {showSyncMenu && (
+            <div
+              className="absolute right-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-lg border py-1"
+              style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', boxShadow: 'var(--shadow-lg)' }}
+            >
+              {([
+                { key: 'import', label: 'Import .ics', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => fileInputRef.current?.click() },
+                { key: 'export', label: 'Export .ics', icon: <Download className="h-3.5 w-3.5" />, onClick: () => handleExport() },
+                ...(feedUrl ? [{ key: 'subscribe', label: 'Subscribe', icon: <Link2 className="h-3.5 w-3.5" />, onClick: () => setShowSubscribeModal(true) }] : []),
+                { key: 'accounts', label: 'Accounts', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => setShowAccountModal(true) },
+                { key: 'logs', label: 'Sync logs', icon: <ScrollText className="h-3.5 w-3.5" />, onClick: () => setShowSyncLogs((v) => !v) },
+              ]).map((item) => (
+                <button
+                  key={item.key}
+                  onClick={() => { setShowSyncMenu(false); item.onClick(); }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-11 transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink)' }}
+                >
+                  <span style={{ color: 'var(--ink-muted)' }}>{item.icon}</span>
+                  {item.label}
+                </button>
+              ))}
+            </div>
           )}
-          <Button
-            onClick={() => setShowAccountModal(true)}
-            variant="outline"
-            tone="neutral"
-            size="xs"
-            title="Configure iCloud / WebCal sync accounts"
-          >
-            Accounts
-          </Button>
-          <Button
-            onClick={() => setShowSyncLogs((v) => !v)}
-            variant="outline"
-            tone="neutral"
-            size="xs"
-            title="View sync logs"
-          >
-            Logs
-          </Button>
         </div>
-        {showSyncLogs && (
-          <div className="mt-1.5 max-h-32 overflow-y-auto rounded-md border p-1.5" style={{ borderColor: 'var(--line-soft)' }}>
-            {syncLogs.length === 0 && <div className="text-11" style={{ color: 'var(--ink-faint)' }}>No sync logs yet</div>}
-            {syncLogs.map((l, i) => (
-              <div key={i} className="flex gap-1.5 text-11 leading-5" style={{ color: l.level === 'error' ? 'var(--danger)' : l.level === 'warn' ? 'var(--warn)' : 'var(--ink-muted)' }}>
-                <span className="shrink-0 opacity-60">{new Date(l.created_at).toLocaleString()}</span>
-                <span className="truncate">{l.message}</span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
+
+      {/* 同步日志（由 ⋯ 菜单的 Sync logs 展开） */}
+      {showSyncLogs && (
+        <div className="max-h-32 shrink-0 overflow-y-auto border-b px-4 py-1.5" style={{ borderColor: 'var(--line-soft)' }}>
+          {syncLogs.length === 0 && <div className="text-11" style={{ color: 'var(--ink-faint)' }}>No sync logs yet</div>}
+          {syncLogs.map((l, i) => (
+            <div key={i} className="flex gap-1.5 text-11 leading-5" style={{ color: l.level === 'error' ? 'var(--danger)' : l.level === 'warn' ? 'var(--warn)' : 'var(--ink-muted)' }}>
+              <span className="shrink-0 opacity-60">{new Date(l.created_at).toLocaleString()}</span>
+              <span className="truncate">{l.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* 隐藏的 .ics 文件选择器 */}
       <input
@@ -906,17 +1012,16 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
           {/* 月/周视图切换 */}
           <div className="flex items-center gap-0.5 rounded-md border p-0.5" style={{ borderColor: 'var(--line-soft)' }}>
             {(['month', 'week'] as const).map((v) => (
-              <button
+              <Button
                 key={v}
                 onClick={() => setView(v)}
-                className="rounded px-2 py-0.5 text-xs transition-colors"
-                style={{
-                  color: view === v ? 'var(--paper)' : 'var(--ink-muted)',
-                  backgroundColor: view === v ? 'var(--primary)' : 'transparent',
-                }}
+                variant={view === v ? 'solid' : 'ghost'}
+                tone={view === v ? 'brand' : 'neutral'}
+                size="micro"
+                className="px-2 py-0.5 text-xs"
               >
                 {v === 'month' ? 'Month' : 'Week'}
-              </button>
+              </Button>
             ))}
           </div>
 
@@ -987,7 +1092,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') runSearch(searchQuery); }}
             placeholder="Search events…"
-            className="w-full rounded-md border py-1.5 pl-7 pr-7 text-xs outline-none focus:border-amber-400"
+            className="w-full rounded-md border py-1.5 pl-7 pr-7 text-xs outline-none transition-colors focus:border-[var(--primary)]"
             style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
           />
           {searchQuery && (
@@ -1003,25 +1108,38 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         </div>
       </div>
 
-      {/* 星期标题（月视图显示星期；周视图显示日期） */}
-      <div className="grid shrink-0 grid-cols-7 border-b" style={{ borderColor: 'var(--line-soft)' }}>
-        {searchResults !== null
-          ? null
-          : (view === 'month'
-            ? WEEKDAYS.map((day) => (
-                <div key={day} className="py-1 text-center text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-                  {day}
-                </div>
-              ))
-            : weekDays.map((d) => (
-                <div key={d.toISOString()} className="py-1 text-center text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-                  {WEEKDAYS[d.getDay()]}
-                  <span className="ml-1" style={{ color: toLocalDateStr(d) === todayStr ? 'var(--primary)' : 'var(--ink)' }}>
-                    {d.getDate()}
-                  </span>
-                </div>
-              ))
-          )}
+      {/* 星期标题（月视图显示星期；周视图显示星期 + 今天胶囊） */}
+      <div className="flex shrink-0 items-stretch border-b" style={{ borderColor: 'var(--line-soft)' }}>
+        {/* 周视图左侧与时间轴刻度列对齐的占位 */}
+        {view === 'week' && searchResults === null && <div className="w-11 shrink-0" />}
+        <div className="grid flex-1 grid-cols-7">
+          {searchResults !== null
+            ? null
+            : (view === 'month'
+              ? WEEKDAYS.map((day) => (
+                  <div key={day} className="py-1.5 text-center text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                    {day}
+                  </div>
+                ))
+              : weekDays.map((d) => {
+                  const isToday = toLocalDateStr(d) === todayStr;
+                  return (
+                    <div key={d.toISOString()} className="flex items-center justify-center gap-1 py-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+                      {WEEKDAYS[d.getDay()]}
+                      <span
+                        className="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1"
+                        style={{
+                          backgroundColor: isToday ? 'var(--primary)' : 'transparent',
+                          color: isToday ? 'var(--paper)' : 'var(--ink)',
+                        }}
+                      >
+                        {d.getDate()}
+                      </span>
+                    </div>
+                  );
+                })
+            )}
+        </div>
       </div>
 
       {/* 日历格子 */}
@@ -1041,9 +1159,12 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               </span>
             </div>
             {searchResults.length === 0 ? (
-              <div className="px-4 py-10 text-center">
-                <span className="text-xs" style={{ color: 'var(--ink-faint)' }}>No matching events</span>
-              </div>
+              <EmptyState
+                size="sm"
+                preset="search"
+                title="No matching events"
+                description="Try a different keyword or clear the search."
+              />
             ) : (
               <div className="flex-1 divide-y divide-[var(--line-soft)] overflow-y-auto">
                 {searchResults.map((ev) => (
@@ -1079,62 +1200,100 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         ) : (
           <>
             {view === 'week' ? (
-              /* 周视图：7 天并排，每列展示当天全部事件 */
-              <div className="grid min-h-0 flex-1 grid-cols-7">
-                {weekDays.map((d) => {
-                  const ds = toLocalDateStr(d);
-                  const dayEvents = (eventsByDate.get(ds) || []).slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
-                  const isToday = ds === todayStr;
-                  return (
-                    <div
-                      key={ds}
-                      className="flex min-h-0 flex-col border-r last:border-r-0"
-                      style={{ borderColor: 'var(--line-soft)', backgroundColor: isToday ? 'var(--primary-soft)' : 'transparent' }}
-                    >
-                      <div className="flex shrink-0 items-center justify-between border-b px-1 py-1" style={{ borderColor: 'var(--line-soft)' }}>
-                        <span className="text-11 font-medium" style={{ color: ds === selectedDate ? 'var(--primary)' : 'var(--ink)' }}>
-                          {WEEKDAYS[d.getDay()]} {d.getDate()}
-                        </span>
-                        <button
-                          onClick={() => openCreate(ds)}
-                          className="rounded p-0.5 opacity-0 transition-opacity hover:opacity-100"
-                          style={{ color: 'var(--ink-muted)' }}
-                          title="Add event"
+              /* 周视图：时间轴网格（左列小时刻度 + 右侧 7 天列，事件按时间绝对定位） */
+              <div ref={weekScrollRef} className="min-h-0 flex-1 overflow-y-auto">
+                <div className="relative flex" style={{ height: 24 * HOUR_HEIGHT }}>
+                  {/* 小时刻度列 */}
+                  <div className="w-11 shrink-0">
+                    {HOURS.map((h) => (
+                      <div key={h} className="relative" style={{ height: HOUR_HEIGHT }}>
+                        <span
+                          className="absolute right-1.5 top-0.5 text-10 tabular-nums"
+                          style={{ color: 'var(--ink-faint)' }}
                         >
-                          <Plus className="h-3 w-3" />
-                        </button>
+                          {`${String(h).padStart(2, '0')}:00`}
+                        </span>
                       </div>
-                      <div className="flex-1 space-y-1 overflow-y-auto p-1">
-                        {dayEvents.length === 0 ? (
-                          <div className="px-1 py-2 text-center text-11" style={{ color: 'var(--ink-faint)' }}>—</div>
-                        ) : (
-                          dayEvents.map((ev) => (
+                    ))}
+                  </div>
+
+                  {/* 7 天列 */}
+                  <div className="relative grid flex-1 grid-cols-7">
+                    {/* 每小时横线 */}
+                    {HOURS.map((h) => (
+                      <div
+                        key={`line-${h}`}
+                        className="pointer-events-none absolute left-0 right-0 border-t"
+                        style={{ top: h * HOUR_HEIGHT, borderColor: 'var(--line-soft)' }}
+                      />
+                    ))}
+
+                    {weekDays.map((d) => {
+                      const ds = toLocalDateStr(d);
+                      const dayEvents = (eventsByDate.get(ds) || []).slice().sort((a, b) => a.start_time.localeCompare(b.start_time));
+                      const isToday = ds === todayStr;
+                      return (
+                        <div
+                          key={ds}
+                          className="relative border-r last:border-r-0"
+                          style={{
+                            borderColor: 'var(--line-soft)',
+                            backgroundColor: isToday ? 'var(--primary-faint)' : 'transparent',
+                          }}
+                          onDoubleClick={() => openCreate(ds)}
+                          title="Double-click to add"
+                        >
+                          {/* 当前时刻红线（仅今天列，客户端挂载后显示，避免水合不一致） */}
+                          {isToday && now && (
                             <div
-                              key={ev.event_id}
-                              onClick={() => openEdit(ev)}
-                              className="cursor-pointer truncate rounded px-1 py-0.5 text-11 leading-tight transition-colors hover:brightness-95"
-                              style={{
-                                backgroundColor: `${ev.color || 'oklch(0.55 0.08 45)'}18`,
-                                color: ev.status === 'done' ? 'var(--success)' : ev.status === 'cancelled' ? 'var(--ink-faint)' : (ev.color || 'oklch(0.55 0.08 45)'),
-                                textDecoration: ev.status === 'done' || ev.status === 'cancelled' ? 'line-through' : 'none',
-                              }}
-                              title={ev.title}
+                              className="pointer-events-none absolute left-0 right-0 z-10"
+                              style={{ top: ((now.getHours() * 60 + now.getMinutes()) / 60) * HOUR_HEIGHT }}
                             >
-                              {!ev.all_day && ev.start_time && (
-                                <span style={{ opacity: 0.7 }}>{new Date(ev.start_time).toTimeString().slice(0, 5)} </span>
-                              )}
-                              {ev.title}
+                              <div className="relative h-px" style={{ backgroundColor: 'var(--danger)' }}>
+                                <span
+                                  className="absolute -left-[3px] -top-[3px] h-1.5 w-1.5 rounded-full"
+                                  style={{ backgroundColor: 'var(--danger)' }}
+                                />
+                              </div>
                             </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                          )}
+
+                          {/* 事件块：按起始时间与时长定位，左侧色条表分类 */}
+                          {dayEvents.map((ev) => {
+                            const startMin = ev.all_day ? 0 : startMinutesOf(ev.start_time);
+                            const dur = ev.all_day ? 30 : durationMinutesOf(ev, startMin);
+                            return (
+                              <div
+                                key={ev.event_id}
+                                onClick={() => openEdit(ev)}
+                                className="absolute left-0.5 right-0.5 cursor-pointer overflow-hidden rounded-md border-l-2 px-1 py-0.5 text-11 leading-tight transition-shadow hover:shadow-md"
+                                style={{
+                                  top: (startMin / 60) * HOUR_HEIGHT + 1,
+                                  height: Math.max((dur / 60) * HOUR_HEIGHT - 2, 15),
+                                  backgroundColor: eventTint(ev.color, 14),
+                                  borderLeftColor: eventBarColor(ev),
+                                  ...eventTextStyle(ev.status),
+                                }}
+                                title={`${ev.all_day ? 'All day' : hhmm(ev.start_time)} ${ev.title}`}
+                              >
+                                <div className="truncate font-medium">{ev.title}</div>
+                                {!ev.all_day && dur >= 45 && (
+                                  <div className="truncate text-10" style={{ color: 'var(--ink-muted)' }}>
+                                    {hhmm(ev.start_time)}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             ) : (
               /* 月视图格子：flex-1 占满网格区域（容器已禁滚动，行高随面板自适应） */
-              <div className="grid min-h-0 flex-1 grid-cols-7">
+              <div className="grid min-h-0 flex-1 grid-cols-7 gap-1 p-1">
               {Array.from({ length: totalCells }).map((_, i) => {
                 const cellDate = new Date(year, month, 1 - startDayOfWeek + i);
                 const cellDateStr = toLocalDateStr(cellDate);
@@ -1146,11 +1305,11 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                 return (
                   <div
                     key={i}
-                    className="relative cursor-pointer border-b border-r p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
+                    className="group relative cursor-pointer rounded-lg border p-1 transition-colors hover:bg-[var(--paper-hover)]"
                     style={{
                       minHeight: '72px',
-                      borderColor: 'var(--line-soft)',
-                      opacity: isCurrentMonth ? 1 : 0.3,
+                      borderColor: isSelected ? 'var(--primary)' : 'var(--line-soft)',
+                      opacity: isCurrentMonth ? 1 : 0.45,
                       backgroundColor: isSelected ? 'var(--primary-soft)' : 'transparent',
                     }}
                     onClick={() => setSelectedDate(cellDateStr)}
@@ -1188,37 +1347,29 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
 
                     {/* 事件标签 */}
                     <div className="mt-0.5 space-y-px">
-                      {dayEvents.slice(0, 3).map((ev) => {
-                        const statusIconCls = ev.status === 'done'
-                          ? { color: 'var(--success)', textDecoration: 'line-through' }
-                          : ev.status === 'cancelled'
-                            ? { color: 'var(--ink-faint)', textDecoration: 'line-through' }
-                            : { color: ev.color || 'oklch(0.55 0.08 45)', textDecoration: 'none' };
-
-                        return (
-                          <div
-                            key={ev.event_id}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openEdit(ev);
-                            }}
-                            className="truncate rounded px-1 py-px text-xs leading-tight transition-colors hover:brightness-95"
-                            style={{
-                              backgroundColor: `${ev.color || 'oklch(0.55 0.08 45)'}18`,
-                              color: statusIconCls.color,
-                              textDecoration: statusIconCls.textDecoration as any,
-                            }}
-                            title={ev.title}
-                          >
-                            {!ev.all_day && ev.start_time && (
-                              <span style={{ opacity: 0.7 }}>
-                                {new Date(ev.start_time).toTimeString().slice(0, 5)}{' '}
-                              </span>
-                            )}
-                            {ev.title}
-                          </div>
-                        );
-                      })}
+                      {dayEvents.slice(0, 3).map((ev) => (
+                        <div
+                          key={ev.event_id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEdit(ev);
+                          }}
+                          className="truncate rounded border-l-2 px-1 py-px text-xs leading-tight transition-colors hover:brightness-95"
+                          style={{
+                            backgroundColor: eventTint(ev.color, 14),
+                            borderLeftColor: eventBarColor(ev),
+                            ...eventTextStyle(ev.status),
+                          }}
+                          title={ev.title}
+                        >
+                          {!ev.all_day && ev.start_time && (
+                            <span style={{ opacity: 0.7 }}>
+                              {new Date(ev.start_time).toTimeString().slice(0, 5)}{' '}
+                            </span>
+                          )}
+                          {ev.title}
+                        </div>
+                      ))}
                       {dayEvents.length > 3 && (
                         <span className="block px-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
                           +{dayEvents.length - 3} more
@@ -1250,11 +1401,12 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               </div>
 
               {selectedDateEvents.length === 0 ? (
-                <div className="px-4 py-6 text-center">
-                  <span className="text-xs" style={{ color: 'var(--ink-faint)' }}>
-                    No tasks for this day
-                  </span>
-                </div>
+                <EmptyState
+                  size="sm"
+                  preset="inbox"
+                  title={selectedDate === todayStr ? 'Nothing scheduled today' : 'Nothing scheduled'}
+                  description="Double-click a day or use + to add an event."
+                />
               ) : (
                 <div className="divide-y divide-[var(--line-soft)]">
                   {selectedDateEvents.map((ev) => (
@@ -1353,7 +1505,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               placeholder="Event title"
               value={formTitle}
               onChange={(e) => setFormTitle(e.target.value)}
-              className="mb-3 w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-amber-400"
+              className="mb-3 w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--primary)]"
               style={{
                 backgroundColor: 'var(--input-bg)',
                 borderColor: 'var(--input-border)',

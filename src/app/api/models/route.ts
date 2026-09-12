@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normalizeVendorName } from '@/lib/model-tags';
+import { registerVisionModels } from '@/lib/model-capabilities';
 import { PROVIDER_PRESETS, sanitizeBaseUrl } from '@/lib/types';
 
 interface ModelsRequest {
@@ -298,6 +299,10 @@ export async function POST(request: NextRequest) {
       const STT_PATTERN = /whisper|asr|sensevoice|transcri|speech|qwen-audio/i;
       resultModels = chatModels.filter((m) => m.type === 'audio' && STT_PATTERN.test(m.modelId));
     }
+
+    // 把模型池判定出的视觉模型登记进共享能力注册表，供聊天直连判定复用（口径对齐）。
+    // 按全量 chatModels（不经 kind 过滤）登记，保证任意 provider 登录后即补齐该下全部视觉模型。
+    registerVisionModels(chatModels.filter((m) => m.type === 'vision').map((m) => m.modelId));
 
     return NextResponse.json({ models: resultModels, total: resultModels.length });
   } catch (err) {

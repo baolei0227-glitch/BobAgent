@@ -20,11 +20,7 @@ export const GRAPH_BRIDGE_ACTIONS = [
   'graphGetPermission',
   'graphRequestPermission',
   'graphGetSnapshot',
-  'graphGetViewport',
   'graphExpandNode',
-  'graphSetViewport',
-  'graphFitView',
-  'graphZoomBy',
   'graphSetNodePositions',
   'graphSetNodeSelected',
 ] as const;
@@ -34,9 +30,6 @@ export type GraphBridgeAction = (typeof GRAPH_BRIDGE_ACTIONS)[number];
 /** 需要 control 授权的动作（可读 + 可操作画布）；其余 graph 动作只需 read（非 none） */
 const CONTROL_ACTIONS: ReadonlySet<string> = new Set([
   'graphExpandNode',
-  'graphSetViewport',
-  'graphFitView',
-  'graphZoomBy',
   'graphSetNodePositions',
   'graphSetNodeSelected',
 ]);
@@ -111,29 +104,12 @@ export async function executeGraphBridgeAction(
   switch (action) {
     case 'graphGetSnapshot':
       return { success: true, data: gateway.getSnapshot() };
-    case 'graphGetViewport':
-      return { success: true, data: gateway.getViewport() };
     case 'graphExpandNode': {
       const nodeId = String(data.nodeId ?? '');
       if (!nodeId) return { success: false, error: 'nodeId is required' };
       gateway.expandNode(nodeId);
       return { success: true, data: { ok: true } };
     }
-    case 'graphSetViewport': {
-      const vp = (data.viewport ?? {}) as { x?: unknown; y?: unknown; zoom?: unknown };
-      gateway.setViewport({
-        x: Number(vp.x ?? 0),
-        y: Number(vp.y ?? 0),
-        zoom: Number(vp.zoom ?? 1),
-      });
-      return { success: true, data: { ok: true } };
-    }
-    case 'graphFitView':
-      gateway.fitView({ padding: Number(data.padding ?? 0.2) });
-      return { success: true, data: { ok: true } };
-    case 'graphZoomBy':
-      gateway.zoomBy(Number(data.delta ?? 0.2));
-      return { success: true, data: { ok: true } };
     case 'graphSetNodePositions': {
       const positions = (data.positions ?? {}) as Record<string, { x: number; y: number }>;
       gateway.setNodePositions(positions);

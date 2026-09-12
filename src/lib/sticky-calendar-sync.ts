@@ -1,16 +1,18 @@
 /**
- * Sticky 便签待办行 ↔ 日历事件 双向同步（2026-09-03 起）
+ * Sticky 便签待办行 ↔ 日历事件 双向同步（2026-09-03 起；2026-09-08 语义收紧）
  *
- * 打通约定（与产品确认）：
- *  - 每个项目便签（CanvasStickyNotes）内的 `- [ ]` 待办行 ≡ 一条项目作用域日历事件，
- *    无需再手动「发送到日历」：便签写盘时增量 reconcile，行文本/勾选/删除自动联动事件。
- *  - 事件行带 source_ref（{"kind":"sticky","noteId":..,"pageId":..}）反向锚点，
+ * 产品约定（与产品确认，2026-09-08）：
+ *  - StickyTodo 行**不自动入日历**：写下一行便签不会静默产生日历事件。
+ *  - 只有显式动作才会入日历：① 用户在便签卡（StickyTodoDock）点该行的「加入日历」；
+ *    ② Butler 经确认用 create_scheduled_todo 排期（绑定行）。两者都写 source_ref 锚点。
+ *  - 已入日历的行保留双向联动：改文本→改事件标题、勾选→事件完成、删行→取消事件；
  *    日历侧改标题 / 勾选 / 删除 → 反向落回对应便签行（正文内容仍 AI 不可读）。
- *  - 无时间的散活行创建事件时用默认时段（与 /todo 规则一致），事件不设提醒（静默清单项）。
+ *  - 手动/排程入日历用默认时段（与 /todo 规则一致），事件不设提醒（静默清单项）。
  *
  * 数据面：只操作 events 表（全局日历库）；不负责 CalDAV 推送（由既有同步轮询覆盖）。
  * 便签正文的 JSON 文件 IO 仍由调用方负责（/api/sticky-notes、AI 工具等各自写盘），
- * 本模块只提供「纯内存 reconcile（前向）」与「按事件改便签行（反向）」两类纯函数。
+ * 本模块只提供「锚点行 reconcile（前向，不自动建事件）」「手动入日历（加锚点）」
+ * 与「按事件改便签行（反向）」等纯函数。
  */
 import { join } from 'path';
 import { readFile, writeFile, mkdir, rename } from 'fs/promises';
@@ -107,12 +109,12 @@ function alignLineMeta(
 }
 
 /**
- * 前向 reconcile（纯内存，不写盘）：把一张便签（或其某一页）的待办行状态
+ * 前向 reconcile（纯内存，不写盘）：把一张便签（或其某一页）的**已入日历**待办行状态
  * 同步到日历事件，返回更新过 lineEventIds / lineCalendared 的 note 副本。
  *  - 有事件锚点的行：文本变化 → 改事件标题；勾选变化 → 改事件状态
- *  - 无事件锚点且未完成的非空行：自动建事件（默认时段，无提醒，写 source_ref）
- *  - 旧页里存在但新页已消失的事件（行被删除）→ 置 cancelled
- *  - 已勾选完成但从未入日历的历史行：不建事件（避免完成项产生日历噪音）
+ *  - 无事件锚点的行：**不自动建事件**（2026-09-08 起 StickyTodo 不自动入日历；
+ *    事件只由手动「加入日历」或 Butler 排程产生），保持无锚点
+ *  - 旧页里存在但新页已消失的事件（行被删除/替换）→ 置 cancelled
  */
 export async function reconcileStickyNoteEvents(
   projectId: string,
@@ -173,29 +175,10 @@ export async function reconcileStickyNoteEvents(
           continue;
         }
 
-        // 无锚点：未完成的行自动建事件；已完成的不建（历史完成行不产生日历噪音）
-        if (!line.done) {
-          try {
-            const slot = stickyTodoDefaultRange();
-            const eid = await createEvent(db, {
-              project_id: projectId,
-              title: text,
-              start_time: slot.start,
-              end_time: slot.end,
-              scope: 'project',
-              reminder_minutes: [], // 便签清单项静默，不触发提醒
-              source_ref: stickyRefOf(note.id, page.id),
-            });
-            evs[i] = [eid];
-            cal[i] = true;
-            kept.add(eid);
-          } catch (e) {
-            console.error('[sticky-calendar] 自动建事件失败:', e);
-          }
-        } else {
-          evs[i] = [];
-          cal[i] = false;
-        }
+        // 无锚点：StickyTodo 行不自动入日历（2026-09-08 起），保持无事件；
+        // 行要入日历只能由用户手动「加入日历」或 Butler 排程显式创建（见 addStickyLineToCalendar）
+        evs[i] = [];
+        cal[i] = false;
       }
 
       // 旧页有但新页已消失的事件（该行被删除/替换）→ 取消（不在 kept 中）
@@ -218,6 +201,117 @@ export async function reconcileStickyNoteEvents(
   );
 
   return { ...note, pages: updatedPages, updatedAt: new Date().toISOString() };
+}
+
+/**
+ * 手动把某一行便签待办加入日历（StickyTodoDock「Add to calendar」按钮 / 开庭 C 表单 / 语义等价路径）。
+ *  - 默认用默认时段（stickyTodoDefaultRange，与 /todo 规则一致）建项目作用域事件，无提醒，写 source_ref 锚点；
+ *  - 传入 opts.start_time（如开庭 C 选的日期/时间）→ 按指定时间建事件，end 缺省 +1h，提醒默认 [30]；
+ *  - 幂等：该行已有事件锚点 → 直接复用返回，不重复建；
+ *  - 事件建在 (project_id, title, start_time) 已存在同文本 scheduled 事件时复用（与 /api/calendar/events 防重一致）；
+ *  - text 提供时同步把该行文本落为 text（覆盖调用方页内容里待保存的最新文本），并返回更新过的 note 副本
+ *    （lineEventIds / lineCalendared / content 已对齐）。文件写盘由调用方负责。
+ */
+export async function addStickyLineToCalendar(
+  projectId: string,
+  note: StickyNote,
+  pageId: string,
+  lineIndex: number,
+  text?: string,
+  opts?: {
+    start_time?: string | null;
+    end_time?: string | null;
+    reminder_minutes?: number[];
+  },
+): Promise<{ note: StickyNote; eventIds: string[]; created: boolean }> {
+  const pages = Array.isArray(note.pages) ? note.pages : [];
+  const page = pages.find((p) => p.id === pageId);
+  if (!page || page.kind === 'note') {
+    throw new Error('page not found or not a todo page');
+  }
+  const lines = parseTodoLines(page.content);
+  if (lineIndex < 0 || lineIndex >= lines.length) {
+    throw new Error('line_index out of range');
+  }
+  const finalText = (text ?? lines[lineIndex].text).trim();
+  if (!finalText) throw new Error('todo text is empty');
+
+  const { evs, cal } = alignLineMeta(page, lines.length);
+  const existing = (evs[lineIndex] ?? []).filter(Boolean);
+  if (existing.length > 0) {
+    // 已入日历：无需重建，直接沿用（仅当调用方给了新文本时顺带更新行文本）
+    if (finalText !== lines[lineIndex].text.trim()) {
+      const rawLines = String(page.content ?? '').split('\n');
+      rawLines[lineIndex] = toChecklistLine({ text: finalText, done: false });
+      return {
+        note: {
+          ...note,
+          pages: pages.map((p) =>
+            p.id === pageId ? { ...p, content: rawLines.join('\n') } : p,
+          ),
+          updatedAt: new Date().toISOString(),
+        },
+        eventIds: existing,
+        created: false,
+      };
+    }
+    return { note, eventIds: existing, created: false };
+  }
+
+  const db = await getCalendarDb();
+  // 时段：显式给了 start_time（开庭 C 等精确排程）→ 按它来，end 缺省 +1h；
+  // 否则沿用默认时段（stickyTodoDefaultRange）。提醒：显式传入生效，缺省 [30]（手动快速加入时传 [] 静默）
+  const def = stickyTodoDefaultRange();
+  const start = opts?.start_time || def.start;
+  const end =
+    opts?.end_time ||
+    (opts?.start_time
+      ? new Date(new Date(start).getTime() + 3600_000).toISOString()
+      : def.end);
+  const reminderMinutes = opts?.reminder_minutes ?? (opts?.start_time ? [30] : []);
+  const dedupe = db
+    .prepare(
+      `SELECT event_id FROM events
+       WHERE project_id = ? AND status = 'scheduled' AND title = ? AND start_time = ?
+       LIMIT 1`,
+    )
+    .get(projectId, finalText, start) as { event_id: string } | undefined;
+
+  let eventId: string;
+  if (dedupe) {
+    eventId = dedupe.event_id;
+  } else {
+    eventId = await createEvent(db, {
+      project_id: projectId,
+      title: finalText,
+      start_time: start,
+      end_time: end,
+      scope: 'project',
+      reminder_minutes: reminderMinutes,
+      source_ref: stickyRefOf(note.id, page.id),
+    });
+  }
+
+  const rawLines = String(page.content ?? '').split('\n');
+  rawLines[lineIndex] = toChecklistLine({ text: finalText, done: false });
+  evs[lineIndex] = [eventId];
+  cal[lineIndex] = true;
+
+  const nextPage: StickyNotePage = {
+    ...page,
+    content: rawLines.join('\n'),
+    lineEventIds: evs,
+    lineCalendared: cal,
+  };
+  return {
+    note: {
+      ...note,
+      pages: pages.map((p) => (p.id === pageId ? nextPage : p)),
+      updatedAt: new Date().toISOString(),
+    },
+    eventIds: [eventId],
+    created: !dedupe,
+  };
 }
 
 /** 收集一张便签所有页所有行的日历事件 id（删除便签前用于取消事件） */

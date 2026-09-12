@@ -262,9 +262,17 @@ export function AgentTeamsPanel({ onClose }: AgentTeamsPanelProps) {
     void runManage('send', { to: msgTo, text: msgText.trim() }).then(() => setMsgText(''));
   };
 
-  // ---- 全屏独立页面（与 Bob Sandbox 全屏市场同构）----
+  // ---- 居中浮窗独立面板（与 Bob Sandbox 浮窗市场同构）----
   return (
-    <div className="fixed inset-0 z-[120] flex flex-col" style={{ backgroundColor: 'var(--paper)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+    <div
+      className="fixed inset-0 z-[130] flex items-center justify-center bg-black/30 p-6"
+      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+    >
+      <div
+        className="flex h-[90vh] w-[1400px] max-h-[94vh] max-w-[94vw] flex-col overflow-hidden rounded-2xl border shadow-2xl"
+        style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)' } as React.CSSProperties}
+      >
+    <div className="flex min-h-0 w-full flex-1 flex-col">
       {/* 顶栏 */}
       <div
         className="flex shrink-0 items-center gap-3 px-6 py-3"
@@ -701,6 +709,8 @@ export function AgentTeamsPanel({ onClose }: AgentTeamsPanelProps) {
             </div>
           </div>
         )}
+      </div>
+        </div>
       </div>
     </div>
   );

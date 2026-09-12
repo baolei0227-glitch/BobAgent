@@ -50,7 +50,6 @@ import {
   Quote,
   Code2,
   Minus,
-  Pilcrow,
   GripVertical,
   Columns2,
   Columns3,
@@ -58,8 +57,6 @@ import {
   Image as ImageIcon,
   Undo,
   Redo,
-  Check,
-  Loader2,
   X,
   ListTree,
   FileDown,
@@ -68,14 +65,13 @@ import {
   CheckSquare,
   MessageSquare,
   Printer,
-  FilePlus,
   Share2,
-  FileText,
   Search,
-  Hash,
   Wand2,
+  Trash2,
   Table as TableIcon,
   AlertTriangle,
+  AlignLeft,
 } from 'lucide-react';
 import { AnnotationBubble, mdSelTempKey } from './extensions/AnnotationBubble';
 import { Button } from '@/components/ui/button';
@@ -87,11 +83,10 @@ import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { extractQuestionnaires, QuestionnairePanel, type QuestionnaireBlock } from './QuestionnairePanel';
 import { ExportDocxDialog } from './ExportDocxDialog';
 import { convertMarkdownToDocx, type DocxExportConfig } from '@/lib/md-to-docx';
-import { MdAnnotationPanel, ANNOTATION_INTENTS, type MdAnnotation, type Revision, type RevisionRound, type RevisionOp } from './MdAnnotationPanel';
+import { MdAnnotationPanel, ANNOTATION_INTENTS, type MdAnnotation, type AnnotationIntent, type Revision, type RevisionRound, type RevisionOp } from './MdAnnotationPanel';
 // track-changes：AI 修订注入为原生 ProseMirror mark（替代文本标记模拟），接受/拒绝/读取原生支持
 import { TrackChangesExtension } from 'tiptap-track-changes';
-// 块级拖拽把手：hover 块首出现，按住可拖拽排序段落/列表项/图片/表格/嵌入卡片等块（TipTap v3 官方开源扩展）
-import DragHandle from '@tiptap/extension-drag-handle-react';
+// 块级拖拽把手为自研组件（BlockDragHandle），见文件底部定义；替换原 TipTap 第三方扩展
 // 多栏容器 MVP：两栏/三栏并排编辑，markdown 以自定义 fence 往返
 import { BobColumn, BobColumns } from './extensions/MultiColumn';
 
@@ -723,17 +718,27 @@ function renderPatchRound(round: RevisionRound): string {
   return p.baseMd.slice(0, idx) + replacement + p.baseMd.slice(idx + p.oldText.length);
 }
 
-/** 调 /api/ai-edit/markdown（SSE），返回 done 事件的完整文本；失败返回 null */
-async function fetchAiEditSse(body: Record<string, unknown>): Promise<string | null> {
+/** 调 /api/ai-edit/markdown（SSE）。成功返回 { text, error:null }；失败返回 { text:null, error }（错误可展示给用户） */
+async function fetchAiEditSse(body: Record<string, unknown>): Promise<{ text: string | null; error: string | null }> {
   try {
     const resp = await fetch('/api/ai-edit/markdown', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    if (!resp.ok) {
+      let reason = `请求失败（HTTP ${resp.status}）`;
+      try {
+        const raw = await resp.text();
+        if (raw) reason = `${reason}: ${raw.slice(0, 300)}`;
+      } catch { /* ignore */ }
+      console.warn('[ai-edit] HTTP', resp.status, reason);
+      return { text: null, error: reason };
+    }
     let resultText = '';
+    let serverError: string | null = null;
     const reader = resp.body?.getReader();
-    if (!reader) return null;
+    if (!reader) return { text: null, error: '无法读取响应流' };
     const decoder = new TextDecoder();
     let buffer = '';
     while (true) {
@@ -751,17 +756,28 @@ async function fetchAiEditSse(body: Record<string, unknown>): Promise<string | n
           if (line.startsWith('event:')) event = line.slice(6).trim();
           else if (line.startsWith('data:')) data = line.slice(5).replace(/^ /, '');
         }
+        if (event === 'error') {
+          serverError = data || 'AI 服务错误';
+          console.warn('[ai-edit] server error:', data);
+        }
         if (event === 'done') {
           try {
-            const parsed = JSON.parse(data.replace(/\\n/g, '\n')) as { success?: boolean; text?: string };
+            const parsed = JSON.parse(data.replace(/\\n/g, '\n')) as { success?: boolean; text?: string; error?: string };
             if (parsed.success && parsed.text) resultText = parsed.text;
+            else if (parsed.error) {
+              serverError = parsed.error;
+              console.warn('[ai-edit] done error:', parsed.error);
+            }
           } catch { /* ignore */ }
         }
       }
     }
-    return resultText || null;
-  } catch {
-    return null;
+    if (resultText) return { text: resultText, error: null };
+    return { text: null, error: serverError || 'AI 未返回改写结果（可能超时或输出为空）' };
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    console.warn('[ai-edit] fetch failed:', e);
+    return { text: null, error: reason || '网络请求异常' };
   }
 }
 
@@ -807,33 +823,13 @@ export function DocEditor({
   const saveStatusRef = useRef(saveStatus);
   saveStatusRef.current = saveStatus;
 
-  // 本地图片上传状态
-  const [uploadingImage, setUploadingImage] = useState(false);
-  const imageInputRef = useRef<HTMLInputElement>(null);
 
   // 目录栏：显示开关 + 内容版本号（文档变化时重算目录与折叠）
   const [showToc, setShowToc] = useState(false);
   const [tocTick, setTocTick] = useState(0);
   const [activeHeadingPos, setActiveHeadingPos] = useState<number | null>(null);
-  // 顶部工具栏：默认折叠（保留「Formatting」常驻条，展开后可用全部格式按钮；格式操作亦可经 ⌘K / `/` 完成）
-  const [toolbarCollapsed, setToolbarCollapsed] = useState(true);
 
-  // `/` 斜杠命令：输入 / 在光标处弹出插入菜单（复用 ⌘K 面板命令，零新依赖）
-  const [slashOpen, setSlashOpen] = useState(false);
-  const [slashQuery, setSlashQuery] = useState('');
-  const [slashIndex, setSlashIndex] = useState(0);
-  /** 菜单锚点：打开瞬间用 coordsAtPos 记录的视口坐标（fixed 定位用） */
-  const [slashAnchor, setSlashAnchor] = useState<{ x: number; y: number } | null>(null);
-  const slashRef = useRef<HTMLDivElement>(null);
-  /** ref 镜像：editorProps 回调（创建时闭包）读取最新菜单开关状态 */
-  const slashOpenRef = useRef(false);
-  slashOpenRef.current = slashOpen;
-  /** 斜杠行当前光标字符位置快照：菜单打开期间随输入/删除实时更新。
-   *  点击弹窗命令会令编辑器短暂失焦，PM selection 可能漂移（误删/误改其他行），
-   *  执行命令时一律以该快照定位，不信任失焦后的 selection。 */
-  const slashCaretRef = useRef<number | null>(null);
-  /** 斜杠菜单键盘导航：以 ref 函数注入 editorProps.handleKeyDown，每次渲染刷新最新命令/索引 */
-  const slashNavRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
+
   /** 表格浮动工具栏：光标在表格内时显示（x/y = 锚点坐标，above = 是否浮在表格上方） */
   const [tableMenu, setTableMenu] = useState<{ x: number; y: number; above: boolean } | null>(null);
 
@@ -855,34 +851,42 @@ export function DocEditor({
       setActiveNodeId(detail?.node_id ?? null);
     };
     window.addEventListener('node-selected', handler);
+    // 挂载时主动请求当前选中节点：画布可能在 DocEditor 挂载前就已广播 node-selected，
+    // 被动监听会错过初始状态导致 activeNodeId 误判为 null（“发送到当前节点”被禁用）
+    window.dispatchEvent(new CustomEvent('node-selected-request'));
     return () => window.removeEventListener('node-selected', handler);
   }, []);
 
-  // ⌘K 命令面板
-  const [commandOpen, setCommandOpen] = useState(false);
-  const [commandQuery, setCommandQuery] = useState('');
-  const [commandIndex, setCommandIndex] = useState(0);
-  /** 顶部搜索栏左侧「历史」按钮（撤销/重做）的悬停高亮 */
-  const [historySel, setHistorySel] = useState<string | null>(null);
+  // 右键命令菜单（⌘K 命令面板改为正文右键触发）：记录打开时的视口坐标（null = 关闭）
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  // 打开右键菜单时若编辑器失焦，执行命令前恢复焦点（focus() 保持文档 selection）
+  const ctxOpenRef = useRef(false);
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setCommandOpen((v) => {
-          if (!v) { setCommandQuery(''); setCommandIndex(0); }
-          return !v;
-        });
-      }
+    if (!ctxMenu) { ctxOpenRef.current = false; return; }
+    ctxOpenRef.current = true;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      // 点菜单内部不关闭；点外部任意处关闭
+      if (!t?.closest?.('.md-ctx-menu')) setCtxMenu(null);
     };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, []);
-
-  // 工具栏下拉菜单开关
-  const [headingDropdownOpen, setHeadingDropdownOpen] = useState(false);
-  const [listDropdownOpen, setListDropdownOpen] = useState(false);
-  const headingDropdownRef = useRef<HTMLDivElement>(null);
-  const listDropdownRef = useRef<HTMLDivElement>(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCtxMenu(null);
+    };
+    const onScroll = (e: Event) => {
+      const t = e.target as HTMLElement | null;
+      // 菜单自身内容滚动（下拉查看超出项）不关闭；外部文档/容器滚动才关闭
+      if (t?.closest?.('.md-ctx-menu')) return;
+      setCtxMenu(null);
+    };
+    document.addEventListener('mousedown', onDown, true);
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('scroll', onScroll, true);
+    };
+  }, [ctxMenu]);
 
   // 通用输入弹窗（替代 Electron 中不可用的 window.prompt）
   const [promptState, setPromptState] = useState<{
@@ -1161,16 +1165,6 @@ export function DocEditor({
     return out;
   }, []);
 
-  /** 取光标所在行文本（不含换行）：斜杠命令检测 / 删除前缀用。
-   *  hardBreak（Shift+Enter 软换行）是行内节点，textBetween 的 blockSeparator 不会为它插入 \n，
-   *  必须用 leafText 把 hardBreak 也渲染成换行，否则 lastIndexOf('\n') 会误切到上一段落，
-   *  导致跨行斜杠误删上一行内容。 */
-  const currentLineText = useCallback((view: EditorView | null | undefined, pos: number): string => {
-    if (!view) return '';
-    const text = view.state.doc.textBetween(0, pos, '\n', (leaf) => (leaf.type.name === 'hardBreak' ? '\n' : ''));
-    return text.slice(text.lastIndexOf('\n') + 1);
-  }, []);
-
   // 扩展列表：用 useMemo 稳定引用，避免每次渲染都触发 editor.setOptions 重新配置
   const extensions = useMemo(
     () => [
@@ -1257,8 +1251,6 @@ export function DocEditor({
         'data-placeholder': editable ? 'Start writing, or paste Markdown…' : '',
       },
       handleKeyDown: (view, event) => {
-        // `/` 斜杠命令菜单键盘导航（优先于编辑器快捷键，避免方向键/回车被编辑器消费）
-        if (slashOpenRef.current && slashNavRef.current(event)) return true;
         // ⌘⇧F / Ctrl+Shift+F：打开编辑器内查找替换（⌘F 已专属全局搜索，见 CanvasFlow）
         if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') {
           event.preventDefault();
@@ -1280,36 +1272,6 @@ export function DocEditor({
           event.preventDefault();
           handleSaveRef.current();
           return true;
-        }
-        return false;
-      },
-      // `/` 斜杠命令触发与查询同步：行首/前导空白输入 / 时打开菜单；菜单打开时继续输入则更新查询词
-      handleTextInput: (view, from, _to, text) => {
-        if (!view.editable || view.composing || text.length !== 1) return false;
-        const line = currentLineText(view, from);
-        if (slashOpenRef.current) {
-          // 菜单已开：输入空白/换行，或 '/' 前缀消失 → 关闭；否则同步查询词
-          if (/\s/.test(text) || !line.startsWith('/')) {
-            setSlashOpen(false);
-            setSlashQuery('');
-          } else {
-            setSlashQuery(line.slice(1));
-            setSlashIndex(0);
-          }
-          slashCaretRef.current = view.state.selection.from;
-          return false;
-        }
-        // 输入 '/'：仅当行首或前导空白时打开（'1/'、'word/' 不误触发）
-        if (text === '/' && from > 0) {
-          const before = line.slice(0, -1);
-          if (/^\s*$/.test(before)) {
-            const coords = view.coordsAtPos(from);
-            setSlashAnchor({ x: coords.left, y: coords.bottom });
-            setSlashOpen(true);
-            setSlashQuery('');
-            setSlashIndex(0);
-            slashCaretRef.current = view.state.selection.from;
-          }
         }
         return false;
       },
@@ -1336,6 +1298,30 @@ export function DocEditor({
           const blob = dataUrlToBlob(m[1]);
           if (blob) void insertPastedImage(view, blob, uploadImageFileRef.current);
           return true;
+        }
+        // 纯文本粘贴自动识别（无富文本 HTML 时）：URL → 链接；文档路径 → 嵌入卡片
+        const plain = (event.clipboardData?.getData('text/plain') || '').trim();
+        if (editor && !html && plain && !plain.includes('\n')) {
+          // 文档相对路径（homework/report.md / 文件.md）→ 嵌入卡片（占位 `![[path]]` 解析）
+          if (/^(?:[\w.\- ]+\/)*[\w.\- ]+\.(?:md|mdx)$/i.test(plain) && /\/|\.md/i.test(plain)) {
+            event.preventDefault();
+            insertMarkdownSlice(editor, view, `![[${plain}]]`);
+            return true;
+          }
+          // 单个 http(s) URL → 链接（有选区时把选中文字包成链接；无选区插入可见 URL 链接）
+          const urlOnly = plain.match(/^https?:\/\/\S+$/i);
+          if (urlOnly) {
+            const url = urlOnly[0];
+            event.preventDefault();
+            const { from, to, empty } = view.state.selection;
+            if (empty) {
+              insertMarkdownSlice(editor, view, `[${url}](${url})`);
+            } else {
+              editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
+              // setLink 只作用于当前选区文本
+            }
+            return true;
+          }
         }
         // 网页富文本粘贴 → 干净 Markdown：
         // - 本地编辑器内部复制带 data-pm-slice 元数据 → 走默认精确粘贴（不拦截）；
@@ -1514,23 +1500,14 @@ export function DocEditor({
     await persistAnnotations([...annotations, a]);
   }, [annotations, persistAnnotations, editor]);
 
-  /** 删除批注 */
-  const deleteAnnotation = useCallback(async (id: string) => {
-    await persistAnnotations(annotations.filter((a) => a.id !== id));
-  }, [annotations, persistAnnotations]);
-
-  /** 二次编辑批注内容（批注卡片编辑保存） */
-  const updateAnnotation = useCallback(async (id: string, content: string) => {
-    await persistAnnotations(annotations.map((a) => (a.id === id ? { ...a, content } : a)));
-  }, [annotations, persistAnnotations]);
-
-  /** 批注变化 → 重新生成正文高亮（被批注文字保持黄色高亮，取消选中不消失；
-   *  已解决批注淡化）。优先按批注记录的精确位置锁定（不乱飘），无位置/失效时回退文本匹配。 */
-  useEffect(() => {
+  /** 重建正文批注装饰（高亮 + 查看图标）：被批注文字保持黄色高亮，取消选中不消失；
+   *  已解决批注淡化。优先按批注记录的精确位置锁定（不乱飘），无位置/失效时回退文本匹配。
+   *  删除 / 编辑批注后立即调用，保证侧边栏与正文实时同步。 */
+  const applyAnnotationHighlights = useCallback((list: MdAnnotation[]) => {
     if (!editor) return;
     const doc = editor.state.doc;
     const decorations: Decoration[] = [];
-    for (const a of annotations) {
+    for (const a of list) {
       if (!a.quote.trim()) continue;
       // 统一锚定：from/to 优先 + quote/prefix/suffix 上下文兜底，每个批注只高亮精确的一处
       // （此前循环 indexOf 会把重复文本的所有出现都高亮，与卡片跳转的第一处行为分裂）
@@ -1562,7 +1539,27 @@ export function DocEditor({
     editor.view.dispatch(
       editor.state.tr.setMeta(mdAnnotationSelKey, DecorationSet.create(doc, decorations)),
     );
-  }, [editor, annotations]);
+  }, [editor]);
+
+  /** 删除批注：从侧边栏 / 批注卡片删除后立即重建正文装饰，高亮与图标实时消失 */
+  const deleteAnnotation = useCallback(async (id: string) => {
+    const next = annotations.filter((a) => a.id !== id);
+    await persistAnnotations(next);
+    // 立即用新列表重建正文装饰（不等被动 effect），保证侧边栏删除 → 正文高亮/图标实时消失
+    applyAnnotationHighlights(next);
+  }, [annotations, persistAnnotations, applyAnnotationHighlights]);
+
+  /** 二次编辑批注内容（批注卡片编辑保存） */
+  const updateAnnotation = useCallback(async (id: string, content: string) => {
+    const next = annotations.map((a) => (a.id === id ? { ...a, content } : a));
+    await persistAnnotations(next);
+    applyAnnotationHighlights(next);
+  }, [annotations, persistAnnotations, applyAnnotationHighlights]);
+
+  /** 批注列表变化（加载 / 新增 / 编辑 / 删除）→ 重建正文高亮装饰 */
+  useEffect(() => {
+    applyAnnotationHighlights(annotations);
+  }, [applyAnnotationHighlights, annotations]);
 
   /** 批注气泡：把选中文字 + 位置 + 批注内容转为批注（不自动打开右侧栏，用户按需从工具栏进入） */
   const handleAnnotate = useCallback((quote: string, content: string, from?: number, to?: number, intent?: string) => {
@@ -1587,8 +1584,6 @@ export function DocEditor({
   useEffect(() => {
     onAnnotationWidgetRef.current = (id, x, y) => setAnnotationCard({ id, x, y });
     if (!annotationCard) return;
-    const close = () => setAnnotationCard(null);
-    // capture 阶段捕获所有滚动（scroll 事件不冒泡，capture 才能拦到内部滚动容器）
     const onDocMouseDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
       // 点卡片内 / 点其他图标：不关闭（点其他图标由 click 转发更新坐标）
@@ -1598,13 +1593,19 @@ export function DocEditor({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setAnnotationCard(null);
     };
+    const onScroll = (e: Event) => {
+      const t = e.target as HTMLElement | null;
+      // 卡片内（textarea 编辑长内容）滚动不关闭卡片，只关外部滚动导致的坐标错位
+      if (t?.closest?.('.md-annotation-card')) return;
+      setAnnotationCard(null);
+    };
     document.addEventListener('mousedown', onDocMouseDown, true);
     document.addEventListener('keydown', onKey, true);
-    document.addEventListener('scroll', close, true);
+    document.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('mousedown', onDocMouseDown, true);
       document.removeEventListener('keydown', onKey, true);
-      document.removeEventListener('scroll', close, true);
+      document.removeEventListener('scroll', onScroll, true);
     };
   }, [annotationCard]);
 
@@ -1613,9 +1614,10 @@ export function DocEditor({
   // 当前正在重写的批注 id（对应卡片显示进度百分比）；null = 无进行中
   const [rewritingId, setRewritingId] = useState<string | null>(null);
 
-  /** 单条重写核心：调 AI 改写 quote 并替换（进度由调用方管理）；替换记录为修订轮次。返回是否成功 */
-  const rewriteSingle = useCallback(async (a: MdAnnotation): Promise<boolean> => {
-    if (!editor || !a.quote.trim() || !a.content.trim()) return false;
+  /** 单条重写核心：调 AI 改写 quote 并替换（进度由调用方管理）；替换记录为修订轮次。
+   *  返回 { ok } 成功 / { ok:false, reason } 失败原因（可展示给用户）。 */
+  const rewriteSingle = useCallback(async (a: MdAnnotation): Promise<{ ok: boolean; reason?: string }> => {
+    if (!editor || !a.quote.trim() || !a.content.trim()) return { ok: false, reason: '选中范围或意见为空' };
     const before = getMarkdown(editor);
     // 结构化意图：给 AI 带明确操作前缀；auto（自动判断）不指定方向，提示 AI 自行理解意见意图
     const intentDef = a.intent ? ANNOTATION_INTENTS.find((x) => x.id === a.intent) : undefined;
@@ -1624,16 +1626,17 @@ export function DocEditor({
       : intentDef?.prefix
         ? `【${intentDef.prefix}】${a.content}`
         : a.content;
-    const text = await fetchAiEditSse({
+    const res = await fetchAiEditSse({
       md: before,
       instruction,
       mode: 'inline',
       selection: { text: a.quote },
     });
-    if (!text || !text.trim()) return false;
+    const text = res.text;
+    if (!text || !text.trim()) return { ok: false, reason: res.error || 'AI 未返回改写结果' };
     // 定位批注文字：统一锚定（from/to 优先 + quote/prefix/suffix 上下文兜底）
     const pos = resolveAnnotationPos(editor, a);
-    if (!pos) return false;
+    if (!pos) return { ok: false, reason: '无法定位选中的文字（可能已被改动）' };
     const from = pos.from;
     const to = pos.to;
     // 输出含块级 markdown（代码块/表格/标题/引用/列表）→ 用 markdown parser 解析为块级内容插入，
@@ -1657,7 +1660,7 @@ export function DocEditor({
     const after = getMarkdown(editor);
     if (revisionDrifted(text, a.quote) || intentUnmet(a.intent, text, a.quote)) {
       editor.commands.setContent(before);
-      return false;
+      return { ok: false, reason: 'AI 改写结果偏离原文 / 未达成意图，已还原（请调整指令后重试）' };
     }
     // 逐条重写也记录为修订轮次（进修订面板可审阅/回退），并关联来源批注（接受修订时自动标记批注已解决）
     addPatchRound(before, after, a.id);
@@ -1682,7 +1685,7 @@ export function DocEditor({
           : x,
       ));
     }
-    return true;
+    return { ok: true };
   }, [editor, addPatchRound, annotations, persistAnnotations]);
 
   /** 单条批注 AI 重写（卡片按钮）：进行中在卡片上显示进度 */
@@ -1693,6 +1696,29 @@ export function DocEditor({
     } finally {
       setRewritingId(null);
     }
+  }, [rewriteSingle]);
+
+  /** AI 直接修订（批注气泡「AI 修订」按钮）：不挂批注，把选中文字按输入意见+风格直接改写进稿；
+   *  复用 rewriteSingle 可靠链路，替换结果进修订面板可审阅/回退。返回 null=成功，否则为失败原因。 */
+  const directRevise = useCallback(async (
+    quote: string,
+    content: string,
+    from: number,
+    to: number,
+    intent: AnnotationIntent | '',
+  ): Promise<string | null> => {
+    if (!quote.trim() || !content.trim()) return '选中范围或意见为空';
+    const a: MdAnnotation = {
+      id: `direct-${Date.now().toString(36)}`,
+      quote,
+      content,
+      intent: intent || undefined,
+      from,
+      to,
+      createdAt: new Date().toISOString(),
+    };
+    const r = await rewriteSingle(a);
+    return r.ok ? null : (r.reason ?? 'AI 修订失败');
   }, [rewriteSingle]);
 
   const rewriteAllAnnotations = useCallback(async () => {
@@ -1722,8 +1748,8 @@ export function DocEditor({
       const doneIds: string[] = [];
       for (const a of unresolved) {
         setRewritingId(a.id);
-        const ok = await rewriteSingle(a);
-        if (ok) doneIds.push(a.id);
+        const r = await rewriteSingle(a);
+        if (r.ok) doneIds.push(a.id);
       }
       setRewritingId(null);
       // 修改成功的批注标记为已解决
@@ -2037,20 +2063,6 @@ export function DocEditor({
     };
   }, []);
 
-  // 点击外部关闭工具栏下拉菜单
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (headingDropdownRef.current && !headingDropdownRef.current.contains(event.target as Node)) {
-        setHeadingDropdownOpen(false);
-      }
-      if (listDropdownRef.current && !listDropdownRef.current.contains(event.target as Node)) {
-        setListDropdownOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
   // DOCX 导出：读取编辑器 markdown → 转换 → 浏览器下载
   // 不注入文件名标题：正文写什么就导出什么，避免与正文已有的一级标题重复
   const handleExportDocx = useCallback(async (config: DocxExportConfig, fileName: string) => {
@@ -2114,147 +2126,9 @@ export function DocEditor({
     }
   }, [ensurePrintContent]);
 
-  /** HTML 导出：把文档正文打包为自包含 HTML（内联基础排版样式）下载 */
-  const handleExportHtml = useCallback(async (fileName: string) => {
-    const printRoot = ensurePrintContent();
-    if (!printRoot) return;
-    const title = fileName.replace(/\.html$/i, '') || 'export';
-    const css = `
-      body { max-width: 900px; margin: 0 auto; padding: 48px; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', sans-serif; color: #1d1d1f; line-height: 1.7; font-size: 15px; }
-      img { max-width: 100%; height: auto; }
-      table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-      th, td { border: 1px solid #d2d2d7; padding: 8px 12px; text-align: left; vertical-align: top; }
-      pre { background: #f5f5f7; padding: 12px; border-radius: 8px; overflow-x: auto; }
-      code { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.92em; }
-      blockquote { border-left: 3px solid #d2d2d7; margin: 8px 0; padding: 4px 12px; color: #6e6e73; }
-      h1, h2, h3, h4, h5, h6 { line-height: 1.3; margin: 1.2em 0 0.5em; }
-      ul, ol { padding-left: 1.6em; }
-      .footnotes { margin-top: 2em; padding-top: 12px; border-top: 1px solid #d2d2d7; font-size: 12px; color: #6e6e73; }
-      .footnotes h2 { font-size: 12px; }
-      .footnotes a[data-footnote-backref] { text-decoration: none; color: #6e6e73; margin-left: 4px; }
-      sup[data-footnote-ref] { font-size: 0.72em; }
-      sup[data-footnote-ref] a { color: #4b3fe3; text-decoration: none; font-weight: 600; }
-    `;
-    const full = `<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>${css}</style></head><body>${printRoot.innerHTML}</body></html>`;
-    const blob = new Blob([full], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName.endsWith('.html') ? fileName : `${fileName}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, [ensurePrintContent]);
-
-  /** PDF 导出：Electron 主进程 printToPDF → 下载；浏览器（dev）回退系统打印面板（可存储为 PDF） */
-  const handleExportPdf = useCallback(async (fileName: string) => {
-    if (!ensurePrintContent()) return;
-    const api = (window as unknown as { api?: { exportPdf?: () => Promise<{ success?: boolean; data?: string; error?: string }> } }).api;
-    if (api?.exportPdf) {
-      try {
-        const res = await api.exportPdf();
-        if (res && res.success && res.data) {
-          const bytes = Uint8Array.from(atob(res.data), (c) => c.charCodeAt(0));
-          const blob = new Blob([bytes], { type: 'application/pdf' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = fileName.endsWith('.pdf') ? fileName : `${fileName}.pdf`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          return;
-        }
-        // 主进程 PDF 生成失败：提示 + 回退系统打印（面板中可选择"存储为 PDF"）
-        alert(res?.error || 'PDF export failed');
-        window.print();
-      } catch (e) {
-        alert(`PDF export failed: ${e instanceof Error ? e.message : String(e)}`);
-        window.print();
-      }
-    } else {
-      window.print();
-    }
-  }, [ensurePrintContent]);
-
   /** 新建 md 文档：在当前文档所在目录创建 untitled.md 并打开。
    *  支持本地文件（绝对路径父目录）与项目文件（项目内相对目录）两种场景；
    *  其他场景（节点文档/docx 编辑）点击给出明确提示，避免"点了没反应"。 */
-  const handleCreateMdDoc = useCallback(async () => {
-    try {
-      // ── 本地文件：绝对路径父目录 ──
-      if (filePath && source === 'local') {
-        const dir = filePath.split('/').slice(0, -1).join('/');
-        const listResp = await fetch(`/api/local-files?path=${encodeURIComponent(dir)}`);
-        const listData = await listResp.json();
-        const names = new Set((listData.items || []).map((it: { name: string }) => it.name));
-        let name = 'untitled.md';
-        let counter = 2;
-        while (names.has(name)) {
-          name = `untitled-${counter}.md`;
-          counter++;
-        }
-        const fullPath = `${dir}/${name}`;
-        const writeResp = await fetch('/api/local-files', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'write', path: fullPath, content: '' }),
-        });
-        const writeData = await writeResp.json();
-        if (!writeData.success) {
-          alert(writeData.error || 'Create file failed');
-          return;
-        }
-        // 与本地文件面板双击 md 行为一致：发布 fileOpen 事件在查看舱打开
-        bus.publish(BusEvents.fileOpen, { source: 'local', path: fullPath, name });
-        return;
-      }
-
-      // ── 项目文件：项目内相对目录（filePath 为项目内相对路径，空目录 = 项目根） ──
-      if (filePath && projectId && source === 'project') {
-        const dir = filePath.split('/').slice(0, -1).join('/');
-        // stat 探测避重命名（轻量存在性校验）
-        const exists = async (rel: string): Promise<boolean> => {
-          try {
-            const resp = await fetch('/api/projects', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'stat', project_id: projectId, file_path: rel }),
-            });
-            const d = await resp.json();
-            return d.success && d.exists === true;
-          } catch { return false; }
-        };
-        let name = 'untitled.md';
-        let counter = 2;
-        let rel = dir ? `${dir}/${name}` : name;
-        while (await exists(rel)) {
-          name = `untitled-${counter}.md`;
-          counter++;
-          rel = dir ? `${dir}/${name}` : name;
-        }
-        const writeResp = await fetch('/api/projects', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'write_file', project_id: projectId, file_path: rel, content: '' }),
-        });
-        const writeData = await writeResp.json();
-        if (!writeData.success) {
-          alert(writeData.error || 'Create file failed');
-          return;
-        }
-        bus.publish(BusEvents.fileOpen, { source: 'project', path: rel, name });
-        return;
-      }
-
-      alert('New Markdown files are supported for local files or project files only: open a .md file in the left file panel first, then use this command.');
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Create file failed');
-    }
-  }, [filePath, projectId, source]);
-
   /** 问卷面板写回：把带答案的 JSON 写入文档，并通知预览刷新以回显答案 */
   const handleQuestionnaireWriteBack = useCallback(
     async (updates: { placeholder: string; json: string }[]) => {
@@ -2280,43 +2154,6 @@ export function DocEditor({
   );
 
   // 工具栏：添加链接
-  const handleAddLink = useCallback(() => {
-    if (!editor) return;
-    const previousUrl = editor.getAttributes('link').href as string | undefined;
-    setPromptValue(previousUrl ?? 'https://');
-    setPromptState({
-      title: 'Add Link',
-      initialValue: previousUrl ?? 'https://',
-      onSubmit: (url) => {
-        if (!editor) return;
-        if (url === '') {
-          editor.chain().focus().extendMarkRange('link').unsetLink().run();
-        } else {
-          editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
-        }
-      },
-    });
-  }, [editor]);
-
-  // 工具栏：添加图片（节点编辑时选择本地图片，无节点时降级为 URL）
-  const handleAddImage = useCallback(() => {
-    if (!editor) return;
-    if (nodeMdId) {
-      // 打开本地图片选择，上传到节点附件目录后插入
-      imageInputRef.current?.click();
-      return;
-    }
-    // 降级：无节点场景（如直接编辑项目文件）仍可粘贴 URL 图片
-    setPromptValue('https://');
-    setPromptState({
-      title: 'Add Image',
-      initialValue: 'https://',
-      onSubmit: (url) => {
-        if (url && editor) editor.chain().focus().setImage({ src: url }).run();
-      },
-    });
-  }, [editor, nodeMdId]);
-
   /** 当前文档可分享的相对/绝对路径（分享用）：优先 filePath；nodeMdId 场景暂不分享 */
   const sharePathForDoc = useCallback((): string | null => {
     if (filePath) return filePath;
@@ -2348,68 +2185,6 @@ export function DocEditor({
     }
   }, [sharePathForDoc]);
 
-  /** 插入文档（飞书式单入口）：输入目标路径后，选择「链接」或「嵌入卡片」两种呈现方式 */
-  const handleInsertDoc = useCallback(() => {
-    if (!editor) return;
-    setPromptValue('');
-    setPromptState({
-      title: 'Insert Document',
-      initialValue: '',
-      placeholder: 'Paste a link, or enter a document path (e.g. homework/report.md)',
-      choices: [
-        {
-          label: 'Link',
-          primary: true,
-          onSubmit: async (targetPath) => {
-            if (!targetPath || !editor) return;
-            const raw = targetPath.trim();
-            // 直接粘贴 URL：跳过 share，原样作为链接
-            const isUrl = /^https?:\/\//i.test(raw);
-            let href = raw;
-            let label = raw;
-            if (!isUrl) {
-              // 文档路径 → 生成局域网分享链接
-              try {
-                const resp = await fetch('/api/share', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ path: raw }),
-                });
-                const data = await resp.json();
-                if (!data.success || !data.url) {
-                  showImageAiEditToast(`Insert failed: ${data.error ?? 'unknown'}`, 'error');
-                  return;
-                }
-                href = data.url;
-                label = raw.split('/').pop()?.replace(/\.md$/i, '') ?? 'document';
-              } catch (e) {
-                showImageAiEditToast(`Insert failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
-                return;
-              }
-            }
-            const { from, to } = editor.state.selection;
-            if (from === to) {
-              // 无选中文字：插入带文本的 markdown 链接
-              editor.chain().focus().insertContent(`[${label}](${href})`).run();
-            } else {
-              // 有选中文字：把选区包成链接
-              editor.chain().focus().extendMarkRange('link').setLink({ href }).run();
-            }
-            showImageAiEditToast('Document link inserted');
-          },
-        },
-        {
-          label: 'Embed Card',
-          onSubmit: (targetPath) => {
-            if (!targetPath || !editor) return;
-            editor.chain().focus().insertContent({ type: 'mdEmbed', attrs: { path: targetPath.trim() } }).run();
-            showImageAiEditToast('Document embedded');
-          },
-        },
-      ],
-    });
-  }, [editor]);
-
   /** 嵌入卡片点击 → 打开目标文档（复用分享链接在应用内打开） */
   useEffect(() => {
     const onOpen = (e: Event) => {
@@ -2430,6 +2205,47 @@ export function DocEditor({
     return () => window.removeEventListener('md-embed-open', onOpen);
   }, []);
 
+  /** 嵌入卡片展开预览：宿主按当前文档所属通道读取目标文档开头内容并回传给卡片 */
+  useEffect(() => {
+    const onRequest = (e: Event) => {
+      const d = (e as CustomEvent<{ path?: string; rid?: number }>).detail;
+      if (!d || !d.path) return;
+      const targetPath = d.path;
+      void (async () => {
+        let content: string | null = null;
+        try {
+          if (projectId) {
+            const r = await fetch('/api/projects', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'read_file', project_id: projectId, file_path: targetPath }),
+            }).then((x) => x.json());
+            if (typeof r.content === 'string') content = r.content;
+          } else if (nodeMdId) {
+            // 节点文档通道：目标 path 视为同一节点库下的文档 id（无法解析则返回不可读）
+            const q = new URLSearchParams({ id: targetPath.replace(/\.md$/i, ''), action: 'raw' });
+            const r = await fetch(`/api/nodes?${q}`).then((x) => x.json());
+            if (typeof r.content === 'string') content = r.content;
+          } else if (source === 'local') {
+            const q = new URLSearchParams({ action: 'read_file', path: targetPath });
+            const r = await fetch(`/api/local-files?${q}`).then((x) => x.json());
+            if (typeof r.content === 'string') content = r.content;
+          }
+        } catch { /* 通道不可用 → 无法预览 */ }
+        if (content !== null) {
+          const clean = stripFrontmatterLocal(content).replace(/\s+/g, ' ').trim();
+          window.dispatchEvent(new CustomEvent('md-embed-preview-result', {
+            detail: { rid: d.rid, ok: true, text: clean.length > 600 ? `${clean.slice(0, 600)}…` : clean },
+          }));
+        } else {
+          window.dispatchEvent(new CustomEvent('md-embed-preview-result', { detail: { rid: d.rid, ok: false } }));
+        }
+      })();
+    };
+    window.addEventListener('md-embed-preview-request', onRequest);
+    return () => window.removeEventListener('md-embed-preview-request', onRequest);
+  }, [projectId, nodeMdId, source]);
+
   /** 格式化文档：轻量整理 markdown（标题空格/空行/行尾空白） */
   const handleFormatMarkdown = useCallback(() => {
     if (!editor) return;
@@ -2438,37 +2254,15 @@ export function DocEditor({
     if (formatted !== md) editor.chain().setContent(formatted).run();
   }, [editor]);
 
-  /** 插入脚注：光标处插入引用标记 [^n]（编号自动递增），定义行统一追加到文档末尾
-   *  （Markdown 规范：脚注定义集中放文末），并把光标移到定义处直接输入内容 */
-  const handleAddFootnote = useCallback(() => {
-    if (!editor) return;
-    const md = getMarkdown(editor);
-    const used = new Set<string>();
-    for (const m of md.matchAll(/\[\^(\d+)\]/g)) used.add(m[1]);
-    let n = 1;
-    while (used.has(String(n))) n++;
-    const marker = `[^${n}]`;
-    // 1) 光标处插入引用标记，光标保持在标记后
-    editor.chain().focus().insertContent(marker).run();
-    // 2) 定义行追加到文档末尾（独立段落，避免 \n 被解析为 <br>）
-    const docEnd = editor.state.doc.content.size;
-    editor
-      .chain()
-      .focus()
-      .setTextSelection(docEnd)
-      .insertContent(`<p></p><p>${marker}: </p>`)
-      .run();
-    // 3) 光标落到定义内容位置，用户可直接输入脚注文字
-    editor.chain().focus().setTextSelection(editor.state.doc.content.size).run();
-  }, [editor]);
-
-  // ⌘K 命令面板：统一入口（格式/段落/插入/历史/工具）
+  /** 命令集：右键菜单统一入口（格式/段落/插入/历史/工具） */
   const paletteCommands = useMemo<PaletteCommand[]>(() => {
     if (!editor) return [];
     const cmds: PaletteCommand[] = [];
     const push = (group: string, id: string, label: string, hint: string | undefined, run: () => void) =>
       cmds.push({ id: `${group}:${id}`, group, label, hint, run });
-    // 格式
+    // 格式（撤销/重做并入组首，渲染时以竖线与后续格式按钮隔开）
+    push('Format', 'undo', 'Undo', '⌘Z', () => editor.chain().focus().undo().run());
+    push('Format', 'redo', 'Redo', '⇧⌘Z', () => editor.chain().focus().redo().run());
     push('Format', 'bold', 'Bold', '⌘B', () => editor.chain().focus().toggleBold().run());
     push('Format', 'italic', 'Italic', '⌘I', () => editor.chain().focus().toggleItalic().run());
     push('Format', 'strike', 'Strikethrough', '', () => editor.chain().focus().toggleStrike().run());
@@ -2484,108 +2278,19 @@ export function DocEditor({
     push('Block', 'quote', 'Blockquote', '', () => editor.chain().focus().toggleBlockquote().run());
     push('Block', 'codeblock', 'Code Block', '', () => editor.chain().focus().toggleCodeBlock().run());
     push('Block', 'hr', 'Divider', '', () => editor.chain().focus().setHorizontalRule().run());
-    // 插入
-    push('Insert', 'link', 'Add Link…', '', handleAddLink);
-    push('Insert', 'image', 'Add Image…', '', handleAddImage);
-    push('Insert', 'footnote', 'Footnote', '', handleAddFootnote);
+    // 插入（链接/图片/文档/脚注改为粘贴自动识别，不再提供按钮）
     push('Insert', 'table', 'Table (3×3)', '', () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run());
     push('Insert', 'columns2', 'Two Columns', '', () => editor.chain().focus().insertBobColumns(2).run());
     push('Insert', 'columns3', 'Three Columns', '', () => editor.chain().focus().insertBobColumns(3).run());
-    // 历史
-    push('History', 'undo', 'Undo', '⌘Z', () => editor.chain().focus().undo().run());
-    push('History', 'redo', 'Redo', '⇧⌘Z', () => editor.chain().focus().redo().run());
     // 工具
     push('Tools', 'format', 'Format Document', '', handleFormatMarkdown);
     push('Tools', 'annotations', 'Annotations', '', () => setAnnotationPanelOpen((v) => !v));
-    push('Tools', 'toc', 'Table of Contents', '', () => setShowToc((v) => !v));
     push('Tools', 'docx', 'Export…', 'DOCX/HTML/PDF', () => setShowExportDialog(true));
     push('Tools', 'print', 'Print', '', handlePrint);
-    push('Tools', 'new-doc', 'New Markdown File', '', handleCreateMdDoc);
-    push('Tools', 'insert-doc', 'Insert Document…', 'Link / Embed', handleInsertDoc);
     push('Tools', 'share', 'Share…', '', handleShareDocument);
     return cmds;
-  }, [editor, handleAddLink, handleAddImage, handleAddFootnote, handleFormatMarkdown, handlePrint, handleCreateMdDoc, handleInsertDoc, handleShareDocument]);
+  }, [editor, handleFormatMarkdown, handlePrint, handleShareDocument]);
 
-  /** `/` 斜杠命令列表：复用 ⌘K 面板的段落/插入类命令，按输入查询词实时过滤 */
-  const slashCommands = useMemo(() => {
-    if (paletteCommands.length === 0) return [];
-    const q = slashQuery.trim().toLowerCase();
-    return paletteCommands
-      .filter((c) => c.group === 'Block' || c.group === 'Insert')
-      .filter((c) => !q || `${c.group}${c.label}`.toLowerCase().includes(q));
-  }, [paletteCommands, slashQuery]);
-
-  /** 执行斜杠命令：先删除光标所在行的 '/' + 查询词（保留行首缩进），再执行插入命令 */
-  const runSlashCommand = useCallback(
-    (cmd: PaletteCommand) => {
-      const view = editor?.view;
-      if (view) {
-        // 用斜杠行光标快照定位（失焦/选区漂移时仍准确）；无快照回退当前选区
-        const caret = typeof slashCaretRef.current === 'number' ? slashCaretRef.current : view.state.selection.from;
-        const pos = Math.max(0, Math.min(caret, view.state.doc.content.size));
-        const line = currentLineText(view, pos);
-        if (line.startsWith('/') && pos > 0) {
-          // 与 currentLineText 一致：hardBreak 也渲染为 \n，行起点以最近换行(含软换行)为准
-          const textBefore = view.state.doc.textBetween(0, pos, '\n', (leaf) => (leaf.type.name === 'hardBreak' ? '\n' : ''));
-          const lineStart = textBefore.lastIndexOf('\n') + 1;
-          view.dispatch(view.state.tr.delete(lineStart, pos));
-        }
-        slashCaretRef.current = null;
-      }
-      setSlashOpen(false);
-      setSlashQuery('');
-      cmd.run();
-    },
-    [editor, currentLineText],
-  );
-
-  // 斜杠菜单键盘导航（注入 editorProps.handleKeyDown；每次渲染刷新闭包拿到最新命令/索引）
-  slashNavRef.current = (e) => {
-    if (!slashOpen) return false;
-    if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex((i) => Math.min(i + 1, slashCommands.length - 1)); return true; }
-    if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex((i) => Math.max(i - 1, 0)); return true; }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const cmd = slashCommands[slashIndex];
-      if (cmd) runSlashCommand(cmd);
-      else { setSlashOpen(false); setSlashQuery(''); }
-      return true;
-    }
-    if (e.key === 'Escape') { e.preventDefault(); setSlashOpen(false); setSlashQuery(''); return true; }
-    if (e.key === 'Backspace') {
-      // 不拦截删除；按删除后的行文本同步菜单（'/' 消失则关闭）
-      const view = editor?.view;
-      const from = view?.state.selection.from ?? 0;
-      const line = currentLineText(view, from);
-      if (line === '/') { setSlashOpen(false); setSlashQuery(''); }
-      else if (line.startsWith('/')) {
-        setSlashQuery(line.slice(1, -1));
-        setSlashIndex(0);
-        // 默认 Backspace 将删除光标前一字符：快照随之回退一位（保持与行尾一致）
-        slashCaretRef.current = Math.max(from - 1, 0);
-      }
-      return false;
-    }
-    return false;
-  };
-
-  // `/` 斜杠菜单：点击外部 / 在菜单外滚轮滚动时关闭（菜单内滚动用于翻看命令列表，不关闭）
-  useEffect(() => {
-    if (!slashOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (slashRef.current && !slashRef.current.contains(e.target as Node)) setSlashOpen(false);
-    };
-    const onWheel = (e: WheelEvent) => {
-      if (slashRef.current && slashRef.current.contains(e.target as Node)) return;
-      setSlashOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('wheel', onWheel, { passive: true });
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('wheel', onWheel);
-    };
-  }, [slashOpen]);
 
   /** 从当前选区向上查找所在表格节点，返回其文档位置（不在表格内则 null） */
   const findTablePos = useCallback((ed: Editor | null): number | null => {
@@ -2751,10 +2456,9 @@ export function DocEditor({
     }
   }, [findOpen, findQuery, refreshFind, editor]);
 
-  /** 执行命令面板命令 */
+  /** 执行命令面板命令（右键菜单点击 → 关闭菜单并执行） */
   const runPaletteCommand = useCallback((cmd: PaletteCommand) => {
-    setCommandOpen(false);
-    setCommandQuery('');
+    setCtxMenu(null);
     cmd.run();
   }, []);
 
@@ -2772,10 +2476,10 @@ export function DocEditor({
       const targetNodeId = nodeMdId || activeNodeId;
       if (!targetNodeId) return;
       window.dispatchEvent(new CustomEvent('node-ask-question', { detail: { nodeId: targetNodeId, text: quote } }));
-      // 目标节点 ≠ 画布当前选中节点时，把它放大置前：输入框 + 引用标签在目标节点上可见，
-      // 避免引用挂到“看不到/输入框已收起”的节点上造成困惑（Ask 后让目标成为可见的当前节点）。
+      // 目标节点 ≠ 画布当前选中节点时，把它切换为当前打开节点：输入框 + 引用标签在目标节点上可见，
+      // 避免引用挂到“看不到”的节点上造成困惑（Ask 后让目标成为可见的当前节点）。
       if (nodeMdId && nodeMdId !== activeNodeId) {
-        window.dispatchEvent(new CustomEvent('node-expand-request', { detail: { node_id: nodeMdId } }));
+        window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId: nodeMdId } }));
       }
     },
     [nodeMdId, activeNodeId],
@@ -2783,361 +2487,41 @@ export function DocEditor({
 
 
   // 本地图片选择 → 上传到节点附件目录 → 以附件 URL 插入编辑器
-  const handleImageFileSelected = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      e.target.value = ''; // 允许重复选择同一文件
-      if (!file || !editor) return;
-      setUploadingImage(true);
-      try {
-        const src = await uploadImageFile(file);
-        if (src) editor.chain().focus().setImage({ src }).run();
-        else console.error('图片上传失败');
-      } catch (err) {
-        console.error('图片上传失败:', err);
-      } finally {
-        setUploadingImage(false);
-      }
-    },
-    [editor, uploadImageFile],
-  );
-
   if (!editor) {
     return <div className="doc-editor-loading p-4 text-sm" style={{ color: 'var(--ink-muted)' }}>Loading editor...</div>;
   }
 
-  // ⌘K 顶部历史区：撤销/重做固定在搜索栏左侧（不占命令分组行）
-  const historyCmds = paletteCommands.filter((c) => c.group === 'History');
-  // 主体命令（不含历史）：用于命令行渲染与搜索导航
-  const mainCommands = paletteCommands.filter((c) => c.group !== 'History');
+  // 右键菜单命令分组（按 Format/Block/Insert/Tools 四类归拢，供下方合成三行）
+  const ctxGroups: { items: PaletteCommand[] }[] = (() => {
+    const g = { fmt: [], blk: [], ins: [], tls: [] } as Record<string, PaletteCommand[]>;
+    for (const c of paletteCommands) {
+      if (c.group === 'Format') g.fmt.push(c);
+      else if (c.group === 'Block') g.blk.push(c);
+      else if (c.group === 'Insert') g.ins.push(c);
+      else if (c.group === 'Tools') g.tls.push(c);
+    }
+    return [g.fmt, g.blk, g.ins, g.tls].map((items) => ({ items }));
+  })();
 
-  // ⌘K 命令面板：过滤后的命令列表
-  const paletteQuery = commandQuery.trim().toLowerCase();
-  const filteredCommands = paletteQuery
-    ? mainCommands.filter((c) => `${c.group}${c.label}${c.hint ?? ''}`.toLowerCase().includes(paletteQuery))
-    : mainCommands;
-
-  // ⌘K 横排分组布局：把扁平命令按组归拢成若干「行」（组内命令仍保持原有先后），每条记录全局 flat 索引供高亮/回车
-  const groupRuns: { group: string; items: { cmd: PaletteCommand; idx: number }[] }[] = [];
-  filteredCommands.forEach((cmd, idx) => {
-    const last = groupRuns[groupRuns.length - 1];
-    if (last && last.group === cmd.group) last.items.push({ cmd, idx });
-    else groupRuns.push({ group: cmd.group, items: [{ cmd, idx }] });
-  });
+  // 右键菜单行（工具并入插入行 → 三段图标行）：
+  // 第一行：撤销/重做 + H1-H3 + 加粗斜体删除线行内码；第二行：其余段落命令；第三行：插入+工具
+  const ctxShort = (id: string) => (id.includes(':') ? id.slice(id.indexOf(':') + 1) : id);
+  const fmtItems = ctxGroups[0]?.items ?? [];
+  const blkItems = ctxGroups[1]?.items ?? [];
+  const hItems = blkItems.filter((c) => ['h1', 'h2', 'h3'].includes(ctxShort(c.id)));
+  const blkRest = blkItems.filter((c) => !['h1', 'h2', 'h3'].includes(ctxShort(c.id)));
+  const ctxRows: { key: string; items: PaletteCommand[] }[] = [
+    { key: 'fmt', items: [...fmtItems.slice(0, 2), ...hItems, ...fmtItems.slice(2)] },
+    { key: 'blk', items: blkRest },
+    { key: 'ins-tools', items: [...(ctxGroups[2]?.items ?? []), ...(ctxGroups[3]?.items ?? [])] },
+  ];
 
   return (
     <div
       className="doc-editor-wrapper flex flex-col h-full"
+      style={{ position: 'relative' }}
       onClick={() => {}}
     >
-      {/* 顶部工具栏（仅可编辑时显示）：默认折叠，常驻 Formatting 条点击展开/收起；格式操作亦可经 ⌘K / `/` 完成 */}
-      {editable && (
-        <div className="shrink-0" style={{ backgroundColor: 'var(--paper-soft)' }}>
-          {/* 折叠条：右侧常驻保存状态 */}
-          <div className="flex h-8 items-center gap-1 border-b px-2" style={{ borderColor: 'var(--line)' }}>
-            <button
-              type="button"
-              onClick={() => setToolbarCollapsed((v) => !v)}
-              title={toolbarCollapsed ? 'Show formatting toolbar' : 'Hide formatting toolbar'}
-              className="flex h-6 items-center gap-1 rounded-md px-1.5 text-12 font-medium transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_8%,transparent)]"
-              style={{ color: 'var(--ink-muted)' }}
-            >
-              <ChevronDown
-                className="h-3.5 w-3.5 transition-transform"
-                style={{ transform: toolbarCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}
-              />
-              Formatting
-            </button>
-            {toolbarCollapsed && (
-              <span className="text-10" style={{ color: 'var(--ink-faint)' }}>
-                Press ⌘K for all commands
-              </span>
-            )}
-            {/* 保存状态指示器（折叠时也可见） */}
-            <div
-              className="ml-auto flex items-center px-1"
-              title={saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : 'Unsaved changes'}
-              style={{ color: 'var(--ink-muted)' }}
-            >
-              {saveStatus === 'saving' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              {saveStatus === 'saved' && <Check className="h-3.5 w-3.5" style={{ color: 'var(--success)' }} />}
-              {saveStatus === 'unsaved' && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: 'var(--warn)' }} />}
-            </div>
-          </div>
-
-          {!toolbarCollapsed && (
-            <div className="doc-editor-toolbar flex flex-wrap items-center gap-0.5 px-2 py-1.5" style={{ borderBottom: '1px solid var(--line)' }}>
-          <ToolbarButton
-            active={editor.isActive('bold')}
-            onClick={() => editor.chain().focus().toggleBold().run()}
-            title="Bold"
-          >
-            <Bold className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton
-            active={editor.isActive('italic')}
-            onClick={() => editor.chain().focus().toggleItalic().run()}
-            title="Italic"
-          >
-            <Italic className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton
-            active={editor.isActive('strike')}
-            onClick={() => editor.chain().focus().toggleStrike().run()}
-            title="Strikethrough"
-          >
-            <Strikethrough className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton
-            active={editor.isActive('code')}
-            onClick={() => editor.chain().focus().toggleCode().run()}
-            title="Inline Code"
-          >
-            <Code className="h-4 w-4" />
-          </ToolbarButton>
-
-          <Divider />
-
-          {/* Heading 下拉分组 */}
-          <div ref={headingDropdownRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setHeadingDropdownOpen((v) => !v)}
-              title="Heading"
-              className="flex items-center justify-center gap-0.5 rounded-md transition-colors"
-              style={{
-                height: '28px',
-                padding: '0 5px',
-                color: editor.isActive('heading') ? 'var(--primary)' : 'var(--ink-muted)',
-                backgroundColor: editor.isActive('heading') ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
-              }}
-              onMouseDown={(e) => e.preventDefault()}
-            >
-              {editor.isActive('heading', { level: 1 }) ? <Heading1 className="h-4 w-4" /> :
-               editor.isActive('heading', { level: 2 }) ? <Heading2 className="h-4 w-4" /> :
-               editor.isActive('heading', { level: 3 }) ? <Heading3 className="h-4 w-4" /> :
-               <Heading className="h-4 w-4" />}
-              <ChevronDown className="h-3 w-3" />
-            </button>
-            {headingDropdownOpen && (
-              <div
-                className="absolute left-0 top-full z-50 mt-1 min-w-[120px] overflow-hidden rounded-lg border py-1 shadow-lg"
-                style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)' }}
-              >
-                <DropdownItem
-                  active={!editor.isActive('heading')}
-                  onClick={() => {
-                    editor.chain().focus().setParagraph().run();
-                    setHeadingDropdownOpen(false);
-                  }}
-                  label="Paragraph"
-                  shortcut={<span className="text-xs">P</span>}
-                />
-                <DropdownItem
-                  active={editor.isActive('heading', { level: 1 })}
-                  onClick={() => {
-                    editor.chain().focus().toggleHeading({ level: 1 }).run();
-                    setHeadingDropdownOpen(false);
-                  }}
-                  label="Heading 1"
-                  shortcut={<Heading1 className="h-3.5 w-3.5" />}
-                />
-                <DropdownItem
-                  active={editor.isActive('heading', { level: 2 })}
-                  onClick={() => {
-                    editor.chain().focus().toggleHeading({ level: 2 }).run();
-                    setHeadingDropdownOpen(false);
-                  }}
-                  label="Heading 2"
-                  shortcut={<Heading2 className="h-3.5 w-3.5" />}
-                />
-                <DropdownItem
-                  active={editor.isActive('heading', { level: 3 })}
-                  onClick={() => {
-                    editor.chain().focus().toggleHeading({ level: 3 }).run();
-                    setHeadingDropdownOpen(false);
-                  }}
-                  label="Heading 3"
-                  shortcut={<Heading3 className="h-3.5 w-3.5" />}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* List 下拉分组 */}
-          <div ref={listDropdownRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setListDropdownOpen((v) => !v)}
-              title="List"
-              className="flex items-center justify-center gap-0.5 rounded-md transition-colors"
-              style={{
-                height: '28px',
-                padding: '0 5px',
-                color: editor.isActive('list') ? 'var(--primary)' : 'var(--ink-muted)',
-                backgroundColor: editor.isActive('list') ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
-              }}
-              onMouseDown={(e) => e.preventDefault()}
-            >
-              {editor.isActive('orderedList') ? <ListOrdered className="h-4 w-4" /> :
-               editor.isActive('taskList') ? <CheckSquare className="h-4 w-4" /> :
-               <List className="h-4 w-4" />}
-              <ChevronDown className="h-3 w-3" />
-            </button>
-            {listDropdownOpen && (
-              <div
-                className="absolute left-0 top-full z-50 mt-1 min-w-[140px] overflow-hidden rounded-lg border py-1 shadow-lg"
-                style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)' }}
-              >
-                <DropdownItem
-                  active={editor.isActive('bulletList')}
-                  onClick={() => {
-                    editor.chain().focus().toggleBulletList().run();
-                    setListDropdownOpen(false);
-                  }}
-                  label="Bullet List"
-                  shortcut={<List className="h-3.5 w-3.5" />}
-                />
-                <DropdownItem
-                  active={editor.isActive('orderedList')}
-                  onClick={() => {
-                    editor.chain().focus().toggleOrderedList().run();
-                    setListDropdownOpen(false);
-                  }}
-                  label="Ordered List"
-                  shortcut={<ListOrdered className="h-3.5 w-3.5" />}
-                />
-                <DropdownItem
-                  active={editor.isActive('taskList')}
-                  onClick={() => {
-                    editor.chain().focus().toggleTaskList().run();
-                    setListDropdownOpen(false);
-                  }}
-                  label="Task List"
-                  shortcut={<CheckSquare className="h-3.5 w-3.5" />}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* 插入表格 */}
-          <ToolbarButton
-            active={editor.isActive('table')}
-            onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
-            title="Insert Table (3×3)"
-          >
-            <TableIcon className="h-4 w-4" />
-          </ToolbarButton>
-
-          <Divider />
-
-          <ToolbarButton
-            active={editor.isActive('blockquote')}
-            onClick={() => editor.chain().focus().toggleBlockquote().run()}
-            title="Blockquote"
-          >
-            <Quote className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton
-            active={editor.isActive('codeBlock')}
-            onClick={() => editor.chain().focus().toggleCodeBlock().run()}
-            title="Code Block"
-          >
-            <Code2 className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={() => editor.chain().focus().setHorizontalRule().run()}
-            title="Horizontal Rule"
-          >
-            <Minus className="h-4 w-4" />
-          </ToolbarButton>
-
-          <Divider />
-
-          <ToolbarButton active={editor.isActive('link')} onClick={handleAddLink} title="Link">
-            <LinkIcon className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={handleAddImage}
-            title={nodeMdId ? 'Insert Local Image' : 'Insert Image (URL)'}
-          >
-            {uploadingImage ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <ImageIcon className="h-4 w-4" />
-            )}
-          </ToolbarButton>
-
-          <ToolbarButton onClick={handleAddFootnote} title="Footnote（插入脚注引用与定义）">
-            <Hash className="h-4 w-4" />
-          </ToolbarButton>
-
-          {/* 本地图片文件选择（仅节点编辑场景使用） */}
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleImageFileSelected}
-          />
-
-          <Divider />
-
-          <ToolbarButton onClick={() => editor.chain().focus().undo().run()} title="Undo">
-            <Undo className="h-4 w-4" />
-          </ToolbarButton>
-          <ToolbarButton onClick={() => editor.chain().focus().redo().run()} title="Redo">
-            <Redo className="h-4 w-4" />
-          </ToolbarButton>
-
-          <Divider />
-
-          <ToolbarButton onClick={() => setShowExportDialog(true)} title="Export（DOCX / HTML / PDF）">
-            <FileDown className="h-4 w-4" />
-          </ToolbarButton>
-
-          {/* 新建 md 文档（本地文件场景：当前文档目录；其他场景点击给出提示） */}
-          <ToolbarButton
-            onClick={handleCreateMdDoc}
-            title="Create new Markdown file in this folder (local files only)"
-          >
-            <FilePlus className="h-4 w-4" />
-          </ToolbarButton>
-
-          <ToolbarButton onClick={handleFormatMarkdown} title="Format（整理 Markdown）">
-            <Wand2 className="h-4 w-4" />
-          </ToolbarButton>
-
-          <ToolbarButton onClick={handleInsertDoc} title="Insert document（插入其他 md 文档，可选链接或嵌入卡片）">
-            <FileText className="h-4 w-4" />
-          </ToolbarButton>
-
-          <ToolbarButton onClick={handleShareDocument} title="Share（生成局域网分享链接）">
-            <Share2 className="h-4 w-4" />
-          </ToolbarButton>
-
-          <ToolbarButton onClick={handlePrint} title="Print">
-            <Printer className="h-4 w-4" />
-          </ToolbarButton>
-
-          <Divider />
-
-          {/* 批注栏开关（仅可编辑且有 sidecar key 时显示）：打开批注面板（修订视图在面板内 tab 切换） */}
-          {annotationKey && (
-            <ToolbarButton
-              active={annotationPanelOpen}
-              onClick={() => setAnnotationPanelOpen((v) => !v)}
-              title={annotationPanelOpen ? 'Close annotations' : 'Annotations'}
-            >
-              <MessageSquare className="h-4 w-4" />
-            </ToolbarButton>
-          )}
-
-            </div>
-          )}
-        </div>
-      )}
-
       {/* 外部变更冲突横幅：磁盘已被外部（AI 等）改写且本地有未保存改动，三选一处理 */}
       {conflict && (
         <div
@@ -3341,8 +2725,14 @@ export function DocEditor({
           </div>
         )}
         <div
-          className="relative flex min-w-0 flex-1 flex-col overflow-y-auto ai-canvas-scroll"
-          style={{ backgroundColor: 'var(--paper-soft)', padding: '28px 32px' }}
+          className="relative flex min-w-0 flex-1 flex-col overflow-y-auto ai-canvas-scroll hide-scrollbar"
+          style={{ backgroundColor: 'var(--paper)' }}
+          onContextMenu={(e) => {
+            // 正文右键：阻止系统菜单，弹出命令菜单（仅可编辑态）
+            if (!editable) return;
+            e.preventDefault();
+            setCtxMenu({ x: e.clientX, y: e.clientY });
+          }}
         >
           {!hideToc && (
             /* 目录开关（悬浮按钮） */
@@ -3417,22 +2807,43 @@ export function DocEditor({
           };
           return (
             <div className="md-annotation-card" style={cardStyle}>
-              <div className="md-annotation-card-title">
-                <MessageSquare className="h-3 w-3" style={{ color: 'var(--primary)' }} />
-                <span className="truncate" title={ann.quote}>
-                  &ldquo;{ann.quote.length > 40 ? `${ann.quote.slice(0, 40)}…` : ann.quote}&rdquo;
+              {/* 标题栏：左侧意图 / 批注图标，右侧时间 */}
+              <div className="md-annotation-card-head">
+                {intentDef ? (
+                  <span className="md-annotation-card-intent">
+                    <Wand2 className="h-2 w-2" />
+                    {intentDef.label}
+                  </span>
+                ) : (
+                  <span className="md-annotation-card-intent" title="批注">
+                    <MessageSquare className="h-2.5 w-2.5" />
+                  </span>
+                )}
+                <span className="md-annotation-card-time">
+                  {ann.resolved ? 'Resolved' : new Date(ann.createdAt).toLocaleString()}
+                </span>
+                <span className="md-annotation-card-actions">
+                  <button
+                    type="button"
+                    className="md-annotation-card-del"
+                    title="删除批注"
+                    aria-label="删除批注"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteAnnotation(ann.id);
+                      setAnnotationCard(null);
+                    }}
+                  >
+                    <Trash2 className="h-2.5 w-2.5" />
+                  </button>
                 </span>
               </div>
-              {intentDef && (
-                <div className="md-annotation-card-intent">
-                  <Wand2 className="h-2 w-2" />
-                  {intentDef.label}
-                </div>
-              )}
-              <div className="md-annotation-card-content">{ann.content}</div>
-              <div className="md-annotation-card-time">
-                {ann.resolved ? 'Resolved' : new Date(ann.createdAt).toLocaleString()}
-              </div>
+              <textarea
+                className="md-annotation-card-content md-annotation-card-edit"
+                value={ann.content}
+                onChange={(e) => updateAnnotation(ann.id, e.target.value)}
+                placeholder="批注内容…"
+              />
             </div>
           );
         })()}
@@ -3443,23 +2854,19 @@ export function DocEditor({
           editor={editor}
           onAdd={handleAnnotate}
           onAsk={handleAskInNode}
+          onDirectRevise={directRevise}
           canAskCurrent={!!(nodeMdId || activeNodeId)}
         />
       )}
 
       {/* ProseMirror 专属样式：复用 .html-renderer 的全局样式，此处补充编辑器特有样式 */}
       <style>{`
-        /* 纸张居中排版：编辑区限宽居中、白纸卡片感（柔和投影/圆角），与面板底色区分。
-           width:100% 必须显式声明：flex-col 容器中子项交叉轴（横向）默认 stretch 撑满，
-           但 margin:0 auto 会禁用 stretch，宽度退化为内容宽（空文档只剩占位符一行，纸张缩成小条）。
-           width:100% + max-width:900px + margin:auto → 面板内贴满（窄面板 516px / 宽面板 896px），宽容器下 900px 居中 */
+        /* 编辑区平铺：占满整个区域，无卡片边框/圆角/限宽，背景与面板一致 */
         .doc-editor-content {
           outline: none;
           flex: 1 0 auto;
           min-height: 200px;
-          max-width: 900px;
           width: 100%;
-          margin: 0 auto;
           padding: 32px 40px;
           font-family: var(--font-sans);
           font-size: 14px;
@@ -3467,10 +2874,6 @@ export function DocEditor({
           color: var(--ink);
           user-select: text;
           background: var(--paper);
-          border: 1px solid var(--line-soft);
-          border-radius: 10px;
-          /* 完全去掉投影：只留边框与圆角（用户反馈去投影） */
-          box-shadow: none;
         }
         .doc-editor-content:focus { outline: none; }
         /* 去掉聚焦时的品牌紫描边（用户反馈"选中后出现紫色边框"）；保留 :focus 无描边即可 */
@@ -3550,52 +2953,93 @@ export function DocEditor({
           height: 10px;
           display: block;
         }
-        /* 批注查看卡片：点图标弹出，纯查看；fixed 定位由 JS 计算（图标下方 / 视口不足翻转） */
+        /* 批注查看卡片：点图标弹出，可自由编辑；fixed 定位由 JS 计算（图标下方 / 视口不足翻转） */
         .md-annotation-card {
-          width: 280px;
-          max-height: 260px;
+          width: 240px;
+          min-height: 96px;
+          max-height: 230px;
           display: flex;
           flex-direction: column;
-          gap: 6px;
-          padding: 10px 12px;
-          border-radius: 12px;
-          border: 1px solid var(--line);
-          background-color: var(--popover);
+          gap: 5px;
+          padding: 8px 10px 9px;
+          border-radius: 10px;
+          border: 1px solid color-mix(in oklab, #b45309 16%, transparent);
+          background-color: #fffbeb;
           color: var(--ink);
-          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+          box-shadow: 0 6px 18px rgba(70, 45, 20, 0.12), 0 1px 3px rgba(70, 45, 20, 0.06);
           font-family: var(--font-sans);
         }
-        .md-annotation-card-title {
+        .md-annotation-card-head {
           display: flex;
           align-items: center;
-          gap: 6px;
-          font-size: 11px;
-          font-weight: 600;
-          color: var(--primary);
+          gap: 5px;
+          padding-bottom: 0;
+          border-bottom: 1px dashed color-mix(in oklab, #b45309 18%, transparent);
+          margin-bottom: 5px;
         }
         .md-annotation-card-intent {
           display: inline-flex;
           align-items: center;
-          gap: 3px;
-          align-self: flex-start;
+          gap: 2px;
           border-radius: 999px;
-          padding: 1px 7px;
-          font-size: 9px;
+          padding: 0 6px;
+          font-size: 8.5px;
           font-weight: 500;
-          background-color: color-mix(in oklab, var(--primary) 10%, transparent);
-          color: var(--primary);
+          line-height: 15px;
+          background-color: color-mix(in oklab, #d97706 13%, transparent);
+          color: #92400e;
         }
+        .md-annotation-card-intent svg { display: block; }
         .md-annotation-card-content {
           font-size: 11.5px;
-          line-height: 1.55;
+          line-height: 1.6;
           color: var(--ink);
           overflow-y: auto;
           white-space: pre-wrap;
           word-break: break-word;
         }
+        .md-annotation-card-edit {
+          flex: 1;
+          resize: vertical;
+          border: none;
+          outline: none;
+          background: transparent;
+          width: 100%;
+          min-height: 60px;
+          padding: 0;
+          font-family: inherit;
+        }
+        .md-annotation-card-edit:focus { color: var(--ink); }
+        .md-annotation-card-actions {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          flex: none;
+          margin-left: auto;
+        }
+        .md-annotation-card-del {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 16px;
+          height: 16px;
+          border-radius: 4px;
+          border: none;
+          background: transparent;
+          color: color-mix(in oklab, var(--ink) 40%, transparent);
+          cursor: pointer;
+          padding: 0;
+          transition: color 120ms ease, background 120ms ease;
+        }
+        .md-annotation-card-del:hover {
+          color: var(--danger);
+          background: var(--danger-soft);
+        }
         .md-annotation-card-time {
-          font-size: 10px;
-          color: var(--ink-faint);
+          flex: none;
+          font-size: 8.5px;
+          color: color-mix(in oklab, var(--ink) 42%, transparent);
+          white-space: nowrap;
         }
         /* 临时选区高亮：批注气泡编辑期间保持选中文字高亮（比批注黄更淡，避免叠加喧宾夺主）。
            与原生选区互斥，任一时刻只有一重高亮：
@@ -3697,23 +3141,26 @@ export function DocEditor({
           list-style: none;
           padding: 0;
         }
-        /* 文档嵌入卡片（MdEmbed NodeView）：明显的「卡片」视觉，与普通文字链接区分 */
+        /* 文档嵌入卡片（MdEmbed NodeView）：折叠显示文档名，展开预览部分内容 */
         .doc-editor-content .md-embed-card {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          padding: 8px 12px 8px 8px;
           border: 1px solid color-mix(in oklab, var(--primary) 25%, var(--line-soft));
           border-radius: 8px;
           background: color-mix(in oklab, var(--primary) 5%, var(--paper));
-          cursor: pointer;
           user-select: none;
+          overflow: hidden;
           transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
         }
         .doc-editor-content .md-embed-card:hover {
-          background: color-mix(in oklab, var(--primary) 10%, transparent);
+          background: color-mix(in oklab, var(--primary) 8%, var(--paper));
           border-color: var(--primary);
           box-shadow: 0 2px 8px color-mix(in oklab, var(--primary) 18%, transparent);
+        }
+        .doc-editor-content .md-embed-card .md-embed-head {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 10px 8px 8px;
+          cursor: pointer;
         }
         .doc-editor-content .md-embed-card .md-embed-icon-wrap {
           display: inline-flex;
@@ -3750,12 +3197,62 @@ export function DocEditor({
           color: var(--ink-muted);
           line-height: 1;
         }
-        .doc-editor-content .md-embed-card .md-embed-open {
-          width: 13px;
-          height: 13px;
-          color: var(--ink-muted);
+        .doc-editor-content .md-embed-card .md-embed-tools {
+          display: inline-flex;
+          align-items: center;
+          gap: 2px;
           flex: none;
         }
+        .doc-editor-content .md-embed-card .md-embed-open {
+          display: inline-flex;
+          width: 22px;
+          height: 22px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 5px;
+          color: var(--ink-muted);
+          transition: background 120ms ease, color 120ms ease;
+        }
+        .doc-editor-content .md-embed-card .md-embed-open:hover {
+          color: var(--primary);
+          background: color-mix(in oklab, var(--primary) 10%, transparent);
+        }
+        .doc-editor-content .md-embed-card .md-embed-chevron {
+          display: inline-flex;
+          align-items: center;
+          color: var(--ink-muted);
+        }
+        .doc-editor-content .md-embed-card .md-embed-open-icon {
+          width: 13px;
+          height: 13px;
+        }
+        .doc-editor-content .md-embed-card .md-embed-preview {
+          border-top: 1px dashed color-mix(in oklab, var(--primary) 20%, var(--line-soft));
+          padding: 6px 10px 8px;
+          background: color-mix(in oklab, var(--paper) 60%, transparent);
+        }
+        .doc-editor-content .md-embed-card .md-embed-preview-text {
+          margin: 0;
+          font-size: 11.5px;
+          line-height: 1.6;
+          color: var(--ink);
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-family: var(--font-sans);
+          max-height: 180px;
+          overflow-y: auto;
+        }
+        .doc-editor-content .md-embed-card .md-embed-preview-state {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          color: var(--ink-muted);
+        }
+        .doc-editor-content .md-embed-card .md-embed-spin {
+          animation: embed-spin 1s linear infinite;
+        }
+        @keyframes embed-spin { to { transform: rotate(360deg); } }
         .doc-editor-content ul[data-type="taskList"] li {
           display: flex;
           align-items: flex-start;
@@ -3975,49 +3472,8 @@ export function DocEditor({
         open={showExportDialog}
         onClose={() => setShowExportDialog(false)}
         onExport={handleExportDocx}
-        onExportHtml={handleExportHtml}
-        onExportPdf={handleExportPdf}
         defaultFileName={nodeMdId ? 'export' : (filePath?.split('/').pop()?.replace(/\.[^.]+$/, '') || 'export')}
       />
-
-      {/* `/` 斜杠命令菜单：光标处弹出插入命令（复用 ⌘K 面板命令，无新依赖） */}
-      {slashOpen && slashAnchor && (
-        <div
-          ref={slashRef}
-          className="fixed z-[150] w-[240px] overflow-hidden rounded-lg border"
-          style={{
-            left: Math.min(slashAnchor.x, (typeof window !== 'undefined' ? window.innerWidth : 900) - 256),
-            top: slashAnchor.y + 6,
-            backgroundColor: 'var(--popover)',
-            borderColor: 'var(--line)',
-            boxShadow: '0 16px 48px rgba(0,0,0,0.22)',
-            WebkitAppRegion: 'no-drag',
-          } as React.CSSProperties}
-        >
-          <div className="max-h-[280px] overflow-y-auto ai-canvas-scroll py-1">
-            {slashCommands.length === 0 ? (
-              <div className="px-3 py-2 text-xs" style={{ color: 'var(--ink-faint)' }}>No matching commands</div>
-            ) : (
-              slashCommands.map((cmd, i) => (
-                <button
-                  key={cmd.id}
-                  onClick={() => runSlashCommand(cmd)}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onMouseEnter={() => setSlashIndex(i)}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors"
-                  style={{ backgroundColor: i === slashIndex ? 'var(--paper-hover)' : 'transparent', color: 'var(--ink)' }}
-                >
-                  <span className="w-10 shrink-0 text-10 font-medium" style={{ color: 'var(--ink-faint)' }}>{cmd.group}</span>
-                  <span className="flex-1 truncate">{cmd.label}</span>
-                </button>
-              ))
-            )}
-          </div>
-          <div className="border-t px-3 py-1 text-10" style={{ borderColor: 'var(--line)', color: 'var(--ink-faint)' }}>
-            ↑↓ navigate · Enter insert · Esc close
-          </div>
-        </div>
-      )}
 
       {/* 表格浮动工具栏：光标在表格内时显示（行/列增删、合并拆分、对齐、删除表格） */}
       {tableMenu && editor && (
@@ -4079,142 +3535,49 @@ export function DocEditor({
         </div>
       )}
 
-      {/* ⌘K 命令面板 */}
-      {commandOpen && (
+      {/* 右键命令菜单：正文右键弹出，所有分类命令图标横向分行展示（无切换）；作用于选中文字 / 所在段落 */}
+      {ctxMenu && (
         <div
-          className="fixed inset-0 z-[300] flex items-start justify-center pt-[16vh]"
-          style={{ backgroundColor: 'color-mix(in oklab, var(--ink) 25%, transparent)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          onClick={() => setCommandOpen(false)}
+          className="md-ctx-menu fixed w-72 overflow-y-auto ai-canvas-scroll rounded-xl border py-1 [&_button_svg]:h-[13px] [&_button_svg]:w-[13px] [&_button_svg]:shrink-0"
+          style={{
+            left: Math.min(ctxMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 0) - 296),
+            top: ctxMenu.y,
+            maxHeight: 380,
+            backgroundColor: 'var(--popover)',
+            borderColor: 'var(--line)',
+            boxShadow: '0 16px 48px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.08)',
+            zIndex: 12000,
+          }}
+          onClick={(e) => e.stopPropagation()}
         >
-          <div
-            className="w-[440px] overflow-hidden rounded-xl border"
-            style={{ backgroundColor: 'var(--popover)', borderColor: 'var(--line)', boxShadow: '0 24px 64px rgba(0,0,0,0.28)' }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-2 border-b px-3 py-2.5" style={{ borderColor: 'var(--line)' }}>
-              {/* 历史（撤销/重做）固定在搜索栏左侧，鼠标悬停高亮；不参与分组行与键盘导航 */}
-              {historyCmds.map((cmd) => {
-                const sel = historySel === cmd.id;
-                return (
-                  <button
-                    key={cmd.id}
-                    type="button"
-                    title={cmd.hint ? `${cmd.label} (${cmd.hint})` : cmd.label}
-                    onClick={() => runPaletteCommand(cmd)}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onMouseEnter={() => setHistorySel(cmd.id)}
-                    onMouseLeave={() => setHistorySel(null)}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors"
-                    style={{
-                      color: sel ? 'var(--primary)' : 'var(--ink-muted)',
-                      backgroundColor: sel ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
-                    }}
-                  >
-                    {commandGlyph(cmd.id)}
-                  </button>
-                );
-              })}
-              <span style={{ width: '1px', height: '16px', backgroundColor: 'var(--line)' }} />
-              <Search className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-              <input
-                autoFocus
-                value={commandQuery}
-                onChange={(e) => { setCommandQuery(e.target.value); setCommandIndex(0); }}
-                onKeyDown={(e) => {
-                  // 当前聚焦命令所在行（组）；-1 表示无可导航命令
-                  const runIdx = commandIndex >= 0 ? groupRuns.findIndex((g) => commandIndex >= g.items[0].idx && commandIndex <= g.items[g.items.length - 1].idx) : -1;
-                  if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    if (groupRuns.length) {
-                      const target = groupRuns[(runIdx + 1 + groupRuns.length) % groupRuns.length];
-                      setCommandIndex(target.items[0].idx);
-                    }
-                  } else if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    if (groupRuns.length) {
-                      const target = groupRuns[(runIdx - 1 + groupRuns.length) % groupRuns.length];
-                      setCommandIndex(target.items[0].idx);
-                    }
-                  } else if (e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    if (runIdx >= 0) {
-                      const run = groupRuns[runIdx];
-                      setCommandIndex((i) => Math.min(i + 1, run.items[run.items.length - 1].idx));
-                    }
-                  } else if (e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    if (runIdx >= 0) {
-                      const run = groupRuns[runIdx];
-                      setCommandIndex((i) => Math.max(i - 1, run.items[0].idx));
-                    }
-                  } else if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const c = filteredCommands[commandIndex];
-                    if (c) runPaletteCommand(c);
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    setCommandOpen(false);
-                  }
-                }}
-                placeholder="Type a command or search…"
-                className="flex-1 bg-transparent text-sm outline-none"
-                style={{ color: 'var(--ink)' }}
-              />
-              <span className="shrink-0 text-10" style={{ color: 'var(--ink-faint)' }}>
-                Esc
-              </span>
-            </div>
-            <div className="max-h-[340px] overflow-y-auto ai-canvas-scroll py-1">
-              {groupRuns.length === 0 ? (
-                <div className="px-3 py-3 text-xs" style={{ color: 'var(--ink-faint)' }}>No matching commands</div>
-              ) : (
-                groupRuns.map((run, gi) => (
-                  <div
-                    key={run.group}
-                    className="flex items-center gap-1 px-3 py-1.5"
-                    style={{ borderTop: gi === 0 ? undefined : '1px solid var(--line)' }}
-                  >
-                    <span className="w-9 shrink-0 text-10 font-medium" style={{ color: 'var(--ink-faint)' }}>{run.group}</span>
-                    <div className="flex min-w-0 flex-1 items-center gap-0.5">
-                      {run.items.map(({ cmd, idx }) => {
-                        const selected = idx === commandIndex;
-                        return (
-                          <button
-                            key={cmd.id}
-                            type="button"
-                            title={cmd.hint ? `${cmd.label} (${cmd.hint})` : cmd.label}
-                            onClick={() => runPaletteCommand(cmd)}
-                            onMouseDown={(e) => e.preventDefault()}
-                            onMouseEnter={() => setCommandIndex(idx)}
-                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors"
-                            style={{
-                              color: selected ? 'var(--primary)' : 'var(--ink-muted)',
-                              backgroundColor: selected ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
-                            }}
-                          >
-                            {commandGlyph(cmd.id)}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+          {ctxRows.map((row, ri) =>
+            row.items.length === 0 ? null : (
+              <div key={row.key}>
+                {ri > 0 && <div className="mx-2 my-1" style={{ borderTop: '1px solid var(--line-soft)' }} />}
+                {/* 分组命令图标横排（无文字，hover 显示名称） */}
+                <div className="flex flex-wrap items-center gap-0.5 px-2 py-0.5">
+                  {row.items.map((cmd) => (
+                    <button
+                      key={cmd.id}
+                      type="button"
+                      title={cmd.hint ? `${ctxLabel(cmd.id)} (${cmd.hint})` : ctxLabel(cmd.id)}
+                      onClick={() => runPaletteCommand(cmd)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
+                      style={{ color: 'var(--ink-muted)' }}
+                    >
+                      {commandGlyph(cmd.id)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ),
+          )}
         </div>
       )}
 
-      {/* 块级拖拽把手（仅可编辑态）：hover 块首显示，按住拖拽可排序段落/列表项/图片/表格/嵌入卡片等块 */}
-      {editable && editor && (
-        <DragHandle
-          editor={editor}
-          nested={{ edgeDetection: 'left', allowedContainers: ['bulletList', 'orderedList', 'taskList'] }}
-          className="doc-drag-handle"
-        >
-          <GripVertical />
-        </DragHandle>
-      )}
+      {/* 块级拖拽把手（仅可编辑态）：hover 块首显示，压住可拖拽排序顶级块（自研定位，固定于纸张左侧内边距列，不压首字） */}
+      <BlockDragHandle editor={editable && editor ? editor : null} />
       <style>{`
         .doc-drag-handle {
           display: flex;
@@ -4225,8 +3588,13 @@ export function DocEditor({
           border-radius: 6px;
           color: var(--ink-muted);
           cursor: grab;
-          z-index: 20;
+          z-index: 30;
+          position: absolute;
+          pointer-events: auto;
+          opacity: 0;
+          transition: opacity 0.12s ease;
         }
+        .doc-drag-handle[data-visible='true'] { opacity: 1; }
         .doc-drag-handle:hover {
           color: var(--primary);
           background: color-mix(in oklab, var(--primary) 8%, transparent);
@@ -4239,6 +3607,11 @@ export function DocEditor({
         .doc-drag-handle svg {
           width: 15px;
           height: 15px;
+        }
+        .doc-drag-target {
+          outline: 1.5px solid var(--primary);
+          outline-offset: -1px;
+          border-radius: 6px;
         }
         .bob-columns-wrap {
           margin: 4px 0;
@@ -4299,7 +3672,7 @@ interface PaletteCommand {
   run: () => void;
 }
 
-/** ⌘K 横排命令按钮图标：命令 id → lucide 图标（与工具栏同款，便于横排识别）
+/** 命令按钮图标：命令 id → lucide 图标（右键菜单与工具栏同款）
  *  注意 PaletteCommand.id 形如 `${group}:${shortId}`（如 "Format:bold"），
  *  这里取冒号后的短 id 做匹配，避免全部走 default 返回 null 导致按钮空白。 */
 function commandGlyph(id: string): React.ReactNode {
@@ -4312,7 +3685,7 @@ function commandGlyph(id: string): React.ReactNode {
     case 'h1': return <Heading1 className="h-4 w-4" />;
     case 'h2': return <Heading2 className="h-4 w-4" />;
     case 'h3': return <Heading3 className="h-4 w-4" />;
-    case 'paragraph': return <Pilcrow className="h-4 w-4" />;
+    case 'paragraph': return <AlignLeft className="h-4 w-4" />;
     case 'bullet': return <List className="h-4 w-4" />;
     case 'ordered': return <ListOrdered className="h-4 w-4" />;
     case 'task': return <CheckSquare className="h-4 w-4" />;
@@ -4321,7 +3694,6 @@ function commandGlyph(id: string): React.ReactNode {
     case 'hr': return <Minus className="h-4 w-4" />;
     case 'link': return <LinkIcon className="h-4 w-4" />;
     case 'image': return <ImageIcon className="h-4 w-4" />;
-    case 'footnote': return <Hash className="h-4 w-4" />;
     case 'table': return <TableIcon className="h-4 w-4" />;
     case 'columns2': return <Columns2 className="h-4 w-4" />;
     case 'columns3': return <Columns3 className="h-4 w-4" />;
@@ -4332,11 +3704,25 @@ function commandGlyph(id: string): React.ReactNode {
     case 'toc': return <ListTree className="h-4 w-4" />;
     case 'docx': return <FileDown className="h-4 w-4" />;
     case 'print': return <Printer className="h-4 w-4" />;
-    case 'new-doc': return <FilePlus className="h-4 w-4" />;
-    case 'insert-doc': return <FileText className="h-4 w-4" />;
     case 'share': return <Share2 className="h-4 w-4" />;
     default: return null;
   }
+}
+
+/** 右键菜单命令中文名：命令 id → 中文 label（用于按钮 tooltip） */
+const CTX_LABELS: Record<string, string> = {
+  undo: '撤销', redo: '重做',
+  bold: '加粗', italic: '斜体', strike: '删除线', code: '行内代码',
+  h1: '标题 1', h2: '标题 2', h3: '标题 3', paragraph: '正文',
+  bullet: '无序列表', ordered: '有序列表', task: '任务列表',
+  quote: '引用', codeblock: '代码块', hr: '分隔线',
+  table: '表格 (3×3)', columns2: '双栏', columns3: '三栏',
+  format: '格式化文档', annotations: '批注',
+  docx: '导出…', print: '打印', share: '分享…',
+};
+function ctxLabel(id: string): string {
+  const key = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
+  return CTX_LABELS[key] ?? id;
 }
 
 interface ToolbarButtonProps {
@@ -4391,33 +3777,273 @@ function Divider() {
   );
 }
 
-interface DropdownItemProps {
-  active?: boolean;
-  onClick: () => void;
-  label: string;
-  shortcut?: React.ReactNode;
-}
+/** 块级拖拽把手（自研，替代 @tiptap/extension-drag-handle-react）。
+ *  解决了第三方两处问题：
+ *  1) 不再「偶尔不显示」——显隐由独立 mousemove/mouseleave 驱动，不依赖第三方「节点变化才显示」的门控；
+ *  2) 不压首字/符号——把手 x 固定在纸张左侧内边距列（content.left + 14，22px 落在 40px 内边距内），
+ *     y 对齐所 hover 顶级块的顶部。
+ *  拖拽：HTML5 DnD；drop 时按光标在目标块的上/下半判定插到其前/后，一个事务内 delete+insert 完成整块移动。 */
+function BlockDragHandle({ editor }: { editor: Editor | null }) {
+  const handleRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const hoverRef = useRef<{ start: number; end: number; el: HTMLElement } | null>(null);
+  // 拖拽中：源块信息（锁定于 mousedown）+ 目标落点（mousemove 实时更新）
+  const dragRef = useRef<{ start: number; end: number; el: HTMLElement } | null>(null);
+  const dropTargetRef = useRef<{ start: number; end: number; before: boolean } | null>(null);
+  const targetElRef = useRef<HTMLElement | null>(null);
+  // 拖拽 ghost（跟随鼠标的块预览）与插入指示线：DOM 直操，避免重渲染
+  const ghostRef = useRef<HTMLElement | null>(null);
+  const indicatorRef = useRef<HTMLElement | null>(null);
 
-function DropdownItem({ active, onClick, label, shortcut }: DropdownItemProps) {
+  viewRef.current = editor?.view ?? null;
+
+  /** 取光标所在顶级块（doc depth=1）：返回 {start,end,el}
+   *  优先 posAtCoords（精确到文本行）；但编辑器在段落之间的垂直间隙（<p> 的 margin 空白区）上
+   *  posAtCoords 会返回 null，导致把手一移过段间距就消失（"时隐时现"）。
+   *  为此退化为按"含 margin 的块盒"扫描顶级子块定位，保证把手始终跟随光标所在块。 */
+  const blockAt = useCallback((clientX: number, clientY: number) => {
+    const view = viewRef.current;
+    if (!view) return null;
+    const resolveTopBlock = (pos: number): { start: number; end: number; el: HTMLElement } | null => {
+      const dp = view.state.doc.resolve(pos);
+      if (dp.depth < 1) return null;
+      const start = dp.before(1);
+      const end = start + dp.node(1).nodeSize;
+      const el = view.nodeDOM(start) as HTMLElement | null;
+      if (!el || !view.dom.contains(el)) return null;
+      return { start, end, el };
+    };
+    // 1) 精确命中文本行
+    const coord = view.posAtCoords({ left: clientX, top: clientY });
+    if (coord) {
+      const b = resolveTopBlock(coord.pos);
+      if (b) return b;
+    }
+    // 2) 段落间隙兜底：遍历顶级子块，按"含上下 margin 的盒"命中纵坐标
+    for (const child of Array.from(view.dom.children)) {
+      if (!(child instanceof HTMLElement)) continue;
+      const r = child.getBoundingClientRect();
+      const cs = getComputedStyle(child);
+      const mTop = parseFloat(cs.marginTop) || 0;
+      const mBot = parseFloat(cs.marginBottom) || 0;
+      if (clientY >= r.top - mTop && clientY <= r.bottom + mBot) {
+        const b = resolveTopBlock(view.posAtDOM(child, 0));
+        if (b) return b;
+      }
+    }
+    return null;
+  }, []);
+
+  /** 定位：把手进入左侧内边距列并对齐块顶部。
+   *  x 以"块文本左缘"为锚：把手右缘恒保持在文本左缘前 8px，不随纸张内边距变化而压住段落首字符。
+   *  y 对齐块顶。可见性由 data-visible 控制。 */
+  const position = useCallback((b: { start: number; end: number; el: HTMLElement } | null) => {
+    const h = handleRef.current;
+    const view = viewRef.current;
+    if (!h || !view) return;
+    if (!b) {
+      h.dataset.visible = 'false';
+      return;
+    }
+    const wrap = h.offsetParent as HTMLElement | null;
+    const wrapRect = wrap?.getBoundingClientRect();
+    const wy = wrapRect?.top ?? 0;
+    const blockLeft = b.el.getBoundingClientRect().left - (wrapRect?.left ?? 0); // 块文本左缘（相对 wrap）
+    const handleW = h.getBoundingClientRect().width || 22;
+    // 右缘距文本左缘 8px；hover 定位时该值通常为正（纸张内边距列），偶发被块内边距压缩时让位给"不错位"
+    h.style.left = `${Math.max(0, blockLeft - handleW - 8)}px`;
+    h.style.top = `${b.el.getBoundingClientRect().top - wy}px`;
+    h.dataset.visible = 'true';
+  }, []);
+
+  const clearTarget = useCallback(() => {
+    if (targetElRef.current) {
+      targetElRef.current.classList.remove('doc-drag-target');
+      targetElRef.current = null;
+    }
+  }, []);
+
+  const hideHandle = useCallback(() => {
+    // 清理 ghost / 指示线 / 源块隐藏
+    if (ghostRef.current) { ghostRef.current.remove(); ghostRef.current = null; }
+    if (indicatorRef.current) { indicatorRef.current.remove(); indicatorRef.current = null; }
+    if (dragRef.current?.el) dragRef.current.el.style.opacity = '';
+    dragRef.current = null;
+    dropTargetRef.current = null;
+    clearTarget();
+    hoverRef.current = null;
+    position(null);
+    if (handleRef.current) handleRef.current.dataset.dragging = 'false';
+  }, [clearTarget, position]);
+
+  // hover 显隐 + 定位 + 跟随滚动/缩放/文档变更时重新定位
+  useEffect(() => {
+    const h = handleRef.current;
+    const view = viewRef.current;
+    if (!h || !view) return;
+    const onMove = (e: MouseEvent) => {
+      if (dragRef.current) return; // 拖拽中不更新 hover（把手显隐交给拖拽逻辑）
+      // 用「编辑器内容区（含内边距列）」的几何范围判断，而非 view.dom 的 mouseleave：
+      // 把手绝对定位在 view.dom 的 DOM 树外，鼠标移到把手上会触发 view.dom mouseleave 导致 hoverRef 被误清空。
+      const rect = view.dom.getBoundingClientRect();
+      const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+      if (!inside) {
+        hoverRef.current = null;
+        position(null);
+        return;
+      }
+      const b = blockAt(e.clientX, e.clientY);
+      hoverRef.current = b;
+      position(b);
+    };
+    const onRepos = () => {
+      if (!dragRef.current) position(hoverRef.current);
+    };
+    document.addEventListener('mousemove', onMove);
+    window.addEventListener('scroll', onRepos, true);
+    window.addEventListener('resize', onRepos);
+    editor?.on('transaction', onRepos);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      window.removeEventListener('scroll', onRepos, true);
+      window.removeEventListener('resize', onRepos);
+      editor?.off('transaction', onRepos);
+    };
+  }, [editor, blockAt, position, clearTarget, hideHandle]);
+
+  // 鼠标事件驱动的块拖拽：mousedown 锁定源块 → mousemove 移动 ghost + 高亮目标/插入线 → mouseup 落点插入。
+  // 不依赖 HTML5 原生 DnD（draggable/dragstart 在该把手场景下易因 hoverRef 竞态失效，且不丝滑）。
+  const onMouseDown = (e: React.MouseEvent) => {
+    const view = viewRef.current;
+    const b = hoverRef.current;
+    if (!view || !b) return;
+    e.preventDefault(); // 阻止文本选择 / 编辑器聚焦
+    e.stopPropagation();
+
+    // 锁定源块
+    const src = { start: b.start, end: b.end, el: b.el };
+    dragRef.current = src;
+    dropTargetRef.current = null;
+    clearTarget();
+    if (handleRef.current) handleRef.current.dataset.dragging = 'true';
+
+    // 源块完全隐藏（提起后原位置留白，ghost 跟随鼠标，视觉更清晰）
+    b.el.style.opacity = '0';
+    const srcRect = b.el.getBoundingClientRect();
+
+    // 创建 ghost：克隆源块，fixed 跟随鼠标
+    const ghost = b.el.cloneNode(true) as HTMLElement;
+    ghost.style.position = 'fixed';
+    ghost.style.left = `${srcRect.left}px`;
+    ghost.style.top = `${srcRect.top}px`;
+    ghost.style.width = `${srcRect.width}px`;
+    ghost.style.margin = '0';
+    ghost.style.pointerEvents = 'none';
+    ghost.style.zIndex = '10000';
+    ghost.style.opacity = '0.92';
+    ghost.style.boxShadow = '0 12px 32px rgba(0,0,0,0.22)';
+    ghost.style.borderRadius = '8px';
+    ghost.style.transform = 'scale(0.99)';
+    document.body.appendChild(ghost);
+    ghostRef.current = ghost;
+
+    // 创建插入指示线（2px 主色横线，显示在目标块上/下边界）
+    const indicator = document.createElement('div');
+    indicator.style.position = 'fixed';
+    indicator.style.height = '2px';
+    indicator.style.backgroundColor = 'var(--primary)';
+    indicator.style.zIndex = '10000';
+    indicator.style.pointerEvents = 'none';
+    indicator.style.display = 'none';
+    indicator.style.borderRadius = '1px';
+    document.body.appendChild(indicator);
+    indicatorRef.current = indicator;
+
+    const onMove = (ev: MouseEvent) => {
+      // ghost 跟随鼠标（右上偏移，避免遮挡视线）
+      if (ghostRef.current) {
+        ghostRef.current.style.left = `${ev.clientX + 12}px`;
+        ghostRef.current.style.top = `${ev.clientY + 12}px`;
+      }
+      // 目标块 + 插入线
+      const tb = blockAt(ev.clientX, ev.clientY);
+      clearTarget();
+      if (tb && tb.el !== src.el) {
+        tb.el.classList.add('doc-drag-target');
+        targetElRef.current = tb.el;
+        const rect = tb.el.getBoundingClientRect();
+        const before = ev.clientY < rect.top + rect.height / 2;
+        dropTargetRef.current = { start: tb.start, end: tb.end, before };
+        if (indicatorRef.current) {
+          indicatorRef.current.style.display = 'block';
+          indicatorRef.current.style.left = `${rect.left}px`;
+          indicatorRef.current.style.width = `${rect.width}px`;
+          indicatorRef.current.style.top = `${before ? rect.top - 1 : rect.bottom - 1}px`;
+        }
+      } else {
+        dropTargetRef.current = null;
+        if (indicatorRef.current) indicatorRef.current.style.display = 'none';
+      }
+    };
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+
+      const view2 = viewRef.current;
+      let dt = dropTargetRef.current;
+      const srcStart = src.start;
+      const srcEnd = src.end;
+      // 恢复源块并清理 ghost/指示线/高亮
+      src.el.style.opacity = '';
+      clearTarget();
+      if (ghostRef.current) { ghostRef.current.remove(); ghostRef.current = null; }
+      if (indicatorRef.current) { indicatorRef.current.remove(); indicatorRef.current = null; }
+      dropTargetRef.current = null;
+      dragRef.current = null;
+      if (handleRef.current) handleRef.current.dataset.dragging = 'false';
+
+      // 落点兜底：若最后一次 mousemove 未留下有效落点（鼠标停在块间隙），用 mouseup 坐标重算
+      if (!dt && view2) {
+        const tb = blockAt(ev.clientX, ev.clientY);
+        if (tb && tb.el !== src.el) {
+          const rect = tb.el.getBoundingClientRect();
+          dt = { start: tb.start, end: tb.end, before: ev.clientY < rect.top + rect.height / 2 };
+        }
+      }
+
+      // 无可落点或落点即原位 → 结束
+      if (!view2 || !dt || dt.start === srcStart) { hideHandle(); return; }
+      const span = srcEnd - srcStart;
+
+      let insertAt = dt.before ? dt.start : dt.end;
+      if (srcStart < insertAt) insertAt -= span; // 源块在目标之前时，删除会使其后的位置前移
+      let tr = view2.state.tr;
+      const node = view2.state.doc.nodeAt(srcStart);
+      if (!node) { hideHandle(); return; }
+      tr.delete(srcStart, srcEnd);
+      const at = Math.max(0, Math.min(insertAt, tr.doc.content.size));
+      tr.insert(at, node);
+      view2.dispatch(tr);
+      hideHandle();
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  if (!editor || !editor.isEditable) return null;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseDown={(e) => e.preventDefault()}
-      className="flex w-full items-center justify-between gap-4 px-2.5 py-1 text-left text-xs transition-colors"
-      style={{
-        color: active ? 'var(--primary)' : 'var(--ink)',
-        backgroundColor: active ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
-      }}
-      onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--ink) 5%, transparent)';
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.backgroundColor = 'transparent';
-      }}
+    <div
+      ref={handleRef}
+      className="doc-drag-handle"
+      data-visible="false"
+      data-dragging="false"
+      onMouseDown={onMouseDown}
+      title="Drag to reorder"
     >
-      <span>{label}</span>
-      {shortcut && <span style={{ color: 'var(--ink-muted)' }}>{shortcut}</span>}
-    </button>
+      <GripVertical />
+    </div>
   );
 }
+

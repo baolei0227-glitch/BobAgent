@@ -23,11 +23,12 @@ import {
   CornerUpLeft,
   Pin,
   PinOff,
+  MoreVertical,
 } from 'lucide-react';
 
 import { bus, BusEvents } from '@/lib/bus';
 import type { MessageAttachment } from '@/lib/types';
-import { isPreviewable } from './viewers/registry';
+import { isBrowserDoc, isPreviewable } from './viewers/registry';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { FileName } from './FileName';
@@ -607,11 +608,21 @@ export function LocalFileExplorer({
     }
   }, []);
 
-  // 右键菜单
+  // 右键菜单（保留作兜底，实际触发已迁移到 MoreVertical 按钮）
   const handleContextMenu = useCallback((e: React.MouseEvent, filePath: string, fileName: string, isDir: boolean) => {
     e.preventDefault();
     e.stopPropagation();
     setCtxMenu({ x: e.clientX, y: e.clientY, filePath, fileName, isDir });
+  }, []);
+
+  // 三个点按钮打开下拉菜单：以按钮右下角为锚点，避免超出视口边界
+  const openActionsMenu = useCallback((btnEl: HTMLElement, filePath: string, fileName: string, isDir: boolean) => {
+    const rect = btnEl.getBoundingClientRect();
+    setCtxMenu({
+      x: rect.right - 180,        // 菜单宽 180px，左对齐按钮左侧 → 贴齐按钮右边但别超出左边界
+      y: rect.bottom + 4,         // 按钮下方 4px
+      filePath, fileName, isDir,
+    });
   }, []);
 
   // 合并浏览目录与授权目录（去重）
@@ -667,19 +678,11 @@ export function LocalFileExplorer({
         onDoubleClick={(e) => {
           if (isDir) return;
           e.stopPropagation();
-          // 可预览的类型优先用 UnifiedViewer 打开
-          if (isPreviewable(item.extension)) {
+          // 可预览的类型优先用 UnifiedViewer 打开；文档类（HTML/PDF/图片）走 file.open 交由 Hippo Browser 打开
+          if (isPreviewable(item.extension) || isBrowserDoc(fileName)) {
             handleOpenInViewer(filePath, fileName);
           } else {
             handleOpenWithApp(filePath);
-          }
-        }}
-        onContextMenu={(e) => {
-          // 文件始终可右键；授权目录内的子文件夹也可右键（可发送为操作目录，锁定 AI 操作范围）
-          if (!isDir) {
-            handleContextMenu(e, filePath, fileName, false);
-          } else if (expandedRoot && roots.includes(expandedRoot)) {
-            handleContextMenu(e, filePath, fileName, true);
           }
         }}
       >
@@ -706,6 +709,24 @@ export function LocalFileExplorer({
 
         {!isDir && item.size && (
           <span className="shrink-0 text-xs" style={{ color: 'var(--ink-muted)' }}>{item.size}</span>
+        )}
+
+        {/* 三个点下拉按钮：hover 时可见，点击阻止冒泡 */}
+        {(!isDir || expandedRoot) && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              // 右键菜单里的按钮都是关闭后执行动作，复用同一套菜单即可
+              openActionsMenu(e.currentTarget, filePath, fileName, isDir);
+            }}
+            className="shrink-0 flex h-5 w-5 items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink-muted)' }}
+            title="More actions"
+            aria-label="More actions"
+          >
+            <MoreVertical className="h-3.5 w-3.5" />
+          </button>
         )}
       </div>
     );
@@ -769,13 +790,13 @@ export function LocalFileExplorer({
       className="relative flex h-full flex-col overflow-hidden shrink-0"
       data-canvas-ui="overlay"
       style={{
-        width: 280,
-        // 2026-09 同平面 dock：与中栏卡片完全一致——圆角12 + 45% 线框 + 纸色底 + 顶部受光高光
+        width: 258,
+        // 2026-09-11 统一淡灰底：面板底改 --paper-soft(#efeff2)，比画布 --canvas-bg(#e6e6ec) 略亮一层
         borderRadius: 12,
         border: '1px solid',
         borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
-        background: 'linear-gradient(180deg, color-mix(in srgb, #fff 7%, var(--paper)) 0%, var(--paper) 38%)',
-        boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 18%, transparent)',
+        background: 'linear-gradient(180deg, color-mix(in srgb, #fff 4%, var(--paper-soft)) 0%, var(--paper-soft) 38%)',
+        boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent)',
         WebkitAppRegion: 'no-drag',
         pointerEvents: 'auto',
       } as React.CSSProperties}
@@ -838,16 +859,6 @@ export function LocalFileExplorer({
         >
           <FilePlus className="h-3.5 w-3.5" />
         </Button>
-        <Button
-          onClick={handleOpenInFinder}
-          variant="ghost"
-          tone="neutral"
-          size="icon-sm"
-          title="Open folder in system file manager"
-          aria-label="Open folder in system file manager"
-        >
-          <FolderOpen className="h-3.5 w-3.5" />
-        </Button>
         {onTogglePinned && (
           <button
             onClick={onTogglePinned}
@@ -879,7 +890,7 @@ export function LocalFileExplorer({
       )}
 
       {/* 内容区 */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto hide-scrollbar">
         {searching || (searchMode && searchQuery) ? (
           <div className="py-2">
             {searching && (
@@ -889,7 +900,7 @@ export function LocalFileExplorer({
             )}
             {!searching && searchResults.length === 0 && searchQuery && (
               <div className="px-3 py-4 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
-                No files match "{searchQuery}"
+                No files match &quot;{searchQuery}&quot;
               </div>
             )}
             {!searching && searchResults.length > 0 && (
@@ -903,7 +914,7 @@ export function LocalFileExplorer({
           <div className="py-2">
             {allDirs.length === 0 ? (
               <div className="px-3 py-6 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
-                No directories<br />Click "Add" to choose a folder
+                No directories<br />Click &quot;Add&quot; to choose a folder
               </div>
             ) : (
               <div className="px-3 py-1 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
@@ -937,6 +948,20 @@ export function LocalFileExplorer({
                       title={isAuthorized ? 'Authorized: AI can read/write this directory (click to revoke)' : 'Authorize AI for this directory'}
                     >
                       <ShieldCheck className="h-3 w-3" />
+                    </button>
+                    {/* 三个点：根目录作为 directory 打开菜单，Delete 自动被 disabled 保护 */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openActionsMenu(e.currentTarget, root, root.split('/').pop() || root, true);
+                      }}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[var(--paper-hover)]"
+                      style={{ color: 'var(--ink-muted)' }}
+                      title="More actions"
+                      aria-label="More actions"
+                    >
+                      <MoreVertical className="h-3 w-3" />
                     </button>
                     <Button
                       onClick={(e) => handleRemoveRoot(root, e)}
@@ -1020,7 +1045,7 @@ export function LocalFileExplorer({
           </div>
           {(() => {
             const ctxExt = ctxMenu.fileName.split('.').pop() || '';
-            const canPreview = isPreviewable(ctxExt);
+            const canPreview = isPreviewable(ctxExt) || isBrowserDoc(ctxMenu.fileName);
             return (
               <>
                 {!ctxMenu.isDir && (
@@ -1075,27 +1100,25 @@ export function LocalFileExplorer({
             Rename
           </button>
 
-          {/* 复制 / 删除：仅文件支持（目录复制/删除需走系统文件管理，暂不支持） */}
-          {!ctxMenu.isDir && (
-            <>
-              <button
-                onClick={() => handleCopy(ctxMenu.filePath)}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink)' }}
-              >
-                <Copy className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
-                Copy
-              </button>
-              <button
-                onClick={() => handleDelete(ctxMenu.filePath, ctxMenu.fileName)}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--danger)' }}
-              >
-                <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
-                Delete
-              </button>
-            </>
-          )}
+          {/* 复制 / 删除：文件和子文件夹都支持；根目录本身受保护不可删除（走独立的 Remove directory 按钮） */}
+          <button
+            onClick={() => handleCopy(ctxMenu.filePath)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink)' }}
+          >
+            <Copy className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            Copy
+          </button>
+          <button
+            onClick={() => handleDelete(ctxMenu.filePath, ctxMenu.fileName)}
+            disabled={allDirs.includes(ctxMenu.filePath)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            style={{ color: allDirs.includes(ctxMenu.filePath) ? 'var(--ink-muted)' : 'var(--danger)' }}
+            title={allDirs.includes(ctxMenu.filePath) ? 'Root directories cannot be deleted here — use the Remove button on the directory header' : undefined}
+          >
+            <Trash className="h-3.5 w-3.5" style={{ color: allDirs.includes(ctxMenu.filePath) ? 'var(--ink-muted)' : 'var(--danger)' }} />
+            Delete
+          </button>
         </div>
       )}
     </div>

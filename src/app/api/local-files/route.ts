@@ -259,6 +259,8 @@ export async function GET(request: NextRequest) {
       const buffer = await fs.readFile(resolved);
       const ext = extname(resolved).toLowerCase();
       const mimeMap: Record<string, string> = {
+        '.html': 'text/html; charset=utf-8',
+        '.htm': 'text/html; charset=utf-8',
         '.pdf': 'application/pdf',
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
@@ -394,7 +396,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, newPath });
     }
 
-    // 复制文件
+    // 复制文件或文件夹（文件夹递归复制）
     if (action === 'copy') {
       const sourcePath = body.sourcePath as string;
       if (!sourcePath) {
@@ -406,20 +408,32 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: '系统目录受保护，无法操作' }, { status: 403 });
       }
 
-      const ext = resolved.split('.').pop() || '';
-      const baseName = resolved.split(sep).pop()?.replace(/\.\w+$/, '') || 'file';
+      const stat = await fs.stat(resolved).catch(() => null);
+      if (!stat) {
+        return NextResponse.json({ error: 'Source does not exist' }, { status: 404 });
+      }
+
+      const isDir = stat.isDirectory();
+      const originalName = resolved.split(sep).pop() || (isDir ? 'folder' : 'file');
       const parentDir = resolved.substring(0, resolved.lastIndexOf(sep));
 
-      // 生成副本名：filename 的副本.ext / filename 的副本 2.ext ...
+      // 生成副本名：filename 的副本.ext / filename 的副本 2.ext ...（文件夹同理）
       let counter = 1;
       let copyPath: string;
       do {
         const suffix = counter === 1 ? ' 的副本' : ` 的副本 ${counter}`;
-        copyPath = join(parentDir, `${baseName}${suffix}.${ext}`);
+        if (isDir) {
+          copyPath = join(parentDir, `${originalName}${suffix}`);
+        } else {
+          const ext = originalName.includes('.') ? '.' + originalName.split('.').pop() : '';
+          const baseName = ext ? originalName.slice(0, -ext.length) : originalName;
+          copyPath = join(parentDir, `${baseName}${suffix}${ext}`);
+        }
         counter++;
       } while (await fs.access(copyPath).then(() => true).catch(() => false));
 
-      await fs.copyFile(resolved, copyPath);
+      // cp 同时支持文件和目录，recursive: true 递归复制目录
+      await fs.cp(resolved, copyPath, { recursive: true });
       const newName = copyPath.split(sep).pop() || '';
       return NextResponse.json({ success: true, newPath: copyPath, newName });
     }

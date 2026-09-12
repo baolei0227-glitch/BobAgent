@@ -378,50 +378,6 @@ export type AgentTeamsNodeData = {
   __hasPersistedPosition?: boolean;
 };
 
-/** 图像生成节点（ImageGen）数据：独立节点，同时支持文生图 + 图生图 + 三视图 */
-export type ImageGenNodeData = {
-  title: string;
-  /** generate = 文生图；edit = 图生图；triplot = 三视图（front/side/top 3张一组串行生成） */
-  mode: 'generate' | 'edit' | 'triplot';
-  prompt: string;
-  negativePrompt?: string;
-  /** 当前选中的模型（缺省用 settings.imageEdit 默认模型） */
-  model?: string;
-  /** 文生图输出尺寸（如 1024x1024） */
-  size: string;
-  /** 图生图输入图 dataUrl */
-  inputImage?: string;
-  /** 原始图 dataUrl（首次生成时自动捕获的输入图，用于 Album 中与所有新版本对比） */
-  originalImage?: string;
-  /** 原始图（originalImage）上的 Detect All 结果缓存：切回 ORIGINAL 时直接复用，无需重新识别。
-   *  与 versions[].regions 对称——原始图不在 versions 数组里，需要独立缓存槽。 */
-  originalRegions?: RegionRef[];
-  /** 最近一次生成结果 dataUrl（triplot 模式下为当前 activeView 对应图） */
-  result?: string;
-  isGenerating?: boolean;
-  /** 三视图生成进度（仅 triplot 模式且生成中存在） */
-  triplotProgress?: TriplotProgress;
-  /** 节点折叠状态 */
-  collapsed?: boolean;
-  /** 版本历史：按生成顺序追加，最新在末尾（triplot 模式下为当前 activeView 的版本） */
-  versions?: ImageGenVersion[];
-  /** 三视图版本组历史（仅 triplot 模式使用）：3 张图一组 */
-  triplotGroups?: TriplotGroup[];
-  /** 当前激活的三视图视角（triplot 模式决定 result / versions 展示哪个视角的内容） */
-  triplotActiveView?: 'front' | 'side' | 'top';
-  /** 当前激活的三视图组 id（triplot 模式下 result / versions 指向该组） */
-  triplotActiveGroupId?: string;
-  /** 版本历史面板是否展开 */
-  versionsOpen?: boolean;
-  /** VLM 识别结果（Detect All），随节点持久化 */
-  regions?: RegionRef[];
-  /** 识别结果对应的图片标识（图片变化时自动清除 regions） */
-  regionsImageKey?: string;
-  /** 当前被引用的区域 id（#chip 双向同步到输入框） */
-  selectedRegions?: string[];
-  [key: string]: unknown;
-};
-
 /* ==================== 统一执行轨迹 TraceSpan 模型 ==================== */
 
 /** 轨迹 Span 类型：所有"模型做了什么"统一抽象为 Span */

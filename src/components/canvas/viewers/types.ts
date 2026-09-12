@@ -33,6 +33,8 @@ export interface ViewerRenderProps {
   slides?: Array<{ src: string; alt?: string; path?: string }>;
   /** 图片集专用：初始激活第几张（默认 0） */
   initialIndex?: number;
+  /** 图片集专用：覆盖默认"派发事件到画布 ImageGen 节点"的 AI 编辑入口（Hippo Browser 独立页用） */
+  onAiEditOverride?: (index: number) => void;
 }
 
 /** 文件类型渲染器插件：test 匹配 → load 懒加载组件 */

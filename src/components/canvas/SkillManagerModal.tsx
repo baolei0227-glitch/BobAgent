@@ -1098,19 +1098,18 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="gap-0"
+        onPointerDownOutside={(e) => e.preventDefault()}
         style={{
           fontFamily: 'var(--font-sans)',
-          // 全屏展示：覆盖 shadcn DialogContent 的居中/圆角/边距，内容按
+          // 居中浮窗（约 1120px × 90vh，圆角 + 阴影），内容按
           // 顶栏(DialogHeader) / 副标题(扩展类型 tabs) / 滚动内容 / 底栏 四行排布
-          inset: 0,
-          transform: 'none',
-          width: '100vw',
-          height: '100vh',
+          width: 'min(1400px, calc(100vw - 48px))',
+          height: 'min(90vh, calc(100vh - 48px))',
           maxWidth: 'none',
-          borderRadius: 0,
-          border: 'none',
+          borderRadius: 16,
           padding: 0,
           gridTemplateRows: 'auto auto minmax(0, 1fr) auto',
+          boxShadow: '0 24px 70px -16px rgba(0,0,0,0.35)',
         }}
       >
         {inner}

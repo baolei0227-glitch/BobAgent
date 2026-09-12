@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, Search, LayoutGrid, FileText, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle } from 'lucide-react';
+import { FolderOpen, Search, LayoutGrid, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText } from 'lucide-react';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
+import { localDateTimeToIso } from '@/lib/utils';
 
 /** 看板项目条目（/api/projects GET 返回，含后端附加的 node_count） */
 interface BoardProject {
@@ -181,7 +182,7 @@ type TodoPopupProps = {
   onClose: () => void;
   onToggle: (noteId: string, pageId: string, lineIndex: number) => void;
   onEdit: (noteId: string, pageId: string, lineIndex: number, text: string) => void;
-  onAdd: (noteId: string, pageId: string, text: string) => void;
+  onAdd: (noteId: string, pageId: string, text: string) => void | Promise<void>;
   onDelete: (noteId: string, pageId: string, lineIndex: number) => void;
   /** 标记某条待办已入日历：把日历事件 id 持久化到该行（写回 sticky note 的 lineEventIds） */
   onMarkCalendared: (noteId: string, pageId: string, lineIndex: number, eventIds: string[]) => void;
@@ -222,10 +223,13 @@ function TodoPopup({
   const [savedFlash, setSavedFlash] = useState(false);
   // Court 开庭录入表单（C 按钮弹出，全英文）
   const [courtOpen, setCourtOpen] = useState(false);
-  const [courtDate, setCourtDate] = useState('');
+  const [courtMatter, setCourtMatter] = useState(''); // 事项（待办主题）
+  const [courtDate, setCourtDate] = useState('');     // YYYY-MM-DD（date picker）
+  const [courtTime, setCourtTime] = useState('');     // HH:MM（time picker，可空）
   const [courtName, setCourtName] = useState('');
   const [courtRoom, setCourtRoom] = useState('');
   const [courtAddr, setCourtAddr] = useState('');
+  const [courtSaving, setCourtSaving] = useState(false);
 
   /** 提交某页的新增待办输入框内容（非空才提交），返回是否已提交 */
   const commitPendingAdd = (noteId: string, pageId: string, pageKey: string) => {
@@ -253,7 +257,7 @@ function TodoPopup({
   /** 各行的"发送到日历"临时状态（key = noteId:pageId:lineIndex；busy/done/error） */
   const [addStates, setAddStates] = useState<Record<string, 'busy' | 'done' | 'error'>>({});
 
-  /** 一键发送到日历（与画布便签 handleAddToDailyTodo 同机制）：
+  /** 手动发送到日历（StickyTodo 不自动入日历，2026-09-08 起，行只在用户显式操作时入日历）：
    *  取待办文本走 /api/wanted/execute 的 /todo 命令写入日历默认时段；
    *  成功后回调 onMarkCalendared 持久化 eventIds → 该行图标由加号变闹钟 */
   const handleAddToCalendar = (noteId: string, pageId: string, lineIndex: number, text: string) => {
@@ -301,25 +305,75 @@ function TodoPopup({
     setEditText('');
   };
 
-  /** 提交 Court 开庭表单：生成固定格式文本，新增到第一个便签的第一页，并自动发送到日历 */
-  const submitCourt = () => {
-    const date = courtDate.trim();
+  const resetCourt = () => {
+    setCourtMatter('');
+    setCourtDate('');
+    setCourtTime('');
+    setCourtName('');
+    setCourtRoom('');
+    setCourtAddr('');
+  };
+
+  /** 提交 Court 开庭表单：追加一行待办（事项/法院信息，**不含日期**——日期时间只作为该行日历事件的开始时间），
+   *  并按所选日期/时间建日历事件绑定该行（StickyTodo 手动入日历语义，不再走旧 /todo 自动） */
+  const submitCourt = async () => {
+    const dateStr = courtDate.trim();
     const name = courtName.trim();
-    if (!date || !name) return;
-    const text = `${date} 在${name}的第${courtRoom.trim()}法庭开庭。地址：${courtAddr.trim()}`;
+    if (!dateStr || !name) return;
+    const matter = courtMatter.trim();
+    const room = courtRoom.trim();
+    const addr = courtAddr.trim();
+    const timeStr = courtTime.trim();
+    const text = `${matter ? `${matter} ` : ''}在${name}${room ? `的第${room}法庭` : ''}开庭${addr ? `。地址：${addr}` : ''}`;
+    const startTime = localDateTimeToIso(dateStr, timeStr);
+    if (!startTime) {
+      showImageAiEditToast('Invalid hearing date/time.', 'error');
+      return;
+    }
     const first = data?.[0];
     const page = first?.pages?.[0];
-    if (first && page) {
-      onAdd(first.noteId, page.pageId, text);
-      // 自动发送到日历（等同于点击待办行的"发送到日历"按钮）
-      void fetch('/api/wanted/execute', {
+    if (!first || !page) {
+      showImageAiEditToast('No todo note to attach the hearing to.', 'error');
+      return;
+    }
+    const lineIndex = page.lines.length;
+    setCourtSaving(true);
+    try {
+      // 1) 先在便签追加该行并等待落盘
+      await onAdd(first.noteId, page.pageId, text);
+      // 2) 按所选时间建日历事件并绑定该行（幂等；事件标题=行文本，source_ref 锚点）
+      const resp = await fetch('/api/sticky-notes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: `/todo ${text}`, project_id: project.id }),
+        body: JSON.stringify({
+          action: 'add_to_calendar',
+          project_id: project.id,
+          note_id: first.noteId,
+          page_id: page.pageId,
+          line_index: lineIndex,
+          text,
+          start_time: startTime,
+          reminder_minutes: [30],
+        }),
       });
+      const d = await resp.json().catch(() => ({ success: false }));
+      if (d?.success) {
+        // 3) 把 event ids 同步进本地弹窗数据（行变闹钟）
+        onMarkCalendared(first.noteId, page.pageId, lineIndex, d.event_ids ?? []);
+        resetCourt();
+        setCourtOpen(false);
+      } else {
+        showImageAiEditToast('Added to todos, but calendar sync failed.', 'error');
+        resetCourt();
+        setCourtOpen(false);
+      }
+    } catch {
+      showImageAiEditToast('Failed to add court hearing.', 'error');
+      resetCourt();
+      setCourtOpen(false);
+    } finally {
+      setCourtSaving(false);
     }
-    setCourtOpen(false);
-    setCourtDate(''); setCourtName(''); setCourtRoom(''); setCourtAddr('');
   };
 
   const unfinishedCount = data?.reduce(
@@ -356,7 +410,10 @@ function TodoPopup({
           {saving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: 'var(--ink-muted)' }} />}
           <button
             type="button"
-            onClick={() => setCourtOpen((v) => !v)}
+            onClick={() => {
+              if (!courtOpen) resetCourt();
+              setCourtOpen(!courtOpen);
+            }}
             title="Court hearing (C)"
             className="shrink-0 rounded-lg px-2 py-1 text-xs font-bold transition-colors hover:bg-[var(--paper-hover)]"
             style={{ color: 'var(--ink-muted)', border: '1px solid var(--border)' }}
@@ -379,8 +436,16 @@ function TodoPopup({
           <div className="space-y-2 border-b px-4 py-3" style={{ borderColor: 'var(--border)' }}>
             <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Court hearing</div>
             <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Todo</span>
+              <input value={courtMatter} onChange={(e) => setCourtMatter(e.target.value)} placeholder="What to do (e.g. 合同纠纷一审开庭)" autoFocus className="min-w-0 flex-1 rounded border px-2 py-1 text-xs outline-none" style={{ borderColor: 'var(--border)', color: 'var(--ink)', background: 'transparent' }} />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
               <span className="w-16 shrink-0">Date</span>
-              <input value={courtDate} onChange={(e) => setCourtDate(e.target.value)} placeholder="2026/8/30 9:00" className="min-w-0 flex-1 rounded border px-2 py-1 text-xs outline-none" style={{ borderColor: 'var(--border)', color: 'var(--ink)', background: 'transparent' }} />
+              <input type="date" value={courtDate} onChange={(e) => setCourtDate(e.target.value)} className="min-w-0 flex-1 rounded border px-2 py-1 text-xs outline-none" style={{ borderColor: 'var(--border)', color: 'var(--ink)', background: 'transparent' }} />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Time</span>
+              <input type="time" value={courtTime} onChange={(e) => setCourtTime(e.target.value)} className="min-w-0 flex-1 rounded border px-2 py-1 text-xs outline-none" style={{ borderColor: 'var(--border)', color: 'var(--ink)', background: 'transparent' }} />
             </label>
             <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
               <span className="w-16 shrink-0">Court</span>
@@ -395,8 +460,8 @@ function TodoPopup({
               <input value={courtAddr} onChange={(e) => setCourtAddr(e.target.value)} placeholder="Address" className="min-w-0 flex-1 rounded border px-2 py-1 text-xs outline-none" style={{ borderColor: 'var(--border)', color: 'var(--ink)', background: 'transparent' }} />
             </label>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setCourtOpen(false)} className="rounded-lg px-3 py-1 text-xs font-medium" style={{ color: 'var(--ink-muted)', background: 'var(--paper-hover)' }}>Cancel</button>
-              <button type="button" onClick={submitCourt} disabled={!courtDate.trim() || !courtName.trim()} className="rounded-lg px-3 py-1 text-xs font-semibold disabled:opacity-50" style={{ color: '#fff', background: 'var(--primary-strong, #5b48d8)' }}>OK</button>
+              <button type="button" onClick={() => { resetCourt(); setCourtOpen(false); }} className="rounded-lg px-3 py-1 text-xs font-medium" style={{ color: 'var(--ink-muted)', background: 'var(--paper-hover)' }}>Cancel</button>
+              <button type="button" onClick={() => void submitCourt()} disabled={courtSaving || !courtDate.trim() || !courtName.trim()} className="rounded-lg px-3 py-1 text-xs font-semibold disabled:opacity-50" style={{ color: '#fff', background: 'var(--primary-strong, #5b48d8)' }}>{courtSaving ? 'Saving…' : 'OK'}</button>
             </div>
           </div>
         )}
@@ -651,7 +716,18 @@ function TodoPopup({
 }
 
 /** 项目看板：全屏大视图，卡片网格总览所有项目（含归档/垃圾桶），支持搜索与状态筛选 */
+/** 启动时是否自动打开项目面板（Projects 看板）的持久化开关；默认开启（保留历史启动行为） */
+export const LAUNCH_BOARD_KEY = 'bobwork.board-open-on-launch';
+
 export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
+  // “Open on launch”开关：开 = 每次打开 BobWork 从项目面板进入；关 = 直接进入上次关闭时的项目
+  const [openOnLaunch, setOpenOnLaunch] = useState<boolean>(() => {
+    try { return localStorage.getItem(LAUNCH_BOARD_KEY) !== '0'; } catch { return true; }
+  });
+  const setOpenOnLaunchPersist = (v: boolean) => {
+    setOpenOnLaunch(v);
+    try { localStorage.setItem(LAUNCH_BOARD_KEY, v ? '1' : '0'); } catch { /* ignore */ }
+  };
   const [projects, setProjects] = useState<BoardProject[]>([]);
   const [currentId, setCurrentId] = useState<string>('');
   const [query, setQuery] = useState('');
@@ -680,15 +756,42 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
   const [switching, setSwitching] = useState<string | null>(null);
   const [mutating, setMutating] = useState(false);
   const [error, setError] = useState('');
-  // 卡片单击/双击区分：单击打开详情，双击打开项目（延迟取消）
-  const cardClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 划选文字判定：卡片上拖选/双击选词时 selection 非空，此时跳过打开详情/进入项目，保证文字可正常复制
+  // 卡片交互：单击立即打开右侧详情；点击卡片内按钮/划选文字时不触发。
+  // “打开/进入项目”由卡片右下角的显式 Open 按钮承担——不再使用双击判定（双击已移除，
+  // 也省去了“单击延迟/双击窗口”带来的响应滞后与误判）。
+  // 划选文字判定：拖选时 selection 非空，单击不打开详情，保证文字可正常拖选复制
   const hasTextSelection = () => {
     const sel = window.getSelection();
     return !!sel && sel.toString().trim().length > 0;
   };
   // 记录当前项目 id（load 时同步），供打开面板时默认选中当前项目
   const currentIdRef = useRef('');
+  // 点击状态筛选（Active/Archived/Trash）后置位：待列表按新视图重算完成，把右侧详情切到该视图首张卡片
+  const viewSelectPendingRef = useRef(false);
+  // 切换项目后等待画布重载完成（CanvasFlow 加载完毕广播 project-canvas-ready）；
+  // 期间看板全屏展示"Opening…"过渡层，避免看板关闭后用户盯着旧项目画布干等
+  const waitCanvasReady = useCallback(
+    (projectId: string) =>
+      new Promise<void>((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          window.removeEventListener('bobagent:project-canvas-ready', onReady);
+          resolve();
+        }, 3000);
+        function onReady(ev: Event) {
+          const d = (ev as CustomEvent).detail as { projectId?: string } | undefined;
+          if (settled || !d || d.projectId !== projectId) return;
+          settled = true;
+          clearTimeout(timer);
+          window.removeEventListener('bobagent:project-canvas-ready', onReady);
+          resolve();
+        }
+        window.addEventListener('bobagent:project-canvas-ready', onReady);
+      }),
+    [],
+  );
 
   // 卡片 TODO 弹窗：目标项目 + 待办明细（notes → pages → lines 三级，含已完成和未完成）
   const [todoProject, setTodoProject] = useState<BoardProject | null>(null);
@@ -896,15 +999,15 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     return () => window.removeEventListener('sticky-notes-changed', onStickyChanged);
   }, [open, load]);
 
-  // Esc 关闭
+  // Esc 关闭（项目打开过渡期间不响应，避免等待画布重载的半途关掉看板）
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape' && !switching) onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, switching]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -992,6 +1095,16 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     return arr;
   }, [filtered, sortKey]);
 
+  // 切换状态视图（Active/Archived/Trash）后，右侧详情跟随该视图：
+  // 选中项目仍在新视图内则保持不动，否则自动选中新视图的第一张卡片（按当前排序）
+  useEffect(() => {
+    if (!viewSelectPendingRef.current) return;
+    viewSelectPendingRef.current = false;
+    if (selected && sorted.some((p) => p.id === selected.id)) return;
+    if (sorted[0]) openDetail(sorted[0]);
+    else setSelected(null);
+  }, [filter, sorted, selected, openDetail]);
+
   // 分组后的列表（none → 单组全量）
   const groups = useMemo(() => {
     if (groupBy === 'none') return [{ key: '__all__', label: '', items: sorted }];
@@ -1019,6 +1132,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     async (projectId: string) => {
       if (projectId === currentId || switching) return;
       setSwitching(projectId);
+      setError('');
       try {
         const resp = await fetch('/api/projects', {
           method: 'POST',
@@ -1028,8 +1142,12 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         const data = await resp.json();
         if (data.success) {
           setCurrentId(projectId);
+          currentIdRef.current = projectId;
           // 与 Sidebar.handleSwitch 一致：广播事件由 CanvasFlow 重载画布
           window.dispatchEvent(new CustomEvent('bobagent:project-switched', { detail: { projectId } }));
+          // 等待目标项目画布就绪后再关闭看板（期间展示 Opening 过渡层），
+          // 避免看板关闭后旧项目画布滞留，看起来像"点了没反应 / 很久才有反应"
+          await waitCanvasReady(projectId);
           onClose();
         } else {
           setError(data.error || 'Failed to switch project');
@@ -1040,7 +1158,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         setSwitching(null);
       }
     },
-    [currentId, switching, onClose],
+    [currentId, switching, onClose, waitCanvasReady],
   );
 
   /** 保存项目名称（rename）：失焦/回车时提交；名称不变或为空时恢复原值 */
@@ -1281,18 +1399,18 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     [todoData, saveTodoPage, pushTodoUndo],
   );
 
-  /** 添加新待办（追加到指定页末尾） */
+  /** 添加新待办（追加到指定页末尾）；返回落盘 Promise（开庭 C 需先落行再建日历事件） */
   const addTodo = useCallback(
     (projectId: string, noteId: string, pageId: string, text: string) => {
-      if (!todoData || !text.trim()) return;
+      if (!todoData || !text.trim()) return Promise.resolve();
       const note = todoData.find((n) => n.noteId === noteId);
       const page = note?.pages.find((pg) => pg.pageId === pageId);
-      if (!page) return;
+      if (!page) return Promise.resolve();
       pushTodoUndo(noteId, pageId, page.lines);
       const newLines = [...page.lines, { done: false, text: text.trim() }];
       // 新行无日历标记，补齐数组长度保持与行对齐
       const newEventIds = page.lineEventIds ? [...page.lineEventIds.map((x) => [...x]), []] : undefined;
-      void saveTodoPage(projectId, noteId, pageId, newLines, newEventIds ? { lineEventIds: newEventIds } : undefined);
+      return saveTodoPage(projectId, noteId, pageId, newLines, newEventIds ? { lineEventIds: newEventIds } : undefined);
     },
     [todoData, saveTodoPage, pushTodoUndo],
   );
@@ -1512,6 +1630,18 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         userSelect: 'text',
       }}
     >
+      {/* 打开项目过渡层：等待目标项目画布重载完成期间全屏提示，切换即刻有反馈 */}
+      {switching && (
+        <div
+          className="absolute inset-0 z-[999] flex flex-col items-center justify-center gap-3"
+          style={{ backgroundColor: 'color-mix(in oklab, var(--bg-secondary, #f7f7f8) 55%, transparent)', backdropFilter: 'blur(2px)' }}
+        >
+          <Loader2 className="h-6 w-6 animate-spin" style={{ color: 'var(--primary-strong, #5b48d8)' }} />
+          <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
+            Opening {projects.find((p) => p.id === switching)?.name || 'project'}…
+          </div>
+        </div>
+      )}
       {/* 顶部工具栏 */}
       <div
         className="flex items-center gap-3 border-b px-5 py-3"
@@ -1522,6 +1652,28 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
           <span className="text-15 font-semibold" style={{ color: 'var(--ink)' }}>
             Projects
           </span>
+          {/* 标题栏开关：打开 BobWork 时自动进入项目面板（每次启动一次）；关闭则直接进入上次项目 */}
+          <div
+            className="ml-3 flex shrink-0 items-center gap-1.5"
+            title="Open this panel every time BobWork launches"
+          >
+            <button
+              type="button"
+              role="switch"
+              aria-checked={openOnLaunch}
+              onClick={() => setOpenOnLaunchPersist(!openOnLaunch)}
+              className="relative h-4 w-7 shrink-0 rounded-full transition-colors"
+              style={{ background: openOnLaunch ? 'var(--primary-strong, #5b48d8)' : 'var(--border)' }}
+            >
+              <span
+                className="absolute top-0.5 h-3 w-3 rounded-full transition-all"
+                style={{ left: openOnLaunch ? 14 : 2, background: '#fff' }}
+              />
+            </button>
+            <span className="text-xs whitespace-nowrap" style={{ color: 'var(--ink-muted)' }}>
+              Open on launch
+            </span>
+          </div>
         </div>
         <div className="ml-2 flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs" style={{ background: 'var(--paper-hover, #f0f0f3)', color: 'var(--ink-muted)' }}>
           {filtered.length}/{projects.length}
@@ -1573,7 +1725,12 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
             <button
               key={c.key}
               type="button"
-              onClick={() => setFilter(c.key)}
+              onClick={() => {
+                if (c.key === filter) return;
+                // 标记：视图切换后由 effect 把右侧详情切到新视图首张卡片
+                viewSelectPendingRef.current = true;
+                setFilter(c.key);
+              }}
               className="rounded-full px-2.5 py-1 text-xs font-medium transition-colors"
               style={
                 filter === c.key
@@ -1680,7 +1837,8 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         </div>
       )}
 
-      {/* 主体：分组卡片网格 + 详情侧栏 */}
+      {/* 主体：分组卡片网格 + 详情侧栏（单击卡片即打开详情；打开/进入项目用卡片右下角 Open 按钮，
+          无双击判定，交互直接无延迟） */}
       <div className="flex min-h-0 flex-1">
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {error && (
@@ -1726,23 +1884,9 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                           role="button"
                           tabIndex={0}
                           onClick={() => {
-                            if (cardClickTimerRef.current) clearTimeout(cardClickTimerRef.current);
-                            // 划选文字时不打开详情，避免弹窗打断复制
+                            // 拖选文字时不打开详情，保证文字可正常复制（卡片内按钮已 stopPropagation）
                             if (hasTextSelection()) return;
-                            cardClickTimerRef.current = setTimeout(() => openDetail(p), 250);
-                          }}
-                          onDoubleClick={() => {
-                            if (cardClickTimerRef.current) clearTimeout(cardClickTimerRef.current);
-                            cardClickTimerRef.current = null;
-                            if (isArchived || isTrashed) return;
-                            // 双击选词时不进入项目，保证文字可复制
-                            if (hasTextSelection()) return;
-                            // 双击进入项目：当前项目直接回到画布，其他项目切换后进入
-                            if (isCurrent) {
-                              onClose();
-                            } else {
-                              void switchTo(p.id);
-                            }
+                            openDetail(p);
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
@@ -1750,8 +1894,10 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                               openDetail(p);
                             }
                           }}
-                          title={isTrashed ? 'Trashed — restore to open' : 'Click for details · double-click to open'}
-                          className="group flex cursor-pointer flex-col rounded-xl p-3 text-left transition-all"
+                          title="Open details"
+                          className="board-card group flex cursor-pointer flex-col rounded-xl p-3 text-left transition-all"
+                          data-current={isCurrent}
+                          data-selected={isSelected}
                           style={{
                             position: 'relative',
                             // 当前项目始终绿色（即使被单击选中也不变色），与其他项目区分；
@@ -1766,11 +1912,8 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                               : isSelected
                                 ? 'color-mix(in oklab, var(--primary, #7c5cff) 6%, var(--paper, #ffffff))'
                                 : 'var(--paper, #ffffff)',
-                            boxShadow: isCurrent
-                              ? '0 0 0 3px color-mix(in oklab, #2fa97a 12%, transparent)'
-                              : isSelected
-                                ? '0 0 0 3px color-mix(in oklab, var(--primary, #7c5cff) 12%, transparent)'
-                                : 'none',
+                            // 卡片阴影（默认/hover/当前/选中）统一在 globals.css 的
+                            // [data-project-board] .board-card 中定义，避免内联样式覆盖 :hover
                             opacity: isTrashed ? 0.6 : 1,
                           }}
                         >
@@ -1859,8 +2002,8 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                           <div className="mt-2 flex items-center justify-between border-t pt-2 text-11" style={{ borderColor: 'var(--border)', color: 'var(--ink-faint)' }}>
                             <span className="flex items-center gap-2.5">
                               <span className="flex items-center gap-1">
-                                <FileText className="h-3 w-3" />
-                                {p.node_count ?? 0} nodes
+                                <MessageSquareText className="h-3 w-3" />
+                                ×{p.node_count ?? 0}
                               </span>
                               {/* Sticky 未完成待办按钮：数量 + 点击弹窗查看明细；有待办时红色呼吸灯，>=3 时节奏加快 */}
                               <button
@@ -1880,7 +2023,22 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                                 {p.todo_count ?? 0}
                               </button>
                             </span>
-                            <span title={`Created ${absDate(p.created_at)}`}>{relTime(p.last_accessed_at || p.created_at)}</span>
+                            {/* 打开/进入项目（唯一入口，替代原双击）：当前项目点击返回画布 */}
+                            <button
+                              type="button"
+                              disabled={isArchived || isTrashed}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isArchived || isTrashed) return;
+                                if (isCurrent) onClose();
+                                else void switchTo(p.id);
+                              }}
+                              title={isArchived || isTrashed ? 'Restore to open' : 'Open project'}
+                              className="shrink-0 rounded-md px-2.5 py-0.5 text-11 font-semibold transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-40"
+                              style={{ color: '#fff', background: 'var(--primary-strong, #5b48d8)' }}
+                            >
+                              Open
+                            </button>
                           </div>
                         </div>
                       );
@@ -1896,7 +2054,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         {selected && (
           <aside
             className="flex w-[340px] shrink-0 flex-col overflow-y-auto border-l px-4 py-4"
-            style={{ borderColor: 'var(--border)', background: '#ffffff' }}
+            style={{ borderColor: 'var(--border)', background: 'var(--bg-secondary, #f7f7f8)' }}
           >
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
@@ -2010,8 +2168,8 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
             {/* 元信息 */}
             <div className="mt-4 flex flex-col gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
               <div className="flex items-center gap-1.5">
-                <FileText className="h-3.5 w-3.5 shrink-0" />
-                <span>{selected.node_count ?? 0} nodes</span>
+                <MessageSquareText className="h-3.5 w-3.5 shrink-0" />
+                <span>×{selected.node_count ?? 0}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <Clock className="h-3.5 w-3.5 shrink-0" />

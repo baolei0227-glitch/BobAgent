@@ -43,6 +43,9 @@
   /* 画布背景：中性浅灰，与节点表面（--paper）拉开亮度差，凸显节点 */
   --canvas-bg: #e6e6ec;
 
+  /* 项目看板背景：与卡片表面（--paper #f7f7f8）拉开亮度差，凸显卡片（对齐 --canvas-bg 分层逻辑） */
+  --bg-secondary: #e6e6ec;
+
   /* 纸张色系 — 4 级层次，间距更分明 */
   --paper: #f7f7f8;
   --paper-soft: #efeff2;
@@ -113,17 +116,19 @@
 }
 
 body {
-  background-color: var(--background);
+  /* 2026-09-11 统一淡灰底：body 用 --canvas-bg，透明左栏透出同一淡灰，
+     与中间画布 pane、右侧 dock 面板形成统一基调 */
+  background-color: var(--canvas-bg);
   color: var(--foreground);
   font-size: 14px;
 }
 
-/* React Flow 画布背景：2026-09 统一浅色底，与根/左栏一致（var(--background)） */
+/* React Flow 画布背景：统一淡灰底（var(--canvas-bg)） */
 .react-flow {
-  background-color: var(--background) !important;
+  background-color: var(--canvas-bg) !important;
 }
 .react-flow__pane {
-  background-color: var(--background) !important;
+  background-color: var(--canvas-bg) !important;
 }
 
 /* 自定义弹窗动画（Apple 风格：减速进入 + 加速退出） */
@@ -330,6 +335,24 @@ body {
   }
 }
 
+/* 项目面板：看板卡片在灰色背景（--bg-secondary）上的层级与“更明显”处理
+   默认阴影建立卡片浮起感；hover 加深阴影并轻微上移；当前/选中态保留绿/紫描边圈。
+   阴影集中在此处，避免卡片内联样式覆盖 :hover（内联优先级高于普通样式表）。 */
+[data-project-board] .board-card {
+  box-shadow: 0 1px 3px rgba(23, 23, 23, 0.10);
+}
+[data-project-board] .board-card:hover {
+  box-shadow: 0 6px 16px rgba(23, 23, 23, 0.16);
+  transform: translateY(-1px);
+}
+/* 当前/选中态：优先使用状态描边圈，覆盖 hover 阴影（同特异性，置于 hover 之后） */
+[data-project-board] .board-card[data-current='true'] {
+  box-shadow: 0 0 0 3px color-mix(in oklab, #2fa97a 14%, transparent);
+}
+[data-project-board] .board-card[data-selected='true'] {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary, #7c5cff) 14%, transparent);
+}
+
 /* 项目面板待办按钮呼吸灯：未完成待办 > 0 时红色脉冲呼吸（透明度 + 红色外发光），提醒待处理；
    待办 >= 3 时前端以更短的 animation-duration 加速节奏 */
 @keyframes todo-breathe {
@@ -415,6 +438,27 @@ body {
 }
 [data-canvas-ui="overlay"] ::-moz-selection {
   background-color: transparent !important;
+  color: inherit !important;
+}
+
+/* 项目看板：恢复文字选中高亮（覆盖上方 overlay 的透明选中，文字仍可正常复制） */
+[data-project-board] ::selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+[data-project-board] ::-moz-selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+
+/* Templates 模板面板：位于 data-canvas-ui="overlay" 内，选中高亮被上方规则置为透明；
+   为此面板单独恢复文字选中高亮（沿用全局金色），输入框内选区也可见 */
+[data-template-panel] ::selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+[data-template-panel] ::-moz-selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
   color: inherit !important;
 }
 
@@ -768,10 +812,10 @@ body {
 }
 
 /* 允许节点对话框内文本选择：
-   覆盖 @xyflow/react base.css 的 .react-flow__node { user-select: none }。
+   覆盖旧 React Flow base.css 的 .react-flow__node { user-select: none }。
    对所有画布节点生效（含动态注册的 agent-* 节点：agent-chat / agent-coding / agent-note 等，
    不再逐类枚举，避免新 agent 节点漏配）。
-   拖动与选择的分工由 d3-drag 保证：非 .nodrag 区域（节点外壳/头部）mousedown 被
+   拖动与选择的分工由宿主节点容器保证：非 .nodrag 区域（节点外壳/头部）mousedown 被
    preventDefault → 照常拖拽节点；.nodrag 区域（消息内容等）→ 允许原生文本选中。 */
 .react-flow__node,
 .react-flow__node * {
@@ -1407,4 +1451,51 @@ body {
   display: none;
   width: 0;
   height: 0;
+}
+
+/* ===== Hippo Browser 胶囊态（收起后主窗口顶中部的窄胶囊 + 呼吸灯） ===== */
+.hippo-capsule {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translate(-50%, 0);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, #6b5cf0 0%, #4b3fe3 100%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(75, 63, 227, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.hippo-capsule:hover {
+  transform: translate(-50%, 0) scale(1.05);
+  box-shadow: 0 10px 30px rgba(75, 63, 227, 0.5);
+}
+.hippo-capsule__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.5);
+  animation: hippo-capsule-pulse 4.6s ease-in-out infinite;
+}
+@keyframes hippo-capsule-breathe {
+  0%, 100% {
+    box-shadow: 0 6px 20px rgba(75, 63, 227, 0.35), 0 0 0 0 rgba(107, 92, 240, 0.45);
+  }
+  50% {
+    box-shadow: 0 6px 20px rgba(75, 63, 227, 0.35), 0 0 0 16px rgba(107, 92, 240, 0);
+  }
+}
+@keyframes hippo-capsule-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }

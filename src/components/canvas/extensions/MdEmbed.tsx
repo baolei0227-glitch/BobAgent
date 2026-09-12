@@ -2,40 +2,115 @@
 
 // 文档嵌入扩展：`![[路径]]` → 嵌入卡片 NodeView
 //
-// 编辑器内把 `![[homework/report.md]]` 渲染为一张可点击的嵌入卡片（标题 + 来源），
-// 点击跳转到目标文档分享页 / 编辑器打开；阅读/分享时由服务端 expandEmbeds 展开为完整内容。
+// 编辑器内把 `![[homework/report.md]]` 渲染为一张可折叠的嵌入卡片：
+// - 折叠态只显示文档名（标题 + 来源）；
+// - 点击卡片展开，向宿主（DocEditor）请求目标文档内容并预览部分内容；
+// - 右上角打开按钮跳转到目标文档分享页 / 编辑器打开；
+// 阅读/分享时由服务端 expandEmbeds 展开为完整内容。
 // markdown 序列化：卡片 → `![[路径]]`（保持源文本可移植）。
 
+import { useEffect, useRef, useState } from 'react';
 import { Node } from '@tiptap/core';
 import { ReactNodeViewRenderer, NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
-import { FileText, ExternalLink } from 'lucide-react';
+import { FileText, ExternalLink, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 
-/** 嵌入卡片 NodeView 组件：显示文档名，点击在应用内打开目标文档（由宿主监听事件处理） */
+/** 预览请求序号：NodeView 与宿主通过 rid 对账，避免旧响应串卡 */
+let previewSeq = 0;
+
+/** 嵌入卡片 NodeView 组件：折叠显示文档名；展开拉取目标文档内容预览 */
 function MdEmbedView({ node }: NodeViewProps) {
   const path = (node.attrs.path as string) || '';
   const label = path.split('/').pop()?.replace(/\.md$/i, '') || path;
+  const [expanded, setExpanded] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const ridRef = useRef<number>(0);
+
+  // 监听宿主返回的预览内容（按 rid 匹配当前卡片）
+  useEffect(() => {
+    const onResult = (e: Event) => {
+      const d = (e as CustomEvent<{ rid: number; ok: boolean; text?: string }>).detail;
+      if (!d || d.rid !== ridRef.current) return;
+      setLoading(false);
+      if (d.ok && d.text) {
+        setPreview(d.text);
+        setFailed(false);
+      } else {
+        setFailed(true);
+      }
+    };
+    window.addEventListener('md-embed-preview-result', onResult);
+    return () => window.removeEventListener('md-embed-preview-result', onResult);
+  }, []);
+
+  const toggleExpand = () => {
+    if (expanded) {
+      setExpanded(false);
+      return;
+    }
+    setExpanded(true);
+    // 首次展开且无缓存 → 向宿主请求内容预览（超时降级为「无法预览」）
+    if (preview === null && !failed) {
+      setLoading(true);
+      const rid = ++previewSeq;
+      ridRef.current = rid;
+      window.dispatchEvent(new CustomEvent('md-embed-preview-request', { detail: { path, rid } }));
+      window.setTimeout(() => {
+        if (ridRef.current === rid) {
+          setLoading(false);
+          setFailed(true);
+        }
+      }, 1500);
+    }
+  };
+
+  const openDoc = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    window.dispatchEvent(new CustomEvent('md-embed-open', { detail: { path } }));
+  };
 
   return (
     <NodeViewWrapper
       as="div"
       className="md-embed-card"
       data-path={path}
-      onClick={(e: React.MouseEvent) => {
-        // 交给宿主处理（DocEditor 监听 md-embed-open 事件打开目标文档）
-        e.preventDefault();
-        e.stopPropagation();
-        window.dispatchEvent(new CustomEvent('md-embed-open', { detail: { path } }));
-      }}
-      title={`嵌入文档：${path}（点击打开）`}
+      title={`嵌入文档：${path}`}
+      contentEditable={false}
     >
-      <span className="md-embed-icon-wrap">
-        <FileText className="md-embed-icon" />
-      </span>
-      <span className="md-embed-text">
-        <span className="md-embed-label">{label}</span>
-        <span className="md-embed-sub">嵌入文档</span>
-      </span>
-      <ExternalLink className="md-embed-open" />
+      <div className="md-embed-head" onClick={toggleExpand}>
+        <span className="md-embed-icon-wrap">
+          <FileText className="md-embed-icon" />
+        </span>
+        <span className="md-embed-text">
+          <span className="md-embed-label">{label}</span>
+          <span className="md-embed-sub">嵌入文档 · 点击展开预览</span>
+        </span>
+        <span className="md-embed-tools">
+          <span className="md-embed-open" role="button" title="打开文档" onClick={openDoc}>
+            <ExternalLink className="md-embed-open-icon" />
+          </span>
+          <span className="md-embed-chevron">
+            {expanded ? <ChevronUp className="md-embed-open-icon" /> : <ChevronDown className="md-embed-open-icon" />}
+          </span>
+        </span>
+      </div>
+      {expanded && (
+        <div className="md-embed-preview">
+          {loading ? (
+            <span className="md-embed-preview-state">
+              <Loader2 className="md-embed-spin" size={12} /> 加载预览…
+            </span>
+          ) : preview ? (
+            <pre className="md-embed-preview-text">{preview}</pre>
+          ) : (
+            <span className="md-embed-preview-state">
+              {failed ? '无法预览（文档不可读），点击右上角打开' : ''}
+            </span>
+          )}
+        </div>
+      )}
     </NodeViewWrapper>
   );
 }
