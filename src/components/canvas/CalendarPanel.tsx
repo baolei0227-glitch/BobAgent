@@ -1382,14 +1382,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             </div>
             )}
 
-            {/* 选中日期待办：独立滚动区域（最多占 45% 高度，待办多时内部滚动，不影响日历网格） */}
-            <div
-              className="shrink-0 min-h-0 max-h-[45%] overflow-y-auto border-t"
-              style={{ borderColor: 'var(--line)' }}
-            >
+            {/* 选中日期待办：固定高度卡片（高度不随待办数量变化，内容过多时内部滚动，避免挤压日历网格） */}
+            <div className="shrink-0 h-[34%] min-h-[132px] max-h-[300px] px-3 pb-3 pt-2">
               <div
-                className="flex items-center gap-1.5 px-4 py-2"
-                style={{ backgroundColor: 'var(--paper-muted)' }}
+                className="flex h-full flex-col overflow-hidden rounded-xl border"
+                style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', boxShadow: 'var(--shadow-sm)' }}
+              >
+              <div
+                className="flex shrink-0 items-center gap-1.5 border-b px-3 py-2"
+                style={{ backgroundColor: 'var(--paper-muted)', borderColor: 'var(--line-soft)' }}
               >
                 <Clock className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
                 <span className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>
@@ -1401,14 +1402,16 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               </div>
 
               {selectedDateEvents.length === 0 ? (
-                <EmptyState
-                  size="sm"
-                  preset="inbox"
-                  title={selectedDate === todayStr ? 'Nothing scheduled today' : 'Nothing scheduled'}
-                  description="Double-click a day or use + to add an event."
-                />
+                <div className="flex min-h-0 flex-1 items-center justify-center">
+                  <EmptyState
+                    size="sm"
+                    preset="inbox"
+                    title={selectedDate === todayStr ? 'Nothing scheduled today' : 'Nothing scheduled'}
+                    description="Double-click a day or use + to add an event."
+                  />
+                </div>
               ) : (
-                <div className="divide-y divide-[var(--line-soft)]">
+                <div className="min-h-0 flex-1 divide-y divide-[var(--line-soft)] overflow-y-auto">
                   {selectedDateEvents.map((ev) => (
                     <div
                       key={ev.event_id}
@@ -1474,6 +1477,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                   ))}
                 </div>
               )}
+              </div>
             </div>
           </>
         )}

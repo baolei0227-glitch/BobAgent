@@ -622,12 +622,12 @@ function UnifiedReaderPanel({
       style={{
         width: PANEL_W,
         zIndex: 50,
-        // 2026-09-11 统一淡灰底：面板底改 --paper-soft(#efeff2)，比画布 --canvas-bg(#e6e6ec) 略亮一层
+        // 2026-09-12 预览面板改纯白：与灰色画布底 --canvas-bg(#e6e6ec) 拉开对比
         borderRadius: 12,
         overflow: 'hidden',
         border: '1px solid',
         borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
-        background: 'linear-gradient(180deg, color-mix(in srgb, #fff 4%, var(--paper-soft)) 0%, var(--paper-soft) 38%)',
+        background: '#fff',
         boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent)',
         WebkitAppRegion: 'no-drag',
         pointerEvents: 'auto',
@@ -695,7 +695,7 @@ function UnifiedReaderPanel({
             const TabIcon = tab.type === 'file' ? FileText : tab.type === 'sandbox' ? Code2 : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
             return (
               <div key={tab.id} className={`group flex shrink-0 items-center ${idx >= visibleCount ? 'hidden' : ''}`}>
-                {/* 圆角胶囊标签：类型图标 + 标签名 + 关闭按钮；选中态带底部高亮指示条 */}
+                {/* 圆角胶囊标签：类型图标 + 标签名 + 关闭按钮；选中态以背景+边框高亮，不加下划线 */}
                 <button
                   onClick={() => handleSelectTab(tab.type, tab.id)}
                   className={`group/tab relative mx-0.5 flex max-w-[148px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-all ${
@@ -726,12 +726,6 @@ function UnifiedReaderPanel({
                   >
                     {tab.label}
                   </span>
-                  {isActive && (
-                    <span
-                      className="absolute bottom-0.5 left-2 right-2 h-[2px] rounded-full"
-                      style={{ backgroundColor: 'var(--primary)' }}
-                    />
-                  )}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1750,6 +1744,13 @@ function CanvasFlowInner() {
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
   const [activePanelTab, setActivePanelTab] = useState<{ type: 'node' | 'file' | 'sandbox' | 'template' | 'plugin'; id: string } | null>(null);
+  // 切换 BobWork 页面（预览面板 tab）时自动收起 Hippo Browser 为胶囊：
+  // 浏览器是独立的系统级置顶窗口，不会随页面切换走，留在最上层会遮住新页面。
+  // collapse 幂等，主进程会跳过「已收起 / 已关闭 / 用户正在浏览器里操作」的情况。
+  useEffect(() => {
+    if (!isDesktop()) return;
+    void desktop.hippoBrowser.collapse();
+  }, [activePanelTab?.type, activePanelTab?.id]);
   const [pluginPanels, setPluginPanels] = usePluginPanels();
   // 模板插件 tab：打开时预选的场景名（AI 扫描到模板字段后跳转携带）
   const [templateInitialScene, setTemplateInitialScene] = useState<string | undefined>(undefined);
@@ -2916,6 +2917,8 @@ function CanvasFlowInner() {
       setCurrentProjectId(projectId);
       setHasProject(true);
       setSelectedNodeIds(new Set());
+      // 切换项目同样属于「切页」：顺手把置顶的 Hippo Browser 收起为胶囊（幂等）
+      if (isDesktop()) void desktop.hippoBrowser.collapse();
       try {
         await loadProjectData();
       } finally {

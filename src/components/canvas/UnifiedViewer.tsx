@@ -410,7 +410,7 @@ export function UnifiedViewer({
   if (collapsed && mode === 'standalone') {
     return (
       <div className="fixed right-0 top-0 flex flex-col items-center justify-center"
-        style={{ width: '44px', height: '100%', backgroundColor: 'var(--paper-soft)', borderLeft: '1px solid var(--line)', boxShadow: '-4px 0 16px rgba(0, 0, 0, 0.04)', zIndex }}>
+        style={{ width: '44px', height: '100%', backgroundColor: '#fff', borderLeft: '1px solid var(--line)', boxShadow: '-4px 0 16px rgba(0, 0, 0, 0.04)', zIndex }}>
         <button onClick={() => setCollapsed(false)}
           className="flex flex-col items-center gap-1.5 rounded-lg px-2 py-3 transition-colors hover:bg-[var(--paper-hover)]"
           style={{ color: 'var(--info)' }} title="Expand">
@@ -436,9 +436,8 @@ export function UnifiedViewer({
         width: mode === 'standalone' ? '48%' : '100%',
         minWidth: mode === 'standalone' ? '480px' : undefined,
         maxWidth: mode === 'standalone' ? '780px' : undefined,
-        // 2026-09-12 统一淡灰底：预览面板内容层与中栏会话卡片、面板外壳同为 --paper-soft(#efeff2)，
-        // 不再用更亮的 --paper(#f7f7f8)，避免同屏两栏背景割裂
-        backgroundColor: 'var(--paper-soft)',
+        // 2026-09-12 预览面板内容层改纯白：与面板外壳、中栏会话卡片同为白色
+        backgroundColor: '#fff',
         borderLeft: mode === 'standalone' ? '1px solid var(--line)' : undefined,
         boxShadow: mode === 'standalone' ? '-12px 0 32px rgba(0, 0, 0, 0.06)' : undefined,
         zIndex: mode === 'standalone' ? zIndex : undefined,
@@ -449,7 +448,7 @@ export function UnifiedViewer({
       {/* Header（floating 模式嵌入预览面板时省略：名称/关闭已由外部标签栏承担） */}
       {mode !== 'floating' && (
       <div className="flex shrink-0 items-center gap-3 px-5 py-3"
-        style={{ borderBottom: '1px solid var(--line-soft)', backgroundColor: 'var(--paper-soft)' }}
+        style={{ borderBottom: '1px solid var(--line-soft)', backgroundColor: '#fff' }}
       >
         {mode === 'tabbed' && onToggleCollapse && (
           <Button onClick={(e) => { e.stopPropagation(); onToggleCollapse(); }}

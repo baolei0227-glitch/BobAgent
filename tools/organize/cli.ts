@@ -13,52 +13,20 @@
  *   --undo           按 _整理日志.json 回滚
  *   --model <p:m>    指定模型，如 deepseek:deepseek-flash
  *   --help
+ *
+ * 整理流程（扫描 / 规划 / 落盘）复用 core.ts，与应用运行期的常驻监听
+ * （src/lib/file-organizer/watcher.ts）保持同一套实现。
  */
 import { promises as fs, watch } from 'fs';
-import { extname, isAbsolute, join, resolve } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 
-import { extract } from './extract';
-import {
-  CATEGORIES,
-  LOW_CONFIDENCE,
-  PENDING_DIR,
-  classifyImage,
-  classifyText,
-  normalizeCategories,
-  resolveModel,
-  type FileInsight,
-  type ResolvedModel,
-} from './model';
+import { CATEGORIES, normalizeCategories } from './model';
 import { readSettingsFromFile } from '@/lib/settings-server';
-import {
-  LOG_NAME,
-  appendLog,
-  buildTargetName,
-  formatVersion,
-  resolveVersionIndex,
-  safeDirName,
-  shouldSkip,
-  todayStamp,
-  undo,
-  type MoveRecord,
-} from './naming';
+import { LOG_NAME, appendLog, todayStamp, undo, type MoveRecord } from './naming';
+import { SETTLE_MS, commitPlan, scanAndPlan } from './core';
 
-/** 新写入的文件需静置多久才处理（毫秒），避免读到写一半的文件 */
-const SETTLE_MS = 3000;
 /** 监听模式的事件防抖窗口（毫秒） */
 const DEBOUNCE_MS = 2500;
-
-interface Plan {
-  from: string;
-  targetDir: string;
-  targetName: string;
-  category: string;
-  topic: string;
-  version: string;
-  confidence: number;
-  modelName: string;
-  note: string;
-}
 
 /* ==================== 输出美化 ==================== */
 
@@ -136,117 +104,25 @@ function printHelp(): void {
 
 /* ==================== 核心流程 ==================== */
 
-/** 主题兜底：解析失败/低置信度时用原文件名当主题 */
-function topicFromFileName(name: string): string {
-  const base = name.slice(0, name.length - extname(name).length)
-    .replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '')
-    .replace(/\s+/g, '')
-    .slice(0, 40);
-  return base || '未命名';
-}
-
-/** 列目录：只要根目录下的普通文件（子文件夹天然不会递归进来） */
-async function listFiles(root: string): Promise<string[]> {
-  const entries = await fs.readdir(root, { withFileTypes: true });
-  return entries
-    .filter((e) => e.isFile() && !shouldSkip(e.name))
-    .map((e) => e.name)
-    .sort();
-}
-
-/** 文件是否已写入完毕（仅监听模式需要，避免读到写一半的内容） */
-async function isSettled(filePath: string): Promise<boolean> {
-  try {
-    const st = await fs.stat(filePath);
-    return Date.now() - st.mtimeMs >= SETTLE_MS;
-  } catch {
-    return false;
-  }
-}
-
-/** 规划单个文件的去向（不落盘） */
-async function planOne(
-  root: string,
-  name: string,
-  stamp: string,
-  categories: readonly string[],
-  modelCache: Map<string, ResolvedModel | null>,
-  override?: string,
-): Promise<Plan> {
-  const from = join(root, name);
-  const ext = extname(name).toLowerCase();
-  const extracted = await extract(from);
-
-  const needVision = extracted.kind === 'image';
-  const cacheKey = needVision ? 'vision' : 'text';
-  if (!modelCache.has(cacheKey)) modelCache.set(cacheKey, await resolveModel(needVision, override));
-  const model = modelCache.get(cacheKey) ?? null;
-
-  let insight: FileInsight | null = null;
-  let note = '';
-  if (!model) {
-    note = '未找到可用模型';
-  } else if (extracted.kind === 'unsupported') {
-    note = extracted.reason;
-  } else {
-    try {
-      insight = extracted.kind === 'image'
-        ? await classifyImage(model, name, extracted.dataUrl, categories)
-        : await classifyText(model, name, extracted.text, categories);
-      if (!insight) note = '模型未返回有效结果';
-    } catch (e) {
-      note = `模型调用失败：${(e as Error)?.message || e}`;
-    }
-  }
-
-  // 低置信度或识别失败 → 落 _待处理，交由人工
-  const usable = !!insight && !!insight.topic && insight.confidence >= LOW_CONFIDENCE;
-  const category = usable ? insight!.category : PENDING_DIR;
-  const topic = usable ? insight!.topic : topicFromFileName(name);
-  const docVersion = usable ? insight!.version : null;
-  const confidence = insight?.confidence ?? 0;
-
-  const targetDir = join(root, safeDirName(category));
-  const versionIndex = await resolveVersionIndex(targetDir, topic, docVersion);
-  const targetName = await buildTargetName(targetDir, stamp, topic, ext, versionIndex);
-
-  return {
-    from,
-    targetDir,
-    targetName,
-    category,
-    topic,
-    version: formatVersion(versionIndex),
-    confidence,
-    modelName: model?.model ?? '',
-    note,
-  };
-}
-
 /** 跑一轮：扫描 → 规划 → 打印 → （可选）落盘。返回因仍在写入而跳过、需重试的文件数 */
 async function runOnce(args: Args, settle: boolean): Promise<number> {
   const { root, apply, model } = args;
   const stamp = todayStamp();
-  const files = await listFiles(root);
-  if (files.length === 0) {
+  const { plans, total, writing } = await scanAndPlan({
+    root,
+    categories: args.categories,
+    stamp,
+    model,
+    settle,
+  });
+  if (total === 0) {
     console.log(`（${root} 下没有待整理的文件）`);
     return 0;
   }
 
   console.log(`\n目录：${root}`);
   console.log(`日期：${stamp}　模式：${apply ? '执行' : '预览（不改动任何文件）'}\n`);
-
-  const modelCache = new Map<string, ResolvedModel | null>();
-  const plans: Plan[] = [];
-  let pending = 0;
-  for (const name of files) {
-    if (settle && !(await isSettled(join(root, name)))) {
-      console.log(`· 跳过（文件仍在写入）：${name}`);
-      pending++;
-      continue;
-    }
-    plans.push(await planOne(root, name, stamp, args.categories, modelCache, model));
-  }
+  for (const name of writing) console.log(`· 跳过（文件仍在写入）：${name}`);
 
   const rows: string[][] = [];
   const records: MoveRecord[] = [];
@@ -259,20 +135,7 @@ async function runOnce(args: Args, settle: boolean): Promise<number> {
       p.note,
     ]);
 
-    if (apply) {
-      await fs.mkdir(p.targetDir, { recursive: true });
-      await fs.rename(p.from, targetAbs);
-      records.push({
-        at: new Date().toISOString(),
-        from: p.from,
-        to: targetAbs,
-        category: p.category,
-        topic: p.topic,
-        version: p.version,
-        confidence: p.confidence,
-        model: p.modelName,
-      });
-    }
+    if (apply) records.push(await commitPlan(p));
   }
 
   const header = ['原文件', '整理为', '置信度', '备注'];
@@ -289,7 +152,7 @@ async function runOnce(args: Args, settle: boolean): Promise<number> {
   } else {
     console.log('\n没有可执行的文件。');
   }
-  return pending;
+  return writing.length;
 }
 
 /** 监听模式：放入文件 → 防抖 → 整理一轮；未写入完成的文件稍后自动重试 */

@@ -372,8 +372,10 @@ function normalizeFileUrl(raw: string): string {
 }
 
 // ============ 书签（本地 JSON 持久化） ============
-// 书签结构：{ url, title, addedAt }，存于用户数据目录 browser-bookmarks.json
-let bmCache: Array<{ url: string; title: string; addedAt: number }> | null = null;
+// 书签结构：{ url, title, favicon, addedAt }，存于用户数据目录 browser-bookmarks.json
+// favicon 仅新收藏的条目有值；老书签缺该字段，渲染时退回站点根 favicon.ico
+type HippoBookmark = { url: string; title: string; favicon?: string; addedAt: number };
+let bmCache: HippoBookmark[] | null = null;
 function bmFile(): string {
   return join(app.getPath('userData'), 'browser-bookmarks.json');
 }
@@ -382,7 +384,7 @@ function bmSave(): void {
     writeFileSync(bmFile(), JSON.stringify(bmCache ?? []), 'utf8');
   } catch { /* 忽略持久化失败 */ }
 }
-function bmLoad(): Array<{ url: string; title: string; addedAt: number }> {
+function bmLoad(): HippoBookmark[] {
   if (bmCache) return bmCache;
   try {
     if (existsSync(bmFile())) {
@@ -396,7 +398,7 @@ function bmLoad(): Array<{ url: string; title: string; addedAt: number }> {
 }
 function registerBookmarkHandlers(): void {
   ipcMain.handle('hippo-browser:bm-list', () => ({ ok: true, list: bmLoad() }));
-  ipcMain.handle('hippo-browser:bm-toggle', (_e, payload: { url?: string; title?: string }) => {
+  ipcMain.handle('hippo-browser:bm-toggle', (_e, payload: { url?: string; title?: string; favicon?: string }) => {
     const url = (payload?.url ?? '').trim();
     if (!url) return { ok: false, error: '缺少网址' };
     const list = bmLoad();
@@ -406,7 +408,8 @@ function registerBookmarkHandlers(): void {
       list.splice(exists, 1);
       bookmarked = false;
     } else {
-      list.push({ url, title: (payload?.title ?? '').trim() || url, addedAt: Date.now() });
+      // favicon 随收藏一并落盘，供书签栏渲染品牌图标（老书签无此字段，渲染时退回站点根 favicon.ico）
+      list.push({ url, title: (payload?.title ?? '').trim() || url, favicon: (payload?.favicon ?? '').trim(), addedAt: Date.now() });
       bookmarked = true;
     }
     bmCache = list;
@@ -431,6 +434,22 @@ function registerBookmarkHandlers(): void {
     bmCache = list;
     bmSave();
     return { ok: true, list };
+  });
+  // 书签右键菜单：主进程弹原生菜单（浮在网页 view 之上），动作经 menu-cmd 回传工具栏执行
+  ipcMain.handle('hippo-browser:bm-menu', (_e, payload: { url?: string }) => {
+    const url = (payload?.url ?? '').trim();
+    if (!url) return;
+    const bmCmd = (action: string) => {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send('hippo-browser:menu-cmd', `bm:${action}:${url}`);
+      }
+    };
+    const items: Electron.MenuItemConstructorOptions[] = [
+      { label: '重命名', click: () => bmCmd('rename') },
+      { type: 'separator' },
+      { label: '删除书签', click: () => bmCmd('remove') },
+    ];
+    Menu.buildFromTemplate(items).popup(win && !win.isDestroyed() ? { window: win } : undefined);
   });
 }
 
@@ -832,9 +851,12 @@ function toolbarHtml(): string {
   .tl { display: grid; grid-auto-flow: column; gap: 8px; padding: 0 8px 0 6px; align-items: center; }
   .tl button { width: 12px; height: 12px; border-radius: 50%; border: none; padding: 0; cursor: pointer;
     -webkit-app-region: no-drag; display: inline-flex; align-items: center; justify-content: center;
-    font-size: 9px; color: transparent; line-height: 1;
     /* 内侧 1px 描边 + 顶部高光 + 底部微投影，营造原生玻璃金属质感 */
     box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.22), inset 0 1px 1px rgba(0,0,0,.16), inset 0 -1px 1px rgba(255,255,255,.18); }
+  /* 图标用矢量描边/填充，不用 Unicode 字形（小字号发虚、字形不统一）；
+     默认隐藏，鼠标移入整组红绿灯才浮现，与 macOS 原生一致 */
+  .tl button svg { width: 8px; height: 8px; opacity: 0; transition: opacity .12s; }
+  .tl:hover button svg { opacity: 1; }
   .tl button:active { filter: brightness(.92); }
   .tl button:hover { color: rgba(0,0,0,.62); }
   .tl .r { background: linear-gradient(#ff6a64, #ff5146); }
@@ -850,20 +872,13 @@ function toolbarHtml(): string {
   .addrStar:hover { background: #ececf4; }
   .addrStar.on { color: #f5b301; }
   /* ===== 书签标签栏（标星的网址，位于地址栏下方） ===== */
-  .bmtabs { display: flex; align-items: center; gap: 6px; padding: 5px 8px; min-height: 36px; flex: none; width: 100%;
+  .bmtabs { display: flex; align-items: center; gap: 5px; padding: 3px 8px; min-height: 28px; flex: none; width: 100%;
     border-bottom: 1px solid #e4e4ec; background: #fbfbfe; overflow-x: auto; -webkit-app-region: drag; }
-  .bmtab { display: inline-flex; align-items: center; gap: 4px; max-width: 180px; height: 24px; padding: 0 6px 0 10px; border-radius: 12px;
-    background: #eef0f8; color: #444; font-size: 12px; cursor: pointer; flex: none; -webkit-app-region: no-drag; }
+  .bmtab { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; height: 20px; padding: 0 7px; border-radius: 10px;
+    background: #eef0f8; color: #444; font-size: 11px; cursor: pointer; flex: none; -webkit-app-region: no-drag; }
   .bmtab:hover { background: #e4e7f2; }
-  .bmtab.cur { background: #6b5cf0; color: #fff; }
+  .bmtab .fav { flex: none; width: 12px; height: 12px; border-radius: 3px; object-fit: contain; }
   .bmtab .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bmtab .x { flex: none; width: 16px; height: 16px; border: none; background: transparent; color: inherit; font-size: 13px; line-height: 1;
-    cursor: pointer; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
-  .bmtab .x:hover { background: rgba(0,0,0,.14); }
-  .bmtab .e { flex: none; width: 16px; height: 16px; border: none; background: transparent; color: inherit; font-size: 11px; line-height: 1;
-    cursor: pointer; border-radius: 50%; display: none; align-items: center; justify-content: center; }
-  .bmtab:hover .e { display: inline-flex; }
-  .bmtab .e:hover { background: rgba(0,0,0,.14); }
   .bmEdit { flex: none; width: 110px; height: 20px; padding: 0 5px; border: 1px solid #6b5cf0; border-radius: 4px;
     font-size: 12px; color: #222; background: #fff; outline: none; -webkit-app-region: no-drag; }
   .bmEmpty { padding: 2px 8px; color: #b0b0c0; font-size: 11.5px; -webkit-app-region: no-drag; }
@@ -970,9 +985,9 @@ function toolbarHtml(): string {
 <div class="progbar" id="progbar"></div>
 <div class="bar">
   <span class="tl">
-    <button class="r" id="winClose" title="关闭">&#10005;</button>
-    <button class="y" id="winMin" title="最小化">&#8722;</button>
-    <button class="g" id="winMax" title="缩放">&#8645;</button>
+    <button class="r" id="winClose" title="关闭" aria-label="关闭"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" aria-hidden="true"><path d="M1.9 1.9 6.1 6.1"></path><path d="M6.1 1.9 1.9 6.1"></path></svg></button>
+    <button class="y" id="winMin" title="最小化" aria-label="最小化"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" aria-hidden="true"><path d="M1.7 4h4.6"></path></svg></button>
+    <button class="g" id="winMax" title="缩放" aria-label="缩放"><svg viewBox="0 0 8 8" aria-hidden="true"><path d="M4.5 1.2h2.3v2.3z" fill="currentColor"></path><path d="M3.5 6.8H1.2V4.5z" fill="currentColor"></path></svg></button>
   </span>
   <button class="btn" id="back" title="后退">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"></path><path d="M12 19l-7-7 7-7"></path></svg>
@@ -1055,7 +1070,11 @@ function toolbarHtml(): string {
     adblockOn: () => alert('\u5DF2\u5F00\u542F\u5E7F\u544A/\u8DDF\u8E2A\u811A\u672C\u62E6\u622A'),
     adblockOff: () => alert('\u5DF2\u5173\u95ED\u5E7F\u544A/\u8DDF\u8E2A\u811A\u672C\u62E6\u622A'),
   };
-  if (BAPI && BAPI.onMenuCmd) BAPI.onMenuCmd((a) => { const f = act[a]; if (f) f(); });
+  // 主进程回传的菜单动作：工具有 act 表；书签右键菜单用 bm: 前缀单独分发
+  if (BAPI && BAPI.onMenuCmd) BAPI.onMenuCmd((a) => {
+    if (typeof a === 'string' && a.indexOf('bm:') === 0) { onBmMenuCmd(a); return; }
+    const f = act[a]; if (f) f();
+  });
   $('winClose').onclick = () => BAPI && BAPI.close();
   $('winMin').onclick = () => BAPI && BAPI.minimize();
   $('winMax').onclick = () => BAPI && BAPI.toggleMaximize();
@@ -1121,6 +1140,7 @@ function toolbarHtml(): string {
     }, 180);
   }
   let current = null;
+  let curFavicon = ''; // 当前激活标签的 favicon，收藏时随书签一起落盘
   let lastStateUrl = null;
   const applyState = (s) => {
     current = s;
@@ -1155,46 +1175,80 @@ function toolbarHtml(): string {
       const empty = document.createElement('span'); empty.className = 'bmEmpty';
       empty.textContent = '暂无书签 —— 点地址栏 ★ 收藏当前网址'; tabs.appendChild(empty); return;
     }
-    const cu = current ? (current.url || '') : '';
     bmAry.forEach((b) => {
-      const tab = document.createElement('span'); tab.className = 'bmtab' + (b.url === cu ? ' cur' : '');
+      // 不加当前页高亮：当前浏览位置已由上方标签条（.tbtab.cur）标示，书签栏重复高亮反而误导
+      const tab = document.createElement('span'); tab.className = 'bmtab';
       tab.title = b.url;
-      const t = document.createElement('span'); t.className = 't'; t.textContent = b.title || b.url;
-      const e = document.createElement('button'); e.className = 'e'; e.title = '重命名书签'; e.textContent = '\u270e';
-      const x = document.createElement('button'); x.className = 'x'; x.title = '删除书签'; x.textContent = '\u00d7';
-      x.onclick = async (ev) => { ev.stopPropagation(); if (!BAPI) return; const r = await BAPI.bmRemove(b.url); if (r && r.ok) { bmAry = r.list; renderBmTabs(); refreshStar(); } };
-      e.onclick = (ev) => { ev.stopPropagation(); startRename(); };
-      tab.appendChild(t); tab.appendChild(e); tab.appendChild(x);
-      tab.addEventListener('click', () => { if (BAPI) BAPI.navigate(b.url); });
-      tabs.appendChild(tab);
-
-      function startRename() {
-        if (!BAPI) return;
-        bmEditing = true;
-        const input = document.createElement('input');
-        input.className = 'bmEdit'; input.value = b.title || b.url; input.spellcheck = false;
-        let done = false;
-        const commit = async (save) => {
-          if (done) return; done = true;
-          const val = input.value.trim();
-          if (save && val && val !== (b.title || b.url)) {
-            try { const r = await BAPI.bmRename({ url: b.url, title: val }); if (r && r.ok) bmAry = r.list; } catch (_) { /* 忽略 */ }
-          }
-          bmEditing = false;
-          renderBmTabs(); refreshStar();
-        };
-        input.addEventListener('keydown', (ev) => {
-          ev.stopPropagation();
-          if (ev.key === 'Enter') { ev.preventDefault(); commit(true); }
-          else if (ev.key === 'Escape') { ev.preventDefault(); commit(false); }
-        });
-        input.addEventListener('blur', () => commit(true));
-        input.addEventListener('click', (ev) => ev.stopPropagation());
-        t.style.display = 'none'; e.style.display = 'none';
-        tab.insertBefore(input, t);
-        input.focus(); input.select();
+      const fav = document.createElement('img'); fav.className = 'fav'; fav.alt = '';
+      let favSrc = b.favicon || '';
+      if (!favSrc) {
+        // 老书签没存图标：退回站点根 favicon.ico，加载失败（onerror）再隐藏，不留破图
+        try { const o = new URL(b.url).origin; if (o && o !== 'null') favSrc = o + '/favicon.ico'; } catch (_) { /* 非标准 URL 忽略 */ }
       }
+      if (favSrc) { fav.src = favSrc; fav.onerror = () => { fav.style.visibility = 'hidden'; }; }
+      else fav.style.visibility = 'hidden';
+      const t = document.createElement('span'); t.className = 't'; t.textContent = b.title || b.url;
+      tab.appendChild(fav); tab.appendChild(t);
+      tab.addEventListener('click', () => { if (BAPI) BAPI.navigate(b.url); });
+      // 重命名 / 删除改由右键原生菜单触发（主进程弹菜单，动作经 menu-cmd 回传）
+      tab.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        if (BAPI && BAPI.bmMenu) BAPI.bmMenu({ url: b.url });
+      });
+      tabs.appendChild(tab);
     });
+  }
+
+  /** 书签：重命名（把标题替换成输入框，回车保存 / Esc 取消） */
+  function startRename(b, chip) {
+    if (!BAPI || !chip) return;
+    bmEditing = true;
+    const t = chip.querySelector('.t');
+    if (!t) return;
+    const input = document.createElement('input');
+    input.className = 'bmEdit'; input.value = b.title || b.url; input.spellcheck = false;
+    let done = false;
+    const commit = async (save) => {
+      if (done) return; done = true;
+      const val = input.value.trim();
+      if (save && val && val !== (b.title || b.url)) {
+        try { const r = await BAPI.bmRename({ url: b.url, title: val }); if (r && r.ok) bmAry = r.list; } catch (_) { /* 忽略 */ }
+      }
+      bmEditing = false;
+      renderBmTabs(); refreshStar();
+    };
+    input.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Enter') { ev.preventDefault(); commit(true); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); commit(false); }
+    });
+    input.addEventListener('blur', () => commit(true));
+    input.addEventListener('click', (ev) => ev.stopPropagation());
+    t.style.display = 'none';
+    chip.insertBefore(input, t);
+    input.focus(); input.select();
+  }
+
+  /** 书签：删除并重建书签栏 */
+  async function removeBm(url) {
+    if (!BAPI) return;
+    const r = await BAPI.bmRemove(url);
+    if (r && r.ok) { bmAry = r.list; renderBmTabs(); refreshStar(); }
+  }
+
+  /** 书签右键菜单动作回传：形如 bm:rename:https://... —— url 自带冒号，只按首个冒号切分 */
+  function onBmMenuCmd(s) {
+    const rest = s.slice(3);
+    const i = rest.indexOf(':');
+    if (i < 0) return;
+    const action = rest.slice(0, i);
+    const url = rest.slice(i + 1);
+    if (action === 'remove') { void removeBm(url); return; }
+    if (action === 'rename') {
+      const idx = bmAry.findIndex((x) => x.url === url);
+      const bar = $('bmtabs');
+      if (idx >= 0 && bar) startRename(bmAry[idx], bar.children[idx]);
+    }
   }
   function refreshStar() {
     const cu = current ? (current.url || '') : '';
@@ -1228,7 +1282,7 @@ function toolbarHtml(): string {
     const cu = current ? (current.url || '') : '';
     if (!cu || isNewTabUrl(cu)) return;
     const title = (current && current.title) ? current.title : cu;
-    const r = await BAPI.bmToggle({ url: cu, title });
+    const r = await BAPI.bmToggle({ url: cu, title, favicon: curFavicon });
     if (r && r.ok) { bmAry = r.list; refreshStar(); renderBmTabs(); }
   };
 
@@ -1285,9 +1339,11 @@ function toolbarHtml(): string {
     const bar = $('tabbar'); if (!bar) return;
     bar.innerHTML = '';
     const list = (data && data.tabs) || [];
+    curFavicon = '';
     list.forEach((t) => {
       const chip = document.createElement('span'); chip.className = 'tbtab' + (t.id === data.active ? ' cur' : '');
       chip.title = t.url || '新标签页';
+      if (t.id === data.active) curFavicon = t.favicon || '';
       const fav = document.createElement('img'); fav.className = 'fav'; fav.alt = '';
       if (t.favicon) fav.src = t.favicon; else fav.style.visibility = 'hidden';
       const lab = document.createElement('span'); lab.className = 't'; lab.textContent = t.title || '新标签页';
@@ -1559,6 +1615,15 @@ ipcMain.handle('hippo-browser:capsule-toggle', () => {
   if (win && !win.isDestroyed()) {
     if (capsuleMode) reveal();
     else collapseToCapsule();
+  }
+  return currentState();
+});
+// 切页自动收起：渲染层在 BobWork 切换页面时调用（幂等）。
+// 仅当窗口可见、未收起、且没有被用户操作（无焦点）时才收起，
+// 避免误伤：用户已关闭窗口 / 正在浏览器里输入 时都不动它。
+ipcMain.handle('hippo-browser:collapse', () => {
+  if (win && !win.isDestroyed() && !capsuleMode && win.isVisible() && !win.isFocused()) {
+    collapseToCapsule();
   }
   return currentState();
 });

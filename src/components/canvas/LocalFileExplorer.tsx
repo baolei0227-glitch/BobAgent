@@ -791,11 +791,11 @@ export function LocalFileExplorer({
       data-canvas-ui="overlay"
       style={{
         width: 258,
-        // 2026-09-11 统一淡灰底：面板底改 --paper-soft(#efeff2)，比画布 --canvas-bg(#e6e6ec) 略亮一层
+        // 2026-09-12 本地文件面板改纯白：与预览面板一致，与灰色画布底 --canvas-bg(#e6e6ec) 拉开对比
         borderRadius: 12,
         border: '1px solid',
         borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
-        background: 'linear-gradient(180deg, color-mix(in srgb, #fff 4%, var(--paper-soft)) 0%, var(--paper-soft) 38%)',
+        background: '#fff',
         boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent)',
         WebkitAppRegion: 'no-drag',
         pointerEvents: 'auto',

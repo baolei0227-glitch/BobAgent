@@ -140,4 +140,16 @@ export async function register() {
   } catch (e) {
     console.error('[py-cleanup] 加载失败:', e);
   }
+  try {
+    // 文件自动整理：设置里开启 File Organizer 并配好投递箱目录后，常驻监听该目录，
+    // 放入文件即自动改名并移入分类子目录（开关/目录变更由 watcher 周期对账感知）。
+    const { startFileOrganizerWatcher } = await import('@/lib/file-organizer/watcher');
+    setTimeout(() => {
+      startFileOrganizerWatcher().catch((e) => {
+        console.error('[file-organizer] 启动失败:', e);
+      });
+    }, 3500);
+  } catch (e) {
+    console.error('[file-organizer] 加载失败:', e);
+  }
 }

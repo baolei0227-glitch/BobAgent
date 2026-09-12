@@ -5,7 +5,6 @@ import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, 
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -281,10 +280,10 @@ export function SettingsModal({
       const r = await desktop.hippoBrowser.clearCookies();
       if (r.ok) {
         setBrowserClearErr(false);
-        setBrowserClearMsg(`已清除 Hippo Browser 的站点数据${typeof r.clearedCount === 'number' ? `（含 ${r.clearedCount} 条 Cookie）` : ''}`);
+        setBrowserClearMsg(`Cleared Hippo Browser site data${typeof r.clearedCount === 'number' ? ` (${r.clearedCount} cookies)` : ''}`);
       } else {
         setBrowserClearErr(true);
-        setBrowserClearMsg(r.error || '清除失败');
+        setBrowserClearMsg(r.error || 'Failed to clear');
       }
     } catch (e) {
       setBrowserClearErr(true);
@@ -301,7 +300,7 @@ export function SettingsModal({
       const r = await desktop.selectDirectory();
       if (r.canceled) return;
       if (!r.success || !r.path) {
-        setFileOrgPickErr(r.error || '无法打开目录选择器（仅桌面端可用）');
+        setFileOrgPickErr(r.error || 'Unable to open the folder picker (desktop only)');
         return;
       }
       setFileOrgDir(r.path);
@@ -456,7 +455,7 @@ export function SettingsModal({
   useEffect(() => {
     if (open) {
       const load = async () => {
-        let settings: AppSettings = await migrateOldSettingsIfNeeded() || await loadSettings();
+        const settings: AppSettings = await migrateOldSettingsIfNeeded() || await loadSettings();
         setSearchConfig(settings.search);
 
         // 基于 PROVIDER_PRESETS 统一构造：扩展新 provider 时无需改此处
@@ -618,7 +617,7 @@ export function SettingsModal({
       : mLow.startsWith('doubao') ? 'doubao'
       : '';
     if (inferred) return `Model Pool → ${PROVIDER_VENDOR[inferred as ProviderType] || inferred}`;
-    return '未配置';
+    return 'Not configured';
   };
 
   /** 单模型连接验证：发极简请求确认 API Key / Base URL / 模型名真实可用。
@@ -626,9 +625,9 @@ export function SettingsModal({
    * 图片生成模型（category='image'）走 images API，其余走 chat/completions（由 /api/test-model 分流）。 */
   const verifyModelConnection = async (type: ProviderType, modelId: string): Promise<{ ok: boolean; error?: string }> => {
     const apiKey = apiKeys[type].trim();
-    if (!apiKey) return { ok: false, error: '请先填写 API Key' };
+    if (!apiKey) return { ok: false, error: 'Please enter an API Key first' };
     const baseUrl = resolveBaseUrl(type);
-    if (/[\u0080-\uFFFF]/.test(baseUrl)) return { ok: false, error: 'Base URL 含非法字符' };
+    if (/[\u0080-\uFFFF]/.test(baseUrl)) return { ok: false, error: 'Base URL contains invalid characters' };
     try {
       const resp = await fetch('/api/test-model', {
         method: 'POST',
@@ -663,7 +662,7 @@ export function SettingsModal({
       } else {
         setTestError((prev) => ({
           ...prev,
-          [type]: `模型 ${modelId} 连接验证失败，未加入模型池${error ? `：${error}` : ''}`,
+          [type]: `Model ${modelId} connection check failed; not added to Model Pool${error ? `: ${error}` : ''}`,
         }));
       }
     } finally {
@@ -691,7 +690,7 @@ export function SettingsModal({
       if (!ok) {
         setTestError((prev) => ({
           ...prev,
-          [provider]: `模型 ${id} 连接验证失败，未添加${error ? `：${error}` : ''}`,
+          [provider]: `Model ${id} connection check failed; not added${error ? `: ${error}` : ''}`,
         }));
         return;
       }
@@ -729,7 +728,7 @@ export function SettingsModal({
 
     // Ollama/BobMultimodal 本地服务无需 Key
     if (!apiKey && !NO_AUTH_LOCAL_PROVIDERS.has(provider)) {
-      setTestAddFeedback({ provider, ok: false, msg: '请先填写 API Key' });
+      setTestAddFeedback({ provider, ok: false, msg: 'Please enter an API Key first' });
       return;
     }
 
@@ -743,7 +742,7 @@ export function SettingsModal({
         : await verifyModelConnection(provider, id);
 
       if (!ok) {
-        setTestAddFeedback({ provider, ok: false, msg: `连接验证失败${error ? `：${error}` : ''}` });
+        setTestAddFeedback({ provider, ok: false, msg: `Connection check failed${error ? `: ${error}` : ''}` });
         return;
       }
 
@@ -770,7 +769,7 @@ export function SettingsModal({
           ],
         };
       });
-      setTestAddFeedback({ provider, ok: true, msg: `已添加 ${id} 到模型池` });
+      setTestAddFeedback({ provider, ok: true, msg: `Added ${id} to Model Pool` });
       setNewModelIdInput('');
     } finally {
       setVerifyingModelId(null);
@@ -805,7 +804,7 @@ export function SettingsModal({
 
       const baseUrl = resolveBaseUrl(type);
       if (/[\u0080-\uFFFF]/.test(baseUrl)) {
-        setTestError((prev) => ({ ...prev, [type]: '请求地址 / Base URL 包含非法字符（如中文），请先修正后再获取模型。' }));
+        setTestError((prev) => ({ ...prev, [type]: 'Request URL / Base URL contains invalid characters (e.g. non-ASCII). Fix it before fetching models.' }));
         return false;
       }
 
@@ -876,7 +875,7 @@ export function SettingsModal({
         setTestError((prev) => ({
           ...prev,
           [type]: isAbort
-            ? '请求超时（30s）：已自动取消，请检查网络或稍后重试。'
+            ? 'Request timed out (30s): automatically cancelled. Check your network or try again later.'
             : 'Network request failed',
         }));
         setFetchedModels((prev) => ({ ...prev, [type]: prev[type] ?? [] }));
@@ -1036,7 +1035,8 @@ export function SettingsModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="gap-0 p-0"
+        showCloseButton={false}
+        className="gap-0 rounded-xl p-0"
         style={{
           width: '60rem',
           maxWidth: '60rem',
@@ -1044,14 +1044,30 @@ export function SettingsModal({
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
+          borderColor: 'var(--line)',
+          backgroundColor: 'var(--paper)',
+          boxShadow: '0 24px 70px -20px rgba(0, 0, 0, 0.35), 0 0 0 0.5px rgba(0, 0, 0, 0.10)',
         }}
       >
         <TooltipProvider delayDuration={150}>
-        <DialogHeader className="px-6 pt-6 pb-3">
-          <DialogTitle className="flex items-center text-base font-semibold" style={{ color: 'var(--ink)' }}>
+        {/* macOS 风格标题栏：左侧标题 + 右侧关闭按钮 + 底部发丝分隔线 */}
+        <div
+          className="flex h-12 shrink-0 items-center justify-between border-b px-4"
+          style={{ borderColor: 'var(--line-soft)' }}
+        >
+          <DialogTitle className="text-[13px] font-semibold" style={{ color: 'var(--ink-strong)' }}>
             Settings
           </DialogTitle>
-        </DialogHeader>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink-faint)' }}
+            title="Close"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
 
         {/* ===== P0 首次设置向导：三步动线引导条（首次设置完成即隐藏，不再显示"Setup complete"提示） ===== */}
         {(() => {
@@ -1065,8 +1081,8 @@ export function SettingsModal({
             { label: 'Set Chat Model', done: hasChatRole, go: () => setActiveSection('roles') },
           ];
           return (
-            <div className="mx-6 mb-4 rounded-xl border px-4 py-3" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}>
-              <div className="mb-2 flex items-center gap-1.5 text-11 font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+            <div className="shrink-0 border-b px-4 py-2.5" style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--primary-soft)' }}>
+              <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
                 <Zap className="h-3 w-3" /> Quick Start
               </div>
               <div className="flex flex-wrap items-center gap-1">
@@ -1101,7 +1117,7 @@ export function SettingsModal({
         <div className="flex min-h-0 flex-1">
           {/* ========== 左栏导航 ========== */}
           <div
-            className="w-44 shrink-0 overflow-y-auto border-r py-3"
+            className="w-52 shrink-0 overflow-y-auto border-r px-2 py-3"
             style={{
               borderColor: 'var(--line-soft)',
               backgroundColor: 'var(--paper-soft)',
@@ -1109,7 +1125,7 @@ export function SettingsModal({
             }}
           >
             {/* P3 搜索框：按名称/关键词过滤导航项（含扩展项） */}
-            <div className="mb-2 px-2.5">
+            <div className="mb-1 px-0.5">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" style={{ color: 'var(--ink-faint)' }} />
                 <input
@@ -1237,33 +1253,67 @@ export function SettingsModal({
                   ],
                 },
               ];
-              const items = groups.flatMap((g) => g.items).filter((it) => match(it.label, it.keywords));
-              if (items.length === 0) {
+              // 图标砖配色：沿用现有设计 token，不新增色值
+              const ITEM_TINT: Record<string, string> = {
+                roles: 'var(--primary)',
+                usage: 'var(--info)',
+                theme: 'var(--purple)',
+                icons: 'var(--warn)',
+                quickprompts: 'var(--danger)',
+                templates: 'var(--info)',
+                wechat: 'var(--success)',
+                browser: 'var(--teal)',
+                fileorganizer: 'var(--warn)',
+                diagram: 'var(--ink-faint)',
+              };
+              const filteredGroups = groups
+                .map((g) => ({ ...g, items: g.items.filter((it) => match(it.label, it.keywords)) }))
+                .filter((g) => g.items.length > 0);
+              if (filteredGroups.length === 0) {
                 return (
-                  <div className="px-4 py-2 text-xs" style={{ color: 'var(--ink-faint)' }}>
+                  <div className="px-2.5 py-2 text-xs" style={{ color: 'var(--ink-faint)' }}>
                     No settings found
                   </div>
                 );
               }
-              return items.map((it) => {
-                const active = activeSection === it.id;
-                return (
-                  <button
-                    key={it.id}
-                    type="button"
-                    onClick={() => setActiveSection(it.id as typeof activeSection)}
-                    className="mx-2 mb-0.5 flex w-[calc(100%-16px)] items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
-                    style={{
-                      backgroundColor: active ? 'var(--purple-soft)' : 'transparent',
-                      color: active ? 'var(--purple)' : 'var(--ink-muted)',
-                      boxShadow: active ? 'inset 3px 0 0 var(--purple)' : 'none',
-                    }}
+              return filteredGroups.map((g) => (
+                <div key={g.label} className="mb-1.5">
+                  {/* 分组标题 */}
+                  <div
+                    className="px-2.5 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider"
+                    style={{ color: 'var(--ink-faint)' }}
                   >
-                    {it.icon}
-                    <span className="flex-1 truncate text-sm font-medium">{it.label}</span>
-                  </button>
-                );
-              });
+                    {g.label}
+                  </div>
+                  {g.items.map((it) => {
+                    const active = activeSection === it.id;
+                    return (
+                      <button
+                        key={it.id}
+                        type="button"
+                        onClick={() => setActiveSection(it.id as typeof activeSection)}
+                        className="mb-0.5 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                        style={{
+                          backgroundColor: active ? 'var(--primary)' : 'transparent',
+                          color: active ? '#fff' : 'var(--ink)',
+                        }}
+                      >
+                        {/* 图标砖 */}
+                        <span
+                          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] [&_svg]:h-3 [&_svg]:w-3"
+                          style={{
+                            backgroundColor: active ? 'rgba(255, 255, 255, 0.24)' : ITEM_TINT[it.id] || 'var(--ink-faint)',
+                            color: '#fff',
+                          }}
+                        >
+                          {it.icon}
+                        </span>
+                        <span className="flex-1 truncate text-[13px] font-medium">{it.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ));
             })()}
           </div>
 
@@ -2150,7 +2200,7 @@ export function SettingsModal({
                       {/* 候选池列表 */}
                       {chatModelPool.length === 0 ? (
                         <p className="mb-2 text-sm italic" style={{ color: 'var(--ink-muted)' }}>
-                          No models in chat pool yet. Add models below — they will be auto-checked in their provider and appear in every node's model selector.
+                          No models in chat pool yet. Add models below — they will be auto-checked in their provider and appear in every node&apos;s model selector.
                         </p>
                       ) : (
                         <div className="mb-2 grid grid-cols-2 gap-1.5">
@@ -2459,46 +2509,34 @@ export function SettingsModal({
         <div className="space-y-6 p-6">
           <div>
             <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>File Organizer</h3>
-            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-              投递箱：把文件丢进指定文件夹后，BobWork 只读取文件首页内容，由 Task 模型判定分类与主题，
-              重命名为 <code>{'{日期}_vNN_{主题}.{扩展名}'}</code>（日期取整理当天）并移入对应分类子目录。
-              模型沿用 Role Assignment 里的 Task 模型，无需单独配置。
-            </p>
           </div>
 
           {/* 开关 */}
           <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>启用自动整理</h4>
-                <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-                  File Organizer 总开关。整理时会读取下面的投递箱目录与分类清单；
-                  关闭后不执行整理。
-                </p>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Enable Auto-organize</h4>
               </div>
               <ToggleSwitch
                 checked={fileOrgEnabled}
                 onChange={() => setFileOrgEnabled((v) => !v)}
-                title={fileOrgEnabled ? '已启用' : '已停用'}
+                title={fileOrgEnabled ? 'Enabled' : 'Disabled'}
               />
             </div>
           </div>
 
           {/* 投递箱目录 */}
           <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
-            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>投递箱目录</h4>
-            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-              就地整理：分类子目录直接建在该文件夹内，不额外产生归档根目录。
-            </p>
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Inbox Folder</h4>
             <div className="mt-3 flex items-center gap-2">
               <Input
                 value={fileOrgDir}
                 onChange={(e) => setFileOrgDir(e.target.value)}
-                placeholder="尚未选择文件夹"
+                placeholder="No folder selected"
               />
               <Button variant="outline" size="sm" onClick={handlePickInboxDir} className="shrink-0">
                 <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
-                选择文件夹
+                Choose Folder
               </Button>
             </div>
             <div className="mt-2 min-h-4">
@@ -2510,11 +2548,7 @@ export function SettingsModal({
 
           {/* 分类目录清单 */}
           <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
-            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>分类目录</h4>
-            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-              模型只能从下列分类中择一，保证目录不发散。留空则使用内置默认分类
-              （合同协议 / 票据凭证 / 证件资质 / 报表数据 / 学习资料 / 项目文档 / 其他）。
-            </p>
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Categories</h4>
             {fileOrgCategories.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-2">
                 {fileOrgCategories.map((c) => (
@@ -2540,7 +2574,7 @@ export function SettingsModal({
                   setFileOrgCategories((prev) => (prev.includes(v) ? prev : [...prev, v]));
                   setFileOrgCategoryInput('');
                 }}
-                placeholder="输入分类名后回车添加"
+                placeholder="Type a category, press Enter"
               />
             </div>
           </div>
@@ -2549,58 +2583,47 @@ export function SettingsModal({
 
       {/* ============ Hippo Browser ============ */}
       {activeSection === 'browser' && (
-        <div className="space-y-6 p-6">
-          <div>
-            <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>Hippo Browser</h3>
-            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-              BobWork 内置的网页浏览器（预览面板的 Browser Tab），使用独立的持久化会话（persist:hippo-browser），
-              登录态与主窗口隔离并可自动记住——这是它能"扫码一次复用"的原因。
-            </p>
-          </div>
+        <div className="px-6 py-5">
+          {/* 面板标题 */}
+          <h2 className="text-[17px] font-semibold" style={{ color: 'var(--ink-strong)' }}>Hippo Browser</h2>
 
-          {/* Cookies */}
-          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Cookies</h4>
-                </div>
-                <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-                  Hippo Browser 默认像普通浏览器一样保存并发送网站 Cookie（登录态持久化的基础）。
-                  下方可**清除**已保存的 Cookie 与站点数据——用于换账号、清脏会话或隐私不留痕。
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={browserClearBusy}
-                    onClick={handleClearBrowserCookies}
-                  >
-                    {browserClearBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Trash className="mr-1.5 h-3.5 w-3.5" />}
-                    清除 Cookies 与站点数据
-                  </Button>
-                </div>
-                <div className="mt-2 min-h-4">
-                  {browserClearMsg && (
-                    <p className="text-xs" style={{ color: browserClearErr ? 'var(--danger)' : 'var(--success, var(--primary))' }}>
-                      {browserClearMsg}
-                    </p>
-                  )}
-                </div>
-                <p className="mt-2 text-[11px] leading-relaxed" style={{ color: 'var(--ink-faint)' }}>
-                  注：清除后当前已登录的网站会退出，下次访问需重新登录。
-                </p>
+          {/* 设置行分组容器：圆角卡片 + 发丝分隔线（左标签 / 右控件） */}
+          <div
+            className="mt-4 overflow-hidden rounded-lg border"
+            style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}
+          >
+            <div className="flex items-center gap-4 px-4 py-3">
+              <div className="min-w-0 flex-1 text-[13px] font-medium" style={{ color: 'var(--ink)' }}>
+                Cookies &amp; Site Data
+              </div>
+              <div className="flex shrink-0 items-center gap-3">
+                {browserClearMsg && (
+                  <span className="text-xs" style={{ color: browserClearErr ? 'var(--danger)' : 'var(--success)' }}>
+                    {browserClearMsg}
+                  </span>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={browserClearBusy}
+                  onClick={handleClearBrowserCookies}
+                >
+                  {browserClearBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Trash className="mr-1.5 h-3.5 w-3.5" />}
+                  Clear
+                </Button>
               </div>
             </div>
-          </div>
 
-          {/* Agent 默认行为（占位说明：当前为单标签页，暂不提供多标签切换） */}
-          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4 opacity-70">
-            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Agent 默认行为</h4>
-            <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
-              打开网页时：当前标签页操作 ·
-              <span className="ml-1 text-[11px]">（Hippo Browser 当前为单标签页，暂不支持"每次新开标签页"；多标签支持已在规划中）</span>
-            </p>
+            <div className="border-t" style={{ borderColor: 'var(--line-soft)' }} />
+
+            <div className="flex items-center gap-4 px-4 py-3">
+              <div className="min-w-0 flex-1 text-[13px] font-medium" style={{ color: 'var(--ink)' }}>
+                Agent Default Behavior
+              </div>
+              <span className="shrink-0 text-[13px]" style={{ color: 'var(--ink-muted)' }}>
+                Current tab
+              </span>
+            </div>
           </div>
         </div>
       )}
@@ -2835,7 +2858,10 @@ export function SettingsModal({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-6 py-4">
+        <div
+          className="flex shrink-0 items-center justify-end gap-2 border-t px-4 py-3"
+          style={{ borderColor: 'var(--line-soft)' }}
+        >
           {saveError && (
             <div className="mr-auto min-w-0 max-w-[360px]">
               <Callout variant="danger" size="sm" description={saveError} icon={<AlertCircle className="h-4 w-4" />} />

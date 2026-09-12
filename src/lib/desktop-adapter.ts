@@ -252,6 +252,10 @@ export const desktop = {
     capsuleToggle(): Promise<unknown> {
       return raw()?.hippoBrowser?.capsuleToggle?.() ?? Promise.resolve(null);
     },
+    /** 仅收起（幂等）：BobWork 切换页面时调用，浏览器被使用时不会被打断 */
+    collapse(): Promise<unknown> {
+      return raw()?.hippoBrowser?.collapse?.() ?? Promise.resolve(null);
+    },
     /** 查询当前是否处于胶囊态 */
     getCapsule(): Promise<boolean> {
       return raw()?.hippoBrowser?.getCapsule?.() ?? Promise.resolve(false);

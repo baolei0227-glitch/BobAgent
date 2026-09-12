@@ -119,6 +119,8 @@ export interface HippoBrowserApi {
   setAnchor: (anchor: { x: number; y: number; width: number; height: number } | null) => Promise<HippoBrowserState>;
   /** 收起/恢复胶囊态：收起时隐藏窗口、主窗口正中显示呼吸灯胶囊按钮（非关闭） */
   capsuleToggle: () => Promise<HippoBrowserState>;
+  /** 仅收起（幂等）：BobWork 切换页面时调用，已收起/已关闭/正在浏览器操作时不会生效 */
+  collapse: () => Promise<HippoBrowserState>;
   /** 查询当前是否处于胶囊态 */
   getCapsule: () => Promise<boolean>;
   /** 主窗口胶囊态变更订阅（true=收起显示胶囊，false=恢复隐藏胶囊） */
@@ -158,11 +160,13 @@ export interface HippoBrowserApi {
   /** 书签：查询全部书签 */
   bmList: () => Promise<{ ok: boolean; list: Array<{ url: string; title: string; addedAt: number }> }>;
   /** 书签：切换当前页收藏（有则移除，无则添加），返回最新收藏态与列表 */
-  bmToggle: (payload: { url: string; title: string }) => Promise<{ ok: boolean; bookmarked: boolean; list: Array<{ url: string; title: string; addedAt: number }> }>;
+  bmToggle: (payload: { url: string; title: string; favicon?: string }) => Promise<{ ok: boolean; bookmarked: boolean; list: Array<{ url: string; title: string; favicon?: string; addedAt: number }> }>;
   /** 书签：移除指定 url */
   bmRemove: (url: string) => Promise<{ ok: boolean; list: Array<{ url: string; title: string; addedAt: number }> }>;
   /** 书签：重命名（只改显示名，url 不变） */
   bmRename: (payload: { url: string; title: string }) => Promise<{ ok: boolean; error?: string; list: Array<{ url: string; title: string; addedAt: number }> }>;
+  /** 书签：右键菜单（主进程弹原生菜单：重命名 / 删除） */
+  bmMenu: (payload: { url: string }) => Promise<void>;
   /** 工具下拉菜单：切换打开/关闭（独立浮层子窗口） */
   toolMenu: () => Promise<void>;
   /** 工具下拉菜单：执行某项动作（转发给工具栏渲染层统一执行） */
@@ -363,6 +367,7 @@ const api: Api = {
     clearCookies: () => ipcRenderer.invoke('hippo-browser:clear-cookies'),
     setAnchor: (anchor: { x: number; y: number; width: number; height: number } | null) => ipcRenderer.invoke('hippo-browser:set-anchor', anchor),
     capsuleToggle: () => ipcRenderer.invoke('hippo-browser:capsule-toggle'),
+    collapse: () => ipcRenderer.invoke('hippo-browser:collapse'),
     getCapsule: () => ipcRenderer.invoke('hippo-browser:get-capsule'),
     toggleTop: () => ipcRenderer.invoke('hippo-browser:toggle-top'),
     onCapsule: (callback: (capsule: boolean) => void) => {
@@ -405,6 +410,7 @@ const api: Api = {
     bmToggle: (payload: { url: string; title: string }) => ipcRenderer.invoke('hippo-browser:bm-toggle', payload),
     bmRemove: (url: string) => ipcRenderer.invoke('hippo-browser:bm-remove', url),
     bmRename: (payload: { url: string; title: string }) => ipcRenderer.invoke('hippo-browser:bm-rename', payload),
+    bmMenu: (payload: { url: string }) => ipcRenderer.invoke('hippo-browser:bm-menu', payload),
     setChromeHeight: (height: number) => ipcRenderer.invoke('hippo-browser:set-chrome-height', height),
     toolMenu: () => ipcRenderer.invoke('hippo-browser:tool-menu'),
     menuExec: (action: string) => ipcRenderer.invoke('hippo-browser:menu-exec', action),

@@ -45,13 +45,13 @@ export function PluginPanelFrame({ name, src, probeUrl }: PluginPanelFrameProps)
   }, [probe]);
 
   return (
-    <div className="h-full w-full" style={{ backgroundColor: 'var(--paper-soft)', position: 'relative' }}>
+    <div className="h-full w-full" style={{ backgroundColor: '#fff', position: 'relative' }}>
       {status === 'ready' ? (
         <iframe
           src={src}
           title={name}
           className="h-full w-full border-0"
-          style={{ backgroundColor: 'var(--paper-soft)' }}
+          style={{ backgroundColor: '#fff' }}
           allow="clipboard-read; clipboard-write"
         />
       ) : (

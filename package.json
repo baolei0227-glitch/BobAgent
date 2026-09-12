@@ -1,6 +1,6 @@
 {
   "name": "bob-work",
-  "version": "0.5.392",
+  "version": "0.5.394",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {

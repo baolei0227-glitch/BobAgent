@@ -225,7 +225,7 @@ export function DocxTemplatePanel({ initialScene }: DocxTemplatePanelProps) {
       {/* Header：场景选择 + 上传 + 刷新 */}
       <div
         className="flex shrink-0 flex-col gap-2 px-4 py-3"
-        style={{ borderBottom: '1px solid var(--line)', backgroundColor: 'var(--paper-soft)' }}
+        style={{ borderBottom: '1px solid var(--line)', backgroundColor: '#fff' }}
       >
         <div className="flex items-center gap-1.5">
           <FileText className="h-4 w-4" style={{ color: 'var(--primary)' }} />

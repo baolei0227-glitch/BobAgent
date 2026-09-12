@@ -6854,8 +6854,8 @@ ${rows.join('\n')}
           confirmPending && 'confirm-breathing',
         )}
         style={{
-          // 2026-09-11 统一淡灰底：卡片底改 --paper-soft(#efeff2)，比画布 --canvas-bg(#e6e6ec) 略亮一层
-          background: 'linear-gradient(180deg, color-mix(in srgb, #fff 4%, var(--paper-soft)) 0%, var(--paper-soft) 38%)',
+          // 2026-09-12 会话区改纯白：与灰色画布底 --canvas-bg(#e6e6ec) 拉开对比，凸显会话卡片
+          background: '#fff',
           // 2026-09 口径：去除身份高亮边框——所有 agent 统一中性边框，不再按 coding/Kar/Butler 染色
           borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
           // inset 高光减弱（淡灰底上原 18% 白光太突兀）
