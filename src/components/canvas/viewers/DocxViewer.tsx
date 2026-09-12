@@ -371,7 +371,7 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
         setMdText(md);
       } catch { setMdText(null); }
       await renderDocx(base64);
-      // inspect：已有修订的文档 → 显示修订面板
+      // inspect：已有修订的文档 → 载入修订列表（2026-09-12 不再自动弹出右侧修订面板，需用户点工具栏「修订面板」按钮手动展开）
       try {
         const r = await fetch('/api/docx/revise', {
           method: 'POST',
@@ -381,7 +381,6 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
         const data = (await r.json()) as ReviseResponse;
         if (data.ok && data.revisions) {
           setRevisions(data.revisions);
-          if (data.revisions.length > 0) setPanelOpen(true);
         }
       } catch { /* ignore */ }
     } catch (e) {
@@ -1029,7 +1028,8 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
       .docx *::-moz-selection { background-color: color-mix(in oklab, var(--primary) 25%, transparent) !important; }
       .ai-sel-hl { background-color: color-mix(in oklab, var(--primary) 25%, transparent); border-radius: 2px; }
       /* 页面视觉：覆盖 docx-preview 默认灰色背景/厚重阴影，浅色衬托 + 柔和纸感阴影（多页纵向留白） */
-      .docx-wrapper { background: transparent !important; padding: 24px 36px 4px !important; }
+      /* 2026-09-12 压缩顶部留白：wrapper 上内边距 24px → 8px，正文尽量贴近工具栏 */
+      .docx-wrapper { background: transparent !important; padding: 8px 36px 4px !important; }
       .docx-wrapper > section.docx { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 4px 16px rgba(0, 0, 0, 0.07) !important; border-radius: 2px !important; margin-bottom: 26px !important; }
       /* 修订标记：docx-preview 渲染为原生 <ins>/<del> 标签（renderChanges:true） */
       .docx ins { border-bottom: 2px solid #4b3fe3; color: #4b3fe3; text-decoration: none; }
@@ -1573,10 +1573,11 @@ export function DocxViewer({ proxyUrl, fileInfo, fileName, onError }: ViewerRend
           onMouseUp={onContainerMouseUp}
           onMouseDown={onContainerMouseDown}
           onScroll={onContainerScroll}
-          style={{ backgroundColor: 'var(--paper)' }}
+          style={{ backgroundColor: '#fff' }}
         >
           {/* 不限宽：docx-preview page 为固定像素宽度，超宽文档由 scroller 的 overflow-auto 横向滚动，避免右侧裁切；wrapper 自带居中 */}
-          <div className="px-4 py-4">
+          {/* 2026-09-12 压缩顶部留白：py-4 → py-1，配合 .docx-wrapper 上内边距压到最小 */}
+          <div className="px-4 py-1">
             {loading && (
               <div className="flex flex-col items-center justify-center gap-3 py-16">
                 <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-r-transparent" style={{ color: 'var(--info)' }} />

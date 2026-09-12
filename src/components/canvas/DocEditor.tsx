@@ -1952,16 +1952,27 @@ export function DocEditor({
     return () => scroller.removeEventListener('scroll', updateActive);
   }, [editor, showToc, tocTick]);
 
-  // 目录项点击 → 平滑滚动到标题
+  // 目录项点击 → 硬切（瞬时跳转，不做平滑动画）到对应章节标题
   // 按 NodeView 的 data-pos 精确定位（domAtPos 对块级标题可能返回内部文本节点，定位不稳定）
   const scrollToHeading = useCallback(
     (pos: number) => {
       if (!editor) return;
       const el = editor.view.dom.querySelector(`[data-pos="${pos}"]`) as HTMLElement | null;
-      el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el?.scrollIntoView({ behavior: 'auto', block: 'start' });
     },
     [editor],
   );
+
+  // 目录弹窗容器：点击弹窗/按钮以外区域时自动关闭
+  const tocRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showToc) return;
+    const onDown = (e: PointerEvent) => {
+      if (!tocRef.current?.contains(e.target as Node)) setShowToc(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    return () => document.removeEventListener('pointerdown', onDown);
+  }, [showToc]);
 
   // 赋值手动保存处理（在 editor 创建之后，闭包内引用 editor）
   handleSaveRef.current = () => {
@@ -2681,52 +2692,13 @@ export function DocEditor({
         </div>
       )}
 
-      {/* 编辑器内容区：左侧目录栏 + 主编辑区 */}
-      <div className="doc-editor-body flex min-h-0 flex-1">
-        {!hideToc && showToc && headings.length > 0 && (
-          <div
-            className="doc-editor-toc w-52 shrink-0 overflow-y-auto border-r py-2 ai-canvas-scroll"
-            style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}
-          >
-            <div className="px-3 pb-1.5 text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>
-              Outline
-            </div>
-            {headings.map((h) => {
-              const active = activeHeadingPos === h.pos;
-              return (
-                <button
-                  key={h.pos}
-                  onClick={() => scrollToHeading(h.pos)}
-                  title={h.text}
-                  className="group relative block w-full truncate px-3 py-0.5 text-left text-xs transition-colors"
-                  style={{
-                    paddingLeft: 12 + (h.level - 1) * 14,
-                    color: active ? 'var(--primary)' : 'var(--ink)',
-                    fontWeight: h.level === 1 ? 600 : 400,
-                    backgroundColor: active ? 'color-mix(in oklab, var(--primary) 6%, transparent)' : 'transparent',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--ink) 5%, transparent)';
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!active) e.currentTarget.style.backgroundColor = 'transparent';
-                  }}
-                >
-                  {active && (
-                    <span
-                      className="absolute left-0 top-0 bottom-0 w-0.5 rounded-r"
-                      style={{ backgroundColor: 'var(--primary)' }}
-                    />
-                  )}
-                  {h.text}
-                </button>
-              );
-            })}
-          </div>
-        )}
+      {/* 编辑器内容区：主编辑区（目录已改为右上角弹窗，不再占用左侧栏） */}
+      <div className="doc-editor-body relative flex min-h-0 flex-1">
+        {/* 主编辑区外层：relative 承载右上角目录弹窗，使其不随正文滚动、也不被滚动容器裁剪 */}
+        <div className="relative flex min-w-0 flex-1">
         <div
           className="relative flex min-w-0 flex-1 flex-col overflow-y-auto ai-canvas-scroll hide-scrollbar"
-          style={{ backgroundColor: 'var(--paper)' }}
+          style={{ backgroundColor: '#fff' }}
           onContextMenu={(e) => {
             // 正文右键：阻止系统菜单，弹出命令菜单（仅可编辑态）
             if (!editable) return;
@@ -2734,17 +2706,6 @@ export function DocEditor({
             setCtxMenu({ x: e.clientX, y: e.clientY });
           }}
         >
-          {!hideToc && (
-            /* 目录开关（悬浮按钮） */
-            <button
-              onClick={() => setShowToc((v) => !v)}
-              title={showToc ? 'Hide TOC' : 'Show TOC'}
-              className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
-              style={{ color: 'var(--ink-muted)', backgroundColor: showToc ? 'color-mix(in oklab, var(--ink) 6%, transparent)' : 'transparent' }}
-            >
-              <ListTree className="h-3.5 w-3.5" />
-            </button>
-          )}
           {/* 问卷交互面板（文档含 ```json 问卷块时显示） */}
           {qResult.blocks.length > 0 && (
             <QuestionnairePanel blocks={qResult.blocks} onWriteBack={handleQuestionnaireWriteBack} />
@@ -2760,6 +2721,66 @@ export function DocEditor({
           )}
           {/* EditorContent 包装层必须为纵向 flex 并撑满滚动区，.doc-editor-content 的 flex:1 才能把纸张卡片自然填满预览高度（否则短文档只占 min-height:200px，下方留白） */}
           <EditorContent editor={editor} className="flex min-h-0 flex-1 flex-col" />
+        </div>
+
+        {!hideToc && (
+          <div ref={tocRef} className="absolute right-2 top-2 z-30 flex flex-col items-end">
+            <button
+              onClick={() => setShowToc((v) => !v)}
+              title={showToc ? 'Hide outline' : 'Show outline'}
+              className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
+              style={{ color: 'var(--ink-muted)', backgroundColor: showToc ? 'color-mix(in oklab, var(--ink) 6%, transparent)' : 'transparent' }}
+            >
+              <ListTree className="h-3.5 w-3.5" />
+            </button>
+            {/* 目录弹窗：点击目录项硬切到对应章节 */}
+            {showToc && headings.length > 0 && (
+              <div
+                className="mt-1 w-64 max-h-[60vh] overflow-y-auto rounded-lg border py-2 shadow-xl ai-canvas-scroll"
+                style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}
+              >
+                <div className="px-3 pb-1.5 text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>
+                  Outline
+                </div>
+                {headings.map((h) => {
+                  const active = activeHeadingPos === h.pos;
+                  return (
+                    <button
+                      key={h.pos}
+                      onClick={() => {
+                        setShowToc(false);
+                        scrollToHeading(h.pos);
+                      }}
+                      title={h.text}
+                      className="group relative block w-full truncate px-3 py-1 text-left text-xs transition-colors"
+                      style={{
+                        paddingLeft: 12 + (h.level - 1) * 14,
+                        color: active ? 'var(--primary)' : 'var(--ink)',
+                        fontWeight: h.level === 1 ? 600 : 400,
+                        backgroundColor: active ? 'color-mix(in oklab, var(--primary) 6%, transparent)' : 'transparent',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!active) e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--ink) 5%, transparent)';
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!active) e.currentTarget.style.backgroundColor = 'transparent';
+                      }}
+                    >
+                      {active && (
+                        <span
+                          className="absolute left-0 top-0 bottom-0 w-0.5 rounded-r"
+                          style={{ backgroundColor: 'var(--primary)' }}
+                        />
+                      )}
+                      {h.text}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         </div>
 
         {/* 右侧批注 + 修订栏（仅可编辑且有 sidecar key 时显示） */}
@@ -2861,7 +2882,7 @@ export function DocEditor({
 
       {/* ProseMirror 专属样式：复用 .html-renderer 的全局样式，此处补充编辑器特有样式 */}
       <style>{`
-        /* 编辑区平铺：占满整个区域，无卡片边框/圆角/限宽，背景与面板一致 */
+        /* 编辑区平铺：占满整个区域，无卡片边框/圆角/限宽，背景与面板一致（2026-09-12 改纯白） */
         .doc-editor-content {
           outline: none;
           flex: 1 0 auto;
@@ -2873,7 +2894,7 @@ export function DocEditor({
           line-height: 1.8;
           color: var(--ink);
           user-select: text;
-          background: var(--paper);
+          background: #fff;
         }
         .doc-editor-content:focus { outline: none; }
         /* 去掉聚焦时的品牌紫描边（用户反馈"选中后出现紫色边框"）；保留 :focus 无描边即可 */
