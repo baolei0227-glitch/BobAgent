@@ -38,12 +38,12 @@ function ImageViewerInner() {
     (async () => {
       try {
         const res = await fetch(`/api/local-files?action=file_proxy&path=${encodeURIComponent(path)}`);
-        if (!res.ok) throw new Error(`加载失败 HTTP ${res.status}`);
+        if (!res.ok) throw new Error(`Failed to load, HTTP ${res.status}`);
         const blob = await res.blob();
         const url = await new Promise<string>((resolve, reject) => {
           const r = new FileReader();
           r.onload = () => resolve(String(r.result));
-          r.onerror = () => reject(new Error('读取图片失败'));
+          r.onerror = () => reject(new Error('Failed to read the image'));
           r.readAsDataURL(blob);
         });
         if (!cancelled) setDataUrl(url);
@@ -65,7 +65,7 @@ function ImageViewerInner() {
       body: JSON.stringify({ action: 'write', path: targetPath, content: base64, encoding: 'base64' }),
     });
     const data = await res.json();
-    if (!data.success) throw new Error(data.error || '保存失败');
+    if (!data.success) throw new Error(data.error || 'Save failed');
   }, []);
 
   const fileInfo = useMemo(

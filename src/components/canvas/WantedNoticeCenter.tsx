@@ -16,17 +16,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X, CalendarDays, Bell, CheckCircle2, ChevronLeft, ChevronRight, MessageCircle,
+  X, CalendarDays, Bell, CheckCircle2, ChevronLeft, ChevronRight,
   LayoutGrid, Eye, EyeOff, Circle, Mail, Search, Trash,
-  Clock, Loader2, Star, MoreHorizontal, Archive, Reply, Forward,
+  Clock, Star, MoreHorizontal, Archive,
   Download, Link2, Check,
 } from 'lucide-react';
 import { bus, BusEvents, stripThinkTags, type WantedNoticePayload, type WantedNoticeItem, type ChatMessage, type WantedExecutingPayload } from '@/lib/bus';
 import { desktop } from '@/lib/desktop-adapter';
 import { useConfirm } from './ConfirmDialog';
 import { HtmlRenderer } from './HtmlRenderer';
-// 注意：askFromMail（原 lib/wanted/node-chat）内含 fs/path/settings-server 等 server-only 依赖，
-// 客户端必须走 API route，不得静态 import → 通过 /api/wanted/mail-reply 访问
 
 interface Notice extends WantedNoticePayload {
   id: string;
@@ -61,9 +59,7 @@ function formatFullTime(iso: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${weekdays[d.getDay()]} ${pad(d.getHours())}:${pad(d.getMinutes())} ${tz}`;
 }
 
-/** 发件人信息：按 kind 映射头像/姓名/邮箱地址；
- *  对于 chat 的 Re: 邮件，如果 messages 最后一条是 user 则显示"Me"发出（相当于转发/回复）。
- */
+/** 发件人信息：按 kind 映射头像/姓名/邮箱地址 */
 type SenderInfo = {
   name: string;
   email: string;
@@ -100,34 +96,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBorder: 'var(--warn)',
         to: 'me',
       };
-    case 'chat': {
-      // 根邮件（threadOrder===1 → 如果当前 n 是最早的）由 XiaoMing 发起；
-      // Re: 回复：交替看 messages 最后一个非 system 角色
-      const nonSys = (n.messages ?? []).filter((m) => m.role !== 'system');
-      const lastRole = nonSys[nonSys.length - 1]?.role ?? 'assistant';
-      if (lastRole === 'user') {
-        return {
-          name: 'Me',
-          email: 'me@bobwork.dev',
-          avatarEmoji: '👤',
-          avatarSrc: '/assets/avatar-me.png',
-          avatarBg: 'var(--primary-soft)',
-          avatarFg: 'var(--primary)',
-          avatarBorder: 'var(--primary)',
-          to: 'XiaoMing <bob@bobwork.dev>',
-        };
-      }
-      return {
-        name: 'XiaoMing',
-        email: 'bob@bobwork.dev',
-        avatarEmoji: '🤖',
-        avatarSrc: '/assets/avatar-drudge.png',
-        avatarBg: 'var(--primary-soft)',
-        avatarFg: 'var(--primary)',
-        avatarBorder: 'var(--primary)',
-        to: 'me',
-      };
-    }
     case 'task':
       return {
         name: 'WANTED · 任务',
@@ -489,20 +457,6 @@ function matchesQuery(n: Notice, q: string): boolean {
   return (n.items ?? []).some((it) => it.title.toLowerCase().includes(query));
 }
 
-/** 可见条目计数：chat 线程折叠后只显示根邮件 → 同线程多轮只计 1，非线程邮件各计 1（与列表实际展示一致） */
-function countVisibleEntries(list: Notice[]): number {
-  const seen = new Set<string>();
-  let count = 0;
-  for (const n of list) {
-    if (n.threadId) {
-      if (seen.has(n.threadId)) continue;
-      seen.add(n.threadId);
-    }
-    count++;
-  }
-  return count;
-}
-
 /** 结构化待办表格（When / Title / Priority / Action，含行内完成/删除）——普通通知与日报分区共用 */
 function ItemsTable({ items, onToggle, onDelete }: {
   items: WantedNoticeItem[];
@@ -799,7 +753,7 @@ interface WantedNoticeCenterProps {
  *  React 会卸载并重建分区，导致内部 expanded state 被重置（展开的 ARCHIVE 点击邮件后自动折叠）。 */
 function CollapsibleSection({
   title, count, defaultExpanded, renderNoticeRow, doneList, isDone,
-  tagBar, collapsedThreads, threadExpandedInArchive, headerAction,
+  tagBar, headerAction,
 }: {
   title: string;
   count: number;
@@ -811,35 +765,10 @@ function CollapsibleSection({
   ) => React.ReactNode;
   doneList: Notice[];
   isDone: boolean;
-  /** 展开时显示在标题栏下方的附加内容（TODO 分区的标签筛选栏；DONE 不传） */
   tagBar?: React.ReactNode;
-  /** 已折叠的 chat 线程 ID（对应非根邮件在列表中隐藏） */
-  collapsedThreads: Set<string>;
-  /** ARCHIVE 区已展开的 chat 线程 ID（区分于 INBOX 的 collapsedThreads） */
-  threadExpandedInArchive: Set<string>;
-  /** 标题栏右侧动作（如 ARCHIVE 的 Select 多选按钮），点击不会触发展开/收起 */
   headerAction?: React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-
-  // 计算每封 chat 邮件在线程中的位次 & 线程总大小（按时间降序编号，1=线程根=最新的邮件）
-  const threadInfo = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const n of doneList) if (n.threadId) counts.set(n.threadId, (counts.get(n.threadId) ?? 0) + 1);
-    const order = new Map<string, number>();
-    const groups = new Map<string, Notice[]>();
-    for (const n of doneList) {
-      if (!n.threadId) continue;
-      const arr = groups.get(n.threadId) ?? [];
-      arr.push(n);
-      groups.set(n.threadId, arr);
-    }
-    for (const [, arr] of groups) {
-      arr.sort((a, b) => b.time - a.time); // 新→旧：最新邮件 order=1（根），旧邮件 order=2,3...
-      arr.forEach((n, i) => order.set(n.id, i + 1));
-    }
-    return { counts, order };
-  }, [doneList]);
 
   return (
     <>
@@ -894,18 +823,7 @@ function CollapsibleSection({
       </div>
       {expanded && tagBar}
       {expanded && doneList.map((n) => {
-        const order = n.threadId ? threadInfo.order.get(n.id) ?? 1 : 1;
-        const size = n.threadId ? threadInfo.counts.get(n.threadId) ?? 1 : 1;
-        const isReply = !!n.threadId && order > 1;
-        // 折叠判定：INBOX 区默认所有 chat 线程折叠，只有 threadId in collapsedThreads（用户显式展开）才显示非根邮件
-        // ARCHIVE 区同样默认折叠，只有 threadExpandedInArchive 中的才展开
-        const isCollapsed = isDone
-          ? (n.threadId ? !threadExpandedInArchive.has(n.threadId) : false)
-          : (n.threadId ? !collapsedThreads.has(n.threadId) : false);
-        // 线程折叠时只显示线程根（order===1），非根邮件跳过
-        if (isReply && n.threadId && isCollapsed) return null;
-        const threadCollapsed = !!n.threadId && isCollapsed;
-        return renderNoticeRow(n, isDone, { threadOrder: order, threadSize: size, threadCollapsed });
+        return renderNoticeRow(n, isDone, { threadOrder: 1, threadSize: 1, threadCollapsed: false });
       })}
     </>
   );
@@ -939,44 +857,9 @@ export function WantedNoticeCenter({
   const [filterCat, setFilterCat] = useState<string | null>(null);
   // 关键字搜索：标题 / 正文 / 待办项标题与标签模糊匹配，TODO + DONE 分区同时过滤
   const [searchQ, setSearchQ] = useState('');
-  // chat 邮件回复：是否展开回复框
-  const [replyOpen, setReplyOpen] = useState(false);
-  // chat 回复输入框内容
-  const [replyText, setReplyText] = useState('');
-  // chat 回复发送状态：idle / sending / error
-  const [replyState, setReplyState] = useState<'idle' | 'sending' | 'error'>('idle');
-  const [replyError, setReplyError] = useState<string>('');
-  // Sending 阶段提示：按 elapsed 秒数切换「连接中 / AI思考中 / 生成回答中」，让用户知道没卡死
-  const [sendingPhase, setSendingPhase] = useState<string>('Sending…');
-  const sendingTimerRef = useRef<number | null>(null);
-  const replyTaRef = useRef<HTMLTextAreaElement>(null);
-  const composingRef = useRef(false);
-  // 详情区：info 邮件带 messages（原始对话附件存档）时，是否展开附件对话记录
   const [attachOpen, setAttachOpen] = useState(false);
-  // popupPos 是最终视口坐标（纯弹层展示用，由受控 anchorRect 或回退定位计算）
   const [popupPos, setPopupPos] = useState<{ top: number; left: number } | null>(null);
-  // 弹层 DOM 引用：用于"点击弹层外部任意位置自动收起"判断
   const popupRef = useRef<HTMLDivElement | null>(null);
-  // 左栏线程折叠：threadId in Set → 用户显式展开的线程（非根邮件展示）；默认空 → 所有线程默认折叠
-  const [collapsedThreads, setCollapsedThreads] = useState<Set<string>>(new Set());
-  const toggleThreadCollapse = useCallback((threadId: string) => {
-    setCollapsedThreads((prev) => {
-      const next = new Set(prev);
-      if (next.has(threadId)) next.delete(threadId);
-      else next.add(threadId);
-      return next;
-    });
-  }, []);
-  // ARCHIVE 区线程展开集合：默认全部折叠，只有 threadId in Set 才展开
-  const [threadExpandedInArchive, setThreadExpandedInArchive] = useState<Set<string>>(new Set());
-  const toggleThreadInArchive = useCallback((threadId: string) => {
-    setThreadExpandedInArchive((prev) => {
-      const next = new Set(prev);
-      if (next.has(threadId)) next.delete(threadId);
-      else next.add(threadId);
-      return next;
-    });
-  }, []);
   // ===== Toast 浮层栈：toast=true 的 action 回执(task/note/info)只弹这个，不落 INBOX =====
   interface ToastItem {
     id: string;
@@ -1019,7 +902,6 @@ export function WantedNoticeCenter({
     note:        { emoji: '📝', label: 'NOTE',    color: 'var(--primary)' },
     notes:       { emoji: '📒', label: 'NOTES',   color: 'var(--primary)' },
     info:        { emoji: 'ℹ️', label: 'INFO',    color: 'var(--info)' },
-    chat:        { emoji: '💬', label: 'CHAT',    color: 'var(--primary)' },
     calendar:    { emoji: '⏰', label: 'REMIND',  color: 'var(--warning-strong)' },
     'daily-report': { emoji: '📋', label: 'REPORT', color: 'var(--info)' },
   };
@@ -1027,14 +909,12 @@ export function WantedNoticeCenter({
   // 未完成（未点击 Done）条数：角标 + 收件箱分区计数 —— 延后到 inboxNotices 声明之后计算（避免 TS2448/2454）
   // （实际值用 lazy getter，放到下面声明后再赋值）
 
-  /** kind → 三大桶映射（actions 类 task/note/info 历史遗留兼容：显示但不新建；无右上角计数，空时折叠）
+  /** kind → bucket 映射（actions 类 task/note/info 历史遗留兼容：显示但不新建；无右上角计数，空时折叠）
    *  Actions: task / note / info（历史遗留兼容：显示但不新建；无右上角计数，空时折叠）
-   *  Chat: chat（AI 节点问答）
    *  Schedules: calendar / daily-report（到期提醒、每日报告）
    */
-  type BucketKey = 'chat' | 'schedules' | 'actions' | 'web' | 'inspect' | 'notes' | 'meeting';
+  type BucketKey = 'schedules' | 'actions' | 'web' | 'inspect' | 'notes' | 'meeting';
   const BUCKET_LABEL: Record<BucketKey, string> = {
-    chat: 'CHAT',
     schedules: 'SCHEDULES',
     actions: 'ACTIONS',
     web: 'WEB',
@@ -1043,7 +923,6 @@ export function WantedNoticeCenter({
     meeting: 'MEETINGS',
   };
   const KIND_TO_BUCKET: Record<string, BucketKey> = {
-    chat: 'chat',
     check: 'schedules',
     todo_del: 'schedules',
     calendar: 'schedules',
@@ -1057,31 +936,15 @@ export function WantedNoticeCenter({
     meeting: 'meeting',
   };
   const bucketOf = (n: Notice): BucketKey | null => KIND_TO_BUCKET[n.kind] ?? null;
-  // 仅 INBOX 保留桶内的（chat / schedules / actions）
   const inboxNotices = useMemo(() => notices.filter((n) => bucketOf(n) !== null), [notices]);
   const pendingList = useMemo(() => inboxNotices.filter((n) => !n.done && matchesQuery(n, searchQ)), [inboxNotices, searchQ]);
   const doneList = useMemo(() => inboxNotices.filter((n) => n.done && matchesQuery(n, searchQ)), [inboxNotices, searchQ]);
 
-  // 未完成（未点击 Done）条数：角标 + 收件箱分区计数 —— 只按 inboxNotices（排除 actions 历史）
-  // chat 邮件被回复后（同 thread 有更新邮件）不再计入 pending，但仍留 INBOX（不归档）
-  const pending = inboxNotices.filter((n) => {
-    if (n.done) return false;
-    if (n.kind === 'chat' && n.threadId) {
-      const hasNewerReply = inboxNotices.some(
-        (other) => other.threadId === n.threadId && other.time > n.time,
-      );
-      if (hasNewerReply) return false;
-    }
-    return true;
-  }).length;
+  const pending = inboxNotices.filter((n) => !n.done).length;
   const pendingCalendar = inboxNotices.filter((n) => !n.done && n.kind === 'calendar').length;
 
-  // INBOX 标题可见计数：chat 线程折叠后只显示根邮件 → 标题按线程去重，与实际展示条目数一致
-  // （同线程多轮只计 1；非线程邮件各计 1）
-  const inboxVisibleCount = useMemo(() => countVisibleEntries(pendingList), [pendingList]);
-
-  // ARCHIVE 标题可见计数：与 INBOX 同规则（线程去重），标题与实际展示条目一致
-  const archiveVisibleCount = useMemo(() => countVisibleEntries(doneList), [doneList]);
+  const inboxVisibleCount = pendingList.length;
+  const archiveVisibleCount = doneList.length;
 
   // 受控：pending 变化 → 通知外部（Sidebar Rail 图标红点）
   const pendingRef = useRef(pending);
@@ -1177,12 +1040,7 @@ export function WantedNoticeCenter({
       if (payload.desktop !== false && (payload.time == null || Date.now() - unifiedTime < 2000)) {
         sendDesktopNotification(payload.title, payload.body, { noticeId: notice.id });
       }
-      // chat 线程：用 threadId 作为 client-side dedupeKey，保证同一封 chat 邮件的
-      // memory(widget-id) / inbox(in-id) 两条路径在 mergeHistory 签名对比时能被同一 threadId 识别。
-      // 对其他类型：若发布者未给 dedupeKey，则 inbox 侧仍用 (kind,title,当日) 做幂等。
-      const dbDedupeKey =
-        payload.dedupeKey ??
-        (payload.threadId ? `chat:${payload.threadId}` : undefined);
+      const dbDedupeKey = payload.dedupeKey;
       // 回执落库（fire-and-forget；失败仅影响历史持久化，不阻塞实时展示）。
       // 落库成功后把内存 notice 的 id 换成服务端 in- 主键——bus 实时 id(wn-) 在 DB 中不存在，
       // 归档/已读/删除的 PATCH 若用 wn- id 会静默 no-op，导致重启后状态（done/read）丢失。
@@ -1267,23 +1125,15 @@ export function WantedNoticeCenter({
   const mergeHistory = useCallback((history: Notice[]) => {
     setNotices((prev) => {
       const existingIds = new Set(prev.map((n) => n.id));
-      // 去重签名按优先级降序：
-      //   ① dedupeKey（服务端 evt:/daily-report:/chat: 等显式唯一键 —— 最可靠）
-      //   ② chat.threadId（线程级稳定主键，其次）
-      //   ③ kind|title|time 三元签名（兜底：兼容老数据无 dedupeKey 的路径）
       const existingDedupeKeys = new Set(
         prev.filter((n) => n.dedupeKey).map((n) => n.dedupeKey as string),
-      );
-      const existingThreadIds = new Set(
-        prev.filter((n) => n.kind === 'chat' && n.threadId).map((n) => n.threadId as string),
       );
       const existingSigs = new Set(prev.map((n) => `${n.kind}|${n.title}|${n.time}`));
       const fresh = history.filter((h) => {
         if (existingIds.has(h.id)) return false;
         if (bucketOf(h) === null) return false;
-        if (h.dedupeKey && existingDedupeKeys.has(h.dedupeKey)) return false; // ① 优先命中即跳过
-        if (h.kind === 'chat' && h.threadId && existingThreadIds.has(h.threadId)) return false; // ②
-        if (existingSigs.has(`${h.kind}|${h.title}|${h.time}`)) return false; // ③ 兜底
+        if (h.dedupeKey && existingDedupeKeys.has(h.dedupeKey)) return false;
+        if (existingSigs.has(`${h.kind}|${h.title}|${h.time}`)) return false;
         return true;
       });
       return fresh.length > 0 ? [...fresh, ...prev] : prev;
@@ -1569,31 +1419,12 @@ export function WantedNoticeCenter({
       return prev.map((n, i) => (i === idx && !n.read ? { ...n, read: true } : n));
     });
     setDetailIdx(idx);
-  // 切详情时重置 chat 回复 UI 态
-    setReplyOpen(false);
-    setReplyText('');
-    setReplyState('idle');
-    setReplyError('');
-    setSendingPhase('Sending…');
-    if (sendingTimerRef.current) {
-      window.clearInterval(sendingTimerRef.current);
-      sendingTimerRef.current = null;
-    }
     applyPopupPos(WIDTH_FULL);
   }, [applyPopupPos]);
 
   // 收起右栏详情：回到仅收件箱态
   const closeDetail = useCallback(() => {
     setDetailIdx(null);
-    setReplyOpen(false);
-    setReplyText('');
-    setReplyState('idle');
-    setReplyError('');
-    setSendingPhase('Sending…');
-    if (sendingTimerRef.current) {
-      window.clearInterval(sendingTimerRef.current);
-      sendingTimerRef.current = null;
-    }
     applyPopupPos(WIDTH_LIST);
   }, [applyPopupPos]);
 
@@ -1622,15 +1453,6 @@ export function WantedNoticeCenter({
     }
     setNotices((ns) => ns.map((n) => (n.id === target.id && !n.read ? { ...n, read: true } : n)));
     setDetailIdx(nextGlobal);
-    setReplyOpen(false);
-    setReplyText('');
-    setReplyState('idle');
-    setReplyError('');
-    setSendingPhase('Sending…');
-    if (sendingTimerRef.current) {
-      window.clearInterval(sendingTimerRef.current);
-      sendingTimerRef.current = null;
-    }
   }, [detailIdx, inboxNotices, notices, doneList, pendingList]);
 
   // 标记单条为已完成：从「收件箱」移入「已完成」分区；角标未完成数随之减一。
@@ -1684,27 +1506,6 @@ export function WantedNoticeCenter({
     return true;
   }, [notices, confirmAskChoices]);
 
-  // 线程级归档：把同 threadId 的所有 chat 邮件一次性标记 done=true（不支持单个邮件归档）
-  const markThreadDone = useCallback((id: string) => {
-    const notice = notices.find((n) => n.id === id);
-    if (!notice?.threadId) {
-      // 无 threadId 的 chat 邮件（单封）回退到单条归档
-      void markDone(id);
-      return;
-    }
-    const siblings = notices.filter((n) => n.threadId === notice.threadId);
-    const ids = siblings.map((n) => n.id);
-    setNotices((prev) => prev.map((n) => (ids.includes(n.id) ? { ...n, done: true } : n)));
-    void fetch('/api/wanted/inbox', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      // 双保险：ids 覆盖内存中已知的邮件；threadId 覆盖 DB 中该线程全部行——
-      // 回复邮件可能仍持客户端 id（wanted-*，未采纳服务端 in-* 主键），仅按 id PATCH 会漏更，
-      // 重启后 fetchInboxHistory 会把 done=0 的回复邮件重新拉回 INBOX。
-      body: JSON.stringify({ ids, threadId: notice.threadId, done: true }),
-    }).catch(() => {});
-  }, [notices, markDone]);
-
   // 星标切换：详情 / 列表行内 Star 按钮用（本地 state + 后端 PATCH）
   const markStar = useCallback((id: string, starred: boolean) => {
     setNotices((prev) => prev.map((n) => (n.id === id ? { ...n, starred } : n)));
@@ -1729,7 +1530,6 @@ export function WantedNoticeCenter({
   // ===== ARCHIVE 多选删除：Select 模式 → 勾选行 → 批量删除 =====
   const [archiveSelMode, setArchiveSelMode] = useState(false);
   const [archiveSelected, setArchiveSelected] = useState<Set<string>>(new Set());
-  // chat 线程按整体切换（归档/删除均以线程为单位），其余类型单条切换
   const toggleArchiveSelect = useCallback((n: Notice) => {
     setArchiveSelected((prev) => {
       const next = new Set(prev);
@@ -1948,178 +1748,17 @@ export function WantedNoticeCenter({
     }
   }, [notices]);
 
-  // 右栏动作按钮：日历类通知打开日历；聊天回复确认；任务/告知/日报类标记完成（联动日历）
+  // 右栏动作按钮：日历类通知打开日历；其余任务/告知/日报类标记完成（联动日历）
   const handleDetailAction = useCallback((n: Notice) => {
     if (n.action?.type === 'open-calendar' || n.kind === 'calendar') {
       onOpenCalendar?.();
       setOpen(false);
     } else if (n.kind === 'task' || n.kind === 'info' || n.kind === 'web' || n.kind === 'daily-report'
       || n.kind === 'inspect' || n.kind === 'note'
-      // notes（/note check 笔记列表）/ check（/todo check 日程查询）同样支持 ✓ Mark as done 归档
       || n.kind === 'notes' || n.kind === 'check') {
-      // 告知类（task / info / web / daily-report / inspect / note / notes / check）
-      // 底部 ✓ Mark as done 均可归档；calendar 已在上方分支走 Open Calendar
       void markDone(n.id);
     }
-    // chat 类：仅确认，无额外动作
   }, [onOpenCalendar, markDone]);
-  /** Chat 邮件回复：使用当前邮件 messages 作为上下文，调用 askFromMail → 生成新的 chat 通知 */
-  const sendChatReply = useCallback(async () => {
-    if (detailIdx === null) return;
-    const current = notices[detailIdx];
-    if (!current || (current.kind !== 'chat' && current.kind !== 'notes')) return;
-    const text = replyText.trim();
-    if (!text) return;
-    setReplyState('sending');
-    setReplyError('');
-    setSendingPhase('Connecting…');
-    // 阶段提示计时器：按耗时递增切换文案，告诉用户"不是卡死"
-    const phaseStarted = Date.now();
-    if (sendingTimerRef.current) window.clearInterval(sendingTimerRef.current);
-    sendingTimerRef.current = window.setInterval(() => {
-      const elapsed = Date.now() - phaseStarted;
-      if (elapsed < 3000) setSendingPhase('Connecting…');
-      else if (elapsed < 10000) setSendingPhase('AI thinking…');
-      else if (elapsed < 25000) setSendingPhase('AI reasoning…');
-      else if (elapsed < 45000) setSendingPhase('Generating answer…');
-      else setSendingPhase(`Still working… ${Math.floor(elapsed / 1000)}s`);
-    }, 1000);
-    // 前端超时：60 秒强制终止（邮件式 chat 一般短问答，长时间多半是模型工具循环卡住）
-    const ac = new AbortController();
-    const timeoutTimer = setTimeout(() => ac.abort(new Error('请求超时（60 秒），请稍后再试或简化问题')), 60_000);
-    try {
-      const resp = await fetch('/api/wanted/mail-reply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: ac.signal,
-        body: JSON.stringify({ messages: current.messages, text }),
-      });
-      clearTimeout(timeoutTimer);
-      if (!resp.ok) {
-        let errText = '';
-        try { errText = (await resp.json()).reply || ''; } catch { /* ignore */ }
-        throw new Error(errText || `HTTP ${resp.status}`);
-      }
-      const res = await resp.json() as { ok: boolean; reply: string; messages: ChatMessage[] };
-      if (!res.ok) {
-        throw new Error(res.reply || 'Reply failed');
-      }
-      // 生成新通知：复用同 threadId，更新 messages（含最新一轮），主体 = 用户 reply，body 末尾附 AI 回复
-      const threadId = current.threadId ?? `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const baseTitle = current.title.replace(/^Re:\s*/i, '');
-      // time 统一计算：内存 notices 写入与 inbox DB POST 必须完全一致，
-      // 避免 mergeHistory 按 (kind,title,time) 签名去重失败产生双条邮件。
-      const replyTime = Date.now();
-      const newNotice: Notice = {
-        id: `wanted-${replyTime}-${noticeSeq++}`,
-        time: replyTime,
-        read: false,
-        done: false,
-        kind: 'chat',
-        title: `Re: ${baseTitle}`,
-        source: current.source ?? 'panel',
-        body: `> ${text}\n\n${res.reply}`,
-        threadId,
-        messages: res.messages,
-      };
-      let newIdx: number = -1;
-      setNotices((prev) => {
-        const next = [newNotice, ...prev];
-        const anchorIdx = next.findIndex((n) => n.id === current.id);
-        // 被回复的原邮件标记为已读（停止未读角标提示），但 done 不变（不归档，仍留 INBOX）
-        if (anchorIdx >= 0) {
-          next[anchorIdx] = { ...next[anchorIdx], read: true };
-        }
-        newIdx = 0;
-        return next;
-      });
-      // 新邮件到达提示：Toast 浮层 + 桌面通知（用户可能切走，回来时能感知到回复已到）
-      pushToast({
-        kind: 'chat',
-        title: newNotice.title,
-        body: res.reply.slice(0, 180),
-        source: 'panel',
-      });
-      sendDesktopNotification(newNotice.title, res.reply.slice(0, 200), { noticeId: newNotice.id });
-      // 原邮件同步标记已读到服务端（read=true，done 不变 → 不归档）
-      if (current.id) {
-        void fetch('/api/wanted/inbox', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: [current.id] }),
-        }).catch(() => {});
-      }
-      // setNotices updater 同步执行（React 18 批处理仍同步跑 updater），因此 newIdx 已写出
-      if (newIdx >= 0) setDetailIdx(newIdx);
-      // 新通知落库（chat 回复也需要持久化，否则刷新后丢失）
-      // dedupeKey = chat:threadId:time —— 同一线程每轮回复各自独立落库（time 唯一），
-      // 避免沿用线程级 chat:threadId 导致第二次回复幂等命中已存在记录而不落库（且 id 冲突）。
-      // 同一次回复因网络重试 POST 两次时 time 相同 → dedupeKey 相同 → 仍幂等。
-      void fetch('/api/wanted/inbox', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind: 'chat',
-          title: newNotice.title,
-          body: newNotice.body,
-          source: newNotice.source,
-          threadId: newNotice.threadId,
-          messages: newNotice.messages,
-          time: newNotice.time,
-          dedupeKey: `chat:${newNotice.threadId}:${newNotice.time}`,
-        }),
-      })
-        .then((r) => r.json().catch(() => null))
-        .then((data) => {
-          // 采纳服务端 in- 主键：否则内存 id(wanted-*) 在 DB 中不存在，
-          // 后续归档/已读/删除 PATCH 会静默 no-op，重启后该回复邮件状态（done/read）丢失
-          const msg = (data as { message?: { id?: string; done?: boolean; read?: boolean } } | null)?.message;
-          if (!msg?.id) return;
-          setNotices((prev) => {
-            // 幂等兜底：服务端命中已存在记录（dedupeKey 相同）时 id 会与既有邮件冲突，
-            // 此时不替换，避免出现两封同 id 邮件导致列表渲染错乱（邮件"消失"）
-            if (prev.some((n) => n.id === msg.id)) return prev;
-            return prev.map((n) =>
-              n.id === newNotice.id ? { ...n, id: msg.id as string, done: !!msg.done, read: !!msg.read } : n,
-            );
-          });
-        })
-        .catch(() => {});
-      setReplyOpen(false);
-      setReplyText('');
-      setReplyState('idle');
-      setSendingPhase('Sending…');
-    } catch (e: any) {
-      clearTimeout(timeoutTimer);
-      const msg = e?.name === 'AbortError'
-        ? (e.message || '请求超时，请稍后重试')
-        : (e?.message || String(e) || '发送失败');
-      setReplyError(msg);
-      setReplyState('error');
-      setSendingPhase('Sending…');
-    } finally {
-      if (sendingTimerRef.current) {
-        window.clearInterval(sendingTimerRef.current);
-        sendingTimerRef.current = null;
-      }
-    }
-  }, [detailIdx, notices, replyText]);
-
-  // Chat 回复快捷键：⌘/Ctrl + Enter 发送
-  useEffect(() => {
-    const ta = replyTaRef.current;
-    if (!ta) return;
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        if (replyState === 'idle' && replyText.trim()) {
-          void sendChatReply();
-        }
-      }
-    };
-    ta.addEventListener('keydown', onKey);
-    return () => ta.removeEventListener('keydown', onKey);
-  }, [replyState, replyText, sendChatReply]);
 
   // ===== 详情区子组件们（辅助渲染：避免 JSX 一大坨） =====
 
@@ -2182,47 +1821,10 @@ export function WantedNoticeCenter({
     }
   };
 
-  /** 邮件动作工具栏（Star / Archive / Delete / Reply / Forward / ⋯ More）
-   *  放在信封头右上角；chat 类再附加 Reply / Forward 三件套。
-   */
+  /** 邮件动作工具栏（Star / Delete / ⋯ More；web 附加下载+复制链接） */
   const mailActions = (n: Notice) => {
-    const isChat = n.kind === 'chat';
-    // ARCHIVE 中禁止回复：已归档邮件隐藏 Reply / Forward（避免回复后邮件状态异常）
-    // notes（/note check 笔记列表）也可回复：模型通过 update_notebook/delete_notebook 工具修改/删除笔记
-    const replyable = (isChat || n.kind === 'notes') && !n.done;
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-        {replyable && (
-          <>
-            <button
-              onClick={() => {
-                setReplyOpen((v) => {
-                  const newVal = !v;
-                  if (newVal) setTimeout(() => replyTaRef.current?.focus(), 0);
-                  return newVal;
-                });
-              }}
-              title="Reply (R) — ⌘/Ctrl + Enter to send"
-              style={iconBtn({ active: replyOpen, activeBg: 'var(--primary)', activeFg: '#fff', color: 'var(--primary)' })}
-            >
-              <Reply size={13} />
-            </button>
-            <button
-              onClick={() => {
-                const lastAssistant = [...(n.messages ?? [])].reverse().find((m) => m.role === 'assistant');
-                const quote = lastAssistant?.content ? `\n\n---\n> ${lastAssistant.content.slice(0, 240)}${lastAssistant.content.length > 240 ? '…' : ''}` : '';
-                setReplyText((t) => (t ? t : '') + quote);
-                setReplyOpen(true);
-                setTimeout(() => replyTaRef.current?.focus(), 0);
-              }}
-              title="Forward — quote last AI reply"
-              style={iconBtn({ color: 'var(--ink-muted)' })}
-            >
-              <Forward size={13} />
-            </button>
-            <div style={{ width: 1, height: 16, background: 'var(--line-soft)', margin: '0 2px' }} />
-          </>
-        )}
         {n.kind === 'web' && (
           <>
             <button
@@ -2301,73 +1903,6 @@ export function WantedNoticeCenter({
     opacity: disabled ? 0.4 : 1,
   } as React.CSSProperties);
 
-  /** chat 邮件：每封只展示本轮 Q+A（最后一条 user + 最后一条 assistant） */
-  const chatBubbles = (n: Notice, kb: string) => {
-    const convMsgs = (n.messages ?? []).filter((m) => m.role !== 'system');
-    if (convMsgs.length === 0) return null;
-    // 只取本轮：最后一条 user + 最后一条 assistant
-    const lastUser = [...convMsgs].reverse().find((m) => m.role === 'user');
-    const lastAssistant = [...convMsgs].reverse().find((m) => m.role === 'assistant');
-    const rendered: ChatMessage[] = [lastUser, lastAssistant].filter((m): m is ChatMessage => !!m);
-    if (rendered.length === 0) return null;
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 }}>
-        {rendered.map((m, i) => {
-          const isUser = m.role === 'user';
-          const s: SenderInfo = isUser
-            ? { name: 'Me', email: 'me@bobwork.dev', avatarEmoji: '👤', avatarSrc: '/assets/avatar-me.png', avatarBg: 'var(--primary-soft)', avatarFg: 'var(--primary)', avatarBorder: 'var(--primary)', to: 'XiaoMing <bob@bobwork.dev>' }
-            : { name: 'XiaoMing', email: 'bob@bobwork.dev', avatarEmoji: '🤖', avatarSrc: '/assets/avatar-drudge.png', avatarBg: 'var(--primary-soft)', avatarFg: 'var(--primary)', avatarBorder: 'var(--primary)', to: 'me' };
-          return (
-            <div
-              key={`${kb}-m${i}`}
-              style={{
-                display: 'flex',
-                gap: 8,
-                flexDirection: isUser ? 'row-reverse' : 'row',
-                alignItems: 'flex-start',
-              }}
-            >
-              {avatarEl(s, 26)}
-              <div style={{
-                maxWidth: 'calc(100% - 34px)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: isUser ? 'flex-end' : 'flex-start',
-                gap: 3,
-              }}>
-                <span style={{ fontSize: '0.666667rem', color: 'var(--ink-faint)', fontWeight: 600 }}>
-                  {isUser ? 'Me' : 'XiaoMing'}
-                </span>
-                <div
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: 8,
-                    borderTopLeftRadius: isUser ? 8 : 2,
-                    borderTopRightRadius: isUser ? 2 : 8,
-                    backgroundColor: isUser ? 'var(--primary)' : 'var(--paper-soft)',
-                    color: isUser ? '#fff' : 'var(--ink)',
-                    border: isUser ? 'none' : '1px solid var(--line-soft)',
-                    fontSize: '0.833333rem',
-                    lineHeight: 1.65,
-                    wordBreak: 'break-word',
-                    fontFamily: SANS_FONT,
-                  }}
-                >
-                  {isUser
-                    // 用户输入按纯文本渲染（用户不写 Markdown），保留原 whitespace-pre-wrap 效果
-                    ? <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
-                    // XiaoMing 回复统一走 Markdown 渲染（支持粗体/列表/表格/代码块等）；
-                    //  方案 B：展示层剥离 <think> 思考块，只保留回复正文（存储仍完整）
-                    : <HtmlRenderer content={stripThinkTags(m.content)} />}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
   /** 单一邮件信封：主题行 ➜ 信封头（头像+From/To+时间+动作） ➜ 分隔线 ➜ 正文 ➜ 底部动作
    *  @param n         邮件通知
    *  @param kb        React key 前缀（堆叠时区分每封邮件）
@@ -2383,11 +1918,9 @@ export function WantedNoticeCenter({
     showJumpTo?: boolean;
   }) => {
     const bucket = bucketOf(n);
-    // MailEnvelope 只在 inboxNotices 渲染（chat/schedules 两种），bucket 必非 null；防御地兜底成 chat 色
-    const bucketSafe: BucketKey = bucket ?? 'chat';
+    const bucketSafe: BucketKey = bucket ?? 'actions';
     const badgeColor: Record<BucketKey, { bg: string; fg: string; label: string }> = {
       schedules: { bg: 'var(--info-soft)', fg: 'var(--info)', label: BUCKET_LABEL.schedules },
-      chat: { bg: 'var(--primary-soft)', fg: 'var(--primary)', label: BUCKET_LABEL.chat },
       actions: { bg: 'var(--success-soft)', fg: 'var(--success)', label: BUCKET_LABEL.actions },
       web: { bg: 'var(--purple-soft)', fg: 'var(--purple)', label: BUCKET_LABEL.web },
       inspect: { bg: 'var(--teal-soft)', fg: 'var(--teal)', label: BUCKET_LABEL.inspect },
@@ -2449,7 +1982,7 @@ export function WantedNoticeCenter({
                 color: b.fg,
                 border: '1px solid currentColor',
               }}>
-                {n.kind === 'calendar' ? <Bell size={10} /> : n.kind === 'chat' ? <MessageCircle size={10} /> : n.kind === 'daily-report' ? <Clock size={10} /> : <Mail size={10} />}
+                {n.kind === 'calendar' ? <Bell size={10} /> : n.kind === 'daily-report' ? <Clock size={10} /> : <Mail size={10} />}
                 {b.label}
               </span>
               {n.threadId && threadCount > 1 && (
@@ -2556,11 +2089,9 @@ export function WantedNoticeCenter({
         {/* === 分隔线 === */}
         <div style={{ height: 1, background: 'var(--line-soft)', margin: '0 14px' }} />
 
-        {/* === 正文容器（chat 走气泡；其余：daily-report 模板 / itemsTable / 正文） */}
+        {/* === 正文容器：daily-report 模板 / itemsTable / 正文 */}
         <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {n.kind === 'chat' && Array.isArray(n.messages) && n.messages.length > 0 ? (
-            chatBubbles(n, kb)
-          ) : n.kind === 'daily-report' && Array.isArray(n.items) && n.items.length > 0 ? (
+          {n.kind === 'daily-report' && Array.isArray(n.items) && n.items.length > 0 ? (
             <DailyReportDetail
               items={n.items}
               onToggle={toggleItemDone}
@@ -2568,10 +2099,8 @@ export function WantedNoticeCenter({
               onCompleteToday={completeAllToday}
             />
           ) : n.kind === 'inspect' && n.body ? (
-            // /inspect：按项目分组渲染成卡片（项目 → 便签 → 页 → 待办）
             <InspectDetail body={n.body} />
           ) : n.kind === 'notes' && Array.isArray(n.items) ? (
-            // /note check：笔记列表（每条带一键删除按钮 + 可回复修改）
             <>
               {n.body.split('\n')[0]?.trim() ? (
                 <div style={{ fontSize: '0.733333rem', color: 'var(--ink-muted)', marginBottom: 4 }}>
@@ -2594,11 +2123,8 @@ export function WantedNoticeCenter({
             </>
           ) : (
             <div style={{ padding: '2px 0' }}>
-              {n.kind === 'chat' || n.kind === 'web'
-                // chat 类正文（> 用户引用 + AI Markdown 回复）与 web 整理报告（结构化 Markdown）
-                // 统一走完整 Markdown 渲染；展示层剥离 <think> 思考块（存储仍完整）
+              {n.kind === 'web'
                 ? <HtmlRenderer content={stripThinkTags(n.body)} />
-                // 其他（schedules 等回执）保持段落/引用的轻量渲染
                 : richText(n.body, { keyBase: `${kb}-body` })}
             </div>
           )}
@@ -2675,8 +2201,8 @@ export function WantedNoticeCenter({
           </div>
         )}
 
-        {/* === 底部动作：calendar 类提供 Open Calendar；其他非 chat 类提供 Mark as done；chat 类这里不放 OK（reply 在工具栏） */}
-        {((n.action?.type === 'open-calendar' || n.kind === 'calendar') || n.kind !== 'chat') && (
+        {/* === 底部动作：calendar 类提供 Open Calendar；其余提供 Mark as done */}
+        {(
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -2749,17 +2275,10 @@ export function WantedNoticeCenter({
   // 归档：语义等同 markDone（快捷键 E 与 Archive 按钮均用 markArchive + autoAdvanceAfterRemove）
   const markArchive = useCallback(async (id: string, doArchive: boolean) => {
     if (doArchive) {
-      // chat 邮件归档整个线程（与行内/信封 Archive 按钮行为一致），其余类型单条归档
-      const notice = notices.find((n) => n.id === id);
-      if (notice?.kind === 'chat') {
-        markThreadDone(id);
-      } else {
-        const ok = await markDone(id);
-        if (!ok) return; // 用户取消确认：不移动邮件
-      }
+      const ok = await markDone(id);
+      if (!ok) return;
       autoAdvanceAfterRemove(id, true);
     } else {
-      // 取消归档：把 done=false 恢复（PATCH done:false）
       setNotices((prev) => prev.map((n) => (n.id === id ? { ...n, done: false } : n)));
       void fetch('/api/wanted/inbox', {
         method: 'PATCH',
@@ -2767,7 +2286,7 @@ export function WantedNoticeCenter({
         body: JSON.stringify({ ids: [id], done: false }),
       }).catch(() => {});
     }
-  }, [notices, markDone, markThreadDone, autoAdvanceAfterRemove]);
+  }, [markDone, autoAdvanceAfterRemove]);
 
   // 单条删除（快捷键 ⌘⇧D / delete 等 UI 复用）：包装已有的 deleteNotices([id])
   const markDelete = useCallback((id: string) => {
@@ -2782,23 +2301,7 @@ export function WantedNoticeCenter({
     }).catch(() => {});
   }, [confirmAsk, deleteNotices, autoAdvanceAfterRemove]);
 
-  // 小型幽灵文本按钮样式（Forward quote / Discard draft 用）——未定义导致的 TS2304 修复
-  const smallGhostBtn = (color: string = 'var(--ink-muted)'): React.CSSProperties => ({
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 4,
-    height: 28,
-    padding: '0 10px',
-    borderRadius: 6,
-    border: '1px solid var(--line-soft)',
-    background: 'none',
-    color,
-    fontSize: '0.766667rem',
-    fontWeight: 600,
-    cursor: 'pointer',
-  });
-
-  // 全局邮箱快捷键：J/K 切上/下一封；Esc 关详情；R 聚焦回复；E 归档；S 星标；⌘⇧D 删除
+  // 全局邮箱快捷键：J/K 切上/下一封；Esc 关详情；E 归档；S 星标；⌘⇧D 删除
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -2821,16 +2324,9 @@ export function WantedNoticeCenter({
           if (!isTyping) { e.preventDefault(); navDetail(-1); }
           break;
         case 'Escape':
-          if (!isTyping || document.activeElement === replyTaRef.current) {
+          if (!isTyping) {
             e.preventDefault();
             closeDetail();
-          }
-          break;
-        case 'r': case 'R':
-          if (detail && (detail.kind === 'chat' || detail.kind === 'notes') && !detail.done) {
-            e.preventDefault();
-            setReplyOpen(true);
-            setTimeout(() => replyTaRef.current?.focus(), 0);
           }
           break;
         case 'e': case 'E':
@@ -2920,13 +2416,11 @@ export function WantedNoticeCenter({
     </div>
   ) : null;
 
-  /** 左栏单行渲染：chat 线程非根邮件缩进 + 垂直连线 + ↳ Re: 前缀；
-   *  线程根邮件带折叠三角（点击在 row 内切换，不触发条目打开详情）
-   */
+  /** 左栏单行渲染 */
   const renderNoticeRow = (
     n: Notice,
     isDone: boolean,
-    info: { threadOrder: number; threadSize: number; threadCollapsed: boolean } = {
+    _info: { threadOrder: number; threadSize: number; threadCollapsed: boolean } = {
       threadOrder: 1,
       threadSize: 1,
       threadCollapsed: false,
@@ -2934,16 +2428,10 @@ export function WantedNoticeCenter({
   ): React.ReactNode => {
     const idx = notices.findIndex((x) => x.id === n.id);
     const selected = idx === detailIdx;
-    // ARCHIVE 多选模式：isDone 且 Select 已开启 → 行显示复选框，点击切换选中而非打开详情
     const selMode = isDone && archiveSelMode;
     const rowSelected = selMode && (n.threadId
       ? notices.filter((x) => x.threadId === n.threadId).some((x) => archiveSelected.has(x.id))
       : archiveSelected.has(n.id));
-    const isThreadReply = !!n.threadId && info.threadOrder > 1;
-    const isThreadRoot = n.kind === 'chat' && !!n.threadId && info.threadOrder === 1 && info.threadSize > 1;
-    const threadDepth = isThreadReply ? 1 : 0;
-    // 报告类邮件的左侧专属强调色（替代统一品牌紫，一眼可辨）：
-    //   Morning Report → 金色；Sticky Report(INSPECT) → 青色
     const leftAccentColor =
       n.kind === 'daily-report' ? 'var(--warn)' :
       n.kind === 'inspect' ? 'var(--teal)' : 'var(--primary)';
@@ -2961,7 +2449,6 @@ export function WantedNoticeCenter({
         onMouseEnter={(e) => { if (!selected && !rowSelected) e.currentTarget.style.backgroundColor = 'var(--paper-hover)'; }}
         onMouseLeave={(e) => { if (!selected && !rowSelected) e.currentTarget.style.backgroundColor = 'transparent'; }}
       >
-        {/* 未读左侧色条（报告类用专属色）：绝对定位覆盖 thread 连线区 */}
         <div style={{
           position: 'absolute',
           left: 0,
@@ -2971,65 +2458,6 @@ export function WantedNoticeCenter({
           background: isDone || n.read ? 'transparent' : leftAccentColor,
           zIndex: 1,
         }} />
-        {/* chat 回复缩进：左侧 L 形连线 */}
-        {isThreadReply && (
-          <>
-            <div style={{
-              position: 'absolute',
-              left: 12 + threadDepth * 10 - 1,
-              top: 0,
-              bottom: 0,
-              width: 1,
-              backgroundColor: 'var(--line-soft)',
-              zIndex: 0,
-            }} />
-            <div style={{
-              position: 'absolute',
-              left: 12 + threadDepth * 10 - 1,
-              top: 18,
-              width: 10,
-              height: 1,
-              backgroundColor: 'var(--line-soft)',
-              zIndex: 0,
-            }} />
-          </>
-        )}
-        {/* 线程根邮件：左侧放折叠展开三角（不触发打开详情），点击在整条左侧区域；多选模式下隐藏避免与复选框重叠 */}
-        {isThreadRoot && n.threadId && !selMode && (
-          <button
-            onClick={(e) => { e.stopPropagation(); if (n.threadId) (isDone ? toggleThreadInArchive(n.threadId) : toggleThreadCollapse(n.threadId)); }}
-            onMouseDown={(e) => e.stopPropagation()}
-            title={info.threadCollapsed ? `Expand thread (${info.threadSize} messages)` : `Collapse thread`}
-            style={{
-              position: 'absolute',
-              left: 2,
-              top: 6,
-              width: 16,
-              height: 16,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'none',
-              border: 'none',
-              borderRadius: 3,
-              cursor: 'pointer',
-              color: 'var(--ink-muted)',
-              zIndex: 3,
-              padding: 0,
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--primary)'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--ink-muted)'; }}
-          >
-            <ChevronRight
-              size={12}
-              style={{
-                transition: 'transform var(--dur-fast) var(--ease-fast)',
-                transform: info.threadCollapsed ? 'none' : 'rotate(90deg)',
-              }}
-            />
-          </button>
-        )}
-        {/* ARCHIVE 多选模式：行首复选框（点击切换选中，不打开详情） */}
         {selMode && (
           <span
             onClick={(e) => { e.stopPropagation(); toggleArchiveSelect(n); }}
@@ -3065,7 +2493,7 @@ export function WantedNoticeCenter({
             display: 'flex',
             flexDirection: 'column',
             gap: 4,
-            padding: `8px 4px 8px ${10 + (isThreadRoot ? 14 : 0) + threadDepth * 14}px`,
+            padding: '8px 4px 8px 10px',
             background: 'none',
             border: 'none',
             cursor: 'pointer',
@@ -3089,7 +2517,6 @@ export function WantedNoticeCenter({
               const b = bucketOf(n);
               const cfg: Record<BucketKey, { bg: string; fg: string; label: string }> = {
                 schedules: { bg: 'var(--info-soft)', fg: 'var(--info)', label: 'SCHEDULES' },
-                chat: { bg: 'var(--primary-soft)', fg: 'var(--primary)', label: 'CHAT' },
                 actions: { bg: 'var(--success-soft)', fg: 'var(--success)', label: 'ACTIONS' },
                 web: { bg: 'var(--purple-soft)', fg: 'var(--purple)', label: 'WEB' },
                 inspect: { bg: 'var(--teal-soft)', fg: 'var(--teal)', label: 'INSPECT' },
@@ -3162,28 +2589,6 @@ export function WantedNoticeCenter({
               onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.45'; }}
             >
               <Circle size={13} />
-            </button>
-          ) : n.kind === 'chat' ? (
-            /* chat：一键归档整个线程（根邮件或旧 reply 都可用，不会残留其他轮次） */
-            <button
-              onClick={(e) => { e.stopPropagation(); markThreadDone(n.id); }}
-              title="Archive thread — archive all messages in this thread"
-              style={{
-                flexShrink: 0,
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                padding: '4px 8px',
-                color: 'var(--success)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                opacity: 0.45,
-                transition: 'opacity var(--dur-fast) var(--ease-fast)',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.45'; }}
-            >
-              <Archive size={13} />
             </button>
           ) : (
             /* 告知类通知：睁开的眼睛（蓝），仅标记通知本身 → 完成后变为闭上的眼睛 */
@@ -3368,9 +2773,9 @@ export function WantedNoticeCenter({
                         </div>
                       )}
                       <div style={{ flex: 1, overflowY: 'auto', overscrollBehavior: 'contain', padding: '4px 0' }}>
-                        <CollapsibleSection title="INBOX" count={filterCat !== null ? countVisibleEntries(filteredMails ?? []) : inboxVisibleCount} defaultExpanded renderNoticeRow={renderNoticeRow} doneList={filterCat !== null ? (filteredMails ?? []) : pendingList} isDone={false} tagBar={tagBarNode} collapsedThreads={collapsedThreads} threadExpandedInArchive={threadExpandedInArchive} />
+                        <CollapsibleSection title="INBOX" count={filterCat !== null ? (filteredMails ?? []).length : inboxVisibleCount} defaultExpanded renderNoticeRow={renderNoticeRow} doneList={filterCat !== null ? (filteredMails ?? []) : pendingList} isDone={false} tagBar={tagBarNode} />
                         {doneList.length > 0 && (
-                          <CollapsibleSection title="ARCHIVE" count={archiveVisibleCount} defaultExpanded={false} renderNoticeRow={renderNoticeRow} doneList={doneList} isDone collapsedThreads={collapsedThreads} threadExpandedInArchive={threadExpandedInArchive} headerAction={(
+                          <CollapsibleSection title="ARCHIVE" count={archiveVisibleCount} defaultExpanded={false} renderNoticeRow={renderNoticeRow} doneList={doneList} isDone headerAction={(
                             <button
                               onClick={(e) => { e.stopPropagation(); if (archiveSelMode) exitArchiveSelect(); else setArchiveSelMode(true); }}
                               title={archiveSelMode ? 'Exit multi-select' : 'Multi-select to delete'}
@@ -3478,7 +2883,7 @@ export function WantedNoticeCenter({
 
                 {/* ===== 右栏：详情（默认收起，点击左侧条目后展开） —— 始终占一席，空态居中插画 ===== */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderLeft: detail ? '1px solid var(--line-soft)' : 'none' }}>
-                  {/* 顶栏：拖动 + Prev/Next + Close（chat/非 chat 都保留；原来的分类 badge 移到信封主题行） */}
+                  {/* 顶栏：拖动 + Prev/Next + Close（分类 badge 移到信封主题行） */}
                   <div
                     onMouseDown={startDrag}
                     style={{
@@ -3613,8 +3018,6 @@ export function WantedNoticeCenter({
                       }}>
                         {[
                           ['J / K', 'Prev / Next'],
-                          ['R', 'Reply (chat)'],
-                          ['⌘↵', 'Send reply'],
                           ['E', 'Archive'],
                           ['S', 'Star / Unstar'],
                         ].map(([k, v]) => (
@@ -3646,186 +3049,6 @@ export function WantedNoticeCenter({
                     // ============ 内容区（可滚动） ============
                     <div style={{ flex: 1, overflowY: 'auto', overscrollBehavior: 'contain', padding: '14px 16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                       <MailEnvelope n={detail} kb={`detail-${detail.id}`} />
-
-                      {/* === chat 底部引用式回复框：在 chat 信封（或整个堆叠）下方单独渲染一次，保持 Gmail 的整线程一个回复框 ===
-                          ARCHIVE 中不渲染（已归档邮件禁止回复）
-                          notes（/note check 笔记列表）同样可回复：模型通过 update_notebook/delete_notebook 工具修改/删除笔记 */}
-                      {(detail.kind === 'chat' || detail.kind === 'notes') && !detail.done && (
-                        <div style={{
-                          marginTop: 2,
-                          padding: 10,
-                          border: '1px solid var(--line)',
-                          borderRadius: 6,
-                          backgroundColor: 'var(--paper-soft)',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 8,
-                        }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.733333rem', color: 'var(--ink-muted)', fontWeight: 700, letterSpacing: '0.04em' }}>
-                            <Reply size={12} />
-                            &nbsp;Reply to thread
-                            <span style={{ flex: 1 }} />
-                            <span style={{
-                              fontSize: '0.666667rem',
-                              color: 'var(--ink-faint)',
-                              fontWeight: 500,
-                            }}>
-                              ⌘/Ctrl + Enter
-                            </span>
-                          </div>
-                          {/* 可选折叠：引用原邮件 */}
-                          {!replyText && (
-                            <details style={{ fontSize: '0.733333rem', color: 'var(--ink-muted)', margin: 0 }}>
-                              <summary
-                                style={{
-                                  cursor: 'pointer',
-                                  listStyle: 'none',
-                                  userSelect: 'none',
-                                  padding: '2px 4px',
-                                  borderRadius: 3,
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: 4,
-                                  fontWeight: 600,
-                                }}
-                                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--paper-hover)'; }}
-                                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.backgroundColor = ''; }}
-                              >
-                                <ChevronRight size={10} />
-                                Quoted content — original message
-                              </summary>
-                              <div style={{
-                                marginTop: 6,
-                                padding: '6px 10px',
-                                borderLeft: `3px solid var(--primary-soft)`,
-                                background: 'var(--paper-hover)',
-                                color: 'var(--ink-muted)',
-                                fontSize: '0.766667rem',
-                                lineHeight: 1.55,
-                                whiteSpace: 'pre-wrap',
-                                wordBreak: 'break-word',
-                                fontFamily: SANS_FONT,
-                              }}>
-                                <div style={{ fontWeight: 600, marginBottom: 2 }}>
-                                  On {formatTime(detail.time)}, {(() => { const s = senderOf(detail); return `${s.name} <${s.email}>`; })()} wrote:
-                                </div>
-                                {/* 引用：chat 取最后一条 assistant 或 body，其余用 body 前 600 字 */}
-                                {(() => {
-                                  const src = (() => {
-                                    if (detail.kind === 'chat' && detail.messages) {
-                                      const nonSys = detail.messages.filter((m) => m.role !== 'system');
-                                      const last = nonSys[nonSys.length - 1];
-                                      return last?.content ?? detail.body;
-                                    }
-                                    return detail.body;
-                                  })();
-                                  const trimmed = src.length > 600 ? `${src.slice(0, 600)}…` : src;
-                                  return richText(trimmed, { keyBase: `reply-quote-${detail.id}` });
-                                })()}
-                              </div>
-                            </details>
-                          )}
-                          <textarea
-                            ref={replyTaRef}
-                            value={replyText}
-                            onChange={(e) => { setReplyText(e.target.value); if (replyState === 'error') { setReplyState('idle'); setReplyError(''); } }}
-                            placeholder="Reply to this thread… Context (up to 40 messages, no TTL) rides along with every reply."
-                            rows={replyOpen || replyText ? 4 : 2}
-                            onFocus={() => setReplyOpen(true)}
-                            onCompositionStart={() => { composingRef.current = true; }}
-                            onCompositionEnd={() => { composingRef.current = false; }}
-                            style={{
-                              width: '100%',
-                              resize: 'vertical',
-                              minHeight: replyOpen || replyText ? 88 : 44,
-                              maxHeight: 280,
-                              padding: '8px 10px',
-                              fontSize: '0.866667rem',
-                              lineHeight: 1.55,
-                              color: 'var(--ink)',
-                              backgroundColor: 'var(--paper)',
-                              border: replyState === 'error' ? '1px solid var(--danger)' : '1px solid var(--line)',
-                              borderRadius: 4,
-                              outline: 'none',
-                              fontFamily: SANS_FONT,
-                              boxSizing: 'border-box',
-                            }}
-                            onKeyDown={(e) => {
-                              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); return; }
-                              if (e.key === 'Enter' && !e.shiftKey && !composingRef.current) {
-                                e.preventDefault();
-                                if (replyState === 'idle' && replyText.trim()) void sendChatReply();
-                              }
-                            }}
-                          />
-                          {replyState === 'error' && (
-                            <div style={{ fontSize: '0.733333rem', color: 'var(--danger)', fontWeight: 600 }}>
-                              ⚠ {replyError || 'Reply failed'}
-                            </div>
-                          )}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button
-                                onClick={() => {
-                                  const lastAssistant = [...(detail.messages ?? [])].reverse().find((m) => m.role === 'assistant');
-                                  const quote = lastAssistant?.content ? `\n\n---\n> ${lastAssistant.content.slice(0, 240)}${lastAssistant.content.length > 240 ? '…' : ''}` : '';
-                                  setReplyText((t) => (t ? t : '') + quote);
-                                  setReplyOpen(true);
-                                  setTimeout(() => replyTaRef.current?.focus(), 0);
-                                }}
-                                style={smallGhostBtn('var(--ink-muted)')}
-                              >
-                                <Forward size={12} /> Forward quote
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setReplyOpen(false);
-                                  setReplyText('');
-                                  setReplyError('');
-                                  setReplyState('idle');
-                                  setSendingPhase('Sending…');
-                                  if (sendingTimerRef.current) {
-                                    window.clearInterval(sendingTimerRef.current);
-                                    sendingTimerRef.current = null;
-                                  }
-                                  const ta = replyTaRef.current;
-                                  if (ta) ta.blur();
-                                }}
-                                disabled={replyState === 'sending'}
-                                style={smallGhostBtn('var(--ink-muted)')}
-                              >
-                                Discard draft
-                              </button>
-                            </div>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                              <button
-                                onClick={() => { if (replyState === 'idle' && replyText.trim()) void sendChatReply(); }}
-                                disabled={replyState === 'sending' || !replyText.trim()}
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: 5,
-                                  background: replyState === 'sending' ? 'var(--primary-soft)' : 'var(--primary)',
-                                  border: 'none',
-                                  borderRadius: 4,
-                                  padding: '7px 16px',
-                                  cursor: replyState === 'sending' || !replyText.trim() ? 'not-allowed' : 'pointer',
-                                  fontSize: '0.833333rem',
-                                  fontWeight: 800,
-                                  color: '#fff',
-                                  boxShadow: replyState === 'sending' ? 'none' : '0 1px 2px rgba(0,0,0,0.08)',
-                                }}
-                              >
-                                {replyState === 'sending' ? (
-                                  <><Loader2 size={13} style={{ animation: 'spin 0.8s linear infinite' }} /> {sendingPhase}</>
-                                ) : (
-                                  <>Send ↵</>
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>

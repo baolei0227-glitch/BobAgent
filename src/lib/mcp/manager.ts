@@ -240,14 +240,17 @@ function topologicalSort<T extends { id: string; dependencies?: string[] }>(item
   return result;
 }
 
+/** 以 Streamable HTTP 接入的本地常驻桥（端口固定；进程重启会轮换 token，需运行时刷新） */
+const LOCAL_BRIDGE_MCP_IDS: readonly string[] = ['bob-browser-mcp', 'bob-ocr-mcp'];
+
 class McpClientManager {
   private kernel = new PluginKernel();
   private configs: McpServerConfig[] = [];
   private configsById = new Map<string, McpServerConfig>();
   /** 正在自愈重连中的 server id（防并发重连） */
   private reconnecting = new Set<string>();
-  /** bob-browser-mcp 桥 token 探测节流时间戳（桥重启会轮换 token，>20s 才探测一次） */
-  private browserTokenProbeAt = 0;
+  /** 本地常驻桥 token 探测节流时间戳（桥重启会轮换 token，>20s 才探测一次） */
+  private localBridgeTokenProbeAt = 0;
   /** 清洗后的 fullName → MCP 原始工具名（调用时还原用） */
   private toolNameByFullName = new Map<string, string>();
 
@@ -262,10 +265,10 @@ class McpClientManager {
    * 挂载新增/缺失的、卸载已移除/禁用的、重启配置变更的；依赖不满足的进入 error 状态并记录原因。
    */
   async syncServers(configs: McpServerConfig[]): Promise<void> {
-    // bob-browser-mcp：桥重启会轮换 token，落盘配置里的旧 token 会让连接 401。
-    // 同步前探测 /setup/status，token 不一致则就地刷新（运行时，不写盘），
-    // 使下方 configChanged 感知变更并触发一次重连。
-    await this.refreshBrowserBridgeToken(configs);
+    // 本地常驻桥（bob-browser-mcp / bob-ocr-mcp）：桥重启会轮换 token，
+    // 落盘配置里的旧 token 会让连接 401。同步前探测 /setup/status，
+    // token 不一致则就地刷新（运行时，不写盘），使下方 configChanged 感知变更并触发一次重连。
+    await this.refreshLocalBridgeTokens(configs);
 
     const prev = this.configs;
     this.configs = configs;
@@ -286,39 +289,41 @@ class McpClientManager {
   }
 
   /**
-   * bob-browser-mcp 桥 token 自动刷新（节流：>20s 才探测一次）。
+   * 本地常驻桥 token 自动刷新（节流：>20s 才探测一次）。
    * 桥 /setup/status 返回实时 token；与配置 url 内嵌 token 不一致时，
    * 就地改写该 config 的 url/headers（仅运行时，不落盘）。桥不可达时保持现状。
    */
-  private async refreshBrowserBridgeToken(configs: McpServerConfig[]): Promise<void> {
+  private async refreshLocalBridgeTokens(configs: McpServerConfig[]): Promise<void> {
     const now = Date.now();
-    if (now - this.browserTokenProbeAt < 20_000) return;
-    this.browserTokenProbeAt = now;
+    if (now - this.localBridgeTokenProbeAt < 20_000) return;
+    this.localBridgeTokenProbeAt = now;
 
-    const cfg = configs.find(
-      (c) => c.id === 'bob-browser-mcp' && c.enabled && !c.builtin && c.transport === 'streamable-http' && !!c.url,
-    );
-    const url = cfg?.url || '';
-    if (!cfg || !url) return;
-    const portMatch = /https?:\/\/(?:127\.0\.0\.1|localhost):(\d+)/.exec(url);
-    if (!portMatch) return;
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 800);
-      const res = await fetch(`http://127.0.0.1:${portMatch[1]}/setup/status`, { signal: ctrl.signal });
-      clearTimeout(t);
-      if (!res.ok) return;
-      const data = (await res.json().catch(() => null)) as { token?: unknown } | null;
-      const token = typeof data?.token === 'string' && data.token ? data.token : null;
-      if (!token) return;
-      const encoded = encodeURIComponent(token);
-      if (url.includes(`token=${encoded}`)) return; // token 未变
-      cfg.url = url.replace(/([?&]token=)[^&]*/, `$1${encoded}`);
-      if (cfg.headers && typeof cfg.headers.Authorization === 'string' && cfg.headers.Authorization.startsWith('Bearer ')) {
-        cfg.headers = { ...cfg.headers, Authorization: `Bearer ${token}` };
+    for (const id of LOCAL_BRIDGE_MCP_IDS) {
+      const cfg = configs.find(
+        (c) => c.id === id && c.enabled && !c.builtin && c.transport === 'streamable-http' && !!c.url,
+      );
+      const url = cfg?.url || '';
+      if (!cfg || !url) continue;
+      const portMatch = /https?:\/\/(?:127\.0\.0\.1|localhost):(\d+)/.exec(url);
+      if (!portMatch) continue;
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 800);
+        const res = await fetch(`http://127.0.0.1:${portMatch[1]}/setup/status`, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (!res.ok) continue;
+        const data = (await res.json().catch(() => null)) as { token?: unknown } | null;
+        const token = typeof data?.token === 'string' && data.token ? data.token : null;
+        if (!token) continue;
+        const encoded = encodeURIComponent(token);
+        if (url.includes(`token=${encoded}`)) continue; // token 未变
+        cfg.url = url.replace(/([?&]token=)[^&]*/, `$1${encoded}`);
+        if (cfg.headers && typeof cfg.headers.Authorization === 'string' && cfg.headers.Authorization.startsWith('Bearer ')) {
+          cfg.headers = { ...cfg.headers, Authorization: `Bearer ${token}` };
+        }
+      } catch {
+        /* 桥不可达：保持现状，等待下一次节流窗口再探测 */
       }
-    } catch {
-      /* 桥不可达：保持现状，等待下一次节流窗口再探测 */
     }
   }
 

@@ -13,6 +13,72 @@
 
 
 ***
+
+## v0.5.407 (2026-09-13)
+
+### 优化
+
+* 查看舱标签页关闭按钮改为悬浮覆盖：关闭按钮绝对定位浮在标签右上角，不再占用标签宽度；标签宽度估算上限同步由 140 收到 112，等宽标签栏能容纳更多标签
+* 本地文件浏览器面板精简：行尾 ⋯ 操作按钮改为悬浮覆盖渐显（带渐变底，不再挤占文件名）；移除「Added directories (N)」分组标题；右键菜单去掉分组小标题与彩色图标，移除 Open in viewer / Open with system app（统一走 Finder）；「Send to current node」「Send to new node」分别改名为「Current chat」「New node」
+* 本地目录读取性能优化：先过滤隐藏文件并按目录优先排序，再用 `Promise.all` 并发 `stat`，替代原先逐条 `await` 的串行系统调用 —— 打开文件较多的大目录不再卡顿
+* 新建 Markdown 文档接口加固：目标目录缺失时兜底创建，文件名 / 子目录继续做路径穿越与重名校验
+
+***
+
+## v0.5.406 (2026-09-13)
+
+### 新增与优化
+
+* 截图 OCR 编辑器马赛克重做：新增细 / 中 / 粗三档画笔（Fine / Medium / Thick），笔刷半径随图像分辨率自适应，落点改为圆形（不再误伤笔刷外像素）；改用局部区域读写 + 快速拖动插值补点，涂抹更跟手、不再出现断层
+* 截图 OCR 编辑器标注文字字号随图像宽度自适应，不同分辨率 / DPR 截图上视觉大小一致
+* 截图 OCR 编辑器缩放基准修正：整屏截图按窗口尺寸铺满（与真实屏幕 1:1），修复用户反馈的「蒙版比真实界面小」
+* 截图 OCR 编辑窗口改为常驻复用：移除每次截图后的整页 reload（Next 重新水合），快捷键唤起编辑画面不再迟滞 / 白闪
+* 新建 Markdown 文档弹窗：⌘F 面板点 Markdown 时可自定义文件名并选择 homework 内目标文件夹，重名 / 非法字符即时提示；`/api/nodes` 创建接口同步支持 `file_name` / `target_dir`，并做路径穿越与重名校验
+* 本地文件浏览器新建 md 同样改为弹窗命名 + 重名校验，弹窗期间面板不自动收起
+* 查看舱标签页关闭按钮修复：标签本身是 button，内部再嵌 button 属非法 HTML，会被 SSR 提前闭合导致悬停不显示关闭按钮 —— 改用 `span[role=button]`，并收紧标签尺寸
+* 模板填充面板「Bob Items」改为可折叠下拉列表：支持 Select all / Invert 批量勾选与逐项复选框
+* warm 主题画布底色微调（#e4e4ea → #e8e8e8）
+
+***
+
+## v0.5.405 (2026-09-13)
+
+### 修复与优化
+
+* 插件面板端口加固：Bob-Mind 面板端口被残留旧进程占用时不再静默加载旧界面 —— 插件侧写入端口冲突标记，并每 10 秒重试绑定端口，占用进程退出后自动接管（无需重启宿主）
+* 新增宿主统一探测接口 `/api/plugin-panel-probe/<pluginId>`：面板挂载前由宿主判定就绪态，能识别「端口被残留旧进程占用」并回报占用进程 PID，避免直连插件端点命中旧进程、误判就绪
+* 面板未就绪提示细化：区分「端口被占用」与「插件未运行」两种情况，均提供 Retry
+
+***
+
+## v0.5.404 (2026-09-13)
+
+### 优化
+
+* 内置浏览器（Hippo）界面文案全面英文化：工具栏（Back / Forward / Reload / Search or enter address / Bookmark this page / Always on top）、书签右键菜单（Rename / Delete Bookmark）、窗口按钮（Close / Minimize / Zoom）与错误提示（Missing URL / Bookmark not found / Only http/https/file links are supported）
+* 各查看器与编辑器文案英文化：PDF 查看器（拖动选中提示、Failed to load PDF、保存结果、OCR 与检索状态）、图片查看器（Rotate 90° / Annotate / AI edit / 全屏与关闭提示）、图片标注器（Arrow / Rectangle / Text / Mosaic、颜色、字号、Undo / Clear all annotations / Cancel / Save）、AI 图像编辑器（No model configured 与参考图说明）、独立 image-viewer 页面加载与保存报错
+* ⌘F 面板标星小程序快捷图标行放大（18px → 28px 圆角方块，字号同步提升），补上悬停高亮；点击功能按钮或标星图标后自动收起面板
+* Extensions Store 图标由 Sparkles 换为 Blocks
+
+***
+
+## v0.5.403 (2026-09-13)
+
+### 修复与优化
+
+* WANTED /chat 对话不再进入 BobMail：下线 /api/wanted/mail-reply 接口与邮件式线程回复逻辑（askFromMail / aggregateSse 一并移除），统一改为面板 toast 浮层展示，保持轻量交互
+* 会话存储统一由服务端 chat-sessions 管理：panel 会话长期保留供多轮复用，wechat 会话 24 小时过期自动清理；/chat out 不再删除临时文件，解绑线程标记后仅退出 node 模式
+* bus.ts 事件模型精简：移除 chat kind 与 threadId 必填约束，对话历史字段改为可选会话线程 ID（DB 保留字段，供未来会话式通知归组使用）
+
+***
+
+## v0.5.402 (2026-09-12)
+
+### 修复
+
+* 文档编辑器分栏内无法输入：ProseMirror 的 toDOM 缺少末尾「内容孔洞」占位符 0 时，renderSpec 会返回 contentDOM=undefined，该 div 被设为 contenteditable=false 且不挂内容孔洞，导致栏内既无法输入也不渲染子块；现为 .bob-column / .bob-columns 补回 0 占位符，并更正注释说明（Tiptap v3 会在 .bob-columns-body 内再注入一层 contentDOM，分栏 layout 样式作用于该注入层）
+* 文件树列式浏览 ⋮ 菜单的 Share 入口对非 Markdown 文件置灰禁用并提示 Only Markdown documents can be shared，与 /api/share 仅接受 .md 的服务端约束保持一致
+
 ***
 
 ## v0.5.401 (2026-09-12)

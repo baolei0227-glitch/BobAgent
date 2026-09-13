@@ -592,7 +592,7 @@ export const THEME_OPTIONS: Array<{
 export const PRESET_THEME_VARIABLES: Record<string, Record<string, string>> = {
   warm: {
     '--background': '#f7f7f8',
-    '--canvas-bg': '#e4e4ea',
+    '--canvas-bg': '#e8e8e8',
     '--foreground': '#171717',
     '--card': '#f7f7f8',
     '--card-foreground': '#171717',

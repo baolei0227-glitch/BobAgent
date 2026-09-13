@@ -5,7 +5,6 @@ import { createPortal } from 'react-dom';
 import {
   Folder,
   FolderOpen,
-  File as FileIcon,
   Search,
   X,
   Loader2,
@@ -17,10 +16,8 @@ import {
   Trash,
   ArrowUpCircle,
   PlusCircle,
-  Eye,
-  ExternalLink,
   ShieldCheck,
-  CornerUpLeft,
+  ChevronRight,
   Pin,
   PinOff,
   MoreVertical,
@@ -28,7 +25,6 @@ import {
 
 import { bus, BusEvents } from '@/lib/bus';
 import type { MessageAttachment } from '@/lib/types';
-import { isBrowserDoc, isPreviewable } from './viewers/registry';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { FileName } from './FileName';
@@ -106,23 +102,6 @@ function searchResultsEqual(a: SearchResult[], b: SearchResult[]): boolean {
   return true;
 }
 
-function fileExtColor(ext?: string): string {
-  switch (ext) {
-    case 'md': return 'oklch(0.55 0.15 45)';
-    case 'json': return 'oklch(0.50 0.12 200)';
-    case 'ts': case 'tsx': return 'oklch(0.50 0.15 240)';
-    case 'js': case 'jsx': return 'oklch(0.55 0.15 60)';
-    case 'py': return 'oklch(0.55 0.15 180)';
-    case 'css': return 'oklch(0.55 0.15 300)';
-    case 'pdf': return 'oklch(0.55 0.18 25)';
-    case 'png': case 'jpg': case 'jpeg': case 'gif': case 'webp': case 'svg': return 'oklch(0.55 0.15 330)';
-    case 'doc': case 'docx': return 'oklch(0.50 0.15 250)';
-    case 'xls': case 'xlsx': return 'oklch(0.55 0.15 140)';
-    case 'db': return 'oklch(0.45 0.05 150)';
-    default: return 'oklch(0.50 0.02 60)';
-  }
-}
-
 const sourceColor: Record<string, string> = {
   local: 'oklch(0.55 0.12 200)',
   attachment: 'oklch(0.55 0.15 45)',
@@ -141,6 +120,13 @@ export function LocalFileExplorer({
   const [error, setError] = useState<string | null>(null);
   // 待授权目录（点击「授权」后弹确认框，确认才授权给 AI）
   const [authorizePendingPath, setAuthorizePendingPath] = useState<string | null>(null);
+  // 新建 md 文件弹窗：creatingFile 为目标目录（当前浏览目录），文件名在弹窗内输入
+  const [creatingFile, setCreatingFile] = useState<string | null>(null);
+  const [createNames, setCreateNames] = useState<Set<string>>(new Set());
+  const [createValue, setCreateValue] = useState('');
+  const [createError, setCreateError] = useState<string | null>(null);
+  // 新建弹窗（body 级 portal）引用：点击弹窗内部不触发折叠
+  const createModalRef = useRef<HTMLDivElement>(null);
   const mouseLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handlePanelMouseEnter = useCallback(() => {
     if (mouseLeaveTimerRef.current) {
@@ -149,14 +135,14 @@ export function LocalFileExplorer({
     }
   }, []);
   const handlePanelMouseLeave = useCallback(() => {
-    // 授权确认弹窗打开时不移出自动收起（无论是否固定）
-    if (pinned || authorizePendingPath) return;
+    // 授权确认弹窗 / 新建 md 弹窗打开时不移出自动收起（无论是否固定）
+    if (pinned || authorizePendingPath || creatingFile) return;
     if (!onToggleCollapse) return;
     if (mouseLeaveTimerRef.current) clearTimeout(mouseLeaveTimerRef.current);
     mouseLeaveTimerRef.current = setTimeout(() => {
       onToggleCollapse();
     }, 1000);
-  }, [pinned, authorizePendingPath, onToggleCollapse]);
+  }, [pinned, authorizePendingPath, creatingFile, onToggleCollapse]);
 
   // 面板挂载期间即展开态：点击面板外部任意位置 → 立即折叠（不等 1s debounce；pinned 固定时不折叠）
   const rootRef = useRef<HTMLDivElement>(null);
@@ -168,8 +154,8 @@ export function LocalFileExplorer({
       const el = rootRef.current;
       if (!el) return;
       const target = e.target as Node | null;
-      // 点击面板内部或授权确认弹窗内不折叠
-      if (target && (el.contains(target) || (authModalRef.current && authModalRef.current.contains(target)))) return;
+      // 点击面板内部、授权确认弹窗或新建 md 弹窗内不折叠
+      if (target && (el.contains(target) || (authModalRef.current && authModalRef.current.contains(target)) || (createModalRef.current && createModalRef.current.contains(target)))) return;
       if (mouseLeaveTimerRef.current) {
         clearTimeout(mouseLeaveTimerRef.current);
         mouseLeaveTimerRef.current = null;
@@ -184,6 +170,8 @@ export function LocalFileExplorer({
   const [browsePath, setBrowsePath] = useState<string | null>(null);
   const [items, setItems] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(false);
+  // 大目录增量渲染：首屏只挂载前 N 行，接近底部时追加，避免一次性挂载数千行导致打开卡顿
+  const [visibleCount, setVisibleCount] = useState(200);
 
   // 搜索状态
   const [searchMode, setSearchMode] = useState(false);
@@ -392,16 +380,6 @@ export function LocalFileExplorer({
     listDirectory(dirPath);
   }, [listDirectory]);
 
-  // 返回上级（不越过授权根目录）
-  const goUp = useCallback(() => {
-    if (!expandedRoot || !browsePath) return;
-    if (browsePath === expandedRoot) return;
-    const parts = browsePath.split('/').filter(Boolean);
-    parts.pop();
-    const parent = '/' + parts.join('/');
-    listDirectory(parent);
-  }, [expandedRoot, browsePath, listDirectory]);
-
   // 刷新当前视图（浏览模式刷新目录，搜索模式重新搜索）；轮询/事件刷新走静默模式，避免 loading 闪烁与内容未变时的重渲染抖动
   const refreshView = useCallback(() => {
     if (expandedRoot && browsePath) {
@@ -410,6 +388,13 @@ export function LocalFileExplorer({
       doSearch(searchQuery, true);
     }
   }, [expandedRoot, browsePath, searchQuery, listDirectory, doSearch]);
+
+  // 滚动接近底部时追加渲染下一批（大目录增量渲染，避免一次性挂载全部行）
+  const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 400) return;
+    setVisibleCount((prev) => (prev < items.length ? Math.min(prev + 300, items.length) : prev));
+  }, [items.length]);
 
   // 发送附件到指定节点：先写入事件缓冲（防新建节点挂载前事件丢失），再广播事件
   const sendAttachmentToNode = useCallback((nodeId: string, attachment: MessageAttachment) => {
@@ -547,30 +532,51 @@ export function LocalFileExplorer({
     }
   }, [refreshView]);
 
-  // 可预览判断：复用 viewers/registry 的 isPreviewable，避免白名单双写
-
-  // 用系统默认程序打开
-  const handleOpenWithApp = useCallback(async (filePath: string) => {
-    setCtxMenu(null);
-    await desktop.openFile(filePath);
-  }, []);
-
-  // 在当前浏览目录新建空 md 文件（未展开目录时禁用）
+  // 点击新建按钮：先拉取当前目录生成不重名的默认名，再弹窗让用户命名（未展开目录时禁用）
   const handleCreateMdFile = useCallback(async () => {
     const dir = browsePath || expandedRoot;
     if (!dir) return;
     try {
-      // 生成不重名的文件名：untitled.md / untitled-2.md ...
+      // 生成不重名的默认文件名：untitled.md / untitled-2.md ...
       const listResp = await fetch(`/api/local-files?path=${encodeURIComponent(dir)}`);
       const listData = await listResp.json();
-      const names = new Set((listData.items || []).map((it: { name: string }) => it.name));
+      const items = (listData.items || []) as FileItem[];
+      const names = new Set<string>(items.map((it) => it.name));
       let name = 'untitled.md';
       let counter = 2;
       while (names.has(name)) {
         name = `untitled-${counter}.md`;
         counter++;
       }
-      const fullPath = `${dir}/${name}`;
+      setCreateError(null);
+      setCreateValue(name);
+      setCreateNames(names);
+      setCreatingFile(dir);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Create file failed');
+    }
+  }, [browsePath, expandedRoot]);
+
+  // 确认新建：按用户输入的文件名在当前浏览目录创建空 md 并打开
+  const confirmCreateMdFile = useCallback(async () => {
+    if (!creatingFile) return;
+    const raw = createValue.trim();
+    if (!raw) {
+      setCreateError('Please enter a file name');
+      return;
+    }
+    if (raw.includes('/') || raw.includes('\\')) {
+      setCreateError('File name cannot contain slashes');
+      return;
+    }
+    // 未带扩展名默认补 .md
+    const name = /\.md$/i.test(raw) ? raw : `${raw}.md`;
+    if (createNames.has(name)) {
+      setCreateError('A file with this name already exists');
+      return;
+    }
+    const fullPath = `${creatingFile}/${name}`;
+    try {
       const writeResp = await fetch('/api/local-files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -578,17 +584,18 @@ export function LocalFileExplorer({
       });
       const writeData = await writeResp.json();
       if (!writeData.success) {
-        setError(writeData.error || 'Create file failed');
+        setCreateError(writeData.error || 'Create file failed');
         return;
       }
+      setCreatingFile(null);
       setError(null);
       window.dispatchEvent(new CustomEvent('local-files-changed'));
       // 打开到查看舱编辑（与双击 md 文件行为一致）
       bus.publish(BusEvents.fileOpen, { source: 'local', path: fullPath, name });
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Create file failed');
+      setCreateError(e instanceof Error ? e.message : 'Create file failed');
     }
-  }, [browsePath, expandedRoot]);
+  }, [creatingFile, createValue, createNames]);
 
   // 在 UnifiedViewer 中打开（发布 file.open 事件，查看舱订阅打开标签）
   const handleOpenInViewer = useCallback((filePath: string, fileName: string) => {
@@ -596,9 +603,8 @@ export function LocalFileExplorer({
     bus.publish(BusEvents.fileOpen, { source: 'local', path: filePath, name: fileName });
   }, []);
 
-  // 移除目录（从浏览与授权中一并移除）
-  const handleRemoveRoot = useCallback(async (rootPath: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  // 移除目录（从浏览与授权中一并移除）——由目录三点菜单中的 Remove directory 触发
+  const handleRemoveRoot = useCallback(async (rootPath: string) => {
     const resp = await fetch(`/api/local-files?action=remove_root&path=${encodeURIComponent(rootPath)}`);
     const data = await resp.json();
     if (data.success) {
@@ -632,6 +638,11 @@ export function LocalFileExplorer({
   useEffect(() => {
     loadRoots();
   }, [loadRoots]);
+
+  // 切换目录时重置增量渲染窗口（新目录重新只渲染前 N 行）
+  useEffect(() => {
+    setVisibleCount(200);
+  }, [browsePath]);
 
   // 轮询刷新：浏览/搜索视图激活时每 2 秒刷新，感知外部文件变化（AI 工具、编辑器保存、外部程序）
   useEffect(() => {
@@ -670,27 +681,19 @@ export function LocalFileExplorer({
     return (
       <div
         key={filePath}
-        className="group flex items-center gap-2 px-2 py-1.5 rounded transition-colors hover:bg-[var(--paper-hover)] select-none"
+        className="group relative flex items-center gap-2 px-2 py-1.5 rounded transition-colors hover:bg-[var(--paper-hover)] select-none"
         style={{ cursor: isDir ? 'pointer' : 'default' }}
-        onClick={(e) => {
-          if (isDir) enterDir(filePath);
-        }}
-        onDoubleClick={(e) => {
-          if (isDir) return;
-          e.stopPropagation();
-          // 可预览的类型优先用 UnifiedViewer 打开；文档类（HTML/PDF/图片）走 file.open 交由 Hippo Browser 打开
-          if (isPreviewable(item.extension) || isBrowserDoc(fileName)) {
-            handleOpenInViewer(filePath, fileName);
-          } else {
-            handleOpenWithApp(filePath);
+        onClick={() => {
+          // 单击：目录进入下级，文件直接用 BobWork 自带查看器打开
+          if (isDir) {
+            enterDir(filePath);
+            return;
           }
+          handleOpenInViewer(filePath, fileName);
         }}
       >
-        {isDir ? (
-          <Folder className="h-4 w-4 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-        ) : (
-          <FileIcon className="h-4 w-4 shrink-0" style={{ color: fileExtColor(item.extension) }} />
-        )}
+        {/* 仅文件夹显示图标，文件不显示 */}
+        {isDir && <Folder className="h-4 w-4 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
 
         <Tooltip>
           <TooltipTrigger asChild>
@@ -716,26 +719,27 @@ export function LocalFileExplorer({
           </span>
         )}
 
-        {!isDir && item.size && (
-          <span className="shrink-0 text-xs" style={{ color: 'var(--ink-muted)' }}>{item.size}</span>
-        )}
-
-        {/* 三个点下拉按钮：hover 时可见，点击阻止冒泡 */}
+        {/* 三个点下拉按钮：悬浮覆盖在行右侧，不占据布局空间，hover 时渐显 */}
         {(!isDir || expandedRoot) && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              // 右键菜单里的按钮都是关闭后执行动作，复用同一套菜单即可
-              openActionsMenu(e.currentTarget, filePath, fileName, isDir);
-            }}
-            className="shrink-0 flex h-5 w-5 items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity hover:bg-[var(--paper-hover)]"
-            style={{ color: 'var(--ink-muted)' }}
-            title="More actions"
-            aria-label="More actions"
+          <div
+            className="pointer-events-none absolute inset-y-0 right-0 flex items-center pl-4 pr-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{ background: 'linear-gradient(to right, transparent, var(--paper-hover) 45%)' }}
           >
-            <MoreVertical className="h-3.5 w-3.5" />
-          </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                // 右键菜单里的按钮都是关闭后执行动作，复用同一套菜单即可
+                openActionsMenu(e.currentTarget, filePath, fileName, isDir);
+              }}
+              className="pointer-events-auto flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--line-soft)]"
+              style={{ color: 'var(--ink-muted)' }}
+              title="More actions"
+              aria-label="More actions"
+            >
+              <MoreVertical className="h-3.5 w-3.5" />
+            </button>
+          </div>
         )}
       </div>
     );
@@ -791,6 +795,17 @@ export function LocalFileExplorer({
     );
   }
 
+  // 当前浏览路径面包屑（相对授权根逐级展开）：内容区顶部展示，点击任意层级即可返回上级
+  const crumbs: { label: string; path: string }[] = [];
+  if (expandedRoot && browsePath && browsePath.startsWith(expandedRoot)) {
+    crumbs.push({ label: expandedRoot.split('/').filter(Boolean).pop() || expandedRoot, path: expandedRoot });
+    let acc = expandedRoot;
+    for (const seg of browsePath.slice(expandedRoot.length).split('/').filter(Boolean)) {
+      acc = `${acc}/${seg}`;
+      crumbs.push({ label: seg, path: acc });
+    }
+  }
+
   return (
     <>
     <TooltipProvider delayDuration={0}>
@@ -812,7 +827,7 @@ export function LocalFileExplorer({
       onMouseEnter={handlePanelMouseEnter}
       onMouseLeave={handlePanelMouseLeave}
     >
-      {/* 搜索框 + 返回上级 + 添加文件夹 + 打开文件夹 + Pin/Unpin 按钮 */}
+      {/* 搜索框 + 添加文件夹 + 打开文件夹 + Pin/Unpin 按钮 */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid var(--line-soft)' }}>
         <div className="relative flex-1">
           <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2" style={{ color: 'var(--ink-muted)' }} />
@@ -834,19 +849,6 @@ export function LocalFileExplorer({
             </button>
           )}
         </div>
-        {expandedRoot && (
-          <Button
-            onClick={goUp}
-            disabled={!browsePath || browsePath === expandedRoot}
-            variant="ghost"
-            tone="info"
-            size="icon-sm"
-            title="Go up"
-            aria-label="Go up"
-          >
-            <CornerUpLeft className="h-3.5 w-3.5" />
-          </Button>
-        )}
         <Button
           onClick={handleSelectDirectory}
           variant="ghost"
@@ -880,16 +882,6 @@ export function LocalFileExplorer({
         )}
       </div>
 
-      {/* 活跃节点提示 */}
-      <div className="shrink-0 px-3 py-1.5" style={{ borderBottom: '1px solid var(--line-soft)', backgroundColor: 'var(--info-soft)' }}>
-        <div className="flex items-center gap-1.5">
-          <div className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: activeNodeIdRef.current ? 'var(--success)' : 'var(--ink-muted)' }} />
-          <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-            {activeNodeIdRef.current ? `Current node: ${activeNodeIdRef.current.slice(0, 8)}` : 'Click a node on the canvas first'}
-          </span>
-        </div>
-      </div>
-
       {/* 错误提示 */}
       {error && (
         <div className="shrink-0 mx-3 mt-2 flex items-start gap-1.5 rounded-md p-2" style={{ backgroundColor: 'var(--danger-soft)' }}>
@@ -898,8 +890,34 @@ export function LocalFileExplorer({
         </div>
       )}
 
+      {/* 路径面包屑：常驻显示当前路径，点击任意层级返回上级；未展开时显示占位 */}
+      <div className="flex shrink-0 items-center overflow-x-auto hide-scrollbar px-3 py-1" style={{ borderBottom: '1px solid var(--line-soft)' }}>
+        {crumbs.length === 0 ? (
+          <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>Local Files</span>
+        ) : (
+          crumbs.map((c, i) => {
+            const isLast = i === crumbs.length - 1;
+            return (
+              <span key={c.path} className="flex shrink-0 items-center">
+                {i > 0 && <ChevronRight className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                <button
+                  type="button"
+                  onClick={() => enterDir(c.path)}
+                  disabled={isLast}
+                  className={`max-w-[120px] truncate rounded px-1 py-0.5 text-xs transition-colors ${isLast ? '' : 'hover:bg-[var(--paper-hover)]'}`}
+                  style={{ color: isLast ? 'var(--ink)' : 'var(--ink-muted)', fontWeight: isLast ? 500 : 400 }}
+                  title={c.path}
+                >
+                  {c.label}
+                </button>
+              </span>
+            );
+          })
+        )}
+      </div>
+
       {/* 内容区 */}
-      <div className="flex-1 overflow-y-auto hide-scrollbar">
+      <div className="flex-1 overflow-y-auto hide-scrollbar" onScroll={handleListScroll}>
         {searching || (searchMode && searchQuery) ? (
           <div className="py-2">
             {searching && (
@@ -921,13 +939,9 @@ export function LocalFileExplorer({
           </div>
         ) : (
           <div className="py-2">
-            {allDirs.length === 0 ? (
+            {allDirs.length === 0 && (
               <div className="px-3 py-6 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
                 No directories<br />Click &quot;Add&quot; to choose a folder
-              </div>
-            ) : (
-              <div className="px-3 py-1 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-                Added directories ({allDirs.length})
               </div>
             )}
             {allDirs.map(root => {
@@ -972,22 +986,11 @@ export function LocalFileExplorer({
                     >
                       <MoreVertical className="h-3 w-3" />
                     </button>
-                    <Button
-                      onClick={(e) => handleRemoveRoot(root, e)}
-                      variant="ghost"
-                      tone="neutral"
-                      size="icon-xs"
-                      className="opacity-0 transition-opacity group-hover:opacity-100"
-                      title="Remove directory"
-                      aria-label="Remove directory"
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
                   </div>
 
                   {/* 展开的目录内容（仅限授权根内导航） */}
                   {isExpanded && (
-                    <div className="ml-5 border-l pl-2" style={{ borderColor: 'var(--line-soft)' }}>
+                    <div className="ml-2 pl-1">
                       {loading ? (
                         <div className="flex items-center justify-center py-6">
                           <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--ink-muted)' }} />
@@ -995,7 +998,7 @@ export function LocalFileExplorer({
                       ) : items.length === 0 ? (
                         <div className="px-3 py-4 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>Empty folder</div>
                       ) : (
-                        items.map(item => renderFileItem(item))
+                        items.slice(0, visibleCount).map(item => renderFileItem(item))
                       )}
                     </div>
                   )}
@@ -1018,23 +1021,17 @@ export function LocalFileExplorer({
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* 一键发送到附件 / 操作目录 */}
-          <div className="px-2 pt-2 pb-1">
-            <span className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-              {ctxMenu.isDir ? 'Send as working directory' : 'Attach'}
-            </span>
-          </div>
           <button
             onClick={() => { setCtxMenu(null); addToCurrentNode(ctxMenu.filePath, ctxMenu.isDir); }}
             disabled={!activeNodeIdRef.current}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-            style={{ color: activeNodeIdRef.current ? 'var(--ink)' : 'var(--ink-muted)' }}
+            style={{ color: 'var(--ink)' }}
             title={activeNodeIdRef.current ? undefined : 'No node selected — click a node on the canvas first'}
           >
-            <ArrowUpCircle className="h-3.5 w-3.5" style={{ color: activeNodeIdRef.current ? 'var(--primary)' : 'var(--ink-muted)' }} />
-            <span className="flex-1">Send to current node</span>
+            <ArrowUpCircle className="h-3.5 w-3.5" />
+            <span className="flex-1">Current chat</span>
             {!activeNodeIdRef.current && (
-              <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>No node</span>
+              <span className="text-xs">No node</span>
             )}
           </button>
           <button
@@ -1042,55 +1039,9 @@ export function LocalFileExplorer({
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
             style={{ color: 'var(--ink)' }}
           >
-            <PlusCircle className="h-3.5 w-3.5" style={{ color: 'var(--info)' }} />
-            Send to new node
+            <PlusCircle className="h-3.5 w-3.5" />
+            New node
           </button>
-
-          <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
-
-          {/* 打开文件/文件夹 */}
-          <div className="px-2 pt-1 pb-1">
-            <span className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Open</span>
-          </div>
-          {(() => {
-            const ctxExt = ctxMenu.fileName.split('.').pop() || '';
-            const canPreview = isPreviewable(ctxExt) || isBrowserDoc(ctxMenu.fileName);
-            return (
-              <>
-                {!ctxMenu.isDir && (
-                  <button
-                    onClick={() => handleOpenInViewer(ctxMenu.filePath, ctxMenu.fileName)}
-                    disabled={!canPreview}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-                    style={{ color: 'var(--ink)' }}
-                  >
-                    <Eye className="h-3.5 w-3.5" style={{ color: 'var(--info)' }} />
-                    Open in viewer
-                  </button>
-                )}
-                <button
-                  onClick={() => handleOpenWithApp(ctxMenu.filePath)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink)' }}
-                >
-                  <ExternalLink className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
-                  Open with system app
-                </button>
-                <button
-                  onClick={() => {
-                    setCtxMenu(null);
-                    void desktop.showItemInFolder(ctxMenu.filePath);
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink)' }}
-                  title="在系统文件管理器中显示并选中该文件"
-                >
-                  <Folder className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
-                  Reveal in Finder
-                </button>
-              </>
-            );
-          })()}
 
           <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
 
@@ -1105,28 +1056,55 @@ export function LocalFileExplorer({
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
             style={{ color: 'var(--ink)' }}
           >
-            <Pencil className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            <Pencil className="h-3.5 w-3.5" />
             Rename
           </button>
 
-          {/* 复制 / 删除：文件和子文件夹都支持；根目录本身受保护不可删除（走独立的 Remove directory 按钮） */}
+          {/* 复制 / 删除：文件和子文件夹都支持；根目录本身受保护不可删除，改由下方 Remove directory 移除 */}
           <button
             onClick={() => handleCopy(ctxMenu.filePath)}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
             style={{ color: 'var(--ink)' }}
           >
-            <Copy className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            <Copy className="h-3.5 w-3.5" />
             Copy
           </button>
           <button
             onClick={() => handleDelete(ctxMenu.filePath, ctxMenu.fileName)}
             disabled={allDirs.includes(ctxMenu.filePath)}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-            style={{ color: allDirs.includes(ctxMenu.filePath) ? 'var(--ink-muted)' : 'var(--danger)' }}
-            title={allDirs.includes(ctxMenu.filePath) ? 'Root directories cannot be deleted here — use the Remove button on the directory header' : undefined}
+            style={{ color: 'var(--ink)' }}
+            title={allDirs.includes(ctxMenu.filePath) ? 'Root directories cannot be deleted here — use Remove directory' : undefined}
           >
-            <Trash className="h-3.5 w-3.5" style={{ color: allDirs.includes(ctxMenu.filePath) ? 'var(--ink-muted)' : 'var(--danger)' }} />
+            <Trash className="h-3.5 w-3.5" />
             Delete
+          </button>
+          {/* 根目录：从浏览与授权列表中移除（原先为目录右侧的 X 按钮，现移入本下拉菜单） */}
+          {allDirs.includes(ctxMenu.filePath) && (
+            <button
+              onClick={() => { setCtxMenu(null); void handleRemoveRoot(ctxMenu.filePath); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+              title="Remove directory from the list (revokes AI authorization)"
+            >
+              <X className="h-3.5 w-3.5" />
+              Remove directory
+            </button>
+          )}
+
+          <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
+
+          <button
+            onClick={() => {
+              setCtxMenu(null);
+              void desktop.showItemInFolder(ctxMenu.filePath);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink)' }}
+            title="在系统文件管理器中显示并选中该文件"
+          >
+            <Folder className="h-3.5 w-3.5" />
+            Finder
           </button>
         </div>
       )}
@@ -1166,6 +1144,64 @@ export function LocalFileExplorer({
               onClick={confirmAuthorize}
             >
               Authorize
+            </Button>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    )}
+    {/* 新建 md 文件命名弹窗：portal 到 body，避免替换/卸载面板导致侧边栏自动收起 */}
+    {creatingFile && createPortal(
+      <div
+        ref={createModalRef}
+        data-canvas-ui="overlay"
+        className="fixed inset-0 flex items-start justify-center pt-20"
+        style={{ backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 9999 }}
+      >
+        <div className="w-80 rounded-xl p-4 shadow-2xl" style={{ backgroundColor: 'var(--paper)' }}>
+          <p className="mb-3 text-sm font-medium" style={{ color: 'var(--ink)', fontFamily: "var(--font-sans)" }}>
+            New Markdown file
+          </p>
+          <input
+            type="text"
+            value={createValue}
+            onChange={(e) => { setCreateValue(e.target.value); setCreateError(null); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void confirmCreateMdFile();
+              if (e.key === 'Escape') setCreatingFile(null);
+            }}
+            className="mb-2 w-full rounded-md border px-3 py-2 text-sm outline-none"
+            style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+            autoFocus
+            onFocus={(e) => {
+              // 选中文件名（不含扩展名）
+              const dotIdx = createValue.lastIndexOf('.');
+              if (dotIdx > 0) {
+                e.target.setSelectionRange(0, dotIdx);
+              } else {
+                e.target.select();
+              }
+            }}
+          />
+          {createError && (
+            <p className="mb-2 text-xs" style={{ color: 'var(--danger)' }}>{createError}</p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="sm"
+              onClick={() => setCreatingFile(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="solid"
+              tone="brand"
+              size="sm"
+              onClick={() => void confirmCreateMdFile()}
+            >
+              Create
             </Button>
           </div>
         </div>

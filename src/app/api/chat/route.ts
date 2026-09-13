@@ -3894,7 +3894,7 @@ export async function POST(request: NextRequest) {
               // 构建 assistant 消息（含 tool_calls）。
               // 所有轮次都把 reasoning 用 <think> 包裹在 content 最前面：
               //   · 下一轮模型请求会真正看到自己之前的思考，保持"思考→动作"风格的一致性（否则多轮后模型习惯丢失标签）
-              //   · node-chat / mail-reply 等纯 SSE 消费方（只看 content）也能拿到并展示思考
+              //   · node-chat 等纯 SSE 消费方（只看 content）也能拿到并展示思考
               //   · 前端 msg.reasoning 仍然作为优先渲染源（不依赖 content 解析）
               // 若模型直接调用工具未输出文字且无 reasoning，content 为空会触发部分 API 的
               // "assistant message must not be empty" 校验错误（OpenAI 兼容格式允许省略 content）

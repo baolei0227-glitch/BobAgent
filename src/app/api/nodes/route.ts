@@ -286,24 +286,46 @@ export async function POST(request: NextRequest) {
       if (!node_id || typeof node_id !== 'string') {
         return NextResponse.json({ error: 'node_id is required' }, { status: 400 });
       }
-      const nodeDir = join(project.path, 'homework');
+      // 可选：自定义文件名（弹窗命名）与目标子目录（homework 内，相对 homework 根的路径）
+      const rawFileName: string = typeof body.file_name === 'string' ? body.file_name.trim() : '';
+      const rawTargetDir: string = typeof body.target_dir === 'string' ? body.target_dir.trim() : '';
+      const homeworkDir = join(project.path, 'homework');
+      await fs.mkdir(homeworkDir, { recursive: true });
+      // 目标子目录：禁止绝对路径与 ../ 穿越
+      const normalizedDir = rawTargetDir.replace(/^[\\/]+/, '').replace(/[\\/]+$/, '');
+      if (normalizedDir && normalizedDir.split(/[\\/]/).some((seg) => seg === '..' || seg === '')) {
+        return NextResponse.json({ error: 'Invalid target directory' }, { status: 400 });
+      }
+      const nodeDir = normalizedDir ? join(homeworkDir, normalizedDir) : homeworkDir;
       await fs.mkdir(nodeDir, { recursive: true });
-      // 避重命名：untitled.md → untitled-2.md …
-      let name = 'untitled.md';
-      let counter = 2;
       const fileExists = async (p: string): Promise<boolean> => {
         try { await fs.access(p); return true; } catch { return false; }
       };
-      while (await fileExists(join(nodeDir, name))) {
-        name = `untitled-${counter}.md`;
-        counter++;
+      let name: string;
+      if (rawFileName) {
+        // 用户指定文件名：禁止路径分隔符，未带扩展名补 .md，重名报错（弹窗内可改名重试）
+        if (rawFileName.includes('/') || rawFileName.includes('\\')) {
+          return NextResponse.json({ error: 'File name cannot contain slashes' }, { status: 400 });
+        }
+        name = /\.md$/i.test(rawFileName) ? rawFileName : `${rawFileName}.md`;
+        if (await fileExists(join(nodeDir, name))) {
+          return NextResponse.json({ error: 'A file with this name already exists' }, { status: 409 });
+        }
+      } else {
+        // 未指定文件名（兼容旧调用）：避重命名 untitled.md → untitled-2.md …
+        name = 'untitled.md';
+        let counter = 2;
+        while (await fileExists(join(nodeDir, name))) {
+          name = `untitled-${counter}.md`;
+          counter++;
+        }
       }
       const absPath = join(nodeDir, name);
       await fs.writeFile(absPath, '', 'utf-8');
       // 登记归属：homework/.ownership.json 相对路径 → nodeId（原子写：tmp + rename）
-      // 相对 homework 根路径（如 untitled.md），与 chat/tools.ts 写入口径一致
-      const rel = name;
-      const manifestPath = join(project.path, 'homework', '.ownership.json');
+      // 相对 homework 根路径（如 sub/untitled.md），与 chat/tools.ts 写入口径一致
+      const rel = normalizedDir ? `${normalizedDir}/${name}` : name;
+      const manifestPath = join(homeworkDir, '.ownership.json');
       let manifest: Record<string, string> = {};
       try {
         manifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as Record<string, string>;

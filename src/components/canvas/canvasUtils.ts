@@ -54,7 +54,7 @@ export function agentIdentityFromNodeType(type?: string): string | undefined {
 /** 估算标签胶囊宽度（用于溢出折叠测量，避免依赖 DOM 布局状态） */
 export function estimateTabWidth(label: string): number {
   const textW = Array.from(label).reduce((w, ch) => w + (ch.charCodeAt(0) > 0xff ? 13 : 7), 0);
-  return Math.min(140, textW + 46); // padding(20) + 关闭按钮(16) + 间距(10)
+  return Math.min(112, textW + 20); // padding(8) + 图标(10) + 间距(2)（关闭按钮改为悬浮覆盖，不占宽度）
 }
 
 /** 插件面板 Tab 图标：按注册表 icon 键映射（brain/notebook），缺省通用插件图标 */

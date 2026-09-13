@@ -36,7 +36,7 @@ function RotateButton() {
       type="button"
       className="yarl__button"
       aria-label="Rotate image 90°"
-      title="旋转 90°"
+      title="Rotate 90°"
       onClick={() => {
         const nextRotation = rotation + 90;
         dispatch({
@@ -62,8 +62,8 @@ function AnnotateButton({ onAnnotate }: { onAnnotate: (index: number) => void })
     <button
       type="button"
       className="yarl__button"
-      aria-label="标注图片"
-      title="标注（箭头/矩形/文字/马赛克）"
+      aria-label="Annotate image"
+      title="Annotate (arrow / rectangle / text / mosaic)"
       onClick={() => onAnnotate(state.currentIndex)}
     >
       <Pencil className="yarl__icon" />
@@ -78,8 +78,8 @@ function AiEditButton({ onAiEdit }: { onAiEdit: (index: number) => void }) {
     <button
       type="button"
       className="yarl__button"
-      aria-label="AI 编辑图片"
-      title="AI 编辑（自然语言指令修改图片）"
+      aria-label="AI edit image"
+      title="AI edit (modify the image with a natural-language instruction)"
       onClick={() => onAiEdit(state.currentIndex)}
     >
       <Sparkles className="yarl__icon" />
@@ -151,7 +151,7 @@ export function ImageViewer({ fileInfo, slides, initialIndex, source, projectId,
           ),
         });
         const data = await resp.json();
-        if (!data.success) throw new Error(data.error || '保存失败');
+        if (!data.success) throw new Error(data.error || 'Save failed');
       }
       // 更新显示（保留 rotation 等自定义字段）
       setMySlides(prev => prev.map((s, i) => (i === annotateIndex ? { ...s, src: dataUrl } : s)));
@@ -210,8 +210,8 @@ export function ImageViewer({ fileInfo, slides, initialIndex, source, projectId,
                 key="toggle-fullscreen"
                 type="button"
                 className="yarl__button"
-                aria-label={fullscreen ? '退出全屏' : '全屏查看'}
-                title={fullscreen ? '退出全屏' : '全屏查看'}
+                aria-label={fullscreen ? 'Exit fullscreen' : 'View fullscreen'}
+                title={fullscreen ? 'Exit fullscreen' : 'View fullscreen'}
                 onClick={() => setFullscreen((f) => !f)}
               >
                 {fullscreen ? <Minimize2 className="yarl__icon" /> : <Maximize2 className="yarl__icon" />}
@@ -222,7 +222,7 @@ export function ImageViewer({ fileInfo, slides, initialIndex, source, projectId,
                 type="button"
                 className="yarl__button"
                 aria-label="Close this image"
-                title="从预览中关闭这张图（不移除文件）"
+                title="Close this image in the preview (file is kept)"
                 onClick={handleRemoveCurrent}
                 style={{
                   display: 'flex',

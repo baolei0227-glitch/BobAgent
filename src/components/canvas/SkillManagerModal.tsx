@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, Download, Trash, Link, FolderSearch, Globe, AlertCircle, X, Upload, FolderUp, Search, Plug, Sparkles, Bot } from 'lucide-react';
+import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, Download, Trash, Link, FolderSearch, Globe, AlertCircle, X, Upload, FolderUp, Search, Plug, Blocks, Bot } from 'lucide-react';
 import { skillEntryIcon } from './ext-icons';
 import { Button } from '@/components/ui/button';
 import { ToggleSwitch } from './ToggleSwitch';
@@ -521,7 +521,7 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
           className="flex items-center gap-2 text-base"
           style={{ color: 'var(--ink-strong)' }}
         >
-          <Sparkles className="h-4 w-4" style={{ color: 'var(--primary)' }} />
+          <Blocks className="h-4 w-4" style={{ color: 'var(--primary)' }} />
           Extensions Store
         </DialogTitle>
       </DialogHeader>

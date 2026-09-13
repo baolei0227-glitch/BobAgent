@@ -15,11 +15,13 @@
  * 只有 enabled 的实例才进清单：出厂默认装配的 bob-notes/bob-mind 恒 enabled → 注册表出厂即有两条。
  */
 
+import { promises as fs } from 'fs';
 import { join, isAbsolute } from 'path';
 import type { McpServerConfig } from '@/lib/mcp/types';
 import { MCP_PRESETS } from '@/lib/mcp/types';
 import type { PluginPanelEntry, PluginPanelIcon } from '@/lib/plugin-panels';
 import { readSettingsFromFile, bundledPluginPath } from '@/lib/settings-server';
+import { bundledDataHome } from '@/lib/extensions/bundled-data-home';
 
 const BUNDLED_PREFIX = '{BUNDLED}:';
 
@@ -101,4 +103,79 @@ export async function collectPluginPanelEntries(): Promise<PluginPanelEntry[]> {
     }
   }
   return entries;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 面板就绪探测                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** serve 面板探测结果：ok=false 时带具体原因，供面板壳给出可操作的提示 */
+export interface PluginPanelProbe {
+  ok: boolean;
+  /** port-in-use = 本实例在跑但端口被别的进程占着；unreachable = 服务未起来 */
+  reason?: 'port-in-use' | 'unreachable';
+  /** 面板端口（仅 port-in-use 时给出） */
+  port?: number;
+  /** 占用端口的进程 pid（尽力识别，可能为 null） */
+  holderPid?: number | null;
+}
+
+/** 插件侧端口冲突标记（数据根/panel-port-conflict.json，由插件 EADDRINUSE 时写入） */
+interface PanelConflictMarker {
+  port?: number;
+  holderPid?: number | null;
+  pid?: number;
+}
+
+/** 读取插件写下的端口冲突标记；无标记 / 解析失败均返回 null */
+async function readPanelConflict(pluginId: string): Promise<PanelConflictMarker | null> {
+  const home = bundledDataHome(pluginId);
+  if (!home) return null;
+  try {
+    const raw = await fs.readFile(join(home.dir, 'panel-port-conflict.json'), 'utf8');
+    const parsed = JSON.parse(raw) as PanelConflictMarker;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 探测 serve 面板是否真的由「本 App 的插件实例」服务。
+ *
+ * 为什么不能只看插件 /api/status：宿主 iframe 是直连插件端口的，若端口被残留旧进程占着，
+ * 新实例绑不上（只告警不退出），直连探测会命中旧进程并拿到 ok:true —— 界面静默停留在旧版本。
+ * 因此先读插件写下的冲突标记：标记存在且写入者（本实例）仍然存活 → 判定「端口被占用」，
+ * 面板壳据此提示用户清理残留进程，而不是把旧界面当成新界面加载。
+ * 标记不存在（或写入者已退出 = 陈旧标记）时才回落到直连探测。
+ */
+export async function probePluginPanel(entry: PluginPanelEntry): Promise<PluginPanelProbe> {
+  if (entry.mode !== 'serve' || !entry.probeUrl) return { ok: true };
+
+  const conflict = await readPanelConflict(entry.pluginId);
+  if (conflict && typeof conflict.pid === 'number' && isPidAlive(conflict.pid)) {
+    return {
+      ok: false,
+      reason: 'port-in-use',
+      port: conflict.port,
+      holderPid: conflict.holderPid ?? null,
+    };
+  }
+
+  try {
+    const resp = await fetch(entry.probeUrl, { signal: AbortSignal.timeout(2500), cache: 'no-store' });
+    const data = (await resp.json()) as { ok?: boolean };
+    return data?.ok ? { ok: true } : { ok: false, reason: 'unreachable' };
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
 }

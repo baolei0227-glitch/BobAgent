@@ -545,7 +545,7 @@ function PdfPageView({
               }}
               onMouseDown={(e) => handleAnnMouseDown(e, a)}
               onClick={(e) => { e.stopPropagation(); onSelect(a.id); }}
-              title="拖动移动，点击选中"
+              title="Drag to move, click to select"
             />
           );
         }
@@ -589,10 +589,10 @@ function PdfPageView({
             onMouseDown={(e) => handleAnnMouseDown(e, a)}
             onClick={(e) => { e.stopPropagation(); onSelect(a.id); }}
             onDoubleClick={(e) => { e.stopPropagation(); onStartEdit(a.id); }}
-            title="拖动移动，双击编辑，右下角手柄调整大小"
+            title="Drag to move, double-click to edit, resize with the bottom-right handle"
           >
             <div className="whitespace-pre-wrap break-words">
-              {a.text || <span style={{ color: 'var(--ink-faint)' }}>双击输入文字</span>}
+              {a.text || <span style={{ color: 'var(--ink-faint)' }}>Double-click to enter text</span>}
             </div>
             {/* 右下角调整大小手柄（选中时显示） */}
             {isSel && (
@@ -861,7 +861,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
         }
       } catch (e) {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : 'PDF 加载失败');
+        setError(e instanceof Error ? e.message : 'Failed to load PDF');
         setLoading(false);
       }
     })();
@@ -1043,13 +1043,13 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
       if (data.success) {
         dirtyRef.current = false;
         setDirty(false);
-        setSaveMsg('已保存');
+        setSaveMsg('Saved');
         setTimeout(() => setSaveMsg(null), 2000);
       } else {
-        setSaveMsg(`保存失败：${data.error || '未知错误'}`);
+        setSaveMsg(`Save failed: ${data.error || 'Unknown error'}`);
       }
     } catch (err) {
-      setSaveMsg(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+      setSaveMsg(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
@@ -1158,7 +1158,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
           pages = [{ page: 1, text: String(data.text).trim() }];
         }
         if (pages.length === 0) {
-          setOcrMsg('OCR 未识别到文本');
+          setOcrMsg('OCR found no text');
           setOcrStage('error');
         } else {
           ocrPagesRef.current = pages;
@@ -1173,7 +1173,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
           setOcrStage('done');
           setOcrResultShown(true);
           setOcrSimPage(totalPages);
-          setOcrMsg(`OCR 完成（${pages.length} 页）`);
+          setOcrMsg(`OCR finished (${pages.length} pages)`);
           if (query.trim()) runSearch(query);
           // 持久化 sidecar：重开该 PDF 直接恢复「已识别」+ 检索 + 文本层，无需二次 OCR
           void fetch('/api/pdf-ocr-status', {
@@ -1183,11 +1183,11 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
           }).catch(() => {});
         }
       } else {
-        setOcrMsg(`OCR 失败：${data.error || '未知错误'}`);
+        setOcrMsg(`OCR failed: ${data.error || 'Unknown error'}`);
         setOcrStage('error');
       }
     } catch (err) {
-      setOcrMsg(`OCR 失败：${err instanceof Error ? err.message : String(err)}`);
+      setOcrMsg(`OCR failed: ${err instanceof Error ? err.message : String(err)}`);
       setOcrStage('error');
     } finally {
       if (ocrSimTimerRef.current !== null) { window.clearInterval(ocrSimTimerRef.current); ocrSimTimerRef.current = null; }
@@ -1249,10 +1249,10 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
 
   // 侧栏状态行文案
   let searchStatus: string;
-  if (indexing) searchStatus = '正在建立文本索引…';
-  else if (!query.trim()) searchStatus = scanNeedsOcr ? '疑似扫描件，先执行 OCR' : '输入关键词开始检索';
-  else if (hits.length === 0) searchStatus = scanNeedsOcr ? '无命中（扫描件需先 OCR）' : noHitNeedsOcr ? '无命中（若为扫描件，可 OCR 后检索）' : '无命中';
-  else searchStatus = `第 ${cursor + 1} / ${hits.length} 处`;
+  if (indexing) searchStatus = 'Building text index…';
+  else if (!query.trim()) searchStatus = scanNeedsOcr ? 'Looks like a scan — run OCR first' : 'Type a keyword to search';
+  else if (hits.length === 0) searchStatus = scanNeedsOcr ? 'No matches (scans need OCR first)' : noHitNeedsOcr ? 'No matches (if this is a scan, run OCR first)' : 'No matches';
+  else searchStatus = `Match ${cursor + 1} / ${hits.length}`;
 
   return (
     <div className="flex flex-col h-full">
@@ -1306,7 +1306,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
             color: searchOpen ? 'var(--warn)' : 'var(--ink-muted)',
             backgroundColor: searchOpen ? 'color-mix(in oklab, var(--warn) 10%, transparent)' : 'transparent',
           }}
-          title={indexing ? '正在建立文本索引…' : '全文检索 (Ctrl/Cmd+Shift+F)'}
+          title={indexing ? 'Building text index…' : 'Search in document (Ctrl/Cmd+Shift+F)'}
         >
           {indexing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
         </button>
@@ -1320,10 +1320,10 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                 color: ocrDone ? 'var(--success)' : isScanned ? 'var(--warn)' : 'var(--ink-muted)',
                 backgroundColor: isScanned && !ocrDone ? 'color-mix(in oklab, var(--warn) 10%, transparent)' : 'transparent',
               }}
-              title={ocrDone ? '已 OCR 识别过（点击可重新识别）' : isScanned ? '检测到扫描件，点击 OCR 识别文字后可检索' : 'BOB OCR 识别全文（扫描件可检索）'}
+              title={ocrDone ? 'Already OCR\u2019d (click to re-run)' : isScanned ? 'Scan detected — click to OCR so the text becomes searchable' : 'BOB OCR full-text recognition (makes scans searchable)'}
             >
               {ocrLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : ocrDone ? <Check className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
-              <span>{ocrLoading ? 'OCR 中' : ocrDone ? '已识别' : 'OCR'}</span>
+              <span>{ocrLoading ? 'OCR…' : ocrDone ? 'OCR done' : 'OCR'}</span>
             </button>
             {/* 文本层可视化：OCR 完成后可切换显示识别文字覆盖层 */}
             {ocrDone && (
@@ -1334,7 +1334,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                   color: showTextLayer ? 'var(--primary)' : 'var(--ink-muted)',
                   backgroundColor: showTextLayer ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
                 }}
-                title="显示/隐藏 OCR 识别文字层"
+                title="Show/hide the OCR text layer"
               >
                 <Eye className="h-4 w-4" />
               </button>
@@ -1350,7 +1350,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               onClick={() => setMode(mode === 'highlight' ? 'none' : 'highlight')}
               className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]"
               style={{ color: mode === 'highlight' ? 'var(--warn)' : 'var(--ink-muted)', backgroundColor: mode === 'highlight' ? 'color-mix(in oklab, var(--warn) 10%, transparent)' : 'transparent' }}
-              title="高亮（拖选区域）"
+              title="Highlight (drag to select an area)"
             >
               <Highlighter className="h-4 w-4" />
             </button>
@@ -1358,7 +1358,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               onClick={() => setMode(mode === 'textbox' ? 'none' : 'textbox')}
               className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]"
               style={{ color: mode === 'textbox' ? 'var(--warn)' : 'var(--ink-muted)', backgroundColor: mode === 'textbox' ? 'color-mix(in oklab, var(--warn) 10%, transparent)' : 'transparent' }}
-              title="文字批注（点击/拖选，双击编辑）"
+              title="Text note (click/drag to place, double-click to edit)"
             >
               <Type className="h-4 w-4" />
             </button>
@@ -1367,7 +1367,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               onChange={(e) => handleFontSizeChange(Number(e.target.value))}
               className="rounded-md border border-[var(--line)] bg-[var(--popover)] px-1 py-1 text-xs outline-none transition-colors hover:bg-[var(--paper-hover)]"
               style={{ color: 'var(--ink)' }}
-              title="文字字号（选中文字框时应用到它；否则作为新建文字框默认字号）"
+              title="Text size (applies to the selected text box; otherwise the default for new ones)"
             >
               {FONT_SIZES.map((s) => (
                 <option key={s} value={s}>{s}px</option>
@@ -1381,7 +1381,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                   onClick={handleDeleteSelected}
                   className="rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]"
                   style={{ color: 'var(--danger)' }}
-                  title="删除批注 (Del)"
+                  title="Delete annotation (Del)"
                 >
                   <Trash className="h-4 w-4" />
                 </button>
@@ -1405,14 +1405,14 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
 
             <div className="flex-1" />
             {saveMsg && (
-              <span className="text-xs whitespace-nowrap" style={{ color: saveMsg.includes('失败') ? 'var(--danger)' : 'var(--success)' }}>
+              <span className="text-xs whitespace-nowrap" style={{ color: /fail/i.test(saveMsg) ? 'var(--danger)' : 'var(--success)' }}>
                 {saveMsg}
               </span>
             )}
             <button
               onClick={handleSave}
               disabled={!dirty || saving}
-              title={dirty ? '保存批注' : '无改动'}
+              title={dirty ? 'Save annotations' : 'No changes'}
               className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed"
               style={{
                 backgroundColor: dirty ? 'var(--warn)' : 'var(--paper-soft)',
@@ -1420,7 +1420,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               }}
             >
               <Save className="h-3.5 w-3.5" />
-              {saving ? '保存中…' : '保存'}
+              {saving ? 'Saving…' : 'Save'}
             </button>
           </>
         )}
@@ -1442,7 +1442,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
             <>
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: 'var(--info)' }} />
               <span className="min-w-0 flex-1 truncate">
-                OCR 识别中 <span className="tabular-nums">{Math.min(ocrSimPage, totalPages)} / {totalPages}</span> 页…
+                OCR running <span className="tabular-nums">{Math.min(ocrSimPage, totalPages)} / {totalPages}</span> pages…
               </span>
               <span className="shrink-0 tabular-nums" style={{ color: 'var(--ink-muted)' }}>{ocrElapsedSec}s</span>
               <div className="h-1 w-28 shrink-0 overflow-hidden rounded-full" style={{ backgroundColor: 'var(--paper-hover)' }}>
@@ -1458,20 +1458,20 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
           ) : (
             <>
               <Zap className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--warn)' }} />
-              <span className="min-w-0 flex-1 truncate">检测到扫描件（无文本层）—— OCR 识别后可全文检索、复制文字</span>
+              <span className="min-w-0 flex-1 truncate">Scanned PDF detected (no text layer) — run OCR to search and copy text</span>
               <button
                 onClick={handleRunOcr}
                 className="flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold transition-colors hover:opacity-90"
                 style={{ backgroundColor: 'var(--warn)', color: '#fff' }}
               >
                 <Zap className="h-3 w-3" />
-                {totalPages > 0 ? `识别 ${totalPages} 页` : '开始 OCR'}
+                {totalPages > 0 ? `OCR ${totalPages} pages` : 'Start OCR'}
               </button>
               <button
                 onClick={() => setScanBannerDismissed(true)}
                 className="shrink-0 rounded p-1 transition-colors hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
                 style={{ color: 'var(--ink-muted)' }}
-                title="关闭提示"
+                title="Dismiss"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -1578,7 +1578,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                     jumpToOffset(e.shiftKey ? -1 : 1);
                   }
                 }}
-                placeholder={isScanned ? '扫描件需先 OCR 再检索' : '输入关键词检索全文'}
+                placeholder={isScanned ? 'Run OCR before searching scans' : 'Search the full text'}
                 className="min-w-0 flex-1 rounded-md border px-2 py-1 text-xs outline-none transition-colors focus:border-[var(--info)]"
                 style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)', color: 'var(--ink)' }}
               />
@@ -1586,7 +1586,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                 onClick={() => setSearchOpen(false)}
                 className="rounded-md p-1 transition-colors hover:bg-[var(--paper-hover)]"
                 style={{ color: 'var(--ink-muted)' }}
-                title="关闭检索 (Esc)"
+                title="Close search (Esc)"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -1600,7 +1600,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                 disabled={hits.length === 0}
                 className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-30"
                 style={{ color: 'var(--ink)' }}
-                title="上一处 (Shift+Enter)"
+                title="Previous match (Shift+Enter)"
               >
                 <ChevronUp className="h-3.5 w-3.5" />
               </button>
@@ -1609,7 +1609,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                 disabled={hits.length === 0}
                 className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-30"
                 style={{ color: 'var(--ink)' }}
-                title="下一处 (Enter)"
+                title="Next match (Enter)"
               >
                 <ChevronDown className="h-3.5 w-3.5" />
               </button>
@@ -1620,7 +1620,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               <div className="px-3 pb-1.5 text-11 leading-relaxed">
                 {ocrMsg && (
                   <p style={{
-                    color: ocrMsg.includes('失败') || ocrMsg.includes('未识别') ? 'var(--danger)' : 'var(--success)',
+                    color: /fail|no text/i.test(ocrMsg) ? 'var(--danger)' : 'var(--success)',
                   }}>
                     {ocrMsg}
                   </p>
@@ -1635,7 +1635,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                     {ocrLoading
                       ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       : <Zap className="h-3.5 w-3.5" style={{ color: 'var(--warn)' }} />}
-                    {ocrLoading ? 'BOB OCR 识别中…' : scanNeedsOcr ? '执行 BOB OCR 后可检索' : '未命中？执行 BOB OCR 后再检索'}
+                    {ocrLoading ? 'Running BOB OCR…' : scanNeedsOcr ? 'Run BOB OCR to enable search' : 'No matches? Run BOB OCR, then search again'}
                   </button>
                 )}
               </div>
@@ -1692,10 +1692,10 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               <Check className="h-4 w-4" style={{ color: 'var(--success)' }} />
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>OCR 识别完成</div>
+              <div className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>OCR complete</div>
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5" style={{ color: 'var(--ink-muted)' }}>
-                <span className="tabular-nums">{ocrMeta.pageCount} 页</span>
-                {ocrMeta.upgradedCount > 0 && <span>升级视觉大模型 {ocrMeta.upgradedCount} 页</span>}
+                <span className="tabular-nums">{ocrMeta.pageCount} pages</span>
+                {ocrMeta.upgradedCount > 0 && <span>{ocrMeta.upgradedCount} pages upgraded to the vision model</span>}
                 <span className="tabular-nums">{(ocrMeta.elapsedMs / 1000).toFixed(1)}s</span>
               </div>
               <div className="mt-1.5 flex items-center gap-3">
@@ -1704,16 +1704,16 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                   className="font-medium underline-offset-2 hover:underline"
                   style={{ color: 'var(--primary)' }}
                 >
-                  显示识别文字
+                  Show recognized text
                 </button>
-                <span style={{ color: 'var(--ink-faint)' }}>现在可全文检索 (Ctrl/Cmd+Shift+F)</span>
+                <span style={{ color: 'var(--ink-faint)' }}>Full-text search is now available (Ctrl/Cmd+Shift+F)</span>
               </div>
             </div>
             <button
               onClick={() => setOcrResultShown(false)}
               className="shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
               style={{ color: 'var(--ink-muted)' }}
-              title="关闭"
+              title="Close"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -1765,7 +1765,7 @@ function HitContextPreview({ data, keepAlive, dismiss }: {
         >
           P{hit.page}
         </span>
-        <span className="text-10" style={{ color: 'var(--ink-muted)' }}>上下文预览</span>
+        <span className="text-10" style={{ color: 'var(--ink-muted)' }}>Context preview</span>
       </div>
       <p className="break-all text-xs leading-relaxed" style={{ color: 'var(--ink)' }}>
         {markOk && ex ? (
@@ -1786,7 +1786,7 @@ function HitContextPreview({ data, keepAlive, dismiss }: {
           hit.context
         )}
       </p>
-      <p className="mt-1.5 text-10" style={{ color: 'var(--ink-muted)' }}>点击条目可在页面中精确定位</p>
+      <p className="mt-1.5 text-10" style={{ color: 'var(--ink-muted)' }}>Click a result to jump to it on the page</p>
     </div>
   );
 }

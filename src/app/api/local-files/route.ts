@@ -296,17 +296,19 @@ export async function GET(request: NextRequest) {
 
   try {
     const entries = await fs.readdir(resolved, { withFileTypes: true });
-    const items = [];
 
-    for (const entry of entries.sort((a, b) => {
-      if (a.isDirectory() !== b.isDirectory()) {
-        return a.isDirectory() ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    })) {
-      // 跳过隐藏文件
-      if (entry.name.startsWith('.')) continue;
+    // 先过滤隐藏文件并排序（目录优先、同类按名称），再并发 stat。
+    // 原实现逐个 await fs.stat，文件多时退化为串行系统调用，是打开目录卡顿的主因。
+    const visible = entries
+      .filter((entry) => !entry.name.startsWith('.'))
+      .sort((a, b) => {
+        if (a.isDirectory() !== b.isDirectory()) {
+          return a.isDirectory() ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+      });
 
+    const items = await Promise.all(visible.map(async (entry) => {
       const fullPath = join(resolved, entry.name);
       let size = '';
       let sizeBytes = 0;
@@ -319,15 +321,15 @@ export async function GET(request: NextRequest) {
         } catch { /* ignore */ }
       }
 
-      items.push({
+      return {
         name: entry.name,
         path: fullPath,
         type: entry.isDirectory() ? 'directory' : 'file',
         size,
         sizeBytes,
         extension: entry.isFile() ? entry.name.split('.').pop()?.toLowerCase() : undefined,
-      });
-    }
+      };
+    }));
 
     return NextResponse.json({
       success: true,

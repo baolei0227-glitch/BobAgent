@@ -59,11 +59,10 @@ export interface ExecResult {
   ambiguous?: string[];
   modelUsed?: string;
   savedCount?: number;
-  /** /chat 对话历史（system + 历史Q&A + 本轮Q&A），供 ⌘F 面板直接传入 BobMail 线程，
-   *  无需各层重复拼 SANDBOX_SYSTEM_PROMPT。仅 command='chat' 时有值。 */
+  /** /chat 对话历史（system + 历史Q&A + 本轮Q&A），供 node-mode 多轮复用上下文。仅 command='chat' 时有值。 */
   messages?: ChatMessage[];
-  /** 当前活动线程（BobMail threadId）——仅 command='chat' 时有值。
-   *  ⌘F 面板用这个 threadId 作为 BobMail 邮件线程主键，保证跨轮次复用同一会话。 */
+  /** 当前活动会话线程——仅 command='chat' 时有值。
+   *  服务端 chat-sessions 的 threadId，跨轮次复用同一会话。 */
   threadId?: string;
   /** /note check 查询出的笔记条目（供 ⌘F 面板直接展示笔记列表，不再生成 BobMail 邮件）。仅 command='notebook' 且为 check 子命令时有值。 */
   notes?: WikiEntryWithContent[];
@@ -74,9 +73,9 @@ export interface ExecResult {
 export interface ExecOptions {
   /** Node 端（微信桥）必传：如 http://localhost:8321；浏览器端省略（相对路径） */
   baseUrl?: string;
-  /** 前端（⌘F 面板）传入 BobMail 的线程 ID 提示，
+  /** 前端（⌘F 面板）传入的会话线程 ID 提示，
    *  askNode 返回时会作为最终 threadId 绑定到 node-mode.activeThreadId，
-   *  确保「BobMail 邮件线程」和「/chat 会话」一一对应、跨轮次复用。 */
+   *  确保面板会话与服务端 chat-sessions 一一对应、跨轮次复用。 */
   threadIdHint?: string;
   /** 会话来源：'panel'（⌘F 面板，长期保留）| 'wechat'（微信桥，24 小时过期）。默认 'panel'。 */
   source?: 'panel' | 'wechat';
@@ -449,8 +448,8 @@ async function runNoteCheck(content: string, baseUrl?: string): Promise<ExecResu
  *   - newThread=true（如用户显式输入 /chat new）：强制新建会话，enterNodeMode 时生成新绑定。
  *   - 其它（默认）：先尝试从 node-mode 拿活动线程的 activeThreadId → 复用；无活动绑定则新建。
  *
- * 返回值 threadId：供调用方（如 ⌘F 面板生成 BobMail 线程时）复用，
- * 保证「用户面板生成的 BobMail threadId」和「服务端 activeThreadId」一一对应。 */
+ * 返回值 threadId：供调用方写回 node-mode.activeThreadId，
+ * 保证面板会话与服务端 chat-sessions 一一对应。 */
 async function askNode(
   question: string,
   baseUrl?: string,
@@ -458,7 +457,7 @@ async function askNode(
 ): Promise<ExecResult> {
   const binding = getActiveThreadBinding();
   const reuseThreadId = opts.newThread ? null : binding.threadId;
-  // 如果调用方（如 ⌘F 面板）传了 threadIdHint，优先用它（确保 BobMail threadId 作为线程权威 ID）
+  // 如果调用方传了 threadIdHint，优先用它（作为线程权威 ID）
   const preferThreadId = opts.threadIdHint || binding.threadId || null;
 
   try {
@@ -615,9 +614,8 @@ export async function executeWantedCommand(text: string, opts: ExecOptions = {})
     if (cmd?.id === 'chat' && /^out\b/i.test((cmd.strip(line) || '').trim())) {
       const wasActive = isNodeModeActive();
       exitNodeMode();
-      // /chat out 仅解绑线程标记 + 退出 node mode，不删除临时 .md 文件（7 天 sweep 负责清理）
-      // 保留用户 7 天回看窗口内的历史，同时 BobMail 的 messages_json 是持久化的，
-      // 用户从邮件回复时仍能拿到上下文。
+      // /chat out 仅解绑线程标记 + 退出 node mode；服务端 chat-sessions 会话保留
+      // （panel 长期保留供多轮复用；wechat 24h 过期自动 sweep 清理）
       return {
         ok: true,
         reply: wasActive

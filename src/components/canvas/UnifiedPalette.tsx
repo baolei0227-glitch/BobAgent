@@ -414,7 +414,6 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
             : result.command === 'notebook' ? (isNoteCheck ? 'notes' : 'note')
             : result.command === 'check' ? 'check'
             : result.command === 'inspect' ? 'inspect'
-            : result.command === 'chat' ? 'chat'
             : 'info';
           let threadId: string | undefined;
           let messages: ChatMessage[] | undefined;
@@ -466,22 +465,7 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
           } else if (result.command === 'todo' && kind === 'todo_del') {
             queryKey = `tododel:${queryText('/todo del') || 'all'}`;
           }
-          if (result.command === 'chat') {
-            const question = group
-              .replace(/^\s*\/chat\b[ \t]*/i, '')
-              .replace(/^\s*new\b[ \t]*/i, '')
-              .split('\n')[0]
-              .trim();
-            const confirmedThreadId: string =
-              result.threadId ||
-              `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            threadId = confirmedThreadId;
-            activeChatThreadIdRef.current = confirmedThreadId;
-            messages = result.messages;
-            if (question) {
-              noticeTitle = question.length > 40 ? question.slice(0, 40) + '…' : question;
-            }
-          }
+          // /chat 不再进 BobMail：统一 toast 浮层展示，保持面板轻量交互
           bus.publish(BusEvents.wantedNotice, {
             kind,
             title: noticeTitle,
@@ -493,7 +477,7 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
             items,
             queryKey,
             dedupeKey: threadId ?? `${kind}|${noticeTitle}|${Date.now() / 1000 | 0}`,
-            toast: kind === 'task' || kind === 'note',
+            toast: kind === 'task' || kind === 'note' || result.command === 'chat',
           });
         }
         // 日历事件变更信号：通知 WantedNoticeCenter 立即拉取 reminders 队列
@@ -704,7 +688,7 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
               <button
                 key={act.key}
                 type="button"
-                onClick={act.onClick}
+                onClick={() => { act.onClick(); onClose(); }}
                 disabled={act.disabled}
                 title={act.label}
                 aria-label={act.label}
@@ -728,10 +712,11 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
                 type="button"
                 title={`${app.name} — open`}
                 aria-label={app.name}
-                onClick={() =>
-                  window.dispatchEvent(new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }))
-                }
-                className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded bg-[var(--paper-soft)] text-9 font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }));
+                  onClose();
+                }}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--paper-soft)] text-sm font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
               >
                 {app.name.charAt(0).toUpperCase()}
               </button>
@@ -741,8 +726,11 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
                 type="button"
                 title="More starred apps — open store"
                 aria-label="More starred mini programs"
-                onClick={() => window.dispatchEvent(new CustomEvent('sandbox-store-open'))}
-                className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded text-9 font-medium transition-colors hover:brightness-95"
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('sandbox-store-open'));
+                  onClose();
+                }}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sm font-medium transition-colors hover:brightness-95"
                 style={{ backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)' }}
               >
                 +{starredApps.length - 5}

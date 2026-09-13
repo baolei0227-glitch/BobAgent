@@ -58,8 +58,8 @@ export interface TraceInspectPayload {
 
 /** WANTED 通知负载（由 ⌘F 面板 / 每日报告 等发布，WantedNoticeCenter 消费） */
 export interface WantedNoticePayload {
-  /** kind：task=任务已建 / calendar=日历提醒 / note=想法已存 / notes=笔记列表（/note check） / todo_del=日程已删 / check=日程查询（/todo check） / chat=AI 节点问答回复（含日程查询回复） / info=通用 / daily-report=每日报告 / inspect=跨项目 sticky 待办检查 */
-  kind: 'task' | 'calendar' | 'note' | 'notes' | 'todo_del' | 'check' | 'chat' | 'info' | 'web' | 'daily-report' | 'inspect';
+  /** kind：task=任务已建 / calendar=日历提醒 / note=想法已存 / notes=笔记列表（/note check） / todo_del=日程已删 / check=日程查询（/todo check） / info=通用 / web=一键整理网页报告 / daily-report=每日报告 / inspect=跨项目 sticky 待办检查 */
+  kind: 'task' | 'calendar' | 'note' | 'notes' | 'todo_del' | 'check' | 'info' | 'web' | 'daily-report' | 'inspect';
   title: string;
   body: string;
   time?: number;
@@ -79,12 +79,9 @@ export interface WantedNoticePayload {
   dedupeKey?: string;
   /** 邮件源查询签名（如 todocheck:today）：跳过 (kind,title) 当日幂等，保证重复执行生成本轮新邮件 */
   queryKey?: string;
-  /** chat 线程 ID（kind === 'chat' 时必填）；同属一次对话的多条回复共用此 ID，
-   *  收件箱中按 threadId 归组缩进显示为邮件线程 */
+  /** 会话线程 ID（可选）；DB 保留字段，供未来会话式通知归组使用 */
   threadId?: string;
-  /** chat 对话历史累积（仅 kind === 'chat' 时携带）。含沙盒 system prompt +
-   *  交替 user/assistant，回复时直接 messages+新问题调 /api/chat，无 TTL 限制。
-   *  限制最近 20 轮（40 条），超出丢弃最早 user/assistant 对。 */
+  /** 对话历史 / 报告附件（kind === 'web' 时携带整理源对话、info 类通知携带原始对话存档） */
   messages?: ChatMessage[];
   /** 星标收藏（详情区 Star 按钮切换）；undefined ≡ false */
   starred?: boolean;

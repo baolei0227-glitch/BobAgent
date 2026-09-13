@@ -1843,7 +1843,7 @@ export const ImageAiEditor = forwardRef<ImageGenApiRef, ImageAiEditorProps>(func
                       {refImages.map((r) => (
                         <span
                           key={r.id}
-                          title={`@ ${r.name}\n将以这张图为参考，修改当前预览图片`}
+                          title={`@ ${r.name}\nUses this image as a reference when editing the current preview`}
                           className="group inline-flex items-center gap-1 rounded-md border px-1 py-0.5"
                           style={{ backgroundColor: 'rgba(129,140,248,0.18)', borderColor: 'rgba(129,140,248,0.45)' }}
                         >
@@ -1936,7 +1936,7 @@ export const ImageAiEditor = forwardRef<ImageGenApiRef, ImageAiEditorProps>(func
                     <select
                       value={currentModel}
                       onChange={(e) => setCurrentModel(e.target.value)}
-                      title={modelCandidates.length > 0 ? 'Image edit model' : '未配置模型，请到设置 → 图像编辑模型中添加'}
+                      title={modelCandidates.length > 0 ? 'Image edit model' : 'No model configured — add one in Settings → Image edit models'}
                       className="max-w-[140px] rounded border bg-transparent px-1.5 py-1 text-11 outline-none"
                       style={{
                         borderColor: modelCandidates.length > 0 ? 'rgba(255,255,255,0.15)' : 'rgba(251,191,36,0.5)',
@@ -1944,7 +1944,7 @@ export const ImageAiEditor = forwardRef<ImageGenApiRef, ImageAiEditorProps>(func
                       }}
                     >
                       {modelCandidates.length === 0 ? (
-                        <option value="" className="bg-neutral-900 text-amber-400">未配置模型</option>
+                        <option value="" className="bg-neutral-900 text-amber-400">No model configured</option>
                       ) : (
                         modelCandidates.map((m) => (
                           <option key={m} value={m} className="bg-neutral-900 text-neutral-200">{m}</option>

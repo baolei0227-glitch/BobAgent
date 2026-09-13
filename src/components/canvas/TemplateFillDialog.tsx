@@ -50,6 +50,8 @@ export function TemplateFillPanel({
   onDeleteTemplate?: (file: string) => void;
 }) {
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  /** Bob Items 下拉菜单展开态（默认收起） */
+  const [itemsOpen, setItemsOpen] = useState(false);
   /** 「Update Fields」时的勾选快照：字段列重建为快照模板的字段并集；null = 未手动更新，字段列 = 全量模板并集 */
   const [fieldGenChecked, setFieldGenChecked] = useState<Set<string> | null>(null);
   const [rows, setRows] = useState<Record<string, string>[]>([{}]);
@@ -112,6 +114,7 @@ export function TemplateFillPanel({
 
   useEffect(() => {
     setChecked(new Set(templates.map((t) => t.file)));
+    setItemsOpen(false);
     // 模板集合变化时快照失效：字段列回到全量模板并集
     setFieldGenChecked(null);
     // 初始一行空行，等待填写
@@ -138,6 +141,13 @@ export function TemplateFillPanel({
       }
       return next;
     });
+
+  /** 全选：勾选所有模板 */
+  const selectAllTemplates = () => setChecked(new Set(templates.map((t) => t.file)));
+
+  /** 反选：勾选当前未选中的模板 */
+  const invertTemplates = () =>
+    setChecked((prev) => new Set(templates.filter((t) => !prev.has(t.file)).map((t) => t.file)));
 
   /** 两个集合是否相等（元素相同即可） */
   const setsEqual = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
@@ -511,48 +521,83 @@ export function TemplateFillPanel({
       <div className={`nowheel px-4 py-3 space-y-3 ${embedded ? '' : 'max-h-[50vh] overflow-y-auto'}`}>
         {templates.length > 1 && (
           <div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
+            <button
+              type="button"
+              onClick={() => setItemsOpen((o) => !o)}
+              aria-expanded={itemsOpen}
+              className="flex w-full items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors"
+              style={{
+                borderColor: itemsOpen ? 'var(--primary)' : 'var(--line)',
+                backgroundColor: itemsOpen ? 'color-mix(in oklab, var(--primary) 6%, transparent)' : 'transparent',
+                color: 'var(--ink-muted)',
+              }}
+            >
+              <span className="flex items-center gap-1.5">
+                {itemsOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
                 Bob Items ({checked.size}/{templates.length})
-              </label>
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-1.5">
-              {templates.map((t) => {
-                const on = checked.has(t.file);
-                return (
-                  <div
-                    key={t.file}
-                    className="flex items-center rounded-md border transition-colors"
-                    style={{
-                      borderColor: on ? 'var(--primary)' : 'var(--line)',
-                      backgroundColor: on ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'transparent',
-                    }}
+              </span>
+              <span className="text-11 opacity-70">
+                {checked.size === templates.length ? 'All selected' : `${templates.length - checked.size} unselected`}
+              </span>
+            </button>
+            {itemsOpen && (
+              <div className="mt-1 rounded-md border" style={{ borderColor: 'var(--line)' }}>
+                {/* 批量操作：全选 / 反选 */}
+                <div className="flex items-center gap-1 border-b px-2 py-1" style={{ borderColor: 'var(--line)' }}>
+                  <button
+                    type="button"
+                    onClick={selectAllTemplates}
+                    className="rounded px-2 py-0.5 text-11 font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ color: 'var(--primary)' }}
                   >
-                    <button
-                      type="button"
-                      onClick={() => toggleTemplate(t.file)}
-                      className="flex items-center gap-1 px-2 py-1 text-xs"
-                      style={{ color: on ? 'var(--primary)' : 'var(--ink-muted)' }}
-                    >
-                      {on ? <Check className="h-3 w-3" /> : <FileText className="h-3 w-3" />}
-                      {t.file}
-                    </button>
-                    {onDeleteTemplate && (
-                      <button
-                        type="button"
-                        onClick={() => onDeleteTemplate(t.file)}
-                        className="mr-1 rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
-                        title={`Delete ${t.file}`}
-                        aria-label={`Delete ${t.file}`}
-                        style={{ color: 'var(--danger)' }}
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={invertTemplates}
+                    className="rounded px-2 py-0.5 text-11 font-medium transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ color: 'var(--primary)' }}
+                  >
+                    Invert
+                  </button>
+                </div>
+                {/* 文件列表：每项前面一个复选框 */}
+                <div className="max-h-[200px] overflow-y-auto p-1">
+                  {templates.map((t) => {
+                    const on = checked.has(t.file);
+                    return (
+                      <label
+                        key={t.file}
+                        className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                        style={{ color: on ? 'var(--ink-strong)' : 'var(--ink-muted)' }}
                       >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggleTemplate(t.file)}
+                          className="h-3.5 w-3.5 shrink-0 cursor-pointer"
+                          style={{ accentColor: 'var(--primary)' }}
+                        />
+                        <FileText className="h-3 w-3 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate" title={t.file}>{t.file}</span>
+                        {onDeleteTemplate && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.preventDefault(); onDeleteTemplate(t.file); }}
+                            className="rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
+                            title={`Delete ${t.file}`}
+                            aria-label={`Delete ${t.file}`}
+                            style={{ color: 'var(--danger)' }}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

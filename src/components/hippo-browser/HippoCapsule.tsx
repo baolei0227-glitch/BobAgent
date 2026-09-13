@@ -32,8 +32,8 @@ export function HippoCapsule() {
   return (
     <button
       type="button"
-      aria-label="恢复 Hippo Browser"
-      title="点击恢复浏览器（⌘⇧B）"
+      aria-label="Restore Hippo Browser"
+      title="Click to restore the browser (⌘⇧B)"
       onClick={() => void desktop.hippoBrowser.capsuleToggle()}
       className="hippo-capsule"
     >

@@ -63,8 +63,8 @@ type Snap = { img: ImageData; marks: Mark[] };
 const MARK_COLOR = '#ff5252';
 /** 马赛克块大小（canvas 像素） */
 const MOSAIC_BLOCK = 12;
-/** 马赛克画笔半径（canvas 像素） */
-const MOSAIC_RADIUS = 48;
+/** 马赛克画笔半径档位（相对基准半径的倍率：细 / 中 / 粗） */
+const MOSAIC_BRUSH_STEPS = [0.5, 1, 1.8];
 /** 撤销栈最大深度（全图快照内存保护） */
 const MAX_HISTORY = 30;
 /** 选区最小边长（canvas 像素） */
@@ -119,15 +119,30 @@ function distToSegment(px: number, py: number, x1: number, y1: number, x2: numbe
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
+/** 标注文字字号（图像像素）：随图像宽度自适应，保证不同分辨率/DPR 截图上视觉大小一致 */
+function markFontSize(imgWidth: number): number {
+  return Math.max(16, Math.min(56, Math.round(imgWidth / 80)));
+}
+
+/** 标注文字字体族（测量 / 绘制 / 输入框共用，避免多处不一致） */
+const MARK_FONT_FAMILY =
+  '"Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif';
+
+/** 标注文字 canvas font 串 */
+function markFont(imgWidth: number): string {
+  return `600 ${markFontSize(imgWidth)}px ${MARK_FONT_FAMILY}`;
+}
+
 /** 命中检测：从后往前（后画的在上），返回命中的标注对象或 null */
 function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, py: number): Mark | null {
-  ctx.font = '600 16px "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif';
+  const fs = markFontSize(ctx.canvas.width);
+  ctx.font = markFont(ctx.canvas.width);
   ctx.textBaseline = 'top';
   for (let i = marks.length - 1; i >= 0; i--) {
     const m = marks[i];
     if (m.kind === 'text') {
       const w = ctx.measureText(m.value).width;
-      if (px >= m.x - 3 && px <= m.x + w + 3 && py >= m.y - 3 && py <= m.y + 19) return m;
+      if (px >= m.x - 3 && px <= m.x + w + 3 && py >= m.y - 3 && py <= m.y + fs + 3) return m;
     } else {
       if (distToSegment(px, py, m.x1, m.y1, m.x2, m.y2) <= 8) return m;
     }
@@ -205,11 +220,17 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
   const selRef = useRef<Sel | null>(null);
   const [sel, setSel] = useState<Sel | null>(null);
   const [tool, setTool] = useState<Tool>('select');
+  /** 马赛克画笔档位索引（MOSAIC_BRUSH_STEPS） */
+  const [mosaicStep, setMosaicStep] = useState(1);
   const [phase, setPhase] = useState<'idle' | 'edit'>('idle');
   const [dragging, setDragging] = useState(false);
   const [dragMode, setDragMode] = useState<null | 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'markMove'>(null);
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
   const [scale, setScale] = useState(1);
+  /** 马赛克画笔半径（图像像素）：基准随图像宽度自适应，再按档位缩放，保证不同 DPR 截图视觉一致 */
+  const mosaicRadius = nat
+    ? Math.max(6, Math.round((nat.w / 60) * MOSAIC_BRUSH_STEPS[mosaicStep]))
+    : 48;
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   /** To Text 弹窗：选区裁剪图 + OCR 文本（可编辑）+ 复制/取消 */
@@ -230,6 +251,9 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     /** 标注对象拖动：被拖对象 id 与命中时原坐标（用于偏移） */
     markId?: number;
     markFrom?: Mark;
+    /** 马赛克涂抹：上一个落笔点（用于相邻点插值，消除快速拖动断层） */
+    lastX?: number;
+    lastY?: number;
   }>({ mode: null, startX: 0, startY: 0, curX: 0, curY: 0, sel0: { x: 0, y: 0, w: 0, h: 0 } });
 
   const setSelBoth = useCallback((s: Sel | null) => {
@@ -259,7 +283,8 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     mc.height = canvas.height;
     const ctx = mc.getContext('2d')!;
     ctx.clearRect(0, 0, mc.width, mc.height);
-    ctx.font = '600 16px "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif';
+    const fs = markFontSize(mc.width);
+    ctx.font = markFont(mc.width);
     ctx.textBaseline = 'top';
     ctx.fillStyle = MARK_COLOR;
     const selId = selMarkIdRef.current;
@@ -271,7 +296,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
           ctx.setLineDash([4, 3]);
           ctx.strokeStyle = 'rgba(75,63,227,0.95)';
           ctx.lineWidth = 1.2;
-          ctx.strokeRect(m.x - 2, m.y - 2, w + 4, 18);
+          ctx.strokeRect(m.x - 2, m.y - 2, w + 4, fs + 4);
           ctx.setLineDash([]);
         }
       } else {
@@ -322,16 +347,16 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         mc.height = img.naturalHeight;
       }
       setNat({ w: img.naturalWidth, h: img.naturalHeight });
-      // 缩放基准：微信式「原尺寸」= 图片物理像素 1:1 映射到屏幕物理像素。
-      // screencapture 输出物理像素（Retina 2x），故原尺寸的 CSS 尺寸 = naturalWidth / devicePixelRatio。
-      // 仅在图片超出窗口时缩小适配（fit），不再封顶 1 —— 封顶 1 会让选区小图（region 模式）
-      // 以物理像素当 CSS 像素渲染，Retina 下被放大 devicePixelRatio 倍。
+      // 缩放基准：微信式「原位置」= 整屏截图铺满覆盖窗口（窗口尺寸即屏幕点尺寸），与真实屏幕 1:1。
       const dpr = window.devicePixelRatio || 1;
-      const sc = Math.min(
-        1 / dpr,
+      const fit = Math.min(
         window.innerWidth / img.naturalWidth,
         window.innerHeight / img.naturalHeight,
       );
+      // 整屏图（图宽 ≥ 窗口宽）直接按 fit 铺满：不再套 1/dpr 硬编码上限——
+      // 该上限假设截图必为物理像素(Retina 2x)，当截图与窗口同为点分辨率时会把画面强制缩半，
+      // 即用户反馈的「蒙版比真实界面小」。小图（选区截图）仍沿用 1/dpr，避免 Retina 下被放大。
+      const sc = img.naturalWidth >= window.innerWidth ? fit : Math.min(1 / dpr, fit);
       setScale(sc);
       // 原生选区已完成（region 模式）：整图直接全选区，进入编辑态立即出工具条（微信式）
       if (initialSelection === 'full') {
@@ -424,29 +449,37 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     [tool, commitTextDraft],
   );
 
-  /** 马赛克：把以 (cx,cy) 为圆心、radius 半径内的像素按 blockSize 网格块化（每块取平均色） */
+  /** 马赛克：把以 (cx,cy) 为圆心、radius 半径内的像素按 MOSAIC_BLOCK 网格块化（每块取平均色） */
   const paintMosaicAt = useCallback(
-    (cx: number, cy: number) => {
+    (cx: number, cy: number, radius: number) => {
       const canvas = getCanvas()!;
       const ctx = getCtx();
       const { width, height } = canvas;
-      const imgData = ctx.getImageData(0, 0, width, height);
+      // 只读写画笔覆盖区域（局部 getImageData）：整图拷贝会让涂抹滞后于光标、产生偏移感
+      const x0 = Math.max(0, Math.floor((cx - radius) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
+      const y0 = Math.max(0, Math.floor((cy - radius) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
+      const x1 = Math.min(width, Math.ceil((cx + radius) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
+      const y1 = Math.min(height, Math.ceil((cy + radius) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
+      const rw = x1 - x0;
+      const rh = y1 - y0;
+      if (rw <= 0 || rh <= 0) return;
+      const imgData = ctx.getImageData(x0, y0, rw, rh);
       const d = imgData.data;
-      const x0 = Math.max(0, Math.floor((cx - MOSAIC_RADIUS) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
-      const y0 = Math.max(0, Math.floor((cy - MOSAIC_RADIUS) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
-      const x1 = Math.min(width, Math.ceil((cx + MOSAIC_RADIUS) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
-      const y1 = Math.min(height, Math.ceil((cy + MOSAIC_RADIUS) / MOSAIC_BLOCK) * MOSAIC_BLOCK);
-      for (let by = y0; by < y1; by += MOSAIC_BLOCK) {
-        for (let bx = x0; bx < x1; bx += MOSAIC_BLOCK) {
-          const bEndY = Math.min(by + MOSAIC_BLOCK, height);
-          const bEndX = Math.min(bx + MOSAIC_BLOCK, width);
+      for (let by = 0; by < rh; by += MOSAIC_BLOCK) {
+        for (let bx = 0; bx < rw; bx += MOSAIC_BLOCK) {
+          // 圆形画笔：块中心超出半径则跳过，不误伤画笔外的像素（涂抹更精准）
+          const bcx = x0 + bx + MOSAIC_BLOCK / 2;
+          const bcy = y0 + by + MOSAIC_BLOCK / 2;
+          if (Math.hypot(bcx - cx, bcy - cy) > radius + MOSAIC_BLOCK / 2) continue;
+          const bEndY = Math.min(by + MOSAIC_BLOCK, rh);
+          const bEndX = Math.min(bx + MOSAIC_BLOCK, rw);
           let r = 0;
           let g = 0;
           let b = 0;
           let n = 0;
           for (let y = by; y < bEndY; y++) {
             for (let x = bx; x < bEndX; x++) {
-              const i = (y * width + x) * 4;
+              const i = (y * rw + x) * 4;
               r += d[i];
               g += d[i + 1];
               b += d[i + 2];
@@ -460,7 +493,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
           }
           for (let y = by; y < bEndY; y++) {
             for (let x = bx; x < bEndX; x++) {
-              const i = (y * width + x) * 4;
+              const i = (y * rw + x) * 4;
               d[i] = r;
               d[i + 1] = g;
               d[i + 2] = b;
@@ -468,7 +501,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
           }
         }
       }
-      ctx.putImageData(imgData, 0, 0);
+      ctx.putImageData(imgData, x0, y0);
     },
     [getCanvas, getCtx],
   );
@@ -495,10 +528,10 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       }
       // 马赛克：直接涂抹（一次笔画一个撤销步）
       if (tool === 'mosaic') {
-        dragRef.current = { mode: 'mosaic', startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y, sel0: selRef.current ?? { x: 0, y: 0, w: 0, h: 0 } };
+        dragRef.current = { mode: 'mosaic', startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y, sel0: selRef.current ?? { x: 0, y: 0, w: 0, h: 0 }, lastX: pos.x, lastY: pos.y };
         setDragMode('mosaic');
         pushUndo();
-        paintMosaicAt(pos.x, pos.y);
+        paintMosaicAt(pos.x, pos.y, mosaicRadius);
         setDragging(true);
         return;
       }
@@ -542,7 +575,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       setSelBoth({ x: pos.x, y: pos.y, w: 0, h: 0 });
       setDragging(true);
     },
-    [toImagePos, tool, phase, pushUndo, paintMosaicAt, setSelBoth, commitTextDraft, setTextDraftBoth, redrawMarks, setSelMarkIdBoth],
+    [toImagePos, tool, phase, mosaicRadius, pushUndo, paintMosaicAt, setSelBoth, commitTextDraft, setTextDraftBoth, redrawMarks, setSelMarkIdBoth],
   );
 
   const onPointerMove = useCallback(
@@ -564,7 +597,17 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         const s0 = d.sel0;
         setSelBoth(resizeSel(s0, d.handle!, pos, canvas.width, canvas.height));
       } else if (d.mode === 'mosaic') {
-        paintMosaicAt(pos.x, pos.y);
+        // 相邻采样点间插值补点：快速拖动时不留未打码的断层
+        const lx = d.lastX ?? pos.x;
+        const ly = d.lastY ?? pos.y;
+        const dist = Math.hypot(pos.x - lx, pos.y - ly);
+        const step = Math.max(1, mosaicRadius * 0.5);
+        const n = Math.max(1, Math.ceil(dist / step));
+        for (let i = 1; i <= n; i++) {
+          paintMosaicAt(lx + (pos.x - lx) * (i / n), ly + (pos.y - ly) * (i / n), mosaicRadius);
+        }
+        d.lastX = pos.x;
+        d.lastY = pos.y;
       } else if (d.mode === 'arrow') {
         // 预览：标注层重绘 marks + 拖拽中的箭头
         redrawMarks();
@@ -596,7 +639,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         }
       }
     },
-    [toImagePos, getCanvas, paintMosaicAt, setSelBoth, redrawMarks, setMarksBoth],
+    [toImagePos, getCanvas, mosaicRadius, paintMosaicAt, setSelBoth, redrawMarks, setMarksBoth],
   );
 
   /** 复位拖拽状态（指针取消/丢失兜底，防止 dragging 卡死导致工具条不弹） */
@@ -1002,10 +1045,10 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
               borderRadius: 4,
               background: 'rgba(255,255,255,0.92)',
               color: MARK_COLOR,
-              fontSize: 16 * scale,
+              fontSize: (nat ? markFontSize(nat.w) : 24) * scale,
               fontWeight: 600,
               lineHeight: 1.3,
-              fontFamily: '"Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif',
+              fontFamily: MARK_FONT_FAMILY,
               outline: 'none',
               resize: 'none',
               overflow: 'hidden',
@@ -1041,6 +1084,40 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
             <button style={toolBtn(tool === 'mosaic')} onClick={() => switchTool('mosaic')} title="Mosaic: paint to blur">
               <MosaicIcon />
             </button>
+            {tool === 'mosaic' && (
+              <>
+                {MOSAIC_BRUSH_STEPS.map((_, i) => (
+                  <button
+                    key={i}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: 26,
+                      height: 26,
+                      borderRadius: 8,
+                      border: 'none',
+                      background: mosaicStep === i ? 'rgba(255,255,255,0.22)' : 'transparent',
+                      color: mosaicStep === i ? '#fff' : 'rgba(255,255,255,0.75)',
+                      cursor: 'pointer',
+                    }}
+                    onClick={() => setMosaicStep(i)}
+                    title={`Brush size: ${['Fine', 'Medium', 'Thick'][i]}`}
+                  >
+                    <span
+                      style={{
+                        display: 'block',
+                        width: [6, 10, 15][i],
+                        height: [6, 10, 15][i],
+                        borderRadius: '50%',
+                        background: 'currentColor',
+                      }}
+                    />
+                  </button>
+                ))}
+                <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.18)', margin: '0 4px' }} />
+              </>
+            )}
             <button style={toolBtn(tool === 'arrow')} onClick={() => switchTool('arrow')} title="Arrow: drag to draw (hand-drawn sketch)">
               <ArrowUpRight className="h-4 w-4" />
             </button>

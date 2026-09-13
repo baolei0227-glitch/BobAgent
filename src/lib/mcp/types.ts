@@ -202,6 +202,18 @@ export const MCP_PRESETS: McpServerConfig[] = [
     enabled: true,
   },
   {
+    id: 'bob-ocr-mcp',
+    name: 'Bob OCR',
+    // 常驻 daemon（bob-ocr-mcp --serve，端口 9478，token 鉴权）须以 Streamable HTTP 接入；
+    // token 由 daemon 生成（~/.bob-ocr-mcp/token.json），运行时由 manager 按 /setup/status 自动刷新，
+    // 故 url 里的占位 token 会在首次同步时被替换为真实值（同 bob-browser-mcp）。
+    transport: 'streamable-http',
+    url: 'http://127.0.0.1:9478/mcp?token=TOKEN_PLACEHOLDER',
+    timeout: 300, // 大 PDF 整份识别（本地 Vision 逐页）可能达 1-2 分钟
+    // 默认开启：daemon 未安装/未启动时连接失败自动自愈重试（设置面板可关闭）
+    enabled: true,
+  },
+  {
     id: 'bobby',
     name: 'Bobby node',
     // Phase 2 开发期用绝对路径指向工作区内的 MCP 构建产物；发布版应改为全局安装路径或相对路径。

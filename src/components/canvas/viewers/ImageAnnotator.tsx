@@ -29,10 +29,10 @@ type Anno = ArrowAnno | RectAnno | TextAnno | MosaicAnno;
 
 const COLORS = ['#e11d48', '#eab308', '#2563eb', '#16a34a', '#111827', '#ffffff'];
 const TOOLS: Array<{ key: Tool; label: string; icon: typeof Square }> = [
-  { key: 'arrow', label: '箭头', icon: ArrowUpRight },
-  { key: 'rect', label: '矩形', icon: Square },
-  { key: 'text', label: '文字', icon: Type },
-  { key: 'mosaic', label: '马赛克', icon: Grid3x3 },
+  { key: 'arrow', label: 'Arrow', icon: ArrowUpRight },
+  { key: 'rect', label: 'Rectangle', icon: Square },
+  { key: 'text', label: 'Text', icon: Type },
+  { key: 'mosaic', label: 'Mosaic', icon: Grid3x3 },
 ];
 /** 文字标注可选字号 */
 const FONT_SIZES = [12, 16, 20, 24, 32, 40, 48, 64];
@@ -360,7 +360,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
             <button
               key={c}
               type="button"
-              title="标注颜色"
+              title="Annotation color"
               onClick={() => setColor(c)}
               className="h-4 w-4 rounded-full transition-transform"
               style={{
@@ -374,11 +374,11 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
         {/* 字号选择：仅文字工具激活时显示 */}
         {tool === 'text' && (
           <div className="flex items-center gap-1 rounded-md px-1.5 py-0.5" style={{ backgroundColor: 'rgba(255,255,255,0.08)' }}>
-            <span className="text-xs" style={{ color: 'rgba(255,255,255,0.55)' }}>字号</span>
+            <span className="text-xs" style={{ color: 'rgba(255,255,255,0.55)' }}>Size</span>
             <select
               value={textFontSize}
               onChange={(e) => handleFontSizeChange(Number(e.target.value))}
-              title="标注字号"
+              title="Annotation font size"
               className="rounded border-none bg-transparent px-1 py-0.5 text-xs outline-none"
               style={{ color: '#fff', backgroundColor: 'rgba(255,255,255,0.14)', fontFamily: "var(--font-sans)", cursor: 'pointer' }}
             >
@@ -392,7 +392,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
           <button
             type="button"
             onClick={undo}
-            title="撤销"
+            title="Undo"
             className="flex items-center justify-center rounded-md px-1.5 py-1 transition-colors hover:bg-white/10"
             style={{ color: 'rgba(255,255,255,0.7)' }}
           >
@@ -401,7 +401,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
           <button
             type="button"
             onClick={clear}
-            title="清空全部标注"
+            title="Clear all annotations"
             className="flex items-center justify-center rounded-md px-1.5 py-1 transition-colors hover:bg-white/10"
             style={{ color: 'rgba(255,255,255,0.7)' }}
           >
@@ -410,7 +410,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
           <button
             type="button"
             onClick={onCancel}
-            title="取消"
+            title="Cancel"
             className="flex items-center justify-center rounded-md px-2 py-1 transition-colors hover:bg-white/10"
             style={{ color: 'rgba(255,255,255,0.75)' }}
           >
@@ -420,7 +420,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
             type="button"
             onClick={save}
             disabled={saving || loading}
-            title={saving ? '保存中…' : '保存'}
+            title={saving ? 'Saving…' : 'Save'}
             className="flex items-center justify-center rounded-md px-2 py-1 transition-opacity disabled:opacity-50"
             style={{ backgroundColor: '#34c759', color: '#fff' }}
           >
@@ -434,7 +434,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
         {loading ? (
           <div className="flex flex-col items-center gap-2">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-r-transparent" style={{ color: 'var(--info)' }} />
-            <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>加载图片…</span>
+            <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>Loading image…</span>
           </div>
         ) : (
           <div className="relative" style={{ lineHeight: 0 }}>
@@ -471,7 +471,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
                         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmText(); }
                         if (e.key === 'Escape') cancelText();
                       }}
-                      placeholder="输入标注文字"
+                      placeholder="Enter annotation text"
                       rows={lineCount}
                       spellCheck={false}
                       className="resize-none border-none bg-transparent p-0 outline-none"
@@ -496,7 +496,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
                         clipPath: 'polygon(100% 0, 100% 100%, 0 100%)',
                         borderBottomRightRadius: 4,
                       }}
-                      title="拖拽调整大小"
+                      title="Drag to resize"
                       onPointerDown={handleResizeStart}
                       onPointerMove={handleResizeMove}
                       onPointerUp={handleResizeEnd}
@@ -509,7 +509,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
                       type="button"
                       onClick={confirmText}
                       disabled={!textValue.trim()}
-                      title="确定"
+                      title="Confirm"
                       className="rounded p-0.5 transition-colors hover:bg-white/20 disabled:opacity-40"
                     >
                       <Check className="h-3.5 w-3.5" />
@@ -517,7 +517,7 @@ export function ImageAnnotator({ src, fileName, onSave, onCancel }: Props) {
                     <button
                       type="button"
                       onClick={cancelText}
-                      title="取消"
+                      title="Cancel"
                       className="rounded p-0.5 transition-colors hover:bg-white/20"
                     >
                       <X className="h-3.5 w-3.5" />

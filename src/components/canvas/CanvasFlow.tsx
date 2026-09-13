@@ -1,7 +1,8 @@
 'use client';
 
 import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore, type ReactNode } from 'react';
-import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Sparkles, Boxes, Users, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, Boxes, Users, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil } from 'lucide-react';
 import type { HostNode, HostEdge, NodeHostValue } from './node-host';
 import { NodeHostContext } from './node-host';
 import {
@@ -48,6 +49,7 @@ import { DocxTemplatePanel } from './DocxTemplatePanel';
 import { UnifiedViewer } from './UnifiedViewer';
 import { Sidebar } from './Sidebar';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { Button } from '@/components/ui/button';
 
 import { CalendarPanel } from './CalendarPanel';
 import { PluginPanelFrame } from './PluginPanelFrame';
@@ -696,7 +698,7 @@ function UnifiedReaderPanel({
                 {/* 圆角胶囊标签：类型图标 + 标签名 + 关闭按钮；选中态以背景+边框高亮，不加下划线 */}
                 <button
                   onClick={() => handleSelectTab(tab.type, tab.id)}
-                  className={`group/tab relative mx-0.5 flex max-w-[148px] shrink-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-all ${
+                  className={`group/tab relative mx-0.5 flex max-w-[112px] shrink-0 items-center gap-0.5 rounded-md border px-1 py-0.5 text-[11px] font-medium transition-all ${
                     isActive
                       ? 'border-[color-mix(in_oklab,var(--primary)_38%,transparent)] bg-[var(--primary-soft)]'
                       : 'border-[color-mix(in_srgb,var(--line)_45%,transparent)] bg-transparent hover:border-[color-mix(in_srgb,var(--line)_95%,transparent)] hover:bg-[var(--paper-hover)]'
@@ -706,9 +708,9 @@ function UnifiedReaderPanel({
                   }}
                   title={tab.label}
                 >
-                  <TabIcon className="h-3 w-3 shrink-0 opacity-70" style={{ color: isActive ? 'var(--primary)' : 'var(--ink-faint)' }} />
+                  <TabIcon className="h-2.5 w-2.5 shrink-0 opacity-70" style={{ color: isActive ? 'var(--primary)' : 'var(--ink-faint)' }} />
                   <span
-                    className="min-w-0 flex-1 truncate"
+                    className="min-w-0 flex-1 truncate transition-[padding] group-hover/tab:pr-4"
                     onMouseEnter={(e) => {
                       const el = e.currentTarget;
                       // 仅在文本被截断时显示完整名称提示
@@ -724,7 +726,13 @@ function UnifiedReaderPanel({
                   >
                     {tab.label}
                   </span>
-                  <button
+                  {/* 关闭按钮：默认隐藏，悬停标签时显示。
+                      注意：不能再用 <button>——外层标签已是 <button>，
+                      嵌套 button 是非法 HTML，SSR 解析时浏览器会提前闭合外层标签，
+                      导致该按钮被移出 group/tab 作用域、group-hover 永远匹配不到。 */}
+                  <span
+                    role="button"
+                    aria-label="Close tab"
                     onClick={(e) => {
                       e.stopPropagation();
                       e.preventDefault();
@@ -738,12 +746,11 @@ function UnifiedReaderPanel({
                       else if (tab.type === 'plugin') onClosePluginTab(tab.id);
                       else onCloseSandboxTab(tab.id);
                     }}
-                    tabIndex={-1}
-                    className="-mr-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded opacity-0 transition-opacity group-hover/tab:opacity-100 hover:bg-[var(--paper-hover)]"
+                    className="absolute right-0.5 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 cursor-pointer items-center justify-center rounded bg-[var(--paper)] opacity-0 pointer-events-none transition-opacity group-hover/tab:pointer-events-auto group-hover/tab:opacity-100 hover:bg-[var(--paper-hover)]"
                     style={{ color: 'var(--ink-muted)' }}
                   >
-                    <X className="h-3 w-3" />
-                  </button>
+                    <X className="h-2.5 w-2.5" />
+                  </span>
                 </button>
               </div>
             );
@@ -891,6 +898,7 @@ function UnifiedReaderPanel({
               style={{ display: isActive ? undefined : 'none' }}
             >
               <PluginPanelFrame
+                pluginId={entry.pluginId}
                 name={entry.name}
                 src={entry.src}
                 probeUrl={entry.probeUrl}
@@ -958,6 +966,38 @@ function ToolBtn({ title, active, disabled, onClick, children }: { title: string
       <TooltipContent side="right">{title}</TooltipContent>
     </Tooltip>
   );
+}
+
+/** 项目文件树中的目录/文件节点（仅取新建 MD 弹窗所需字段） */
+interface ProjectTreeLikeNode {
+  name: string;
+  type: 'file' | 'directory';
+  children?: ProjectTreeLikeNode[];
+}
+
+/** 从项目文件树收集 homework 下所有目录（含根）与各目录已有文件名，供新建 MD 弹窗选择文件夹并查重 */
+function collectHomeworkTree(files: ProjectTreeLikeNode[] | undefined): {
+  dirs: Array<{ rel: string; label: string; depth: number }>;
+  namesByDir: Map<string, Set<string>>;
+} {
+  const dirs: Array<{ rel: string; label: string; depth: number }> = [{ rel: '', label: 'homework', depth: 0 }];
+  const namesByDir = new Map<string, Set<string>>();
+  namesByDir.set('', new Set<string>());
+  const hw = (files || []).find((f) => f.name === 'homework' && f.type === 'directory');
+  const walk = (children: ProjectTreeLikeNode[] | undefined, rel: string, depth: number) => {
+    for (const c of children || []) {
+      if (c.type === 'directory') {
+        const childRel = rel ? `${rel}/${c.name}` : c.name;
+        dirs.push({ rel: childRel, label: c.name, depth });
+        namesByDir.set(childRel, new Set<string>());
+        walk(c.children, childRel, depth + 1);
+      } else {
+        namesByDir.get(rel)?.add(c.name);
+      }
+    }
+  };
+  walk(hw?.children, '', 1);
+  return { dirs, namesByDir };
 }
 
 function CanvasFlowInner() {
@@ -1411,19 +1451,80 @@ function CanvasFlowInner() {
   const [calendarOpen, setCalendarOpen] = useState(false);
   // ===== 原 ⌘F 底部栏按钮迁入左侧边栏所需状态与逻辑（2026-09） =====
   // Markdown：为当前打开的会话生成 homework Markdown 文档（归属当前项目）
+  // 点击后弹窗让用户命名并选择 homework 内的目标文件夹（默认 homework 根）
   const [mdCreating, setMdCreating] = useState(false);
-  const handleCreateSidebarMd = async () => {
+  const [mdDialog, setMdDialog] = useState<{
+    nodeId: string;
+    dirs: Array<{ rel: string; label: string; depth: number }>;
+    namesByDir: Map<string, Set<string>>;
+  } | null>(null);
+  const [mdName, setMdName] = useState('untitled.md');
+  const [mdDir, setMdDir] = useState('');
+  const [mdError, setMdError] = useState<string | null>(null);
+  const openCreateMdDialog = async () => {
     if (mdCreating) return;
     const targetNodeId = focusedNodeId;
-    const targetProjectId = currentProjectId;
     if (!targetNodeId) {
       window.alert('Please open a conversation node first, then tap Markdown.');
       return;
     }
     setMdCreating(true);
     try {
-      const body: Record<string, unknown> = { action: 'create_homework_md', node_id: targetNodeId };
-      if (targetProjectId) body.project_id = targetProjectId;
+      // 拉取项目文件树 → 收集 homework 目录树与各目录已有文件名（用于选择文件夹 + 默认名查重）
+      const resp = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'list_files', project_id: currentProjectId || undefined }),
+      });
+      const data = await resp.json();
+      if (!data.success) {
+        window.alert(data.error || 'Failed to load project files');
+        return;
+      }
+      const { dirs, namesByDir } = collectHomeworkTree(data.files as ProjectTreeLikeNode[] | undefined);
+      const rootNames = namesByDir.get('') || new Set<string>();
+      let name = 'untitled.md';
+      let counter = 2;
+      while (rootNames.has(name)) {
+        name = `untitled-${counter}.md`;
+        counter++;
+      }
+      setMdName(name);
+      setMdDir('');
+      setMdError(null);
+      setMdDialog({ nodeId: targetNodeId, dirs, namesByDir });
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Failed to load project files');
+    } finally {
+      setMdCreating(false);
+    }
+  };
+
+  // 确认新建：按用户输入的文件名在所选 homework 子目录创建空 md 并打开
+  const confirmCreateSidebarMd = async () => {
+    if (!mdDialog) return;
+    const raw = mdName.trim();
+    if (!raw) {
+      setMdError('Please enter a file name');
+      return;
+    }
+    if (raw.includes('/') || raw.includes('\\')) {
+      setMdError('File name cannot contain slashes');
+      return;
+    }
+    const name = /\.md$/i.test(raw) ? raw : `${raw}.md`;
+    if ((mdDialog.namesByDir.get(mdDir) || new Set<string>()).has(name)) {
+      setMdError('A file with this name already exists');
+      return;
+    }
+    try {
+      const body: Record<string, unknown> = {
+        action: 'create_homework_md',
+        node_id: mdDialog.nodeId,
+        file_name: name,
+        target_dir: mdDir,
+      };
+      if (currentProjectId) body.project_id = currentProjectId;
       const resp = await fetch('/api/nodes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1431,14 +1532,13 @@ function CanvasFlowInner() {
       });
       const data = await resp.json();
       if (!data.success) {
-        window.alert(data.error || 'Create MD file failed');
+        setMdError(data.error || 'Create MD file failed');
         return;
       }
+      setMdDialog(null);
       bus.publish(BusEvents.fileOpen, { source: 'project', path: data.path, name: data.name });
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Create MD file failed');
-    } finally {
-      setMdCreating(false);
+      setMdError(e instanceof Error ? e.message : 'Create MD file failed');
     }
   };
   // Draft：底部快捷发起（Chat 头像 + 可选名称 + 大输入框 → 在当前项目新建 Chat 会话自动执行）。
@@ -4224,7 +4324,7 @@ function CanvasFlowInner() {
 
   // 功能按钮（2026-09-12 从左侧栏迁回 ⌘F 面板）：渲染在 ⌘F 输入框下方，仅图标 + 悬停显示名称
   const navActions: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }> = [
-    { key: 'store', label: 'Extensions Store', icon: <Sparkles className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('skill-store-open')) },
+    { key: 'store', label: 'Extensions Store', icon: <Blocks className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('skill-store-open')) },
     { key: 'miniapps', label: 'Mini Programs', icon: <Boxes className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('sandbox-store-open')) },
     { key: 'teams', label: 'Agent Teams', icon: <Users className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('team-panel-open')) },
     { key: 'calendar', label: 'Calendar', icon: <Calendar className="h-4 w-4 shrink-0" />, onClick: () => setCalendarOpen(true) },
@@ -4256,7 +4356,7 @@ function CanvasFlowInner() {
         onClick: () => window.dispatchEvent(new CustomEvent('open-plugin-panel', { detail: { id: p.pluginId } })),
       })),
     { key: 'templates', label: 'Templates', onClick: () => window.dispatchEvent(new CustomEvent('open-template-panel', { detail: {} })) },
-    { key: 'md', label: 'Markdown', onClick: () => void handleCreateSidebarMd(), disabled: mdCreating },
+    { key: 'md', label: 'Markdown', onClick: () => void openCreateMdDialog(), disabled: mdCreating },
   ];
 
   return (
@@ -5158,6 +5258,71 @@ function CanvasFlowInner() {
       </div>
       ) : (
         <WelcomeScreen onCreateProject={handleCreateProject} />
+      )}
+      {/* 新建 Markdown 文档弹窗：命名 + 选择 homework 内的目标文件夹（portal 到 body，避免被画布 UI 层 stacking context 囚禁） */}
+      {mdDialog && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-[1600] flex items-start justify-center pt-20"
+          style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
+          onClick={() => setMdDialog(null)}
+        >
+          <div
+            className="w-96 rounded-xl p-4 shadow-2xl"
+            style={{ backgroundColor: 'var(--paper)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="mb-3 text-sm font-medium" style={{ color: 'var(--ink)' }}>
+              New Markdown file
+            </p>
+            <label className="mb-1 block text-xs" style={{ color: 'var(--ink-muted)' }}>File name</label>
+            <input
+              type="text"
+              autoFocus
+              value={mdName}
+              onChange={(e) => { setMdName(e.target.value); setMdError(null); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void confirmCreateSidebarMd();
+                if (e.key === 'Escape') setMdDialog(null);
+              }}
+              className="w-full rounded-md border px-3 py-2 text-sm outline-none"
+              style={{ borderColor: 'var(--input-border)', color: 'var(--ink)', backgroundColor: 'var(--paper)' }}
+              onFocus={(e) => {
+                // 选中文件名（不含扩展名）
+                const dotIdx = mdName.lastIndexOf('.');
+                if (dotIdx > 0) {
+                  e.target.setSelectionRange(0, dotIdx);
+                } else {
+                  e.target.select();
+                }
+              }}
+            />
+            <label className="mb-1 mt-3 block text-xs" style={{ color: 'var(--ink-muted)' }}>Folder</label>
+            <select
+              value={mdDir}
+              onChange={(e) => { setMdDir(e.target.value); setMdError(null); }}
+              className="w-full rounded-md border px-3 py-2 text-sm outline-none"
+              style={{ borderColor: 'var(--input-border)', color: 'var(--ink)', backgroundColor: 'var(--paper)' }}
+            >
+              {mdDialog.dirs.map((d) => (
+                <option key={d.rel || '__root__'} value={d.rel}>
+                  {`${'\u00A0\u00A0'.repeat(d.depth)}${d.label}`}
+                </option>
+              ))}
+            </select>
+            {mdError && (
+              <p className="mt-2 text-xs" style={{ color: 'var(--danger)' }}>{mdError}</p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="ghost" tone="neutral" size="sm" onClick={() => setMdDialog(null)}>
+                Cancel
+              </Button>
+              <Button variant="solid" tone="brand" size="sm" onClick={() => void confirmCreateSidebarMd()}>
+                Create
+              </Button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
       {/* 删除确认弹窗 */}
       {confirmRender}

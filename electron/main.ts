@@ -558,10 +558,10 @@ function openScreenOcrEditorWindow(dataUrl: string, mode: 'region' | 'full'): Br
       ocrEditorWindow.focus();
       try { app.focus({ steal: true }); } catch { /* ignore */ }
       try { ocrEditorWindow.webContents.focus(); } catch { /* ignore */ }
-      // 兼容新旧前端：先尝试直发（新前端监听 new-shot），同时 reload 兜底——
-      // 旧前端无 new-shot 监听，reload 后页面经 getEditorShot 拉取最新截图（pending 已更新）。
+      // 常驻复用：前端已监听 new-shot 直接更新画面，无需 reload。
+      // 旧实现每次截图都 webContents.reload()（整页重载 + Next 重新水合），
+      // 导致「按快捷键→出现编辑画面」明显迟滞/白闪——已移除。
       try { ocrEditorWindow.webContents.send('screen-ocr:new-shot', { dataUrl, mode }); } catch { /* ignore */ }
-      if (ocrEditorWindow && !ocrEditorWindow.isDestroyed()) ocrEditorWindow.webContents.reload();
       return ocrEditorWindow;
     }
     if (ocrEditorWindow && !ocrEditorWindow.isDestroyed()) ocrEditorWindow.close();

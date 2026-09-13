@@ -3,7 +3,7 @@
  *
  * 用户在 wanted 面板 / 微信输入 `/chat 问题` 时：
  *   1. 决定会话 threadId：
- *      - 显式 threadIdHint（⌘F 面板续聊，对应 BobMail 邮件线程）优先
+ *      - 显式 threadIdHint（由面板传入，用于复用服务端会话存储）优先
  *      - 其次复用 30min 活动窗口内的线程绑定（reuseThreadId）
  *      - 否则新建（/chat out 后首问 / /chat new / 无活动绑定）
  *   2. 从会话存储（chat_sessions 表）加载历史 messages → 组装对话（沙盒系统提示 + 历史 + 新问题）
@@ -11,7 +11,8 @@
  *   4. 聚合 SSE 流为完整文本 → 写回会话存储（panel 长期保留；wechat 24 小时过期）
  *   5. 返回 reply + messages + threadId
  *
- * 生命周期：panel 会话长期保留（对应 BobMail 邮件线程）；wechat 会话 24 小时过期；
+ * 注：/chat 结果不再发布到 BobMail（2026-09），仅通过面板 toast 浮层展示。
+ * 生命周期：panel 会话长期保留（供多轮问答复用上下文）；wechat 会话 24 小时过期；
  * 过期由 chat-session 的 60s 周期 sweep 兜底清理。
  */
 import { readSettingsFromFile } from '@/lib/settings-server';
@@ -61,7 +62,7 @@ export async function resolveTempNodeModel(): Promise<TempNodeModel> {
 }
 
 /** 沙盒约束提示：Node 模式为纯问答，禁止写类工具产生任何副作用。
- *  唯一定义源——executor / UnifiedPalette / askFromMail 均从此导入，杜绝多处副本不一致。 */
+ *  唯一定义源——askTempNode 内部组装消息时从此导入，杜绝多处副本不一致。 */
 export const SANDBOX_SYSTEM_PROMPT =
   '当前为 WANTED 临时问答模式（Node 模式）。你主要回答用户的提问，严格禁止执行多数有副作用的操作：' +
   '不调用 write_file / rename_file / delete_file / run_command / execute_script / draw 等写类工具，' +
@@ -221,133 +222,4 @@ export function trimChatMessages(messages: ChatMessage[]): ChatMessage[] {
     }
   }
   return sys ? [sys, ...trimmed] : trimmed;
-}
-
-/** SSE 聚合：与 askTempNode 内联逻辑一致，抽出供 askFromMail 复用
- *  返回 answer 会把 reasoning 用 <think> 包裹在 content 最前面：
- *   · 会话存储保留完整（多轮上下文模型能看到自己之前的思考，不丢失标签风格）
- *   · 展示层（微信 / BobMail）经 stripThinkTags 剥离思考块，只显示正文 */
-function aggregateSse(raw: string): { ok: boolean; answer: string; reasoning: string; error?: string } {
-  let answer = '';
-  let reasoning = '';
-  for (const chunk of raw.split('\n\n')) {
-    const line = chunk.trim();
-    if (!line.startsWith('data:')) continue;
-    try {
-      const data = JSON.parse(line.slice(5).trim());
-      if (data.error) return { ok: false, answer: '', reasoning: '', error: String(data.error) };
-      if (typeof data.reasoning === 'string' && data.reasoning) reasoning += data.reasoning;
-      if (typeof data.content === 'string') answer += data.content;
-    } catch {
-      // 忽略无法解析的 chunk
-    }
-  }
-  const thinkWrapped = reasoning ? `<think>${reasoning}</think>\n` : '';
-  const combined = thinkWrapped + answer;
-  if (!combined.trim()) return { ok: false, answer: '', reasoning: '', error: '模型未返回有效内容，请重试' };
-  return { ok: true, answer: combined, reasoning };
-}
-
-/**
- * 邮件式 chat 线程回复：直接用邮件携带的 messages（已含沙盒 system prompt + 历史对话）
- * 追加新用户问题调 /api/chat。无临时项目依赖，无 TTL 限制。
- *
- * 返回新回答文本 + 更新后的 messages（调用方用于生成新的 chat 通知）。
- * opts.baseUrl 用于 Node 端显式传服务地址；浏览器端省略（相对路径）。
- */
-export async function askFromMail(
-  prevMessages: ChatMessage[] | undefined,
-  replyText: string,
-  opts: { baseUrl?: string } = {},
-): Promise<{ ok: boolean; reply: string; messages: ChatMessage[] }> {
-  if (!replyText.trim()) {
-    return { ok: false, reply: '回复内容为空', messages: prevMessages ?? [] };
-  }
-
-  const base: ChatMessage[] =
-    Array.isArray(prevMessages) && prevMessages.length > 0
-      ? [...prevMessages]
-      : [{ role: 'system', content: SANDBOX_SYSTEM_PROMPT }];
-  if (base[0]?.role !== 'system') {
-    base.unshift({ role: 'system', content: SANDBOX_SYSTEM_PROMPT });
-  }
-
-  // ⭐ 防御性规范化：历史消息中若 reasoning 存于独立字段但 content 未包 <think>，
-  // 则在此处回填 think 标签，避免模型多轮后丢失包标签习惯。
-  // askTempNode 产出的 BobMail 消息 content 已带 think 标签（正常路径不会命中），
-  // 此分支用于兼容：① 早期版本遗留的无标签历史；② 手工同步/导入的消息；
-  // ③ CanvasFlow 加载的节点消息（reasoning 与 answer 分字段存储）被带入邮件线程。
-  for (const m of base) {
-    const cast = m as unknown as { reasoning?: string };
-    if (m.role === 'assistant' && cast.reasoning && cast.reasoning.trim().length > 0) {
-      if (!/(^\s*<think[\s>])|<think>/i.test(m.content)) {
-        (m as { content: string }).content = `<think>${cast.reasoning}</think>\n` + m.content;
-      }
-    }
-  }
-
-  const trimmed = trimChatMessages(base);
-  const messages: ChatMessage[] = [...trimmed, { role: 'user', content: replyText.trim() }];
-
-  const model = await resolveTempNodeModel();
-
-  const baseUrl = opts.baseUrl ? opts.baseUrl.replace(/\/$/, '') : '';
-  const ac = new AbortController();
-  const timeoutTimer = setTimeout(() => ac.abort(new Error('请求超时（180 秒），请稍后重试或简化问题')), 180_000);
-  try {
-    const chatResp = await fetch(`${baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: ac.signal,
-      body: JSON.stringify({
-        messages,
-        // 邮件式回复不绑定具体项目/节点，占位使用 TEMP_NODE_ID 以复用现有 gateway 路径；
-        // 注意：不传 projectId，避免虚假 ID 引发 getProjectById 抛错干扰工具执行；
-        // /api/chat 会在内部尝试 getCurrentProject，失败则回退到 sandbox 兜底路径
-        nodeId: TEMP_NODE_ID,
-        thinkingLevel: 'medium',
-        sandbox: true,
-        ...(model.custom
-          ? { apiKey: model.apiKey, baseUrl: model.baseUrl, providerModelId: model.providerModelId }
-          : { modelId: model.modelId }),
-      }),
-    });
-    clearTimeout(timeoutTimer);
-
-    if (!chatResp.ok) {
-      let errText = '';
-      try { errText = (await chatResp.json()).error || ''; } catch { /* 非 JSON */ }
-      return { ok: false, reply: errText || `请求失败（HTTP ${chatResp.status}）`, messages };
-    }
-
-    const raw = await chatResp.text();
-    const ct = chatResp.headers.get('content-type') || '';
-    if (ct.includes('application/json')) {
-      try {
-        const jsonErr = JSON.parse(raw);
-        return {
-          ok: false,
-          reply: (jsonErr.error || jsonErr.message || jsonErr.reply || '服务端错误') as string,
-          messages,
-        };
-      } catch {
-        // 解析失败：继续走 SSE 兜底
-      }
-    }
-
-    const agg = aggregateSse(raw);
-    if (!agg.ok) {
-      return { ok: false, reply: agg.error as string, messages };
-    }
-
-    const finalMessages = trimChatMessages([...messages, { role: 'assistant', content: agg.answer }]);
-    return { ok: true, reply: agg.answer, messages: finalMessages };
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      return { ok: false, reply: e.message || '请求超时，请稍后重试', messages };
-    }
-    return { ok: false, reply: e?.message || String(e) || '网络错误', messages };
-  } finally {
-    clearTimeout(timeoutTimer);
-  }
 }

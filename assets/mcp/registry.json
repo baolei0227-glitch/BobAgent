@@ -46,8 +46,8 @@
   {
     "id": "bob-ocr-mcp",
     "name": "Bob OCR",
-    "description": "Scanned-document and image recognition service (local Vision + GLM-OCR / Online OCR). Model & vendor settings live in the plugin itself — open Configure to manage them.",
-    "group": "bundled",
+    "description": "Scanned-document and image recognition service (local Vision + GLM-OCR / Online OCR). Requires the standalone bob-ocr-mcp daemon (port 9478; install.sh / --install-daemon). Model & vendor settings live in the plugin itself — open Configure to manage them.",
+    "group": "download",
     "category": "OCR",
     "risk": "normal",
     "vetted": true,
@@ -136,7 +136,7 @@
   {
     "id": "coze",
     "name": "Coze (扣子)",
-    "description": "Chat with your Coze bots (published as an API service) and run your Coze workflows from BobWork. Requires a Coze Personal Access Token (PAT).",
+    "description": "Chat with your Coze bots (published as an API service) and run your Coze workflows from BobWork. Built into BobWork — no download required; enable it from the Market with a Coze Personal Access Token (PAT).",
     "group": "download",
     "category": "AI Agents",
     "risk": "normal",
