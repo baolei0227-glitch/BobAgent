@@ -1,7 +1,7 @@
 /**
  * bob-notes-mcp 宿主转发桥（server-only）
  *
- * 与 /api/team、/api/bobby 同构：BobWork 宿主侧笔记的唯一数据通道。
+ * 与 /api/bobby 同构：BobWork 宿主侧笔记的唯一数据通道。
  * 笔记实现（raw/wiki/ingest/review/lint）全部在 bob-notes-mcp 插件域，
  * 本模块只做"mcpManager → notes_* 工具"的语义转发与结果解析，不含任何笔记逻辑。
  *
@@ -16,6 +16,7 @@
  *   lint       → notes_lint      自检
  *   backfill   → notes_backfill  答案回填
  *   stats      → notes_stats     库概览
+ *   types      → notes_types     页面类型清单（SCHEMA.md「页面类型」段）
  *   config_get → notes_config_get / config_set → notes_config_set（插件大脑模型配置）
  */
 
@@ -29,7 +30,7 @@ const NOTES_SERVER_ID = 'bob-notes-mcp';
 export type NotesBridgeAction =
   | 'add_raw' | 'raw_list' | 'ingest' | 'query' | 'get' | 'update' | 'delete'
   | 'review' | 'lint' | 'backfill' | 'stats' | 'config_get' | 'config_test' | 'config_set'
-  | 'history' | 'restore' | 'log' | 'schema_get' | 'schema_set';
+  | 'history' | 'restore' | 'log' | 'schema_get' | 'schema_set' | 'types';
 
 function toolFor(action: NotesBridgeAction): string {
   return `notes_${action}`;
@@ -48,7 +49,7 @@ async function getNotesConfig(): Promise<{ settings: { mcpServers?: McpServerCon
   return { settings, serverConfig };
 }
 
-/** 确保 bob-notes-mcp 已连接并调用插件工具（与 /api/team callTeam 同构） */
+/** 确保 bob-notes-mcp 已连接并调用插件工具（与 lib/chat/team-run.ts callTeamTool 同构）。 */
 export async function callNotes(
   action: NotesBridgeAction,
   args: Record<string, unknown> = {},

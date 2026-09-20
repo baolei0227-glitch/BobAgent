@@ -36,6 +36,8 @@ interface Props {
   open: boolean;
   /** 画布坐标（flow 坐标），创建节点时写入 frontmatter 便于重启恢复布局 */
   position: { x: number; y: number } | null;
+  /** 初始档位：默认 mini（新建小程序）；'agent' = 直接落在 Sub-Agent 档 */
+  initialKind?: 'mini' | 'agent';
   onClose: () => void;
   /** 创建成功回调，由画布层挂载节点并打开预览 */
   onCreated: (payload: CreatedNodePayload) => void;
@@ -48,7 +50,7 @@ interface Props {
  * AI Coding 节点创建时写入 frontmatter.sandbox_app_id，
  * 后端 /api/chat 会据此注入编程上下文（写入路径、截图自检闭环）。
  */
-export function AICodingCreateDialog({ open, position, onClose, onCreated }: Props) {
+export function AICodingCreateDialog({ open, position, initialKind = 'mini', onClose, onCreated }: Props) {
   // 产物类型：mini = Bob Sandbox 小程序（原有）；agent = 创建专属子 Agent（经 Coding 对话确认后调 create_agent_package）
   const [kind, setKind] = useState<'mini' | 'agent'>('mini');
   // Sub-Agent 档内部：new = 新建（create_agent_package）；existing = 改造已装 agent（update_agent_package）
@@ -117,7 +119,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
   // 打开时重置状态并预加载小程序清单与模板
   useEffect(() => {
     if (open) {
-      setKind('mini');
+      setKind(initialKind);
       setAgentMode('new');
       setMode('create');
       setName('');
@@ -127,7 +129,7 @@ export function AICodingCreateDialog({ open, position, onClose, onCreated }: Pro
       loadSandbox();
       loadInstalledAgents();
     }
-  }, [open, loadSandbox, loadInstalledAgents]);
+  }, [open, initialKind, loadSandbox, loadInstalledAgents]);
 
   if (!open) return null;
 

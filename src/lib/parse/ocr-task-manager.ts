@@ -31,8 +31,10 @@ interface OcrTaskRec {
   error?: string;
   createdAt: number;
   finishedAt?: number;
-  /** 完成回调：把插件结果写入 BobWork 主缓存 + 二级索引 */
-  onDone?: (rec: OcrTaskRec, result: unknown) => Promise<void>;
+  /** 完成订阅：把插件结果写入 BobWork 主缓存 / 内容索引（同一任务可被多处订阅，如 chat 附件与 materials 各挂一个） */
+  onDoneHooks: Array<(rec: OcrTaskRec, result: unknown) => Promise<void>>;
+  /** 失败订阅：供订阅方把「识别中」落成「失败可重试」，避免用户界面永远转圈 */
+  onFailHooks: Array<(rec: OcrTaskRec) => Promise<void>>;
 }
 
 /** 进行中任务表（hash → 任务记录） */
@@ -56,10 +58,14 @@ export async function submitOcrTask(opts: {
   upgrade?: 'off' | 'auto' | 'always';
   pagesArg?: string;
   onDone?: (rec: OcrTaskRec, result: unknown) => Promise<void>;
+  onFail?: (rec: OcrTaskRec) => Promise<void>;
 }): Promise<OcrTaskRec> {
   const hash = opts.hash;
   const existing = tasksByHash.get(hash);
   if (existing && (existing.status === 'queued' || existing.status === 'running')) {
+    // 已有进行中任务：本次订阅者挂到同一任务上（chat 附件与 materials 各自要一份结果）
+    if (opts.onDone) existing.onDoneHooks.push(opts.onDone);
+    if (opts.onFail) existing.onFailHooks.push(opts.onFail);
     return existing;
   }
   // 已完成 → 直接复用（结果已在缓存）
@@ -78,7 +84,8 @@ export async function submitOcrTask(opts: {
     pagesArg: opts.pagesArg,
     status: 'queued',
     createdAt: Date.now(),
-    onDone: opts.onDone,
+    onDoneHooks: opts.onDone ? [opts.onDone] : [],
+    onFailHooks: opts.onFail ? [opts.onFail] : [],
   };
   tasksByHash.set(hash, rec);
   tasksById.set(rec.taskId, rec);
@@ -130,12 +137,22 @@ async function pollAll(): Promise<void> {
     if (st.error) rec.error = st.error;
     if (st.status === 'done' || st.status === 'failed') {
       rec.finishedAt = Date.now();
-      if (st.status === 'done' && rec.onDone && st.result !== undefined) {
-        try {
-          await rec.onDone(rec, st.result);
-        } catch (e) {
-          rec.status = 'failed';
-          rec.error = `完成回调失败: ${e instanceof Error ? e.message : String(e)}`;
+      if (st.status === 'done') {
+        // 多订阅者逐个执行：单个订阅方抛错不牵连其他订阅方（也不把识别本身判为失败）
+        if (st.result !== undefined) {
+          for (const hook of rec.onDoneHooks) {
+            try {
+              await hook(rec, st.result);
+            } catch (e) {
+              console.warn(`[ocr-task] 完成订阅回调失败: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      } else {
+        for (const hook of rec.onFailHooks) {
+          try {
+            await hook(rec);
+          } catch { /* 失败订阅本身失败不影响任务状态 */ }
         }
       }
     }

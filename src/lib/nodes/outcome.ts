@@ -8,6 +8,8 @@
  *  - 校验规则 R-1 ~ R-8b（R-8「未锁定不得建边」在 edges 侧执行，见 api/edges/route.ts）
  */
 
+import { BRIEF_MAX_CHARS_PER_UPSTREAM } from '@/lib/context-limits';
+
 // ==================== 字段定义 ====================
 
 export interface OutcomeFieldDef {
@@ -69,12 +71,18 @@ function truncate(s: string, max = 40): string {
 /** 校验用的正则（v3 §三） */
 /** 规范空值标记（R-2 允许）：逐条校验（R-3~R-8b）应跳过这些条目 */
 const EMPTY_MARKERS = new Set(['无', '无已知限制']);
-/** R-3 来源标记：n_xxx 或 n_xxx#q-007 或 本节点（n_ 后允许 UUID 连字符） */
-const SOURCE_RE = /\[来源:\s*(n_[a-z0-9-]+(?:#[a-z]+-\d+)?|本节点)\]/;
+/** R-3 材料来源页码未通过索引校验时的降级标记（见 src/lib/nodes/outcome-source-check.ts） */
+export const PAGE_UNVERIFIED = '页码待核实';
+/** R-3 来源标记，三种其一（互不替代）：
+ *  - `n_xxx` / `n_xxx#q-007`：上游节点成果块（n_ 后允许 UUID 连字符）
+ *  - `本节点`：本节点对话记录中提炼
+ *  - `材料:materials/相对路径#p页码`：项目材料原文（页码可省略；路径不含 `]` 与 `#`）
+ *    页码未通过索引校验时写作 `#p页码待核实`（保留出处、不冒充已核实）*/
+const SOURCE_RE = /\[来源:\s*(n_[a-z0-9-]+(?:#[a-z]+-\d+)?|本节点|材料:materials\/[^\]\n#]+(?:#p(?:\d+|页码待核实))?)\]/;
 /** R-4 可定位的规范指向：条款号 / 案例编号 / 法释 / 年份文号 */
 const CITATION_RE = /(第[零一二三四五六七八九十百千\d]+[条款章]|法释|指导案例|公报案例|案例|[〔\[]20\d{2}[〕\]])/;
-/** R-5 确定性等级标签 */
-const CERTAINTY_RE = /\[(确定|倾向性|存疑)\]/;
+/** R-5 确定性等级标签（导出：账本自检据它识别「疑似越权结论」，见 lib/mcp/ledger.ts lintLedger） */
+export const CERTAINTY_RE = /\[(确定|倾向性|存疑)\]/;
 /** R-8b 未认定标记 */
 const UNVERIFIED_RE = /\[原始对话·未认定\]/;
 /** R-6 待确认条目：需写明所需内容与责任方（宽松校验） */
@@ -149,6 +157,90 @@ export function renderOutcome(outcome: Outcome): string {
     return `### ${def.label}\n${value || def.emptyValue}`;
   });
   return blocks.join('\n\n');
+}
+
+/**
+ * 将 Outcome 渲染为「结论档」brief 正文（不含 `## 上游节点…` 标题——标题由调用方拼，P0-c）。
+ * 只出三样：结论原文 + 确定性等级 + 来源 id；**不做摘要改写**，超预算时只按整条取舍：
+ *  - 结论：按 conclusions 条目顺序原文列出，超出预算则丢弃**尾部整条**（绝不从条目中间切断，
+ *    保证条目内的等级/来源标记不丢）；
+ *  - 确定性等级：条目未带 [确定|倾向性|存疑] 时在该条尾部补 ` [等级未标注]`，并在汇总行给出计数；
+ *  - 来源：只从**保留下来的**条目中收集 [来源: …] 的 id（去重、保持出现顺序）。
+ * 任何丢弃/缺标都在文本里显式告知模型（含回原节点核对提示），不做静默截断。
+ *
+ * @param maxChars 单上游 brief 硬上限（默认 BRIEF_MAX_CHARS_PER_UPSTREAM）
+ * @param nodeId   来源节点标识（如 n_xxx），用于截断/来源缺标时提示回原节点核对
+ */
+export function renderOutcomeBrief(
+  outcome: Outcome,
+  maxChars = BRIEF_MAX_CHARS_PER_UPSTREAM,
+  nodeId?: string,
+): string {
+  const backTo = nodeId ? `原节点${nodeId}` : '原节点';
+  const items = getItems(outcome.conclusions);
+
+  if (items.length === 0) {
+    return `### 结论\n- 无\n\n### 来源\n- （未标注，请回${backTo}核对）`;
+  }
+
+  // 固定尾巴（确定性等级汇总 + 来源清单 + 截断提示）预留约 240 字符
+  const budget = maxChars - 240;
+  const kept: string[] = [];
+  let used = 0;
+  let dropped = 0;
+  let firstOverBudget = false;
+  for (const item of items) {
+    const hasLevel = CERTAINTY_RE.test(item);
+    const line = `- ${item}${hasLevel ? '' : ' [等级未标注]'}`;
+    // 至少保留第 1 条：第 1 条本身超长时原样保留（并在末尾说明）
+    if (kept.length > 0 && used + line.length > budget) {
+      dropped = items.length - kept.length;
+      break;
+    }
+    if (kept.length === 0 && line.length > budget) firstOverBudget = true;
+    kept.push(line);
+    used += line.length + 1;
+  }
+
+  // 确定性等级汇总：只统计实际列出的条目
+  const counts = { 确定: 0, 倾向性: 0, 存疑: 0, 未标注: 0 };
+  for (const line of kept) {
+    const m = line.match(CERTAINTY_RE);
+    if (m) counts[m[1] as '确定' | '倾向性' | '存疑'] += 1;
+    else counts.未标注 += 1;
+  }
+  const levelParts = (['确定', '倾向性', '存疑', '未标注'] as const)
+    .filter((k) => counts[k] > 0)
+    .map((k) => `${k} ${counts[k]}`)
+    .join(' / ');
+
+  // 来源 id：只从保留下来的条目文本里收集（去重、保持出现顺序）
+  const sources: string[] = [];
+  const sourceRe = /\[来源:\s*([^\]]+)\]/g;
+  for (const line of kept) {
+    for (const m of line.matchAll(sourceRe)) {
+      if (!sources.includes(m[1])) sources.push(m[1]);
+    }
+  }
+  const sourceBlock = sources.length > 0
+    ? sources.map((s) => `- ${s}`).join('\n')
+    : `- （未标注，请回${backTo}核对）`;
+
+  const notes: string[] = [];
+  if (dropped > 0) notes.push(`（另有 ${dropped} 条结论未列出，请回${backTo}查看）`);
+  if (firstOverBudget) notes.push('（首条结论已超单条预算，按整条原样保留）');
+
+  return [
+    '### 结论',
+    kept.join('\n'),
+    '',
+    '### 确定性等级',
+    `- ${levelParts || '无'}`,
+    '',
+    '### 来源',
+    sourceBlock,
+    ...(notes.length > 0 ? ['', ...notes] : []),
+  ].join('\n');
 }
 
 /** 生成空成果块模板（新节点初始化用，空值标记符合 R-2） */
@@ -241,3 +333,24 @@ export function validateOutcome(outcome: Outcome, maxLength = OUTCOME_MAX_LENGTH
 
   return { valid: errors.length === 0, errors };
 }
+
+// ==================== 记忆源权威顺序（P0-1） ====================
+
+/**
+ * 记忆源权威顺序（最小口径，不做五源排序）：
+ * 冲突时「谁算数」只有一个判据 —— **锁定成果块是结论的唯一权威**；
+ * 账本只出索引与出处、不出结论；压缩记忆/摘要等缓存不得作为引用来源。
+ *
+ * 只在**条件注入段**使用（上游成果块注入 / 项目档案快照头），不做常驻注入：
+ * 没有跨源冲突可能的轮次不该为它付 token。
+ */
+export const MEMORY_AUTHORITY_RULE = [
+  '## 记忆源权威顺序（跨源冲突时按此裁决）',
+  '1) 结论只认**锁定成果块**（本节点成果块被用户手动修正过时以用户修正为准）；',
+  '2) 项目账本（.ledger/）提供索引、出处与既有结论/约定，但**与锁定成果块冲突时一律以锁定成果块为准**；',
+  '3) 压缩记忆、对话摘要等缓存只用于理解上下文，**不得作为引用来源**；引用一律回原始出处（材料原文 / 上游成果块 / 本节点对话）。',
+].join('\n');
+
+/** 紧凑版（一行）：挂在项目档案快照头，随账本索引/材料清单一并给模型定调 */
+export const MEMORY_AUTHORITY_BRIEF =
+  '记忆源权威顺序：结论只认「锁定成果块」，账本/缓存与它冲突时以它为准；压缩记忆与摘要不得作为引用来源。';

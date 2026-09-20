@@ -7,7 +7,7 @@
  * 不产生运行时循环依赖；SKILLS_DIR 仍被 index.ts 的路径守卫（isWritablePath）复用，故此处 export。
  */
 
-import { join, isAbsolute } from 'path';
+import { join, isAbsolute, relative } from 'path';
 import { readFile } from 'fs/promises';
 import { resolveAppRoot } from '@/lib/app-root';
 import type { Tool } from './index';
@@ -44,10 +44,81 @@ function getBuiltinSkillsRoot(): string {
 }
 
 /**
- * 解析 skill 内的 L3 资源路径：<skill_root>/<skillName>/resources/<resourceFile>
- *  - resourceFile 为空时返回 skill 的 resources/ 目录路径（用于列目录）
+ * L3 资源目录命名约定：`resources/` 与 `references/` 两种历史写法都存在（如 bob-ui 用 resources/，
+ * legal-drafter / slide-craft / intern-lawyer 用 references/），故二者都作为资源根；
+ * 再把技能根目录本身作为兜底（可读 SKILL.md、scripts/xxx.py 等技能内任意相对路径）。
+ */
+const RESOURCE_DIR_NAMES = ['resources', 'references'];
+
+/** 技能目录候选（已存在者）：builtin 内置优先，其次用户目录 SKILLS_DIR */
+function skillDirCandidates(skillName: string): string[] {
+  const fs = require('fs');
+  const dirs: string[] = [];
+  const builtinRoot = getBuiltinSkillsRoot();
+  if (builtinRoot) dirs.push(join(builtinRoot, skillName));
+  dirs.push(join(SKILLS_DIR, skillName));
+  return dirs.filter((d) => {
+    try { return fs.statSync(d).isDirectory(); } catch { return false; }
+  });
+}
+
+/** 技能内实际存在的资源根目录（绝对路径）：约定目录优先，技能根目录兜底 */
+function listSkillResourceRoots(skillName: string): string[] {
+  const fs = require('fs');
+  const out: string[] = [];
+  for (const dir of skillDirCandidates(skillName)) {
+    for (const name of RESOURCE_DIR_NAMES) {
+      const sub = join(dir, name);
+      try {
+        if (fs.statSync(sub).isDirectory() && !out.includes(sub)) out.push(sub);
+      } catch { /* 该约定目录不存在 */ }
+    }
+    if (!out.includes(dir)) out.push(dir);
+  }
+  return out;
+}
+
+/**
+ * 列举技能全部 L3 资源文件（相对技能目录路径 + 绝对路径），供索引与「未找到」时自纠。
+ * 递归一层子目录（如 scripts/、templates/），否则 scripts/generate_docx.py 这类附属脚本
+ * 不会出现在索引里，模型只能靠猜（历史故障：猜成 /Users/xxx/.trae-cn/skills/... 被 read_file 拒绝）。
+ */
+function listSkillResourceFiles(skillName: string): Array<{ rel: string; abs: string }> {
+  const fs = require('fs');
+  const base = skillDirCandidates(skillName)[0];
+  if (!base) return [];
+  const out: Array<{ rel: string; abs: string }> = [];
+
+  const walk = (dir: string, depth: number) => {
+    let entries: Array<{ name: string; isFile: () => boolean; isDirectory: () => boolean }>;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch { return; }
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      const abs = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth > 0) walk(abs, depth - 1);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      const rel = relative(base, abs).split('\\').join('/');
+      if (rel.startsWith('..')) continue;
+      if (!out.some((x) => x.rel === rel)) out.push({ rel, abs });
+    }
+  };
+
+  for (const root of listSkillResourceRoots(skillName)) walk(root, 1);
+  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
+/**
+ * 解析 skill 内的 L3 资源路径：resourceFile 为「相对技能目录」的路径
+ * （如 `references/document-templates.md` / `01-style-rulers.md` / `scripts/gen.py`），
+ * 依次在 resources/、references/、技能根目录下查找（兼容两种目录命名）。
+ *  - resourceFile 为空时返回首个资源根目录（用于列目录）
  *  - 优先 builtin 内置目录，其次用户目录
- *  - 强制防穿越：resourceFile 不得含 ".."、不得绝对路径、不得含 path.sep 以外的分隔符
+ *  - 强制防穿越：resourceFile 不得含 ".."、不得绝对路径
  */
 function resolveSkillResource(skillName: string, resourceFile: string | undefined): { path: string; isDir: boolean } | null {
   const safeName = (skillName || '').trim();
@@ -55,32 +126,27 @@ function resolveSkillResource(skillName: string, resourceFile: string | undefine
   // skillName 本身也防穿越：只允许字母/数字/-/_/.，避免 skillName 里带路径
   if (!/^[\w.\-]+$/.test(safeName)) return null;
 
-  let target: string | undefined;
+  let rel: string | undefined;
   if (resourceFile && resourceFile.trim().length > 0) {
-    let rf = resourceFile.trim();
+    const rf = resourceFile.trim();
     // 硬穿越防护
     if (isAbsolute(rf) || rf.includes('..')) return null;
     // 规范化：用 / 分隔符统一后再 join，保证不允许用反斜杠拼接 Windows 风格
-    rf = rf.replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!rf) return null;
-    const parts = rf.split('/');
+    const norm = rf.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!norm) return null;
+    const parts = norm.split('/');
     if (parts.some((p) => p === '..' || p === '.')) return null;
-    target = join('resources', ...parts);
-  } else {
-    target = 'resources';
+    rel = parts.join('/');
   }
 
-  const builtinRoot = getBuiltinSkillsRoot();
-  const candidates: string[] = [];
-  if (builtinRoot) candidates.push(join(builtinRoot, safeName, target));
-  candidates.push(join(SKILLS_DIR, safeName, target));
   const fs = require('fs');
-  for (const c of candidates) {
+  for (const root of listSkillResourceRoots(safeName)) {
+    const target = rel ? join(root, rel) : root;
     try {
-      const st = fs.statSync(c);
-      if (st.isDirectory()) return { path: c, isDir: true };
-      if (st.isFile()) return { path: c, isDir: false };
-    } catch { /* continue */ }
+      const st = fs.statSync(target);
+      if (st.isDirectory()) return { path: target, isDir: true };
+      if (st.isFile()) return { path: target, isDir: false };
+    } catch { /* 换下一个根目录 */ }
   }
   return null;
 }
@@ -145,24 +211,16 @@ async function toolReadSkillResource(args: Record<string, unknown>): Promise<str
     const resourceRaw = args.resource === undefined || args.resource === null ? undefined : String(args.resource);
     if (!skillName) return JSON.stringify({ ok: false, error: 'skill_name 必填' });
 
-    // 1) 无 resource → 返回索引
+    // 1) 无 resource → 返回索引（resources/ + references/ + 技能根目录内的文件一次列全）
     if (resourceRaw === undefined || resourceRaw.trim() === '') {
-      const dir = resolveSkillResource(skillName, undefined);
-      if (!dir || !dir.isDir) {
-        return JSON.stringify({
-          ok: false,
-          error: `技能 ${skillName} 没有 resources/ 目录（该技能未拆分 L3，细节全在 L2 正文）`,
-        });
-      }
       const fs = require('fs');
-      const entries = fs.readdirSync(dir.path, { withFileTypes: true }) as Array<{ name: string; isFile: () => boolean; isDirectory: () => boolean }>;
-      const files = entries.filter((e) => e.isFile() && !e.name.startsWith('.')).map((e) => e.name).sort();
+      if (skillDirCandidates(skillName).length === 0) {
+        return JSON.stringify({ ok: false, error: `技能 ${skillName} 不存在（内建/用户技能库均未找到该目录）` });
+      }
       const index: Array<{ file: string; size_chars: number; preview: string }> = [];
-      for (const f of files) {
-        const full = join(dir.path, f);
+      for (const f of listSkillResourceFiles(skillName)) {
         try {
-          const content = fs.readFileSync(full, 'utf-8') as string;
-          const sizeChars = content.length;
+          const content = fs.readFileSync(f.abs, 'utf-8') as string;
           // 预览：首段 280 字符（优先取第一条 # / ## 标题 + 首段非空行）
           const lines = content.split(/\r?\n/).filter((l: string) => l.trim().length > 0);
           const headings = lines.filter((l: string) => /^#{1,3}\s+/.test(l)).slice(0, 2);
@@ -170,15 +228,15 @@ async function toolReadSkillResource(args: Record<string, unknown>): Promise<str
           const rawPreview = [...headings, firstBody].join('  ·  ');
           const preview =
             rawPreview.length > 320 ? rawPreview.slice(0, 317) + '...' : rawPreview;
-          index.push({ file: f, size_chars: sizeChars, preview });
+          index.push({ file: f.rel, size_chars: content.length, preview });
         } catch {
-          index.push({ file: f, size_chars: 0, preview: '(读取失败)' });
+          index.push({ file: f.rel, size_chars: 0, preview: '(读取失败)' });
         }
       }
       return JSON.stringify({
         ok: true,
         skill: skillName,
-        note: '按需读取（可带 section 只读某段，如 resource="01-style-rulers.md" section="字号梯度"）：样式标尺(色板/字体/字号/间距/圆角/阴影)→01-style-rulers；布局/密度/对齐→02-density-layout；类型示例(html组件/mermaid着色/antv与chart清单)→03-widget-examples；自检→04-quality-checklist；信息图海报→05-infographic-poster；审美→06-aesthetic-design；数据图原则→07-dataviz-principles。',
+        note: 'resource 传 index 里的 file 值（相对技能目录路径，如 "references/document-templates.md"）；可带 section 只读某段（如 resource="01-style-rulers.md" section="字号梯度"）。bob-ui 类技能资源映射：样式标尺→01-style-rulers；布局/密度/对齐→02-density-layout；组件与图表示例→03-widget-examples；自检→04-quality-checklist；信息图海报→05-infographic-poster；审美→06-aesthetic-design；数据图原则→07-dataviz-principles。',
         resources_count: index.length,
         index,
       }, null, 2);
@@ -187,7 +245,15 @@ async function toolReadSkillResource(args: Record<string, unknown>): Promise<str
     // 2) 有 resource → 读单个文件
     const resolved = resolveSkillResource(skillName, resourceRaw);
     if (!resolved) {
-      return JSON.stringify({ ok: false, error: `未找到资源：${resourceRaw}（可能路径非法或文件不存在；如需索引，不传 resource 参数即可）` });
+      const available = listSkillResourceFiles(skillName).map((f) => f.rel);
+      return JSON.stringify({
+        ok: false,
+        error: `未找到资源：${resourceRaw}`,
+        available_resources: available,
+        hint: available.length
+          ? '请从 available_resources 中选一个（相对技能目录的路径）重新调用，不要再猜文件名；省略 resource 参数可看带摘要的索引。'
+          : '该技能没有可读资源文件（细节全在 L2 正文），直接用 load_skill 返回的内容即可，不必再读资源。',
+      });
     }
     if (resolved.isDir) {
       // 指向目录（resource 以 / 结尾或 资源名是子目录）：返回该子目录下的 index（与空 resource 类似但限定子目录）
@@ -258,7 +324,7 @@ export const skillToolDefs: Tool[] = [
   },
   {
     name: 'read_skill_resource',
-    description: '读取已加载/内建技能的 L3「按需资源」文件（结构化分块文档：色板/字号表/组件类/示例代码/自检清单等），在 L2 正文（规则层）注入后需精确细节时按需读取。不传 resource 返回 resources/ 索引表（文件名+摘要）。传 resource + 可选 section 只读某节（按 ##/### 切分），避免整份大文件进上下文。适用 bob-ui 等「L2 规则 + L3 细节」拆分技能。',
+    description: '读取已加载/内建技能的 L3「按需资源」文件（结构化分块文档：色板/字号表/组件类/示例代码/自检清单/附属脚本等），在 L2 正文（规则层）注入后需精确细节时按需读取。不传 resource 返回索引表（相对技能目录的文件名+摘要，兼容 resources/ 与 references/ 两种目录命名，子目录一层也会列出）。传 resource + 可选 section 只读某节（按 ##/### 切分），避免整份大文件进上下文。资源名来自 SKILL.md 正文里的相对路径（如 "references/xxx.md"、"scripts/generate_docx.py"）；未命中时会返回 available_resources 清单，按清单重试即可，不要凭猜测改文件名。技能文件只能用本工具读取：不要用 read_file/list_directory 拼技能目录的绝对路径（如 ~/.trae-cn/skills/…），那不在可读范围会被直接拒绝。',
     parameters: {
       type: 'object',
       properties: {
@@ -268,7 +334,7 @@ export const skillToolDefs: Tool[] = [
         },
         resource: {
           type: 'string',
-          description: '资源文件名（含扩展名，如 "01-style-rulers.md"）；支持 resources/ 下相对路径。留空/省略=返回 resources/ 目录索引（文件名+首段摘要）。',
+          description: '资源文件相对技能目录的路径（如 "01-style-rulers.md"、"references/document-templates.md"）。留空/省略=返回全部资源索引（文件名+首段摘要）。',
         },
         section: {
           type: 'string',

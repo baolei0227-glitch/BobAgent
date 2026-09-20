@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { desktop } from '@/lib/desktop-adapter';
+import { desktop, type ScreenOcrGeometry } from '@/lib/desktop-adapter';
 import { ScreenOcrEditor } from '@/components/screen-ocr/ScreenOcrEditor';
 
 /**
@@ -14,6 +14,10 @@ import { ScreenOcrEditor } from '@/components/screen-ocr/ScreenOcrEditor';
 export default function OcrEditorPage() {
   const [editImage, setEditImage] = useState<string | null>(null);
   const [initialSelection, setInitialSelection] = useState<'full' | 'none'>('none');
+  /** 截图时刻的窗口几何（整屏链路才有）：供编辑面板做窗口吸附 */
+  const [geometry, setGeometry] = useState<ScreenOcrGeometry | null>(null);
+  /** 画面属于哪一屏（geometry.screens 下标）；-1/null = 全部屏幕并集 */
+  const [screenIndex, setScreenIndex] = useState<number | null>(null);
   const [status, setStatus] = useState<'loading' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
 
@@ -21,6 +25,8 @@ export default function OcrEditorPage() {
   const resetEditor = () => {
     setEditImage(null);
     setInitialSelection('none');
+    setGeometry(null);
+    setScreenIndex(null);
     setStatus('loading');
     setError(null);
   };
@@ -40,6 +46,8 @@ export default function OcrEditorPage() {
         if (shot?.dataUrl) {
           setEditImage(shot.dataUrl);
           setInitialSelection(shot.mode === 'region' ? 'full' : 'none');
+          setGeometry(shot.geometry ?? null);
+          setScreenIndex(shot.screenIndex ?? null);
           setStatus('loading');
         }
       } catch (e) {
@@ -49,10 +57,12 @@ export default function OcrEditorPage() {
       }
     })();
     // 常驻复用：主进程下发新截图（窗口不销毁，直接更新画面，免重建窗口/重载页面）
-    const off = desktop.screenOcr.onNewShot?.(({ dataUrl, mode }) => {
+    const off = desktop.screenOcr.onNewShot?.(({ dataUrl, mode, geometry: geo, screenIndex: si }) => {
       if (!alive) return;
       setEditImage(dataUrl);
       setInitialSelection(mode === 'region' ? 'full' : 'none');
+      setGeometry(geo ?? null);
+      setScreenIndex(si ?? null);
       setStatus('loading');
       setError(null);
     });
@@ -124,6 +134,8 @@ export default function OcrEditorPage() {
       key={editImage}
       dataUrl={editImage}
       initialSelection={initialSelection}
+      geometry={geometry}
+      screenIndex={screenIndex}
       onDone={async (editedDataUrl) => {
         // 清理暂存截图 → 复制到剪贴板 → 重置并隐藏（常驻窗口等下一次截图）
         desktop.screenOcr.finishEdit();

@@ -18,6 +18,8 @@ interface NavSearchHit {
   path: string;
   extension?: string;
   projectId?: string;
+  /** 内容命中的页码（1-based，非分页文件恒为 1）；用于 PDF 定位跳转 */
+  page?: number;
 }
 
 interface NavSearchSections {
@@ -104,7 +106,14 @@ export function NavSearchBox() {
       return;
     }
     if (isPreviewable(item.extension) || isBrowserDoc(item.name)) {
-      bus.publish(BusEvents.fileOpen, { source: 'local', path: item.path, name: item.name });
+      // 带上定位锚点：内容命中带 page，PDF 打开后跳该页并高亮当前关键词（其他类型由下游忽略锚点）
+      bus.publish(BusEvents.fileOpen, {
+        source: 'local',
+        path: item.path,
+        name: item.name,
+        page: item.page,
+        query: text.trim() || undefined,
+      });
     } else {
       void desktop.openFile(item.path);
     }

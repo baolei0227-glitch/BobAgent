@@ -65,7 +65,7 @@ interface FileNode {
   extension?: string;
   /** 相对扫描根目录（项目根）的路径，如 homework/报告.md；树形摊平后仍可据此解析真实路径 */
   rel: string;
-  /** 会话标题（attachments/ 下节点附件目录：由短 id 关联 notes-memory node 元数据填充，仅展示用） */
+  /** 会话标题（materials/ 与历史 attachments/ 下的节点附件目录：由短 id 关联 notes-memory node 元数据填充，仅展示用） */
   title?: string;
 }
 
@@ -241,6 +241,30 @@ async function scanHomeworkByKind(projectPath: string): Promise<{
     .filter((g) => g.files.length > 0);
 
   return { groups };
+}
+
+/** homework 归属视图：文件（相对 homework 根）→ 来源会话 { node_id, 会话标题, 修改时间 }。
+ *  数据源：homework/.ownership.json（文件 → node_id）+ notes-memory 的 node 元数据（标题）。
+ *  mtimeMs 供侧边栏「按来源会话分组」按最近产出排序；已删除 / 已归档条目不返回（前端也不会渲染）。 */
+async function scanHomeworkOwners(
+  projectPath: string,
+): Promise<Record<string, { nodeId: string; title?: string; mtimeMs: number }>> {
+  const homeworkRoot = join(projectPath, 'homework');
+  let manifest: Record<string, string> = {};
+  try {
+    manifest = JSON.parse(await fs.readFile(join(homeworkRoot, '.ownership.json'), 'utf-8')) as Record<string, string>;
+  } catch {
+    return {}; // 无清册或损坏：无归属信息，前端文件全部落到 Ungrouped
+  }
+  const meta = await parseNodeMeta(join(projectPath, 'notes-memory'));
+  const owners: Record<string, { nodeId: string; title?: string; mtimeMs: number }> = {};
+  for (const [rel, nodeId] of Object.entries(manifest)) {
+    if (!rel || typeof nodeId !== 'string' || !nodeId) continue;
+    const st = await fs.stat(join(homeworkRoot, rel)).catch(() => null);
+    if (!st || !st.isFile()) continue; // 磁盘上已不存在（删除 / 归档）→ 不返回
+    owners[rel] = { nodeId, title: meta.get(nodeId)?.title, mtimeMs: st.mtimeMs };
+  }
+  return owners;
 }
 
 /** 从项目 Sticky 待办解析未来最近的开庭日期，返回 YYYY-MM-DD。
@@ -644,8 +668,9 @@ export async function POST(request: NextRequest) {
       const tree = flattenTemplateTree(await scanDirectory(project.path));
       // homework/ 按 kind 类别分组的输出文件，供侧边栏按类别展示（不再按节点分组）
       const { groups } = await scanHomeworkByKind(project.path);
-      // attachments/<shortId>_<type>/ 会话附件目录：短 id 关联 notes-memory 的 node 标题，
-      // 前端展示时以会话标题代替机器目录名（原名仅作路径标识，不展示给人）
+      // materials/<shortId>_<标题>/（历史 attachments/ 同构）会话附件目录：短 id 关联 notes-memory 的 node 标题，
+      // 前端展示时以会话标题代替机器目录名（原名仅作路径标识，不展示给人）；
+      // 用户在 materials 下自建的分组不属于任何会话（短 id 匹配不上）→ 保持原名。
       const titleByShort = new Map<string, string>();
       const nodeMeta = await parseNodeMeta(join(project.path, 'notes-memory'));
       for (const [nid, meta] of nodeMeta) {
@@ -655,7 +680,7 @@ export async function POST(request: NextRequest) {
       const attachSessionTitles = (nodes: FileNode[]) => {
         for (const n of nodes) {
           if (n.type !== 'directory') continue;
-          if (n.rel === 'attachments') {
+          if (n.rel === 'attachments' || n.rel === 'materials') {
             for (const ch of n.children ?? []) {
               if (ch.type !== 'directory') continue;
               const title = titleByShort.get(ch.name.split('_')[0]);
@@ -666,7 +691,15 @@ export async function POST(request: NextRequest) {
         }
       };
       attachSessionTitles(tree);
-      return NextResponse.json({ success: true, files: tree, project_path: project.path, homework_kind_groups: groups });
+      // homework 归属视图：文件 → 来源会话（侧边栏「按来源会话分组」用；无清册时为空对象）
+      const homeworkOwners = await scanHomeworkOwners(project.path);
+      return NextResponse.json({
+        success: true,
+        files: tree,
+        project_path: project.path,
+        homework_kind_groups: groups,
+        homework_owners: homeworkOwners,
+      });
     }
 
     if (action === 'stat') {

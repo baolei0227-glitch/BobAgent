@@ -11,7 +11,7 @@ import { basename, isAbsolute, resolve } from 'path';
 
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { SETTLE_MS, commitPlan, scanAndPlan } from '../../../tools/organize/core';
-import { normalizeCategories } from '../../../tools/organize/model';
+import { normalizeCategories, VERDICT_LABEL } from '../../../tools/organize/model';
 import { appendLog, normalizeNaming, todayStamp, type MoveRecord } from '../../../tools/organize/naming';
 
 /** 监听事件防抖窗口（毫秒） */
@@ -121,6 +121,7 @@ async function tick(): Promise<void> {
       stamp: todayStamp(),
       settle: true,
       naming: normalizeNaming(fo.naming),
+      autoCreate: fo.autoCreateCategories === true,
     });
     if (total === 0) return;
 
@@ -131,7 +132,7 @@ async function tick(): Promise<void> {
         records.push(rec);
         console.log(
           `[file-organizer] ${basename(rec.from)} → ${rec.category}/${basename(rec.to)}`
-          + `（置信度 ${Math.round(rec.confidence * 100)}%）`,
+          + `（判定：${VERDICT_LABEL[rec.verdict]}${rec.note ? ` · ${rec.note}` : ''}）`,
         );
       } catch (e) {
         console.error(`[file-organizer] 整理失败 ${basename(plan.from)}:`, e);

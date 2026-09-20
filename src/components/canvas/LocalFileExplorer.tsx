@@ -17,6 +17,7 @@ import {
   ArrowUpCircle,
   PlusCircle,
   ShieldCheck,
+  Shield,
   ChevronRight,
   Pin,
   PinOff,
@@ -945,7 +946,6 @@ export function LocalFileExplorer({
               </div>
             )}
             {allDirs.map(root => {
-              const isAuthorized = roots.includes(root);
               const isExpanded = expandedRoot === root;
               return (
                 <div key={root}>
@@ -963,16 +963,7 @@ export function LocalFileExplorer({
                     <div className="flex-1 min-w-0">
                       <div className="truncate text-sm font-medium" style={{ color: 'var(--ink)' }} title={root.split('/').pop() || root}>{root.split('/').pop() || root}</div>
                     </div>
-                    {/* 授权状态按钮：未授权 → 点击授权；已授权 → 点击断开 */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleAuthorizeClick(root); }}
-                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                      style={{ color: isAuthorized ? 'var(--info)' : 'var(--ink-muted)', opacity: isAuthorized ? 1 : 0.55 }}
-                      title={isAuthorized ? 'Authorized: AI can read/write this directory (click to revoke)' : 'Authorize AI for this directory'}
-                    >
-                      <ShieldCheck className="h-3 w-3" />
-                    </button>
-                    {/* 三个点：根目录作为 directory 打开菜单，Delete 自动被 disabled 保护 */}
+                    {/* 三个点：根目录作为 directory 打开菜单（授权 / 移除等操作收于菜单内），Delete 自动被 disabled 保护 */}
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1079,6 +1070,23 @@ export function LocalFileExplorer({
             <Trash className="h-3.5 w-3.5" />
             Delete
           </button>
+          {/* 根目录：授权 / 撤销授权（原先为目录行内常驻的盾牌按钮，现收于本下拉菜单） */}
+          {allDirs.includes(ctxMenu.filePath) && (
+            <button
+              onClick={() => { const target = ctxMenu.filePath; setCtxMenu(null); handleAuthorizeClick(target); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+              title={roots.includes(ctxMenu.filePath) ? 'Revoke AI read/write access for this directory' : 'Authorize AI read/write for this directory'}
+            >
+              {roots.includes(ctxMenu.filePath) ? (
+                <ShieldCheck className="h-3.5 w-3.5" />
+              ) : (
+                <Shield className="h-3.5 w-3.5" />
+              )}
+              {roots.includes(ctxMenu.filePath) ? 'Revoke AI access' : 'Authorize AI access'}
+            </button>
+          )}
+
           {/* 根目录：从浏览与授权列表中移除（原先为目录右侧的 X 按钮，现移入本下拉菜单） */}
           {allDirs.includes(ctxMenu.filePath) && (
             <button

@@ -28,8 +28,11 @@ export function MdViewer({
   nodeMdId,
   filePath,
   projectId,
+  fileName,
 }: ViewerRenderProps) {
   const editable = !!(nodeMdId || (filePath && (source === 'project' || source === 'local')));
+  // 打印默认文件名用「标题_v1_年月日」：标题取展示名 → 文件名 → 路径末段（去掉扩展名）
+  const docTitle = (fileName || fileInfo?.name || filePath?.split('/').pop() || '').replace(/\.[^.]+$/, '');
   const [content, setContent] = useState<string>(() => stripFrontmatter(fileInfo?.content ?? ''));
 
   useEffect(() => {
@@ -63,6 +66,7 @@ export function MdViewer({
         filePath={filePath}
         projectId={projectId}
         source={source}
+        docTitle={docTitle}
         editable={editable}
       />
     </div>

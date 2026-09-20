@@ -2,8 +2,8 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRenderer } from 'unified-renderer';
-import type { SanitizeWhitelist } from 'unified-renderer';
 import 'highlight.js/styles/github.css';
+import { MARKDOWN_SANITIZE_WHITELIST } from '@/lib/sanitize-whitelist';
 import { isLikelyQuestionnaire, JSON_CODE_FENCE } from './QuestionnairePanel';
 import { desktop } from '@/lib/desktop-adapter';
 // 正文图片点击放大预览（与 UnifiedViewer 图片查看器同源 yarl lightbox）
@@ -14,50 +14,6 @@ import 'yet-another-react-lightbox/styles.css';
 interface HtmlRendererProps {
   content: string;
 }
-
-/** sanitize 白名单扩展：允许 AI 输出的交互元素和标注
- *  注意：属性名使用 hast property 名（className 而非 class）——rehype-sanitize 按此匹配。 */
-const whitelist: SanitizeWhitelist = {
-  tags: [
-    'details', 'summary', 'mark', 'button',
-    // SVG 标签（内联 <svg> 插图/信息图被 sanitize 剥掉时只残留文字，这里放行）
-    'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon',
-    'text', 'tspan', 'defs', 'linearGradient', 'radialGradient', 'stop',
-    'use', 'clipPath', 'mask', 'pattern', 'image', 'marker', 'filter', 'title',
-  ],
-  attributes: {
-    '*': ['className'],
-    mark: ['data-note', 'className'],
-    a: ['target', 'rel'],
-    button: ['className', 'type'],
-    code: ['className'],
-    pre: ['className'],
-    span: ['className'],
-    td: ['colspan', 'rowspan'],
-    th: ['colspan', 'rowspan'],
-    table: ['className'],
-    img: ['className'],
-    svg: ['viewBox', 'width', 'height', 'xmlns', 'preserveAspectRatio', 'role', 'aria-label'],
-    path: ['d', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'transform', 'opacity', 'fill-opacity', 'stroke-opacity'],
-    rect: ['x', 'y', 'width', 'height', 'rx', 'ry', 'fill', 'stroke', 'stroke-width', 'transform', 'opacity'],
-    circle: ['cx', 'cy', 'r', 'fill', 'stroke', 'stroke-width', 'transform'],
-    ellipse: ['cx', 'cy', 'rx', 'ry', 'fill', 'stroke', 'stroke-width'],
-    line: ['x1', 'y1', 'x2', 'y2', 'stroke', 'stroke-width', 'stroke-dasharray'],
-    polyline: ['points', 'fill', 'stroke', 'stroke-width'],
-    polygon: ['points', 'fill', 'stroke', 'stroke-width'],
-    text: ['x', 'y', 'dx', 'dy', 'text-anchor', 'fill', 'stroke', 'font-size', 'font-weight', 'font-family', 'transform'],
-    tspan: ['x', 'y', 'dx', 'dy', 'text-anchor', 'fill', 'font-size', 'font-weight'],
-    defs: [],
-    linearGradient: ['id', 'x1', 'y1', 'x2', 'y2', 'gradientUnits'],
-    radialGradient: ['id', 'cx', 'cy', 'r', 'gradientUnits'],
-    stop: ['offset', 'stop-color', 'stop-opacity'],
-    use: ['href', 'xlink:href', 'x', 'y', 'width', 'height'],
-    clipPath: ['id'],
-    mask: ['id'],
-    image: ['href', 'xlink:href', 'x', 'y', 'width', 'height', 'preserveAspectRatio'],
-    marker: ['id', 'markerWidth', 'markerHeight', 'refX', 'refY', 'orient', 'markerUnits'],
-  },
-};
 
 /**
  * AI 卡片样式层（宿主注入，仅供 AI 输出用 class 引用）：
@@ -96,7 +52,7 @@ const renderer = createRenderer({
   slug: true,
   highlight: true,
   allowDangerousHtml: true,
-  sanitizeWhitelist: whitelist,
+  sanitizeWhitelist: MARKDOWN_SANITIZE_WHITELIST,
 });
 
 /** 为表格包裹横向滚动容器，避免宽表格溢出气泡 */

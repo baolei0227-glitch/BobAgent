@@ -20,7 +20,7 @@
 import { promises as fs, watch } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 
-import { CATEGORIES, normalizeCategories } from './model';
+import { CATEGORIES, PENDING_DIR, VERDICT_LABEL, normalizeCategories } from './model';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import {
   LOG_NAME,
@@ -70,6 +70,8 @@ interface Args extends ParsedArgs {
   root: string;
   categories: string[];
   naming: NamingRule;
+  /** 允许模型自创分类（来自设置开关） */
+  autoCreate: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -110,7 +112,10 @@ function printHelp(): void {
 目录缺省时读取设置的「File Organizer → 投递箱目录」。
 命名规则：默认 {版本号}{主题}_{日期}.{扩展名}   如 v01房屋租赁合同_2026-09-12.pdf
           字段顺序 / 分隔符 / 版本号补零可在设置中自定义
-分类枚举：内置默认 ${CATEGORIES.join(' / ')}（可在设置中自定义）`);
+分类枚举：内置默认 ${CATEGORIES.join(' / ')}（可在设置中自定义）
+          「AI 自动新建分类文件夹」开启后，枚举都不合适时模型可自创分类名
+判定：模型自评「确定 / 存疑 / 无法判断」；存疑时带首页内容复核一次，
+      复核仍存疑或无法判断则落 ${PENDING_DIR}`);
 }
 
 /* ==================== 核心流程 ==================== */
@@ -126,6 +131,7 @@ async function runOnce(args: Args, settle: boolean): Promise<number> {
     model,
     settle,
     naming: args.naming,
+    autoCreate: args.autoCreate,
   });
   if (total === 0) {
     console.log(`（${root} 下没有待整理的文件）`);
@@ -144,14 +150,14 @@ async function runOnce(args: Args, settle: boolean): Promise<number> {
     rows.push([
       truncate(p.from.slice(root.length + 1), 30),
       truncate(targetAbs.slice(root.length + 1), 48),
-      `${Math.round(p.confidence * 100)}%`,
-      p.note,
+      `${VERDICT_LABEL[p.verdict]}${p.reviewed ? '（复核）' : ''}`,
+      truncate(p.note, 40),
     ]);
 
     if (apply) records.push(await commitPlan(p));
   }
 
-  const header = ['原文件', '整理为', '置信度', '备注'];
+  const header = ['原文件', '整理为', '判定', '备注'];
   const widths = header.map((h, i) => Math.max(width(h), ...rows.map((r) => width(r[i]))) + 2);
   console.log(header.map((h, i) => pad(h, widths[i])).join(''));
   console.log(widths.map((w) => '-'.repeat(w - 1)).join(' '));
@@ -219,6 +225,7 @@ async function main(): Promise<void> {
     root,
     categories: normalizeCategories(fileOrg.categories),
     naming: normalizeNaming(fileOrg.naming),
+    autoCreate: fileOrg.autoCreateCategories === true,
   };
 
   const st = await fs.stat(args.root).catch(() => null);

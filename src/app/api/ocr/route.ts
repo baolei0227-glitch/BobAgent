@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolve, isAbsolute, join } from 'path';
+import { resolve, isAbsolute, join, relative, sep } from 'path';
 import { promises as fs } from 'fs';
 import { homedir } from 'os';
 import { getCurrentProject } from '@/lib/project/project-manager';
@@ -11,7 +11,8 @@ import { SANDBOX_DIRNAME } from '@/lib/app-root';
  * body: { path: string, upgrade?: 'off'|'auto'|'always' }  文件路径：
  *   - 绝对路径 / ~/ 路径（用户已授权目录内）
  *   - attachments/、homework/ 相对路径（从项目根解析）
- *   upgrade 可选：off=纯本地（默认）；auto=质量低/勾稽异常自动升级视觉大模型；always=全部升级（需配置 Vision Model）
+ *   upgrade 可选：auto=质量低/勾稽异常自动升级视觉大模型（默认，质量优先）；off=不升级；always=全部升级。
+ *   识别引擎由 bob-ocr-mcp 插件 ocr.source 决定（在线 GLM-OCR / 本地多模态），与 upgrade 正交。
  *
  * 返回: { success, method, text, pageCount, pages: [{index,text,qualityScore,ledgerVerified,rotated,enhanced,upgraded,upgradeChain,upgradeModel}], upgradedCount, error? }
  *   upgradeChain: 'online-ocr'|'vlm-upgrade'（该页采用在线模型时的链路）；upgradeModel: 实际采用的模型 id
@@ -35,6 +36,9 @@ async function resolveInputPath(input: string): Promise<string> {
   if (isAbsolute(p)) return resolve(p);
   const root = await projectRootPath();
   const normalized = p.replace(/\\/g, '/');
+  if (normalized.startsWith('materials/') || normalized === 'materials') {
+    return resolve(join(root, p));
+  }
   if (normalized.startsWith('attachments/') || normalized === 'attachments') {
     return resolve(join(root, p));
   }
@@ -76,9 +80,9 @@ export async function POST(request: NextRequest) {
     }
 
     const { ocrFile } = await import('@/lib/pdf/ocr-service');
-    // upgrade 策略（可选）：off/auto/always，非法值回退 off
+    // upgrade 策略（可选）：off/auto/always，非法值回退 auto（质量优先）
     const upgradeArg = typeof body?.upgrade === 'string' ? body.upgrade.trim() : '';
-    const upgrade = upgradeArg === 'auto' || upgradeArg === 'always' ? upgradeArg : 'off';
+    const upgrade = upgradeArg === 'off' || upgradeArg === 'always' ? upgradeArg : 'auto';
     const result = await ocrFile(filePath, { upgrade });
     if (!result.success) {
       return NextResponse.json(result, { status: 422 });
@@ -104,6 +108,23 @@ export async function POST(request: NextRequest) {
           parsed_at: new Date().toISOString(),
           file_hash: hash,
         }, projectPath);
+        // 同时回写项目内容索引（.materials-index/<内容hash>/）：与 materials 共用同一份索引，
+        // 同一份字节之后被上传/读取到 materials 时直接复用本次识别结果，不再重复 OCR。
+        // sourcePath 仅作 meta.json 溯源备注，不影响索引按内容 hash 寻址。
+        try {
+          const rel = relative(projectPath, filePath);
+          const sourcePath = rel && !rel.startsWith('..') && !isAbsolute(rel)
+            ? rel.split(sep).join('/')
+            : filePath;
+          const { writeAttachmentIndex } = await import('@/lib/materials/indexer');
+          await writeAttachmentIndex(projectPath, {
+            hash,
+            sourcePath,
+            pages: result.pages,
+            fullText: result.text,
+            pageCount: result.pageCount,
+          });
+        } catch { /* 索引写入失败不影响 OCR 主流程 */ }
       }
     } catch { /* 缓存写入失败不影响 OCR 主流程 */ }
 

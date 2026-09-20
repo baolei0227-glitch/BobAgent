@@ -7,7 +7,6 @@ import {
   Paperclip,
   FileText,
   Archive,
-  RefreshCw,
   ArrowDownUp,
   Loader2,
 } from 'lucide-react';
@@ -25,17 +24,21 @@ interface ProjectActivityLogProps {
   projectId: string;
   /** 外部刷新信号（文件/项目列表变更时自增） */
   refreshKey?: number;
+  /** 搜索关键词（受控）：搜索框位于浮层标题栏，按视图切换生效 */
+  query: string;
+  /** 搜索关键词变更回调 */
+  onQueryChange: (query: string) => void;
   className?: string;
 }
 
 const PAGE_LIMIT = 100;
 
 const KIND_META: Record<ActivityKind, { label: string; color: string }> = {
-  project: { label: '项目创建', color: 'var(--primary)' },
-  task: { label: '执行任务', color: 'oklch(0.55 0.15 265)' },
-  attachment: { label: '添加附件', color: 'oklch(0.58 0.12 200)' },
-  document: { label: '生成文档', color: 'oklch(0.58 0.14 150)' },
-  lifecycle: { label: '项目状态', color: 'oklch(0.58 0.12 60)' },
+  project: { label: 'Project created', color: 'var(--primary)' },
+  task: { label: 'Task executed', color: 'oklch(0.55 0.15 265)' },
+  attachment: { label: 'Attachment added', color: 'oklch(0.58 0.12 200)' },
+  document: { label: 'Document generated', color: 'oklch(0.58 0.14 150)' },
+  lifecycle: { label: 'Project status', color: 'oklch(0.58 0.12 60)' },
 };
 
 const KIND_ICON = {
@@ -47,15 +50,16 @@ const KIND_ICON = {
 } as const;
 
 const FILTERS: { key: 'all' | ActivityKind; label: string }[] = [
-  { key: 'all', label: '全部' },
-  { key: 'task', label: '任务' },
-  { key: 'attachment', label: '附件' },
-  { key: 'document', label: '文档' },
-  { key: 'project', label: '项目' },
-  { key: 'lifecycle', label: '状态' },
+  { key: 'all', label: 'All' },
+  { key: 'task', label: 'Tasks' },
+  { key: 'attachment', label: 'Attachments' },
+  { key: 'document', label: 'Documents' },
+  { key: 'project', label: 'Projects' },
+  { key: 'lifecycle', label: 'Status' },
 ];
 
-const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** 本地日期键 YYYY-MM-DD */
 function localDateKey(ts: string): string {
@@ -67,7 +71,7 @@ function localDateKey(ts: string): string {
   return `${y}-${m}-${day}`;
 }
 
-/** 日期头：今天 / 昨天 / YYYY年M月D日 周X */
+/** 日期头：Today / Yesterday / Mon, Sep 14, 2026 */
 function formatDateHeader(dateKey: string): string {
   const [y, m, d] = dateKey.split('-').map((n) => Number.parseInt(n, 10));
   if (!y || !m || !d) return dateKey;
@@ -75,9 +79,9 @@ function formatDateHeader(dateKey: string): string {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
-  if (diffDays === 0) return '今天';
-  if (diffDays === 1) return '昨天';
-  return `${y}年${m}月${d}日 ${WEEKDAYS[target.getDay()]}`;
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  return `${WEEKDAYS[target.getDay()]}, ${MONTHS[m - 1]} ${d}, ${y}`;
 }
 
 /** 时间 HH:mm */
@@ -111,7 +115,7 @@ function groupByDate(items: ActivityItem[]): ActivityGroup[] {
   return groups;
 }
 
-export function ProjectActivityLog({ projectId, refreshKey = 0, className }: ProjectActivityLogProps) {
+export function ProjectActivityLog({ projectId, refreshKey = 0, query, onQueryChange, className }: ProjectActivityLogProps) {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
@@ -155,7 +159,16 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
     void load(null);
   }, [load, refreshKey]);
 
-  const groups = useMemo(() => groupByDate(items), [items]);
+  // 搜索：仅过滤已加载条目（标题 + 副行描述），不改动分页请求
+  const visibleItems = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(
+      (item) => item.title.toLowerCase().includes(q) || (item.detail ?? '').toLowerCase().includes(q),
+    );
+  }, [items, query]);
+
+  const groups = useMemo(() => groupByDate(visibleItems), [visibleItems]);
 
   const openItem = (item: ActivityItem) => {
     if (item.kind === 'task' && item.nodeId) {
@@ -169,7 +182,7 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
 
   return (
     <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
-      {/* 工具条：排序 + 类型过滤 + 刷新 */}
+      {/* 工具条：排序 + 类型过滤（搜索框已上移至浮层标题栏，按视图切换目标） */}
       <div
         className="flex shrink-0 flex-wrap items-center gap-1.5 border-b px-2 py-1.5"
         style={{ borderColor: 'var(--line-soft)' }}
@@ -179,13 +192,13 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
           onClick={() => setOrder((o) => (o === 'desc' ? 'asc' : 'desc'))}
           className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs transition-colors hover:bg-[var(--paper-hover)]"
           style={{ color: 'var(--ink-muted)' }}
-          title={order === 'desc' ? '当前：最新在前' : '当前：最早在前'}
+          title={order === 'desc' ? 'Current: newest first' : 'Current: oldest first'}
         >
           <ArrowDownUp className="h-3 w-3" />
-          {order === 'desc' ? '最新在前' : '最早在前'}
+          {order === 'desc' ? 'Newest first' : 'Oldest first'}
         </button>
         <span style={{ width: 1, height: 14, backgroundColor: 'var(--line-soft)' }} />
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+        <div className="flex min-w-0 shrink flex-wrap items-center gap-1">
           {FILTERS.map((f) => {
             const active = kind === f.key;
             return (
@@ -205,23 +218,13 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
             );
           })}
         </div>
-        <button
-          type="button"
-          onClick={() => void load(null)}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-          style={{ color: 'var(--ink-muted)' }}
-          title="刷新日志"
-          aria-label="刷新日志"
-        >
-          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-        </button>
       </div>
 
       {/* 流水账主体 */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
-        {items.length === 0 ? (
+        {visibleItems.length === 0 ? (
           <div className="flex h-full items-center justify-center py-8 text-xs" style={{ color: 'var(--ink-muted)' }}>
-            {loading ? '加载中…' : '暂无记录'}
+            {loading ? 'Loading…' : items.length > 0 ? 'No matching entries' : 'No activity yet'}
           </div>
         ) : (
           groups.map((group) => (
@@ -238,6 +241,12 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
                   const Icon = KIND_ICON[item.kind];
                   const clickable = Boolean(item.nodeId) || Boolean(item.path);
                   const sizeText = formatSize(item.size);
+                  // 副行由「类型标签 + 描述 + 大小」去重拼接：与主文案相同的标签、与标签相同的描述均省略，避免同一文案重复出现
+                  const subParts = [
+                    meta.label === item.title ? '' : meta.label,
+                    item.detail && item.detail !== meta.label ? item.detail : '',
+                    sizeText,
+                  ].filter(Boolean);
                   return (
                     <button
                       key={item.id}
@@ -248,7 +257,7 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
                         'flex min-w-0 items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors',
                         clickable && 'hover:bg-[var(--paper-hover)] cursor-pointer',
                       )}
-                      title={clickable ? (item.nodeId ? '定位到该节点' : '打开文件') : undefined}
+                      title={clickable ? (item.nodeId ? 'Locate this node' : 'Open file') : undefined}
                     >
                       <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: meta.color }} />
                       <span
@@ -261,11 +270,13 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
                         <span className="block truncate text-sm" style={{ color: 'var(--ink)' }}>
                           {item.title}
                         </span>
-                        {(item.detail || sizeText) && (
+                        {subParts.length > 0 && (
                           <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                            <span className="shrink-0">{meta.label}</span>
-                            {item.detail && <span className="min-w-0 truncate">· {item.detail}</span>}
-                            {sizeText && <span className="shrink-0">· {sizeText}</span>}
+                            {subParts.map((part, i) => (
+                              <span key={i} className="min-w-0 truncate">
+                                {i > 0 ? `· ${part}` : part}
+                              </span>
+                            ))}
                           </span>
                         )}
                       </span>
@@ -287,7 +298,7 @@ export function ProjectActivityLog({ projectId, refreshKey = 0, className }: Pro
               style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
             >
               {loading && <Loader2 className="h-3 w-3 animate-spin" />}
-              加载更多（已显示 {items.length} / {total}）
+              Load more (showing {items.length} / {total})
             </button>
           </div>
         )}

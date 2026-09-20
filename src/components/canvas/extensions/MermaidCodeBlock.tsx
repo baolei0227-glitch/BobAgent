@@ -18,7 +18,8 @@ import {
 } from '@tiptap/react';
 import { CodeBlockLowlight } from '@tiptap/extension-code-block-lowlight';
 import { renderMermaidSVG } from '@ktrysmt/beautiful-mermaid';
-import { getMermaidRenderColors, getWidgetTokens, useWidgetTheme, fixTimelineTextOverflow, applyAppleSemanticTints } from '../WidgetRenderer';
+import { useWidgetTheme, fixTimelineTextOverflow, applyAppleSemanticTints } from '../WidgetRenderer';
+import { getMermaidRenderColors, getWidgetTokens } from '@/lib/widget-theme';
 
 // Mermaid 图表类型关键词：用于自动识别没有显式 mermaid 语言标签的代码块
 const MERMAID_TYPE_PATTERN = /^(flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie\b|gitGraph|mindmap|timeline|xychart|block\b|quadrantChart|sankey|journey|requirementDiagram|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b/;

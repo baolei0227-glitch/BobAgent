@@ -14,7 +14,8 @@ import {
 } from '@/lib/db';
 import { wouldCreateCycle, type EdgeInfo } from '@/lib/edge/cycle-detector';
 import { getCurrentProject } from '@/lib/project/project-manager';
-import { findNodeFileById, parseNodeMarkdown, serializeNode, updateNodeFile, type NodeMarkdown } from '@/lib/node-markdown';
+import { findNodeFileById, parseNodeMarkdown } from '@/lib/node-markdown';
+import { markStaleCascade } from '@/lib/nodes/stale';
 
 /** 获取数据库实例（基于当前项目路径） */
 async function getDb() {
@@ -24,18 +25,32 @@ async function getDb() {
   return initDb(dbPath);
 }
 
-/** 将节点标记为 stale（断边通知下游：上游成果块不再可用） */
-async function markStale(nodeId: string, projectPath: string): Promise<void> {
+/** 断边/上游变更后级联标记下游 stale（含原因链，见 lib/nodes/stale.ts） */
+async function markDownstreamStale(
+  edge: { from_node_id: string; to_node_id: string },
+  projectPath: string,
+  projectId: string,
+): Promise<void> {
+  await markStaleCascade(
+    [{
+      nodeId: edge.to_node_id,
+      upstreamId: edge.from_node_id,
+      upstreamTitle: await nodeTitle(edge.from_node_id, projectPath),
+      cause: 'edge-disconnected',
+    }],
+    { path: projectPath, id: projectId },
+  );
+}
+
+/** 取节点标题（写进失效原因链，便于模型读懂）；读不到则用 id 兜底 */
+async function nodeTitle(nodeId: string, projectPath: string): Promise<string> {
   try {
-    const childPath = await findNodeFileById(nodeId, projectPath);
-    if (!childPath) return;
-    const childContent = await fs.readFile(childPath, 'utf-8');
-    const child = parseNodeMarkdown(childContent);
-    child.frontmatter.outcome_status = 'stale';
-    child.frontmatter.updated_at = new Date().toISOString();
-    await updateNodeFile(childPath, serializeNode(child));
-  } catch (e) {
-    console.warn('[edges] 标记下游 stale 失败 nodeId:', nodeId, e instanceof Error ? e.message : String(e));
+    const filePath = await findNodeFileById(nodeId, projectPath);
+    if (!filePath) return nodeId;
+    const node = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));
+    return node.frontmatter.title || nodeId;
+  } catch {
+    return nodeId;
   }
 }
 
@@ -97,9 +112,8 @@ export async function POST(request: NextRequest) {
 
       // R-8: 未锁定节点不得建立出边（成果块是唯一向下传播的东西）
       // 例外：edge_type='bobby' 是「执行关联边」（Bobby 插件观察/授权节点），
-      // edge_type='team' 是「执行关联边」（Agent Teams 观察节点），
-      // 均由主 Agent 调用对应插件工具时自动建立，非成果块传播，不适用锁定约束。
-      const isBobbyEdge = edge_type === 'bobby' || edge_type === 'team';
+      // 由主 Agent 调用对应插件工具时自动建立，非成果块传播，不适用锁定约束。
+      const isBobbyEdge = edge_type === 'bobby';
       if (!isBobbyEdge) {
         const project = await getCurrentProject();
         const fromFile = await findNodeFileById(from, project.path);
@@ -181,9 +195,9 @@ export async function POST(request: NextRequest) {
       const target = allEdges.find((r) => r.edge_id === edge_id);
       await disconnectEdge(db, edge_id);
 
-      // 标记下游节点为 stale（上游已断开，成果块不再可用）
+      // 标记下游节点为 stale（上游已断开，成果块不再可用；级联到更深下游并写下原因链）
       if (target && project) {
-        await markStale(target.to_node_id, project.path);
+        await markDownstreamStale(target, project.path, projectId);
       }
 
       return NextResponse.json({ success: true, disconnected: true });
@@ -222,9 +236,9 @@ export async function POST(request: NextRequest) {
       const target = allEdges.find((r) => r.edge_id === edge_id);
       await deleteEdge(db, edge_id);
 
-      // 标记下游节点为 stale
+      // 标记下游节点为 stale（级联 + 原因链）
       if (target && project) {
-        await markStale(target.to_node_id, project.path);
+        await markDownstreamStale(target, project.path, projectId);
       }
 
       return NextResponse.json({ success: true });
@@ -249,10 +263,8 @@ export async function POST(request: NextRequest) {
 
       if (target) {
         await disconnectEdge(db, target.edge_id);
-        // 标记下游节点为 stale
-        if (project) {
-          await markStale(target.to_node_id, project.path);
-        }
+        // 标记下游节点为 stale（级联 + 原因链）
+        await markDownstreamStale(target, project.path, projectId);
       }
 
       return NextResponse.json({ success: true, disconnected: true });

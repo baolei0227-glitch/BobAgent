@@ -32,13 +32,13 @@ export async function toolTranscribeAudio(args: Record<string, unknown>): Promis
 export const audioToolDefs: Tool[] = [
   {
     name: 'transcribe_audio',
-    description: 'Transcribe audio (mp3/wav/m4a/aac/ogg/flac/opus/amr) to text via the configured STT engine (cloud Volcengine Doubao / Alibaba DashScope / SiliconFlow / OpenAI-compatible, optional local whisper fallback). Use when the user uploads audio or asks to transcribe a voice memo/recording/meeting. Returns the full transcript (chunked with timestamps >60s). Path: attachments/{nodeId}/{filename} or project-relative.',
+    description: 'Transcribe audio (mp3/wav/m4a/aac/ogg/flac/opus/amr) to text via the configured STT engine (cloud Volcengine Doubao / Alibaba DashScope / SiliconFlow / OpenAI-compatible, optional local whisper fallback). Use when the user uploads audio or asks to transcribe a voice memo/recording/meeting. Returns the full transcript (chunked with timestamps >60s). Path: materials/{attachmentFolder}/{filename} (legacy attachments/{nodeId}/{filename}) or project-relative.',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'Audio file path. Format: attachments/{nodeId}/{filename}, or a project-relative path. Get from the attachment list in user message.',
+          description: 'Audio file path. Format: materials/{attachmentFolder}/{filename} (legacy attachments/{nodeId}/{filename}), or a project-relative path. Get from the attachment list in user message.',
         },
       },
       required: ['path'],

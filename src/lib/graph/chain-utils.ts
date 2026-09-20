@@ -4,7 +4,6 @@
  * "遍历 edges -> 建 childrenOf/parentsOf / adjacency -> BFS 连通分量"代码。
  */
 import type { GraphNodeInfo, GraphEdgeInfo } from './graph-gateway';
-import { groupComponentsByConnectivity } from './nodemap-layout';
 
 export interface ChildEntry {
   id: string;

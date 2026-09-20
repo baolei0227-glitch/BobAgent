@@ -4,11 +4,13 @@ import { useState, useRef, useEffect, useCallback, useContext, useMemo, memo, us
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { useNodeHost, type HostNode, type HostEdge } from './node-host';
-import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Check, Zap, Wrench, CheckCircle2, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Lightbulb, AlertTriangle, AlertCircle, AtSign, Trash, Plug, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, Play, SlidersHorizontal, Clock, Loader2, Bot, Search, Globe, Terminal, Pencil } from 'lucide-react';
+import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Check, Zap, Wrench, CheckCircle2, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Lightbulb, AlertTriangle, AlertCircle, AtSign, Trash, Plug, Users, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, ChartSpline, Play, SlidersHorizontal, Clock, Loader2, Bot, Search, Globe, Terminal, Pencil, Archive } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, ToolCallPhase, MessageAttachment, OutputFileItem, SkillDetail } from '@/lib/types';
+import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, ToolCallPhase, MessageAttachment, MessageReference, OutputFileItem, SkillDetail, SubagentPanel, TeamChatEvent } from '@/lib/types';
 import QuestionPopup, { stripQuestionsBlock, type QuestionItem, type AnswerEntry } from './QuestionPopup';
 import { ButlerConfirmModal, type ButlerConfirmState } from './ButlerConfirmModal';
+import TeamMemberPickerDialog from './TeamMemberPickerDialog';
+import TeamWorkbench from './TeamWorkbench';
 import LoginDialog from './LoginDialog';
 import { StreamingMarkdown } from './HtmlRenderer';
 import { bus, BusEvents } from '@/lib/bus';
@@ -32,7 +34,8 @@ import type { McpServerConfig } from '@/lib/mcp/types';
 import { analyzeTask, selectBestModel } from '@/lib/model-matcher';
 import { isVisionModel } from '@/lib/model-tags';
 import { outcomeMaxLengthForModel, inferContextWindow, compactTriggerTokensForContext } from '@/lib/context-limits';
-import { WidgetRenderer, WidgetSkeleton, parseWidgetBlocks, hasWidgetBlocks, hasOpenWidgetFence } from './WidgetRenderer';
+import { WidgetRenderer, WidgetSkeleton } from './WidgetRenderer';
+import { parseWidgetBlocks, hasWidgetBlocks, hasOpenWidgetFence } from '@/lib/widget-blocks';
 import { desktop } from '@/lib/desktop-adapter';
 import type { CodingPhase, AgentId } from '@/lib/agents/profiles';
 import { registerScreenOcrTarget, unregisterScreenOcrTarget, setScreenOcrFocus } from '@/lib/screen-ocr/frontend';
@@ -47,6 +50,16 @@ import { ContextMeter, type CtxMeterInfo } from './ContextMeter';
 import { createTraceWindow, normalizeSseFrame, pushWindowFrame, finishWindow, eventsToTraceWindow, type TraceWindowState } from '@/lib/trajectory/present';
 // P5a-2 Trace 面板窗口派生（可回退），行为不变：窗口 → ConversationTrajectoryItem 同形素材
 import { windowToTrajectoryItems, type TraceWindowTurnItem } from '@/lib/trajectory/render';
+import {
+  useComposer,
+  formatFileSize,
+  type MaterialItem,
+  type ComposerLink,
+  type ComposerDirRef,
+  type ComposerContext,
+} from './composer/useComposer';
+import ComposerChips from './composer/ComposerChips';
+import MentionMenu from './composer/MentionMenu';
 
 // ── S2b 思考档位徽标元数据（字母 + 颜色）：DSH 四档 off/low/high/max + legacy medium
 //  legacy medium 保留旧 M/蓝 显示（存量消息/节点向后兼容）
@@ -150,8 +163,7 @@ async function fetchWithServerRecovery(url: string, init: RequestInit): Promise<
 const SYSTEM_PROMPT =
   'You are a helpful, knowledgeable AI assistant. Respond concisely and clearly. Use markdown formatting when appropriate. Answer in the same language as the user.';
 
-/** 单个 URL（http/https/ftp 开头、无空白） */
-const URL_ONLY_RE = /^(https?:\/\/|ftp:\/\/)[^\s/$.?#][^\s]*$/i;
+/** 单个 URL（http/https/ftp 开头、无空白）：见 composer/useComposer */
 
 /** think 标签及其常见变体（大小写不敏感）：
  *  标准 <think>、以及部分模型（尤其追问模型）输出的 <thinking> / <Thought> / <reasoning> 等。
@@ -245,15 +257,33 @@ function isErrorReply(text: string): boolean {
   return /^\[?(?:Error|工具|tool)/i.test(text.trimStart());
 }
 
+/**
+ * 点击气泡内的附件 / 引用 chip 时，在预览面板打开对应文件。
+ * 绝对路径（/ 或 ~ 开头）按 local 来源，项目内相对路径（materials/…、homework/…）按 project 来源，
+ * 与 OutputFilesCard 的打开逻辑同源；目录类没有「预览」语义，由调用方过滤。
+ */
+function openChipPath(path: string | undefined, name: string) {
+  const p = (path ?? '').replace(/\\/g, '/').trim();
+  if (!p) return;
+  const isAbsolute = p.startsWith('~/') || p.startsWith('/');
+  bus.publish(BusEvents.fileOpen, { source: isAbsolute ? 'local' : 'project', path: p, name });
+}
+
 /** 消息附件 chips（用户/助手消息通用）：图片缩略图或类型图标 + 文件名 + 大小 */
 function AttachmentChips({ attachments, role }: { attachments: MessageAttachment[]; role: 'user' | 'assistant' }) {
   if (!attachments || attachments.length === 0) return null;
   return (
     <div className="mb-2 flex flex-wrap gap-0.5">
-      {attachments.map((att) => (
+      {attachments.map((att) => {
+        // folder 是授权目录、无预览语义；无 path 的历史附件同样不可点
+        const canOpen = att.type !== 'folder' && !!att.path;
+        return (
         <span
           key={att.id}
-          className="inline-flex items-center gap-0.5 rounded-full px-1 py-px"
+          onClick={canOpen ? (e) => { e.stopPropagation(); openChipPath(att.path, att.name); } : undefined}
+          title={canOpen ? att.path : undefined}
+          role={canOpen ? 'button' : undefined}
+          className={cn('inline-flex items-center gap-0.5 rounded-full px-1 py-px', canOpen && 'cursor-pointer hover:opacity-80')}
           style={{
             backgroundColor: role === 'user' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'rgba(255,255,255,0.5)',
             border: `1px solid ${role === 'user' ? 'var(--primary-soft)' : 'rgba(0,0,0,0.08)'}`,
@@ -279,9 +309,104 @@ function AttachmentChips({ attachments, role }: { attachments: MessageAttachment
             {formatFileSize(att.size)}
           </span>
         </span>
-      ))}
+        );
+      })}
     </div>
   );
+}
+
+/**
+ * 消息 @引用 chips（用户消息）：资料库文件 / 引用本地文件 / 链接材料 / 操作目录。
+ * 与 AttachmentChips 并列渲染于气泡内；虚线边框 + AtSign/Link2/Folder 图标与上传附件区分。
+ */
+function ReferenceChips({ references, role }: { references: MessageReference[]; role: 'user' | 'assistant' }) {
+  if (!references || references.length === 0) return null;
+  const nameColor = role === 'user' ? 'color-mix(in oklab, var(--ink-muted) 80%, transparent)' : '#a09880';
+  return (
+    <div className="mb-2 flex flex-wrap gap-0.5">
+      {references.map((ref) => {
+        // link 走浏览器打开 url；material/file 走预览面板；folder 是操作目录、无预览语义
+        const isLink = ref.kind === 'link' && !!ref.url;
+        const canOpen = isLink || ((ref.kind === 'material' || ref.kind === 'file') && !!ref.path);
+        return (
+        <span
+          key={ref.id}
+          onClick={canOpen ? (e) => {
+            e.stopPropagation();
+            if (ref.kind === 'link' && ref.url) window.open(ref.url, '_blank', 'noopener');
+            else openChipPath(ref.path, ref.name);
+          } : undefined}
+          title={ref.path ?? ref.url ?? ref.name}
+          role={canOpen ? 'button' : undefined}
+          className={cn('inline-flex items-center gap-0.5 rounded-full px-1 py-px', canOpen && 'cursor-pointer hover:opacity-80')}
+          style={{
+            backgroundColor: role === 'user' ? 'color-mix(in oklab, var(--primary) 8%, transparent)' : 'rgba(255,255,255,0.5)',
+            border: `1px dashed ${role === 'user' ? 'var(--primary-soft)' : 'rgba(0,0,0,0.08)'}`,
+          }}
+        >
+          {ref.kind === 'link' ? (
+            <Link2 className="h-2.5 w-2.5" style={{ color: '#3b82c4' }} />
+          ) : ref.kind === 'folder' ? (
+            <Folder className="h-2.5 w-2.5" style={{ color: 'var(--info)' }} />
+          ) : (
+            <AtSign className="h-2.5 w-2.5" style={{ color: '#537D96' }} />
+          )}
+          <span className="max-w-[64px] truncate text-xs" style={{ color: nameColor }}>
+            {ref.name}
+          </span>
+          {ref.size ? (
+            <span className="text-xs" style={{ color: nameColor }}>
+              {ref.size}
+            </span>
+          ) : null}
+        </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 由本轮 @引用 上下文组装消息级 references 快照。
+ * 与发送给 AI 的正文块（--- 资料列表 --- 等）同源，保证「气泡 chip」与「模型实际收到的上下文」一致。
+ */
+function buildTurnReferences(
+  materials: MaterialItem[],
+  dirRefs: ComposerDirRef[],
+  links: ComposerLink[],
+  folders: MessageAttachment[],
+): MessageReference[] {
+  const refs: MessageReference[] = [];
+  for (const mat of materials) {
+    refs.push({ id: `ref-mat:${mat.path}`, kind: 'material', name: mat.name, path: mat.path, size: formatFileSize(mat.size) });
+  }
+  for (const d of dirRefs) {
+    refs.push({ id: `ref-dir:${d.path}`, kind: 'file', name: d.name, path: d.path, size: d.size });
+  }
+  for (const l of links) {
+    refs.push({ id: `ref-link:${l.url}`, kind: 'link', name: l.url, url: l.url });
+  }
+  for (const f of folders) {
+    refs.push({ id: `ref-folder:${f.path}`, kind: 'folder', name: f.name, path: f.path, locked: f.id.startsWith('sent-folder:') });
+  }
+  return refs;
+}
+
+/**
+ * 剥离正文中已被 chip 承载的 @引用 标记（@文件名）。
+ * 输入栏为支持「标记 ↔ chip」双向渲染，会把 chip 文案以 `@文件名` 形式写进镜像文本；
+ * 若原样发送，气泡正文会与 chip 重复展示同一文件名。此处按本轮 references 精确剥离，
+ * 仅剥离确实登记为引用的名字（用户手打的未被识别的 @xxx 保持不变）。
+ */
+function stripReferenceMarkers(text: string, references: MessageReference[]): string {
+  let out = text;
+  for (const ref of references) {
+    if (ref.kind !== 'material' && ref.kind !== 'file') continue;
+    if (!ref.name) continue;
+    const escaped = ref.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`@${escaped}[ \\t]*`, 'g'), '');
+  }
+  return out.replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 /**
@@ -330,12 +455,6 @@ export interface ChatNodeKernelProps {
 // Context: 节点点击 .md 附件时通知画布打开阅读器
 // options.outcomeMode: true 表示直接打开成果块编辑模式
 export const NodeReaderContext = React.createContext<(nodeMdId: string, options?: { outcomeMode?: boolean }) => void>(() => {});
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
 
 /** 分步看板耗时格式化：<1分钟→秒，<1小时→分秒，≥1小时→时分 */
 function formatDuration(ms: number): string {
@@ -418,7 +537,7 @@ function StepTypeIcon({ name, size = 14 }: { name: string; size?: number }) {
   const cls = { width: size, height: size, flexShrink: 0, color } as const;
   const file = n.includes('write_file') || n.includes('read_file') || n.includes('delete_file') || n.includes('rename_file')
     || n.includes('edit_code') || n.includes('create_file') || n.includes('list_directory') || n.includes('list_files') || n.includes('search_files')
-    || n.includes('attachment') || n.includes('material') || n.includes('upload_file') || n.includes('export_pdf') || n.includes('read_attachment') || n.includes('read_material');
+    || n.includes('attachment') || n.includes('material') || n.includes('upload_file') || n.includes('export_pdf');
   const search = n.includes('web_search') || n.includes('search_web') || n.includes('intern_search') || n.includes('search_capabilities') || n.includes('search');
   const web = n.includes('navigate') || n.includes('web_fetch') || n.includes('fetch') || n.includes('browser') || n.includes('get_html') || n.includes('click') || n.includes('type') || n.includes('fill') || n.includes('select_') || n.includes('press_key') || n.includes('scroll') || n.includes('wait_for') || n.includes('login') || n.includes('handle_dialog') || n.includes('resize_viewport') || n.includes('screenshot') || n.includes('extract_text') || n.includes('interact_preview') || n.includes('capture_preview') || n.includes('get_storage') || n.includes('reload') || n.includes('back') || n.includes('forward');
   const ocr = n.includes('ocr') || n.includes('crop_image') || n.includes('vision') || n.includes('recognize');
@@ -442,7 +561,11 @@ function StepTypeIcon({ name, size = 14 }: { name: string; size?: number }) {
 }
 
 /** 结束态整体折叠辅助：估算「执行过程」区占行数（Think 芯片 1 行 + 每个工具 1 行 + 技能一行）。 */
-function estimateProcessRows(thinkText: string | undefined, toolCalls: ToolCallRecord[] | undefined, skillNames: string[] | undefined): number {
+function estimateProcessRows(
+  thinkText: string | undefined,
+  toolCalls: ToolCallRecord[] | undefined,
+  skillNames: string[] | undefined,
+): number {
   const hasThink = !!thinkText && thinkText.trim().length > 0;
   const calls = toolCalls ?? [];
   const skills = skillNames ?? [];
@@ -742,6 +865,7 @@ function TaskStepsPanel({
   steps,
   completed,
   running,
+  discarded,
   onClose,
 }: {
   anchor: HTMLElement | null;
@@ -749,9 +873,14 @@ function TaskStepsPanel({
   steps: PanelStep[];
   completed: number;
   running: boolean;
+  /** 本轮的多智能体方案被用户丢弃（审批卡 Discard / 超时作废）：步骤轨不再推进，
+   *  面板收口为终态「DISCARDED」，避免停在 EXECUTING 让人误以为还在执行 */
+  discarded?: boolean;
   onClose: () => void;
 }) {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  // 上一帧坐标镜像：坐标未变时跳过 setPos，避免每帧用新对象触发一次重渲染
+  const lastPosRef = useRef<{ left: number; top: number } | null>(null);
   useEffect(() => {
     if (!anchor) return;
     let raf = 0;
@@ -763,7 +892,11 @@ function TaskStepsPanel({
       const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
       const left = Math.max(8, Math.min(r.right + 10, vw - PANEL_W - 8));
       const top = Math.max(8, Math.min(r.top + 8, vh - estH - 8));
-      setPos({ left, top });
+      const last = lastPosRef.current;
+      if (!last || last.left !== left || last.top !== top) {
+        lastPosRef.current = { left, top };
+        setPos({ left, top });
+      }
       raf = requestAnimationFrame(update);
     };
     raf = requestAnimationFrame(update);
@@ -774,7 +907,9 @@ function TaskStepsPanel({
   const total = steps.length;
   const allDone = completed >= total && !running;
   const failedCount = steps.filter((s) => s.status === 'failed').length;
-  const currentIdx = steps.findIndex((s) => s.status === 'in_progress');
+  // 丢弃后步骤轨不再推进：不 pulse、不认「当前步」（in_progress 视为已终止的普通步骤）
+  const isRunning = running && !discarded;
+  const currentIdx = discarded ? -1 : steps.findIndex((s) => s.status === 'in_progress');
   const displayCount = Math.min(completed, total);
   const mono = "'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace";
   return createPortal(
@@ -801,13 +936,16 @@ function TaskStepsPanel({
         <span
           className="inline-block h-1.5 w-1.5 rounded-full"
           style={{
-            backgroundColor: failedCount > 0 ? '#f87171' : '#34d399',
-            boxShadow: running ? `0 0 6px ${failedCount > 0 ? '#f87171' : '#34d399'}` : 'none',
-            animation: running ? 'pulse 1.2s ease-in-out infinite' : 'none',
+            backgroundColor: discarded ? '#fbbf24' : failedCount > 0 ? '#f87171' : '#34d399',
+            boxShadow: isRunning ? `0 0 6px ${failedCount > 0 ? '#f87171' : '#34d399'}` : 'none',
+            animation: isRunning ? 'pulse 1.2s ease-in-out infinite' : 'none',
           }}
         />
-        <span className="text-10 font-bold tracking-[0.14em]" style={{ color: failedCount > 0 ? '#f87171' : '#34d399' }}>
-          {allDone ? (failedCount > 0 ? 'DONE w/ ERRORS' : 'COMPLETE') : 'EXECUTING'}
+        <span
+          className="text-10 font-bold tracking-[0.14em]"
+          style={{ color: discarded ? '#fbbf24' : failedCount > 0 ? '#f87171' : '#34d399' }}
+        >
+          {discarded ? 'DISCARDED' : allDone ? (failedCount > 0 ? 'DONE w/ ERRORS' : 'COMPLETE') : 'EXECUTING'}
         </span>
         <span className="text-10" style={{ color: 'rgba(148,163,184,0.55)' }}>
           {displayCount}/{total}{failedCount > 0 ? ` · ${failedCount} failed` : ''}
@@ -839,7 +977,8 @@ function TaskStepsPanel({
         {steps.map((s, i) => {
           const text = s.content.replace(/^Step\s*\d+\s*[:.]\s*/i, '');
           const isDone = s.status === 'completed';
-          const isCurrent = s.status === 'in_progress';
+          // 丢弃后 in_progress 不再渲染成「正在执行」（无旋转箭头/无 activeForm 脉冲），降级为置灰普通步
+          const isCurrent = !discarded && s.status === 'in_progress';
           const isFailed = s.status === 'failed';
           // 当前步优先展示 activeForm 动态文案，否则展示静态 content
           const label = isCurrent && s.activeForm ? s.activeForm : text;
@@ -870,16 +1009,27 @@ function TaskStepsPanel({
           );
         })}
       </div>
-      {/* 当前步高亮条（独立于清单，便于一眼定位正在做什么） */}
-      {currentIdx >= 0 && (
-        <div className="border-t px-2.5 py-1" style={{ borderColor: 'rgba(34,197,94,0.2)', backgroundColor: '#0d131c' }}>
-          <div className="text-9 font-semibold uppercase tracking-widest" style={{ color: 'rgba(34,211,238,0.7)' }}>
-            Now
+      {/* 当前步高亮条（独立于清单，便于一眼定位正在做什么）；方案被丢弃 → 改显终态说明，不再假装还在跑 */}
+      {discarded ? (
+        <div className="border-t px-2.5 py-1" style={{ borderColor: 'rgba(251,191,36,0.25)', backgroundColor: '#0d131c' }}>
+          <div className="text-9 font-semibold uppercase tracking-widest" style={{ color: 'rgba(251,191,36,0.75)' }}>
+            Discarded
           </div>
-          <div className="mt-0.5 text-11 leading-snug animate-pulse" style={{ color: '#a5f3fc', wordBreak: 'break-word' }}>
-            {steps[currentIdx].activeForm || steps[currentIdx].content}
+          <div className="mt-0.5 text-11 leading-snug" style={{ color: '#fcd34d', wordBreak: 'break-word' }}>
+            Multi-agent plan discarded — no member or task was created.
           </div>
         </div>
+      ) : (
+        currentIdx >= 0 && (
+          <div className="border-t px-2.5 py-1" style={{ borderColor: 'rgba(34,197,94,0.2)', backgroundColor: '#0d131c' }}>
+            <div className="text-9 font-semibold uppercase tracking-widest" style={{ color: 'rgba(34,211,238,0.7)' }}>
+              Now
+            </div>
+            <div className="mt-0.5 text-11 leading-snug animate-pulse" style={{ color: '#a5f3fc', wordBreak: 'break-word' }}>
+              {steps[currentIdx].activeForm || steps[currentIdx].content}
+            </div>
+          </div>
+        )
       )}
     </div>,
     document.body,
@@ -961,8 +1111,8 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
 
   // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）
   const isCoding = identity === 'coding';
-  // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Butler→ClipboardList / 其余→Bot
-  // 尺寸：chat 的 Bot 16px；coding/kar/butler 专属图标 15px（2026-09 视觉校准）
+  // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Butler→ClipboardList / Archivist→Archive / 其余→Bot
+  // 尺寸：chat 的 Bot 16px；coding/kar/butler/archivist 专属图标 15px（2026-09 视觉校准）
   const TitleIdentityIcon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> =
     identity === 'coding'
       ? Terminal
@@ -970,8 +1120,10 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
         ? FileText
         : identity === 'butler'
           ? ClipboardList
-          : Bot;
-  const isBotTitleIcon = identity !== 'coding' && identity !== 'note' && identity !== 'butler';
+          : identity === 'archivist'
+            ? Archive
+            : Bot;
+  const isBotTitleIcon = identity !== 'coding' && identity !== 'note' && identity !== 'butler' && identity !== 'archivist';
 
   // AI Coding 专项任务循环状态（改码→预览自检→测试→完成）：由服务端 coding_phase SSE 驱动
   const [codingPhase, setCodingPhase] = useState<CodingPhase>('idle');
@@ -1095,12 +1247,39 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Bob-Mind（Buzan）未回看改动：用户在插件面板手动增删改导图走插件 REST，不会推给本节点，
+  // 面板把「自上次回看以来的改动数」经 iframe 中继广播过来（PluginPanelFrame）→ 卡片显示角标；
+  // 面板点 Ask Buzan → 自动发一轮消息，让 Buzan 先看最新导图再就改动表态（赞同/反对 + 理由）。
+  const isMind = identity === 'mind';
+  const [mindChanges, setMindChanges] = useState(0);
+  useEffect(() => {
+    if (!isMind) return;
+    const onChanges = (e: Event) => {
+      const n = Number((e as CustomEvent<{ count?: unknown }>).detail?.count);
+      setMindChanges(Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+    };
+    const onAsk = () => {
+      if (streamingRef.current) return; // 正在跑：不打断，等本轮结束由用户再点
+      sendTextRef.current(
+        '（系统自动）我在 Bob-Mind 面板刚改过导图，请先 mind_query 看最新状态，再就我的改动表态（赞同/反对 + 理由）。',
+      );
+    };
+    window.addEventListener('bob-mind-changes', onChanges);
+    window.addEventListener('bob-mind-ask', onAsk);
+    return () => {
+      window.removeEventListener('bob-mind-changes', onChanges);
+      window.removeEventListener('bob-mind-ask', onAsk);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMind]);
+
   const [modelId, setModelId] = useState(data.modelId ?? DEFAULT_MODEL_ID);
   // 模型为 Auto 时思考强度默认 High，且允许用户手动调整（不再由模型推断覆盖）
   const thinkingAutoMode = modelId === DEFAULT_MODEL_ID;
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  // 节点内内容分栏（dsh 对话 / 轨迹）：默认对话视图；轨迹承载完整执行明细
-  const [pane, setPane] = useState<'chat' | 'trace'>('chat');
+  // 节点内内容分栏（dsh 对话 / 轨迹 / 团队）：默认对话视图；轨迹承载完整执行明细，
+  // 团队是本节点关联团队的协作工作台（数据真相源在引擎侧，见 TeamWorkbench）
+  const [pane, setPane] = useState<'chat' | 'trace' | 'team'>('chat');
   /** P5b-1 历史 replay：点 Turn「查看原始轨迹」→ fetch /api/trajectory events → 窗口 → Trace 分栏渲染 */
   const [replay, setReplay] = useState<null | {
     taskId: string;
@@ -1113,9 +1292,15 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [planPanelClosed, setPlanPanelClosed] = useState(false);
   // 面板收尾停留：流式结束后保留 3 秒全绿/失败状态再淡出，避免骤然消失
   const [planPanelLingering, setPlanPanelLingering] = useState(false);
+  // 本轮多智能体方案被丢弃（审批卡 Discard / 等待批准超时）：右侧步骤面板据此收口为
+  // 终态 DISCARDED，避免停在 EXECUTING 让人误以为还在执行。
+  const [teamPlanDiscarded, setTeamPlanDiscarded] = useState(false);
   const prevStreamingRef = useRef(false);
   useEffect(() => {
-    if (isStreaming && !prevStreamingRef.current) setPlanPanelClosed(false);
+    if (isStreaming && !prevStreamingRef.current) {
+      setPlanPanelClosed(false);
+      setTeamPlanDiscarded(false);
+    }
     // 流式从 true→false → 进入收尾停留
     if (!isStreaming && prevStreamingRef.current) {
       setPlanPanelLingering(true);
@@ -1377,27 +1562,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     return null;
   };
   const [currentStage, setCurrentStage] = useState<StageKind>(null);
-  // === 优化6：流式阶段进度条 ===
-  // 已完成的阶段集合：thinking → tool → writing（按出现顺序）
-  const [completedStages, setCompletedStages] = useState<Set<'thinking' | 'tool' | 'writing'>>(new Set());
-  // 追踪上一个阶段，用于在切换时标记"已完成"
-  const prevStageRef = useRef<StageKind>(null);
-  /** 设置当前阶段并同步更新已完成阶段集合 */
-  const setStageWithProgress = useCallback((next: StageKind) => {
-    const prev = prevStageRef.current;
-    const prevKind = stageKindOf(prev);
-    const nextKind = stageKindOf(next);
-    // 根据上一个阶段标记已完成
-    if (prevKind === 'thinking' && nextKind !== 'thinking') {
-      setCompletedStages((s) => new Set(s).add('thinking'));
-    } else if (prevKind === 'tool' && nextKind !== 'tool') {
-      setCompletedStages((s) => new Set(s).add('tool'));
-    } else if (prevKind === 'writing' && nextKind !== 'writing') {
-      setCompletedStages((s) => new Set(s).add('writing'));
-    }
-    prevStageRef.current = next;
-    setCurrentStage(next);
-  }, []);
   const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
   // 空态欢迎区 BobWork 打字机效果：新建会话时逐字从左到右显示
   const [typedBrand, setTypedBrand] = useState('');
@@ -1427,10 +1591,26 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [enabledMcpIds, setEnabledMcpIds] = useState<Set<string>>(
     () => new Set(Array.isArray(data.enabledMcpIds) ? data.enabledMcpIds as string[] : [])
   );
+  /** 多智能体协作模式开关（frontmatter multi_agent_mode）：开启后本轮请求带 multiAgentMode，
+   *  主 agent 可调用 team_run 编排多个成员协作，过程以折叠分支卡片呈现在「执行过程」区 */
+  const [multiAgentMode, setMultiAgentMode] = useState<boolean>(data.multiAgentMode === true);
+  /** Team 分栏两档模型（frontmatter team_main_model / team_worker_model）：队长跑主模型（规划成员与任务、
+   *  复核并整合产出），全部成员一刀切跑次模型。只作用于多智能体协作，**绝不回写节点自身 chat 模型** */
+  const [teamMainModel, setTeamMainModel] = useState<string>(typeof data.teamMainModel === 'string' ? data.teamMainModel : '');
+  const [teamWorkerModel, setTeamWorkerModel] = useState<string>(typeof data.teamWorkerModel === 'string' ? data.teamWorkerModel : '');
+  /** 本次执行的成员名单（Multi-agent mode 弹窗勾选的已安装 agent id）：**只存会话内不落盘**
+   *  （用户每次点按钮重新选）；随请求发送，服务端据此注入编排规则、并对名单外补充成员强制弹卡审批 */
+  const [presetAgentIds, setPresetAgentIds] = useState<string[]>([]);
+  /** 成员选择弹窗开合 */
+  const [memberPickerOpen, setMemberPickerOpen] = useState(false);
+  /** 本节点关联的协作团队 id 清单（frontmatter team_ids）：团队工作台据此列出「本会话产生过的团队」。
+   *  只存引用——团队状态真相源在引擎侧（bob-team-mcp），节点不镜像任何团队数据 */
+  const [teamIds, setTeamIds] = useState<string[]>(Array.isArray(data.teamIds) ? (data.teamIds as string[]) : []);
+  const teamIdsRef = useRef<string[]>(Array.isArray(data.teamIds) ? (data.teamIds as string[]) : []);
   const [providerConfigs, setProviderConfigs] = useState<ProviderConfig[]>([]);
   // Role Assignment 主对话模型配置（决定节点 chat 下拉菜单的模型范围：优先模型 + 候选池）
   const [chatRoleModel, setChatRoleModel] = useState<{ defaultModel?: string; pool?: Array<{ provider: string; modelId: string }> } | undefined>(undefined);
-  const [pendingAttachments, setPendingAttachments] = useState<MessageAttachment[]>([]);
+  // 附件 / 链接 / 操作目录 的待发状态由 composer/useComposer 统一承载（chat 与 team 共用）
   // 划词操作窗：在消息内容中选中文字 → 显示"作为附件"浮层
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const selectionMenuRef = useRef<HTMLDivElement>(null);
@@ -1454,12 +1634,6 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // 复制反馈：图标短暂变 ✓（不显示 "Copied" 文案），弹窗保持不消失；~900ms 后图标复原可再次复制
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
-  // 待发送链接材料（粘贴 URL 自动识别，发送时提示 AI 用 web_fetch 访问）
-  const [pendingLinks, setPendingLinks] = useState<{ url: string }[]>([]);
-  const [uploadingAttachment, setUploadingAttachment] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-  // 已授权文件夹（全局授权：AI 可读写这些目录）
-  const [authorizedRoots, setAuthorizedRoots] = useState<string[]>([]);
   const [questionPopup, setQuestionPopup] = useState<{
     questions: QuestionItem[];
     /** ask_user_questions 工具模式：提交后 POST /api/chat/questions 回传，由服务端把答案并入对话继续生成 */
@@ -1517,6 +1691,8 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const [confirmPending, setConfirmPending] = useState(false);
   const [hasDisconnectedUpstream, setHasDisconnectedUpstream] = useState(false);
   const [outcomeStatus, setOutcomeStatus] = useState<'locked' | 'draft' | 'stale' | 'legacy' | null>(null);
+  // 失效原因链（frontmatter outcome_stale_reason）：悬浮提示展示「因哪条上游、哪条前提已废」
+  const [outcomeStaleReason, setOutcomeStaleReason] = useState<string | null>(null);
   const [outcomeLoading, setOutcomeLoading] = useState(false);
   // 强制锁定标记：成果块校验未通过但用户自主决定锁定
   const [forceLocked, setForceLocked] = useState(false);
@@ -1595,60 +1771,9 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     };
   }, [currentMdId]);
 
-  // 监听从文件浏览器发送的附件（挂载时先消费事件缓冲，防止"发送到新建节点"时事件先于监听器注册而丢失）
-  useEffect(() => {
-    // 挂载时消费缓冲中属于本节点的附件
-    const pendingMap = window.__pendingNodeAttachments;
-    if (pendingMap?.[currentMdId]?.length) {
-      const buffered = pendingMap[currentMdId];
-      setPendingAttachments((prev) => [...prev, ...buffered.filter((a) => a.type !== 'folder')]);
-      setContextFolders((prev) => [...prev, ...buffered.filter((a) => a.type === 'folder')]);
-      delete pendingMap[currentMdId];
-    }
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { node_id: string; attachment: MessageAttachment };
-      if (detail?.node_id === currentMdId && detail?.attachment) {
-        // 事件已到达则从缓冲移除，避免节点重挂载时重复添加
-        if (pendingMap?.[currentMdId]) {
-          pendingMap[currentMdId] = pendingMap[currentMdId].filter((a) => a.id !== detail.attachment.id);
-          if (pendingMap[currentMdId].length === 0) delete pendingMap[currentMdId];
-        }
-        const att = detail.attachment;
-        if (att.type === 'folder') {
-          // 授权目录引用 → 显示在输入框下方工具栏（操作目录）
-          setContextFolders((prev) => prev.some((f) => f.id === att.id) ? prev : [...prev, att]);
-        } else {
-          setPendingAttachments((prev) => [...prev, att]);
-        }
-      }
-    };
-    window.addEventListener('add-attachment-to-node', handler);
-    return () => window.removeEventListener('add-attachment-to-node', handler);
-  }, [currentMdId]);
+  // 从文件浏览器发送的附件通道（add-attachment-to-node）在 useComposer 之后接入，见下方
 
-  // Materials @ mention state
-  interface MaterialItem { id: string; name: string; path: string; size: number; extension: string; type: string; uploadedAt: string }
-  /** @ 目录模式下的条目（授权目录/子目录中的文件或目录） */
-  interface DirMentionItem { name: string; path: string; type: 'file' | 'directory'; size?: string; sizeBytes?: number; extension?: string }
-  const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionQuery, setMentionQuery] = useState('');
-  const [mentionIndex, setMentionIndex] = useState(0);
-  const [mentionAtPos, setMentionAtPos] = useState(-1);
-  const mentionRef = useRef<HTMLDivElement>(null);
-  const [pendingMaterials, setPendingMaterials] = useState<MaterialItem[]>([]);
-  const [pendingMaterialPaths, setPendingMaterialPaths] = useState<Set<string>>(new Set());
-  // 操作目录（授权文件夹发送到节点后显示在输入框下方工具栏）
-  const [contextFolders, setContextFolders] = useState<MessageAttachment[]>([]);
-  // @ 引用授权目录中的文件（有授权目录时 @ 数据源切换为本地目录）
-  const [pendingDirRefs, setPendingDirRefs] = useState<{ name: string; path: string; size?: string }[]>([]);
-  const [pendingDirRefPaths, setPendingDirRefPaths] = useState<Set<string>>(new Set());
-  // @ 弹窗目录导航状态（null = 显示入口列表；非 null = 浏览目录/子目录）
-  // source: 'auth' = 授权目录 / 'materials' = materials 文件夹（多级子目录浏览）
-  const [mentionDir, setMentionDir] = useState<{ root: string; path: string; source: 'auth' | 'materials' } | null>(null);
-  const [mentionDirItems, setMentionDirItems] = useState<DirMentionItem[]>([]);
-  const [mentionDirLoading, setMentionDirLoading] = useState(false);
-  /** materials 目录树缓存（一次拉取，前端按路径过滤实现多级浏览） */
-  const materialTreeRef = useRef<any[] | null>(null);
+  // Materials @ mention：状态与处理器统一由 composer/useComposer 承载（chat 与 team 共用）
   /** contentEditable 输入框的纯文本镜像（含 @文件名 标记文本，DOM 渲染时替换为 chip） */
   const [localInput, setLocalInput] = useState('');
   // 输入草稿持久化：切换节点 / 节点重挂载 / 项目切换时保留未发送的输入（localStorage 按 项目+节点 隔离）
@@ -1775,11 +1900,22 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   }, []);
 
   // AI 配置类工具执行完成 → 广播配置变更（设置弹窗 / Sidebar logo / 其他节点自动刷新）
+  // 去重：流式期间 messages 每来一个 chunk 就变一次，若只看「是否存在已完成的配置工具」，
+  // 会在本轮每个 chunk 都广播一次 → 订阅方（本组件 + Sidebar + 其他节点）反复全量 loadSettings
+  // 并重渲染全画布。改为按「消息 id + 工具序号 + 工具名」记忆已广播项，同一处只广播一次。
+  const broadcastConfigToolsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const CONFIG_TOOL_NAMES = new Set(['get_app_config', 'set_app_icon', 'update_provider_config', 'manage_mcp_server']);
-    const changed = messages.some((m) =>
-      (m.toolCalls || []).some((t) => CONFIG_TOOL_NAMES.has(t.toolName) && t.phase === 'done'),
-    );
+    let changed = false;
+    for (const m of messages) {
+      (m.toolCalls || []).forEach((t, i) => {
+        if (t.phase !== 'done' || !CONFIG_TOOL_NAMES.has(t.toolName)) return;
+        const key = `${m.id}#${i}#${t.toolName}`;
+        if (broadcastConfigToolsRef.current.has(key)) return;
+        broadcastConfigToolsRef.current.add(key);
+        changed = true;
+      });
+    }
     if (changed) {
       // 通知全局组件刷新（Sidebar logo / 其他节点 MCP、模型下拉）
       window.dispatchEvent(new Event('provider-configs-changed'));
@@ -1844,7 +1980,10 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     })();
   }, [messages]);
 
-  const availableModels = getAvailableModels(providerConfigs);
+  // providerConfigs 引用变化时才重算：getAvailableModels 每次调用都返回新数组，
+  // 若直接内联，会让下游 effect / useMemo 的依赖（dropdownModels、teamModelOptions 等）每渲染必变，
+  // 引发「每渲染必跑 effect」的重渲染放大。
+  const availableModels = useMemo(() => getAvailableModels(providerConfigs), [providerConfigs]);
 
   // 设置加载完成 & 模型池就绪后，补发挂载期暂存的一键安装任务。
   // 依赖 availableModels：确保 setProviderConfigs 已生效（状态更新批量提交后本 effect 才运行），
@@ -1905,6 +2044,24 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
     return result;
   }, [availableModels, chatRoleModel]);
 
+  // Team 分栏两档模型的候选项（与节点 chat 下拉同源：chatModel 角色池）
+  const teamModelOptions = useMemo(
+    () => dropdownModels.map((m) => ({ modelId: m.modelId, label: m.label })),
+    [dropdownModels],
+  );
+  // 最终生效值：frontmatter 存的选择若已不在模型池（换供应商/取消勾选）→ 回落池内首个
+  //（再退到节点当前 chat 模型），避免下拉空选、team_run 因缺模型被直接拒绝
+  const resolvedTeamMainModel = useMemo(() => {
+    if (teamMainModel && teamModelOptions.some((m) => m.modelId === teamMainModel)) return teamMainModel;
+    const fallback = availableModels.find((m) => m.modelId === modelId) ?? availableModels[0];
+    return teamModelOptions[0]?.modelId ?? fallback?.modelId ?? '';
+  }, [teamMainModel, teamModelOptions, availableModels, modelId]);
+  // 次模型缺省 = 主模型（配置极简：默认不额外选）
+  const resolvedTeamWorkerModel = useMemo(() => {
+    if (teamWorkerModel && teamModelOptions.some((m) => m.modelId === teamWorkerModel)) return teamWorkerModel;
+    return resolvedTeamMainModel;
+  }, [teamWorkerModel, teamModelOptions, resolvedTeamMainModel]);
+
   // 菜单打开时对本地回环 baseUrl 的 provider 做一次轻量连接探测（10s 节流），
   // 探测失败 → localHealth[provider] = 'down'，下拉模型项显示"本地未连接"灰色标注
   useEffect(() => {
@@ -1963,6 +2120,76 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   // IME 合成状态追踪：macOS 中文拼音输入法确认候选词时，浏览器先触发 compositionend 再触发 keydown(Enter)，
   // 此时 nativeEvent.isComposing 已为 false。用 ref 手动追踪合成状态，弥补这一竞态。
   const composingRef = useRef(false);
+
+  // ===== 附件 + @ 引用能力（chat 与 team 输入框共用同一实现：composer/useComposer）=====
+  const composer = useComposer({
+    nodeId: currentMdId,
+    nodeTitle: data.title || '',
+    disabled: isStreaming,
+    inputRef: textareaRef,
+    text: localInput,
+    setText: setLocalInput,
+    composingRef,
+  });
+  const {
+    pendingAttachments,
+    pendingLinks,
+    contextFolders,
+    setContextFolders,
+    uploadingAttachment,
+    dragOver,
+    authorizedRoots,
+    addAttachments,
+    removePendingAttachment,
+    removePendingLink,
+    removeContextFolder,
+    revokeRootAuth,
+    handleFileSelect,
+    handlePaste,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+    pendingMaterials,
+    pendingDirRefs,
+    mentionOpen,
+    mentionQuery,
+    mentionIndex,
+    mentionDir,
+    mentionDirItems,
+    mentionDirLoading,
+    mentionRef,
+    handleInput,
+    handleMentionKeyDown,
+    handleMentionSelect,
+    openMentionFromIcon,
+    goBackDir,
+    buildBlocks,
+  } = composer;
+
+  // 监听从文件浏览器发送的附件（挂载时先消费事件缓冲，防止"发送到新建节点"时事件先于监听器注册而丢失）
+  useEffect(() => {
+    // 挂载时消费缓冲中属于本节点的附件
+    const pendingMap = window.__pendingNodeAttachments;
+    if (pendingMap?.[currentMdId]?.length) {
+      const buffered = pendingMap[currentMdId];
+      addAttachments(buffered);
+      delete pendingMap[currentMdId];
+    }
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { node_id: string; attachment: MessageAttachment };
+      if (detail?.node_id === currentMdId && detail?.attachment) {
+        // 事件已到达则从缓冲移除，避免节点重挂载时重复添加
+        if (pendingMap?.[currentMdId]) {
+          pendingMap[currentMdId] = pendingMap[currentMdId].filter((a) => a.id !== detail.attachment.id);
+          if (pendingMap[currentMdId].length === 0) delete pendingMap[currentMdId];
+        }
+        addAttachments([detail.attachment]);
+      }
+    };
+    window.addEventListener('add-attachment-to-node', handler);
+    return () => window.removeEventListener('add-attachment-to-node', handler);
+  }, [currentMdId, addAttachments]);
+
   // 左侧导航圆点：每个 user 消息一个 ref，用于点击跳转 + 滚动联动高亮
   const userMsgRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [activeUserMsgId, setActiveUserMsgId] = useState<string | null>(null);
@@ -1990,7 +2217,7 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
   const agentNodeId = data.nodeMdId || id;
 
   /** 持久化节点级 MCP / 技能选择到 .md frontmatter（重启后恢复）；null 表示清除该字段（回归跟随全局），字段缺失表示保留现值 */
-  const persistAgentState = async (patch: { enabledMcpIds?: string[] | null; selectedSkills?: string[] | null; quickPromptIds?: string[] | null }) => {
+  const persistAgentState = async (patch: { enabledMcpIds?: string[] | null; selectedSkills?: string[] | null; quickPromptIds?: string[] | null; multiAgentMode?: boolean | null; teamIds?: string[] | null; teamMainModel?: string | null; teamWorkerModel?: string | null }) => {
     try {
       await fetch('/api/nodes', {
         method: 'POST',
@@ -2021,6 +2248,68 @@ export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelP
       return next;
     });
   };
+
+  /** 切换多智能体协作模式（Multi-agent mode）：开启后本轮主 agent 可编排多成员协作；
+   *  与 MCP 勾选同构：更新 state + 节点 data + 写盘 frontmatter 三连 */
+  const toggleMultiAgentMode = () => {
+    const next = !multiAgentMode;
+    setMultiAgentMode(next);
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === agentNodeId
+          ? { ...n, data: { ...n.data, multiAgentMode: next } }
+          : n,
+      ),
+    );
+    persistAgentState({ multiAgentMode: next });
+  };
+
+  /** 选择 Team 分栏两档模型（队长 / 成员）：与开关同构的 state + 节点 data + 写盘 frontmatter 三连。
+   *  只写 frontmatter 的 team_main_model / team_worker_model，**不动节点 chat 模型** */
+  const selectTeamModel = (tier: 'main' | 'worker', modelRef: string) => {
+    if (!modelRef) return;
+    if (tier === 'main') {
+      setTeamMainModel(modelRef);
+      setNodes((nds) =>
+        nds.map((n) => (n.id === agentNodeId ? { ...n, data: { ...n.data, teamMainModel: modelRef } } : n)),
+      );
+      persistAgentState({ teamMainModel: modelRef });
+      return;
+    }
+    setTeamWorkerModel(modelRef);
+    setNodes((nds) =>
+      nds.map((n) => (n.id === agentNodeId ? { ...n, data: { ...n.data, teamWorkerModel: modelRef } } : n)),
+    );
+    persistAgentState({ teamWorkerModel: modelRef });
+  };
+
+  /** 登记本节点产生的协作团队（team_run 每推一帧成员快照即携带 teamId）：
+   *  幂等追加 + 节点 data + 写盘 frontmatter 三连，团队工作台据此列出「本会话产生过的团队」 */
+  const rememberTeamId = useCallback((teamId: string) => {
+    if (!teamId || teamIdsRef.current.includes(teamId)) return;
+    const next = [...teamIdsRef.current, teamId];
+    teamIdsRef.current = next;
+    setTeamIds(next);
+    setNodes((nds) =>
+      nds.map((n) => (n.id === agentNodeId ? { ...n, data: { ...n.data, teamIds: next } } : n)),
+    );
+    void persistAgentState({ teamIds: next });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentNodeId]);
+
+  /** 解绑本节点的一个协作团队记录（工作台「过往记录」的删除）：只从节点清单移除（不触碰引擎侧记录），
+   *  幂等 + 节点 data + 写盘 frontmatter 三连；清空即回到工作台初始发起界面 */
+  const forgetTeamId = useCallback((teamId: string) => {
+    if (!teamId || !teamIdsRef.current.includes(teamId)) return;
+    const next = teamIdsRef.current.filter((x) => x !== teamId);
+    teamIdsRef.current = next;
+    setTeamIds(next);
+    setNodes((nds) =>
+      nds.map((n) => (n.id === agentNodeId ? { ...n, data: { ...n.data, teamIds: next } } : n)),
+    );
+    void persistAgentState({ teamIds: next });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentNodeId]);
 
   /** 节点 MCP id → 显示名（store options 未就绪/含自定义时回退 id） */
   const mcpNameOf = useCallback(
@@ -2470,59 +2759,6 @@ ${rows.join('\n')}
     return `${header}\n\n${table}\n${toolHint}${footer}`;
   };
 
-  /** File → base64 (不含 data: 前缀) */
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result as string;
-        resolve(result.split(',')[1] || '');
-      };
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const handleFileSelect = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0 || !currentMdId) return;
-
-    const fileArray = Array.from(files);
-
-    setUploadingAttachment(true);
-    for (let i = 0; i < fileArray.length; i++) {
-      const file = fileArray[i];
-      try {
-        // 用 base64 + JSON 上传，避免 Turbopack FormData bug
-        const base64 = await fileToBase64(file);
-
-        const resp: Response = await fetch('/api/attachments', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            nodeId: currentMdId,
-            nodeTitle: data.title || '',
-            fileName: file.name,
-            fileType: file.type || 'application/octet-stream',
-            data: base64,
-          }),
-        });
-        const respData = await resp.json();
-        if (respData.success && respData.attachment) {
-          setPendingAttachments((prev) => [...prev, respData.attachment]);
-        } else {
-          console.error('上传附件失败:', file.name, respData.error);
-        }
-      } catch (e) {
-        if (e instanceof DOMException && e.name === 'NotReadableError') {
-          console.warn(`附件无法读取（文件可能已被移动或删除）: ${file.name}`);
-        } else {
-          console.error('上传附件失败:', file.name, e);
-        }
-      }
-    }
-    setUploadingAttachment(false);
-  }, [currentMdId]);
-
   // 划词检测：在消息内容（data-msg-node 内）选中文字 → 弹出操作窗。
   // 多节点安全：仅选区起点所在消息的监听命中（其他节点 anchor 不在其消息内）。
   useEffect(() => {
@@ -2590,357 +2826,21 @@ ${rows.join('\n')}
     };
   }, []);
 
-  // 按钮 1：选中文字 → 保存为当前节点附件材料（attachments/ 目录），加入待发附件
-  const handleSaveAsAttachment = useCallback(async (text: string) => {
+  // 按钮 1：选中文字 → 在输入框上方挂引用标签（仅内存态，发送时以 `> 引用文字` 并入本轮消息）。
+  // 标签形态与 md 编辑「发送到当前会话」一致：ai 图标 + 选中文字。
+  // 不再落盘：旧实现会同时写一份 note-<时间戳>.txt 到 materials/，但该文件无任何回读路径，
+  // 只会在账本原件层留下碎片、污染材料索引与 search_materials 结果，故移除。
+  const handleQuoteSelection = useCallback((text: string) => {
     setSelectionMenu(null);
     clearDocSelection();
     if (!currentMdId || !text) return;
-    try {
-      const base64 = btoa(unescape(encodeURIComponent(text)));
-      const resp = await fetch('/api/attachments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodeId: currentMdId,
-          nodeTitle: data.title || '',
-          fileName: `note-${Date.now()}.txt`,
-          fileType: 'text/plain',
-          data: base64,
-        }),
-      });
-      const d = await resp.json();
-      if (d.success && d.attachment) {
-        setPendingAttachments((prev) => [...prev, d.attachment]);
-      } else {
-        console.warn('[划词] 附件保存失败:', d.error);
-      }
-    } catch (err) {
-      console.warn('[划词] 附件保存失败:', String(err));
-    }
-  }, [currentMdId, data.title, clearDocSelection]);
+    setReferenceTag({ text });
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [currentMdId, clearDocSelection]);
 
-  /** 获取 contentEditable 内光标偏移（字符数） */
-  const getCursorOffset = useCallback((el: HTMLElement): number => {
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || !el.contains(sel.anchorNode)) return el.textContent?.length ?? 0;
-    const range = sel.getRangeAt(0).cloneRange();
-    const pre = range.cloneRange();
-    pre.selectNodeContents(el);
-    pre.setEnd(range.endContainer, range.endOffset);
-    return pre.toString().length;
-  }, []);
+  // 粘贴 / 拖拽 / 待发附件移除：统一由 composer/useComposer 承载（chat 与 team 共用）
 
-  /** 粘贴图片/PDF */
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    if (isStreaming) return;
-    const items = e.clipboardData?.items;
-
-    // 1) 文件粘贴：作为附件上传
-    if (items) {
-      const files: File[] = [];
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.kind === 'file') {
-          const file = item.getAsFile();
-          if (file) files.push(file);
-        }
-      }
-      if (files.length > 0) {
-        e.preventDefault();
-        const dt = new DataTransfer();
-        files.forEach((f) => dt.items.add(f));
-        handleFileSelect(dt.files);
-        return;
-      }
-    }
-
-    // 2) 粘贴单个 URL：自动识别为链接材料（类似附件胶囊），发送时 AI 用 web_fetch 访问
-    let text = e.clipboardData?.getData('text/plain')?.trim() ?? '';
-    // 引号包裹的文本先剥掉首尾配对引号再识别（find 拖文件到终端复制的路径常带引号）
-    const quoted = text.match(/^(['"])(.*)\1$/);
-    if (quoted) text = quoted[2].trim();
-    if (text && URL_ONLY_RE.test(text)) {
-      e.preventDefault();
-      setPendingLinks((prev) => (prev.some((l) => l.url === text) ? prev : [...prev, { url: text }]));
-      return;
-    }
-
-    // 2.5) 粘贴本地绝对路径：转为输入框内文件引用 chip（@文件名），
-    //      发送时经 pendingDirRefs 注入 AI 上下文，AI 用 read_file 读取完整绝对路径；
-    //      未授权目录的路径在 AI 请求授权时，因用户消息中明确出现过该路径而自动放行（AUTH_REQ 安全护栏）
-    if (text) {
-      const pathTokens = text.split(/[\s，,；;]+/).filter((t) => {
-        if (t.length === 0 || t.includes('://')) return false; // 排除 URL
-        return /^(\/|~\/|~)(?!\/+$).+\S$/.test(t); // 绝对路径（/ 或 ~ 开头，非纯斜杠）
-      });
-      if (pathTokens.length > 0) {
-        e.preventDefault();
-        let newText = text;
-        for (const p of [...new Set(pathTokens)]) {
-          const name = p.replace(/\/+$/, '').split('/').pop() ?? p;
-          // 登记文件引用（函数式更新去重，避免闭包 stale）
-          setPendingDirRefs((prev) => (prev.some((r) => r.path === p) ? prev : [...prev, { name, path: p }]));
-          setPendingDirRefPaths((prev) => new Set(prev).add(p));
-          // 文本中把路径替换为 @文件名 标记（镜像 effect 按 localInput 重建 DOM 并渲染 chip）
-          const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          newText = newText.replace(new RegExp(escaped, 'g'), `@${name}`);
-        }
-        // 光标处插入替换后的文本；DOM 由镜像 effect 重建（与 @ mention 一致，光标落到末尾）
-        const el = textareaRef.current;
-        const current = el?.textContent ?? '';
-        const offset = el ? getCursorOffset(el) : current.length;
-        setLocalInput(current.slice(0, offset) + newText + current.slice(offset));
-        return;
-      }
-    }
-
-    // 3) 普通文本：contentEditable 需要按纯文本插入（阻止浏览器粘贴富文本 HTML 节点），
-    //    onInput 会自动同步镜像 → 重建 DOM，光标由浏览器保持
-    const plain = e.clipboardData?.getData('text/plain') ?? '';
-    if (plain) {
-      e.preventDefault();
-      document.execCommand('insertText', false, plain);
-    }
-  }, [isStreaming, handleFileSelect, getCursorOffset]);
-
-  /** 拖拽进入 */
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!isStreaming) setDragOver(true);
-  }, [isStreaming]);
-
-  /** 拖拽离开 */
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-  }, []);
-
-  /** 拖拽放下 */
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-    if (isStreaming) return;
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) {
-      handleFileSelect(files);
-    }
-  }, [isStreaming, handleFileSelect]);
-
-  const removePendingAttachment = useCallback((attId: string) => {
-    setPendingAttachments((prev) => prev.filter((a) => a.id !== attId));
-  }, []);
-
-  // 加载 materials 目录树（一次性缓存，供多级子目录浏览）
-  const loadMaterialTree = useCallback(async (): Promise<any[]> => {
-    if (materialTreeRef.current) return materialTreeRef.current;
-    try {
-      const resp = await fetch('/api/materials?action=list');
-      const data = await resp.json();
-      if (data.success && Array.isArray(data.tree)) {
-        materialTreeRef.current = data.tree;
-      } else {
-        materialTreeRef.current = [];
-      }
-    } catch {
-      materialTreeRef.current = [];
-    }
-    return materialTreeRef.current ?? [];
-  }, []);
-
-  // 按相对路径（'' = 根）列出 materials 目录内容（子目录 + 文件），支持多级嵌套
-  const listMaterialDir = useCallback(async (relPath: string): Promise<DirMentionItem[]> => {
-    const tree = await loadMaterialTree();
-    const segs = relPath ? relPath.split('/') : [];
-    const findNode = (nodes: any[], pathSegs: string[]): any[] | null => {
-      if (pathSegs.length === 0) return nodes || [];
-      const [head, ...rest] = pathSegs;
-      const child = (nodes || []).find((n) => n.type === 'directory' && n.name === head);
-      if (!child) return null;
-      return findNode(child.children || [], rest);
-    };
-    const nodes = findNode(tree, segs);
-    if (!nodes) return [];
-    return nodes.map((n) => ({
-      name: n.name,
-      path: n.path ?? '',
-      type: n.type === 'directory' ? 'directory' : 'file',
-      size: n.size != null ? String(n.size) : undefined,
-      extension: n.extension,
-    }));
-  }, [loadMaterialTree]);
-
-  /** 进入 materials 目录浏览（从根开始） */
-  const enterMentionMaterials = useCallback(() => {
-    // 打开 materials 浏览时强制重新拉取目录树：材料列表以文件系统为准，
-    // 否则已打开节点会一直显示首次缓存的旧材料（新建节点才可见）
-    materialTreeRef.current = null;
-    setMentionDir({ root: '__materials__', path: '', source: 'materials' });
-    setMentionQuery('');
-    setMentionIndex(0);
-    setMentionDirLoading(true);
-    listMaterialDir('').then((items) => {
-      setMentionDirItems(items);
-      setMentionDirLoading(false);
-    });
-  }, [listMaterialDir]);
-
-  // 关闭 mention 弹窗
-  const closeMention = useCallback(() => {
-    setMentionOpen(false);
-    setMentionQuery('');
-    setMentionAtPos(-1);
-    setMentionIndex(0);
-  }, []);
-
-  // 点击 mention 弹窗外部 / Esc → 关闭弹窗
-  useEffect(() => {
-    if (!mentionOpen) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (t.closest('[data-mention-popup]')) return;
-      if (t.closest('[data-chat-input]')) return;
-      closeMention();
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeMention(); };
-    document.addEventListener('mousedown', onDown);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [mentionOpen, closeMention]);
-
-  // 加载目录内容（授权目录/子目录文件列表）
-  const loadDirItems = useCallback(async (dir: string) => {
-    setMentionDirLoading(true);
-    try {
-      const resp = await fetch(`/api/local-files?path=${encodeURIComponent(dir)}`);
-      const data = await resp.json();
-      if (data.success && Array.isArray(data.items)) {
-        setMentionDirItems(data.items as DirMentionItem[]);
-      } else {
-        setMentionDirItems([]);
-      }
-    } catch {
-      setMentionDirItems([]);
-    } finally {
-      setMentionDirLoading(false);
-    }
-  }, []);
-
-  // 打开 @ 入口列表（Materials 文件夹 + 授权目录们）
-  const openDirMode = useCallback(() => {
-    setMentionDir(null);
-    setMentionDirItems([]);
-    setMentionIndex(0);
-  }, []);
-
-  // 进入授权目录/子目录浏览（source 由入口来源决定：授权目录 or materials）
-  const enterDir = useCallback((item: DirMentionItem) => {
-    if (item.type !== 'directory') return;
-    if (!mentionDir) {
-      // 从入口列表进入：materials 根（固定标记）或授权目录（完整路径）
-      const source: 'auth' | 'materials' = item.path === '__materials__' ? 'materials' : 'auth';
-      setMentionDir({ root: item.path, path: '', source });
-      setMentionQuery('');
-      setMentionIndex(0);
-      if (source === 'materials') {
-        // 从入口列表进入 materials：同样强制刷新（与 enterMentionMaterials 一致），
-        // 保证本节点打开期间新增/删除的材料可见
-        materialTreeRef.current = null;
-        setMentionDirLoading(true);
-        listMaterialDir('').then((items) => { setMentionDirItems(items); setMentionDirLoading(false); });
-      } else {
-        loadDirItems(item.path);
-      }
-    } else {
-      // 进入子目录
-      const sub = mentionDir.path ? `${mentionDir.path}/${item.name}` : item.name;
-      setMentionDir({ ...mentionDir, path: sub });
-      setMentionQuery('');
-      setMentionIndex(0);
-      if (mentionDir.source === 'materials') {
-        setMentionDirLoading(true);
-        listMaterialDir(sub).then((items) => { setMentionDirItems(items); setMentionDirLoading(false); });
-      } else {
-        loadDirItems(`${mentionDir.root}/${sub}`);
-      }
-    }
-  }, [mentionDir, loadDirItems, listMaterialDir]);
-
-  // 返回上级（或回到入口列表）
-  const goBackDir = useCallback(() => {
-    setMentionQuery('');
-    setMentionIndex(0);
-    if (!mentionDir) {
-      // 入口列表无可返回 → 关闭弹窗
-      closeMention();
-      return;
-    }
-    if (!mentionDir.path) {
-      // 已回到根 → 返回入口列表（授权目录存在时显示；否则关闭）
-      if (authorizedRoots.length > 0) {
-        setMentionDir(null);
-        setMentionDirItems([]);
-      } else {
-        closeMention();
-      }
-      return;
-    }
-    const parentPath = mentionDir.path.split('/').slice(0, -1).join('/');
-    const loadParent = (relOrFull: string) => {
-      if (mentionDir.source === 'materials') {
-        setMentionDirLoading(true);
-        listMaterialDir(relOrFull).then((items) => { setMentionDirItems(items); setMentionDirLoading(false); });
-      } else {
-        loadDirItems(relOrFull);
-      }
-    };
-    if (!parentPath) {
-      setMentionDir({ ...mentionDir, path: '' });
-      loadParent(mentionDir.source === 'materials' ? '' : mentionDir.root);
-    } else {
-      setMentionDir({ ...mentionDir, path: parentPath });
-      loadParent(mentionDir.source === 'materials' ? parentPath : `${mentionDir.root}/${parentPath}`);
-    }
-  }, [mentionDir, loadDirItems, closeMention, listMaterialDir, authorizedRoots.length]);
-
-  // ---- 已授权文件夹（全局授权：AI 可读写） ----
-  const loadAuthorizedRoots = useCallback(async () => {
-    try {
-      const resp = await fetch('/api/local-files?action=roots');
-      const data = await resp.json();
-      if (data.success) {
-        const roots = (data.roots || []) as string[];
-        setAuthorizedRoots(roots);
-        // 联动：撤销授权后，输入框下方工具栏中已不再授权的操作目录一并移除
-        setContextFolders(prev => prev.filter(f => roots.includes(f.path)));
-      }
-    } catch { /* ignore */ }
-  }, []);
-
-  // 断开授权（保留浏览）
-  const revokeRootAuth = useCallback(async (root: string) => {
-    try {
-      const resp = await fetch(`/api/local-files?action=revoke_root&path=${encodeURIComponent(root)}`);
-      const data = await resp.json();
-      if (data.success) {
-        setAuthorizedRoots(data.roots || []);
-        window.dispatchEvent(new CustomEvent('local-roots-changed'));
-      }
-    } catch { /* ignore */ }
-  }, []);
-
-  // 加载授权列表，并监听侧栏授权变化（local-roots-changed 事件）
-  useEffect(() => {
-    loadAuthorizedRoots();
-    const handler = () => loadAuthorizedRoots();
-    window.addEventListener('local-roots-changed', handler);
-    return () => window.removeEventListener('local-roots-changed', handler);
-  }, [loadAuthorizedRoots]);
+  // @ 弹窗数据源（materials 树 / 授权目录 / 导航 / 关闭 / 授权列表）：统一由 composer/useComposer 承载
 
   // 新节点（messages 空）自动把所有已授权目录填入操作目录工具栏（免发送，仅首次触发一次）
   useEffect(() => {
@@ -2996,6 +2896,7 @@ ${rows.join('\n')}
         if (dd.success && dd.node) {
           setOutcomeStatus(dd.node.outcome_status || null);
           setForceLocked(!!dd.node.outcome_force_locked);
+          setOutcomeStaleReason(dd.node.outcome_stale_reason || null);
         }
       };
       let d = await doLock();
@@ -3044,6 +2945,7 @@ ${rows.join('\n')}
           if (d.success && d.node) {
             setOutcomeStatus(d.node.outcome_status || null);
             setForceLocked(!!d.node.outcome_force_locked);
+            setOutcomeStaleReason(d.node.outcome_stale_reason || null);
           }
         })
         .catch(() => {});
@@ -3060,171 +2962,7 @@ ${rows.join('\n')}
     };
   }, [currentMdId, nodeProjectQuery]);
 
-  /** 选择 @ 引用的文件（materials 材料或授权目录中的文件），目录项则进入浏览 */
-  const handleMentionSelect = useCallback((file: MaterialItem | DirMentionItem) => {
-    // 目录：进入浏览（不关闭弹窗，保留 @ 状态）
-    if (file.type === 'directory') {
-      enterDir(file as DirMentionItem);
-      return;
-    }
-    // 1) 引用登记（发送时作为操作对象注入 AI 上下文）
-    if (mentionDir?.source === 'materials') {
-      // materials 材料 → read_material 语义（路径为相对项目根的 materials/xxx）
-      const dir = file as DirMentionItem;
-      const mat: MaterialItem = {
-        id: `mat-${dir.path}`,
-        name: dir.name,
-        path: `materials/${dir.path}`,
-        size: typeof dir.sizeBytes === 'number' ? dir.sizeBytes : (Number(dir.size) || 0),
-        extension: dir.extension ?? '',
-        type: dir.extension ? dir.extension.replace('.', '') : 'file',
-        uploadedAt: '',
-      };
-      if (!pendingMaterialPaths.has(mat.path)) {
-        setPendingMaterials(prev => [...prev, mat]);
-        setPendingMaterialPaths(prev => new Set(prev).add(mat.path));
-      }
-    } else {
-      const dir = file as DirMentionItem;
-      if (!pendingDirRefPaths.has(dir.path)) {
-        setPendingDirRefs(prev => [...prev, { name: dir.name, path: dir.path, size: dir.size }]);
-        setPendingDirRefPaths(prev => new Set(prev).add(dir.path));
-      }
-    }
-    // 2) 输入框：@ 触发 → 原位替换查询词；图标触发（mentionAtPos < 0）→ 末尾追加 @文件名
-    //    镜像文本含 @文件名 标记，DOM 由镜像 effect 渲染为高亮 chip
-    const el = textareaRef.current;
-    if (el) {
-      if (mentionAtPos >= 0) {
-        const domText = el.textContent ?? '';
-        const beforeAt = domText.slice(0, mentionAtPos);
-        const afterQuery = domText.slice(mentionAtPos + 1 + mentionQuery.length);
-        setLocalInput(`${beforeAt}@${file.name}${afterQuery}`);
-      } else {
-        const cur = localInput ?? '';
-        const sep = cur.length > 0 && !cur.endsWith(' ') && !cur.endsWith('\n') ? ' ' : '';
-        setLocalInput(`${cur}${sep}@${file.name} `);
-      }
-    }
-    closeMention();
-    setTimeout(() => textareaRef.current?.focus(), 0);
-  }, [mentionAtPos, mentionQuery, localInput, mentionDir, pendingMaterialPaths, pendingDirRefPaths, closeMention, enterDir]);
-
-  // ===== contentEditable 输入框：@ 文件引用 chip（同 ImageGenPromptBar 的富文本机制） =====
-  /** 获取 contentEditable 中光标相对 textContent 的偏移（无光标/不在元素内 → 末尾） */
-  /** 创建 @文件引用 chip（contentEditable=false 整块删除，含 × 移除按钮） */
-  const createFileChip = useCallback((path: string, label: string, onRemove: (path: string) => void): HTMLSpanElement => {
-    const span = document.createElement('span');
-    span.dataset.filePath = path;
-    span.contentEditable = 'false';
-    span.setAttribute('class', 'node-file-chip');
-    const labelEl = document.createElement('span');
-    labelEl.textContent = label;
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.textContent = '×';
-    del.title = 'Remove file reference';
-    del.addEventListener('click', (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      span.remove();
-      onRemove(path);
-    });
-    span.appendChild(labelEl);
-    span.appendChild(del);
-    return span;
-  }, []);
-
-  /** 文本镜像 → DOM：把 @文件名 标记文本渲染为高亮 chip；其余按纯文本重建 */
-  const renderPromptToDom = useCallback(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    const text = localInput;
-    // 引用候选：materials + 授权目录文件（长标签优先，避免短文件名误匹配）
-    const refs: Array<{ label: string; path: string }> = [
-      ...pendingMaterials.map((m) => ({ label: `@${m.name}`, path: m.path })),
-      ...pendingDirRefs.map((r) => ({ label: `@${r.name}`, path: r.path })),
-    ].sort((a, b) => b.label.length - a.label.length);
-    const removeRef = (path: string) => {
-      setPendingMaterials((prev) => prev.filter((m) => m.path !== path));
-      setPendingMaterialPaths((prev) => { const s = new Set(prev); s.delete(path); return s; });
-      setPendingDirRefs((prev) => prev.filter((r) => r.path !== path));
-      setPendingDirRefPaths((prev) => { const s = new Set(prev); s.delete(path); return s; });
-      const after = textareaRef.current?.textContent ?? '';
-      setLocalInput(after);
-    };
-    el.innerHTML = '';
-    let rest = text;
-    while (rest.length > 0) {
-      let matched: { label: string; path: string } | null = null;
-      let matchIdx = -1;
-      for (const c of refs) {
-        const idx = rest.indexOf(c.label);
-        if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) { matched = c; matchIdx = idx; }
-      }
-      if (!matched) break;
-      if (matchIdx > 0) el.appendChild(document.createTextNode(rest.slice(0, matchIdx)));
-      el.appendChild(createFileChip(matched.path, matched.label, removeRef));
-      rest = rest.slice(matchIdx + matched.label.length);
-    }
-    if (rest.length > 0) el.appendChild(document.createTextNode(rest));
-    // 光标移到末尾
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(false);
-    const sel = window.getSelection();
-    if (sel) { sel.removeAllRanges(); sel.addRange(range); }
-  }, [localInput, pendingMaterials, pendingDirRefs, createFileChip]);
-
-  // 镜像 effect：localInput 变化 → 重建 DOM（IME 组合中跳过，避免打断中文输入）
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    if (composingRef.current) return;
-    if ((el.textContent ?? '') !== localInput) {
-      renderPromptToDom();
-    }
-  }, [localInput, renderPromptToDom]);
-
-  /** contentEditable onInput：同步文本镜像 + 键盘删除 chip 同步引用 + @ mention 检测 */
-  const handleInput = useCallback((e: React.FormEvent<HTMLDivElement>) => {
-    const el = e.currentTarget;
-    const newText = el.textContent ?? '';
-    setLocalInput(newText);
-    // 键盘（Backspace/Delete）删掉 chip → DOM 中消失 → 同步从引用集合移除
-    const chipPaths = new Set<string>();
-    el.querySelectorAll<HTMLSpanElement>('span[data-file-path]').forEach((s) => {
-      const p = s.dataset.filePath;
-      if (p) chipPaths.add(p);
-    });
-    setPendingMaterials((prev) => prev.filter((m) => chipPaths.has(m.path)));
-    setPendingMaterialPaths((prev) => { const s = new Set(prev); for (const p of [...s]) if (!chipPaths.has(p)) s.delete(p); return s; });
-    setPendingDirRefs((prev) => prev.filter((r) => chipPaths.has(r.path)));
-    setPendingDirRefPaths((prev) => { const s = new Set(prev); for (const p of [...s]) if (!chipPaths.has(p)) s.delete(p); return s; });
-    // @ mention 检测（不要求前导空格）
-    const cursorPos = getCursorOffset(el);
-    const textBeforeCursor = newText.slice(0, cursorPos);
-    const atMatch = textBeforeCursor.match(/@([^\s@]*)$/);
-    if (atMatch) {
-      const query = atMatch[1];
-      setMentionAtPos(cursorPos - query.length - 1);
-      setMentionQuery(query);
-      setMentionOpen(true);
-      setMentionIndex(0);
-      // 仅新触发时初始化数据源（连续输入/弹窗内导航不重置）：有授权目录 → 入口列表；无 → materials 浏览
-      if (!mentionOpen) {
-        if (authorizedRoots.length > 0) openDirMode();
-        else enterMentionMaterials();
-      }
-    } else if (mentionOpen) {
-      closeMention();
-    }
-  }, [getCursorOffset, authorizedRoots.length, mentionOpen, openDirMode, enterMentionMaterials, closeMention]);
-
-  /** 移除操作目录（工具栏中的授权目录） */
-  const removeContextFolder = useCallback((attId: string) => {
-    setContextFolders(prev => prev.filter(f => f.id !== attId));
-  }, []);
+  // @ 选择 / 输入框 chip 渲染 / 镜像 effect / onInput / 操作目录移除：统一由 composer/useComposer 承载
 
   const handleSend = () => {
     // contentEditable 输入框：以镜像文本为准（含 @文件名 标记，chip 引用由引用集合承载）
@@ -3262,9 +3000,34 @@ ${rows.join('\n')}
     doSend(text);
   };
 
-  const doSend = async (userInput: string, opts?: { continuation?: boolean }) => {
+  /** 团队界面「发起协作」：需求文本走同一轮 /api/chat（本节点的既有链路），
+   *  显式带上 multiAgent（不依赖 state 提交时序）；开关同步置为开启并落盘，
+   *  之后停在团队视图看成员分工与协作过程，最终回答仍回落到对话流。
+   *  ctx：团队输入框自己的附件/@引用上下文（该输入栏有独立的 composer 实例），
+   *  随本轮透传给 doSend 顶替节点级 pending 状态 */
+  const launchTeamRun = (text: string, ctx?: ComposerContext) => {
+    const t = text.trim();
+    if (!t) return;
+    if (!multiAgentMode) toggleMultiAgentMode();
+    setPane('team');
+    void doSend(t, { multiAgent: true, composer: ctx });
+  };
+
+  /** 本轮多智能体成员名单：opts.presetAgentIds 优先——「选完即发起」在同一点击里 setState 尚未提交，
+   *  只能由调用方直接告知本轮名单（同 opts.multiAgent 口径），否则本轮会丢掉刚勾选的成员 */
+  const doSend = async (
+    userInput: string,
+    opts?: { continuation?: boolean; multiAgent?: boolean; presetAgentIds?: string[]; composer?: ComposerContext; attachments?: MessageAttachment[]; references?: MessageReference[] },
+  ) => {
     const isContinuation = opts?.continuation === true;
     if ((!userInput && !isContinuation) || streamingRef.current || persistingRef.current) return;
+    // 本轮引用上下文来源：团队输入栏发起时用其 composer 快照，其余情况沿用节点级输入栏
+    // 重发/重试（Regenerate）会显式回传原轮快照（opts.attachments / opts.references），优先使用
+    const turnAttachments = opts?.attachments ?? opts?.composer?.attachments ?? pendingAttachments;
+    const turnMaterials = opts?.composer?.materials ?? pendingMaterials;
+    const turnDirRefs = opts?.composer?.dirRefs ?? pendingDirRefs;
+    const turnLinks = opts?.composer?.links ?? pendingLinks;
+    const turnFolders = opts?.composer?.folders ?? contextFolders;
     // 新一轮消息发送：清空"等待授权"状态（授权自动继续的事件处理器会在授权完成时重新判断）
     pendingGrantTargetRef.current = null;
     // P5a-1 事件窗口 schema（旁路，行为不变）：每轮 doSend 开始时重置窗口
@@ -3285,12 +3048,13 @@ ${rows.join('\n')}
     // 新一轮：清掉"当前流式全局"的阶段/确认/MCP等瞬态信息
     // （注意：Skills 已按 msgId 分桶，不能在这里粗暴清空！要等 assistantId 生成后，只清对应 msgId 桶）
     setCurrentStage(null);
-    setCompletedStages(new Set());
-    prevStageRef.current = null;
     setHasDisconnectedUpstream(false);
 
     // 如果有引用标签，拼接到消息中
     let effectiveContent = userInput;
+    // 气泡展示与落盘用的正文：剥离已由 chip 承载的 @文件名 标记（避免正文与 chip 重复）；
+    // 送给模型的 effectiveContent 不受影响（下方 --- 资料列表 --- 块已含完整路径）
+    let displayContent = userInput;
     if (!isContinuation && referenceTag) {
       effectiveContent = `> ${referenceTag.text}\n\n${userInput}`;
       setReferenceTag(null); // 发送后清除引用标签
@@ -3312,7 +3076,7 @@ ${rows.join('\n')}
       // 本轮上下文是否携带图片附件（新挂的附件 + 发送窗口内历史 user 消息仍带图的）。
       // 命中时 Auto 优先选视觉模型，使后端能把图片以多模态直连喂给模型（而非描述注入兜底）。
       const hasImageInContext =
-        (pendingAttachments?.length > 0 && pendingAttachments.some((a) => a.type === 'image')) ||
+        (turnAttachments?.length > 0 && turnAttachments.some((a) => a.type === 'image')) ||
         messages.some(
           (m) => m.role === 'user' && !!m.attachments && m.attachments.some((a) => a.type === 'image'),
         );
@@ -3419,46 +3183,51 @@ ${rows.join('\n')}
         effectiveContent = lastUser.content;
       }
     } else {
+      // @引用 快照：与下方拼给 AI 的正文块同源，用于气泡 chip 展示 + 落盘（<!-- REFERENCES: -->）
+      // 重发/重试时沿用原轮快照（opts.references），否则按本轮输入栏上下文重新组装
+      const turnReferences = opts?.references ?? buildTurnReferences(turnMaterials, turnDirRefs, turnLinks, turnFolders);
+      displayContent = stripReferenceMarkers(userInput, turnReferences);
       userMsg = {
         id: `msg-${Date.now()}`,
         role: 'user',
-        content: userInput,
-        attachments: pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
+        content: displayContent,
+        attachments: turnAttachments.length > 0 ? [...turnAttachments] : undefined,
+        references: turnReferences.length > 0 ? turnReferences : undefined,
         timestamp: now.toISOString(),
       };
 
-      // 使用 pendingMaterials 构建材料引用表
-      for (const mat of pendingMaterials) {
+      // 使用本轮资料引用构建材料引用表
+      for (const mat of turnMaterials) {
         materialFileMap[mat.path] = mat;
       }
 
-      // 构建带材料引用的消息内容（发送给 AI 时使用）
-      if (pendingMaterials.length > 0) {
-        const materialInfo = pendingMaterials.map((file, i) => {
+      // 构建带资料引用的消息内容（发送给 AI 时使用）
+      if (turnMaterials.length > 0) {
+        const materialInfo = turnMaterials.map((file, i) => {
           return `  ${i + 1}. ${file.name} (${file.type}, ${formatFileSize(file.size)})\n     路径: ${file.path}`;
         }).join('\n');
-        effectiveContent += `\n\n--- 引用资料列表 ---\n${materialInfo}\n如需了解资料详细内容，请使用 read_material 工具读取。`;
+        effectiveContent += `\n\n--- 资料列表 ---\n${materialInfo}\n--- 资料列表结束 ---\n\n如需了解资料内容，请使用 read_attachment 工具读取（路径已在列表中给出，勿向用户索要）。`;
       }
 
       // 引用授权目录中的文件：提示 AI 用文件工具读取
-      if (pendingDirRefs.length > 0) {
-        const dirInfo = pendingDirRefs.map((ref, i) => {
+      if (turnDirRefs.length > 0) {
+        const dirInfo = turnDirRefs.map((ref, i) => {
           return `  ${i + 1}. ${ref.name}${ref.size ? ` (${ref.size})` : ''}\n     路径: ${ref.path}`;
         }).join('\n');
         effectiveContent += `\n\n--- 引用本地文件 ---\n${dirInfo}\n以上为本地文件引用（来源：@ 引用或用户粘贴路径）。如需了解文件内容，请使用 read_file 工具读取完整绝对路径；若目录未授权，请先按 AUTH_REQ 流程请求授权。`;
       }
 
       // 链接材料：粘贴 URL 自动识别，提示 AI 用 web_fetch 访问
-      if (pendingLinks.length > 0) {
-        const linkInfo = pendingLinks.map((l, i) => `  ${i + 1}. ${l.url}`).join('\n');
+      if (turnLinks.length > 0) {
+        const linkInfo = turnLinks.map((l, i) => `  ${i + 1}. ${l.url}`).join('\n');
         effectiveContent += `\n\n--- 链接材料 ---\n${linkInfo}\n请使用 web_fetch 工具依次访问以上链接获取网页内容，并结合链接内容回答用户问题。`;
       }
 
       // 操作目录（授权目录/子文件夹发送到节点）：提示 AI 在指定目录内完成读写操作
-      if (contextFolders.length > 0) {
+      if (turnFolders.length > 0) {
         // 用户从文件面板一键发送的子文件夹 = 锁定操作范围
-        const hasUserLocked = contextFolders.some((f) => f.id.startsWith('sent-folder:'));
-        const folderInfo = contextFolders.map((folder) => {
+        const hasUserLocked = turnFolders.some((f) => f.id.startsWith('sent-folder:'));
+        const folderInfo = turnFolders.map((folder) => {
           const isUserLocked = folder.id.startsWith('sent-folder:');
           return `- ${folder.name}${isUserLocked ? '（用户指定·锁定操作范围）' : ''}\n  路径: ${folder.path}`;
         }).join('\n');
@@ -3499,13 +3268,8 @@ ${rows.join('\n')}
     setStreamingMsgId(assistantId);
     setLocalInput('');
     clearNodeDraft();
-    setPendingAttachments([]);
-    setPendingMaterials([]);
-    setPendingMaterialPaths(new Set());
-    setPendingDirRefs([]);
-    setPendingDirRefPaths(new Set());
-    setPendingLinks([]);
-    setContextFolders([]);
+    // 团队输入栏发起时不重置节点输入栏的引用（本轮用的是团队 composer 快照，节点侧待发内容应保留）
+    if (!opts?.composer) composer.reset();
     setIsStreaming(true);
     streamingRef.current = true; // 同步执行标志到 ref，供输入框/发送按钮同步判断
     // 新任务开始：重置 AI Coding 循环状态（等待本轮工具调用重新驱动）
@@ -3584,7 +3348,7 @@ ${rows.join('\n')}
           const attachmentInfo = fileAtts.map((att, i) => {
             return `  ${i + 1}. ${att.name} (${att.type === 'text' ? 'Text' : att.type === 'image' ? 'Image' : 'File'}, ${formatFileSize(att.size)})\n     路径: ${att.path}`;
           }).join('\n');
-          serialized += `\n\n--- 附件列表 ---\n${attachmentInfo}\n--- 附件列表结束 ---\n\n如需了解附件内容，请使用 read_attachment 工具读取。`;
+          serialized += `\n\n--- 资料列表 ---\n${attachmentInfo}\n--- 资料列表结束 ---\n\n如需了解资料内容，请使用 read_attachment 工具读取（路径已在列表中给出，勿向用户索要）。`;
         }
 
         return { role: m.role, content: serialized };
@@ -3630,6 +3394,11 @@ ${rows.join('\n')}
     let reasoningContent = '';
     const toolCallRecords: ToolCallRecord[] = [];
     const outputFileItems: OutputFileItem[] = [];
+    // 多智能体协作进度：本轮 team_run 编排的成员分支快照（subagent_update 逐帧覆盖；
+    // 用局部变量而非 state，保证流末收口读到的是最新值——同 toolCallRecords 范式）
+    let subagentPanel: SubagentPanel | null = null;
+    // 协作「群聊流」时间线（subagent_events 增量累积）：只活在本次流式过程与会话内存里，不落盘
+    const subagentEventList: TeamChatEvent[] = [];
 
     const requestBody: Record<string, unknown> = {
       messages: apiMessages,
@@ -3660,6 +3429,22 @@ ${rows.join('\n')}
     // MCP 强制使用列表：勾选才发送（与 skill 一致）；缺省 = 服务端按 Store 全局 enabled + 场景门控自动注入
     if (enabledMcpIds.size > 0) {
       requestBody.enabledMcpIds = Array.from(enabledMcpIds);
+    }
+
+    // 多智能体协作模式：开启才发送（缺省 = 关闭）；服务端据此激活 team 场景并注入编排规则。
+    // opts.multiAgent：团队界面「发起协作」显式带上的本轮开关——同一次点击里 state 尚未提交，
+    // 只能由调用方直接告知本轮是多智能体（见 launchTeamRun）
+    if (multiAgentMode || opts?.multiAgent === true) {
+      requestBody.multiAgentMode = true;
+      // 本次执行的成员名单（弹窗选定的已安装 agent id）：不落盘、仅本轮生效；
+      // 服务端据此优先编排名单内成员，并对名单外补充成员强制弹卡请用户批准
+      const ids = opts?.presetAgentIds ?? presetAgentIds;
+      if (ids.length > 0) {
+        requestBody.presetAgentIds = ids;
+      }
+      // Team 分栏两档模型：队长（规划 + 复核/整合）与成员（一刀切）各跑一档；服务端交给队长会话与成员会话
+      if (resolvedTeamMainModel) requestBody.teamMainModel = resolvedTeamMainModel;
+      if (resolvedTeamWorkerModel) requestBody.teamWorkerModel = resolvedTeamWorkerModel;
     }
 
     if (custom) {
@@ -3812,7 +3597,7 @@ ${rows.join('\n')}
               if (parsed.reasoning) {
                 reasoningContent += parsed.reasoning;
                 if (mountedRef.current) {
-                  setStageWithProgress('thinking');
+                  setCurrentStage('thinking');
                   setMessages((prev) =>
                     prev.map((m) =>
                       m.id === assistantId
@@ -3829,7 +3614,7 @@ ${rows.join('\n')}
               if (parsed.content) {
                 assistantContent += parsed.content;
                 if (mountedRef.current) {
-                  setStageWithProgress('writing');
+                  setCurrentStage('writing');
                   setMessages((prev) =>
                     prev.map((m) =>
                       m.id === assistantId
@@ -3856,7 +3641,7 @@ ${rows.join('\n')}
                   purpose: tc.purpose,
                 });
                 if (mountedRef.current) {
-                  setStageWithProgress({ kind: 'tool', name: tc.name });
+                  setCurrentStage({ kind: 'tool', name: tc.name });
                   setMessages((prev) =>
                     prev.map((m) =>
                       m.id === assistantId
@@ -3895,6 +3680,97 @@ ${rows.join('\n')}
                     });
                   } catch {
                     /* 回传失败：服务端超时按拒绝处理 */
+                  }
+                  setConfirmPending(false);
+                })();
+              }
+              if (parsed.team_confirm) {
+                // 多智能体协作人类审批门禁：宿主已把团队规划成草案（成员清单 + 任务 DAG），
+                // 用户批准后才 approve & run；拒绝或超时则草案作废，不创建任何成员/任务。
+                const tc = parsed.team_confirm as {
+                  confirmId: string;
+                  /** 团队 id：建队即绑定到本节点，用户刷新页面后团队面板仍能认领（不必等 approve 后的推帧） */
+                  teamId?: string;
+                  goal?: string;
+                  members?: Array<{ name?: string; role?: string; identity?: string }>;
+                  tasks?: Array<{ subject?: string; assignee?: string; dependencies?: string[] }>;
+                  timeoutSec?: number;
+                  /** 名单外补充成员的名字：非空即表示本次是「AI 判断已选成员不够 → 推荐补充」触发的审批 */
+                  extraMemberNames?: string[];
+                  /** 用户名单里被弃用（AI 最终方案未指派任务）的成员名字：非空即表示名单被改动过 */
+                  droppedMemberNames?: string[];
+                };
+                // 建队即绑定：团队此刻已存在于引擎（planning 态），把它登记到本节点，
+                // 这样即使用户在批准前刷新页面，团队工作台依然能列出该团队
+                if (tc.teamId) rememberTeamId(tc.teamId);
+                void (async () => {
+                  const memberLines = (tc.members ?? [])
+                    .map(
+                      (m) =>
+                        `· ${m.name || '(unnamed)'}${m.role ? ` — ${m.role}` : ''}` +
+                        `${m.identity ? `  [agent: ${m.identity}]` : ''}`,
+                    )
+                    .join('\n');
+                  const dag = (tc.tasks ?? [])
+                    .map(
+                      (t, i) =>
+                        `${i + 1}. ${t.subject || '(unnamed task)'}` +
+                        `${t.assignee ? ` → ${t.assignee}` : ''}` +
+                        `${t.dependencies && t.dependencies.length > 0 ? `  (after: ${t.dependencies.join(', ')})` : ''}`,
+                    )
+                    .join('\n');
+                  const mins = Math.ceil((tc.timeoutSec ?? 600) / 60);
+                  const extras = tc.extraMemberNames ?? [];
+                  // AI 改动了用户选定的名单：补充成员（extras）与弃用你选的成员（dropped）都要逐条点名，
+                  // 否则用户会以为名单被原样采纳（名单是软约束，AI 允许只用一部分，但改动必须可见）
+                  const dropped = tc.droppedMemberNames ?? [];
+                  // 完整计划里最占篇幅的「成员 + 任务 DAG」：一律折叠进 details，主文案只留概述
+                  const plan =
+                    `Members (${(tc.members ?? []).length}):\n${memberLines || '(none)'}\n\n` +
+                    `Tasks (${(tc.tasks ?? []).length}):\n${dag || '(none)'}`;
+                  const timeoutNote = `If no action is taken within ${mins} min, the plan is discarded without creating any member or task.`;
+                  // 提醒用户：桌面通知（Electron IPC / web 浏览器 Notification）+ 本节点呼吸灯
+                  setConfirmPending(true);
+                  notifyToolConfirm('team_run', tc.timeoutSec);
+                  const approved = await confirmAsk({
+                    title:
+                      dropped.length > 0
+                        ? 'Approve member changes?'
+                        : extras.length > 0
+                          ? 'Approve extra members?'
+                          : 'Approve multi-agent plan?',
+                    // 名单改动逐条点名：弃用（-）与补充（+）都列出来，用户一眼看清动的是谁；
+                    // 无改动时（普通计划卡）只留目标与规模概述。
+                    // 成员清单与任务 DAG 一律折叠（点 View details 可查），避免卡片高过视口。
+                    message:
+                      dropped.length > 0
+                        ? `The main agent changed the members you picked:\n` +
+                          dropped.map((n) => `- dropped: ${n}`).join('\n') +
+                          (extras.length > 0 ? `\n${extras.map((n) => `+ added: ${n}`).join('\n')}` : '') +
+                          `\n\nApprove to run this lineup. ${timeoutNote}`
+                        : extras.length > 0
+                          ? `The main agent found the members you picked insufficient and suggests adding:\n` +
+                            extras.map((n) => `+ ${n}`).join('\n') +
+                            `\n\nThey run only if you approve. ${timeoutNote}`
+                          : `A multi-agent team will be created and run only after you approve.\n\n` +
+                            `Goal: ${tc.goal || '(none)'}\n\n` +
+                            `Members: ${(tc.members ?? []).length} · Tasks: ${(tc.tasks ?? []).length}\n\n` +
+                            timeoutNote,
+                    details: plan,
+                    confirmLabel: 'Approve & Run',
+                    cancelLabel: 'Discard',
+                    anchor: inputAnchor(),
+                  }).catch(() => false);
+                  // 未批准（Discard，或卡片超时自动作废）→ 方案作废：右侧步骤面板收口为 DISCARDED
+                  if (!approved) setTeamPlanDiscarded(true);
+                  try {
+                    await fetch('/api/chat/confirm', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ confirmId: tc.confirmId, approved }),
+                    });
+                  } catch {
+                    /* 回传失败：服务端超时按未批准处理 */
                   }
                   setConfirmPending(false);
                 })();
@@ -3962,7 +3838,7 @@ ${rows.join('\n')}
                   };
                 }
                 if (mountedRef.current) {
-                  if (up.phase === 'running') setStageWithProgress({ kind: 'tool', name: up.name });
+                  if (up.phase === 'running') setCurrentStage({ kind: 'tool', name: up.name });
                   setMessages((prev) =>
                     prev.map((m) =>
                       m.id === assistantId
@@ -4031,27 +3907,51 @@ ${rows.join('\n')}
                 }
               }
               if (parsed.bobby_trigger) {
-                // 主 Agent 调用 Bobby 插件工具 → 通知画布自动打开 BobbyNode 并建立连线。
-                // 用 window 全局事件（CanvasFlow 监听），避免穿透巨型组件树传 props。
+                // 主 Agent 调用 Bobby 插件工具。
+                // 2026-09-18：原「通知画布自动打开 BobbyNode 并连线」（CanvasFlow 监听 bobby:trigger）
+                // 已随画布移除而停用，此处暂保留广播（无监听方，无副作用），授权改由 grant_required
+                // 事件驱动全局宿主 BobbyAuthHost 弹窗。
                 const bt = parsed.bobby_trigger as { tool: string };
                 if (typeof window !== 'undefined') {
                   window.dispatchEvent(new CustomEvent('bobby:trigger', { detail: { nodeId: id, tool: bt.tool } }));
                 }
               }
-              if (parsed.team_trigger) {
-                // 主 Agent 调用 Agent Teams 编排工具 → 通知画布自动打开 AgentTeamsNode 展示执行过程。
-                const tt = parsed.team_trigger as { tool: string };
-                if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('team:trigger', { detail: { nodeId: id, tool: tt.tool } }));
+              if (parsed.subagent_update) {
+                // 多智能体协作模式：主 Agent 经 team_run 编排成员时，服务端每 2s 推一帧成员进度快照。
+                // 折叠分支卡片（Process 区内）据此实时刷新；逐帧覆盖 —— 新帧即全量成员状态。
+                const panel = parsed.subagent_update as SubagentPanel;
+                subagentPanel = panel;
+                // 登记团队 id 到本节点（团队工作台据此列出本会话产生过的团队）
+                if (panel.teamId) rememberTeamId(panel.teamId);
+                // 同帧可附带「群聊流」增量事件（subagent_events 只含本次新增）：累积成时间线，与快照互补
+                const fresh = Array.isArray(parsed.subagent_events)
+                  ? (parsed.subagent_events as TeamChatEvent[])
+                  : [];
+                if (fresh.length > 0) subagentEventList.push(...fresh);
+                if (mountedRef.current) {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantId
+                        ? { ...m, subagents: panel, subagentEvents: [...subagentEventList] }
+                        : m,
+                    ),
+                  );
                 }
               }
               if (parsed.grant_required) {
                 // Bobby 工具返回授权拦截：记录等待授权的目标。
-                // BobbyNode 弹窗授权成功后广播 bobby:granted，本节点匹配则自动补发"继续"消息重试，
-                // 用户无需手动回复"已授权"。
+                // 全局 BobbyAuthHost（layout.tsx）授权成功后广播 bobby:granted，本节点匹配则自动补发
+                // "继续"消息重试，用户无需手动回复"已授权"。
                 const gr = parsed.grant_required as { target?: string };
                 if (typeof gr.target === 'string') {
                   pendingGrantTargetRef.current = gr.target;
+                  // 即时通知全局浮层弹授权框（无需等 BobbyAuthHost 的 5s 状态轮询）。
+                  // 旧链路是「通知画布打开 BobbyNode 再弹窗」，画布移除后该路径已失效。
+                  if (typeof window !== 'undefined') {
+                    window.dispatchEvent(
+                      new CustomEvent('bobby:grant-required', { detail: { target: gr.target } }),
+                    );
+                  }
                 }
               }
               if (parsed.tool_summary) {
@@ -4062,7 +3962,7 @@ ${rows.join('\n')}
                 // 前端展示一个醒目的提示，让用户知道系统正在强制模型补执行
                 const cm = parsed.claim_mismatch as { mismatches: string[]; correctionCount: number };
                 if (mountedRef.current) {
-                  setStageWithProgress({ kind: 'tool', name: 'claim-verify' });
+                  setCurrentStage({ kind: 'tool', name: 'claim-verify' });
                   // 在 assistant 消息内容末尾追加校验提示（用户可见）
                   assistantContent += `\n\n> ⚠️ **Claim verification failed** (${cm.correctionCount}/2): The following claims lack matching tool execution:\n${cm.mismatches.map((m) => `> - ${m}`).join('\n')}\n> Forcing tool execution...`;
                   setMessages((prev) =>
@@ -4078,7 +3978,7 @@ ${rows.join('\n')}
                 // 系统注入「假完成确认」：本轮无工具调用但此前执行过工具，系统正要求模型确认是否真正完成。
                 // 模型可能随后重答一遍——在此追加轻提示，避免用户看到"无头两遍答案"的错觉。
                 if (mountedRef.current) {
-                  setStageWithProgress({ kind: 'tool', name: 'completion-check' });
+                  setCurrentStage({ kind: 'tool', name: 'completion-check' });
                   assistantContent += `\n\n> ⏳ **Completion check**: No tool was called in this round, so the system is asking the assistant to confirm all steps are truly finished. It will only re-answer if something is still incomplete.`;
                   setMessages((prev) =>
                     prev.map((m) =>
@@ -4255,13 +4155,8 @@ ${rows.join('\n')}
         setStreamingMsgId(null);
         setVisionProgress(null); // 图片识别进度随本轮流式结束清理
         streamingRef.current = false; // 同步执行标志（先复位，待办队列才能进入下一条）
-        // === 优化6：流式结束时把当前阶段标记为已完成，进度条全绿 ===
-        const lastKind = stageKindOf(prevStageRef.current);
-        if (lastKind === 'thinking') setCompletedStages((s) => new Set(s).add('thinking'));
-        else if (lastKind === 'tool') setCompletedStages((s) => new Set(s).add('tool'));
-        else if (lastKind === 'writing') setCompletedStages((s) => new Set(s).add('writing'));
-        prevStageRef.current = null;
-        setCurrentStage(null); // 流式结束，清除阶段胶囊
+        // 流式结束，清除当前阶段（「当前动作」条随之消失）
+        setCurrentStage(null);
         // 回答完成 → 仅窗口不在前台时发系统通知
         if (document.hidden && assistantContent && !assistantContent.startsWith('Error:')) {
           const preview = assistantContent.slice(0, 80).replace(/\n/g, ' ');
@@ -4285,6 +4180,10 @@ ${rows.join('\n')}
             modelId: currentModelId,
             thinkingLevel: actualThinkingLevel,
             taskId: taskIdForTurn ?? undefined,
+            // 多智能体协作分支面板：随本轮回答定格（折叠卡片重启后仍可回看）
+            subagents: subagentPanel ?? undefined,
+            // 协作「群聊流」时间线：仅会话内存（不随回答落盘，重启后由分支面板降级合成）
+            subagentEvents: subagentEventList.length > 0 ? [...subagentEventList] : undefined,
           },
         ];
         setMessages(finalMessages);
@@ -4365,6 +4264,8 @@ ${rows.join('\n')}
           }
           // 从用户消息中获取附件（移除 dataUrl 以减少存储）
           const savedAttachments = userMsg.attachments?.map(({ dataUrl, ...rest }) => rest) || [];
+          // 本轮 @引用 快照（资料/本地文件/链接/操作目录）：纯元数据，直接落盘
+          const savedReferences = userMsg.references || [];
 
           // 1. 先写入 .md 文件（带重试）
           //   - 透传当前节点正在用的自定义模型（apiKey/baseUrl/providerModelId）
@@ -4438,13 +4339,14 @@ ${rows.join('\n')}
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
               // 续写模式：question 用合并了补充信息的 effectiveContent
-              const questionForPersist = isContinuation ? (effectiveContent || userMsg.content) : userInput;
+              const questionForPersist = isContinuation ? (effectiveContent || userMsg.content) : displayContent;
               const appendBody: Record<string, unknown> = {
                 action: 'append',
                 node_id: currentMdId,
                 question: questionForPersist,
                 answer: finalAnswer,
                 question_attachments: savedAttachments,
+                question_references: savedReferences,
                 title: data.title || 'AI Chat',
                 // 记录本轮真实调用的模型与推理强度：auto 模式每轮可能不同，持久化后历史消息可追溯
                 model_id: currentModelId,
@@ -4453,8 +4355,10 @@ ${rows.join('\n')}
                 reasoning: reasoningContent || undefined,
                 tool_calls: toolCallRecords.length > 0 ? toolCallRecords : undefined,
                 task_id: taskIdForTurn ?? undefined,
-                // 持久化输出文件卡片：重启/切换节点后仍可显示（homework/、attachments/ 产物）
+                // 持久化输出文件卡片：重启/切换节点后仍可显示（homework/、materials/ 产物）
                 output_files: outputFileItems.length > 0 ? outputFileItems : undefined,
+                // 多智能体协作分支面板：只在本轮确有成员时写盘（RMETA 单行 JSON）
+                subagents: subagentPanel && subagentPanel.members.length > 0 ? subagentPanel : undefined,
                 compact_model_config: compactModelCfg,
                 // P1 事件溯源（方案 A）：优先由服务端从本轮 .trajectory 事件日志派生摘要；
                 // question/answer 等字段仍随请求直传，服务端仅在日志可用时用派生值补缺/校正（回退安全）
@@ -4533,7 +4437,7 @@ ${rows.join('\n')}
             // 3 次重试都失败，保存待重试数据并提示
             pendingAppendRef.current = {
               nodeId: currentMdId!,
-              question: isContinuation ? (effectiveContent || userMsg.content) : userInput,
+              question: isContinuation ? (effectiveContent || userMsg.content) : displayContent,
               answer: cleanAnswer,
               modelId: currentModelId,
               thinkingLevel: actualThinkingLevel,
@@ -4566,7 +4470,7 @@ ${rows.join('\n')}
               const summarizeBody: Record<string, unknown> = {
                 action: 'summarize',
                 node_id: currentMdId,
-                question: userInput,
+                question: displayContent,
                 answer: cleanAnswer,
               };
               if (custom) {
@@ -4742,49 +4646,8 @@ ${rows.join('\n')}
   }, [id, setNodes]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    // 如果 mention 弹窗打开，处理其中的键盘事件
-    if (mentionOpen) {
-      // 数据源：进入浏览后按当前目录内容过滤；未进入 → 入口列表（Materials + 授权目录）按名称过滤
-      const filtered: DirMentionItem[] = mentionDir
-        ? mentionDirItems.filter((i) => i.name.toLowerCase().includes(mentionQuery.toLowerCase()))
-        : authorizedRoots.length > 0
-          ? [
-              { name: 'Materials', path: '__materials__', type: 'directory' as const },
-              ...authorizedRoots.map((r) => ({ name: r.split('/').filter(Boolean).pop() || r, path: r, type: 'directory' as const })),
-            ].filter((i) => i.name.toLowerCase().includes(mentionQuery.toLowerCase()))
-          : [];
-      if (filtered.length === 0) {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeMention();
-          return;
-        }
-      } else {
-        if (e.key === 'ArrowDown') {
-          e.preventDefault();
-          setMentionIndex((prev) => Math.min(prev + 1, filtered.length - 1));
-          return;
-        }
-        if (e.key === 'ArrowUp') {
-          e.preventDefault();
-          setMentionIndex((prev) => Math.max(prev - 1, 0));
-          return;
-        }
-        // 输入法合成状态（中文候选/英文确认）按 Enter 不触发选择
-        if (e.key === 'Enter' && !(composingRef.current || (e.nativeEvent as KeyboardEvent).isComposing || e.keyCode === 229)) {
-          e.preventDefault();
-          const target = filtered[mentionIndex];
-          if (!target) return;
-          handleMentionSelect(target);
-          return;
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeMention();
-          return;
-        }
-      }
-    }
+    // @ mention 弹窗打开时，其中键盘事件（↑↓ 导航 / Enter 选择 / Esc 关闭）由 composer 统一处理
+    if (handleMentionKeyDown(e)) return;
 
     // 输入法合成状态（中文候选确认/英文确认）按 Enter 不触发发送
     // composingRef 弥补 macOS 拼音输入法 compositionend 先于 keydown 触发的竞态
@@ -4882,7 +4745,8 @@ ${rows.join('\n')}
     while (userIdx >= 0 && messages[userIdx].role !== 'user') userIdx--;
     if (userIdx < 0) return;
 
-    const originalContent = messages[userIdx].content;
+    const originalUserMsg = messages[userIdx];
+    const originalContent = originalUserMsg.content;
 
     // 先从 state 中移除这一轮（user + assistant）
     setMessages(prev => {
@@ -4913,8 +4777,11 @@ ${rows.join('\n')}
       }
     }
 
-    // 重新发送原始问题
-    doSend(originalContent);
+    // 重新发送原始问题（带回原轮的附件与 @引用 快照，否则重试后气泡内 chip 消失）
+    doSend(originalContent, {
+      attachments: originalUserMsg.attachments,
+      references: originalUserMsg.references,
+    });
   }, [messages, currentMdId, isStreaming, doSend]);
 
   const messagesInner = (<>
@@ -5027,7 +4894,7 @@ ${rows.join('\n')}
           const mergedOutputFiles = mergeOutputFiles(msg.outputFiles, inlineFilesParsed?.files ?? []);
 
           // OutputFile 均来自当前节点自身的工具调用结果（产物统一写 homework/ 根，按节点归属由后端清册维护），直接展示
-          // Trae 式图片内联：项目内相对路径（homework/ attachments/）的图片产物不进入文件框，
+          // Trae 式图片内联：项目内相对路径（homework/ materials/）的图片产物不进入文件框，
           // 直接内联显示在正文（点击放大）；~/ 与绝对路径等外部图片仍由文件框管理（可本地打开）
           const isInlineImage = (f: OutputFileItem) => {
             const p = f.path.replace(/\\/g, '/');
@@ -5059,6 +4926,7 @@ ${rows.join('\n')}
           const msgPrefixSegs = prefixSegsByMsg[msg.id];
           const msgPrefixSegChanged = prefixSegChangedByMsg[msg.id];
           // 对话视图是否展示紧凑「执行过程」摘要（思考 / 工具 / 技能任一存在即可）
+          // 多智能体协作的过程（成员分工 / 群聊流 / 产出）不在这里出现，只在团队视图呈现
           const hasInlineTrace = msg.role === 'assistant'
             && ((msg.toolCalls?.length ?? 0) > 0
               || msgMatchedSkills.length > 0
@@ -5091,58 +4959,6 @@ ${rows.join('\n')}
                   draggable={false}
                 />
                 <span className="text-xs font-semibold" style={{ color: 'var(--ink-strong)' }}>BobWork</span>
-              </div>
-            )}
-
-            {/* ① 阶段胶囊：当前阶段指示器，固定在最上方（最顶部），归属本条回答，不跨轮次。
-                恒高容器（h-[24px] overflow-hidden）：流式期间三颗胶囊始终渲染（不再依赖 currentStage !== null），
-                当前/完成态只换颜色与工具名，不插入/移除区块 → 消除"胶囊出现/消失"的跳动 */}
-            {msg.role === 'assistant' && msg.id === streamingMsgId && isStreaming && (
-              <div
-                key={`stage-pills-${stageKind ?? 'idle'}`}
-                className="mb-1 h-[24px] w-full overflow-hidden"
-                style={{ animation: 'fade-in 150ms ease-out' }}
-              >
-                <div className="flex h-full items-center gap-1.5 text-xs">
-                  <span className="shrink-0 text-10 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}>
-                    Phase
-                  </span>
-                  {(['thinking', 'tool', 'writing'] as const).map((k, idx) => {
-                    const display = k === 'thinking' ? 'Thinking' : k === 'tool' ? 'Tools' : 'Writing';
-                    const isCurrent = stageKind === k;
-                    const isDone = completedStages.has(k);
-                    const showConnector = idx > 0;
-                    let bg = 'var(--paper-soft)';
-                    let fg = 'color-mix(in oklab, var(--ink-muted) 55%, transparent)';
-                    let border = 'color-mix(in oklab, var(--line) 22%, transparent)';
-                    if (isCurrent) {
-                      bg = 'color-mix(in oklab, var(--primary) 12%, transparent)';
-                      fg = 'var(--primary-strong)';
-                      border = 'color-mix(in oklab, var(--primary) 30%, transparent)';
-                    } else if (isDone) {
-                      bg = 'color-mix(in oklab, var(--success) 10%, transparent)';
-                      fg = 'color-mix(in oklab, var(--success) 80%, transparent)';
-                      border = 'color-mix(in oklab, var(--success) 22%, transparent)';
-                    }
-                    return (
-                      <div key={k} className="flex items-center gap-1">
-                        {showConnector && (
-                          <span style={{ color: isDone ? 'color-mix(in oklab, var(--success) 50%, transparent)' : 'color-mix(in oklab, var(--line) 60%, transparent)' }}>→</span>
-                        )}
-                        <span
-                          className={cn(
-                            'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium',
-                            isCurrent && 'animate-pulse',
-                          )}
-                          style={{ backgroundColor: bg, color: fg, borderColor: border }}
-                        >
-                          {k === 'thinking' ? <Brain className="h-2.5 w-2.5" /> : k === 'tool' ? <Wrench className="h-2.5 w-2.5" /> : <Sparkles className="h-2.5 w-2.5" />}
-                          {display}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
               </div>
             )}
 
@@ -5259,22 +5075,6 @@ ${rows.join('\n')}
                       </div>
                     )}
 
-            {/* 实时「当前动作」条：流式中指示正在做什么（思考 / 正在调用的工具+目的 / 写答案），完成后消失 */}
-            {currentActionText && (
-              <div
-                className="mb-1 flex w-full items-center gap-1.5 rounded-md border px-1.5 py-0.5"
-                style={{
-                  backgroundColor: 'color-mix(in oklab, var(--primary) 7%, transparent)',
-                  borderColor: 'color-mix(in oklab, var(--primary) 20%, transparent)',
-                }}
-              >
-                <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" style={{ color: 'var(--primary-strong)' }} />
-                <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--primary-strong)' }}>
-                  {currentActionText}
-                </span>
-              </div>
-            )}
-
             {/* 对话视图「执行过程」紧凑摘要：Think 小条 + 每工具一行 + 技能药丸；
                 点击 Think / 工具行就地展开明细（思考原文 / 参数 / 结果），无需切换到 Trace */}
             {msg.role === 'assistant' && hasInlineTrace && (
@@ -5303,6 +5103,24 @@ ${rows.join('\n')}
             )}
 
 
+            {/* 实时「当前动作」条：流式中指示正在做什么（思考 / 正在调用的工具+目的 / 写答案）。
+                置于过程区末尾、正文（Final Answer）之上：思考/调工具阶段它是回复最底部一条，
+                开始写答案后固定在答案上方；完成后消失 */}
+            {currentActionText && (
+              <div
+                className="mb-1 flex w-fit items-center gap-1.5 rounded-md border px-2 py-0.5"
+                style={{
+                  backgroundColor: 'transparent',
+                  borderColor: 'var(--ink-strong)',
+                }}
+              >
+                <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" style={{ color: 'var(--primary-strong)' }} />
+                <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--primary-strong)' }}>
+                  {currentActionText}
+                </span>
+              </div>
+            )}
+
             {/* Message bubble wrapper */}
             <div className={cn('relative group/msg-container', msg.role === 'user' ? 'ml-auto max-w-[85%]' : 'w-full')}>
               {/* Widget 消息（assistant + 含 widget）：不套气泡，直接满宽展示
@@ -5311,6 +5129,7 @@ ${rows.join('\n')}
                 <div className="flex w-full flex-col gap-0.5">
                   {/* 附件 chips：与气泡分支一致（widget 分支同样展示，避免附件丢失） */}
                   <AttachmentChips attachments={msg.attachments ?? []} role={msg.role} />
+                  <ReferenceChips references={msg.references ?? []} role={msg.role} />
                   {parseWidgetBlocks(bodyContent).map((block, i) =>
                     block.kind === 'text' ? (
                       /* Trae 风格：流式期间即用 markdown 渲染，完成时不切换引擎，消除割裂感 */
@@ -5356,6 +5175,7 @@ ${rows.join('\n')}
                 }}
               >
                 <AttachmentChips attachments={msg.attachments ?? []} role={msg.role} />
+                <ReferenceChips references={msg.references ?? []} role={msg.role} />
                 {cleanContent ? (
                   <>
                     {/* Trae 风格统一渲染：流式和完成态都用 StreamingMarkdown（HtmlRenderer 节流），
@@ -5582,9 +5402,9 @@ ${rows.join('\n')}
                   <ShareCard
                     question={question}
                     answer={bodyContent || ''}
-                    timestamp={msg.timestamp}
                     modelLabel={shareModelLabel}
                     levelLetter={shareLevelLetter}
+                    nodeId={currentMdId}
                     open
                     onClose={() => setShareMsgId(null)}
                   />
@@ -5621,218 +5441,29 @@ ${rows.join('\n')}
         // 阻止 click 冒泡：输入栏内点击不得触发节点级 onNodeClick（避免被当作"点击节点"处理）
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 待发送附件预览 — 小图标模式 */}
-        {pendingAttachments.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-0.5">
-            {pendingAttachments.map((att) => (
-              <span
-                key={att.id}
-                className="group inline-flex items-center gap-0.5 rounded-full px-1 py-px"
-                style={{
-                  backgroundColor: 'color-mix(in oklab, var(--primary) 8%, transparent)',
-                  border: '1px solid var(--primary-soft)',
-                }}
-                title={`${att.name} (${formatFileSize(att.size)})`}
-              >
-                {att.type === 'image' && att.dataUrl ? (
-                  <img src={att.dataUrl} alt={att.name} className="h-3 w-3 rounded-sm object-cover" />
-                ) : att.type === 'text' ? (
-                  <FileText className="h-2.5 w-2.5" style={{ color: '#537D96' }} />
-                ) : att.type === 'folder' ? (
-                  <Folder className="h-2.5 w-2.5" style={{ color: 'var(--info)' }} />
-                ) : att.type === 'video' ? (
-                  <Film className="h-2.5 w-2.5" style={{ color: 'var(--warn)' }} />
-                ) : att.type === 'audio' ? (
-                  <Music className="h-2.5 w-2.5" style={{ color: 'var(--success)' }} />
-                ) : (
-                  <Paperclip className="h-2.5 w-2.5" style={{ color: '#7a7260' }} />
-                )}
-                <span className="max-w-[48px] truncate text-xs" style={{ color: 'var(--ink)' }}>
-                  {att.name}
-                </span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removePendingAttachment(att.id);
-                  }}
-                  className="ml-0 rounded-full p-px opacity-0 transition-opacity group-hover:opacity-100"
-                  style={{ color: 'var(--ink-muted)' }}
-                >
-                  <X className="h-2 w-2" />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
         {/* 勾选的 skill / MCP 胶囊标签已并入输入框内（见 inputInner 输入容器） */}
 
-        {/* @ 文件引用 chip 已内嵌于输入框（contentEditable）；下方仅保留链接材料标签 */}
-        {/* 链接材料标签 — 粘贴 URL 自动识别，在输入框上方 */}
-        {pendingLinks.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-0.5">
-            {pendingLinks.map((link) => (
-              <span
-                key={link.url}
-                className="group inline-flex items-center gap-0.5 rounded-full px-1.5 py-px"
-                style={{
-                  backgroundColor: 'color-mix(in oklab, var(--info) 8%, transparent)',
-                  border: '1px solid color-mix(in oklab, var(--info) 25%, transparent)',
-                }}
-                title={link.url}
-              >
-                <Link2 className="h-2.5 w-2.5" style={{ color: 'var(--info)' }} />
-                <span className="max-w-[160px] truncate text-xs" style={{ color: 'var(--ink)' }}>
-                  {link.url}
-                </span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setPendingLinks((prev) => prev.filter((l) => l.url !== link.url));
-                  }}
-                  className="ml-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                  style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}
-                >
-                  <X className="h-2 w-2" />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
+        {/* 待发送附件 + 链接材料标签（chat 与 team 共用组件；@ 文件引用 chip 内嵌于输入框） */}
+        <ComposerChips
+          attachments={pendingAttachments}
+          links={pendingLinks}
+          onRemoveAttachment={removePendingAttachment}
+          onRemoveLink={removePendingLink}
+        />
 
-        {/* @ mention 弹窗 */}
-        {mentionOpen && (
-          <div
-            ref={mentionRef}
-            data-mention-popup
-            className="absolute z-50 mb-1 max-h-40 w-64 overflow-y-auto rounded-xl border py-1 shadow-lg"
-            style={{
-              bottom: '100%',
-              left: 0,
-              borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
-              backgroundColor: 'var(--popover)',
-            }}
-            onWheel={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            {(() => {
-              // 未进入任何目录 → 入口列表（Materials 文件夹 + 授权目录们）
-              if (!mentionDir) {
-                const entries: DirMentionItem[] = [
-                  { name: 'Materials', path: '__materials__', type: 'directory' },
-                  ...authorizedRoots.map((r) => ({ name: r.split('/').filter(Boolean).pop() || r, path: r, type: 'directory' as const })),
-                ];
-                const q = mentionQuery.toLowerCase();
-                const filtered = entries.filter((i) => i.name.toLowerCase().includes(q));
-                if (filtered.length === 0) {
-                  return (
-                    <div className="px-3 py-2 text-xs" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}>
-                      No matching folders
-                    </div>
-                  );
-                }
-                return filtered.slice(0, 10).map((item, idx) => (
-                  <button
-                    key={item.path}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleMentionSelect(item);
-                    }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors"
-                    style={{
-                      backgroundColor: idx === mentionIndex ? 'var(--paper-soft)' : 'transparent',
-                    }}
-                    onMouseEnter={(el) => {
-                      el.currentTarget.style.backgroundColor = 'var(--paper-soft)';
-                    }}
-                    onMouseLeave={(el) => {
-                      if (idx !== mentionIndex) {
-                        el.currentTarget.style.backgroundColor = 'transparent';
-                      }
-                    }}
-                  >
-                    <Folder className="h-3 w-3 shrink-0" style={{ color: item.path === '__materials__' ? 'var(--primary-strong)' : 'var(--info)' }} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>
-                        {item.name}
-                      </div>
-                      <div className="text-xs" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}>
-                        {item.path === '__materials__' ? 'Materials folder' : 'Authorized directory'}
-                      </div>
-                    </div>
-                  </button>
-                ));
-              }
-              // 已进入目录/子目录（materials 或授权目录）
-              const q = mentionQuery.toLowerCase();
-              const filtered = mentionDirItems.filter((i) =>
-                i.name.toLowerCase().includes(q),
-              );
-              return (
-                <>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      goBackDir();
-                    }}
-                    className="flex w-full items-center gap-1 px-3 py-1 text-left text-xs transition-colors"
-                    style={{ color: 'color-mix(in oklab, var(--ink-muted) 80%, transparent)' }}
-                  >
-                    <ChevronLeft className="h-3 w-3" />
-                    {mentionDir.path
-                      ? 'Back'
-                      : (authorizedRoots.length > 0 ? 'Back to folder list' : 'Close')}
-                  </button>
-                  {mentionDirLoading ? (
-                    <div className="px-3 py-2 text-xs" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}>
-                      Loading...
-                    </div>
-                  ) : filtered.length === 0 ? (
-                    <div className="px-3 py-2 text-xs" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}>
-                      {mentionDirItems.length === 0 ? 'Folder is empty' : 'No matching files'}
-                    </div>
-                  ) : (
-                    filtered.slice(0, 10).map((item, idx) => (
-                      <button
-                        key={item.path}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleMentionSelect(item);
-                        }}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors"
-                        style={{
-                          backgroundColor: idx === mentionIndex ? 'var(--paper-soft)' : 'transparent',
-                        }}
-                        onMouseEnter={(el) => {
-                          el.currentTarget.style.backgroundColor = 'var(--paper-soft)';
-                        }}
-                        onMouseLeave={(el) => {
-                          if (idx !== mentionIndex) {
-                            el.currentTarget.style.backgroundColor = 'transparent';
-                          }
-                        }}
-                      >
-                        {item.type === 'directory' ? (
-                          <Folder className="h-3 w-3 shrink-0" style={{ color: 'var(--info)' }} />
-                        ) : (
-                          <AtSign className="h-3 w-3 shrink-0" style={{ color: 'var(--primary-strong)' }} />
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>
-                            {item.name}
-                          </div>
-                          <div className="text-xs" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}>
-                            {item.type === 'directory' ? 'Directory' : `${item.extension ? item.extension.toUpperCase() : 'File'}${item.size ? ' · ' + item.size : ''}`}
-                          </div>
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </>
-              );
-            })()}
-          </div>
-        )}
+        {/* @ mention 弹窗（chat 与 team 共用组件） */}
+        <MentionMenu
+          open={mentionOpen}
+          menuRef={mentionRef}
+          dir={mentionDir}
+          dirItems={mentionDirItems}
+          dirLoading={mentionDirLoading}
+          query={mentionQuery}
+          index={mentionIndex}
+          authorizedRoots={authorizedRoots}
+          onSelect={handleMentionSelect}
+          onBack={goBackDir}
+        />
 
         {/* 引用标签 — 在输入框上方 */}
         {referenceTag && (
@@ -5948,11 +5579,6 @@ ${rows.join('\n')}
             role="textbox"
             aria-multiline="true"
             data-chat-input
-            data-placeholder={
-              typeof data.sandboxAppId === 'string' && data.sandboxAppId
-                  ? '描述要开发的功能，AI 将直接编写小程序代码并预览自检...'
-                  : 'Type a message...'
-            }
             onInput={handleInput}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
@@ -6273,7 +5899,7 @@ ${rows.join('\n')}
                     color: enabledMcpIds.size > 0 ? 'var(--info)' : 'var(--ink-muted)',
                     borderColor: enabledMcpIds.size > 0 ? 'color-mix(in oklab, var(--info) 30%, transparent)' : 'transparent',
                   }}
-                  title={!mcpSupported ? '当前模型不支持 MCP 工具调用' : (enabledMcpIds.size > 0 ? `${enabledMcpIds.size} MCP forced in this node` : 'Force MCP (Store-enabled MCPs are auto-available)')}
+                  title={!mcpSupported ? 'This model does not support MCP tool calls' : (enabledMcpIds.size > 0 ? `${enabledMcpIds.size} MCP forced in this node` : 'Force MCP (Store-enabled MCPs are auto-available)')}
                 >
                   <Plug className="h-3.5 w-3.5" />
                 </button>
@@ -6350,9 +5976,7 @@ ${rows.join('\n')}
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  setMentionAtPos(-1);
-                  setMentionOpen(true);
-                  enterMentionMaterials();
+                  openMentionFromIcon();
                 }}
                 className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-50"
                 style={{ backgroundColor: 'var(--paper-hover)', color: 'var(--ink-muted)' }}
@@ -6421,6 +6045,30 @@ ${rows.join('\n')}
                   ))}
               </div>
             )}
+
+            {/* 多智能体协作（Multi-agent mode）：点击弹出成员选择器（已安装 Agent 包勾选）；
+                开启后本轮主 agent 可调用 team_run 编排多成员协作，与「团队」分栏是并行入口 */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isStreaming) setMemberPickerOpen(true);
+              }}
+              disabled={isStreaming}
+              className={cn(
+                'flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 transition-colors disabled:opacity-50',
+                multiAgentMode && 'ring-1',
+              )}
+              style={{
+                backgroundColor: multiAgentMode ? 'var(--info-soft)' : 'var(--paper-hover)',
+                color: multiAgentMode ? 'var(--info)' : 'var(--ink-muted)',
+                borderColor: multiAgentMode ? 'color-mix(in oklab, var(--info) 30%, transparent)' : 'transparent',
+              }}
+              title={multiAgentMode
+                ? `Multi-agent mode on${presetAgentIds.length > 0 ? ` · ${presetAgentIds.length} members` : ''} — click to change members or turn off`
+                : 'Multi-agent mode — pick the installed Agent packages to take part in this run; if you pick none, the main agent plans the members and asks for your approval'}
+            >
+              <Users className="h-3.5 w-3.5" />
+            </button>
           </div>
 
           {/* 右侧：推理强度 + 模型 + 发送 */}
@@ -6748,6 +6396,7 @@ ${rows.join('\n')}
             data-canvas-ui="overlay"
             className="fixed z-[600] flex items-center gap-1 rounded-xl border p-1 shadow-xl"
             style={{
+              // 右边缘钳制：复制按钮 + Bot 按钮（图标态）≈ 90px 内容宽，留足余量
               left: Math.min(selectionMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 240),
               top: selectionMenu.y + 12,
               borderColor: 'color-mix(in oklab, var(--line) 35%, transparent)',
@@ -6782,10 +6431,10 @@ ${rows.join('\n')}
             </button>
             <button
               type="button"
-              onClick={() => handleSaveAsAttachment(selectionMenu.text)}
+              onClick={() => handleQuoteSelection(selectionMenu.text)}
               className="flex items-center justify-center rounded-lg px-2.5 py-1.5 transition-colors hover:bg-[var(--paper-hover)]"
               style={{ color: 'var(--ink)' }}
-              title="将选中文字保存为当前节点的附件材料"
+              title="将选中文字挂为输入框引用标签"
             >
               <Bot className="h-4 w-4" style={{ color: 'var(--ink-muted)' }} />
             </button>
@@ -6801,6 +6450,7 @@ ${rows.join('\n')}
           steps={planInfo.steps}
           completed={planInfo.completed}
           running={planInfo.running}
+          discarded={teamPlanDiscarded}
           onClose={() => setPlanPanelClosed(true)}
         />
       )}
@@ -6874,8 +6524,11 @@ ${rows.join('\n')}
         }
         rightActions={
           <>
-            {/* 视图分栏：Chat（对话）/ Trace（轨迹）——迁至标题栏右操作组 */}
-            {(messages.length > 0 || pane === 'trace') && (
+            {/* 视图切换：主分栏只留 Chat / Team（Team = 多智能体协作工作台，唯一发起口，空会话也要能进），
+                Trace（对话轨迹 / 历史回放）定位是「查看执行过程」，与另两者语义不同，拆成独立图标按钮：
+                无外框、无底色（与标题栏其他图标按钮同款样式），仅靠与主分栏的间距区分，
+                避免三个字数不等的文字标签挤在一个分段控件里 */}
+            <div className="flex items-center gap-1.5">
               <div
                 className="flex items-center gap-0.5 rounded-lg border p-0.5"
                 style={{
@@ -6883,7 +6536,7 @@ ${rows.join('\n')}
                   backgroundColor: 'color-mix(in oklab, var(--paper) 75%, transparent)',
                 }}
               >
-                {(['chat', 'trace'] as const).map((k) => {
+                {(['chat', 'team'] as const).map((k) => {
                   const active = pane === k;
                   return (
                     <button
@@ -6894,13 +6547,23 @@ ${rows.join('\n')}
                       style={active
                         ? { backgroundColor: 'color-mix(in oklab, var(--primary) 14%, transparent)', color: 'var(--primary-strong)' }
                         : { color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                      title={k === 'team' ? 'Team: launch multi-agent runs here, and watch member assignments / task progress / collaboration — you can interject and retry tasks' : 'Chat: this turn\'s conversation and the final answer'}
                     >
-                      {k === 'chat' ? 'Chat' : 'Trace'}
+                      {k === 'chat' ? 'Chat' : 'Team'}
                     </button>
                   );
                 })}
               </div>
-            )}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setPane('trace'); }}
+                className="flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: pane === 'trace' ? 'var(--primary-strong)' : 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                title="Trace: this conversation's execution trajectory and task replay"
+              >
+                <ChartSpline className="h-3.5 w-3.5" />
+              </button>
+            </div>
             {/* 连线关系入口：画布已物理移除连线（2026-09），关系经 NodeMap 查看/管理。
                 点击 → NodeMap 展开并高亮本节点及其连线。 */}
             {linkCount > 0 && (
@@ -6919,6 +6582,20 @@ ${rows.join('\n')}
                   {linkCount > 9 ? '9+' : linkCount}
                 </span>
               </button>
+            )}
+            {/* Bob-Mind 未回看改动角标：面板手动改过导图，Buzan 还没看过（说话或点 Ask Buzan 后消失） */}
+            {isMind && mindChanges > 0 && (
+              <span
+                className="relative flex h-5 min-w-5 shrink-0 items-center justify-center gap-1 rounded-full px-1.5 text-7 font-bold leading-none"
+                style={{
+                  backgroundColor: 'color-mix(in oklab, var(--primary-strong) 12%, transparent)',
+                  color: 'var(--primary-strong)',
+                }}
+                title={`Bob-Mind was edited ${mindChanges} time${mindChanges > 1 ? 's' : ''} and Buzan hasn't reviewed it yet`}
+              >
+                <Pencil className="h-3 w-3" />
+                {mindChanges > 9 ? '9+' : mindChanges}
+              </span>
             )}
             {/* 断线警告角标 */}
             {hasDisconnectedUpstream && (
@@ -7018,7 +6695,8 @@ ${rows.join('\n')}
                     ? 'The node file is being written. Please wait before locking.'
                     : outcomeStatus === 'locked'
                       ? (forceLocked ? '已强制锁定（校验未通过·用户确认，点击解锁）' : '已锁定（点击解锁）')
-                      : outcomeStatus === 'stale' ? '上游成果块已变更（点击重新锁定刷新）'
+                      : outcomeStatus === 'stale'
+                        ? `${outcomeStaleReason ? `${outcomeStaleReason.split('。')[0]}。` : '上游成果块已变更'}（点击重新锁定刷新）`
                       : outcomeStatus === 'legacy' ? '旧节点（未启用成果块）'
                       : '未锁定（点击锁定）'
                 }
@@ -7144,6 +6822,25 @@ ${rows.join('\n')}
               {messagesInner}
             </div>
           )
+        ) : pane === 'team' ? (
+          /* 团队视图：本节点关联的协作团队工作台（引擎侧落盘真相源的只读投影 + 插话/重试），
+             同时是多智能体的**唯一发起口**（需求输入 + 选成员 + 发起，走本节点同一轮 /api/chat） */
+          <TeamWorkbench
+            teamIds={teamIds}
+            presetAgentIds={presetAgentIds}
+            launching={isStreaming}
+            nodeId={currentMdId}
+            nodeTitle={data.title || ''}
+            onOpenMemberPicker={() => setMemberPickerOpen(true)}
+            onLaunch={launchTeamRun}
+            onAdoptTeam={rememberTeamId}
+            onForgetTeam={forgetTeamId}
+            mainModel={resolvedTeamMainModel}
+            workerModel={resolvedTeamWorkerModel}
+            modelOptions={teamModelOptions}
+            onSelectMainModel={(m) => selectTeamModel('main', m)}
+            onSelectWorkerModel={(m) => selectTeamModel('worker', m)}
+          />
         ) : (
           <>
             {/* P5b-1 历史 replay：回放态顶部条（事件日志回放 → 本 Trace 分栏），带返回 live 关闭按钮；
@@ -7228,7 +6925,7 @@ ${rows.join('\n')}
       {/* 底部输入框：空态已由中部欢迎区承载输入框，仅在已有对话内容时于底部展示；空态不再重复渲染。
           提问卡活跃（未最小化）时以停靠卡片替代输入框占位，不遮挡正文；用 display 切换而非条件卸载，
           保证最小化↔恢复往返时组件实例与已作答内容不丢失 */}
-      {messages.length > 0 && (
+      {messages.length > 0 && pane !== 'team' && (
         <div className="w-full min-w-0 px-7">
           <div
             className="mx-auto"
@@ -7289,6 +6986,32 @@ ${rows.join('\n')}
           pending={butlerConfirm}
           anchor={butlerAnchor}
           onClose={() => setButlerConfirm(null)}
+        />
+      )}
+
+      {/* 多智能体成员选择弹窗：从已安装 Agent 包中勾选本次执行成员（名单仅会话内，不落盘，每次重选）。
+          选完即发起：输入框已有需求时，点 Start 直接用本轮名单发起（不再要求用户二次发送）；空输入则只设名单 */}
+      {memberPickerOpen && (
+        <TeamMemberPickerDialog
+          selected={presetAgentIds}
+          modeOn={multiAgentMode}
+          willLaunch={localInput.trim().length > 0}
+          onCancel={() => setMemberPickerOpen(false)}
+          onConfirm={(ids) => {
+            setPresetAgentIds(ids);
+            if (!multiAgentMode) toggleMultiAgentMode();
+            setMemberPickerOpen(false);
+            const text = (localInput ?? '').trim();
+            if (!text) return;
+            setLocalInput('');
+            clearNodeDraft();
+            void doSend(text, { multiAgent: true, presetAgentIds: ids });
+          }}
+          onDisable={() => {
+            setPresetAgentIds([]);
+            if (multiAgentMode) toggleMultiAgentMode();
+            setMemberPickerOpen(false);
+          }}
         />
       )}
 
@@ -7353,7 +7076,7 @@ function inferOutputKind(name: string): OutputFileItem['kind'] {
 /**
  * 从回答正文提取 `OutputFile: <path>` 行（模型按系统提示在末尾输出的产物标记）。
  * 当写文件发生在工具结果未回传 SSE 时，正文行是展示产物的唯一线索。
- * 仅产物路径（homework/ attachments/ .sandbox/ ~/）会转卡片，其余路径保留原文。
+ * 仅产物路径（homework/ materials/ .sandbox/ ~/）会转卡片，其余路径保留原文。
  * 存储平铺：homework 产物直接落在根目录，路径原样使用（kind 仅用于侧边栏分组标签）。
  */
 function extractOutputFileBlocks(content: string): { files: OutputFileItem[]; cleanContent: string } {
@@ -7366,7 +7089,7 @@ function extractOutputFileBlocks(content: string): { files: OutputFileItem[]; cl
     const raw = m[1].trim();
     if (!raw) continue;
     const normalized = raw.replace(/\\/g, '/');
-    if (!/^(homework\/|attachments\/|\.sandbox\/|~\/)/.test(normalized)) continue; // 非产物路径：保留原文行
+    if (!/^(homework\/|materials\/|attachments\/|\.sandbox\/|~\/)/.test(normalized)) continue; // 非产物路径：保留原文行
     const name = normalized.split('/').pop() || 'file';
     files.push({ path: normalized, name, size: 0, kind: inferOutputKind(name), source: 'answer_text' });
     clean = clean.replace(m[0], '');
@@ -7528,7 +7251,7 @@ function OutputFilesCard({ files, projectId }: { files: OutputFileItem[]; projec
     }
     setWarnText('');
     const p = f.path.replace(/\\/g, '/');
-    // homework/ 与 attachments/ 都属于项目的本地相对路径
+    // homework/、materials/（含历史 attachments/）都属于项目的本地相对路径
     const isSandbox = p.startsWith('~/') || p.startsWith('/');
     if (isSandbox) {
       // 绝对或 ~ 路径：直接走 local 打开（UnifiedViewer 支持 FileSourceKind=local 这种）
@@ -7935,8 +7658,8 @@ export function areNodePropsEqual<T extends { id: string; data: AiChatNodeData; 
   if (a.compactedUntil !== b.compactedUntil) return false;
   // 常用扩展字段：身份/技能/MCP等（都用引用比较）
   const extraKeys = [
-    '__hasPersistedPosition', 'enabledMcpIds', 'selectedSkills',
-    'collapsed', 'nodeHeight', 'isArchived',
+    '__hasPersistedPosition', 'enabledMcpIds', 'selectedSkills', 'multiAgentMode',
+    'collapsed', 'nodeHeight', 'isArchived', 'teamIds',
   ] as const;
   for (const k of extraKeys) {
     if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;

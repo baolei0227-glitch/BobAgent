@@ -345,7 +345,7 @@ export function pushWindowFrame(state: TraceWindowState, ev: TraceWindowEvent | 
     }
     default:
       // 未识别帧 / 已知但窗口不建模的帧（content_truncated / vision_progress / tool_summary /
-      // claim_mismatch / completion_check / output_files / bobby_trigger / team_trigger ...）→ 安全忽略
+      // claim_mismatch / completion_check / output_files / bobby_trigger ...）→ 安全忽略
       return next;
   }
 }

@@ -16,6 +16,7 @@
  */
 
 import { promises as fs } from 'fs';
+import { execFile } from 'child_process';
 import { join, isAbsolute } from 'path';
 import type { McpServerConfig } from '@/lib/mcp/types';
 import { MCP_PRESETS } from '@/lib/mcp/types';
@@ -118,6 +119,8 @@ export interface PluginPanelProbe {
   port?: number;
   /** 占用端口的进程 pid（尽力识别，可能为 null） */
   holderPid?: number | null;
+  /** 已回收「本插件残留实例」：插件侧重试接管端口后会自愈，面板壳可自动重探 */
+  reaped?: boolean;
 }
 
 /** 插件侧端口冲突标记（数据根/panel-port-conflict.json，由插件 EADDRINUSE 时写入） */
@@ -149,26 +152,138 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 监听指定端口的进程 pid（macOS lsof）；非 darwin / 查询失败返回 null */
+function portHolderPid(port: number): Promise<number | null> {
+  if (process.platform !== 'darwin') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { timeout: 2000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const pid = Number(String(stdout).trim().split('\n')[0]);
+      resolve(Number.isInteger(pid) && pid > 0 ? pid : null);
+    });
+  });
+}
+
+/**
+ * 端口上正在服务的是不是该插件：直接问它的 /api/status。
+ * 比按进程命令行猜路径可靠（打包态资源目录、相对路径启动都能认），也是唯一安全的判据——
+ * 答不出或答的不是该插件，就绝不回收那个进程。
+ */
+async function isOwnPluginOnPort(pluginId: string, port: number): Promise<boolean> {
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/api/status`, {
+      signal: AbortSignal.timeout(1500),
+      cache: 'no-store',
+    });
+    const data = (await resp.json()) as { plugin?: unknown };
+    return data?.plugin === pluginId;
+  } catch {
+    return false;
+  }
+}
+
+/** 取进程的父 pid（ps）；失败返回 null */
+function processParentPid(pid: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    execFile('ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 2000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const ppid = Number(String(stdout).trim());
+      resolve(Number.isInteger(ppid) && ppid > 0 ? ppid : null);
+    });
+  });
+}
+
+/**
+ * 只回收「本宿主的上一代」与「孤儿」：
+ *   - ppid === 本进程 pid：本宿主重复 spawn 留下的旧一代（真凶场景）；
+ *   - ppid === 1：宿主崩溃/被强杀后 reparent 到 launchd 的孤儿。
+ * 父进程是另一个仍在运行的主机（如同时开着的打包版 App / 另一个 dev 服务）时，它是合法实例，
+ * 绝不回收——否则两个宿主会互相抢杀、面板来回失效。不认识的占用者一律不碰。
+ */
+async function isReapableStaleHolder(pid: number): Promise<boolean> {
+  if (pid === process.pid || pid === process.ppid) return false;
+  const ppid = await processParentPid(pid);
+  return ppid !== null && (ppid === process.pid || ppid === 1);
+}
+
+/**
+ * 回收「本插件的残留实例」：重复 spawn 的上一代、宿主崩溃后 reparent 到 launchd 的孤儿
+ * 都会卡在面板端口上。SIGTERM →1s→ 仍存活则 SIGKILL；返回是否真的回收了进程。
+ */
+async function reapStaleHolder(pluginId: string, pid: number, port: number): Promise<boolean> {
+  if (!(await isReapableStaleHolder(pid))) return false;
+  if (!isPidAlive(pid) || !(await isOwnPluginOnPort(pluginId, port))) return false;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return false;
+  }
+  for (let i = 0; i < 10 && isPidAlive(pid); i++) await delay(100);
+  if (isPidAlive(pid)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* 已退出 */
+    }
+  }
+  return true;
+}
+
+/** 等面板就绪（占用者被回收后，插件侧下一次重试即接管端口）；超时返回 false */
+async function waitPanelReady(probeUrl: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const resp = await fetch(probeUrl, { signal: AbortSignal.timeout(1200), cache: 'no-store' });
+      const data = (await resp.json()) as { ok?: boolean };
+      if (data?.ok) return true;
+    } catch {
+      /* 未就绪，继续等 */
+    }
+    if (Date.now() >= deadline) return false;
+    await delay(400);
+  }
+}
+
 /**
  * 探测 serve 面板是否真的由「本 App 的插件实例」服务。
  *
  * 为什么不能只看插件 /api/status：宿主 iframe 是直连插件端口的，若端口被残留旧进程占着，
  * 新实例绑不上（只告警不退出），直连探测会命中旧进程并拿到 ok:true —— 界面静默停留在旧版本。
- * 因此先读插件写下的冲突标记：标记存在且写入者（本实例）仍然存活 → 判定「端口被占用」，
- * 面板壳据此提示用户清理残留进程，而不是把旧界面当成新界面加载。
- * 标记不存在（或写入者已退出 = 陈旧标记）时才回落到直连探测。
+ * 因此先读插件写下的冲突标记：标记存在、写入者（本实例）仍然存活且占用者是别的进程 → 判定「端口被占用」。
+ * 若占用者是「本插件的残留实例」（重复 spawn 的第二代 / 崩溃孤儿），宿主直接回收它，
+ * 插件侧下一次重试（3s 一次）即接管端口——面板自愈，用户无需手工 kill 或重启 BobWork。
  */
 export async function probePluginPanel(entry: PluginPanelEntry): Promise<PluginPanelProbe> {
   if (entry.mode !== 'serve' || !entry.probeUrl) return { ok: true };
 
   const conflict = await readPanelConflict(entry.pluginId);
-  if (conflict && typeof conflict.pid === 'number' && isPidAlive(conflict.pid)) {
-    return {
-      ok: false,
-      reason: 'port-in-use',
-      port: conflict.port,
-      holderPid: conflict.holderPid ?? null,
-    };
+  const port = conflict?.port;
+  const holderPid = conflict ? (conflict.holderPid ?? (port ? await portHolderPid(port) : null)) : null;
+
+  /**
+   * 标记可信的前提：写标记的插件实例仍然活着（它确实没拿到端口），且占用者是「另一个」进程。
+   * holderPid === conflict.pid 是「自己占着自己的端口」的自指标记——插件回收上一代并重绑成功后，
+   * 标记写入与其 listening 清理存在竞态，会残留这种脏标记。
+   * 宿主若照此回收，等于杀掉插件健在的当前实例，面板随即变成 unreachable（历史故障根因之一）。
+   * 故自指标记 / 占用者查不到时一律不信任，退回直连探测。
+   */
+  if (
+    conflict &&
+    typeof conflict.pid === 'number' &&
+    isPidAlive(conflict.pid) &&
+    typeof holderPid === 'number' &&
+    holderPid !== conflict.pid
+  ) {
+    const reaped = port ? await reapStaleHolder(entry.pluginId, holderPid, port) : false;
+    if (reaped && (await waitPanelReady(entry.probeUrl, 4000))) {
+      return { ok: true };
+    }
+    return { ok: false, reason: 'port-in-use', port, holderPid, reaped };
   }
 
   try {

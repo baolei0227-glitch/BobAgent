@@ -27,6 +27,7 @@ import {
   Star,
   Receipt,
   ScanText,
+  Map as MapIcon,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -45,6 +46,7 @@ export function officialSkillIcon(name: string, scenes: string[] = []): LucideIc
     'meeting-minutes': ClipboardList,
     'bob-bank-statement': Receipt,
     'video-split': Scissors,
+    'hand-drawn-map': MapIcon,
   };
   if (byName[name]) return byName[name];
   const scene = scenes[0];

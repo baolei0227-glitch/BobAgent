@@ -397,6 +397,34 @@ if [ -d "$COZE_MCP_DIR" ]; then
 else
   warn "coze-mcp 目录不存在，Coze 功能不可用"
 fi
+# 内置 bobby-mcp（Bobby node · 桌面软件 GUI 自动化 MCP）：
+#   构建插件 → 复制 dist + package.json + scripts 到 next-standalone/bobby-mcp/ → 安装运行时依赖。
+#   注意两点：
+#   1) 依赖 @modelcontextprotocol/sdk，cli.js 非单文件 bundle，必须自带 node_modules；
+#   2) scripts/*.swift 必须一并随包——SCRIPTS_DIR 由 dist 上级目录推导（ocr-recovery.ts:27），
+#      input_events / ax_tree / ocr_locate / ocr_vision / screen_capture / screen_info / permissions_check
+#      均在运行时按需 swiftc 编译，缺失会导致全部 GUI 动作失败。
+#   预置配置里 {BUNDLED}:bobby-mcp/dist/cli.js 在 server 读取 settings 时按 cwd 解析。
+BOBBY_MCP_DIR="$PROJECT_DIR/../bobby-mcp"
+if [ -d "$BOBBY_MCP_DIR" ]; then
+  log "内置 bobby-mcp（Bobby node · 桌面控制）..."
+  if ! (cd "$BOBBY_MCP_DIR" && npm run build >/dev/null 2>&1); then
+    warn "bobby-mcp 构建失败，Bobby node 功能将不可用"
+  else
+    mkdir -p "$STAGING/next-standalone/bobby-mcp"
+    cp -R "$BOBBY_MCP_DIR/dist" "$STAGING/next-standalone/bobby-mcp/dist"
+    cp "$BOBBY_MCP_DIR/package.json" "$STAGING/next-standalone/bobby-mcp/package.json"
+    if [ -d "$BOBBY_MCP_DIR/scripts" ]; then
+      cp -R "$BOBBY_MCP_DIR/scripts" "$STAGING/next-standalone/bobby-mcp/scripts"
+    else
+      warn "bobby-mcp/scripts 不存在，GUI 动作（Swift helper）将不可用"
+    fi
+    npm --prefix "$STAGING/next-standalone/bobby-mcp" install --omit=dev --no-optional --silent 2>&1 | tail -1 || true
+    ok "bobby-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bobby-mcp" | awk '{print $1}'))"
+  fi
+else
+  warn "bobby-mcp 目录不存在，Bobby node 功能不可用"
+fi
 ok "Next.js standalone 准备完成（node_modules: $(du -sh "$STAGING/next-standalone/node_modules" 2>/dev/null | awk '{print $1}')）"
 
 # ---------- 6. 生成 icon ----------
@@ -511,32 +539,31 @@ PLIST
   else
     log "  ⚠️ 未找到 BobWorkCapture.app（先运行 screenshot-plugin/build-helper.sh）；Cmd+Shift+O 将回退内置链路"
   fi
-  # 启动欢迎窗口南瓜表情包 logo（每次启动随机更换）
-  # 体积优化：720×720 透明 PNG（约 3.8M）转 WebP（约 0.3M），
-  # 仅用于 splash/头像显示，WebP 质量足够且保留透明通道。
-  if [ -d "$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新" ]; then
-    mkdir -p "$APP_DIR/Contents/Resources/splash-logos"
+  # 内置头像（随包分发，供头像池内置项使用）
+  # 体积优化：透明 PNG 转 WebP（体积大幅下降），WebP 质量足够且保留透明通道。
+  if [ -d "$PROJECT_DIR/assets/avatars" ]; then
+    mkdir -p "$APP_DIR/Contents/Resources/avatars"
     if python3 -c "import PIL" >/dev/null 2>&1; then
-      # Pillow 可用：转 WebP 减小体积（约 3.8M → 0.3M）
-      SPLASH_SRC="$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新" \
-      SPLASH_DST="$APP_DIR/Contents/Resources/splash-logos" \
+      # Pillow 可用：转 WebP 减小体积
+      AVATAR_SRC="$PROJECT_DIR/assets/avatars" \
+      AVATAR_DST="$APP_DIR/Contents/Resources/avatars" \
       python3 -c '
 import os, glob
 from PIL import Image
-src_dir = os.environ["SPLASH_SRC"]
-dst_dir = os.environ["SPLASH_DST"]
+src_dir = os.environ["AVATAR_SRC"]
+dst_dir = os.environ["AVATAR_DST"]
 n = 0
 for p in sorted(glob.glob(os.path.join(src_dir, "*.png"))):
     name = os.path.splitext(os.path.basename(p))[0] + ".webp"
     Image.open(p).save(os.path.join(dst_dir, name), "WEBP", quality=82, method=6)
     n += 1
-print(f"converted {n} splash logos to webp")
+print(f"converted {n} built-in avatars to webp")
 '
-      ok "启动欢迎窗口南瓜 logo 已转为 WebP"
+      ok "内置头像已转为 WebP"
     else
       # 无 Pillow：回退复制 PNG（体积不优化，但功能不受影响）
-      cp "$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新/"*.png "$APP_DIR/Contents/Resources/splash-logos/" 2>/dev/null || true
-      warn "未检测到 Pillow，南瓜 logo 以 PNG 原样复制"
+      cp "$PROJECT_DIR/assets/avatars/"*.png "$APP_DIR/Contents/Resources/avatars/" 2>/dev/null || true
+      warn "未检测到 Pillow，内置头像以 PNG 原样复制"
     fi
   fi
   # 防御性清理：确保 release-dist 构建产物目录及其冲突副本绝不被循环打包进 .app

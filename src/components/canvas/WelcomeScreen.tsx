@@ -8,9 +8,18 @@ interface WelcomeScreenProps {
   onCreateProject: (name: string) => Promise<void>;
 }
 
+/** 欢迎面板图标候选：点击图标在其间轮换（仅本次会话，不持久化）。
+ *  hippo-icon.png / bobwork-logo.png 无 alpha 通道（不透明白底），用 multiply 融进底色 */
+const WELCOME_ICONS: { src: string; blend?: boolean }[] = [
+  { src: '/welcome-icon.png' },
+  { src: '/hippo-icon.png', blend: true },
+  { src: '/bobwork-logo.png', blend: true },
+];
+
 export function WelcomeScreen({ onCreateProject }: WelcomeScreenProps) {
   const [projectName, setProjectName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [iconIndex, setIconIndex] = useState(0);
 
   const handleCreate = async () => {
     const name = projectName.trim();
@@ -58,9 +67,12 @@ export function WelcomeScreen({ onCreateProject }: WelcomeScreenProps) {
         className="w-full max-w-lg"
         icon={
           <img
-            src="/welcome-icon.png"
+            src={WELCOME_ICONS[iconIndex].src}
             alt="BobWork"
-            className="h-full w-full rounded-[inherit] object-contain p-1"
+            onClick={() => setIconIndex((i) => (i + 1) % WELCOME_ICONS.length)}
+            title="Click to switch icon"
+            className="h-full w-full cursor-pointer rounded-[inherit] object-contain p-1"
+            style={WELCOME_ICONS[iconIndex].blend ? { mixBlendMode: 'multiply' } : undefined}
             draggable={false}
           />
         }

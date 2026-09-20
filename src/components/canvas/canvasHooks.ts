@@ -35,6 +35,60 @@ export function useMailPending(): [number, Dispatch<SetStateAction<number>>] {
   return [mailPending, setMailPending];
 }
 
+/** 品牌 logo 变更广播事件：设置面板 / 分享卡落盘 settings.brandLogo 后发出，侧边栏据此即时跟随 */
+export const BRAND_LOGO_CHANGED_EVT = 'brand-logo-changed';
+
+/** 默认品牌图标：不透明白底，需 multiply 融进栏底（见 CanvasFlow 渲染处注释） */
+const DEFAULT_BRAND_LOGO = '/hippo-icon.png';
+
+export interface BrandLogo {
+  /** 图片地址：默认图标，或头像池条目的 dataUrl */
+  src: string;
+  /** 是否用 multiply 融掉不透明白底（仅默认图标需要；头像池条目自带 alpha，直接叠加） */
+  multiply: boolean;
+}
+
+/** 通知各消费端重新解析品牌 logo（写入方在持久化 settings.brandLogo 之后调用） */
+export function notifyBrandLogoChanged(): void {
+  window.dispatchEvent(new Event(BRAND_LOGO_CHANGED_EVT));
+}
+
+/**
+ * 底部品牌区 logo：读 settings.brandLogo（头像池 id）→ 解析出头像池里的 dataUrl；
+ * 未设置 / 条目已失效（删除或换机）/ 非桌面环境一律回落默认图标，不出现空白图标。
+ */
+export function useBrandLogo(): BrandLogo {
+  const [logo, setLogo] = useState<BrandLogo>({ src: DEFAULT_BRAND_LOGO, multiply: true });
+  useEffect(() => {
+    let alive = true;
+    const fallback = () => setLogo({ src: DEFAULT_BRAND_LOGO, multiply: true });
+    const resolve = async () => {
+      try {
+        const api = (window as unknown as {
+          api?: {
+            settings?: { load: () => Promise<{ brandLogo?: string } | null> };
+            avatar?: { list: () => Promise<Array<{ id: string; dataUrl: string }>> };
+          };
+        }).api;
+        const id = (await api?.settings?.load())?.brandLogo;
+        if (!alive) return;
+        if (!id) { fallback(); return; }
+        const list = (await api?.avatar?.list()) ?? [];
+        if (!alive) return;
+        const hit = list.find((a) => a.id === id);
+        setLogo(hit ? { src: hit.dataUrl, multiply: false } : { src: DEFAULT_BRAND_LOGO, multiply: true });
+      } catch {
+        if (alive) fallback();
+      }
+    };
+    void resolve();
+    const onChange = () => { void resolve(); };
+    window.addEventListener(BRAND_LOGO_CHANGED_EVT, onChange);
+    return () => { alive = false; window.removeEventListener(BRAND_LOGO_CHANGED_EVT, onChange); };
+  }, []);
+  return logo;
+}
+
 export type UpdateStatus =
   | 'idle'
   | 'checking'

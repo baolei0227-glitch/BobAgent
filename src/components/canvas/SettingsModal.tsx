@@ -56,6 +56,7 @@ import {
   type NamingRule,
 } from '@/lib/file-organizer/naming-rule';
 import { desktop } from '@/lib/desktop-adapter';
+import { notifyBrandLogoChanged } from './canvasHooks';
 
 interface SettingsModalProps {
   open: boolean;
@@ -284,6 +285,7 @@ export function SettingsModal({
   const [fileOrgDir, setFileOrgDir] = useState('');
   const [fileOrgCategories, setFileOrgCategories] = useState<string[]>([]);
   const [fileOrgCategoryInput, setFileOrgCategoryInput] = useState('');
+  const [fileOrgAutoCreate, setFileOrgAutoCreate] = useState(false);
   const [fileOrgPickErr, setFileOrgPickErr] = useState('');
   // 命名规则（受控选项：字段顺序 / 分隔符 / 版本号补零）
   const [fileOrgNaming, setFileOrgNaming] = useState<NamingRule>(DEFAULT_NAMING);
@@ -566,6 +568,7 @@ export function SettingsModal({
         setFileOrgEnabled(fo.enabled === true);
         setFileOrgDir(fo.inboxDir ?? '');
         setFileOrgCategories(fo.categories ?? []);
+        setFileOrgAutoCreate(fo.autoCreateCategories === true);
         setFileOrgNaming(normalizeNaming(fo.naming));
         setFileOrgCategoryInput('');
         setFileOrgPickErr('');
@@ -617,7 +620,7 @@ export function SettingsModal({
     theme,
     thinkingPolicy,
     // 文件自动整理投递箱
-    fileOrgEnabled, fileOrgDir, fileOrgCategories, fileOrgNaming,
+    fileOrgEnabled, fileOrgDir, fileOrgCategories, fileOrgAutoCreate, fileOrgNaming,
     // 字体缩放（原先点击即独立落盘，现并入自动保存，避免与自动保存并发写同一 settings.json）
     fontScale,
   ]);
@@ -1040,6 +1043,8 @@ export function SettingsModal({
           enabled: fileOrgEnabled,
           inboxDir: fileOrgDir.trim() || undefined,
           categories: fileOrgCategories,
+          // AI 自动新建分类文件夹（关 = 严格限定在清单内）
+          autoCreateCategories: fileOrgAutoCreate || undefined,
           // 默认规则不落盘：留空即默认，日后调整默认形态也能生效
           naming: isDefaultNaming(fileOrgNaming) ? undefined : fileOrgNaming,
         },
@@ -1051,6 +1056,8 @@ export function SettingsModal({
       window.dispatchEvent(new Event('provider-configs-changed'));
       // 主题变更：通知 sandbox 预览刷新注入的 CSS 变量
       window.dispatchEvent(new Event('theme-changed'));
+      // 品牌 logo 变更：侧边栏底部图标据此即时跟随（无需重启/重挂载）
+      notifyBrandLogoChanged();
       setSaveStatus('saved');
       // 2.5s 后自动隐藏"Saved"提示
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
@@ -1453,7 +1460,7 @@ export function SettingsModal({
                     style={{ width: 40, height: 40, borderColor: !brandLogo ? 'var(--purple)' : 'transparent', backgroundColor: '#fff' }}
                     title="Default Logo"
                   >
-                    <img src="/bobwork-logo.png" alt="Default" className="h-full w-full object-contain" />
+                    <img src="/hippo-line.png" alt="Default" className="h-full w-full object-contain" />
                   </button>
                   {avatarList.map((av) => {
                     const isSelected = brandLogo === av.id;
@@ -1818,7 +1825,7 @@ export function SettingsModal({
                 <div className="mt-3 divide-y rounded-xl border" style={{ borderColor: 'var(--line)' }}>
                   {(
                     [
-                      { keys: ['⌘', 'R'], label: 'Fit canvas & arrange sticky notes' },
+                      { keys: ['⌘', 'R'], label: 'Auto arrange nodes (Node Map)' },
                       { keys: ['⌘', 'G'], label: 'Open Project Board' },
                       { keys: ['⌘', 'S'], label: 'Save document' },
                       { keys: ['⌘', 'Enter'], label: 'Send message (in input fields)' },
@@ -2620,6 +2627,25 @@ export function SettingsModal({
                 placeholder="Type a category, press Enter"
               />
             </div>
+
+            {/* AI 自动新建分类文件夹：关 = 模型只能在上面清单里择一，越界落末位兜底项 */}
+            <div
+              className="mt-3 flex items-start justify-between gap-4 border-t pt-3"
+              style={{ borderColor: 'var(--line-soft)' }}
+            >
+              <div>
+                <p className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Auto-create Categories</p>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  Let the AI create a new folder when none of the categories above fit.
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={fileOrgAutoCreate}
+                onChange={() => setFileOrgAutoCreate((v) => !v)}
+                title={fileOrgAutoCreate ? 'Enabled' : 'Disabled'}
+              />
+            </div>
+
           </div>
 
           {/* 命名规则（受控选项：顺序 / 分隔符 / 版本号补零，拼名与反解共用同一规则） */}

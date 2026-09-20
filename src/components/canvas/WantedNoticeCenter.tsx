@@ -9,16 +9,16 @@
  *
  * 布局（一个弹窗内左右两栏，仿邮件客户端）：
  *   - 左栏 收件箱：每条 = 未读圆点 + 主题单行 + 2 行摘要 + 时间；未读加粗 + 左侧品牌色条
- *   - 右栏 详情：点击列表项即时切换，展示完整正文 + 类型 + 时间，底部 Prev / 动作 / Next 连续阅读
+ *   - 右栏 详情：点击列表项即时切换，展示完整正文 + 类型 + 时间；上/下一封与收起详情并入标题栏，右栏保持纯净
  *   - 已读时机：打开弹窗不标已读，仅点开某条时才清除该条未读标记；头部提供 Mark all read
  *   - 桌面系统通知：发布者未自行发送时（desktop !== false）自动补发
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X, CalendarDays, Bell, CheckCircle2, ChevronLeft, ChevronRight,
+  X, CalendarDays, Bell, CheckCircle2, ChevronLeft, ChevronRight, ChevronsRight,
   LayoutGrid, Eye, EyeOff, Circle, Mail, Search, Trash,
-  Clock, Star, MoreHorizontal, Archive,
+  Clock, Star, Archive,
   Download, Link2, Check,
 } from 'lucide-react';
 import { bus, BusEvents, stripThinkTags, type WantedNoticePayload, type WantedNoticeItem, type ChatMessage, type WantedExecutingPayload } from '@/lib/bus';
@@ -71,8 +71,6 @@ type SenderInfo = {
   avatarBg: string;
   avatarFg: string;
   avatarBorder: string;
-  /** 收件人显示（全部是 To: 我） */
-  to: string;
 };
 function senderOf(n: Notice): SenderInfo {
   switch (n.kind) {
@@ -84,7 +82,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--info-soft)',
         avatarFg: 'var(--info)',
         avatarBorder: 'var(--info)',
-        to: 'me',
       };
     case 'daily-report':
       return {
@@ -94,7 +91,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--warn-soft)',
         avatarFg: 'var(--warn)',
         avatarBorder: 'var(--warn)',
-        to: 'me',
       };
     case 'task':
       return {
@@ -104,7 +100,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--success-soft)',
         avatarFg: 'var(--success)',
         avatarBorder: 'var(--success)',
-        to: 'me',
       };
     case 'note':
       return {
@@ -114,7 +109,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--success-soft)',
         avatarFg: 'var(--success)',
         avatarBorder: 'var(--success)',
-        to: 'me',
       };
     case 'inspect':
       return {
@@ -124,7 +118,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--teal-soft)',
         avatarFg: 'var(--teal)',
         avatarBorder: 'var(--teal)',
-        to: 'me',
       };
     case 'web':
       return {
@@ -134,7 +127,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--purple-soft)',
         avatarFg: 'var(--purple)',
         avatarBorder: 'var(--purple)',
-        to: 'me',
       };
     case 'info':
     default:
@@ -145,7 +137,6 @@ function senderOf(n: Notice): SenderInfo {
         avatarBg: 'var(--success-soft)',
         avatarFg: 'var(--success)',
         avatarBorder: 'var(--success)',
-        to: 'me',
       };
   }
 }
@@ -748,12 +739,12 @@ interface WantedNoticeCenterProps {
   onPendingChange?: (pending: number) => void;
 }
 
-/** 可折叠分区：pending（INBOX，默认展开）/ done（ARCHIVE，默认折叠），点击标题栏展开/收起。
+/** 可折叠分区（现仅 ARCHIVE 使用，默认折叠），点击标题栏展开/收起。
  *  必须定义为模块级组件（而非组件函数体内）：若定义在组件体内，每次渲染都会产生新的组件类型，
  *  React 会卸载并重建分区，导致内部 expanded state 被重置（展开的 ARCHIVE 点击邮件后自动折叠）。 */
 function CollapsibleSection({
   title, count, defaultExpanded, renderNoticeRow, doneList, isDone,
-  tagBar, headerAction,
+  headerAction,
 }: {
   title: string;
   count: number;
@@ -765,7 +756,6 @@ function CollapsibleSection({
   ) => React.ReactNode;
   doneList: Notice[];
   isDone: boolean;
-  tagBar?: React.ReactNode;
   headerAction?: React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -821,7 +811,6 @@ function CollapsibleSection({
           </span>
         )}
       </div>
-      {expanded && tagBar}
       {expanded && doneList.map((n) => {
         return renderNoticeRow(n, isDone, { threadOrder: 1, threadSize: 1, threadCollapsed: false });
       })}
@@ -1762,32 +1751,6 @@ export function WantedNoticeCenter({
 
   // ===== 详情区子组件们（辅助渲染：避免 JSX 一大坨） =====
 
-  /** 头像：图片优先，否则 emoji + 色板（发件人用） */
-  const avatarEl = (s: SenderInfo, size: number = 36) => (
-    <div style={{
-      width: size,
-      height: size,
-      borderRadius: '50%',
-      flexShrink: 0,
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontSize: Math.round(size * 0.48),
-      backgroundColor: s.avatarBg,
-      color: s.avatarFg,
-      border: `1.5px solid ${s.avatarBorder}`,
-      overflow: 'hidden',
-      userSelect: 'none',
-    }}>
-      {s.avatarSrc ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={s.avatarSrc} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-      ) : (
-        s.avatarEmoji
-      )}
-    </div>
-  );
-
   /** Star / Archive / Delete 后自动跳下一封（删除 L1337 重名实现，统一使用 L1047 版本）——这里不再重新定义 */
 
   // ——— webbridge 报告分享：下载 .md / 复制分析链接（仅 kind === 'web'） ———
@@ -1845,13 +1808,6 @@ export function WantedNoticeCenter({
           </>
         )}
         <button
-          onClick={() => markStar(n.id, !n.starred)}
-          title={n.starred ? 'Unstar (S)' : 'Star (S)'}
-          style={iconBtn({ color: n.starred ? 'var(--warn)' : 'var(--ink-muted)' })}
-        >
-          <Star size={14} fill={n.starred ? 'var(--warn)' : 'none'} />
-        </button>
-        <button
           onClick={async () => {
             const ok = await confirmAsk({
               title: 'Delete this message?',
@@ -1866,16 +1822,6 @@ export function WantedNoticeCenter({
           style={iconBtn({ color: 'var(--danger)' })}
         >
           <Trash size={14} />
-        </button>
-        <button
-          title="More…"
-          style={iconBtn({ color: 'var(--ink-muted)' })}
-          onClick={() => {
-            // 占位：真实项目可展开下拉 (Mark as unread / Mute thread / Print etc.)
-            void 0;
-          }}
-        >
-          <MoreHorizontal size={14} />
         </button>
       </div>
     );
@@ -1903,7 +1849,7 @@ export function WantedNoticeCenter({
     opacity: disabled ? 0.4 : 1,
   } as React.CSSProperties);
 
-  /** 单一邮件信封：主题行 ➜ 信封头（头像+From/To+时间+动作） ➜ 分隔线 ➜ 正文 ➜ 底部动作
+  /** 单一邮件信封（QQ 邮箱式头部）：主题 + 右侧动作 ➜ 元信息一行（分类 · 发件人 · 时间） ➜ 分隔线 ➜ 正文 ➜ 底部动作
    *  @param n         邮件通知
    *  @param kb        React key 前缀（堆叠时区分每封邮件）
    *  @param options.isCurrentInThread  是否当前是"主查看邮件"（高亮，不折叠摘要）
@@ -1941,12 +1887,12 @@ export function WantedNoticeCenter({
           flexDirection: 'column',
         }}
       >
-        {/* === 主题行：⭐ · 标题 · thread(N) · [标签 chip] */}
+        {/* === QQ 邮箱式头部第一行：⭐ · 主题（大字） · 右侧动作工具栏 === */}
         <div style={{
           display: 'flex',
           alignItems: 'flex-start',
           gap: 8,
-          padding: '12px 14px 6px',
+          padding: '14px 14px 6px',
         }}>
           <button
             onClick={() => markStar(n.id, !n.starred)}
@@ -1964,53 +1910,9 @@ export function WantedNoticeCenter({
           >
             <Star size={15} fill={n.starred ? 'var(--warn)' : 'none'} />
           </button>
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ fontSize: '1.066667rem', fontWeight: 900, color: 'var(--ink-strong)', lineHeight: 1.35, wordBreak: 'break-word' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: '1.066667rem', fontWeight: 800, color: 'var(--ink-strong)', lineHeight: 1.35, wordBreak: 'break-word' }}>
               {n.title}
-            </div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                fontSize: '0.7rem',
-                fontWeight: 700,
-                letterSpacing: '0.04em',
-                padding: '1px 7px',
-                borderRadius: 2,
-                backgroundColor: b.bg,
-                color: b.fg,
-                border: '1px solid currentColor',
-              }}>
-                {n.kind === 'calendar' ? <Bell size={10} /> : n.kind === 'daily-report' ? <Clock size={10} /> : <Mail size={10} />}
-                {b.label}
-              </span>
-              {n.threadId && threadCount > 1 && (
-                <span style={{
-                  fontSize: '0.666667rem',
-                  padding: '1px 7px',
-                  borderRadius: 999,
-                  backgroundColor: 'var(--primary-soft)',
-                  color: 'var(--primary)',
-                  fontWeight: 700,
-                  border: '1px solid currentColor',
-                }}>
-                  🧵 {threadCount} msgs
-                </span>
-              )}
-              {n.done && (
-                <span style={{
-                  fontSize: '0.666667rem',
-                  padding: '1px 7px',
-                  borderRadius: 999,
-                  backgroundColor: 'var(--success-soft)',
-                  color: 'var(--success)',
-                  fontWeight: 700,
-                  border: '1px solid currentColor',
-                }}>
-                  ✓ Archived
-                </span>
-              )}
             </div>
           </div>
           {showJumpTo && (
@@ -2035,55 +1937,52 @@ export function WantedNoticeCenter({
               ↗ Focus
             </button>
           )}
+          {mailActions(n)}
         </div>
 
-        {/* === 信封头：头像 + From/To + 完整时间 + 动作工具栏 */}
+        {/* === QQ 邮箱式头部第二行：分类 · 发件人 <邮箱> · 时间（徽章降级为一行文本） === */}
         <div style={{
           display: 'flex',
-          alignItems: 'flex-start',
-          gap: 10,
-          padding: '8px 14px 10px',
+          alignItems: 'center',
+          gap: 6,
+          flexWrap: 'wrap',
+          padding: '0 14px 12px',
+          fontSize: '0.733333rem',
+          color: 'var(--ink-muted)',
         }}>
-          {avatarEl(s, 40)}
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2, paddingTop: 2 }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              gap: 8,
-              flexWrap: 'wrap',
-            }}>
-              <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--ink-strong)' }}>
-                {s.name}
-              </span>
-              <span style={{ fontSize: '0.733333rem', color: 'var(--ink-faint)' }}>
-                &lt;{s.email}&gt;
-              </span>
-            </div>
-            <div style={{ fontSize: '0.733333rem', color: 'var(--ink-muted)' }}>
-              To:&nbsp;<span style={{ color: 'var(--ink-strong)' }}>{s.to}</span>
-              {n.kind === 'calendar' && (
-                <>
-                  &nbsp;·&nbsp;
-                  <span style={{ color: 'var(--info)', fontWeight: 600 }}>📅 Calendar reminder</span>
-                </>
-              )}
-              {n.kind === 'daily-report' && (
-                <>
-                  &nbsp;·&nbsp;
-                  <span style={{ color: 'var(--warn)', fontWeight: 600 }}>🌞 Scheduled daily digest</span>
-                </>
-              )}
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-            <div
-              title={formatFullTime(n.time)}
-              style={{ fontSize: '0.733333rem', color: 'var(--ink-muted)', whiteSpace: 'nowrap' }}
-            >
-              {formatTime(n.time)}
-            </div>
-            {mailActions(n)}
-          </div>
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            fontSize: '0.7rem',
+            fontWeight: 700,
+            letterSpacing: '0.04em',
+            padding: '1px 6px',
+            borderRadius: 3,
+            backgroundColor: b.bg,
+            color: b.fg,
+            flexShrink: 0,
+          }}>
+            {n.kind === 'calendar' ? <Bell size={10} /> : n.kind === 'daily-report' ? <Clock size={10} /> : <Mail size={10} />}
+            {b.label}
+          </span>
+          <span style={{ color: 'var(--line)' }}>·</span>
+          <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--ink-strong)' }}>{s.name}</span>
+          <span style={{ color: 'var(--ink-faint)' }}>&lt;{s.email}&gt;</span>
+          <span style={{ color: 'var(--line)' }}>·</span>
+          <span title={formatFullTime(n.time)}>{formatTime(n.time)}</span>
+          {n.threadId && threadCount > 1 && (
+            <>
+              <span style={{ color: 'var(--line)' }}>·</span>
+              <span>🧵 {threadCount} msgs</span>
+            </>
+          )}
+          {n.done && (
+            <>
+              <span style={{ color: 'var(--line)' }}>·</span>
+              <span style={{ color: 'var(--success)', fontWeight: 700 }}>✓ Archived</span>
+            </>
+          )}
         </div>
 
         {/* === 分隔线 === */}
@@ -2201,8 +2100,8 @@ export function WantedNoticeCenter({
           </div>
         )}
 
-        {/* === 底部动作：calendar 类提供 Open Calendar；其余提供 Mark as done */}
-        {(
+        {/* === 底部动作：仅日历类邮件展示 Open Calendar，其余邮件不再渲染空操作栏 === */}
+        {(n.action?.type === 'open-calendar' || n.kind === 'calendar') && (
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -2213,26 +2112,24 @@ export function WantedNoticeCenter({
             background: 'var(--paper-soft)',
             borderRadius: '0 0 6px 6px',
           }}>
-            {(n.action?.type === 'open-calendar' || n.kind === 'calendar') && (
-              <button
-                onClick={() => handleDetailAction(n)}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  background: 'var(--info-soft)',
-                  border: '1px solid var(--info)',
-                  color: 'var(--info)',
-                  borderRadius: 2,
-                  padding: '6px 12px',
-                  cursor: 'pointer',
-                  fontSize: '0.8rem',
-                  fontWeight: 700,
-                }}
-              >
-                <CalendarDays size={13} /> Open Calendar
-              </button>
-            )}
+            <button
+              onClick={() => handleDetailAction(n)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                background: 'var(--info-soft)',
+                border: '1px solid var(--info)',
+                color: 'var(--info)',
+                borderRadius: 2,
+                padding: '6px 12px',
+                cursor: 'pointer',
+                fontSize: '0.8rem',
+                fontWeight: 700,
+              }}
+            >
+              <CalendarDays size={13} /> Open Calendar
+            </button>
           </div>
         )}
       </div>
@@ -2353,18 +2250,9 @@ export function WantedNoticeCenter({
     return () => window.removeEventListener('keydown', onKey, true);
   }, [open, detail, closeDetail, navDetail, markArchive, markStar, markDelete]);
 
-  /** INBOX 标题栏下方的类别筛选栏：按类别标签（bucket）统计收件箱邮件条数，降序；点击原位筛选 */
+  /** 类别筛选 pills —— 与搜索框同处一行：不换行、超出横向滚动；All 兼作收件箱总数 */
   const tagBarNode = catSummary.length > 0 ? (
-    <div
-      style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 4,
-        padding: '6px 10px',
-        borderBottom: '1px solid var(--line-soft)',
-        backgroundColor: 'var(--paper-soft)',
-      }}
-    >
+    <>
       <button
         onClick={() => setFilterCat(null)}
         title="Show all categories"
@@ -2381,9 +2269,14 @@ export function WantedNoticeCenter({
           fontSize: '0.733333rem',
           fontWeight: filterCat === null ? 700 : 400,
           lineHeight: '16px',
+          flexShrink: 0,
+          whiteSpace: 'nowrap',
         }}
       >
         All
+        <span style={{ color: filterCat === null ? 'var(--primary)' : 'var(--ink-faint)', fontSize: '0.666667rem' }}>
+          {inboxVisibleCount}
+        </span>
       </button>
       {catSummary.map(({ tag, count }) => {
         const active = filterCat === tag;
@@ -2405,6 +2298,8 @@ export function WantedNoticeCenter({
               fontSize: '0.733333rem',
               fontWeight: active ? 700 : 400,
               lineHeight: '16px',
+              flexShrink: 0,
+              whiteSpace: 'nowrap',
             }}
           >
             <LayoutGrid size={10} />
@@ -2413,7 +2308,7 @@ export function WantedNoticeCenter({
           </button>
         );
       })}
-    </div>
+    </>
   ) : null;
 
   /** 左栏单行渲染 */
@@ -2503,6 +2398,22 @@ export function WantedNoticeCenter({
             zIndex: 2,
           }}
         >
+          {/* 第 1 行：标题（独占一行占满宽度） */}
+          <span
+            style={{
+              display: 'block',
+              fontSize: '0.8rem',
+              fontWeight: n.read ? 400 : 700,
+              color: n.read ? 'var(--ink-muted)' : 'var(--ink)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              lineHeight: '18px',
+            }}
+          >
+            {n.title}
+          </span>
+          {/* 第 2 行：元信息合并（未读点 + 分类标签 + 时间），列表行由三行压缩为两行 */}
           <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span
               style={{
@@ -2541,30 +2452,18 @@ export function WantedNoticeCenter({
                 </span>
               );
             })()}
-          </span>
-          <span
-            style={{
-              display: 'block',
-              fontSize: '0.8rem',
-              fontWeight: n.read ? 400 : 700,
-              color: n.read ? 'var(--ink-muted)' : 'var(--ink)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              lineHeight: '18px',
-            }}
-          >
-            {n.title}
-          </span>
-          <span
-            title={formatFullTime(n.time)}
-            style={{
-              fontSize: '0.666667rem',
-              color: 'var(--ink-muted)',
-              lineHeight: '16px',
-            }}
-          >
-            {formatTime(n.time)}
+            <span
+              title={formatFullTime(n.time)}
+              style={{
+                marginLeft: 'auto',
+                flexShrink: 0,
+                fontSize: '0.666667rem',
+                color: 'var(--ink-muted)',
+                lineHeight: '16px',
+              }}
+            >
+              {formatTime(n.time)}
+            </span>
           </span>
         </button>
         {!isDone ? (
@@ -2656,6 +2555,18 @@ export function WantedNoticeCenter({
     );
   };
 
+  /** 标题栏内详情导航按钮样式：无边框、无底色，仅弱化图标，避免与正文抢视觉 */
+  const detailNavStyle = (enabled: boolean): React.CSSProperties => ({
+    background: 'none',
+    border: 'none',
+    padding: '2px 3px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    borderRadius: 2,
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    color: enabled ? 'var(--ink-muted)' : 'var(--ink-faint)',
+  });
+
   return (
     <>
       {/* 触发按钮已移到 Sidebar Rail（WANTED 图标）——本组件只渲染弹层 + toast */}
@@ -2695,7 +2606,7 @@ export function WantedNoticeCenter({
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'space-between',
+                gap: 2,
                 padding: '8px 10px',
                 borderBottom: '1px solid var(--line-soft)',
                 backgroundColor: 'var(--paper-soft)',
@@ -2703,18 +2614,41 @@ export function WantedNoticeCenter({
                 userSelect: 'none',
               }}
             >
-              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--ink-strong)', letterSpacing: '0.08em' }}>
-                BobMail<span style={{ color: 'var(--ink-muted)', fontWeight: 400, marginLeft: 4 }}>· {pending} pending</span>
+              <span style={{ flex: 1, fontSize: '0.8rem', fontWeight: 700, color: 'var(--ink-strong)', letterSpacing: '0.08em' }}>
+                BobMail
               </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <button
-                  onClick={closePopup}
-                  title="Close"
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--ink-muted)', display: 'inline-flex' }}
-                >
-                  <X size={14} />
-                </button>
-              </div>
+              {/* 详情导航（上/下一封 · 收起详情）并入标题栏，右栏不再单独叠一条标题栏 */}
+              {detail && (
+                <>
+                  <button
+                    onClick={() => navDetail(-1)}
+                    disabled={notices.length <= 1}
+                    title="Previous (K)"
+                    style={detailNavStyle(notices.length > 1)}
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <button
+                    onClick={() => navDetail(1)}
+                    disabled={notices.length <= 1}
+                    title="Next (J)"
+                    style={detailNavStyle(notices.length > 1)}
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                  <button onClick={closeDetail} title="Collapse detail (Esc)" style={detailNavStyle(true)}>
+                    <ChevronsRight size={14} />
+                  </button>
+                  <span style={{ width: 1, height: 12, background: 'var(--line)', margin: '0 2px' }} />
+                </>
+              )}
+              <button
+                onClick={closePopup}
+                title="Close"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--ink-muted)', display: 'inline-flex' }}
+              >
+                <X size={14} />
+              </button>
             </div>
             {inboxNotices.length === 0 ? (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -2730,9 +2664,10 @@ export function WantedNoticeCenter({
                   style={{ width: 360, flexShrink: 0, borderRight: '1px solid var(--line-soft)' }}
                 >
 
-                  {/* 收件箱态：搜索框 + 通知列表 = 收件箱（未完成）分区 + 已完成分区；
+                  {/* 收件箱态：单行标题（搜索 + 类别筛选）+ 通知列表 → ARCHIVE 分区；
                       类别筛选时 INBOX 列表按类别标签原位过滤 */}
                   <>
+                      {/* 左栏唯一标题行：搜索 + 类别 pills 合并，替代原本「搜索栏 / INBOX 分区栏 / 类别栏」三行 */}
                       {notices.length > 0 && (
                         <div
                           style={{
@@ -2748,11 +2683,11 @@ export function WantedNoticeCenter({
                           <input
                             value={searchQ}
                             onChange={(e) => setSearchQ(e.target.value)}
-                            placeholder="Search title / body / tag…"
+                            placeholder="Search…"
                             spellCheck={false}
                             style={{
-                              flex: 1,
-                              minWidth: 0,
+                              flex: '1 1 0%',
+                              minWidth: 72,
                               height: 20,
                               background: 'none',
                               border: 'none',
@@ -2765,15 +2700,30 @@ export function WantedNoticeCenter({
                             <button
                               onClick={() => setSearchQ('')}
                               title="Clear search"
-                              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--ink-faint)', display: 'inline-flex' }}
+                              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--ink-faint)', display: 'inline-flex', flexShrink: 0 }}
                             >
                               <X size={11} />
                             </button>
                           )}
+                          {tagBarNode && <span style={{ width: 1, height: 12, background: 'var(--line)', flexShrink: 0 }} />}
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 4,
+                              flex: '0 1 auto',
+                              minWidth: 0,
+                              overflowX: 'auto',
+                              overscrollBehaviorX: 'contain',
+                              scrollbarWidth: 'none',
+                            }}
+                          >
+                            {tagBarNode}
+                          </div>
                         </div>
                       )}
                       <div style={{ flex: 1, overflowY: 'auto', overscrollBehavior: 'contain', padding: '4px 0' }}>
-                        <CollapsibleSection title="INBOX" count={filterCat !== null ? (filteredMails ?? []).length : inboxVisibleCount} defaultExpanded renderNoticeRow={renderNoticeRow} doneList={filterCat !== null ? (filteredMails ?? []) : pendingList} isDone={false} tagBar={tagBarNode} />
+                        {(filterCat !== null ? (filteredMails ?? []) : pendingList).map((n) => renderNoticeRow(n, false, { threadOrder: 1, threadSize: 1, threadCollapsed: false }))}
                         {doneList.length > 0 && (
                           <CollapsibleSection title="ARCHIVE" count={archiveVisibleCount} defaultExpanded={false} renderNoticeRow={renderNoticeRow} doneList={doneList} isDone headerAction={(
                             <button
@@ -2881,176 +2831,16 @@ export function WantedNoticeCenter({
                     </>
                 </div>
 
-                {/* ===== 右栏：详情（默认收起，点击左侧条目后展开） —— 始终占一席，空态居中插画 ===== */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderLeft: detail ? '1px solid var(--line-soft)' : 'none' }}>
-                  {/* 顶栏：拖动 + Prev/Next + Close（分类 badge 移到信封主题行） */}
-                  <div
-                    onMouseDown={startDrag}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '10px 14px',
-                      borderBottom: '1px solid var(--line-soft)',
-                      backgroundColor: 'var(--paper-soft)',
-                      cursor: detail ? 'move' : 'move',
-                      userSelect: 'none',
-                    }}
-                  >
-                    <div style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: '0.733333rem',
-                      fontWeight: 700,
-                      letterSpacing: '0.06em',
-                      padding: '2px 8px',
-                      borderRadius: 2,
-                      backgroundColor: 'var(--primary-soft)',
-                      color: 'var(--primary)',
-                      border: '1px solid currentColor',
-                    }}>
-                      <Mail size={11} />
-                      {detail ? 'MESSAGE' : 'INBOX'}
-                    </div>
-                    {detail && (
-                      <span style={{ fontSize: '0.733333rem', color: 'var(--ink-muted)' }}>
-                        {Math.min(detailIdx ?? 0, notices.length - 1) + 1} / {notices.length}
-                      </span>
-                    )}
-                    <span style={{ flex: 1 }} />
-                    <button
-                      onClick={() => navDetail(-1)}
-                      disabled={!detail || notices.length <= 1}
-                      title="Previous (K)"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 3,
-                        background: 'none',
-                        border: '1px solid var(--line)',
-                        borderRadius: 2,
-                        cursor: detail && notices.length > 1 ? 'pointer' : 'not-allowed',
-                        fontSize: '0.8rem',
-                        color: detail && notices.length > 1 ? 'var(--ink)' : 'var(--ink-faint)',
-                        padding: '4px 8px',
-                      }}
-                    >
-                      <ChevronLeft size={13} />
-                      Prev
-                    </button>
-                    <button
-                      onClick={() => navDetail(1)}
-                      disabled={!detail || notices.length <= 1}
-                      title="Next (J)"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 3,
-                        background: 'none',
-                        border: '1px solid var(--line)',
-                        borderRadius: 2,
-                        cursor: detail && notices.length > 1 ? 'pointer' : 'not-allowed',
-                        fontSize: '0.8rem',
-                        color: detail && notices.length > 1 ? 'var(--ink)' : 'var(--ink-faint)',
-                        padding: '4px 8px',
-                      }}
-                    >
-                      Next
-                      <ChevronRight size={13} />
-                    </button>
-                    <button
-                      onClick={closeDetail}
-                      title="Collapse detail (Esc)"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        background: 'none',
-                        border: 'none',
-                        cursor: 'pointer',
-                        color: 'var(--ink-muted)',
-                        padding: '2px 4px',
-                      }}
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-
-                  {!detail ? (
-                    // ============ 空态：📭 Select a message ============
-                    <div style={{
-                      flex: 1,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 16,
-                      padding: '24px 40px',
-                      color: 'var(--ink-muted)',
-                    }}>
-                      <div style={{
-                        width: 96, height: 96,
-                        borderRadius: '50%',
-                        background: 'var(--primary-soft)',
-                        border: '1.5px solid var(--primary)',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: 44,
-                      }}>
-                        📭
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                        <div style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--ink-strong)' }}>
-                          Select a message to preview
-                        </div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--ink-muted)', textAlign: 'center', lineHeight: 1.6, maxWidth: 360 }}>
-                          Choose a conversation from the left inbox.<br/>
-                          Chat threads are preserved forever — no 15-minute TTL.
-                        </div>
-                      </div>
-                      <div style={{
-                        display: 'flex',
-                        gap: 8,
-                        marginTop: 4,
-                        flexWrap: 'wrap',
-                        justifyContent: 'center',
-                      }}>
-                        {[
-                          ['J / K', 'Prev / Next'],
-                          ['E', 'Archive'],
-                          ['S', 'Star / Unstar'],
-                        ].map(([k, v]) => (
-                          <div key={k} style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 6,
-                            padding: '3px 8px',
-                            border: '1px solid var(--line-soft)',
-                            borderRadius: 4,
-                            fontSize: '0.733333rem',
-                          }}>
-                            <span style={{
-                              fontFamily: "var(--font-mono)",
-                              fontWeight: 700,
-                              color: 'var(--primary)',
-                              fontSize: '0.7rem',
-                              padding: '1px 5px',
-                              borderRadius: 3,
-                              backgroundColor: 'var(--primary-soft)',
-                              border: '1px solid var(--primary)',
-                            }}>{k}</span>
-                            <span style={{ color: 'var(--ink-muted)' }}>{v}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    // ============ 内容区（可滚动） ============
-                    <div style={{ flex: 1, overflowY: 'auto', overscrollBehavior: 'contain', padding: '14px 16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      <MailEnvelope n={detail} kb={`detail-${detail.id}`} />
-                    </div>
-                  )}
+                {/* ===== 右栏：详情（默认收起，点击左侧条目后展开）—— 无详情时为 0 宽，不渲染空态 ===== */}
+                <div style={{
+                  flex: 1,
+                  minWidth: 0,
+                  borderLeft: detail ? '1px solid var(--line-soft)' : 'none',
+                  overflowY: 'auto',
+                  overscrollBehavior: 'contain',
+                  padding: '14px 16px 18px',
+                }}>
+                  {detail && <MailEnvelope n={detail} kb={`detail-${detail.id}`} />}
                 </div>
               </div>
             )}

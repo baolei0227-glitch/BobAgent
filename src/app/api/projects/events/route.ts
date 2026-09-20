@@ -5,9 +5,11 @@
  *  - `projects-changed`：项目列表变化（手动拖入/删除工作区目录等）→ 刷新项目列表
  *  - `files-changed`：项目内文件树可见内容变化（Finder 里直接增删改 homework/materials 等）
  *    → 刷新已展开项目的文件树
+ *  - `node-outcome`：某节点成果块被后台自动提炼改写 → 负载 `{"node_id":"n_xxx"}`，
+ *    前端转为 `node-outcome-refresh` 窗口事件，让画布上该节点的成果块状态立即更新
  * 连接断开自动清理订阅。
  */
-import { onProjectsChanged, onProjectFilesChanged } from '@/lib/project/project-events';
+import { onProjectsChanged, onProjectFilesChanged, onNodeOutcomeChanged } from '@/lib/project/project-events';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,6 +38,9 @@ export async function GET() {
       const unsubFiles = onProjectFilesChanged(() => {
         send('event: files-changed\ndata: {}\n\n');
       });
+      const unsubOutcome = onNodeOutcomeChanged((nodeId) => {
+        send(`event: node-outcome\ndata: ${JSON.stringify({ node_id: nodeId })}\n\n`);
+      });
 
       const heartbeat = setInterval(() => {
         send(': keepalive\n\n');
@@ -47,6 +52,7 @@ export async function GET() {
         clearInterval(heartbeat);
         unsubProjects();
         unsubFiles();
+        unsubOutcome();
       };
       cleanups.set(controller, cleanup);
 

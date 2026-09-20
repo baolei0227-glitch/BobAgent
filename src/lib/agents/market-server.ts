@@ -30,10 +30,13 @@ export const BUILTIN_AGENTS_SRC_DIR = path.resolve(process.cwd(), 'assets', 'age
 const AGENT_FILE = 'agent.json';
 const ID_RE = /^[a-z][a-z0-9-]{0,47}$/;
 
-/** 允许在 manifest 中声明的场景白名单（与 tools.ts ToolScene 对齐；未知场景会在转换时丢弃并告警） */
+/** 允许在 manifest 中声明的场景白名单（与 tools.ts ToolScene 对齐；未知场景会在转换时丢弃并告警）。
+ *  刻意不含 'team'：Agent 包不得以 fixedScenes 声明白嫖多智能体（唯一入口是「Multi-agent mode」开关）。 */
 export const ALLOWED_AGENT_SCENES: readonly string[] = [
   'general', 'coding', 'butler', 'legal', 'node', 'audio', 'skill', 'design',
-  'ocr', 'admin', 'office', 'browser', 'company', 'team', 'local', 'notebook',
+  'ocr', 'admin', 'office', 'browser', 'company', 'local', 'notebook', 'mind',
+  // 项目账本：ledger = 只读入口（Read the project ledger）；ledger-keeper = 账本写/维护（仅档案员 Archivist）
+  'ledger', 'ledger-keeper',
 ];
 
 export interface AgentPackageManifest {

@@ -59,6 +59,7 @@ function buildAgentBasePrompt(name: string, description: string, role: string): 
     `- Finish by writing your final answer directly in the reply body: the body itself is the deliverable and the turn ends there naturally. finish_task is OPTIONAL (an explicit completion signal only) — never call it as a ritual, and never append empty "task done" closers.`,
     `\n## Deliverables & output`,
     `- To save a deliverable file, write it under the homework/ directory (path "homework/<filename>") and end your reply with the marker line \`OutputFile: homework/<filename>\` so it is shown to the user as an output card.`,
+    `- The final reply after all tools finish MUST contain the actual answer text in its body; the \`OutputFile:\` line is appended after the answer — never reply with a bare \`OutputFile:\` line and no body. Text emitted in the same turn as the write_file tool call is not retained as your answer, so restate the conclusion in the final post-tool message.`,
     `- When quoting law articles, judgments or other materials, give the source and version date.`,
     `\n## Communication`,
     `- Reply in the same language the user writes in.`,
@@ -314,7 +315,7 @@ export const agentPackageToolDefs: Tool[] = [
         scenes: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional fixed scenes that decide which scened tools/MCP this agent can call. Allowed: general, coding, wanted, legal, node, audio, skill, design, ocr, admin, office, browser, company, team, local, notebook, butler. Defaults to ["general"]. Scene "notebook" grants the full note domain (Kar-like); "legal" grants pkulaw.',
+          description: 'Optional fixed scenes that decide which scened tools/MCP this agent can call. Allowed: general, coding, legal, node, audio, skill, design, ocr, admin, office, browser, company, local, notebook, butler. Defaults to ["general"]. Scene "notebook" grants the full note domain (Kar-like); "legal" grants pkulaw. Scene "team" is NOT allowed (multi-agent is switch-only).',
         },
         coreExclusions: {
           type: 'array',

@@ -43,6 +43,204 @@ export interface MessageAttachment {
   dataUrl?: string;
 }
 
+/**
+ * 附件落盘根目录（相对项目根）：
+ *   - `materials`（默认）：项目资料层，登记进材料 manifest、参与 search_materials 正文检索；
+ *   - `attachments`：对话级临时附件（如粘贴的截图），不进 manifest、不参与正文检索，
+ *     随节点删除一并回收（见 nodes/route.ts 的附件目录清理）。
+ * 两处子目录命名规则相同（`{nodeId前4位}_{标题}`），删除时按前缀匹配。
+ */
+export type AttachmentStore = 'materials' | 'attachments';
+
+/**
+ * 消息级 @引用 快照（资料库文件 / 本地文件 / 链接 / 操作目录）。
+ * 与 MessageAttachment 区分：@引用 不产生上传文件，仅作为本轮上下文，
+ * 需要在气泡内以 chip 展示并随回答落盘（<!-- REFERENCES: -->）。
+ */
+export interface MessageReference {
+  id: string;
+  /** material=资料库文件；file=引用本地文件；link=链接材料；folder=操作目录 */
+  kind: 'material' | 'file' | 'link' | 'folder';
+  name: string;
+  /** material：相对项目根路径（materials/...）；file/folder：本地绝对路径 */
+  path?: string;
+  url?: string;
+  /** 展示用大小文本（如 "176.5 KB"），未知则省略 */
+  size?: string;
+  /** folder：用户显式授权锁定（sent-folder:） */
+  locked?: boolean;
+}
+
+/**
+ * 多智能体协作（Multi-agent mode）：单个成员分支的进度。
+ * 由 team_run 编排期间的服务端进度快照（SSE subagent_update 帧）逐帧刷新，随回答写入持久化。
+ */
+export interface SubagentBranch {
+  id: string;
+  name: string;
+  role: string;
+  /** queued=等待/未开始，running=执行中，done=完成，failed=失败 */
+  state: 'queued' | 'running' | 'done' | 'failed';
+  taskId?: string;
+  /** 该成员当前任务的标题 */
+  subject?: string;
+  /** 成员上报的进度文本 */
+  progressText?: string;
+  startAt?: number;
+  endAt?: number;
+  durationMs?: number;
+  resultSummary?: string;
+  error?: string;
+}
+
+/** 一次多智能体协作的进度面板（团队目标 + 成员分支），挂在回答消息上用于折叠分支卡片 */
+export interface SubagentPanel {
+  teamId: string;
+  goal: string;
+  done: number;
+  total: number;
+  failed: number;
+  members: SubagentBranch[];
+}
+
+/**
+ * 多智能体协作「群聊流」事件：team_run 编排期间由宿主（lib/chat/team-run.ts）外推的过程叙述，
+ * 经 SSE subagent_events 帧送达前端，渲染成「多角色消息流」（形态 A 呈现层）。
+ *
+ * 与 SubagentPanel 的关系：面板是**逐帧全量快照**（当前状态），事件是**增量时间线**（发生过什么）。
+ * 两者同源同帧下发，前端分别用于「分支卡片」与「群聊流」两种视图。
+ *
+ * 不落盘：事件只活在会话内存里（写入 .md RMETA 会让单行 JSON 体积随消息条数膨胀）；
+ * 重启后由 SubagentPanel.members 合成降级视图（见 TeamChatStream）。
+ */
+export type TeamChatEvent =
+  /** 团队启动：主 agent 已给出编排（成员 + 任务 DAG）并获批，调度器开始推进 */
+  | { kind: 'team_start'; at: number; goal: string; memberNames: string[]; taskCount: number }
+  /** 成员被任务唤醒，开始执行（taskId：被唤醒时认领的任务；消息唤醒等无任务场景为空） */
+  | { kind: 'member_start'; at: number; memberId: string; name: string; subject?: string; taskId?: string }
+  /** 成员任务完成（summary 为剥离留言块后的产出正文，已截断；全文在 TeamDetail.results[taskId]） */
+  | { kind: 'member_done'; at: number; memberId: string; name: string; subject?: string; summary?: string; taskId?: string }
+  /** 成员任务失败 */
+  | { kind: 'member_failed'; at: number; memberId: string; name: string; subject?: string; error?: string; taskId?: string }
+  /** 成员间留言投递（宿主中转成功后的实际投递；from 为真实来源成员名，to 为目标成员名） */
+  | { kind: 'relay'; at: number; from: string; to: string; text: string }
+  /** 其他状态迁移（成员增减、搁浅接管/冷恢复、人工重试、计划/质量链）：团队工作台读引擎事件流时才有 */
+  | { kind: 'system'; at: number; text: string }
+  /** 协作收口（全部任务终态或超出时间预算） */
+  | { kind: 'team_done'; at: number; done: number; total: number; failed: number; timedOut: boolean };
+
+/**
+ * 团队工作台（chat 节点顶部 [对话 | 团队] 的团队视图）数据模型。
+ *
+ * 与前一组类型的差别：TeamChatEvent / SubagentPanel 是 **team_run 编排期间**宿主外推的
+ * 过程数据（只活在会话内存、随回答落盘）；本组类型是引擎侧（bob-team-mcp）**落盘真相源**
+ * 的只读投影——团队、成员、任务、邮箱、事件流（<teamId>.events.jsonl），由 /api/team/*
+ * 实时读取，因此刷新/重启后仍在。
+ */
+
+/** 团队概览（列表视图；字段全部来自引擎面板，宿主不落库、不缓存） */
+export interface TeamSummary {
+  teamId: string;
+  name: string;
+  goal: string;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+  /** 全部任务是否已进入终态（done/failed） */
+  terminal: boolean;
+  memberCount: number;
+  taskCount: number;
+  doneCount: number;
+  failedCount: number;
+}
+
+/** 团队成员（status: idle/busy/parked/offline） */
+export interface TeamMemberView {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  /** 已安装 Agent identity（bobwork market agent id）；空 = 以默认 chat 画像运行 */
+  identity?: string;
+  modelRef?: string;
+  /** 当前正在执行的任务 id（busy 时有值） */
+  currentTaskId?: string;
+  /** 该成员累计发言次数（任务唤醒 + 消息唤醒） */
+  messageCount: number;
+}
+
+/** 团队任务（DAG 节点） */
+export interface TeamTaskView {
+  id: string;
+  subject: string;
+  assignee?: string;
+  dependencies: string[];
+  status: string;
+  progressText?: string;
+  attempts?: number;
+  lastActivityAt?: number;
+  error?: string;
+  qualityStage?: string;
+}
+
+/** 团队邮箱里的一条消息（引擎消息表，截断最近 50 条） */
+export interface TeamMessageView {
+  id: string;
+  from: string;
+  to: string;
+  text: string;
+  kind: string;
+  delivered: boolean;
+  createdAt: number;
+}
+
+/** 团队事件流的原始条目（= 引擎 TeamEvent，落盘 <teamId>.events.jsonl） */
+export interface TeamEventItem {
+  id: string;
+  ts: number;
+  kind: string;
+  memberId?: string;
+  memberName?: string;
+  taskId?: string;
+  from?: string;
+  to?: string;
+  text?: string;
+  meta?: Record<string, unknown>;
+}
+
+/** 团队详情（工作台主视图一次拉全；results 为成员产出全文，只在拉全量时给） */
+export interface TeamDetail {
+  teamId: string;
+  name: string;
+  goal: string;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+  approvedAt?: number | null;
+  terminal: boolean;
+  /** 当前可认领（依赖已满足）的任务 id */
+  ready: string[];
+  members: TeamMemberView[];
+  tasks: TeamTaskView[];
+  messages: TeamMessageView[];
+  /** 最近 50 条原始事件（全量拉取时给；增量走 SSE events 帧） */
+  events?: TeamEventItem[];
+  /** 成员产出全文：taskId → 文本（只含 done 任务；全量拉取时给，增量走 results 帧） */
+  results?: Record<string, string>;
+  /** 增量游标：已消费到的最后一条事件 id（SSE 断线重连时回传 since） */
+  cursor?: string | null;
+}
+
+/** 团队工作台 SSE 帧（GET /api/team/<id>/stream） */
+export type TeamStreamFrame =
+  /** 面板状态变化（成员/任务/邮箱/终态）；不含产出全文，避免逐帧传大文本 */
+  | { type: 'panel'; detail: TeamDetail }
+  /** 成员产出增量（新 done 任务 → taskId → 全文） */
+  | { type: 'results'; results: Record<string, string> }
+  /** 群聊流增量事件（引擎事件的呈现层映射） */
+  | { type: 'events'; events: TeamChatEvent[] }
+  | { type: 'error'; message: string };
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -54,6 +252,8 @@ export interface ChatMessage {
   processNarration?: string;
   toolCalls?: ToolCallRecord[];
   attachments?: MessageAttachment[];
+  /** 本轮 @引用 的上下文快照（资料 / 本地文件 / 链接 / 操作目录），气泡内以 chip 展示并落盘 */
+  references?: MessageReference[];
   /** 本次回答生成的输出文件（homework/ 目录下的 .md/.docx/.pdf 等）或 attachments/nodes 下的文件 */
   outputFiles?: OutputFileItem[];
   /** 消息时间戳（ISO 字符串或 .md 中记录的 questionTime/answerTime） */
@@ -64,6 +264,10 @@ export interface ChatMessage {
   thinkingLevel?: ThinkingLevel;
   /** P2 轨迹：本轮任务的轨迹事件日志 id（对应 .trajectory/<nodeId>/<taskId>.jsonl） */
   taskId?: string;
+  /** 多智能体协作：本轮由主 agent 编排的成员分支进度（Multi-agent mode 开启且触发协作时才有） */
+  subagents?: SubagentPanel;
+  /** 多智能体协作：本轮的「群聊流」事件时间线（与 subagents 同源；仅会话内存，不随回答落盘） */
+  subagentEvents?: TeamChatEvent[];
 }
 
 export interface OutputFileItem {
@@ -139,6 +343,10 @@ export interface ProviderModel {
   description: string;
   thinking: boolean;
   temperature: number;
+  /** 模型家族声明（2026-09-15）：决定「怎么跟这个模型说话」的协议分支（回传 reasoning_content、
+   *  强制 temperature=1、1M 上下文预检），**读声明优先、模型名正则仅作未知型号兜底**。
+   *  'deepseek-v4' = DeepSeek V4 家族。厂商改 id（deepseek-v4-flash → deepseek-flash）只需改这里。 */
+  family?: 'deepseek-v4';
   spec?: ModelSpec;
 }
 
@@ -186,7 +394,7 @@ export interface AvailableModel {
   vendor?: string;
 }
 
-export { getAvailableModels, isCustomModel, parseCustomModel, getProviderPreset } from './providers/resolve';
+export { getAvailableModels, isCustomModel, parseCustomModel, getProviderPreset, isDeclaredV4Model } from './providers/resolve';
 
 /* ==================== 思考深度控制系统 ==================== */
 
@@ -265,6 +473,18 @@ export type AiChatNodeData = {
   sandboxAppId?: string;
   /** 已压缩对话轮次数（memory_compacted_until）：请求时跳过已压缩历史，交由压缩记忆+成果块兜底 */
   compactedUntil?: number;
+  /** 多智能体协作模式开关（frontmatter multi_agent_mode）：开启后本轮请求带 multiAgentMode，主 agent 只作
+   *  用户代理交 goal，宿主拉起队长（captain）会话做规划与整合 */
+  multiAgentMode?: boolean;
+  /** team 模式队长模型（frontmatter team_main_model，provider:modelId）：Team 分栏「Main model」选择，
+   *  宿主用它跑队长会话（规划 + 复核/整合）。与节点模型（modelId）完全隔离，互不写回 */
+  teamMainModel?: string;
+  /** team 模式成员模型（frontmatter team_worker_model，provider:modelId）：Team 分栏「Worker model」选择，
+   *  一刀切覆盖全部成员。与节点模型（modelId）完全隔离，互不写回 */
+  teamWorkerModel?: string;
+  /** 本节点关联的团队 id 清单（frontmatter team_ids）：团队工作台列出「本会话产生过的团队」，
+   *  团队真相源在引擎侧（bob-team-mcp），此处只存引用，不镜像任何团队状态 */
+  teamIds?: string[];
   /** 批注框（annotation）节点：批注文字（圆角矩形顶部展示） */
   annotationText?: string;
   /** 批注框（annotation）节点：关联的卡片节点 id 列表（自动跟随包围盒用） */
@@ -366,17 +586,6 @@ export type BobbyNodeData = {
     fallback?: { reason: string };
     error?: string;
   };
-  __hasPersistedPosition?: boolean;
-};
-
-/** Agent Teams 画布节点（团队执行观察台）数据：状态从 /api/team 实时拉取，data 只存节点元信息 */
-export type AgentTeamsNodeData = {
-  title: string;
-  /** .md 文件持久化 ID（UUID），删除节点时使用 */
-  nodeMdId?: string;
-  prompt: string;
-  /** 团队执行状态（驱动节点头部徽标与连线电流） */
-  status?: 'idle' | 'running' | 'done' | 'error';
   __hasPersistedPosition?: boolean;
 };
 

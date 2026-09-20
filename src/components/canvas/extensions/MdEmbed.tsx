@@ -76,7 +76,7 @@ function MdEmbedView({ node }: NodeViewProps) {
       as="div"
       className="md-embed-card"
       data-path={path}
-      title={`嵌入文档：${path}`}
+      title={`Embedded document: ${path}`}
       contentEditable={false}
     >
       <div className="md-embed-head" onClick={toggleExpand}>
@@ -88,7 +88,7 @@ function MdEmbedView({ node }: NodeViewProps) {
           <span className="md-embed-sub">嵌入文档 · 点击展开预览</span>
         </span>
         <span className="md-embed-tools">
-          <span className="md-embed-open" role="button" title="打开文档" onClick={openDoc}>
+          <span className="md-embed-open" role="button" title="Open document" onClick={openDoc}>
             <ExternalLink className="md-embed-open-icon" />
           </span>
           <span className="md-embed-chevron">

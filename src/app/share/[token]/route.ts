@@ -9,6 +9,8 @@ import { dirname } from 'path';
 import { createRenderer } from 'unified-renderer';
 import { getShareLink } from '@/lib/share-links';
 import { expandEmbeds } from '@/lib/md-embed';
+import { SHARE_WIDGET_SANITIZE_WHITELIST } from '@/lib/sanitize-whitelist';
+import { buildShareWidgetCss, injectShareWidgets, preprocessShareMarkdown } from '@/lib/share-widget';
 
 /** 创建渲染器：GFM + sanitize + 标题锚点 + 代码高亮（与编辑器预览一致的管线） */
 const renderer = createRenderer({
@@ -18,7 +20,12 @@ const renderer = createRenderer({
   slug: true,
   highlight: true,
   allowDangerousHtml: true,
+  // 放行内联 SVG 与 widget 片段依赖的 style / data-*，否则图表会被 sanitize 剥成纯文本
+  sanitizeWhitelist: SHARE_WIDGET_SANITIZE_WHITELIST,
 });
+
+/** widget 组件 CSS（作用域限 .bw-widget，模块加载时只算一次） */
+const SHARE_WIDGET_CSS = buildShareWidgetCss();
 
 /** 简单转义 HTML（title 插入时用） */
 function escapeHtml(s: string): string {
@@ -65,6 +72,11 @@ function buildPage(title: string, html: string): string {
   .paper hr { border: none; border-top: 1px solid #e6e8eb; margin: 24px 0; }
   .paper :is(h1,h2,h3,h4) a { color: inherit; }
   .footer { margin-top: 24px; text-align: center; font-size: 12px; color: #8b949e; }
+  /* 预渲染的 widget / mermaid / chart 片段（组件 CSS 已作用域到 .bw-widget） */
+  .paper .bw-widget { margin: 14px 0; }
+  .paper .bw-widget svg { max-width: 100%; height: auto; }
+  .paper .bw-widget-source { margin: 0; }
+${SHARE_WIDGET_CSS}
   @media (prefers-color-scheme: dark) {
     :root { color-scheme: dark; }
     body { background: #16181d; color: #e6e8ec; }
@@ -76,6 +88,8 @@ function buildPage(title: string, html: string): string {
     .paper th { background: #262a32; }
     .paper th, .paper td { border-color: #33373f; }
     .paper a { color: #7c9cf5; }
+    /* 图表颜色在服务端已固化为浅色配色，深色下垫一层浅色底板保证可读 */
+    .paper .bw-widget { background: #f7f7f8; border-radius: 10px; }
   }
 </style>
 </head>
@@ -101,8 +115,10 @@ export async function GET(
     const md = await readFile(entry.path, 'utf-8');
     // 展开嵌入（![[其他文档]] → 递归渲染其内容，分享页可读本地文件；相对路径以本文档所在目录为基准）
     const expanded = await expandEmbeds(md, 0, undefined, dirname(entry.path));
-    const { html } = renderer.markdownSync(expanded);
-    const page = buildPage(entry.title, html);
+    // 服务端预渲染 ```mermaid / ```widget:* 围栏为静态 HTML/SVG（分享页无客户端脚本，无法像编辑器那样运行时出图）
+    const { markdown, blocks } = await preprocessShareMarkdown(expanded);
+    const { html } = renderer.markdownSync(markdown);
+    const page = buildPage(entry.title, injectShareWidgets(html, blocks));
     return new Response(page, {
       status: 200,
       headers: {

@@ -211,7 +211,7 @@ export const officeToolDefs: Tool[] = [
         files: {
           type: 'array',
           items: { type: 'string' },
-          description: '显式列出单个或多个 .docx 文件路径（如 attachments/{nodeId}/{filename}）。和 dir 同时提供时会合并去重。',
+          description: '显式列出单个或多个 .docx 文件路径（如 materials/{attachmentFolder}/{filename}）。和 dir 同时提供时会合并去重。',
         },
       },
       required: [],
@@ -222,12 +222,12 @@ export const officeToolDefs: Tool[] = [
   },
   {
     name: 'fill_docx_templates',
-    description: '用 JSON 数据批量填写 Word 模板（仅 .docx）。1) 选模板：dir（模板目录）或 files（模板文件列表，如 attachments/{nodeId}/{filename}）；2) 给数据：context={...} 单套 或 rows=[{...},...] 多套批量；3) 可选 namingRule 自定义输出名（str.format 风格）。返回 JSON：所有生成文件绝对路径、大小与自动打包 zip 路径。文件落在 homework/template/docx_fill_*/ 并自动前端展示。',
+    description: '用 JSON 数据批量填写 Word 模板（仅 .docx）。1) 选模板：dir（模板目录）或 files（模板文件列表，如 materials/{attachmentFolder}/{filename}）；2) 给数据：context={...} 单套 或 rows=[{...},...] 多套批量；3) 可选 namingRule 自定义输出名（str.format 风格）。返回 JSON：所有生成文件绝对路径、大小与自动打包 zip 路径。文件落在 homework/template/docx_fill_*/ 并自动前端展示。',
     parameters: {
       type: 'object',
       properties: {
         dir: { type: 'string', description: '自定义模板目录绝对路径' },
-        files: { type: 'array', items: { type: 'string' }, description: '显式列出的模板文件路径数组（如 attachments/{nodeId}/{filename}）' },
+        files: { type: 'array', items: { type: 'string' }, description: '显式列出的模板文件路径数组（如 materials/{attachmentFolder}/{filename}）' },
         context: {
           type: 'object',
           description: '单套数据（键值对），如 {"contractNo":"CG-001","甲方名称":"北京XX公司"}。与 rows 二选一，优先 context。',

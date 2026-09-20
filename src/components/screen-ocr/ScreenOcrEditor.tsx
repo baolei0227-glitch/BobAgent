@@ -11,8 +11,9 @@
  * （box-shadow 暗角技巧，无需重绘画布）。无第三方依赖，UI 文案英文，配色走主题变量。
  */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Move, Undo2, Redo2, RotateCcw, Check, X, ScanText, Copy, Loader2, ArrowUpRight, Type } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Move, Undo2, Redo2, RotateCcw, Check, X, ScanText, Copy, Loader2, ArrowUpRight, Type, Underline } from 'lucide-react';
+import type { ScreenOcrGeometry } from '@/lib/desktop-adapter';
 
 /** 马赛克工具图标：4×4 像素块、对角填充（像素化/模糊语义，lucide 无对应图标故自绘） */
 function MosaicIcon({ size = 16 }: { size?: number }) {
@@ -46,21 +47,40 @@ export interface ScreenOcrEditorProps {
   onCancel: () => void;
   /** 初始选区：'full' = 整图直接全选区（原生 -i 选区已完成，进面板直接标注）；缺省 'none' = 用户自行拖选 */
   initialSelection?: 'full' | 'none';
+  /** 截图时刻的窗口几何（整屏链路才有）：用于窗口吸附（hover 高亮 / 点击选中整个窗口 / Tab 轮换） */
+  geometry?: ScreenOcrGeometry | null;
+  /** 画面属于哪一屏（geometry.screens 下标）。多屏时画面只含该屏，坐标基准必须是这一屏；
+   *  null 或 -1 = 全部屏幕并集（兜底），此时沿用并集基准。 */
+  screenIndex?: number | null;
 }
 
-type Tool = 'select' | 'mosaic' | 'arrow' | 'text';
+type Tool = 'select' | 'mosaic' | 'arrow' | 'text' | 'underline';
 type Sel = { x: number; y: number; w: number; h: number };
 
 /** 可移动标注对象：文字 / 箭头（对象化：可点选、拖动、删除；渲染在独立覆盖层 canvas） */
 type Mark =
   | { kind: 'text'; id: number; x: number; y: number; value: string }
-  | { kind: 'arrow'; id: number; x1: number; y1: number; x2: number; y2: number };
+  | { kind: 'arrow'; id: number; x1: number; y1: number; x2: number; y2: number }
+  /**
+   * 下划线批注：x/y 为横线左端，w 为线长，value 为批注文字。
+   * textX = 文字气泡锚点（默认划线结束处，即松手那一端）；缺省时回退到线尾。
+   */
+  | { kind: 'underline'; id: number; x: number; y: number; w: number; value: string; textX?: number };
+
+/** 文字输入草稿：x/y 为输入框位置；携带 underline 时表示「下划线批注」的待落定横线 */
+type TextDraft = { x: number; y: number; value: string; underline?: { x: number; y: number; w: number } };
 
 /** 撤销/重做快照：主画布（原图+马赛克）像素 + 标注对象列表 */
 type Snap = { img: ImageData; marks: Mark[] };
 
-/** 标注色（微信截图箭头/文字默认红） */
-const MARK_COLOR = '#ff5252';
+/** 标注色（微信电脑版截图标注红） */
+const MARK_COLOR = '#FA5151';
+/** 批注文字气泡底色：白色实心圆角矩形 + 标注红字（PDF 批注便签观感，红字在白底上最清晰） */
+const MARK_TEXT_BG = '#FFFFFF';
+/** 箭头尺寸标定基准宽度：典型 Retina 整屏图（3024px）。箭头/文字都按图宽缩放，保证不同 DPR 观感一致 */
+const MARK_GEOM_BASE_W = 3024;
+/** 下划线批注：最短线长（图像像素），短于此按误触处理，不进入输入 */
+const MIN_UNDERLINE = 16;
 /** 马赛克块大小（canvas 像素） */
 const MOSAIC_BLOCK = 12;
 /** 马赛克画笔半径档位（相对基准半径的倍率：细 / 中 / 粗） */
@@ -74,27 +94,34 @@ const TOOLBAR_W = 236;
 /** 选区/裁剪输出圆角半径（图像自然像素） */
 const SEL_RADIUS = 10;
 
-/** 画箭头（微信/QQ 标注风：圆头实线 + 实心三角头，醒目通用） */
+/**
+ * 画箭头（微信电脑版标注风：粗杆圆头 + 饱满实心三角头）
+ *
+ * 尺寸一律按图宽标定（旧实现用固定 2.5px 线宽，在 Retina 整屏图 3024px 上缩放显示后
+ * 只有约 1.25pt，视觉极其单薄——这是「箭头太普通」的真正原因）。
+ * 以 MARK_GEOM_BASE_W 为基准：杆粗约 4pt、头长约 22pt，短箭头按比例收敛。
+ */
 function drawArrow(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number): void {
   const len = Math.hypot(x2 - x1, y2 - y1);
   if (len < 12) return;
+  const k = (ctx.canvas.width || MARK_GEOM_BASE_W) / MARK_GEOM_BASE_W;
+  const lineWidth = Math.max(3, 8 * k);                       // 杆粗（视觉约 4pt）
+  const headLen = Math.min(len * 0.55, Math.max(22, 44 * k)); // 头长（视觉约 22pt）
+  const halfW = headLen * 0.46;                               // 底宽 ≈ 0.92 × 头长：饱满不尖细
   const ang = Math.atan2(y2 - y1, x2 - x1);
   const dx = Math.cos(ang);
   const dy = Math.sin(ang);
-  // 实心头：长度与翼半宽（比例收敛，视觉协调）
-  const headLen = Math.min(26, len * 0.3);
-  const halfW = headLen * 0.42;
-  // 杆终点 = 头底边中点（实心头占位）
+  // 杆终点 = 三角底边中点（实心头占位，衔接无缝）
   const bx = x2 - dx * headLen;
   const by = y2 - dy * headLen;
   const nx = -dy;
   const ny = dx;
   ctx.strokeStyle = MARK_COLOR;
   ctx.fillStyle = MARK_COLOR;
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = lineWidth;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  // 杆：起点 → 头底边中点（圆头实线）
+  // 杆：起点 → 三角底边中点（圆头实线）
   ctx.beginPath();
   ctx.moveTo(x1, y1);
   ctx.lineTo(bx, by);
@@ -106,6 +133,23 @@ function drawArrow(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: nu
   ctx.lineTo(bx - nx * halfW, by - ny * halfW);
   ctx.closePath();
   ctx.fill();
+}
+
+/** 下划线批注：文字相对横线的下移量（按字号比例，保证不同分辨率下间距观感一致） */
+function underlineTextOffset(fontSize: number): number {
+  return Math.round(fontSize * 0.34);
+}
+
+/** 画下划线批注的横线（粗度按图宽标定，视觉约 2.5pt；下划线恒为水平线） */
+function drawUnderline(ctx: CanvasRenderingContext2D, x: number, y: number, w: number): void {
+  const k = (ctx.canvas.width || MARK_GEOM_BASE_W) / MARK_GEOM_BASE_W;
+  ctx.strokeStyle = MARK_COLOR;
+  ctx.lineWidth = Math.max(2, 5 * k);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + w, y);
+  ctx.stroke();
 }
 
 /** 点到线段距离（箭头命中检测） */
@@ -133,6 +177,87 @@ function markFont(imgWidth: number): string {
   return `600 ${markFontSize(imgWidth)}px ${MARK_FONT_FAMILY}`;
 }
 
+/** 批注文字气泡内边距（图像像素，按字号比例）——不同分辨率截图上观感一致 */
+function textBubblePadding(fontSize: number): { x: number; y: number; radius: number } {
+  return {
+    x: Math.max(4, Math.round(fontSize * 0.34)),
+    y: Math.max(3, Math.round(fontSize * 0.2)),
+    radius: Math.max(3, Math.round(fontSize * 0.18)),
+  };
+}
+
+/** 圆角矩形路径（手工构造，不依赖 ctx.roundRect 的运行时支持） */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+/** 批注文字气泡矩形（图像像素）：命中检测与选中框复用，保证判定范围与视觉一致 */
+function textBubbleRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  value: string,
+): { x: number; y: number; w: number; h: number } {
+  const fs = markFontSize(ctx.canvas.width);
+  ctx.font = markFont(ctx.canvas.width);
+  const p = textBubblePadding(fs);
+  const tw = ctx.measureText(value).width;
+  return { x: x - p.x, y: y - p.y, w: tw + p.x * 2, h: fs + p.y * 2 };
+}
+
+/**
+ * 下划线批注的文字锚点 x（图像像素）。
+ * 规则：落在**划线结束处**（松手那一端），缺省回退线尾；
+ * 若文字会超出图宽，则整体左移，保证气泡完整可见（不出现半截气泡）。
+ */
+function underlineTextX(
+  ctx: CanvasRenderingContext2D,
+  m: Extract<Mark, { kind: 'underline' }>,
+  value: string,
+): number {
+  const raw = m.textX ?? m.x + m.w;
+  if (!value) return raw;
+  const fs = markFontSize(ctx.canvas.width);
+  const p = textBubblePadding(fs);
+  ctx.font = markFont(ctx.canvas.width);
+  const tw = ctx.measureText(value).width;
+  const maxX = ctx.canvas.width - (tw + p.x); // 气泡右边缘不出图
+  return Math.max(p.x, Math.min(raw, maxX));
+}
+
+/** 画批注文字气泡：白底 + 标注红字，返回气泡矩形（供选中框复用） */
+function drawTextBubble(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  value: string,
+): { x: number; y: number; w: number; h: number } {
+  const fs = markFontSize(ctx.canvas.width);
+  const r = textBubbleRect(ctx, x, y, value);
+  roundRectPath(ctx, r.x, r.y, r.w, r.h, textBubblePadding(fs).radius);
+  ctx.fillStyle = MARK_TEXT_BG;
+  ctx.fill();
+  ctx.font = markFont(ctx.canvas.width);
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = MARK_COLOR;
+  ctx.fillText(value, x, y);
+  return r;
+}
+
 /** 命中检测：从后往前（后画的在上），返回命中的标注对象或 null */
 function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, py: number): Mark | null {
   const fs = markFontSize(ctx.canvas.width);
@@ -141,8 +266,16 @@ function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, p
   for (let i = marks.length - 1; i >= 0; i--) {
     const m = marks[i];
     if (m.kind === 'text') {
-      const w = ctx.measureText(m.value).width;
-      if (px >= m.x - 3 && px <= m.x + w + 3 && py >= m.y - 3 && py <= m.y + fs + 3) return m;
+      // 按气泡矩形判定（含内边距），点到底色边缘也能选中
+      const r = textBubbleRect(ctx, m.x, m.y, m.value);
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return m;
+    } else if (m.kind === 'underline') {
+      // 命中横线本体（线段）或线下批注文字气泡
+      if (distToSegment(px, py, m.x, m.y, m.x + m.w, m.y) <= 8) return m;
+      if (m.value) {
+        const r = textBubbleRect(ctx, underlineTextX(ctx, m, m.value), m.y + underlineTextOffset(fs), m.value);
+        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return m;
+      }
     } else {
       if (distToSegment(px, py, m.x1, m.y1, m.x2, m.y2) <= 8) return m;
     }
@@ -193,7 +326,18 @@ function clampMove(s: Sel, cw: number, ch: number): Sel {
   };
 }
 
-export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelection = 'none' }: ScreenOcrEditorProps) {
+/** 吸附目标（图像像素坐标）：窗口 / 菜单栏 / Dock */
+type SnapTarget = { id: string; label: string; x: number; y: number; w: number; h: number };
+
+export function ScreenOcrEditor({
+  dataUrl,
+  onDone,
+  onOcr,
+  onCancel,
+  initialSelection = 'none',
+  geometry = null,
+  screenIndex = null,
+}: ScreenOcrEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
   /** 标注覆盖层（文字/箭头对象画在此透明 canvas，叠在主画布上） */
@@ -224,24 +368,98 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
   const [mosaicStep, setMosaicStep] = useState(1);
   const [phase, setPhase] = useState<'idle' | 'edit'>('idle');
   const [dragging, setDragging] = useState(false);
-  const [dragMode, setDragMode] = useState<null | 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'markMove'>(null);
+  const [dragMode, setDragMode] = useState<null | 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'underline' | 'markMove'>(null);
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
   const [scale, setScale] = useState(1);
   /** 马赛克画笔半径（图像像素）：基准随图像宽度自适应，再按档位缩放，保证不同 DPR 截图视觉一致 */
   const mosaicRadius = nat
     ? Math.max(6, Math.round((nat.w / 60) * MOSAIC_BRUSH_STEPS[mosaicStep]))
     : 48;
+
+  /** 画面在屏幕坐标系中的基准矩形（CG 点）。
+   *  单屏/已知命中屏时 = 那一屏；未知（null 或 -1）时 = 全部屏幕并集（兜底）。
+   *  所有「点 ↔ 图像像素」换算都以此矩形为准——它在多屏下决定画面是否与真实界面对齐。 */
+  const viewBase = useMemo(() => {
+    const screens = geometry?.screens ?? [];
+    if (screens.length === 0) return null;
+    if (typeof screenIndex === 'number' && screenIndex >= 0 && screens[screenIndex]) {
+      const s = screens[screenIndex];
+      return { x: s.x, y: s.y, w: s.w, h: s.h };
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of screens) {
+      minX = Math.min(minX, s.x);
+      minY = Math.min(minY, s.y);
+      maxX = Math.max(maxX, s.x + s.w);
+      maxY = Math.max(maxY, s.y + s.h);
+    }
+    if (!(maxX > minX) || !(maxY > minY)) return null;
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }, [geometry, screenIndex]);
+
+  /** 吸附目标：主进程给的窗口/区域是 CG 点坐标，此处换算到图像像素坐标。
+   *  基准矩形（点）↔ 整屏图（像素）：kx/ky 即「点 → 图像像素」系数。 */
+  const snapTargets = useMemo<SnapTarget[]>(() => {
+    if (!geometry || !nat || !viewBase) return [];
+    const gw = viewBase.w;
+    const gh = viewBase.h;
+    if (gw <= 0 || gh <= 0) return [];
+    const kx = nat.w / gw;
+    const ky = nat.h / gh;
+    const out: SnapTarget[] = [];
+    // 只保留与本屏相交的目标（多屏时其他屏的窗口/菜单栏不在画面里，不应参与命中）
+    const intersects = (x: number, y: number, w: number, h: number) =>
+      x < viewBase.x + gw && x + w > viewBase.x && y < viewBase.y + gh && y + h > viewBase.y;
+    for (const r of geometry.regions ?? []) {
+      if (!intersects(r.x, r.y, r.w, r.h)) continue;
+      out.push({
+        id: `region:${r.kind}`,
+        label: r.kind === 'menubar' ? '菜单栏' : 'Dock 栏',
+        x: (r.x - viewBase.x) * kx, y: (r.y - viewBase.y) * ky, w: r.w * kx, h: r.h * ky,
+      });
+    }
+    // 窗口（CGWindowList 返回顺序 front-to-back，命中检测沿用此顺序 = 最前面的窗口优先）
+    for (const w of geometry.windows ?? []) {
+      if (!intersects(w.x, w.y, w.w, w.h)) continue;
+      out.push({
+        id: `window:${w.id}`,
+        label: w.name || w.owner,
+        x: (w.x - viewBase.x) * kx, y: (w.y - viewBase.y) * ky, w: w.w * kx, h: w.h * ky,
+      });
+    }
+    return out;
+  }, [geometry, nat, viewBase]);
+
+  /** 当前 hover 命中的吸附目标（引用取自 snapTargets，同目标重复 set 不会触发重渲染） */
+  const [hoverTarget, setHoverTarget] = useState<SnapTarget | null>(null);
+  const hoverTargetRef = useRef<SnapTarget | null>(null);
+  const setHoverTargetBoth = useCallback((t: SnapTarget | null) => {
+    hoverTargetRef.current = t;
+    setHoverTarget(t);
+  }, []);
+
+  /** 命中检测：优先窗口（顺序即层级），其次菜单栏 / Dock */
+  const hitTarget = useCallback(
+    (px: number, py: number): SnapTarget | null => {
+      const inside = (t: SnapTarget) => px >= t.x && px <= t.x + t.w && py >= t.y && py <= t.y + t.h;
+      for (const t of snapTargets) if (t.id.startsWith('window:') && inside(t)) return t;
+      for (const t of snapTargets) if (!t.id.startsWith('window:') && inside(t)) return t;
+      return null;
+    },
+    [snapTargets],
+  );
+
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   /** To Text 弹窗：选区裁剪图 + OCR 文本（可编辑）+ 复制/取消 */
   const [ocrPopup, setOcrPopup] = useState<{ dataUrl: string; text: string; loading: boolean; error?: string; copied: boolean } | null>(null);
   /** 文字工具：进行中的输入草稿（图像坐标） */
-  const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string } | null>(null);
-  const textDraftRef = useRef<{ x: number; y: number; value: string } | null>(null);
+  const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
+  const textDraftRef = useRef<TextDraft | null>(null);
   /** 文字输入框最近一次挂载时间戳（挂载初期误失焦保护用） */
   const textMountTs = useRef(0);
   const dragRef = useRef<{
-    mode: 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'markMove' | null;
+    mode: 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'underline' | 'markMove' | null;
     handle?: string;
     startX: number;
     startY: number;
@@ -261,7 +479,16 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     setSel(s);
   }, []);
 
-  const setTextDraftBoth = useCallback((d: { x: number; y: number; value: string } | null) => {
+  /** 选中吸附目标（点击 / Tab 轮换）→ 选区直接等于该窗口矩形 */
+  const selectTarget = useCallback(
+    (t: SnapTarget) => {
+      setSelBoth({ x: t.x, y: t.y, w: t.w, h: t.h });
+      setPhase('edit');
+    },
+    [setSelBoth],
+  );
+
+  const setTextDraftBoth = useCallback((d: TextDraft | null) => {
     textDraftRef.current = d;
     setTextDraft(d);
   }, []);
@@ -290,13 +517,30 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     const selId = selMarkIdRef.current;
     for (const m of marksRef.current) {
       if (m.kind === 'text') {
-        ctx.fillText(m.value, m.x, m.y);
+        // 气泡：半透明深底 + 标注红字（PDF 批注气泡观感）
+        const box = drawTextBubble(ctx, m.x, m.y, m.value);
         if (m.id === selId) {
-          const w = ctx.measureText(m.value).width;
           ctx.setLineDash([4, 3]);
           ctx.strokeStyle = 'rgba(75,63,227,0.95)';
           ctx.lineWidth = 1.2;
-          ctx.strokeRect(m.x - 2, m.y - 2, w + 4, fs + 4);
+          ctx.strokeRect(box.x - 2, box.y - 2, box.w + 4, box.h + 4);
+          ctx.setLineDash([]);
+        }
+      } else if (m.kind === 'underline') {
+        // 下划线批注：横线 + 线下文字气泡（气泡锚在**划线结束处**，整体一个对象，选中框覆盖两者）
+        drawUnderline(ctx, m.x, m.y, m.w);
+        const box = m.value
+          ? drawTextBubble(ctx, underlineTextX(ctx, m, m.value), m.y + underlineTextOffset(fs), m.value)
+          : null;
+        if (m.id === selId) {
+          const left = Math.min(m.x - 3, box ? box.x - 2 : m.x - 3);
+          const right = Math.max(m.x + m.w + 3, box ? box.x + box.w + 2 : m.x + m.w + 3);
+          const top = Math.min(m.y - 4, box ? box.y - 2 : m.y - 4);
+          const bottom = Math.max(m.y + 4, box ? box.y + box.h + 2 : m.y + 4);
+          ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = 'rgba(75,63,227,0.95)';
+          ctx.lineWidth = 1.2;
+          ctx.strokeRect(left, top, right - left, bottom - top);
           ctx.setLineDash([]);
         }
       } else {
@@ -315,6 +559,9 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         }
       }
     }
+    // 下划线批注草稿：输入期间把「待落定横线」画出来（提交后才成为 mark 对象）
+    const draftLine = textDraftRef.current?.underline;
+    if (draftLine) drawUnderline(ctx, draftLine.x, draftLine.y, draftLine.w);
   }, []);
 
   /** 标注对象/选中态变化 → 重绘覆盖层（兜底，防某操作路径漏重绘） */
@@ -347,17 +594,30 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         mc.height = img.naturalHeight;
       }
       setNat({ w: img.naturalWidth, h: img.naturalHeight });
-      // 缩放基准：微信式「原位置」= 整屏截图铺满覆盖窗口（窗口尺寸即屏幕点尺寸），与真实屏幕 1:1。
+      // 缩放基准：画面 CSS 尺寸 = **屏幕逻辑尺寸**（与真实界面 1:1），而不是窗口尺寸。
+      // 窗口若被建成物理尺寸（Electron display.bounds 的单位问题），拿窗口做基准会把画面
+      // 缩到屏幕中间并留白——即用户反馈的「蒙版在中间、比真实屏幕小」。
       const dpr = window.devicePixelRatio || 1;
-      const fit = Math.min(
-        window.innerWidth / img.naturalWidth,
-        window.innerHeight / img.naturalHeight,
-      );
-      // 整屏图（图宽 ≥ 窗口宽）直接按 fit 铺满：不再套 1/dpr 硬编码上限——
-      // 该上限假设截图必为物理像素(Retina 2x)，当截图与窗口同为点分辨率时会把画面强制缩半，
-      // 即用户反馈的「蒙版比真实界面小」。小图（选区截图）仍沿用 1/dpr，避免 Retina 下被放大。
-      const sc = img.naturalWidth >= window.innerWidth ? fit : Math.min(1 / dpr, fit);
+      // 1) 优先：助手给的屏幕点尺寸。**必须是「画面所属那一屏」的尺寸**，不是所有屏幕的并集——
+      //    多屏时画面只含一屏（screencapture -D），拿并集做基准会把画面缩到窗口里、与真实界面对不齐。
+      let targetW = viewBase?.w ?? 0;
+      let targetH = viewBase?.h ?? 0;
+      // 2) 回退：window.screen（CSS 逻辑像素，单屏权威）
+      if (!(targetW > 0) || !(targetH > 0)) {
+        targetW = window.screen?.width || window.innerWidth;
+        targetH = window.screen?.height || window.innerHeight;
+      }
+      const fit = Math.min(targetW / img.naturalWidth, targetH / img.naturalHeight);
+      // 小图（region 选区截图，没有窗口几何）不超过 1:1，避免 Retina 下被放大变糊
+      const sc = geometry ? fit : Math.min(fit, 1 / dpr);
       setScale(sc);
+      // 埋点：尺寸与缩放现场数据（覆盖窗口 console 会转发到 ~/.bobwork-renderer.log，前缀 OCR-WIN）
+      console.log(
+        `[ocr-perf] nat=${img.naturalWidth}x${img.naturalHeight} inner=${window.innerWidth}x${window.innerHeight} ` +
+          `screen=${window.screen?.width ?? 0}x${window.screen?.height ?? 0} target=${Math.round(targetW)}x${Math.round(targetH)} dpr=${dpr} ` +
+          `fit=${fit.toFixed(4)} scale=${sc.toFixed(4)} shown=${Math.round(img.naturalWidth * sc)}x${Math.round(img.naturalHeight * sc)} ` +
+          `screens=${geometry?.screens?.length ?? 0} screenIndex=${screenIndex ?? 'null'} regions=${geometry?.regions?.length ?? 0} windows=${geometry?.windows?.length ?? 0}`,
+      );
       // 原生选区已完成（region 模式）：整图直接全选区，进入编辑态立即出工具条（微信式）
       if (initialSelection === 'full') {
         setSelBoth({ x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight });
@@ -365,7 +625,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       }
     };
     img.src = dataUrl;
-  }, [dataUrl, getCanvas, getCtx, initialSelection, setSelBoth]);
+  }, [dataUrl, getCanvas, getCtx, initialSelection, setSelBoth, geometry, viewBase, screenIndex]);
 
   /** 把当前画面（主画布像素 + 标注对象）压入撤销栈，清空重做栈 */
   const pushUndo = useCallback(() => {
@@ -425,16 +685,31 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
 
   /** 提交文字草稿：把文本画到内容画布（空文本直接丢弃） */
   const commitTextDraft = useCallback(
-    (d: { x: number; y: number; value: string }) => {
+    (d: TextDraft) => {
       setTextDraftBoth(null);
       const v = d.value.trim();
-      if (!v) {
+      // 纯文字工具：空文本直接丢弃；下划线批注：即使没写字也保留横线（只划线不批注是合理用法）
+      if (!v && !d.underline) {
         redrawMarks();
         return;
       }
-      // 对象化：文字入标注列表（渲染在覆盖层），可点选/拖动/删除
+      // 对象化：入标注列表（渲染在覆盖层），可点选/拖动/删除。
+      // 携带 underline 时落定为「下划线批注」（横线 + 线下文字 = 一个整体对象）
       pushUndo();
-      setMarksBoth([...marksRef.current, { kind: 'text', id: markIdRef.current++, x: Math.round(d.x), y: Math.round(d.y), value: v }]);
+      const id = markIdRef.current++;
+      const next: Mark = d.underline
+        ? {
+            kind: 'underline',
+            id,
+            x: Math.round(d.underline.x),
+            y: Math.round(d.underline.y),
+            w: Math.round(d.underline.w),
+            value: v,
+            // 文字气泡锚点 = 划线结束处（与落定时输入框位置一致）
+            textX: Math.round(d.x),
+          }
+        : { kind: 'text', id, x: Math.round(d.x), y: Math.round(d.y), value: v };
+      setMarksBoth([...marksRef.current, next]);
       redrawMarks();
     },
     [setTextDraftBoth, redrawMarks, pushUndo, setMarksBoth],
@@ -443,7 +718,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
   /** 切换工具：若有未提交的文字草稿先落定（防残留输入框/状态混乱） */
   const switchTool = useCallback(
     (t: Tool) => {
-      if (tool === 'text' && textDraftRef.current) commitTextDraft(textDraftRef.current);
+      if ((tool === 'text' || tool === 'underline') && textDraftRef.current) commitTextDraft(textDraftRef.current);
       setTool(t);
     },
     [tool, commitTextDraft],
@@ -516,6 +791,15 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       if (tool === 'text') {
         if (textDraftRef.current) commitTextDraft(textDraftRef.current);
         setTextDraftBoth({ x: pos.x, y: pos.y, value: '' });
+        return;
+      }
+      // 下划线批注：水平拖拽画横线 → 松开即在横线下方开输入框（线 + 文字一次成型）
+      if (tool === 'underline') {
+        if (textDraftRef.current) commitTextDraft(textDraftRef.current);
+        setSelMarkIdBoth(null);
+        dragRef.current = { mode: 'underline', startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y, sel0: { x: 0, y: 0, w: 0, h: 0 } };
+        setDragMode('underline');
+        setDragging(true);
         return;
       }
       // 箭头：拖拽预览（画标注层）→ 松开落定（对象化，一次箭头一个撤销步）
@@ -608,6 +892,14 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         }
         d.lastX = pos.x;
         d.lastY = pos.y;
+      } else if (d.mode === 'underline') {
+        // 预览：只取水平分量（下划线恒为水平线，y 固定为按下点）
+        redrawMarks();
+        const mc = markCanvasRef.current;
+        if (mc) {
+          const x = Math.min(d.startX, pos.x);
+          drawUnderline(mc.getContext('2d')!, x, d.startY, Math.abs(pos.x - d.startX));
+        }
       } else if (d.mode === 'arrow') {
         // 预览：标注层重绘 marks + 拖拽中的箭头
         redrawMarks();
@@ -624,6 +916,15 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
               if (m.id !== d.markId) return m;
               if (m.kind === 'text' && from.kind === 'text')
                 return { ...m, x: Math.max(0, Math.round(from.x + dx)), y: Math.max(0, Math.round(from.y + dy)) };
+              // 下划线批注整体移动：横线与文字同步偏移（线长不变，锚点同步偏移）
+              if (m.kind === 'underline' && from.kind === 'underline')
+                return {
+                  ...m,
+                  x: Math.max(0, Math.round(from.x + dx)),
+                  y: Math.max(0, Math.round(from.y + dy)),
+                  textX:
+                    from.textX === undefined ? undefined : Math.max(0, Math.round(from.textX + dx)),
+                };
               if (m.kind === 'arrow' && from.kind === 'arrow')
                 return {
                   ...m,
@@ -655,7 +956,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     if (d.mode === 'select') {
       const s = selRef.current;
       if (s && s.w >= MIN_SEL && s.h >= MIN_SEL) setPhase('edit');
-    } else if (d.mode === 'arrow' || d.mode === 'markMove') {
+    } else if (d.mode === 'arrow' || d.mode === 'underline' || d.mode === 'markMove') {
       // 取消未落定操作：清预览、恢复原标注层
       redrawMarks();
     }
@@ -667,11 +968,30 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     if (!d.mode) return;
     if (d.mode === 'select') {
       const s = selRef.current;
-      if (s && s.w >= MIN_SEL && s.h >= MIN_SEL) {
+      const moved = Math.hypot(d.curX - d.startX, d.curY - d.startY);
+      // 点击（几乎无位移）且命中吸附目标 → 微信式：一次点击选中整个窗口 / 菜单栏 / Dock
+      if (moved < 6 && hoverTargetRef.current) {
+        selectTarget(hoverTargetRef.current);
+      } else if (s && s.w >= MIN_SEL && s.h >= MIN_SEL) {
         setPhase('edit');
       } else {
         setSelBoth(null);
       }
+    } else if (d.mode === 'underline') {
+      // 落定横线：达到最短长度 → 自动在横线下方开输入框（先不建 mark，等文字提交后线+文字合成一个对象）
+      const x = Math.min(d.startX, d.curX);
+      const w = Math.abs(d.curX - d.startX);
+      if (w >= MIN_UNDERLINE) {
+        const fs = nat ? markFontSize(nat.w) : 24;
+        // 输入框锚在**划线结束处**（松手点 d.curX），左往右划则在右端、右往左划则在左端
+        setTextDraftBoth({
+          x: d.curX,
+          y: d.startY + underlineTextOffset(fs),
+          value: '',
+          underline: { x, y: d.startY, w },
+        });
+      }
+      redrawMarks();
     } else if (d.mode === 'arrow') {
       // 落定箭头（对象化）：有效线段 → 入标注列表 + 一次撤销步；过短则丢弃（清预览）
       if (Math.hypot(d.curX - d.startX, d.curY - d.startY) >= 6) {
@@ -687,7 +1007,21 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
       setSelMarkIdBoth(d.markId ?? null);
     }
     resetDrag();
-  }, [setSelBoth, pushUndo, setMarksBoth, redrawMarks, setSelMarkIdBoth, resetDrag]);
+  }, [setSelBoth, pushUndo, setMarksBoth, redrawMarks, setSelMarkIdBoth, resetDrag, selectTarget, nat, setTextDraftBoth]);
+
+  /** 未拖拽时的指针移动：窗口吸附 hover 高亮（仅 select 工具 + 有吸附目标时） */
+  const onRootPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (dragRef.current.mode) return; // 拖拽中不改 hover，避免干扰自由框选
+      if (tool !== 'select' || snapTargets.length === 0) {
+        if (hoverTargetRef.current) setHoverTargetBoth(null);
+        return;
+      }
+      const pos = toImagePos(e.clientX, e.clientY);
+      setHoverTargetBoth(hitTarget(pos.x, pos.y));
+    },
+    [tool, snapTargets.length, hitTarget, toImagePos, setHoverTargetBoth],
+  );
 
   /** 缩放手柄按下（阻止冒泡到画布），捕获指针以便移出元素后继续 */
   const onHandleDown = useCallback(
@@ -726,12 +1060,22 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         setMarksBoth(marksRef.current.filter((m) => m.id !== selMarkIdRef.current));
         setSelMarkIdBoth(null);
         redrawMarks();
+      } else if (e.key === 'Tab' && snapTargets.length > 0) {
+        // 微信式：Tab 在窗口 / 菜单栏 / Dock 之间轮换吸附选中
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const cur = hoverTargetRef.current;
+        const idx = cur ? snapTargets.findIndex((t) => t.id === cur.id) : -1;
+        const next = snapTargets[(idx + 1) % snapTargets.length];
+        setHoverTargetBoth(next);
+        selectTarget(next);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopImmediatePropagation();
         // 文字输入中按 Esc：丢弃草稿，留在编辑器
         if (textDraftRef.current) {
           setTextDraftBoth(null);
+          redrawMarks(); // 清掉草稿态（含下划线批注的待落定横线预览）
           return;
         }
         // 有选中标注对象：先取消选中（再按 Esc 才退出）
@@ -745,7 +1089,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [undo, redo, onCancel, setTextDraftBoth, pushUndo, setMarksBoth, setSelMarkIdBoth, redrawMarks]);
+  }, [undo, redo, onCancel, setTextDraftBoth, pushUndo, setMarksBoth, setSelMarkIdBoth, redrawMarks, snapTargets, setHoverTargetBoth, selectTarget]);
 
   /** 按选区裁剪内容画布 → dataUrl（选区无效返回 null；输出带圆角，透明角） */
   const cropToDataUrl = useCallback((): string | null => {
@@ -833,8 +1177,11 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
     if (!sel || !nat) return { left: 12, top: 12 };
     const boxW = nat.w * scale;
     const boxH = nat.h * scale;
-    const sx = (window.innerWidth - boxW) / 2 + sel.x * scale;
-    const sy = (window.innerHeight - boxH) / 2 + sel.y * scale;
+    // 与根容器对齐方式保持一致：整屏链路左上角对齐（偏移 0），小图居中
+    const offX = geometry ? 0 : (window.innerWidth - boxW) / 2;
+    const offY = geometry ? 0 : (window.innerHeight - boxH) / 2;
+    const sx = offX + sel.x * scale;
+    const sy = offY + sel.y * scale;
     const sw = sel.w * scale;
     const sh = sel.h * scale;
     const barH = 44;
@@ -870,6 +1217,9 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
           ? 'move'
           : 'crosshair';
 
+  /** 输入草稿框的内边距（图像像素）：与气泡一致，保证打字时所见 = 落定后所见 */
+  const draftPad = textBubblePadding(nat ? markFontSize(nat.w) : 24);
+
   const toolBtn = (active: boolean, disabled = false): React.CSSProperties => ({
     display: 'inline-flex',
     alignItems: 'center',
@@ -888,6 +1238,7 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
   return (
     <div
       data-screen-ocr-editor="true"
+      onPointerMove={onRootPointerMove}
       style={{
         position: 'fixed',
         inset: 0,
@@ -896,8 +1247,10 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
         // 半透明暗色（微信截图式）：透出底层界面，避免 -i 选区小图在纯黑背景下形成"整屏漆黑"
         background: 'rgba(0,0,0,0.6)',
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        // 整屏链路：左上角对齐（画面左上角 = 屏幕左上角，保证与真实界面原位重合）；
+        // 小图（region 选区截图）仍居中，避免缩在角落
+        alignItems: geometry ? 'flex-start' : 'center',
+        justifyContent: geometry ? 'flex-start' : 'center',
         fontFamily: 'var(--font-sans)',
         userSelect: 'none',
         WebkitUserSelect: 'none',
@@ -947,6 +1300,40 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
               pointerEvents: 'none',
             }}
           />
+        )}
+
+        {/* 窗口吸附 hover 高亮：未形成选区时提示，点击即选中整个窗口 / 菜单栏 / Dock */}
+        {hoverTarget && !sel && (
+          <div
+            style={{
+              position: 'absolute',
+              left: hoverTarget.x * scale,
+              top: hoverTarget.y * scale,
+              width: hoverTarget.w * scale,
+              height: hoverTarget.h * scale,
+              border: '2px solid rgba(75,63,227,0.95)',
+              borderRadius: 4,
+              background: 'rgba(75,63,227,0.12)',
+              pointerEvents: 'none',
+            }}
+          >
+            <span
+              style={{
+                position: 'absolute',
+                left: 0,
+                top: -22,
+                padding: '2px 8px',
+                borderRadius: 8,
+                background: 'rgba(75,63,227,0.95)',
+                color: '#fff',
+                fontSize: '0.7rem',
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {hoverTarget.label}
+            </span>
+          </div>
         )}
 
         {/* 选区高亮块：box-shadow 暗角其余区域（微信截图式） */}
@@ -1037,13 +1424,17 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
             }}
             style={{
               position: 'absolute',
-              left: textDraft.x * scale,
-              top: textDraft.y * scale,
-              width: Math.max(60, Math.min(320 * scale, nat ? (nat.w - textDraft.x) * scale : 320 * scale)),
-              padding: '2px 6px',
+              // 输入框外框 = 气泡外框（左/上按内边距外扩、padding 一致），
+              // 保证「打字时所见」与「落定后的气泡」位置与观感完全一致
+              left: (textDraft.x - draftPad.x) * scale,
+              top: (textDraft.y - draftPad.y) * scale,
+              width:
+                Math.max(60, Math.min(320 * scale, nat ? (nat.w - textDraft.x) * scale : 320 * scale)) +
+                draftPad.x * scale * 2,
+              padding: `${Math.max(1, draftPad.y * scale)}px ${Math.max(1, draftPad.x * scale)}px`,
               border: `1.5px solid ${MARK_COLOR}`,
-              borderRadius: 4,
-              background: 'rgba(255,255,255,0.92)',
+              borderRadius: Math.max(3, draftPad.radius * scale),
+              background: MARK_TEXT_BG,
               color: MARK_COLOR,
               fontSize: (nat ? markFontSize(nat.w) : 24) * scale,
               fontWeight: 600,
@@ -1123,6 +1514,13 @@ export function ScreenOcrEditor({ dataUrl, onDone, onOcr, onCancel, initialSelec
             </button>
             <button style={toolBtn(tool === 'text')} onClick={() => switchTool('text')} title="Text: click to add text">
               <Type className="h-4 w-4" />
+            </button>
+            <button
+              style={toolBtn(tool === 'underline')}
+              onClick={() => switchTool('underline')}
+              title="Underline: drag a line, then type the note right below it"
+            >
+              <Underline className="h-4 w-4" />
             </button>
             <button
               style={{

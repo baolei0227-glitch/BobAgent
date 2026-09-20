@@ -48,6 +48,8 @@ const SCENE_FILTERS: { key: string; label: string }[] = [
   { key: 'node', label: 'Node' },
   { key: 'general', label: 'General' },
   { key: 'butler', label: 'Butler' },
+  // 项目账本（Archivist 档案员的固定场景：ledger 只读 + ledger-keeper 维护）
+  { key: 'ledger', label: 'Ledger' },
 ];
 
 const sceneLabel = (key: string) => SCENE_FILTERS.find((f) => f.key === key)?.label ?? key;

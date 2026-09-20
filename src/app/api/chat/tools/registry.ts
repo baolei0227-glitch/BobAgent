@@ -35,6 +35,21 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   // 写读笔记相关工具在普通对话（General Chat / sandbox / butler 等不含 notebook 场景者）一律不再注入，
   // 沉淀知识库的入口统一为 Kar（知识库）节点或 /note 指令。
   write_notebook_answer: ['notebook'],
+  // ---- ledger（项目账本 = 档案员 Archivist 维护的项目档案；与个人库 notebook 并列的第二本库）----
+  // 只读入口归 ledger 场景（存在激活项目即放行 → 全体 agent 可先读档案再取原文）；
+  // 写/维护工具归 ledger-keeper（仅档案员画像 Archivist 的 fixedScenes 含它）→ 其他 agent 只读不写。
+  read_ledger: ['ledger', 'ledger-keeper'],
+  // 项目材料检索（P0 只读入口）：读宿主已建的材料内容索引（清单/正文命中），
+  // 与 read_ledger 同属「项目档案」面——存在激活项目即放行，全体 agent（含团队成员的固定画像）可用。
+  search_materials: ['ledger'],
+  // 观点体检（双侧检索 + 对称性呈现）：只读，但属**档案员职责**——2026-09-18 随「账本管理权唯一归 Archivist」收归，
+  // 不再给 'ledger' 场景（管家等只读者拿到它就会自行体检，与「引导去档案员」的口径冲突）。
+  ledger_challenge: ['ledger-keeper'],
+  ledger_record: ['ledger-keeper'],
+  ledger_pending: ['ledger-keeper'],
+  ledger_lint: ['ledger-keeper'],
+  // 项目页（p-… 创作闭环）：一件要产出的事开一页，属档案员的整理职责（其他 agent 只读）。
+  ledger_project: ['ledger-keeper'],
   // 注意：read_preferences 保持通用——系统提示条件式指示「任务涉及输出格式/引用规范等偏好时调用」，
   //   触发由模型自主判断（如用户说"用表格输出"无偏好字样），门控会阻断偏好遵循链路
   delete_preference: ['butler'],

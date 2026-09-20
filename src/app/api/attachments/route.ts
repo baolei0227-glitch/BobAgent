@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import { join, extname, basename, resolve } from 'path';
 import { getCurrentProject } from '@/lib/project/project-manager';
+import type { AttachmentStore } from '@/lib/types';
 
 
 export const maxDuration = 60;
@@ -31,6 +32,8 @@ export async function POST(request: NextRequest) {
     let fileName: string;
     let fileType: string;
     let buffer: Buffer;
+    /** 落盘根目录：默认 materials/（附件即项目资料）；'attachments' 为对话级临时附件（如粘贴的截图） */
+    let store: AttachmentStore = 'materials';
 
     // 特殊动作：从本地路径复制文件到节点附件目录
     if (contentType.includes('application/json')) {
@@ -42,6 +45,7 @@ export async function POST(request: NextRequest) {
       nodeTitle = body.nodeTitle || '';
       fileName = body.fileName;
       fileType = body.fileType || 'application/octet-stream';
+      store = body.store === 'attachments' ? 'attachments' : 'materials';
       buffer = Buffer.from(body.data, 'base64');
     } else {
       const formData = await request.formData();
@@ -70,7 +74,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'File too large (max 500MB)' }, { status: 400 });
     }
 
-    const attachmentsDir = join(projectPath, 'attachments', assetFolderName);
+    // 资料统一存放在 materials/ 下（附件即资料的一种），目录名保留「短 id + 标题」便于辨认；
+    // 粘贴的截图等对话级临时附件走 attachments/，避免进入项目账本的材料层
+    const attachmentsDir = join(projectPath, store, assetFolderName);
     await fs.mkdir(attachmentsDir, { recursive: true });
 
     const safeName = basename(fileName).replace(/[\\/:*?"<>|\n\r\t]/g, '_');
@@ -94,7 +100,7 @@ export async function POST(request: NextRequest) {
     await fs.writeFile(filePath, buffer);
 
     const type = getAttachmentType(fileType, fileName);
-    const relativePath = `attachments/${assetFolderName}/${destName}`;
+    const relativePath = `${store}/${assetFolderName}/${destName}`;
 
     let dataUrl: string | undefined;
     if (buffer.length < 2 * 1024 * 1024) {
@@ -209,7 +215,7 @@ async function addFromLocal(
     : '';
   const assetFolderName = safeTitle ? `${shortId}_${safeTitle}` : nodeId;
 
-  const attachmentsDir = join(projectPath, 'attachments', assetFolderName);
+  const attachmentsDir = join(projectPath, 'materials', assetFolderName);
   await fs.mkdir(attachmentsDir, { recursive: true });
 
   const originalName = basename(resolvedSource);
@@ -235,7 +241,7 @@ async function addFromLocal(
 
   const fileType = extToMimeType(ext);
   const type = getAttachmentType(fileType, originalName);
-  const relativePath = `attachments/${assetFolderName}/${destName}`;
+  const relativePath = `materials/${assetFolderName}/${destName}`;
 
   // 小图片生成 dataUrl
   let dataUrl: string | undefined;

@@ -36,11 +36,26 @@ export interface AvatarApi {
   delete: (id: string) => Promise<{ success: boolean; avatars?: AvatarItem[]; error?: string }>;
 }
 
+/** 截图时刻的屏幕/窗口几何（CG 全局坐标，原点 = 主屏左上角，单位 = 点） */
+export interface ScreenOcrGeometry {
+  /** 屏幕列表（点坐标 + 缩放因子） */
+  screens: Array<{ x: number; y: number; w: number; h: number; scale: number }>;
+  /** 系统区域：菜单栏 / Dock，可作为吸附目标 */
+  regions: Array<{ kind: 'menubar' | 'dock'; x: number; y: number; w: number; h: number }>;
+  /** 可吸附窗口（front-to-back 顺序，最前面的窗口在前） */
+  windows: Array<{ id: number; owner: string; name: string; x: number; y: number; w: number; h: number }>;
+}
+
 /** 截图完成载荷（进入编辑阶段，dataUrl 为截图 PNG；mode 标注选区来源） */
 export interface ScreenOcrCapturedPayload {
   dataUrl: string;
   /** region = 助手 -i 原生选区已完成；full = 内置链路整屏截图（待前端拖选） */
   mode?: 'region' | 'full';
+  /** 截图时刻的窗口几何（整屏链路才有；缺失时编辑面板不做窗口吸附） */
+  geometry?: ScreenOcrGeometry | null;
+  /** 画面属于哪一屏（geometry.screens 下标）；null/-1 = 全部屏幕并集（兜底）。
+   *  多屏时画面只含该屏，渲染层须以该屏（而非并集）为坐标基准，否则画面被缩放错位。 */
+  screenIndex?: number | null;
 }
 
 /** 全局截图 OCR（Cmd+Shift+O）事件订阅 */
@@ -61,7 +76,7 @@ export interface ScreenOcrApi {
   /** 选区转文字：OCR 选区图片并返回识别文本（编辑面板「To Text」，请求/响应式） */
   ocrRegion: (dataUrl: string) => Promise<{ ok: boolean; text?: string; error?: string }>;
   /** 覆盖编辑窗口：拉取当前待编辑截图（页面挂载后调用，避免与 send 的时序竞争） */
-  getEditorShot: () => Promise<{ dataUrl: string; mode?: 'region' | 'full' } | null>;
+  getEditorShot: () => Promise<{ dataUrl: string; mode?: 'region' | 'full'; geometry?: ScreenOcrGeometry | null; screenIndex?: number | null } | null>;
   /** 覆盖编辑窗口：编辑结束，关闭窗口（回到截图前的界面） */
   closeEditor: () => void;
   /** 查询 BobWorkCapture 屏幕录制授权状态（设置面板用） */
@@ -90,6 +105,8 @@ export interface HippoBrowserApi {
   close: () => Promise<HippoBrowserState>;
   toggle: () => Promise<HippoBrowserState>;
   navigate: (url: string) => Promise<{ ok: boolean; error?: string }>;
+  /** 按工具菜单的「打开方式」开关打开链接（书签点击用）：新标签 / 覆盖当前标签 */
+  openLink: (url: string) => Promise<{ ok: boolean; error?: string }>;
   back: () => Promise<{ ok: boolean; error?: string }>;
   forward: () => Promise<{ ok: boolean; error?: string }>;
   reload: () => Promise<{ ok: boolean; error?: string }>;
@@ -110,6 +127,8 @@ export interface HippoBrowserApi {
   >;
   /** 截图：fullPage=true 走整页长截图 */
   capture: (opts?: { fullPage?: boolean }) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+  /** 打印当前页：弹系统打印面板 */
+  print: () => Promise<{ ok: boolean; error?: string }>;
   getState: () => Promise<HippoBrowserState>;
   /** 在当前页在系统默认浏览器中打开 */
   openExternal: () => Promise<{ ok: boolean; error?: string }>;
@@ -171,7 +190,7 @@ export interface HippoBrowserApi {
   toolMenu: () => Promise<void>;
   /** 工具下拉菜单：执行某项动作（转发给工具栏渲染层统一执行） */
   menuExec: (action: string) => Promise<void>;
-  /** 工具下拉菜单：主进程转发的命令回调（back/fwd/reload/ext/shot/extopen/edit/pin） */
+  /** 工具下拉菜单：主进程转发的命令回调（back/fwd/reload/ext/shot/extopen/edit/linkNewTab/linkCurrentTab） */
   onMenuCmd: (callback: (action: string) => void) => () => void;
   /** 上报工具栏 chrome 实际高度（书签栏随内容变化），用于定位网页视图下边 */
   setChromeHeight: (height: number) => Promise<boolean>;
@@ -343,6 +362,7 @@ const api: Api = {
     toggleMaximize: () => ipcRenderer.invoke('hippo-browser:toggle-maximize'),
     toggle: () => ipcRenderer.invoke('hippo-browser:toggle'),
     navigate: (url: string) => ipcRenderer.invoke('hippo-browser:navigate', url),
+    openLink: (url: string) => ipcRenderer.invoke('hippo-browser:open-link', url),
     back: () => ipcRenderer.invoke('hippo-browser:back'),
     forward: () => ipcRenderer.invoke('hippo-browser:forward'),
     reload: () => ipcRenderer.invoke('hippo-browser:reload'),
@@ -362,6 +382,7 @@ const api: Api = {
     },
     extract: () => ipcRenderer.invoke('hippo-browser:extract'),
     capture: (opts?: { fullPage?: boolean }) => ipcRenderer.invoke('hippo-browser:capture', opts),
+    print: () => ipcRenderer.invoke('hippo-browser:print'),
     getState: () => ipcRenderer.invoke('hippo-browser:get-state'),
     openExternal: () => ipcRenderer.invoke('hippo-browser:open-external'),
     clearCookies: () => ipcRenderer.invoke('hippo-browser:clear-cookies'),

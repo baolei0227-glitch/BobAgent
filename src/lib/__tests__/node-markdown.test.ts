@@ -3,7 +3,9 @@ import {
   parseNodeMarkdown,
   appendConversation,
   type ConversationAttachment,
+  type ConversationReference,
 } from '../node-markdown';
+import type { SubagentPanel } from '../types';
 
 /**
  * 回归测试：question 块开头的 META / ATTACHMENTS 注释必须被完整剥净（顺序无关），
@@ -43,6 +45,15 @@ const attachment: ConversationAttachment = {
 };
 const attJson = JSON.stringify([attachment]);
 const metaJson = JSON.stringify({ modelId: 'deepseek-chat', thinkingLevel: 'medium' });
+
+/** 本轮 @引用 快照样例：覆盖四种 kind（资料 / 本地文件 / 链接 / 操作目录） */
+const references: ConversationReference[] = [
+  { id: 'ref-mat:materials/a/合同.pdf', kind: 'material', name: '合同.pdf', path: 'materials/a/合同.pdf', size: '176.5 KB' },
+  { id: 'ref-dir:/Users/x/案卷', kind: 'file', name: '案卷', path: '/Users/x/案卷' },
+  { id: 'ref-link:https://example.com/a', kind: 'link', name: 'https://example.com/a', url: 'https://example.com/a' },
+  { id: 'ref-folder:/Users/x/out', kind: 'folder', name: 'out', path: '/Users/x/out', locked: true },
+];
+const refsJson = JSON.stringify(references);
 
 describe('parseConversations: question 块注释剥离（方案 2 循环剥）', () => {
   it('回归：META 在前、ATTACHMENTS 在后（序列化顺序）→ 两条注释全部剥净，元信息解析正确', () => {
@@ -142,6 +153,19 @@ describe('parseConversations: question 块注释剥离（方案 2 循环剥）',
     expect(turn.question).not.toContain('<!--');
     expect(turn.modelId).toBe('deepseek-chat');
   });
+
+  it('三条注释（META + REFERENCES + ATTACHMENTS）→ 全部剥净，引用快照解析正确', () => {
+    const md = mdWithQuestion(
+      `<!-- META: ${metaJson} -->\n<!-- REFERENCES: ${refsJson} -->\n<!-- ATTACHMENTS: ${attJson} -->\n引用这些材料分析。`,
+    );
+    const turn = parseNodeMarkdown(md).conversations[0];
+
+    // 核心断言：正文不残留任何注释 JSON（旧 bug 会让 JSON 原样展示给用户）
+    expect(turn.question).toBe('引用这些材料分析。');
+    expect(turn.question).not.toContain('<!--');
+    expect(turn.questionAttachments).toEqual([attachment]);
+    expect(turn.questionReferences).toEqual(references);
+  });
 });
 
 describe('round-trip: appendConversation（真实数据流）', () => {
@@ -172,6 +196,21 @@ describe('round-trip: appendConversation（真实数据流）', () => {
     expect(turn.questionAttachments).toEqual([attachment]);
   });
 
+  it('带 @引用 追加 → 落盘 REFERENCES 注释，重新解析后引用快照完整保留', () => {
+    const md = appendConversation(baseMd, '参考这些资料写一份意见。', '好的。', {
+      questionTime: '2026-08-26T00:00:00.000Z',
+      answerTime: '2026-08-26T00:00:01.000Z',
+      questionReferences: references,
+    });
+
+    expect(md).toContain('<!-- REFERENCES:');
+
+    const turn = parseNodeMarkdown(md).conversations[0];
+    expect(turn.question).toBe('参考这些资料写一份意见。');
+    expect(turn.question).not.toContain('<!--');
+    expect(turn.questionReferences).toEqual(references);
+  });
+
   it('无附件追加 → question 不引入任何注释，保持纯净', () => {
     const md = appendConversation(baseMd, '什么是诉讼时效？', '回答。', {
       modelId: 'deepseek-chat',
@@ -183,5 +222,38 @@ describe('round-trip: appendConversation（真实数据流）', () => {
     expect(turn.question).not.toContain('<!--');
     expect(turn.modelId).toBe('deepseek-chat');
     expect(turn.thinkingLevel).toBe('high');
+  });
+
+  it('多智能体协作：subagents 分支面板 append → 重新解析后完整保留', () => {
+    const panel: SubagentPanel = {
+      teamId: 'team_1',
+      goal: '核对三份合同条款差异',
+      done: 1,
+      total: 2,
+      failed: 0,
+      members: [
+        { id: 'm1', name: 'Reviewer', role: '审阅条款', state: 'done', subject: '审阅 A 合同', durationMs: 1200, resultSummary: '发现 2 处风险' },
+        { id: 'm2', name: 'Researcher', role: '检索判例', state: 'running', subject: '检索类案' },
+      ],
+    };
+    const md = appendConversation(baseMd, '帮我核对合同差异。', '结论如下。', {
+      modelId: 'deepseek-chat',
+      thinkingLevel: 'medium',
+      subagents: panel,
+    });
+    const turn = parseNodeMarkdown(md).conversations[0];
+
+    expect(turn.subagents).toEqual(panel);
+    // 面板不污染正文
+    expect(turn.question).toBe('帮我核对合同差异。');
+    expect(turn.answer).not.toContain('subagents');
+  });
+
+  it('无成员时 subagents 不落盘，旧文件解析后为 undefined（向前兼容）', () => {
+    const md = appendConversation(baseMd, '普通提问。', '普通回答。', { modelId: 'deepseek-chat' });
+    const turn = parseNodeMarkdown(md).conversations[0];
+
+    expect(md).not.toContain('subagents');
+    expect(turn.subagents).toBeUndefined();
   });
 });

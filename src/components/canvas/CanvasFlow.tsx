@@ -2,7 +2,7 @@
 
 import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, Boxes, Users, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, Boxes, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil, GitMerge, GitFork, Network, Archive } from 'lucide-react';
 import type { HostNode, HostEdge, NodeHostValue } from './node-host';
 import { NodeHostContext } from './node-host';
 import {
@@ -15,7 +15,7 @@ import {
   estimateTabWidth,
   pluginPanelTabIcon,
 } from './canvasUtils';
-import { useStarredApps, useMailPending, useUpdateStatus, usePluginPanels } from './canvasHooks';
+import { useStarredApps, useMailPending, useUpdateStatus, usePluginPanels, useBrandLogo } from './canvasHooks';
 
 // —— 宿主自绘画布（2026-09 布局重构）：以本地类型替代旧 React Flow 的 Node/Edge/Connection。
 // 节点 state 统一以 AiChatNodeData 承载（非研究节点 data 语义照旧经断言访问）。
@@ -34,8 +34,6 @@ import { CodingNode } from './CodingNode';
 import { NoteNode } from './NoteNode';
 import { ButlerNode } from './ButlerNode';
 import { BobbyNode } from './BobbyNode';
-import { AgentTeamsNode } from './AgentTeamsNode';
-import { AgentTeamsPanel } from './AgentTeamsPanel';
 import { UsagePanel } from './UsagePanel';
 import { AnnotationNode } from './AnnotationNode';
 import { useConfirm } from './ConfirmDialog';
@@ -58,7 +56,7 @@ import { LocalFileExplorer } from './LocalFileExplorer';
 import { UnifiedPalette } from './UnifiedPalette';
 import { NavSearchBox } from './NavSearchBox';
 import { AICodingCreateDialog } from './AICodingCreateDialog';
-import type { AiChatNodeData, BobbyNodeData, AgentTeamsNodeData, ProviderConfig, ChatMessage } from '@/lib/types';
+import type { AiChatNodeData, BobbyNodeData, ProviderConfig, ChatMessage } from '@/lib/types';
 import { DEFAULT_MODEL_ID, DEFAULT_THINKING_LEVEL } from '@/lib/types';
 import type { FileSourceKind } from '@/lib/files/types';
 import type { FileOpenPayload } from '@/lib/files/types';
@@ -69,7 +67,6 @@ import { edgeTypeToRelation } from '@/lib/edge/relations';
 import type { GraphGateway, GraphSnapshot } from '@/lib/graph/graph-gateway';
 import type { PluginPanelEntry } from '@/lib/plugin-panels';
 import { executeGraphBridgeAction, isGraphBridgeAction } from '@/lib/graph/graph-bridge';
-import { buildChains } from '@/lib/graph/chain-utils';
 import { updateSandboxGraphPermission, updateSandboxChatPermission, getSandboxChatPermission, PRESET_THEME_VARIABLES, estimateChatCost, type SandboxChatPermission } from '@/lib/settings';
 import { HOST_CHAT_PERMISSION_ACTIONS } from '@/lib/sandbox/bridge-constants';
 import {
@@ -124,7 +121,7 @@ function genericAgentNodeFor(agentId: string): React.ComponentType<HostAgentNode
   return node;
 }
 // 研究节点渲染分发表：aiChat/aiCoding 存量兼容 + agent-<id> 派生；
-// imageGen/bobby/agentTeams/annotation 等豁免类型由 renderHostNode switch 分流，不在此表。
+// imageGen/bobby/annotation 等豁免类型由 renderHostNode switch 分流，不在此表。
 const nodeTypes: Record<string, React.ComponentType<HostAgentNodeProps>> = {
   // 兼容存量：旧 aiChat/aiCoding 节点（frontmatter 无 node_type）仍可渲染
   aiChat: ChatNode,
@@ -162,14 +159,17 @@ const NARROW_W_PANEL = NAV_W_COLLAPSED + PANEL_W_MIN + NARROW_COMFORT_CANVAS; //
 
 
 /** 右键菜单 agent 项图标（id → 图标元素；未配置的 agent 用默认聊天气泡）。
- *  颜色与各身份节点实际外框高亮色保持一致：coding 蓝(--info)/Kar 黄(--warn)/Butler 绿(--success)/chat 暖红(--danger)，
+ *  颜色与各身份节点实际外框高亮色保持一致：coding 蓝(--info)/Kar 黄(--warn)/Butler 绿(--success)/chat 暖红(--danger)/Buzan 紫(--purple)，
  *  与 ChatNodeKernel 的 accentVar 映射同源。 */
 const AGENT_MENU_ICONS: Record<string, { icon: React.ReactNode; color: string; hoverBg: string }> = {
-  // 尺寸：chat 的 Bot 14px；coding/kar/butler 专属图标 13px（2026-09 视觉校准）
+  // 尺寸：chat 的 Bot 14px；coding/kar/butler/buzan 专属图标 13px（2026-09 视觉校准）
   chat: { icon: <Bot className="h-[14px] w-[14px] shrink-0" />, color: 'var(--danger)', hoverBg: 'var(--danger-soft)' },
   coding: { icon: <Code2 className="h-[13px] w-[13px] shrink-0" />, color: 'var(--info)', hoverBg: 'var(--info-soft)' },
   note: { icon: <NotebookText className="h-[13px] w-[13px] shrink-0" />, color: 'var(--warn)', hoverBg: 'var(--warn-soft)' },
   butler: { icon: <CalendarClock className="h-[13px] w-[13px] shrink-0" />, color: 'var(--success)', hoverBg: 'var(--success-soft)' },
+  mind: { icon: <Network className="h-[13px] w-[13px] shrink-0" />, color: 'var(--purple)', hoverBg: 'var(--purple-soft)' },
+  // Archivist（档案员，项目账本 keeper，2026-09-18 从管家剥离）：青灰 = 档案/冷静，与 Kar 的信息黄、Butler 的事务绿区分
+  archivist: { icon: <Archive className="h-[13px] w-[13px] shrink-0" />, color: 'var(--teal)', hoverBg: 'var(--teal-soft)' },
 };
 const AGENT_MENU_DEFAULT_ICON = { icon: <MessageSquareText className="h-[13px] w-[13px] shrink-0" />, color: 'var(--primary-strong)', hoverBg: 'var(--paper-hover)' };
 
@@ -179,7 +179,97 @@ const AGENT_MENU_LABELS: Record<string, string> = {
   coding: 'Coding',
   note: 'Kar',
   butler: 'Butler',
+  mind: 'Buzan',
+  archivist: 'Archivist',
 };
+
+/** 会话行标题右侧的关系符号（只表达"一层"直接连线，不做传递推理、不改变按时间的排序）：
+ *  - 上一层 GitFork + 数量：本会话有 N 个上游会话连入（悬停列出标题）——分叉图标贴"从上层分出"的语义；
+ *  - 有分支 GitMerge + 数量：本会话连出 N 个下游会话（悬停列出标题）——汇合图标贴"向下汇聚"的语义。
+ *  - 悬停弹出自绘浮层（portal 到 body）列出对应会话标题，样式为透明底 + 灰色外框。
+ *  两者都是排序之外的补充信息，故用中性灰阶，不占用绿色（绿色只留给运行/未读状态点）。 */
+function RailRelationMarks({
+  upstream,
+  downstream,
+}: {
+  /** 一层上游会话标题（仅取与侧边栏可见会话相连的边） */
+  upstream: string[];
+  /** 一层下游会话标题 */
+  downstream: string[];
+}) {
+  // 悬停浮层状态：锚点屏幕坐标 + 是否向上弹 + 文案 + 标题列表
+  const [tip, setTip] = useState<{ x: number; y: number; up: boolean; label: string; titles: string[] } | null>(null);
+  // 列表滚动 / 窗口尺寸变化会让锚点失效，直接收起（浮层 pointer-events-none，不会挡点击）
+  useEffect(() => {
+    if (!tip) return;
+    const clear = () => setTip(null);
+    window.addEventListener('scroll', clear, true);
+    window.addEventListener('resize', clear);
+    return () => {
+      window.removeEventListener('scroll', clear, true);
+      window.removeEventListener('resize', clear);
+    };
+  }, [tip]);
+  if (upstream.length === 0 && downstream.length === 0) return null;
+  const chipCls = 'flex shrink-0 items-center gap-0.5 rounded px-1 text-11 leading-4';
+  const chipBg = { backgroundColor: 'color-mix(in oklab, var(--ink) 6%, transparent)' };
+  // 用自绘浮层代替原生 title：按钮内的 title 在 Chromium 不弹，且侧边栏滚动容器会把浮层裁掉
+  const show = (el: HTMLElement, label: string, titles: string[]) => {
+    const r = el.getBoundingClientRect();
+    const up = r.bottom + 84 > window.innerHeight;
+    setTip({ x: r.left + r.width / 2, y: up ? r.top - 6 : r.bottom + 6, up, label, titles });
+  };
+  return (
+    <>
+      {upstream.length > 0 && (
+        <span
+          className={chipCls}
+          style={{ ...chipBg, color: 'var(--ink-muted)' }}
+          onClick={(e) => e.stopPropagation()}
+          onMouseEnter={(e) => show(e.currentTarget, `Upstream sessions (1 level) · ${upstream.length}`, upstream)}
+          onMouseLeave={() => setTip(null)}
+        >
+          <GitFork className="h-2.5 w-2.5 shrink-0" />
+          <span>{upstream.length}</span>
+        </span>
+      )}
+      {downstream.length > 0 && (
+        <span
+          className={chipCls}
+          style={{ ...chipBg, color: 'var(--ink-muted)' }}
+          onClick={(e) => e.stopPropagation()}
+          onMouseEnter={(e) => show(e.currentTarget, `Branches to (1 level) · ${downstream.length}`, downstream)}
+          onMouseLeave={() => setTip(null)}
+        >
+          <GitMerge className="h-2.5 w-2.5 shrink-0" />
+          <span>{downstream.length}</span>
+        </span>
+      )}
+      {tip && typeof document !== 'undefined' && createPortal(
+        <div
+          className="pointer-events-none fixed z-[1500] rounded-md border px-2 py-1"
+          style={{
+            left: tip.x,
+            top: tip.y,
+            transform: `translate(-50%, ${tip.up ? '-100%' : '0'})`,
+            maxWidth: 240,
+            borderColor: 'var(--line)',
+            backgroundColor: 'color-mix(in oklab, var(--paper) 92%, transparent)',
+            boxShadow: '0 2px 10px color-mix(in oklab, var(--ink) 12%, transparent)',
+          }}
+        >
+          <div className="text-11" style={{ color: 'var(--ink-muted)' }}>{tip.label}</div>
+          {tip.titles.map((t, i) => (
+            <div key={`${t}-${i}`} className="max-w-[224px] truncate text-xs" style={{ color: 'var(--ink)' }}>
+              {t}
+            </div>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
 
 // 从 .md 文件恢复节点到画布
 function restoredNodeToFlowNode(
@@ -190,9 +280,17 @@ function restoredNodeToFlowNode(
     summary?: string;
     /** 会话创建时间（frontmatter）：左栏会话列表"最新在上"排序用 */
     created_at?: string;
-    conversations: Array<{ question: string; answer: string; questionTime: string; answerTime: string; modelId?: string; thinkingLevel?: string; reasoning?: string; processNarration?: string; toolCalls?: ChatMessage['toolCalls']; outputFiles?: ChatMessage['outputFiles'] }>;
+    conversations: Array<{ question: string; answer: string; questionTime: string; answerTime: string; modelId?: string; thinkingLevel?: string; reasoning?: string; processNarration?: string; toolCalls?: ChatMessage['toolCalls']; outputFiles?: ChatMessage['outputFiles']; subagents?: ChatMessage['subagents']; questionAttachments?: ChatMessage['attachments']; questionReferences?: ChatMessage['references'] }>;
     enabledMcpIds?: string[];
     selectedSkills?: string[];
+    /** 多智能体协作模式开关（frontmatter multi_agent_mode） */
+    multiAgentMode?: boolean;
+    /** team 模式队长模型（frontmatter team_main_model） */
+    teamMainModel?: string;
+    /** team 模式成员模型（frontmatter team_worker_model） */
+    teamWorkerModel?: string;
+    /** 本节点关联的团队 id 清单（frontmatter team_ids） */
+    teamIds?: string[];
     position_x?: number;
     position_y?: number;
     sandbox_app_id?: string;
@@ -213,6 +311,11 @@ function restoredNodeToFlowNode(
       id: `msg-${nodeData.node_id}-q${i}`,
       role: 'user',
       content: conv.question,
+      // 恢复用户问题携带的附件（.md 中以 <!-- ATTACHMENTS: --> 落盘）：
+      // 缺失则重启/切项目后气泡内附件 chips 全部消失
+      attachments: conv.questionAttachments,
+      // 恢复本轮 @引用 快照（<!-- REFERENCES: -->）：气泡内引用 chips 同样需要跨会话保留
+      references: conv.questionReferences,
       timestamp: conv.questionTime,
     });
     messages.push({
@@ -229,6 +332,8 @@ function restoredNodeToFlowNode(
       processNarration: conv.processNarration,
       toolCalls: conv.toolCalls,
       outputFiles: conv.outputFiles,
+      // 多智能体协作分支面板：重启/切换节点后折叠卡片仍可回看
+      subagents: conv.subagents,
     });
   }
 
@@ -260,6 +365,10 @@ function restoredNodeToFlowNode(
       createdAt: nodeData.created_at,
       ...(nodeData.enabledMcpIds !== undefined ? { enabledMcpIds: nodeData.enabledMcpIds } : {}),
       ...(nodeData.selectedSkills !== undefined ? { selectedSkills: nodeData.selectedSkills } : {}),
+      ...(nodeData.multiAgentMode === true ? { multiAgentMode: true } : {}),
+      ...(nodeData.teamMainModel ? { teamMainModel: nodeData.teamMainModel } : {}),
+      ...(nodeData.teamWorkerModel ? { teamWorkerModel: nodeData.teamWorkerModel } : {}),
+      ...(Array.isArray(nodeData.teamIds) && nodeData.teamIds.length > 0 ? { teamIds: nodeData.teamIds } : {}),
       ...(nodeData.sandbox_app_id ? { sandboxAppId: nodeData.sandbox_app_id } : {}),
       ...(typeof nodeData.compacted_until === 'number' && nodeData.compacted_until > 0 ? { compactedUntil: nodeData.compacted_until } : {}),
       __hasPersistedPosition: hasPersistedPosition,
@@ -325,39 +434,6 @@ function restoredBobbyToFlowNode(
     },
   };
 }
-
-/** 将恢复的 Agent Teams 观察节点转换为 flow 节点（薄客户端，状态从 /api/team 实时拉取） */
-function restoredAgentTeamsToFlowNode(
-  nodeData: {
-    node_id: string;
-    title: string;
-    position_x?: number;
-    position_y?: number;
-  },
-  index: number,
-): Node<AgentTeamsNodeData> {
-  let position: { x: number; y: number };
-  const hasPersistedPosition = typeof nodeData.position_x === 'number' && typeof nodeData.position_y === 'number';
-  if (hasPersistedPosition) {
-    position = { x: nodeData.position_x as number, y: nodeData.position_y as number };
-  } else {
-    const col = index % 3;
-    const row = Math.floor(index / 3);
-    position = { x: -300 + col * 400, y: -200 + row * 350 };
-  }
-  return {
-    id: nodeData.node_id,
-    type: 'agentTeams',
-    position,
-    data: {
-      title: nodeData.title || 'Agent Teams',
-      prompt: '',
-      status: 'idle',
-      __hasPersistedPosition: hasPersistedPosition,
-    },
-  };
-}
-
 
 /** 置顶标签：这些插件面板的标签固定在标签栏最前面（先于会话/文件/沙盒标签） */
 const PINNED_PANEL_PLUGIN_IDS = new Set(['bob-mind-mcp']);
@@ -643,7 +719,7 @@ function UnifiedReaderPanel({
         pointerEvents: 'auto',
       } as React.CSSProperties}
     >
-      {/* 拖拽 handle：面板左边缘 4px 竖条，hover 时变宽变蓝，cursor: col-resize */}
+      {/* 拖拽 handle：面板左边缘 4px 隐形热区（无可见视觉），仍可拖动调宽，cursor: col-resize */}
       <div
         onMouseDown={(e) => {
           e.preventDefault();
@@ -653,24 +729,10 @@ function UnifiedReaderPanel({
           document.body.style.cursor = 'col-resize';
           document.body.style.userSelect = 'none';
         }}
-        className="absolute left-0 top-0 z-[60] h-full shrink-0 select-none transition-[width,background-color] duration-100"
+        className="absolute left-0 top-0 z-[60] h-full w-1 shrink-0 select-none"
         style={{
-          width: dragging ? 6 : 4,
           cursor: 'col-resize',
-          backgroundColor: dragging ? 'var(--primary)' : 'transparent',
-          borderRadius: '12px 0 0 12px',
-        }}
-        onMouseEnter={(e) => {
-          if (!dragging) {
-            (e.currentTarget as HTMLDivElement).style.width = '6px';
-            (e.currentTarget as HTMLDivElement).style.backgroundColor = 'color-mix(in oklab, var(--primary) 35%, transparent)';
-          }
-        }}
-        onMouseLeave={(e) => {
-          if (!dragging) {
-            (e.currentTarget as HTMLDivElement).style.width = '4px';
-            (e.currentTarget as HTMLDivElement).style.backgroundColor = 'transparent';
-          }
+          backgroundColor: 'transparent',
         }}
       />
       {/* 标签栏（overflow-visible：供 "…" 下拉菜单浮出；标签列表自身 overflow-hidden 负责裁剪） */}
@@ -945,7 +1007,7 @@ async function fetchPluginDirty(src: string): Promise<boolean> {
 }
 
 /** 左列/工具条圆形小图标按钮（2026-09 布局重构后复用） */
-function ToolBtn({ title, active, disabled, onClick, children }: { title: string; active?: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode }) {
+function ToolBtn({ title, active, disabled, noHoverBg, onClick, children }: { title: string; active?: boolean; disabled?: boolean; noHoverBg?: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -954,7 +1016,7 @@ function ToolBtn({ title, active, disabled, onClick, children }: { title: string
           aria-label={title}
           onClick={onClick}
           disabled={disabled}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${noHoverBg ? '' : 'hover:bg-[var(--paper-hover)]'}`}
           style={{
             color: active ? 'var(--primary)' : 'var(--ink-muted)',
             backgroundColor: active ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
@@ -1212,10 +1274,6 @@ function CanvasFlowInner() {
     graphGateway.getSnapshot,
     graphGateway.getSnapshot,
   );
-  const canvasChains = useMemo(
-    () => buildChains(graphSnap.nodes, graphSnap.edges),
-    [graphSnap.nodes, graphSnap.edges],
-  );
   // ———— 单焦点画布（2026-09）：桌面同一时刻只打开一个研究节点，其余研究节点归左侧节点圆点。
   //  focusedNodeId = 当前打开节点；annotation/imageGen 等豁免常驻；Todo 已上收为会话标题栏
   //  Dock（StickyTodoDock，见 ChatNodeKernel 成果块旁），不再占用画布。————
@@ -1325,11 +1383,19 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('canvas-focus-node', onFocus);
   }, [graphGateway, switchFocusNode]);
 
-  // 单焦点左侧节点圆点列数据：研究节点按链顺序分组展平；未入链的独立研究节点排尾组。
-  // 不再隐藏空会话（messageCount=0）节点——即使尚未执行任务也保留在侧边栏。
-  // 排序：按"组内最新创建的会话时间"降序 → 新增加的会话始终排在最上面。
+  // 单焦点左侧会话列表数据：研究节点按创建时间降序（新建会话始终排在最上面）。
+  // 2026-09-17：去掉链分组/父子归属表达——列表不再嵌套分组，只按时间排列；
+  // 节点间关系改由每行标题右侧的关系符号表达（一层上游/下游，见 RailRelationMarks）。
   const focusRail = useMemo(() => {
-    type Dot = { id: string; title: string; isNote: boolean; sandboxAppId?: string; identity?: string };
+    type Dot = {
+      id: string;
+      title: string;
+      identity?: string;
+      /** 一层上游会话标题（关系符号悬停弹窗列出） */
+      upstream: string[];
+      /** 一层下游会话标题 */
+      downstream: string[];
+    };
     // 创建时间（ms）：取自 .md frontmatter created_at；
     // 本地刚新建、尚未重载 frontmatter 的节点无 createdAt → 按"最新"（+∞）处理，保证新建会话即时置顶
     const createdMs = new Map<string, number>();
@@ -1338,38 +1404,34 @@ function CanvasFlowInner() {
       createdMs.set(n.id, Number.isFinite(t) ? t : Number.POSITIVE_INFINITY);
     }
     const timeOf = (id: string) => createdMs.get(id) ?? 0;
-    const dotOf = (n: (typeof graphSnap.nodes)[number]): Dot => ({
-      id: n.id,
-      title: n.title,
-      isNote: n.type === 'agent-note',
-      sandboxAppId: n.sandboxAppId,
-      identity: agentIdentityFromNodeType(n.type),
-    });
-    const groups: Array<{ key: string; dots: Dot[] }> = [];
-    const seen = new Set<string>();
-    for (const chain of canvasChains) {
-      const items = chain.ids
-        .map((id) => graphSnap.nodes.find((n) => n.id === id))
-        .filter((n): n is NonNullable<(typeof graphSnap.nodes)[number]> => !!n && isFocusableResearch(n.type));
-      if (items.length === 0) continue;
-      const dots: Dot[] = items.map(dotOf);
-      for (const d of dots) seen.add(d.id);
-      groups.push({ key: chain.rootId, dots });
+    const titleById = new Map(graphSnap.nodes.map((n) => [n.id, n.title]));
+    // 关系符号只描述"侧边栏里看得见的会话关系"：两端都必须是会在 rail 出现的会话节点，
+    // 避免 Bobby / 附件类连线把数量算进来；只取一层直接相连，不做传递推理。
+    const railIds = new Set(
+      graphSnap.nodes.filter((n) => isFocusableResearch(n.type)).map((n) => n.id),
+    );
+    const upstreamOf = new Map<string, string[]>();
+    const downstreamOf = new Map<string, string[]>();
+    for (const e of graphSnap.edges) {
+      if (e.disconnected || !railIds.has(e.source) || !railIds.has(e.target)) continue;
+      const kids = downstreamOf.get(e.source) ?? [];
+      kids.push(titleById.get(e.target) ?? 'Untitled');
+      downstreamOf.set(e.source, kids);
+      const pars = upstreamOf.get(e.target) ?? [];
+      pars.push(titleById.get(e.source) ?? 'Untitled');
+      upstreamOf.set(e.target, pars);
     }
-    const strayDots = graphSnap.nodes
-      .filter((n) => isFocusableResearch(n.type) && !seen.has(n.id))
-      .map(dotOf)
+    return graphSnap.nodes
+      .filter((n) => isFocusableResearch(n.type))
+      .map((n): Dot => ({
+        id: n.id,
+        title: n.title,
+        identity: agentIdentityFromNodeType(n.type),
+        upstream: upstreamOf.get(n.id) ?? [],
+        downstream: downstreamOf.get(n.id) ?? [],
+      }))
       .sort((a, b) => timeOf(b.id) - timeOf(a.id));
-    if (strayDots.length > 0) groups.push({ key: '__strays__', dots: strayDots });
-    // 组间降序（组键 = 组内最新会话时间）；时间相同保持原有链序（Array.sort 稳定）
-    const groupNewest = (g: { dots: Dot[] }) => g.dots.reduce((mx, d) => Math.max(mx, timeOf(d.id)), 0);
-    groups.sort((a, b) => {
-      const ta = groupNewest(a);
-      const tb = groupNewest(b);
-      return ta === tb ? 0 : tb > ta ? 1 : -1;
-    });
-    return groups;
-  }, [canvasChains, graphSnap.nodes]);
+  }, [graphSnap.nodes, graphSnap.edges]);
 
   // 应用内置确认弹窗（macOS 风格英文文案）
   const { ask: confirmAsk, askChoices: confirmAskChoices, render: confirmRender } = useConfirm();
@@ -1411,8 +1473,17 @@ function CanvasFlowInner() {
   // 单焦点宿主下用户可见的会话即"当前节点"，随焦点同步写入 ref。
   // 不能只依赖画布点击赋值：聚焦节点输入栏的 click 被 stopPropagation 拦截（见 ChatNodeKernel 输入栏），
   // 用户点进输入框时并不会触发 onHostCanvasClick，导致"发送到当前节点"始终无目标。
+  // 同时广播 active-node-changed：划词气泡的「发送到当前会话」在 node-selected 为空时（用户点进
+  // 输入框/文档面板后 React Flow 选中态丢失）以此兜底，避免按钮恒为禁用。
   useEffect(() => {
-    lastActiveNodeIdRef.current = focusedNodeId;
+    const broadcast = () => {
+      lastActiveNodeIdRef.current = focusedNodeId;
+      window.dispatchEvent(new CustomEvent('active-node-changed', { detail: { node_id: focusedNodeId ?? null } }));
+    };
+    broadcast();
+    // 新挂载的订阅方（如 DocEditor）请求重播：复用 node-selected 同一握手事件，避免错过挂载前的状态
+    window.addEventListener('node-selected-request', broadcast);
+    return () => window.removeEventListener('node-selected-request', broadcast);
   }, [focusedNodeId]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // 设置弹窗打开时聚焦的区块（由 open-settings 事件指定，如节点模型菜单 → 'chat'）
@@ -1592,8 +1663,6 @@ function CanvasFlowInner() {
   };
   // Bob Sandbox 全屏管理页（小程序商城）开关
   const [storeOpen, setStoreOpen] = useState(false);
-  // Agent Teams 全屏面板开关（侧边栏入口派发 team-panel-open 事件打开）
-  const [teamsFullscreenOpen, setTeamsFullscreenOpen] = useState(false);
   // 模型用量统计面板（图标栏/调色板入口派发 usage-panel-open 事件打开）
   const [usageOpen, setUsageOpen] = useState(false);
   // 统一悬浮面板
@@ -1834,6 +1903,8 @@ function CanvasFlowInner() {
   // 新建节点对话框（双击画布空白触发）：AI Chat / AI Coding 类型选择 + 小程序项目绑定
   const [nodeCreateDialogOpen, setNodeCreateDialogOpen] = useState(false);
   const [nodeCreatePos, setNodeCreatePos] = useState<{ x: number; y: number } | null>(null);
+  // 新建对话框初始档位：'agent' = 打开即落在 Sub-Agent 档
+  const [nodeCreateKind, setNodeCreateKind] = useState<'mini' | 'agent'>('mini');
   // 标题栏「＋」会话类型下拉菜单
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   // Agent 市场已装画像（2026-09-06）：创建菜单与节点类型动态并入 /api/agents 返回的已装市场 agent
@@ -1885,6 +1956,8 @@ function CanvasFlowInner() {
   const [mailPending, setMailPending] = useMailPending();
   // 标星小程序（与 SandboxPanel 共享数据源）：在 ⌘F 面板输入框下方与功能按钮同排展示，点击直接打开预览
   const [starredApps] = useStarredApps();
+  // 底部品牌区 logo：跟随设置里的 Sidebar 品牌头像（settings.brandLogo），默认 hippo-icon.png
+  const brandLogo = useBrandLogo();
   const [, setProviderConfigs] = useState<ProviderConfig[]>([]);
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
@@ -1920,6 +1993,8 @@ function CanvasFlowInner() {
   const [currentProjectId, setCurrentProjectId] = useState<string>('');
   // 画布左上角展示的当前项目名称（切换项目时重取）
   const [currentProjectTitle, setCurrentProjectTitle] = useState('');
+  // 当前项目元信息（侧边栏项目名悬停时展示：分类 / 标签 / 备注）
+  const [currentProjectMeta, setCurrentProjectMeta] = useState<{ category?: string; tags?: string[]; note?: string } | null>(null);
   // 原生全屏检测（mac 全屏时隐藏红绿灯 → 项目名卡片移到最左）
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
   useEffect(() => {
@@ -1932,17 +2007,23 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  useEffect(() => {
+  // 拉取当前项目名称与元信息（分类/标签/备注）：切换项目时自动拉取，侧边栏项目名悬停时再拉一次保鲜
+  const refreshCurrentProject = useCallback(() => {
     if (!currentProjectId) return;
     let alive = true;
     fetch('/api/projects?action=current')
       .then((r) => r.json())
       .then((d) => {
-        if (alive && d?.success && d?.project?.name) setCurrentProjectTitle(d.project.name);
+        if (alive && d?.success && d?.project?.name) {
+          setCurrentProjectTitle(d.project.name);
+          setCurrentProjectMeta({ category: d.project.category, tags: d.project.tags, note: d.project.note });
+        }
       })
       .catch(() => { /* 静默：名称加载失败则隐藏标签 */ });
     return () => { alive = false; };
   }, [currentProjectId]);
+
+  useEffect(() => refreshCurrentProject(), [refreshCurrentProject]);
 
   // 广播当前项目 id：会话标题栏 todo/便签 Dock（ChatNodeKernel 深层组件）经此订阅
   useEffect(() => {
@@ -2067,7 +2148,7 @@ function CanvasFlowInner() {
   //  - 本地绝对路径 → file:// 直接载入（HTML 可原样编辑并落盘；PDF 主进程重定向到内置批注阅读器）
   //  - 项目内相对路径 → 解析到项目真实磁盘绝对路径后同样走 file://
   //  - 解析失败兜底 → file_proxy 代理（仅只读渲染）
-  const openLocalFileInBrowser = useCallback(async (_source: string, filePath: string) => {
+  const openLocalFileInBrowser = useCallback(async (_source: string, filePath: string, anchor?: { page?: number; query?: string }) => {
     if (!isDesktop()) return;
     let target: string;
     if (isAbsoluteFsPath(filePath)) {
@@ -2095,7 +2176,13 @@ function CanvasFlowInner() {
       }
     }
     void desktop.hippoBrowser.open();
-    void desktop.hippoBrowser.navigate(target);
+    // 定位锚点以 file:// 的 hash 承载（#page=3&q=关键词），主进程重定向到查看页时转为查询串；
+    // 非 file:// 兜底（file_proxy 代理）不追加，避免污染代理 URL
+    const anchorParams = new URLSearchParams();
+    if (anchor?.page && anchor.page > 0) anchorParams.set('page', String(Math.floor(anchor.page)));
+    if (anchor?.query && anchor.query.trim()) anchorParams.set('q', anchor.query.trim());
+    const anchorHash = anchorParams.toString() ? `#${anchorParams.toString()}` : '';
+    void desktop.hippoBrowser.navigate(/^file:\/\//i.test(target) ? target + anchorHash : target);
   }, []);
 
   // Step 2：订阅 file.open 事件 —— 任意舱（目录浏览器/项目树/搜索/素材）发布打开意图，查看舱统一处理
@@ -2103,7 +2190,9 @@ function CanvasFlowInner() {
     return bus.subscribe<FileOpenPayload>(BusEvents.fileOpen, (p) => {
       // 文档类（HTML/PDF/图片）不进入预览面板，直接交由 Hippo Browser 打开（PDF/图片由主进程重定向到对应查看页）
       if (/\.html?$/i.test(p.name) || /\.pdf$/i.test(p.name) || /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(p.name)) {
-        void openLocalFileInBrowser(p.source, p.path);
+        // 仅 PDF 支持定位锚点（页码 / 关键词）；HTML 追加 hash 会误触发页内锚点
+        const anchor = /\.pdf$/i.test(p.name) ? { page: p.page, query: p.query } : undefined;
+        void openLocalFileInBrowser(p.source, p.path, anchor);
         return;
       }
       openFileTab(p.source, p.name, p.path);
@@ -2262,13 +2351,6 @@ function CanvasFlowInner() {
     const handler = () => setStoreOpen(true);
     window.addEventListener('sandbox-store-open', handler);
     return () => window.removeEventListener('sandbox-store-open', handler);
-  }, []);
-
-  // 订阅 team-panel-open 事件 —— 侧边栏 Agent Teams 入口派发，打开全屏团队面板
-  useEffect(() => {
-    const handler = () => setTeamsFullscreenOpen(true);
-    window.addEventListener('team-panel-open', handler);
-    return () => window.removeEventListener('team-panel-open', handler);
   }, []);
 
   // 订阅 usage-panel-open 事件 —— 图标栏/⌘F 入口派发，打开用量统计面板
@@ -3006,15 +3088,16 @@ function CanvasFlowInner() {
     const data = await resp.json();
 
     if (data.success && data.nodes && data.nodes.length > 0) {
-      const restoredNodes = data.nodes.map((n: Record<string, unknown>, i: number) =>
-        n.node_type === 'bobby'
-          ? restoredBobbyToFlowNode(n as Parameters<typeof restoredBobbyToFlowNode>[0], i)
-          : n.node_type === 'agentTeams'
-              ? restoredAgentTeamsToFlowNode(n as Parameters<typeof restoredAgentTeamsToFlowNode>[0], i)
-              : n.node_type === 'annotation'
-                ? restoredAnnotationToFlowNode(n as Parameters<typeof restoredAnnotationToFlowNode>[0])
-                : restoredNodeToFlowNode(n as Parameters<typeof restoredNodeToFlowNode>[0], i),
-      );
+      const restoredNodes = data.nodes
+        // Agent Teams 观察节点已退役（多智能体改为对话式 team_run，不再有画布节点）→ 忽略存量记录
+        .filter((n: Record<string, unknown>) => n.node_type !== 'agentTeams')
+        .map((n: Record<string, unknown>, i: number) =>
+          n.node_type === 'bobby'
+            ? restoredBobbyToFlowNode(n as Parameters<typeof restoredBobbyToFlowNode>[0], i)
+            : n.node_type === 'annotation'
+              ? restoredAnnotationToFlowNode(n as Parameters<typeof restoredAnnotationToFlowNode>[0])
+              : restoredNodeToFlowNode(n as Parameters<typeof restoredNodeToFlowNode>[0], i),
+        );
       setNodes(restoredNodes);
 
       // 节点就绪后再加载连线
@@ -3189,11 +3272,11 @@ function CanvasFlowInner() {
   // 键盘删除节点前的风险确认（Backspace/Delete 触发；返回 false 取消删除）
   const onBeforeDelete = useCallback(async ({ nodes: delNodes, edges: delEdges }: { nodes: Node[]; edges: Edge[] }) => {
     if (!delNodes.length) return true;
-    // Bobby node / Agent Teams node 禁用键盘删除（防误删）：只能通过节点标题栏的 ✕ 按钮删除
-    if (delNodes.some((n) => n.type === 'bobby' || n.type === 'agentTeams')) {
+    // Bobby node 禁用键盘删除（防误删）：只能通过节点标题栏的 ✕ 按钮删除
+    if (delNodes.some((n) => n.type === 'bobby')) {
       await confirmAsk({
         title: '观察节点',
-        message: 'Bobby / Agent Teams 节点不支持键盘删除。请点击节点标题栏的 ✕ 按钮执行删除。',
+        message: 'Bobby 节点不支持键盘删除。请点击节点标题栏的 ✕ 按钮执行删除。',
       });
       return false;
     }
@@ -3233,7 +3316,7 @@ function CanvasFlowInner() {
       const nData = node.data as AiChatNodeData | undefined;
       for (const msg of nData?.messages || []) {
         for (const att of msg.attachments || []) {
-          const m = att.path?.match(/^(?:attachments|assets)\/([^/]+)\//);
+          const m = att.path?.match(/^(?:attachments|assets|materials)\/([^/]+)\//);
           if (m) attachmentFolders.add(m[1]);
         }
       }
@@ -3264,7 +3347,7 @@ function CanvasFlowInner() {
     const attachmentFolders = new Set<string>();
     for (const msg of nData?.messages || []) {
       for (const att of msg.attachments || []) {
-        const m = att.path?.match(/^(?:attachments|assets)\/([^/]+)\//);
+        const m = att.path?.match(/^(?:attachments|assets|materials)\/([^/]+)\//);
         if (m) attachmentFolders.add(m[1]);
       }
     }
@@ -3773,147 +3856,11 @@ function CanvasFlowInner() {
     [getNodes, getEdges, setNodes, setEdges, createBobbyNode],
   );
 
-  // 监听 ChatNodeKernel 广播的 Bobby 触发事件（主 Agent 调用了 Bobby 工具）
-  useEffect(() => {
-    const onBobbyTrigger = (e: Event) => {
-      const detail = (e as CustomEvent<{ nodeId?: string; tool?: string }>).detail;
-      if (!detail?.nodeId) return;
-      openBobbyNodeFor(detail.nodeId);
-    };
-    window.addEventListener('bobby:trigger', onBobbyTrigger);
-    return () => window.removeEventListener('bobby:trigger', onBobbyTrigger);
-  }, [openBobbyNodeFor]);
-
-  // 在指定位置创建 Agent Teams 观察节点（薄客户端，只对接 /api/team）
-  const createAgentTeamsNode = useCallback(
-    (position: { x: number; y: number }, opts?: { sourceNodeId?: string; autoFocus?: boolean }) => {
-      const linkAfter = (teamId: string) => {
-        const source = opts?.sourceNodeId;
-        if (!source) return;
-        fetch('/api/edges', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'create', from: source, to: teamId, edge_type: 'team' }),
-        })
-          .then((r) => r.json())
-          .then((ed) => {
-            if (ed.success && ed.edge) {
-              setEdges((eds) =>
-                addEdge(
-                  {
-                    id: ed.edge.edge_id,
-                    source: ed.edge.from,
-                    target: ed.edge.to,
-                    type: 'floating',
-                    animated: true, // 信号流动感：团队执行时连线上的小方块流动
-                    data: { relation: 'child', disconnected: ed.edge.disconnected ?? false },
-                  },
-                  eds,
-                ),
-              );
-            }
-          })
-          .catch(() => { /* 连线失败忽略 */ });
-      };
-
-      fetch('/api/nodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'create',
-          title: 'Agent Teams',
-          model: DEFAULT_MODEL_ID,
-          sources: [],
-          node_type: 'agentTeams',
-          position_x: position.x,
-          position_y: position.y,
-        }),
-      })
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.success) {
-            const nodeId = data.node_id;
-            const newNode = {
-              id: nodeId,
-              type: 'agentTeams' as const,
-              position,
-              data: { title: 'Agent Teams', prompt: '', status: 'idle' as const, nodeMdId: nodeId },
-            } as unknown as Node<AiChatNodeData>;
-            setNodes((nds) => [...nds, newNode]);
-            linkAfter(nodeId);
-          }
-        })
-        .catch(() => {
-          // 创建失败时使用临时 ID（降级）
-          const id = `team-${Date.now()}-${nodeIdCounter.current++}`;
-          const newNode = {
-            id,
-            type: 'agentTeams' as const,
-            position,
-            data: { title: 'Agent Teams', prompt: '', status: 'idle' as const, nodeMdId: id },
-          } as unknown as Node<AiChatNodeData>;
-          setNodes((nds) => [...nds, newNode]);
-        });
-    },
-    [setNodes, setEdges],
-  );
-
-  // 主 Agent 调用团队编排工具 → 自动打开 AgentTeamsNode 并建立连线（"一条连线打开"）
-  // 语义：复用画布已有节点（高亮 + 滚动定位 + 补线）；没有则自动创建在发起节点右下方。
-  const openTeamNodeFor = useCallback(
-    (sourceNodeId: string) => {
-      const existing = getNodes().find((n) => n.type === 'agentTeams');
-      if (existing) {
-        setNodes((nds) => nds.map((n) => (n.id === existing.id ? { ...n, selected: true } : n)));
-        const hasEdge = getEdges().some((e) => e.source === sourceNodeId && e.target === existing.id);
-        if (!hasEdge) {
-          fetch('/api/edges', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'create', from: sourceNodeId, to: existing.id, edge_type: 'team' }),
-          })
-            .then((r) => r.json())
-            .then((ed) => {
-              if (ed.success && ed.edge) {
-                setEdges((eds) =>
-                  addEdge(
-                    {
-                      id: ed.edge.edge_id,
-                      source: ed.edge.from,
-                      target: ed.edge.to,
-                      type: 'floating',
-                      animated: true,
-                      data: { relation: 'child', disconnected: ed.edge.disconnected ?? false },
-                    },
-                    eds,
-                  ),
-                );
-              }
-            })
-            .catch(() => { /* 忽略 */ });
-        }
-        return;
-      }
-      const src = getNodes().find((n) => n.id === sourceNodeId);
-      const pos = {
-        x: (src?.position.x ?? 400) + 500,
-        y: (src?.position.y ?? 200) + 40,
-      };
-      createAgentTeamsNode(pos, { sourceNodeId, autoFocus: true });
-    },
-    [getNodes, getEdges, setNodes, setEdges, createAgentTeamsNode],
-  );
-
-  // 监听 ChatNodeKernel 广播的 Agent Teams 触发事件（主 Agent 调用了 mcp__team__* 工具）
-  useEffect(() => {
-    const onTeamTrigger = (e: Event) => {
-      const detail = (e as CustomEvent<{ nodeId?: string; tool?: string }>).detail;
-      if (!detail?.nodeId) return;
-      openTeamNodeFor(detail.nodeId);
-    };
-    window.addEventListener('team:trigger', onTeamTrigger);
-    return () => window.removeEventListener('team:trigger', onTeamTrigger);
-  }, [openTeamNodeFor]);
+  // 2026-09-18：原「主 Agent 调 Bobby 工具 → 自动创建/聚焦 BobbyNode 再弹授权框」链路已停用。
+  // 原因：CanvasFlow 改为单焦点 world 后画布已不存在，且 openBobbyNodeFor 复用已有节点时只
+  // setSelected、不居中定位，节点可能落在视口外 → 授权弹窗不可见、主 Agent 卡在等待授权。
+  // 授权与权限引导现由全局宿主 BobbyAuthHost（layout.tsx）接管，不再依赖任何画布节点。
+  // （openBobbyNodeFor / createBobbyNode 保留为存量 bobby 节点的恢复与观察用途，暂无调用方。）
 
   // 监听 Bobby 运行状态 → 控制连线"电流"：执行中 animated=true（信号流动），闲置 false（静止）
   useEffect(() => {
@@ -4171,7 +4118,7 @@ function CanvasFlowInner() {
   }, [graphSnap.nodes, focusedNodeId]);
 
   // ============ 宿主自绘节点通道（2026-09）：NodeHostContext 注入值 + 删除统一入口 ============
-  // 删除节点 + 关联边（Annotation ✕ / Bobby / AgentTeams / ImageGen ✕ 标题栏删除统一入口）：
+  // 删除节点 + 关联边（Annotation ✕ / Bobby / ImageGen ✕ 标题栏删除统一入口）：
   // 与旧实现一致 —— POST /api/nodes delete（nodeMdId 档案）+ 连带 imagegenAlbum 子节点/连线的清理。
   const deleteNodeWithEdgesHost = useCallback((nodeId: string) => {
     const node = nodesRef.current.find((n) => n.id === nodeId);
@@ -4186,7 +4133,7 @@ function CanvasFlowInner() {
       : [];
     for (const msg of msgs) {
       for (const att of msg.attachments ?? []) {
-        const m = att.path?.match(/^(?:attachments|assets)\/([^/]+)\//);
+        const m = att.path?.match(/^(?:attachments|assets|materials)\/([^/]+)\//);
         if (m) attachmentFolders.add(m[1]);
       }
     }
@@ -4259,8 +4206,6 @@ function CanvasFlowInner() {
       
       case 'bobby':
         return <BobbyNode id={nodeId} data={hostNode.data as unknown as BobbyNodeData} selected={selected} />;
-      case 'agentTeams':
-        return <AgentTeamsNode id={nodeId} data={hostNode.data as unknown as AgentTeamsNodeData} selected={selected} />;
       case 'annotation':
         return <AnnotationNode id={nodeId} data={hostNode.data as AiChatNodeData} selected={selected} />;
       default: {
@@ -4326,7 +4271,6 @@ function CanvasFlowInner() {
   const navActions: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }> = [
     { key: 'store', label: 'Extensions Store', icon: <Blocks className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('skill-store-open')) },
     { key: 'miniapps', label: 'Mini Programs', icon: <Boxes className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('sandbox-store-open')) },
-    { key: 'teams', label: 'Agent Teams', icon: <Users className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('team-panel-open')) },
     { key: 'calendar', label: 'Calendar', icon: <Calendar className="h-4 w-4 shrink-0" />, onClick: () => setCalendarOpen(true) },
     // Bob Notes 主入口 → 打开 bob-notes-mcp 原厂 Web 面板（宿主定制 UI 壳已去除）
     { key: 'notes', label: 'Bob Notes', icon: <NotebookText className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('open-plugin-panel', { detail: { id: 'bob-notes-mcp' } })) },
@@ -4394,6 +4338,10 @@ function CanvasFlowInner() {
             className={`relative flex ${navCollapsed ? 'w-[52px]' : 'w-[258px]'} shrink-0 select-none flex-col overflow-hidden transition-[width] duration-150`}
             style={{
               backgroundColor: 'transparent',
+              // 左栏底色透出 body 的 --canvas-bg（#e8e8e8），而全局 --paper-hover（#e8e8ec）
+              // 与该灰底几乎同色 → 悬停背景看不出来。此处在左栏作用域内改用中性加深色，
+              // 使栏内所有 hover:bg-[var(--paper-hover)] 的悬停反馈清晰可见（不影响其他面板）。
+              '--paper-hover': 'color-mix(in oklab, var(--ink) 7%, transparent)',
               WebkitAppRegion: 'no-drag',
             } as React.CSSProperties}
           >
@@ -4429,15 +4377,27 @@ function CanvasFlowInner() {
             </div>
             {/* 搜索框下方功能入口（2026-09-12）：原「项目下方工具条」除 Trash 外迁入此处，以图标+文字展示 */}
             <div className="px-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setProjectBoardOpen(true)}
-                className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-13 font-medium transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
-              >
-                <LayoutGrid className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">Project board</span>
-              </button>
+              <div className="group flex items-center gap-1 rounded-lg transition-colors hover:bg-[var(--paper-hover)]">
+                <button
+                  type="button"
+                  onClick={() => setProjectBoardOpen(true)}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1 text-left text-13 font-medium transition-colors"
+                  style={{ color: 'var(--ink-muted)' }}
+                >
+                  <LayoutGrid className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">Project board</span>
+                </button>
+                {/* 新建项目（纯图标，悬停显示） */}
+                <button
+                  type="button"
+                  onClick={() => window.dispatchEvent(new Event('create-project-open'))}
+                  className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)] group-hover:flex"
+                  title="New project"
+                  aria-label="New project"
+                >
+                  <Plus className="h-[13px] w-[13px] shrink-0" />
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => setLocalExplorerCollapsed((v) => !v)}
@@ -4481,6 +4441,7 @@ function CanvasFlowInner() {
                   <button
                     type="button"
                     onClick={() => window.dispatchEvent(new Event('workspace-toggle'))}
+                    onMouseEnter={refreshCurrentProject}
                     className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
                     style={{ cursor: 'pointer' }}
                   >
@@ -4490,34 +4451,38 @@ function CanvasFlowInner() {
                     </span>
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="right">Switch project</TooltipContent>
-              </Tooltip>
-              {/* 新建项目（纯图标，位于新建会话按钮之前） */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => window.dispatchEvent(new Event('create-project-open'))}
-                    className="-ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                  >
-                    <Plus className="h-[13px] w-[13px] shrink-0" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top">New project</TooltipContent>
+                <TooltipContent side="right" className="max-w-[260px]">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-11 font-medium">{currentProjectTitle || 'Project'}</span>
+                    {(currentProjectMeta?.category || (currentProjectMeta?.tags?.length ?? 0) > 0) && (
+                      <div className="flex flex-wrap items-center gap-1">
+                        {currentProjectMeta?.category && (
+                          <span
+                            className="rounded px-1 py-px text-10"
+                            style={{ backgroundColor: 'color-mix(in oklab, var(--paper) 18%, transparent)' }}
+                          >
+                            {currentProjectMeta.category}
+                          </span>
+                        )}
+                        {currentProjectMeta?.tags?.filter(Boolean).map((t) => (
+                          <span key={t} className="text-10 opacity-75">#{t}</span>
+                        ))}
+                      </div>
+                    )}
+                    {currentProjectMeta?.note && (
+                      <p className="max-h-24 overflow-hidden text-10 whitespace-pre-wrap opacity-75">{currentProjectMeta.note}</p>
+                    )}
+                  </div>
+                </TooltipContent>
               </Tooltip>
               <div className="relative -ml-1 shrink-0">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => setAddMenuOpen((v) => !v)}
-                      className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                    >
-                      <MessageCircle className="h-[13px] w-[13px] shrink-0" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="left">Add session</TooltipContent>
-                </Tooltip>
+                <button
+                  type="button"
+                  onClick={() => setAddMenuOpen((v) => !v)}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
+                >
+                  <MessageCircle className="h-[13px] w-[13px] shrink-0" />
+                </button>
                 {addMenuOpen && (
                   <>
                     <div className="fixed inset-0 z-[290]" onClick={() => setAddMenuOpen(false)} />
@@ -4537,7 +4502,7 @@ function CanvasFlowInner() {
                         const pos = spawnSiblingPosition();
                         let onClick: () => void;
                         if (a.id === 'coding') {
-                          onClick = () => { setNodeCreatePos(pos); setNodeCreateDialogOpen(true); };
+                          onClick = () => { setNodeCreateKind('mini'); setNodeCreatePos(pos); setNodeCreateDialogOpen(true); };
                         } else if (a.id === 'note') {
                           onClick = () => createNoteAgentNode(pos);
                         } else if (a.id === 'butler') {
@@ -4590,7 +4555,8 @@ function CanvasFlowInner() {
                 )}
               </div>
             </div>
-            {/* 会话/任务树：链分组（含散落节点），点击切换到该节点（左内边距与项目图标对齐） */}
+            {/* 会话列表：按创建时间降序（最新的在最上面），点击切换到该节点（左内边距与项目图标对齐）；
+                标题右侧关系符号只表达一层上游/下游，不再有分组/嵌套的连线表达 */}
             <div className="min-h-0 flex-1 overflow-y-auto hide-scrollbar pl-[9.5px] pb-2 pr-1.5">
               {focusRail.length === 0 ? (
                 <div className="px-2 pt-4 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
@@ -4598,32 +4564,26 @@ function CanvasFlowInner() {
                   <br />Create one below.
                 </div>
               ) : (
-                focusRail.map((group, gi) => {
-                  const rootDot = group.dots[0];
-                  const rootTitle = rootDot?.title || 'Untitled';
-                  const rootActive = focusedNodeId === rootDot?.id;
-                  // 会话级聚合状态：任一子节点执行中=呼吸灯，任一已完成未读=实心绿点
-                  const rootRunning = group.dots.some((d) => railDotState(d.id) === 'running');
-                  const rootDone = group.dots.some((d) => railDotState(d.id) === 'done');
+                focusRail.map((dot, gi) => {
+                  const active = focusedNodeId === dot.id;
+                  const dotState = railDotState(dot.id);
                   return (
-                    <div key={group.key} style={{ marginTop: gi === 0 ? 2 : 14 }}>
-                      {/* 根行 = 会话标题（点击聚焦根节点）；hover 显示三点菜单 */}
+                    <div key={dot.id} style={{ marginTop: gi === 0 ? 2 : 4 }}>
+                      {/* 会话行：标题 + 标题右侧关系符号（点击聚焦该节点）；hover 显示三点菜单 */}
                       <div className="group relative flex items-center">
-                        {railEditingId === rootDot?.id ? (
+                        {railEditingId === dot.id ? (
                           <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1">
-                            {AGENT_MENU_ICONS[rootDot?.identity ?? '']?.icon ?? AGENT_MENU_DEFAULT_ICON.icon}
+                            {AGENT_MENU_ICONS[dot.identity ?? '']?.icon ?? AGENT_MENU_DEFAULT_ICON.icon}
                             <input
                               autoFocus
                               value={railEditDraft}
                               onChange={(e) => setRailEditDraft(e.target.value)}
                               onFocus={(e) => e.currentTarget.select()}
-                              onBlur={() => {
-                                if (rootDot) commitRenameNodeFromRail(rootDot.id);
-                              }}
+                              onBlur={() => commitRenameNodeFromRail(dot.id)}
                               onKeyDown={(e) => {
                                 e.stopPropagation();
                                 if (e.key === 'Enter') {
-                                  if (rootDot) commitRenameNodeFromRail(rootDot.id);
+                                  commitRenameNodeFromRail(dot.id);
                                 } else if (e.key === 'Escape') {
                                   cancelRenameNodeFromRail();
                                 }
@@ -4631,34 +4591,33 @@ function CanvasFlowInner() {
                               className="min-w-0 flex-1 rounded bg-transparent px-0.5 text-xs outline-none"
                               style={{ color: 'var(--ink-strong)', fontWeight: 600 }}
                             />
+                            <RailRelationMarks upstream={dot.upstream} downstream={dot.downstream} />
                           </div>
                         ) : (
                           <button
                             type="button"
                             onClick={() => {
-                              if (rootDot && !rootActive) switchFocusNode(rootDot.id);
+                              if (!active) switchFocusNode(dot.id);
                             }}
                             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
                             style={{
-                              backgroundColor: rootActive ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
+                              backgroundColor: active ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
                               cursor: 'pointer',
                             }}
                           >
-                            {AGENT_MENU_ICONS[rootDot?.identity ?? '']?.icon ?? AGENT_MENU_DEFAULT_ICON.icon}
+                            {AGENT_MENU_ICONS[dot.identity ?? '']?.icon ?? AGENT_MENU_DEFAULT_ICON.icon}
                             <span
                               className="min-w-0 flex-1 truncate text-xs"
-                              style={{ color: rootActive ? 'var(--ink-strong)' : 'var(--ink)', fontWeight: rootActive ? 600 : 400 }}
+                              style={{ color: active ? 'var(--ink-strong)' : 'var(--ink)', fontWeight: active ? 600 : 400 }}
                             >
-                              {rootTitle}
+                              {dot.title || 'Untitled'}
                             </span>
-                            {(rootRunning || rootDone) && (
+                            <RailRelationMarks upstream={dot.upstream} downstream={dot.downstream} />
+                            {(dotState === 'running' || dotState === 'done') && (
                               <span
-                                className={`block h-1.5 w-1.5 shrink-0 rounded-full${rootRunning ? ' rail-run-breathing' : ''}`}
+                                className={`block h-1.5 w-1.5 shrink-0 rounded-full${dotState === 'running' ? ' rail-run-breathing' : ''}`}
                                 style={{ backgroundColor: 'var(--success)' }}
                               />
-                            )}
-                            {group.dots.length > 1 && (
-                              <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>{group.dots.length - 1}</span>
                             )}
                           </button>
                         )}
@@ -4668,15 +4627,15 @@ function CanvasFlowInner() {
                             title="More actions"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setRailMenuOpenId((prev) => prev === rootDot?.id ? null : rootDot?.id ?? null);
+                              setRailMenuOpenId((prev) => prev === dot.id ? null : dot.id);
                             }}
                             className={`flex h-5 shrink-0 items-center justify-center rounded text-[var(--ink-faint)] transition-all duration-100 hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)] ${
-                              railMenuOpenId === rootDot?.id ? 'w-5 text-[var(--ink-strong)]' : 'w-0 overflow-hidden group-hover:w-5'
+                              railMenuOpenId === dot.id ? 'w-5 text-[var(--ink-strong)]' : 'w-0 overflow-hidden group-hover:w-5'
                             }`}
                           >
                             <MoreVertical className="h-3.5 w-3.5 shrink-0" />
                           </button>
-                          {railMenuOpenId === rootDot?.id && (
+                          {railMenuOpenId === dot.id && (
                             <>
                               <div className="fixed inset-0 z-[290]" onClick={() => setRailMenuOpenId(null)} />
                               <div
@@ -4691,7 +4650,7 @@ function CanvasFlowInner() {
                                   type="button"
                                   onClick={() => {
                                     setRailMenuOpenId(null);
-                                    if (rootDot) startRenameNodeFromRail(rootDot.id);
+                                    startRenameNodeFromRail(dot.id);
                                   }}
                                   className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
                                   style={{ color: 'var(--ink)' }}
@@ -4703,7 +4662,7 @@ function CanvasFlowInner() {
                                   type="button"
                                   onClick={() => {
                                     setRailMenuOpenId(null);
-                                    if (rootDot) void deleteNodeFromRail(rootDot.id);
+                                    void deleteNodeFromRail(dot.id);
                                   }}
                                   className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-[var(--danger-soft)]"
                                   style={{ color: 'var(--danger)' }}
@@ -4716,116 +4675,6 @@ function CanvasFlowInner() {
                           )}
                         </div>
                       </div>
-                      {group.dots.slice(1).map((dot) => {
-                        const active = focusedNodeId === dot.id;
-                        const dotState = railDotState(dot.id);
-                        return (
-                          <div key={dot.id} className="group relative flex items-center">
-                            {railEditingId === dot.id ? (
-                              <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1">
-                                <span className="block h-1.5 w-1.5 shrink-0" />
-                                <input
-                                  autoFocus
-                                  value={railEditDraft}
-                                  onChange={(e) => setRailEditDraft(e.target.value)}
-                                  onFocus={(e) => e.currentTarget.select()}
-                                  onBlur={() => commitRenameNodeFromRail(dot.id)}
-                                  onKeyDown={(e) => {
-                                    e.stopPropagation();
-                                    if (e.key === 'Enter') {
-                                      commitRenameNodeFromRail(dot.id);
-                                    } else if (e.key === 'Escape') {
-                                      cancelRenameNodeFromRail();
-                                    }
-                                  }}
-                                  className="min-w-0 flex-1 rounded bg-transparent px-0.5 text-xs outline-none"
-                                  style={{ color: 'var(--ink-strong)', fontWeight: 600 }}
-                                />
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!active) switchFocusNode(dot.id);
-                                }}
-                                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
-                                style={{
-                                  backgroundColor: active ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : undefined,
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                {dotState === 'running' || dotState === 'done' ? (
-                                  <span
-                                    className={`block h-1.5 w-1.5 shrink-0 rounded-full${dotState === 'running' ? ' rail-run-breathing' : ''}`}
-                                    style={{ backgroundColor: 'var(--success)' }}
-                                  />
-                                ) : (
-                                  <span className="block h-1.5 w-1.5 shrink-0" />
-                                )}
-                                <span
-                                  className="min-w-0 flex-1 truncate text-xs"
-                                  style={{ color: active ? 'var(--ink-strong)' : 'var(--ink)', fontWeight: active ? 600 : 400 }}
-                                >
-                                  {dot.title}
-                                </span>
-                              </button>
-                            )}
-                            <div className="relative">
-                              <button
-                                type="button"
-                                title="More actions"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setRailMenuOpenId((prev) => prev === dot.id ? null : dot.id);
-                                }}
-                                className={`flex h-5 shrink-0 items-center justify-center rounded text-[var(--ink-faint)] transition-all duration-100 hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)] ${
-                                  railMenuOpenId === dot.id ? 'w-5 text-[var(--ink-strong)]' : 'w-0 overflow-hidden group-hover:w-5'
-                                }`}
-                              >
-                                <MoreVertical className="h-3.5 w-3.5 shrink-0" />
-                              </button>
-                              {railMenuOpenId === dot.id && (
-                                <>
-                                  <div className="fixed inset-0 z-[290]" onClick={() => setRailMenuOpenId(null)} />
-                                  <div
-                                    className="absolute right-0 top-full z-[300] mt-0.5 w-32 rounded-lg border p-1 shadow-lg"
-                                    style={{
-                                      borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
-                                      backgroundColor: 'var(--popover)',
-                                    }}
-                                    onMouseDown={(e) => e.stopPropagation()}
-                                  >
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setRailMenuOpenId(null);
-                                        startRenameNodeFromRail(dot.id);
-                                      }}
-                                      className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
-                                      style={{ color: 'var(--ink)' }}
-                                    >
-                                      <Pencil className="h-3 w-3 shrink-0" />
-                                      <span>Rename</span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setRailMenuOpenId(null);
-                                        void deleteNodeFromRail(dot.id);
-                                      }}
-                                      className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-[var(--danger-soft)]"
-                                      style={{ color: 'var(--danger)' }}
-                                    >
-                                      <Trash className="h-3 w-3 shrink-0" />
-                                      <span>Delete</span>
-                                    </button>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
                     </div>
                   );
                 })
@@ -4939,9 +4788,11 @@ function CanvasFlowInner() {
                   type="button"
                   onClick={() => setSettingsOpen(true)}
                   title="Settings"
-                  className="flex items-center gap-1.5 rounded-lg px-1.5 py-1 transition-colors hover:bg-[var(--paper-hover)]"
+                  className="flex items-center gap-1.5 rounded-lg px-1.5 py-1"
                 >
-                  <img src="/hippo-icon.png" alt="BobWork" className="h-4 w-4 shrink-0 rounded object-contain" draggable={false} />
+                  {/* 默认 hippo-icon.png 为不透明白底：multiply 让白底融进栏底（视觉透明），黑线保持不变；
+                      若换成头像池里的自定义 logo（自带 alpha），则直接叠加 */}
+                  <img src={brandLogo.src} alt="BobWork" className="h-4 w-4 shrink-0 rounded object-contain" style={brandLogo.multiply ? { mixBlendMode: 'multiply' } : undefined} draggable={false} />
                   <span className="shrink-0 text-xs font-medium" style={{ color: 'var(--ink-strong)' }}>BobWork</span>
                 </button>
                 {/* 版本号 = 更新状态入口：检查/发现新版本过渡/下载中/就绪呼吸灯，不再另设独立更新按钮 */}
@@ -5058,19 +4909,61 @@ function CanvasFlowInner() {
             </div>
             </>
             )}
-            {/* 折叠态：窄图标轨 —— 只保留“项目下方工具条”对应图标（Search/Project board/Calendar/Local files/Trash + 快速工具） */}
+            {/* 折叠态：窄图标轨 —— 顺序与展开态左栏保持一致（搜索框 → Project board → Local files → Browser → 快速工具 → 分隔线 → 项目/回收站） */}
             {navCollapsed && (
+              <>
               <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto hide-scrollbar px-1 py-1">
                 <ToolBtn title="Search (⌘F)" onClick={() => setPaletteOpen(true)}><Search className="h-[13px] w-[13px]" /></ToolBtn>
                 <ToolBtn title="Project board" onClick={() => setProjectBoardOpen(true)}><LayoutGrid className="h-[13px] w-[13px]" /></ToolBtn>
                 <ToolBtn title="Local files" onClick={() => setLocalExplorerCollapsed((v) => !v)}><Monitor className="h-[13px] w-[13px]" /></ToolBtn>
-                <ToolBtn title="Trash (deleted nodes)" onClick={() => window.dispatchEvent(new Event('trash-open'))}><Trash className="h-[13px] w-[13px]" /></ToolBtn>
                 <ToolBtn title="Hippo Browser (⌘⇧B)" onClick={() => void desktop.hippoBrowser.open()}><Globe className="h-[13px] w-[13px]" /></ToolBtn>
-                <div className="my-1 h-px w-5 shrink-0" style={{ backgroundColor: 'color-mix(in oklab, var(--line) 30%, transparent)' }} />
                 {quickTools.map((t) => (
                   <ToolBtn key={`q-${t.key}`} title={t.label} onClick={t.onClick} disabled={t.disabled}>{quickToolIcon(t.key, 'h-[13px] w-[13px]')}</ToolBtn>
                 ))}
+                <div className="my-1 h-px w-5 shrink-0" style={{ backgroundColor: 'color-mix(in oklab, var(--line) 30%, transparent)' }} />
+                {/* 当前项目文件夹：点击打开 Workspace 浮层（项目切换 + 文件树）；展开态中项目行位于快速工具之下。
+                    图标保持紫色（var(--primary)），与展开态项目行的 Folder 图标一致。 */}
+                <ToolBtn
+                  title={currentProjectTitle ? `${currentProjectTitle} — Open workspace` : 'Open workspace'}
+                  onClick={() => window.dispatchEvent(new Event('workspace-toggle'))}
+                >
+                  <Folder className="h-[13px] w-[13px]" style={{ color: 'var(--primary)' }} />
+                </ToolBtn>
+                <ToolBtn title="Trash (deleted nodes)" onClick={() => window.dispatchEvent(new Event('trash-open'))}><Trash className="h-[13px] w-[13px]" /></ToolBtn>
               </div>
+              {/* 折叠态底部：BobMail（未读角标）在上，品牌（Settings 入口）在下 */}
+              <div className="flex shrink-0 flex-col items-center gap-0.5 px-1 pb-2 pt-1">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="BobMail"
+                      onClick={(e) => {
+                        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                        window.dispatchEvent(new CustomEvent('bobmail-toggle', { detail: { anchor: rect } }));
+                      }}
+                      className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
+                    >
+                      {/* 折叠态 rail 内图标统一 13px（与 ToolBtn 一致）；未读角标锚在按钮容器右上角，不随图标缩放 */}
+                      <Mail className="h-[13px] w-[13px]" />
+                      {mailPending > 0 && (
+                        <span
+                          className="absolute -right-0.5 -top-0.5 flex min-w-[14px] items-center justify-center rounded-full px-1 text-9 font-semibold"
+                          style={{ backgroundColor: 'var(--danger)', color: '#fff', lineHeight: '14px' }}
+                        >
+                          {mailPending > 99 ? '99+' : mailPending}
+                        </span>
+                      )}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">BobMail</TooltipContent>
+                </Tooltip>
+                <ToolBtn title={`BobWork${appVersion ? ` v${appVersion}` : ''} — Settings`} noHoverBg onClick={() => setSettingsOpen(true)}>
+                  {/* 同上：默认图标用 multiply 去掉不透明白底；自定义 logo 直接叠加 */}
+                  <img src={brandLogo.src} alt="BobWork" className="h-4 w-4 shrink-0 rounded object-contain" style={brandLogo.multiply ? { mixBlendMode: 'multiply' } : undefined} draggable={false} />
+                </ToolBtn>
+              </div>
+              </>
             )}
           </aside>
           </TooltipProvider>
@@ -5147,7 +5040,7 @@ function CanvasFlowInner() {
         />
 
         {/* ⌘F 统一面板：文件搜索 + WANTED 指令（原 GlobalSearch + TaskPanel）。
-            2026-09-12：功能按钮（Extensions Store / Mini Programs / Agent Teams / Calendar / Bob Notes）
+            2026-09-12：功能按钮（Extensions Store / Mini Programs / Calendar / Bob Notes）
             从左侧边栏迁回本面板，渲染在输入框下方，仅图标 + 悬停显示名称 */}
         <UnifiedPalette
           open={paletteOpen}
@@ -5175,11 +5068,6 @@ function CanvasFlowInner() {
           <SandboxPanel onClose={() => setStoreOpen(false)} />
         )}
 
-        {/* Agent Teams 全屏面板：侧边栏入口打开，Esc / 关闭按钮退出 */}
-        {teamsFullscreenOpen && (
-          <AgentTeamsPanel onClose={() => setTeamsFullscreenOpen(false)} />
-        )}
-
         {/* 模型用量统计面板：图标栏/⌘F 入口打开，Esc / 关闭按钮退出 */}
         {usageOpen && (
           <UsagePanel onClose={() => setUsageOpen(false)} />
@@ -5189,6 +5077,7 @@ function CanvasFlowInner() {
         <AICodingCreateDialog
           open={nodeCreateDialogOpen}
           position={nodeCreatePos}
+          initialKind={nodeCreateKind}
           onClose={() => setNodeCreateDialogOpen(false)}
           onCreated={handleNodeCreated}
         />

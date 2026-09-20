@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { desktop } from '@/lib/desktop-adapter';
+import { desktop, type ScreenOcrGeometry } from '@/lib/desktop-adapter';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { ScreenOcrEditor } from '@/components/screen-ocr/ScreenOcrEditor';
 
@@ -23,6 +23,10 @@ export function ScreenOcrHost() {
   const [editImage, setEditImage] = useState<string | null>(null);
   /** 初始选区模式：region（原生 -i 已选区）→ 整图全选区直接标注；full（整屏待选）→ 用户自行拖选 */
   const [initialSelection, setInitialSelection] = useState<'full' | 'none'>('none');
+  /** 截图时刻的窗口几何（整屏链路才有）：供编辑面板做窗口吸附 */
+  const [geometry, setGeometry] = useState<ScreenOcrGeometry | null>(null);
+  /** 画面属于哪一屏（geometry.screens 下标）；-1/null = 全部屏幕并集 */
+  const [screenIndex, setScreenIndex] = useState<number | null>(null);
 
   useEffect(() => {
     const offStart = desktop.screenOcr.onStart(() => {
@@ -34,9 +38,11 @@ export function ScreenOcrHost() {
     const offCanceled = desktop.screenOcr.onCanceled(() => {
       /* 用户按 Esc 取消选区：静默 */
     });
-    const offCaptured = desktop.screenOcr.onCaptured(({ dataUrl, mode }) => {
+    const offCaptured = desktop.screenOcr.onCaptured(({ dataUrl, mode, geometry: geo, screenIndex: si }) => {
       setEditImage(dataUrl);
       setInitialSelection(mode === 'region' ? 'full' : 'none');
+      setGeometry(geo ?? null);
+      setScreenIndex(si ?? null);
     });
     return () => {
       offStart();
@@ -52,6 +58,8 @@ export function ScreenOcrHost() {
     <ScreenOcrEditor
       dataUrl={editImage}
       initialSelection={initialSelection}
+      geometry={geometry}
+      screenIndex={screenIndex}
       onDone={async (editedDataUrl) => {
         setEditImage(null);
         // 编辑完成（✓）：清理主进程暂存截图，避免 shot.png/result.json 残留

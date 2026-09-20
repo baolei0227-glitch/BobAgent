@@ -26,10 +26,10 @@ async function toolOcrDocument(args: Record<string, unknown>): Promise<string> {
     if (!st?.isFile()) return `Error: 文件不存在或不可读: ${pathArg}`;
 
     const { ocrFile } = await import('@/lib/pdf/ocr-service');
-    // upgrade 参数透传给 bob-ocr-mcp：off=不升级（默认）；auto=质量低/勾稽异常自动升级；always=全部升级。
-    // 仅 off/auto/always 合法，其余（含缺失）一律回退 off。
+    // upgrade 参数透传给 bob-ocr-mcp：auto=质量低/勾稽异常自动升级（默认，质量优先）；off=不升级；always=全部升级。
+    // 仅 off/auto/always 合法，其余（含缺失）一律回退 auto。
     const upgradeArg = typeof args.upgrade === 'string' ? args.upgrade.trim() : '';
-    const upgrade = upgradeArg === 'auto' || upgradeArg === 'always' ? upgradeArg : 'off';
+    const upgrade = upgradeArg === 'off' || upgradeArg === 'always' ? upgradeArg : 'auto';
     const result = await ocrFile(filePath, { upgrade });
     if (!result.success) {
       return `Error: OCR 失败（${result.error ?? '未知原因'}）`;
@@ -40,14 +40,17 @@ async function toolOcrDocument(args: Record<string, unknown>): Promise<string> {
     for (const note of result.notes ?? []) {
       lines.push(`[Note] ${note}`);
     }
+    // 插件识别缓存命中：正文与 notes 都是历史结果，明确标注避免被当成"本次刚识别"
+    const cacheNote = result.cached ? '，插件缓存命中·本次未重新识别' : '';
     if (result.method === 'pdf-text') {
-      lines.push(`OCR 结果（原生文本 PDF，共 ${result.pageCount} 页）`);
+      lines.push(`OCR 结果（原生文本 PDF，共 ${result.pageCount} 页${cacheNote}）`);
       lines.push(result.text);
     } else {
       const upgradedMeta = (result as { upgradedCount?: number }).upgradedCount ?? 0;
       lines.push(
         `OCR 结果（扫描件，共 ${result.pageCount} 页，仅识别辅助，原图保留）` +
-          (upgradedMeta > 0 ? `，其中 ${upgradedMeta} 页采用在线模型升级` : ''),
+          (upgradedMeta > 0 ? `，其中 ${upgradedMeta} 页采用在线模型升级` : '') +
+          cacheNote,
       );
       for (const p of result.pages) {
         const meta = [
@@ -128,18 +131,18 @@ async function toolCropImage(args: Record<string, unknown>): Promise<string> {
 export const ocrToolDefs: Tool[] = [
   {
     name: 'ocr_document',
-    description: 'OCR 识别（独立工具）：对 PDF 扫描件/图片做高质量文字识别，返回逐页文本 + qualityScore（0-1）+ ledgerVerified（流水勾稽）。【级联】印刷体默认走本地 macOS Vision（确定性、零成本），仅本地质量低（qualityScore<0.30）/文本为空/勾稽异常时自动升级 VLM。手写字段（姓名/身份证/日期）多次识别结果波动属正常——不要整页反复重试，改用 crop_image 裁可疑区域单独复核，或标注【需人工复核】。区别于 read_attachment：纯 OCR，不处理 docx/视频，返回精简且带质量元数据。传入 attachments/、homework/ 相对或绝对路径。',
+    description: 'OCR 识别（独立工具）：对 PDF 扫描件/图片做高质量文字识别，返回逐页文本 + qualityScore（0-1）+ ledgerVerified（流水勾稽）。【级联】识别引擎由 bob-ocr-mcp 插件配置决定（默认在线 GLM-OCR 文档解析），质量低（qualityScore<0.30）/文本为空/勾稽异常时自动升级视觉大模型（upgrade=auto，默认）。手写字段（姓名/身份证/日期）多次识别结果波动属正常——不要整页反复重试，改用 crop_image 裁可疑区域单独复核，或标注【需人工复核】。区别于 read_attachment：纯 OCR，不处理 docx/视频，返回精简且带质量元数据。传入 materials/、attachments/、homework/ 相对或绝对路径。',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: '文件路径：attachments/{nodeId}/{filename}（项目内附件）、homework/ 相对路径或绝对路径。支持 PDF（扫描件自动 OCR）与图片（png/jpg/jpeg/gif/webp/bmp/tif）。',
+          description: '文件路径：materials/{attachmentFolder}/{filename}（项目内附件，历史附件仍为 attachments/{nodeId}/{filename}）、homework/ 相对路径或绝对路径。支持 PDF（扫描件自动 OCR）与图片（png/jpg/jpeg/gif/webp/bmp/tif）。',
         },
         upgrade: {
           type: 'string',
           enum: ['off', 'auto', 'always'],
-          description: '可选，VLM 升级：off=纯本地（默认）；auto=本地质量低（qualityScore<0.30）/勾稽异常/文本为空时该页升级视觉大模型；always=全部走 VLM。auto/always 需在 Role Assignment 配置 Vision Model，未配置则静默退化为纯本地。',
+          description: '可选，VLM 升级：auto=质量低（qualityScore<0.30）/勾稽异常/文本为空时该页升级视觉大模型（默认，质量优先）；off=不升级；always=全部走 VLM。升级模型在插件配置的 Vision 中指定；未配置则只跑主引擎（GLM-OCR），不报错。',
         },
       },
       required: ['path'],
@@ -156,7 +159,7 @@ export const ocrToolDefs: Tool[] = [
       properties: {
         path: {
           type: 'string',
-          description: '图片路径：attachments/{nodeId}/{filename}、homework/ 相对路径或绝对路径。',
+          description: '图片路径：materials/{attachmentFolder}/{filename}（历史附件为 attachments/{nodeId}/{filename}）、homework/ 相对路径或绝对路径。',
         },
         bbox: {
           type: 'array',

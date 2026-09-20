@@ -17,8 +17,8 @@ export const DEFAULT_CONTEXT_WINDOW = 1000000;
 export const OUTCOME_CONTEXT_RATIO = 0.1;
 /** 上下文闸占 contextWindow 比例（R-14） */
 export const CONTEXT_GATE_RATIO = 0.2;
-/** 工具单次输出上限占 contextWindow 比例（1M→150000、256k→38400、128k→19200） */
-export const TOOL_OUTPUT_RATIO = 0.15;
+/** T_turn 单次工具返回上限占 contextWindow 比例（闸外敞口收口）：1M→50000、256k→12800、128k→6400 */
+export const TOOL_OUTPUT_RATIO = 0.05;
 /** 记忆压缩触发 token 阈值占 contextWindow 比例（1M→100000、256k→25600、128k→12800，下限 16000） */
 export const COMPACT_TOKEN_RATIO = 0.1;
 /** 成果块上限下限（字符），保证小模型也能容纳精炼成果 */
@@ -52,10 +52,22 @@ export function contextGateForContext(contextWindow: number): number {
   return Math.max(CONTEXT_GATE_FLOOR, Math.round(contextWindow * CONTEXT_GATE_RATIO));
 }
 
-/** 工具单次输出上限：contextWindow × 15%（1M→150000、256k→38400、128k→19200），下限 8000 保证不劣于现状 */
+/** T_turn 单次工具返回上限（闸外敞口收口）：contextWindow × 5%（1M→50000、256k→12800、128k→6400），下限 8000 保证不劣于现状 */
 export function toolOutputMaxForContext(contextWindow: number): number {
   return Math.max(8000, Math.round(contextWindow * TOOL_OUTPUT_RATIO));
 }
+
+/** 单任务累计工具返回上限占 contextWindow 比例（T_task）：防多轮下钻累积爆窗（1M→150000） */
+export const TASK_TOOL_OUTPUT_RATIO = 0.15;
+
+/** 单任务累计工具返回上限（字符）：contextWindow × 15%，下限 8000 */
+export function taskToolOutputMaxForContext(contextWindow: number): number {
+  return Math.max(8000, Math.round(contextWindow * TASK_TOOL_OUTPUT_RATIO));
+}
+
+/** brief 硬上限（每上游节点，P0-c）：结论档注入的硬长度约束，保证多个满额上游降级后仍在闸内。
+ *  1800 为建议值（待实测）；只约束「结论 + 确定性等级 + 来源 id」三样，不含分析推理全文。 */
+export const BRIEF_MAX_CHARS_PER_UPSTREAM = 1800;
 
 /** 记忆压缩 token 触发阈值：contextWindow × 10%（1M→100000、256k→25600、128k→12800），下限 16000 */
 export function compactTriggerTokensForContext(contextWindow: number): number {

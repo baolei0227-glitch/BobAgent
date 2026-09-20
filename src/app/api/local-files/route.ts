@@ -5,6 +5,8 @@ import { homedir, tmpdir } from 'os';
 import { getCurrentProject, getProjectsDir } from '@/lib/project/project-manager';
 import { expandEmbeds } from '@/lib/md-embed';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
+import { renameMaterialsIndex } from '@/lib/materials/indexer';
+import { renameFileTags, removeFileTags, type TagScope } from '@/lib/files/tags';
 
 /**
  * 解析路径（支持 ~ 展开为主目录）
@@ -405,6 +407,97 @@ async function transferHomeworkOwnership(fromAbs: string, toAbs: string): Promis
   } catch { /* 无清册或损坏时忽略 */ }
 }
 
+/**
+ * 解析「某项目 materials/ 内的重命名」相对路径对：源与目标都须落在同一 <项目>/materials 根内。
+ * 非 materials 内路径、或重命名后跨出 materials 根时返回 null。
+ */
+function resolveMaterialsRename(
+  fromAbs: string,
+  toAbs: string,
+): { projectPath: string; relFrom: string; relTo: string } | null {
+  const workspaceRoot = resolve(getProjectsDir());
+  // 从源路径的父目录向上找 materials 根（其父目录须位于 BobWorkspace 内，即 <project>/materials）
+  let dir = fromAbs.substring(0, fromAbs.lastIndexOf(sep));
+  let materialsRoot: string | null = null;
+  while (dir.startsWith(workspaceRoot + sep)) {
+    if (dir.split(sep).pop() === 'materials') {
+      materialsRoot = dir;
+      break;
+    }
+    const parent = dir.substring(0, dir.lastIndexOf(sep));
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (!materialsRoot) return null;
+  if (!(toAbs === materialsRoot || toAbs.startsWith(materialsRoot + sep))) return null;
+
+  const relFrom = fromAbs.slice(materialsRoot.length + 1);
+  const relTo = toAbs.slice(materialsRoot.length + 1);
+  if (!relFrom || !relTo || relFrom.startsWith('.') || relTo.startsWith('.')) return null;
+
+  return { projectPath: materialsRoot.substring(0, materialsRoot.lastIndexOf(sep)), relFrom, relTo };
+}
+
+/** 标签作用域根目录名（与 <项目> 下的顶层目录同名） */
+const TAG_SCOPE_DIRS: readonly TagScope[] = ['materials', 'homework'];
+
+/**
+ * 定位路径所属的标签作用域：从路径的父目录向上找最近的 materials/ 或 homework/ 根
+ * （作用域根的父目录须是 BobWorkspace 下的项目目录，避免把更深的同名子目录误判为作用域根）。
+ * 路径本身位于作用域根之外（含隐藏条目 / 根目录自身）时返回 null。
+ */
+function resolveTagScopePath(
+  absPath: string,
+): { projectPath: string; scope: TagScope; rel: string } | null {
+  const workspaceRoot = resolve(getProjectsDir());
+  let dir = absPath.substring(0, absPath.lastIndexOf(sep));
+  while (dir.startsWith(workspaceRoot + sep)) {
+    const parent = dir.substring(0, dir.lastIndexOf(sep));
+    if (parent === dir) break;
+    const name = dir.split(sep).pop();
+    const scope = TAG_SCOPE_DIRS.find((s) => s === name);
+    // 仅当作用域根的父目录就是项目目录时才算命中，否则继续向上（跳过同名嵌套子目录）
+    if (scope && parent.startsWith(workspaceRoot + sep) && !parent.slice(workspaceRoot.length + 1).includes(sep)) {
+      const rel = absPath.slice(dir.length + 1);
+      if (!rel || rel.startsWith('.')) return null;
+      return { projectPath: parent, scope, rel };
+    }
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * 重命名后迁移标签表键：源与目标须落在同一项目、同一作用域根内。无标签表时静默忽略。
+ */
+async function transferFileTagsRename(fromAbs: string, toAbs: string): Promise<void> {
+  const from = resolveTagScopePath(fromAbs);
+  const to = resolveTagScopePath(toAbs);
+  if (!from || !to || from.projectPath !== to.projectPath || from.scope !== to.scope) return;
+  await renameFileTags(from.projectPath, from.scope, from.rel, to.rel)
+    .catch(() => { /* 无标签表时忽略 */ });
+}
+
+/**
+ * 重命名后迁移 <项目>/materials/ 的附属数据：内容索引条目（.materials-index）。
+ * （标签表键的迁移统一由 transferFileTagsRename 处理，覆盖 materials 与 homework 两个作用域。）
+ * 无对应数据时静默忽略。
+ */
+async function transferMaterialsRename(fromAbs: string, toAbs: string): Promise<void> {
+  const target = resolveMaterialsRename(fromAbs, toAbs);
+  if (!target) return;
+  await renameMaterialsIndex(target.projectPath, target.relFrom, target.relTo)
+    .catch(() => { /* 无索引时忽略 */ });
+}
+
+/** 删除后回收标签表键（该路径及其子路径前缀）。无标签表时静默忽略。 */
+async function transferFileTagsRemove(absPath: string): Promise<void> {
+  const target = resolveTagScopePath(absPath);
+  if (!target) return;
+  await removeFileTags(target.projectPath, target.scope, target.rel)
+    .catch(() => { /* 无标签表时忽略 */ });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -424,12 +517,12 @@ export async function POST(request: NextRequest) {
 
       const resolved = resolvePath(sourcePath);
       if (!isHumanWritablePath(resolved)) {
-        return NextResponse.json({ error: '系统目录受保护，无法操作' }, { status: 403 });
+        return NextResponse.json({ error: 'Protected system directory' }, { status: 403 });
       }
 
       // 安全检查：新文件名不能包含路径分隔符
       if (newName.includes('/') || newName.includes('\\')) {
-        return NextResponse.json({ error: '文件名不能包含路径分隔符' }, { status: 400 });
+        return NextResponse.json({ error: 'File name cannot contain path separators' }, { status: 400 });
       }
 
       const parentDir = resolved.substring(0, resolved.lastIndexOf(sep));
@@ -437,13 +530,18 @@ export async function POST(request: NextRequest) {
 
       try {
         await fs.access(newPath);
-        return NextResponse.json({ error: '目标名称已存在' }, { status: 409 });
+        return NextResponse.json({ error: 'A file or folder with that name already exists' }, { status: 409 });
       } catch { /* 目标不存在，可以 rename */ }
 
       await fs.rename(resolved, newPath);
       // 归属清册维护：重命名项目 homework/ 内的文件时迁移 .ownership.json 条目，
       // 否则该产物会丢失与原节点的归属关系（AI 的 rename_file 工具同样做归属转移）。
       await transferHomeworkOwnership(resolved, newPath);
+      // 附属数据维护：重命名项目 materials/ 内的文件/文件夹时迁移可检索索引条目，
+      // 否则重命名后既有正文索引会因键路径失配而失效（需重新 OCR）；
+      // 标签表键的迁移覆盖 materials 与 homework 两个作用域，避免标签丢失。
+      await transferMaterialsRename(resolved, newPath);
+      await transferFileTagsRename(resolved, newPath);
       return NextResponse.json({ success: true, newPath });
     }
 
@@ -456,7 +554,7 @@ export async function POST(request: NextRequest) {
 
       const resolved = resolvePath(sourcePath);
       if (!isHumanWritablePath(resolved)) {
-        return NextResponse.json({ error: '系统目录受保护，无法操作' }, { status: 403 });
+        return NextResponse.json({ error: 'Protected system directory' }, { status: 403 });
       }
 
       const stat = await fs.stat(resolved).catch(() => null);
@@ -468,11 +566,11 @@ export async function POST(request: NextRequest) {
       const originalName = resolved.split(sep).pop() || (isDir ? 'folder' : 'file');
       const parentDir = resolved.substring(0, resolved.lastIndexOf(sep));
 
-      // 生成副本名：filename 的副本.ext / filename 的副本 2.ext ...（文件夹同理）
+      // 生成副本名：filename copy.ext / filename copy 2.ext ...（文件夹同理）
       let counter = 1;
       let copyPath: string;
       do {
-        const suffix = counter === 1 ? ' 的副本' : ` 的副本 ${counter}`;
+        const suffix = counter === 1 ? ' copy' : ` copy ${counter}`;
         if (isDir) {
           copyPath = join(parentDir, `${originalName}${suffix}`);
         } else {
@@ -489,6 +587,127 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, newPath: copyPath, newName });
     }
 
+    // 粘贴：把「复制」暂存（应用内剪贴板）的源复制到目标目录，对应 macOS 的拷贝 / 粘贴语义。
+    // 目标目录已有同名条目时才追加 " copy" / " copy 2"，否则保持原名（与 Finder 一致）。
+    if (action === 'paste') {
+      const sourcePath = body.sourcePath as string;
+      const destDir = body.destDir as string;
+      if (!sourcePath || !destDir) {
+        return NextResponse.json({ error: 'sourcePath and destDir are required' }, { status: 400 });
+      }
+
+      const resolvedSource = resolvePath(sourcePath);
+      const resolvedDest = resolvePath(destDir);
+      if (!isHumanWritablePath(resolvedSource) || !isHumanWritablePath(resolvedDest)) {
+        return NextResponse.json({ error: 'Protected system directory' }, { status: 403 });
+      }
+
+      const srcStat = await fs.stat(resolvedSource).catch(() => null);
+      if (!srcStat) {
+        return NextResponse.json({ error: 'Source does not exist' }, { status: 404 });
+      }
+
+      const destStat = await fs.stat(resolvedDest).catch(() => null);
+      if (!destStat || !destStat.isDirectory()) {
+        return NextResponse.json({ error: 'Destination is not a directory' }, { status: 400 });
+      }
+
+      const isDir = srcStat.isDirectory();
+      // 目录不能粘贴进自身或其子孙目录（fs.cp 递归复制自身会无限膨胀）：
+      // 比较前先解符号链接取真实路径；macOS 文件系统默认大小写不敏感，统一小写后再比前缀。
+      // 反向（源在目标之内，如把子目录粘到父目录）是合法操作，不拦。
+      if (isDir) {
+        const [realSource, realDest] = await Promise.all([
+          fs.realpath(resolvedSource).catch(() => resolvedSource),
+          fs.realpath(resolvedDest).catch(() => resolvedDest),
+        ]);
+        const norm = (p: string) => (process.platform === 'darwin' ? p.toLowerCase() : p);
+        const srcKey = norm(realSource);
+        const dstKey = norm(realDest);
+        if (dstKey === srcKey || dstKey.startsWith(srcKey + sep)) {
+          return NextResponse.json({ error: 'Cannot paste a folder into itself' }, { status: 400 });
+        }
+      }
+
+      const originalName = resolvedSource.split(sep).pop() || (isDir ? 'folder' : 'file');
+      const ext = !isDir && originalName.includes('.') ? '.' + originalName.split('.').pop() : '';
+      const baseName = ext ? originalName.slice(0, -ext.length) : originalName;
+
+      // 优先沿用原名；被占用时按 Finder 规则追加 " copy"、" copy 2"……
+      let counter = 0;
+      let destPath: string;
+      do {
+        const suffix = counter === 0 ? '' : counter === 1 ? ' copy' : ` copy ${counter}`;
+        destPath = join(resolvedDest, `${baseName}${suffix}${ext}`);
+        counter++;
+      } while (await fs.access(destPath).then(() => true).catch(() => false));
+
+      await fs.cp(resolvedSource, destPath, { recursive: true });
+      const newName = destPath.split(sep).pop() || '';
+      return NextResponse.json({ success: true, newPath: destPath, newName });
+    }
+
+    // 移动：把源文件/文件夹移到目标目录（侧栏分组视图的拖拽落点），对应 macOS 的拖拽移动语义。
+    // 目标已有同名条目时报错（不自动改名）：拖拽后拿到名字被改的副本更令人困惑。
+    if (action === 'move') {
+      const sourcePath = body.sourcePath as string;
+      const destDir = body.destDir as string;
+      if (!sourcePath || !destDir) {
+        return NextResponse.json({ error: 'sourcePath and destDir are required' }, { status: 400 });
+      }
+
+      const resolvedSource = resolvePath(sourcePath);
+      const resolvedDest = resolvePath(destDir);
+      if (!isHumanWritablePath(resolvedSource) || !isHumanWritablePath(resolvedDest)) {
+        return NextResponse.json({ error: 'Protected system directory' }, { status: 403 });
+      }
+
+      const srcStat = await fs.stat(resolvedSource).catch(() => null);
+      if (!srcStat) {
+        return NextResponse.json({ error: 'Source does not exist' }, { status: 404 });
+      }
+
+      const destStat = await fs.stat(resolvedDest).catch(() => null);
+      if (!destStat || !destStat.isDirectory()) {
+        return NextResponse.json({ error: 'Destination is not a directory' }, { status: 400 });
+      }
+
+      // 已在目标目录内：视为成功（幂等），避免「拖回原处」报错
+      if (resolvedSource.substring(0, resolvedSource.lastIndexOf(sep)) === resolvedDest) {
+        return NextResponse.json({ success: true, newPath: resolvedSource, unchanged: true });
+      }
+
+      // 目录不能移入自身或其子孙目录：比较前先解符号链接取真实路径；
+      // macOS 文件系统默认大小写不敏感，统一小写后再比前缀。
+      if (srcStat.isDirectory()) {
+        const [realSource, realDest] = await Promise.all([
+          fs.realpath(resolvedSource).catch(() => resolvedSource),
+          fs.realpath(resolvedDest).catch(() => resolvedDest),
+        ]);
+        const norm = (p: string) => (process.platform === 'darwin' ? p.toLowerCase() : p);
+        const srcKey = norm(realSource);
+        const dstKey = norm(realDest);
+        if (dstKey === srcKey || dstKey.startsWith(srcKey + sep)) {
+          return NextResponse.json({ error: 'Cannot move a folder into itself' }, { status: 400 });
+        }
+      }
+
+      const originalName = resolvedSource.split(sep).pop() || (srcStat.isDirectory() ? 'folder' : 'file');
+      const newPath = join(resolvedDest, originalName);
+
+      try {
+        await fs.access(newPath);
+        return NextResponse.json({ error: 'A file or folder with that name already exists' }, { status: 409 });
+      } catch { /* 目标不存在，可以 move */ }
+
+      await fs.rename(resolvedSource, newPath);
+      // 与 rename 一致的附属数据维护：归属清册 / 内容索引 / 标签表键（含目录按前缀整体迁移）
+      await transferHomeworkOwnership(resolvedSource, newPath);
+      await transferMaterialsRename(resolvedSource, newPath);
+      await transferFileTagsRename(resolvedSource, newPath);
+      return NextResponse.json({ success: true, newPath });
+    }
+
     // 删除文件
     if (action === 'delete') {
       const targetPath = body.targetPath as string;
@@ -498,7 +717,7 @@ export async function POST(request: NextRequest) {
 
       const resolved = resolvePath(targetPath);
       if (!isHumanWritablePath(resolved)) {
-        return NextResponse.json({ error: '系统目录受保护，无法操作' }, { status: 403 });
+        return NextResponse.json({ error: 'Protected system directory' }, { status: 403 });
       }
 
       const stat = await fs.stat(resolved);
@@ -509,6 +728,8 @@ export async function POST(request: NextRequest) {
       }
       // 联动清理：删除文档/目录时同步清理 md-annotations 中对应的批注/修订 sidecar
       await cleanupMdAnnotationSidecars({ targets: [{ abs: resolved, isDir: stat.isDirectory() }] }).catch(() => {});
+      // 回收标签表键：删除 materials / homework 作用域内的条目时，其标签一并清除
+      await transferFileTagsRemove(resolved);
       return NextResponse.json({ success: true });
     }
 
@@ -563,6 +784,8 @@ export async function POST(request: NextRequest) {
           await fs.rename(tmp, manifestPath);
         }
       } catch { /* 无清册或损坏时忽略 */ }
+      // 回收标签表键：删除 homework 内的文件/目录时，其标签一并清除
+      await transferFileTagsRemove(resolved);
       return NextResponse.json({ success: true });
     }
 
@@ -757,7 +980,7 @@ export async function POST(request: NextRequest) {
       });
       const nodeData = await resp.json();
       if (!nodeData.success) {
-        return NextResponse.json({ error: nodeData.error || '创建节点失败' }, { status: 500 });
+        return NextResponse.json({ error: nodeData.error || 'Failed to create node' }, { status: 500 });
       }
 
       const nodeId = nodeData.node_id;

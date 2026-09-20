@@ -65,6 +65,25 @@ export function getAvailableModels(
   return result;
 }
 
+/**
+ * 预设中显式声明为 DeepSeek V4 家族的模型 id 集合（模块加载时构建一次）。
+ *
+ * 与 model-capabilities.ts 的视觉声明注册表同范式：把「模型家族」这种既无法从 baseUrl 推断
+ * （第三方网关一个 baseUrl 挂多家族）、又会被厂商改名的属性落到显式声明上。厂商改 id
+ * （deepseek-v4-flash → deepseek-flash）只需改 presets.ts 的 family 字段，不必再猜模型名
+ * ——名字正则仅留给「未在预设中声明」的未知型号兜底。
+ */
+const declaredV4ModelIds = new Set<string>(
+  PROVIDER_PRESETS.flatMap((p) =>
+    p.models.filter((m) => m.family === 'deepseek-v4').map((m) => m.modelId.trim().toLowerCase()),
+  ),
+);
+
+/** 判断模型 id 是否在预设里被显式声明为 DeepSeek V4 家族（大小写不敏感，忽略首尾空白） */
+export function isDeclaredV4Model(modelId: string): boolean {
+  return !!modelId && declaredV4ModelIds.has(modelId.trim().toLowerCase());
+}
+
 /** 判断模型 ID 是否为自定义提供商模型 */
 export function isCustomModel(modelId: string): boolean {
   return modelId.includes(':');

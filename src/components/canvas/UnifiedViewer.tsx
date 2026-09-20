@@ -105,6 +105,13 @@ export function UnifiedViewer({
   const [outcomeViewActive, setOutcomeViewActive] = useState(false);
   const [outcomeEditMode, setOutcomeEditMode] = useState(false);
   const [outcomeStatus, setOutcomeStatus] = useState<'locked' | 'draft' | 'stale' | 'legacy' | null>(null);
+  // 失效原因链（frontmatter outcome_stale_reason）：成果块面板展示「哪条前提已废」
+  const [outcomeStaleReason, setOutcomeStaleReason] = useState<string | null>(null);
+  /** 状态变更：离开 stale 即清掉原因链（重新锁定/重新生成后原因链作废） */
+  const handleOutcomeStatusChange = useCallback((status: 'locked' | 'draft' | 'stale' | 'legacy' | null) => {
+    setOutcomeStatus(status);
+    if (status !== 'stale') setOutcomeStaleReason(null);
+  }, []);
 
   // --- 轨迹事件检查器（TraceTimeline 选中事件 → 右侧检查器） ---
   const [inspectorSpan, setInspectorSpan] = useState<TraceSpan | null>(null);
@@ -227,6 +234,7 @@ export function UnifiedViewer({
       .then(d => {
         if (d.success && d.node) {
           setOutcomeStatus(d.node.outcome_status || null);
+          setOutcomeStaleReason(d.node.outcome_stale_reason || null);
         }
       })
       .catch(() => {});
@@ -245,6 +253,7 @@ export function UnifiedViewer({
           .then(d => {
             if (d.success && d.node) {
               setOutcomeStatus(d.node.outcome_status || null);
+              setOutcomeStaleReason(d.node.outcome_stale_reason || null);
             }
           })
           .catch(() => {});
@@ -586,7 +595,8 @@ export function UnifiedViewer({
           <OutcomeEditor
             nodeMdId={nodeMdId!}
             outcomeStatus={outcomeStatus}
-            onStatusChange={setOutcomeStatus}
+            staleReason={outcomeStaleReason}
+            onStatusChange={handleOutcomeStatusChange}
             readonly={!outcomeEditMode}
           />
         </div>

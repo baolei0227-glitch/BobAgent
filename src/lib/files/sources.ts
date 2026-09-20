@@ -122,6 +122,15 @@ class ProjectSource implements IFileSource, IWritableSource {
   }
 }
 
+/** 附件相对项目根的路径归一：新附件物理统一在 materials/ 下，历史附件仍在 attachments/
+ *  （更早为 assets/，按旧规则映射回 attachments/）；无前缀的裸名按新布局归入 materials/。 */
+function normalizeAttachmentRel(path: string): string {
+  const p = path.replace(/\\/g, '/');
+  if (p.startsWith('materials/') || p.startsWith('attachments/')) return p;
+  if (p.startsWith('assets/')) return `attachments/${p.slice('assets/'.length)}`;
+  return `materials/${p}`;
+}
+
 /** 附件来源（骨架：检索 + 读取委托项目来源） */
 class AttachmentSource implements IFileSource {
   readonly kind = 'attachment' as const;
@@ -129,14 +138,11 @@ class AttachmentSource implements IFileSource {
   readonly capabilities = { writable: true, searchable: true, watchable: false };
 
   async read(path: string): Promise<FileInfo> {
-    // 附件位于项目 attachments/ 下，委托项目来源读取（兼容旧格式 assets/）
-    const stripped = path.replace(/^(?:attachments|assets)\//, '');
-    return new ProjectSource().read(`attachments/${stripped}`);
+    return new ProjectSource().read(normalizeAttachmentRel(path));
   }
 
   async proxy(path: string): Promise<string> {
-    const stripped = path.replace(/^(?:attachments|assets)\//, '');
-    return new ProjectSource().proxy(`attachments/${stripped}`);
+    return new ProjectSource().proxy(normalizeAttachmentRel(path));
   }
 
   async search(query: string): Promise<SearchHit[]> {

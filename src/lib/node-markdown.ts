@@ -1,6 +1,7 @@
 import matter from 'gray-matter';
 import { renderOutcome, parseOutcome, createEmptyOutcome, type Outcome } from '@/lib/nodes/outcome';
 import { collectAnchorIds, generateAnchorId } from '@/lib/nodes/anchor';
+import type { SubagentPanel } from '@/lib/types';
 
 // ==================== 数据模型 ====================
 
@@ -23,8 +24,23 @@ export interface NodeFrontmatter {
   outcome_version?: number;
   /** 成果块已覆盖的对话轮次数（append/手动提取成果块成功时更新）；锁定前据此判断是否存在未提炼的新对话 */
   outcome_turns?: number;
+  /** 研究结论回流已覆盖的对话轮次数（后台静默窗回流成功后更新）：
+   *  幂等游标 —— 无新轮次则连模型都不调，见 @/lib/nodes/note-ingest-auto */
+  note_ingest_turns?: number;
   /** 强制锁定标记：校验未通过但用户自主决定锁定（R-1~R-8b 有未达标项） */
   outcome_force_locked?: boolean;
+  /** 成果块失效原因（R-10 级联）：写下可读的前提失效链，注入侧据此告诉下游模型「哪条前提已废」；
+   *  仅在 outcome_status === 'stale' 期间有意义，重新锁定/重新生成时清除 */
+  outcome_stale_reason?: string;
+  /** 锁定留痕（签署）：发起锁定/强制锁定的操作者标识（本地用户名或 'unknown'）。
+   *  属「自称」留痕，用于事后追溯「谁签的字」，不作为密码学意义上的不可否认证据。 */
+  outcome_locked_by?: string;
+  /** 锁定时的成果块内容哈希（SHA-256(renderOutcome(outcome)) 前 32 位 hex）：
+   *  注入/继承前据此校验「盘上的成果块是否仍是签字那一刻的那一份」，不一致则降级为警告。 */
+  outcome_content_hash?: string;
+  /** 追加式锁定历史（P0-a 外部锚点在节点侧的镜像）：每次锁定/重锁 push 一条，
+   *  与项目级台账 .ledger/locks.md 双向比对，防止正文与哈希被一并重写。 */
+  outcome_lock_history?: Array<{ version: number; hash: string; by?: string; at: string; prev?: string }>;
   /** 画布节点位置（重启恢复用；缺省时按网格排列） */
   position_x?: number;
   position_y?: number;
@@ -42,6 +58,14 @@ export interface NodeFrontmatter {
   enabledMcpIds?: string[];
   /** 节点级技能强制勾选：undefined=未自定义；[name]=强制注入 */
   selectedSkills?: string[];
+  /** 多智能体协作模式（chat 节点「Multi-agent mode」开关）：true=主 agent 只作用户代理，队长会话负责编排 */
+  multi_agent_mode?: boolean;
+  /** team 模式队长模型（provider:modelId）：Team 分栏「Main model」选择，跑队长会话（规划 + 复核/整合） */
+  team_main_model?: string;
+  /** team 模式成员模型（provider:modelId）：Team 分栏「Worker model」选择，一刀切覆盖全部成员 */
+  team_worker_model?: string;
+  /** 本节点关联的团队 id 清单（团队工作台用）：只存引用，团队数据真相源在引擎侧 */
+  team_ids?: string[];
   /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
   sandbox_app_id?: string;
   /** 节点类型：aiChat（默认，缺省）/ imageGen（图像生成节点）等 */
@@ -66,12 +90,28 @@ export interface ConversationAttachment {
   path: string;
 }
 
+/**
+ * 本轮 @引用 快照（资料库文件 / 引用本地文件 / 链接材料 / 操作目录）。
+ * 落盘为 question 块开头的 `<!-- REFERENCES: [...] -->`，恢复后气泡内仍展示引用 chip。
+ */
+export interface ConversationReference {
+  id: string;
+  kind: 'material' | 'file' | 'link' | 'folder';
+  name: string;
+  path?: string;
+  url?: string;
+  size?: string;
+  locked?: boolean;
+}
+
 export interface ConversationTurn {
   question: string;
   answer: string;
   questionTime: string;
   answerTime: string;
   questionAttachments?: ConversationAttachment[];
+  /** 本轮 @引用 快照（资料 / 本地文件 / 链接 / 操作目录） */
+  questionReferences?: ConversationReference[];
   /** v3 锚点 id（如 'q-003'），全文件唯一，只增不改 */
   anchor?: string;
   /** 该轮回答实际使用的模型 id（auto 模式每轮可能不同；custom 模型为完整配置串） */
@@ -101,6 +141,8 @@ export interface ConversationTurn {
     kind: string;
     source: string;
   }>;
+  /** 该轮多智能体协作的成员分支面板（Multi-agent mode 下主 agent 编排的过程，重启后仍可回看） */
+  subagents?: SubagentPanel;
 }
 
 export interface NodeMarkdown {
@@ -241,7 +283,7 @@ function splitSections(content: string): Map<string, string> {
 }
 
 /**
- * 剥离 question 块开头的单行元信息注释（`<!-- META: ... -->` / `<!-- ATTACHMENTS: ... -->`）。
+ * 剥离 question 块开头的单行元信息注释（`<!-- META: ... -->` / `<!-- ATTACHMENTS: ... -->` / `<!-- REFERENCES: ... -->`）。
  *
  * 与 RMETA 相同的行级容错：注释由 JSON.stringify 生成，总是单行（换行已转义为 \n 字符串），
  * 但 payload（如附件 path、模型名）可能含 ` -->`（如内嵌的 `<!-- TITLE: ... -->` 注释），
@@ -301,6 +343,19 @@ function parseConversations(content: string): ConversationTurn[] {
             continue;
           }
 
+          // @引用 快照（资料 / 本地文件 / 链接 / 操作目录）
+          const refs = stripQuestionCommentLine(text, 'REFERENCES');
+          if (refs) {
+            try {
+              currentTurn.questionReferences = JSON.parse(refs.payload);
+            } catch {
+              // JSON 损坏：丢弃引用记录，仅剥注释
+            }
+            text = refs.rest;
+            commentRemoved = true;
+            continue;
+          }
+
           // 消息级元数据（实际模型 + 思考等级）
           const meta = stripQuestionCommentLine(text, 'META');
           if (meta) {
@@ -336,6 +391,8 @@ function parseConversations(content: string): ConversationTurn[] {
             if (typeof rmeta.taskId === 'string') currentTurn.taskId = rmeta.taskId;
             if (Array.isArray(rmeta.toolCalls)) currentTurn.toolCalls = rmeta.toolCalls;
             if (Array.isArray(rmeta.outputFiles)) currentTurn.outputFiles = rmeta.outputFiles;
+            // 多智能体协作分支面板（旧文件无此字段 → 保持 undefined，向前兼容）
+            if (rmeta.subagents && Array.isArray(rmeta.subagents.members)) currentTurn.subagents = rmeta.subagents;
           } catch {
             // 解析失败就忽略
           }
@@ -465,7 +522,15 @@ export function serializeNode(node: NodeMarkdown): string {
     ...(node.frontmatter.outcome_locked_at ? { outcome_locked_at: node.frontmatter.outcome_locked_at } : {}),
     ...(node.frontmatter.outcome_version !== undefined ? { outcome_version: node.frontmatter.outcome_version } : {}),
     ...(node.frontmatter.outcome_turns !== undefined ? { outcome_turns: node.frontmatter.outcome_turns } : {}),
+    ...(node.frontmatter.note_ingest_turns !== undefined ? { note_ingest_turns: node.frontmatter.note_ingest_turns } : {}),
     ...(node.frontmatter.outcome_force_locked ? { outcome_force_locked: node.frontmatter.outcome_force_locked } : {}),
+    ...(node.frontmatter.outcome_stale_reason ? { outcome_stale_reason: node.frontmatter.outcome_stale_reason } : {}),
+    ...(node.frontmatter.outcome_locked_by ? { outcome_locked_by: node.frontmatter.outcome_locked_by } : {}),
+    ...(node.frontmatter.outcome_content_hash ? { outcome_content_hash: node.frontmatter.outcome_content_hash } : {}),
+    // 追加式锁定历史（P0-a）：外部台账在节点侧的镜像，非空数组才写
+    ...(node.frontmatter.outcome_lock_history && node.frontmatter.outcome_lock_history.length > 0
+      ? { outcome_lock_history: node.frontmatter.outcome_lock_history }
+      : {}),
     ...(node.frontmatter.position_x !== undefined ? { position_x: node.frontmatter.position_x } : {}),
     ...(node.frontmatter.position_y !== undefined ? { position_y: node.frontmatter.position_y } : {}),
     // AI Coding 节点绑定的小程序 ID（缺此字段重启后 coding 上下文会丢失）
@@ -490,6 +555,13 @@ export function serializeNode(node: NodeMarkdown): string {
     // 节点级 MCP / 技能选择：undefined 不写（跟随全局），空数组显式全关也保留
     ...(node.frontmatter.enabledMcpIds !== undefined ? { enabledMcpIds: node.frontmatter.enabledMcpIds } : {}),
     ...(node.frontmatter.selectedSkills !== undefined ? { selectedSkills: node.frontmatter.selectedSkills } : {}),
+    // 多智能体协作模式：仅在开启时写出（缺省=关闭，避免冗余字段）
+    ...(node.frontmatter.multi_agent_mode === true ? { multi_agent_mode: true } : {}),
+    // team 模式两档模型：undefined 不写（未在 Team 分栏显式选择时回落默认）
+    ...(node.frontmatter.team_main_model ? { team_main_model: node.frontmatter.team_main_model } : {}),
+    ...(node.frontmatter.team_worker_model ? { team_worker_model: node.frontmatter.team_worker_model } : {}),
+    // 关联团队 id 清单：undefined 不写，空数组也写出（表示用户显式解绑了全部团队）
+    ...(node.frontmatter.team_ids !== undefined ? { team_ids: node.frontmatter.team_ids } : {}),
   };
 
   // 对话记录（v3：每轮前置锚点注释）
@@ -500,6 +572,11 @@ export function serializeNode(node: NodeMarkdown): string {
       const attJson = JSON.stringify(turn.questionAttachments);
       questionBlock = `<!-- ATTACHMENTS: ${attJson} -->\n${turn.question}`;
     }
+    // @引用 快照（资料 / 本地文件 / 链接 / 操作目录）
+    if (turn.questionReferences && turn.questionReferences.length > 0) {
+      const refJson = JSON.stringify(turn.questionReferences);
+      questionBlock = `<!-- REFERENCES: ${refJson} -->\n${questionBlock}`;
+    }
     // 消息级元数据（实际模型 + 思考等级）：注释行写入，便于追溯每条回复的推理参数
     if (turn.modelId || turn.thinkingLevel) {
       const metaJson = JSON.stringify({ modelId: turn.modelId ?? null, thinkingLevel: turn.thinkingLevel ?? null });
@@ -507,13 +584,14 @@ export function serializeNode(node: NodeMarkdown): string {
     }
     // 回答级元数据（思考内容 + 工具调用 + 输出文件）：注释行写入，think/executing steps/output files 持久化
     let answerBlock = turn.answer;
-    if (turn.reasoning || turn.processNarration || turn.taskId || (turn.toolCalls && turn.toolCalls.length > 0) || (turn.outputFiles && turn.outputFiles.length > 0)) {
+    if (turn.reasoning || turn.processNarration || turn.taskId || (turn.toolCalls && turn.toolCalls.length > 0) || (turn.outputFiles && turn.outputFiles.length > 0) || (turn.subagents && turn.subagents.members.length > 0)) {
       const rmetaJson = JSON.stringify({
         reasoning: turn.reasoning ?? null,
         processNarration: turn.processNarration ?? null,
         taskId: turn.taskId ?? null,
         toolCalls: turn.toolCalls ?? null,
         outputFiles: turn.outputFiles ?? null,
+        subagents: turn.subagents ?? null,
       });
       answerBlock = `<!-- RMETA: ${rmetaJson} -->\n${answerBlock}`;
     }
@@ -545,6 +623,16 @@ export function serializeNode(node: NodeMarkdown): string {
   }
 
   return matter.stringify(bodyParts.join('\n\n'), fm);
+}
+
+/**
+ * 成果块内容哈希（锁定签字留痕）：SHA-256(renderOutcome(outcome)) 前 32 位 hex。
+ * 与 R-9 闸门同口径（都是比对 renderOutcome），因此「签字后手改 .md 正文的成果块」
+ * 必然导致哈希不一致 —— 注入/继承前据此判断盘上内容是否仍是签字那一刻的那一份。
+ */
+export function outcomeContentHash(outcome: Outcome | null | undefined): string {
+  const text = outcome ? renderOutcome(outcome) : '';
+  return createHash('sha256').update(text, 'utf-8').digest('hex').slice(0, 32);
 }
 
 // ==================== 解析 ====================
@@ -604,7 +692,7 @@ export function appendConversation(
   mdString: string,
   question: string,
   answer: string,
-  options?: { questionTime?: string; answerTime?: string; summary?: string; title?: string; questionAttachments?: ConversationAttachment[]; modelId?: string; thinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'max'; reasoning?: string; processNarration?: string; taskId?: string; toolCalls?: ConversationTurn['toolCalls']; outputFiles?: ConversationTurn['outputFiles'] },
+  options?: { questionTime?: string; answerTime?: string; summary?: string; title?: string; questionAttachments?: ConversationAttachment[]; questionReferences?: ConversationReference[]; modelId?: string; thinkingLevel?: 'off' | 'low' | 'medium' | 'high' | 'max'; reasoning?: string; processNarration?: string; taskId?: string; toolCalls?: ConversationTurn['toolCalls']; outputFiles?: ConversationTurn['outputFiles']; subagents?: ConversationTurn['subagents'] },
 ): string {
   const node = parseNodeMarkdown(mdString);
   const now = new Date().toISOString();
@@ -619,6 +707,7 @@ export function appendConversation(
     questionTime: options?.questionTime || now,
     answerTime: options?.answerTime || now,
     questionAttachments: options?.questionAttachments,
+    questionReferences: options?.questionReferences,
     ...(options?.modelId ? { modelId: options.modelId } : {}),
     ...(options?.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
     ...(options?.reasoning ? { reasoning: options.reasoning } : {}),
@@ -626,6 +715,7 @@ export function appendConversation(
     ...(options?.taskId ? { taskId: options.taskId } : {}),
     ...(options?.toolCalls && options.toolCalls.length > 0 ? { toolCalls: options.toolCalls } : {}),
     ...(options?.outputFiles && options.outputFiles.length > 0 ? { outputFiles: options.outputFiles } : {}),
+    ...(options?.subagents && options.subagents.members.length > 0 ? { subagents: options.subagents } : {}),
     anchor,
   });
 
@@ -703,7 +793,7 @@ export function createNodeMarkdown(
 
 import { promises as fs } from 'fs';
 import { join } from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { tmpdir } from 'os';
 
 /** 原子写入：先写临时文件再 rename 替换目标文件 */

@@ -17,7 +17,7 @@ export type OcrUpgrade = 'off' | 'auto' | 'always';
 
 /** ocrFile 选项 */
 export interface OcrServiceOptions {
-  /** VLM 升级：off=纯本地（默认安全）；auto=本地质量低/复杂页自动升级；always=全部升级。 */
+  /** VLM 升级：auto=质量低/复杂页自动升级（默认，质量优先）；off=不升级；always=全部升级。 */
   upgrade?: OcrUpgrade;
   /** 项目路径（VLM 结果缓存目录用）；缺省取当前活跃项目 */
   projectPath?: string;
@@ -58,6 +58,10 @@ export interface OcrServiceResult {
   upgradedCount: number;
   /** 过程性说明/告警（如"Online OCR 已配置但未生效：原因X"），消除静默失败 */
   notes?: string[];
+  /** bob-ocr-mcp 识别缓存命中：本次未重新识别，text/notes 均为历史结果 */
+  cached?: boolean;
+  /** 缓存写入时间（ISO），仅 cached=true 时有值 */
+  cachedAt?: string;
   error?: string;
   /** 逐页骨架（blocks / 勾稽 / 质量画像）；MCP 经 HTTP 返回 JSON 时可能缺失，调用方需自行降级 */
   rawPages?: OcrPage[];
@@ -88,7 +92,7 @@ function serviceUnavailable(reason: string): OcrServiceResult {
 export async function ocrFile(filePath: string, opts: OcrServiceOptions = {}): Promise<OcrServiceResult> {
   try {
     const { tryOcrViaMcp } = await import('@/lib/mcp/ocr-client');
-    const mcp = await tryOcrViaMcp(filePath, opts.upgrade ?? 'off');
+    const mcp = await tryOcrViaMcp(filePath, opts.upgrade ?? 'auto');
     if (mcp) return mcp as unknown as OcrServiceResult;
     return serviceUnavailable('未配置或未启动');
   } catch (e) {

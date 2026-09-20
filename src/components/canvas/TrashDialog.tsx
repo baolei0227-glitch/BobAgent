@@ -104,9 +104,10 @@ export function TrashDialog({ open, onOpenChange, projectId }: TrashDialogProps)
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) setConfirmEmpty(false); onOpenChange(v); }}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md gap-3 p-4">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+          {/* 字号收敛：覆盖 DialogTitle 默认的 text-lg（1.125rem，L 档约 19px），与其它弹窗统一为 text-13 */}
+          <DialogTitle className="flex items-center gap-2 text-13 font-semibold" style={{ color: 'var(--ink-strong)' }}>
             <Trash2 className="h-4 w-4" />
             Trash (Recycle Bin)
           </DialogTitle>
@@ -137,8 +138,8 @@ export function TrashDialog({ open, onOpenChange, projectId }: TrashDialogProps)
                   style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{it.title || 'Untitled'}</div>
-                    <div className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                    <div className="truncate text-13 font-medium">{it.title || 'Untitled'}</div>
+                    <div className="text-11" style={{ color: 'var(--ink-muted)' }}>
                       {new Date(it.deleted_at).toLocaleString()} · {it.turns} turn{it.turns === 1 ? '' : 's'} · {(it.size / 1024).toFixed(1)} KB
                     </div>
                   </div>

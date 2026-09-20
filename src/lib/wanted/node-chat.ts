@@ -69,7 +69,10 @@ export const SANDBOX_SYSTEM_PROMPT =
   '不写入待办、日历或任何文件。' +
   '笔记/知识库（notebook）能力 2026-09-06 起收归画布「知识库（Kar）节点」专职承载，本临时问答不注入笔记工具——' +
   '用户明确要查阅/记录/整理笔记时，请引导其使用 ⌘F / 微信的 /note 指令（/note check 查阅、/note 记录、/note ingest 编译）' +
-  '或打开画布 Kar 节点操作，不要尝试调用不存在的 read_notebook 等工具。';
+  '或打开画布 Kar 节点操作，不要尝试调用不存在的 read_notebook 等工具。' +
+  '想法/灵感/思维导图（mind）能力 2026-09-17 起收归画布「Mind（Buzan）节点」专职承载，本临时问答同样不注入 mind_* 工具——' +
+  '用户想记录灵感或回忆之前记过的想法时，请引导其打开画布 Mind 节点（需先在 Extensions Store 安装 Buzan 并启用 bob-mind-mcp 插件），' +
+  '不要尝试调用不存在的 mind_save / mind_query 等工具。';
 
 /**
  * 向 /chat 会话提问（原 askTempNode，已脱离节点文件模型）：

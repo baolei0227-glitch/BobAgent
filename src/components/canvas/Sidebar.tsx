@@ -1,34 +1,46 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, type ReactNode, type RefObject } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  BookOpen,
   Folder,
   FolderOpen,
   Plus,
   Trash,
   FileText,
-  FolderPlus,
   Upload,
   FolderUp,
+  FolderPlus,
   Shield,
   ShieldCheck,
   ArrowUpCircle,
   PlusCircle,
   Pencil,
-  ExternalLink,
-  StickyNote,
   X,
   Star,
-  MoreHorizontal,
   MoreVertical,
   Copy,
+  Download,
+  SquareCheck,
+  Archive,
   Share2,
   ChevronDown,
+  ChevronRight,
+  Loader2,
+  Search,
+  Tag,
+  Check,
+  Minus,
+  Filter,
+  MessagesSquare,
+  AlertTriangle,
 } from 'lucide-react';
 import { WantedNoticeCenter } from './WantedNoticeCenter';
 import { SkillManagerModal } from './SkillManagerModal';
 import { TrashDialog } from './TrashDialog';
+import { ArchiveDialog } from './ArchiveDialog';
+import { LedgerDocPanel } from './LedgerDocPanel';
 import { ProjectActivityLog } from './ProjectActivityLog';
 import { bus, BusEvents } from '@/lib/bus';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
@@ -37,8 +49,8 @@ import { loadSettings, applyCustomTheme, applyFontScale } from '@/lib/settings';
 import type { MessageAttachment } from '@/lib/types';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import type { TagScope } from '@/lib/files/tags';
 import { Button } from '@/components/ui/button';
-import { FileName } from './FileName';
 
 export interface ProjectInfo {
   id: string;
@@ -69,33 +81,70 @@ interface FileNode {
   title?: string;
 }
 
-/** homework/ 按 kind 类别分组的输出文件（来自 list_files 的 homework_kind_groups） */
-interface HomeworkKindGroup {
-  kind: string; // doc|sheet|slide|pdf|image|text|code|other
-  label: string; // 英文展示标签（Documents/Spreadsheets/...）
-  files: { name: string; extension?: string; path: string; source?: 'project' | 'local' }[];
+/** homework 单文件的来源会话（后端 .ownership.json + notes-memory 关联结果） */
+interface HomeworkOwner {
+  nodeId: string;
+  /** 会话标题；缺失时前端回落为 nodeId 短 id */
+  title?: string;
+  /** 文件修改时间（ms）：分组视图按「该会话最新产出」倒序排组 */
+  mtimeMs: number;
 }
 
-// 文件树层级缩进：每级 6px、封顶 3 级；多级文件夹通过缩进表达层级（无圆点/竖线装饰）
-const LEVEL_INDENT_STEP = 6; // 每级缩进 px
-const LEVEL_INDENT_CAP = 3; // 缩进封顶级数（更深层级不再右移）
-/** 层级缩进（封顶） */
-const levelIndent = (level: number) => Math.min(Math.max(level, 0), LEVEL_INDENT_CAP) * LEVEL_INDENT_STEP;
 /** Workspace 浮层最小宽度（保证 Finder 列式浏览可读） */
 const WORKSPACE_MIN_WIDTH = 560;
 /** 项目一级默认目录（homework / materials / attachments）：不提供重命名 / 复制 / 删除 */
 const DEFAULT_ROOT_DIRS = new Set(['homework', 'materials', 'attachments']);
-/** homework 内的系统目录：Image 为旧版图片产物目录，template 为模板填充工作区，
- *  doc/sheet/slide/pdf/image/text/code/other 为旧版 kind 目录。不提供重命名 / 复制 / 删除。
- *  隐藏系统目录（.ai-workspace/.crops/.evidence/.unpacks）以 . 开头，不会出现在文件树中。 */
-const HOMEWORK_SYSTEM_DIRS = new Set(['Image', 'image', 'template', 'doc', 'sheet', 'slide', 'pdf', 'text', 'code', 'other']);
-/** 路径是否位于 homework 的系统目录内（含其子目录，如 homework/template/set_000） */
-const isUnderHomeworkSystemDir = (rel: string): boolean => {
-  if (!rel.startsWith('homework/')) return false;
-  return HOMEWORK_SYSTEM_DIRS.has(rel.slice('homework/'.length).split('/')[0]);
-};
+/** 上传后「解析中」提示的最长展示时长：超时仍未建索引（无文字 / 解析失败）则自动撤下，避免永久转圈 */
+const PARSING_DEADLINE_MS = 5 * 60 * 1000;
+/** 文件树折叠态的 localStorage 键前缀（按项目分键：前缀 + 项目 id）。
+ *  homework / materials 已改为扁平清单，折叠态即整个清单的显隐；attachments 等仍为可折叠树。 */
+const WS_EXPANDED_LS_PREFIX = 'bob.workspace.expanded.';
+/** homework 清单视图的 localStorage 键前缀（按项目分键：前缀 + 项目 id；'0'=扁平，其余 / 缺失=按来源会话分组） */
+const WS_HOMEWORK_GROUPED_LS_PREFIX = 'bob.workspace.homework-grouped.';
+/** materials 清单视图的 localStorage 键前缀（按项目分键：前缀 + 项目 id；'1'=按来源文件夹分组，其余 / 缺失=扁平） */
+const WS_MATERIALS_GROUPED_LS_PREFIX = 'bob.workspace.materials-grouped.';
+/** 侧栏内部拖拽（分组视图把资料行拖进来源文件夹）的 dataTransfer 类型，与 OS 文件拖入的 'Files' 区分 */
+const WS_ROW_DRAG_MIME = 'application/x-bobwork-ws-row';
+/** 标签筛选中的「无标签」哨兵：以 NUL 开头，与用户可输入的标签（经清洗后必为可见字符）不会撞名 */
+const UNTAGGED_FILTER = '\u0000untagged';
+/** materials 作用域的预设标签：无需先给文件打标签即可直接勾选 */
+const DEFAULT_MATERIAL_TAGS = ['原告', '被告', '法院'];
+/** 标签调色板：12 个可区分的色相（浅底深字由统一饱和度/亮度生成，保证同一色相下的胶囊都清晰可读） */
+const TAG_COLOR_HUES = [352, 20, 42, 95, 145, 172, 197, 222, 252, 282, 312, 332];
 /** 可否分享：分享链接仅支持 .md 文档（/api/share 服务端同样只接受 .md），文件夹不支持 */
 const isShareableDoc = (fileName: string, isDir: boolean): boolean => !isDir && /\.md$/i.test(fileName);
+
+/** 拖拽上传收集结果：subPath 为相对目标目录的子路径（顶层文件为空串，目录内文件含目录名） */
+interface DroppedFile { file: File; subPath: string; }
+
+/** 读取目录项的全部子项（readEntries 单次最多返回 100 条，需循环读到空数组为止） */
+const readAllEntries = (entry: FileSystemDirectoryEntry): Promise<FileSystemEntry[]> =>
+  new Promise((resolve) => {
+    const reader = entry.createReader();
+    const acc: FileSystemEntry[] = [];
+    const readBatch = () => {
+      reader.readEntries((batch) => {
+        if (batch.length === 0) resolve(acc);
+        else { acc.push(...batch); readBatch(); }
+      }, () => resolve(acc));
+    };
+    readBatch();
+  });
+
+/** 递归收集拖入的文件/目录：dirPath 为当前所在子路径（保留拖入目录的层级结构） */
+const collectDropped = async (entry: FileSystemEntry, dirPath: string, out: DroppedFile[]): Promise<void> => {
+  if (entry.isFile) {
+    const file = await new Promise<File | null>((resolve) => {
+      (entry as FileSystemFileEntry).file(resolve, () => resolve(null));
+    });
+    if (file) out.push({ file, subPath: dirPath });
+    return;
+  }
+  for (const child of await readAllEntries(entry as FileSystemDirectoryEntry)) {
+    if (child.isDirectory) await collectDropped(child, dirPath ? `${dirPath}/${child.name}` : child.name, out);
+    else await collectDropped(child, dirPath, out);
+  }
+};
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -169,14 +218,23 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   // Workspace → 可拖动浮层（项目列表 + 文件树）
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
+  // 编译文稿浮层（标题栏 Ledger 按钮打开）：只读查看账本 wiki 归并结果，不落盘
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  // 归档箱弹窗（根行 ⋮ 菜单的 Archived… 打开）；null 表示关闭，值即当前查看的作用域
+  const [archiveScope, setArchiveScope] = useState<TagScope | null>(null);
   // 浮层位置（初始贴左缘；拖动标题栏可移动，会话内记忆）
   const [wsPos, setWsPos] = useState<{ x: number; y: number }>({ x: 52, y: 96 });
   // 浮层宽度（右缘拖动调宽，会话内记忆）
   const [wsWidth, setWsWidth] = useState(700);
-  // 浮层视图：files=文件树（Finder 列式）/ log=项目流水账
+  // 浮层视图：files=项目文件（materials 为扁平清单 + 标签筛选，其余目录为可折叠树）/ log=项目流水账
   const [wsView, setWsView] = useState<'files' | 'log'>('files');
   // 流水账刷新信号（项目内文件变更时自增，触发日志面板重新拉取）
   const [logRefreshKey, setLogRefreshKey] = useState(0);
+  // 标题栏搜索关键词：Files 搜文件名（全树扁平匹配）/ Log 搜日志条目，两视图各存一份互不覆盖
+  const [wsFileQuery, setWsFileQuery] = useState('');
+  const [wsLogQuery, setWsLogQuery] = useState('');
+  const wsQuery = wsView === 'files' ? wsFileQuery : wsLogQuery;
+  const setWsQuery = wsView === 'files' ? setWsFileQuery : setWsLogQuery;
   // 拖动/调宽期间读取最新值用 ref 镜像（避免重建事件监听）
   const wsPosRef = useRef(wsPos);
   useEffect(() => {
@@ -186,8 +244,35 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   useEffect(() => {
     wsWidthRef.current = wsWidth;
   }, [wsWidth]);
-  // 右栏 Finder 列式浏览路径（openPath[i] = 第 i 层选中的目录名）
-  const [wsOpenPath, setWsOpenPath] = useState<string[]>([]);
+  // 目录展开态（homework / attachments 等可折叠树）：已展开目录的 rel 集合，按项目分别持久化到 localStorage
+  const [wsExpanded, setWsExpanded] = useState<Set<string>>(new Set());
+  // 根目录标签栏：materials / homework 当前显示的一栏（两栏都存在时才出现标签栏）；仅会话内记忆
+  const [wsRootTab, setWsRootTab] = useState<'materials' | 'homework'>('materials');
+  // homework 清单视图：默认 true=按来源会话分组；显式切回扁平后按项目持久化（随项目切换由 effect 重新读取）
+  const [homeworkGrouped, setHomeworkGrouped] = useState(true);
+  // materials 清单视图：默认 false=扁平清单（沿用原行为）；显式开启后按来源文件夹分组并按项目持久化
+  const [materialsGrouped, setMaterialsGrouped] = useState(false);
+  // 分组视图下已折叠的分组键（`<项目id>|m:<目录>` / `<项目id>|h:<会话键>`）：点击分组标题切换，仅会话内记忆
+  const [collapsedWsGroups, setCollapsedWsGroups] = useState<Set<string>>(new Set());
+  const toggleWsGroupCollapsed = useCallback((key: string) => {
+    setCollapsedWsGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+  // 文件标签：作用域（materials 资料 / homework 作业产物）→ 作用域根相对路径 → 标签数组。
+  // 各自存于 <项目>/<作用域>/.tags.json，随项目切换重新拉取
+  const [fileTags, setFileTags] = useState<Record<TagScope, Record<string, string[]>>>({ materials: {}, homework: {} });
+  // 标签筛选（按作用域分别记录，单选）：'' 表示 All（不筛选），UNTAGGED_FILTER 为「无标签」哨兵
+  const [tagFilter, setTagFilter] = useState<Record<TagScope, string>>({ materials: '', homework: '' });
+  // 标签筛选下拉（根行筛选按钮触发）：锚点为按钮右下角
+  const [tagFilterMenu, setTagFilterMenu] = useState<{ x: number; y: number; scope: TagScope } | null>(null);
+  // 标签编辑弹层：锚点为行内标签按钮右下角，scope 决定写入哪张标签表
+  const [tagEditor, setTagEditor] = useState<{ x: number; y: number; scope: TagScope; rel: string } | null>(null);
+  // 标签编辑弹层的新建标签输入
+  const [tagDraft, setTagDraft] = useState('');
   // 无 rail 视觉条：通知父级布局按"折叠态"处理（NodeMap / 预览面板偏移保持折叠值）
   useEffect(() => {
     onCollapsedChange?.(true);
@@ -201,15 +286,29 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         const el = t as Element;
         if (el.closest('[data-bob-sidebar-popover]')) return; // 浮层内部点击不关闭
         if (el.closest('[data-bob-sidebar-rail]')) return; // rail 按钮（重新点击切换）不关闭
-        if (el.closest('[data-material-menu]')) return; // materials 操作菜单同样 portal 到 body：点击菜单项不关闭浮层
         if (el.closest('[data-ws-switch]')) return; // 标题栏项目切换下拉 portal 到 body：点击项不关闭浮层
-        if (el.closest('[data-row-menu], [data-ws-rename]')) return; // 文件行 ⋮ 菜单 / 重命名弹窗：点击不关闭浮层
+        if (el.closest('[data-row-menu], [data-materials-menu], [data-ws-rename], [data-tag-menu], [data-tag-filter-menu]')) return; // 文件行 / materials 行 ⋮ 菜单 / 重命名弹窗 / 标签编辑弹层 / 标签筛选下拉：点击不关闭浮层
       }
       setWorkspaceOpen(false);
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
   }, [workspaceOpen]);
+
+  // 标签筛选下拉：点击菜单外部 → 关闭（触发按钮自身由 onClick 切换，不算外部）
+  useEffect(() => {
+    if (!tagFilterMenu) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node | null;
+      if (t && t.nodeType === 1) {
+        const el = t as Element;
+        if (el.closest('[data-tag-filter-menu], [data-tag-filter-trigger]')) return;
+      }
+      setTagFilterMenu(null);
+    };
+    window.addEventListener('pointerdown', onDown);
+    return () => window.removeEventListener('pointerdown', onDown);
+  }, [tagFilterMenu]);
 
   // 事件桥接：⌘F 面板底部图标栏触发 Sidebar 内部面板（rail 已移除，2026-09-01）
   useEffect(() => {
@@ -305,10 +404,228 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
 
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [currentId, setCurrentId] = useState<string>('');
-  // 切换当前项目后，右栏 Finder 列式浏览回到根列
+  // 切换当前项目：恢复该项目上次的资料树展开态（localStorage 持久化），并清空标签筛选
   useEffect(() => {
-    setWsOpenPath([]);
+    setTagFilter({ materials: '', homework: '' });
+    // homework 清单视图：首开默认按来源会话分组，用户显式切回扁平后按项目记住（仅 '0' 表示扁平）
+    try {
+      setHomeworkGrouped(localStorage.getItem(WS_HOMEWORK_GROUPED_LS_PREFIX + currentId) !== '0');
+    } catch {
+      setHomeworkGrouped(true);
+    }
+    // materials 清单视图：首开默认扁平，用户显式切到按来源文件夹分组后按项目记住（仅 '1' 表示分组）
+    try {
+      setMaterialsGrouped(localStorage.getItem(WS_MATERIALS_GROUPED_LS_PREFIX + currentId) === '1');
+    } catch {
+      setMaterialsGrouped(false);
+    }
+    if (!currentId) {
+      setWsExpanded(new Set());
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(WS_EXPANDED_LS_PREFIX + currentId);
+      const arr = raw ? (JSON.parse(raw) as unknown) : null;
+      // 首次打开该项目（无持久化记录）：默认展开 homework（作业产物）与 materials（资料），可直接看到文件清单
+      setWsExpanded(Array.isArray(arr) ? new Set<string>(arr as string[]) : new Set<string>(['homework', 'materials']));
+    } catch {
+      setWsExpanded(new Set<string>(['homework', 'materials']));
+    }
   }, [currentId]);
+  /** 展开态持久化（按项目分键）：重启 BobWork 后仍保留上次的折叠状态 */
+  const persistWsExpanded = useCallback((pid: string, next: Set<string>) => {
+    try {
+      localStorage.setItem(WS_EXPANDED_LS_PREFIX + pid, JSON.stringify([...next]));
+    } catch {
+      /* 隐私模式/配额异常：忽略，仅丢失持久化 */
+    }
+  }, []);
+  /** 展开态更新入口（统一在此持久化，避免依赖 effect 顺序） */
+  const updateWsExpanded = useCallback((updater: (prev: Set<string>) => Set<string>) => {
+    setWsExpanded((prev) => {
+      const next = updater(prev);
+      if (currentId) persistWsExpanded(currentId, next);
+      return next;
+    });
+  }, [currentId, persistWsExpanded]);
+  /** 折叠 / 展开单个目录 */
+  const toggleWsDir = useCallback((rel: string) => {
+    updateWsExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(rel)) next.delete(rel);
+      else next.add(rel);
+      return next;
+    });
+  }, [updateWsExpanded]);
+  /** homework 清单视图切换（按来源会话分组 ↔ 扁平），按项目持久化 */
+  const toggleHomeworkGrouped = useCallback(() => {
+    setHomeworkGrouped((prev) => {
+      const next = !prev;
+      if (currentId) {
+        try {
+          localStorage.setItem(WS_HOMEWORK_GROUPED_LS_PREFIX + currentId, next ? '1' : '0');
+        } catch {
+          /* 隐私模式/配额异常：忽略，仅丢失持久化 */
+        }
+      }
+      return next;
+    });
+  }, [currentId]);
+
+  /** materials 清单视图切换（按来源文件夹分组 ↔ 扁平），按项目持久化 */
+  const toggleMaterialsGrouped = useCallback(() => {
+    setMaterialsGrouped((prev) => {
+      const next = !prev;
+      if (currentId) {
+        try {
+          localStorage.setItem(WS_MATERIALS_GROUPED_LS_PREFIX + currentId, next ? '1' : '0');
+        } catch {
+          /* 隐私模式/配额异常：忽略，仅丢失持久化 */
+        }
+      }
+      return next;
+    });
+  }, [currentId]);
+
+  /** 拉取标签表（项目切换时调用，materials / homework 两个作用域并行）；
+   *  失败静默保留上次结果，标签是附加信息不阻塞文件浏览 */
+  const loadFileTags = useCallback(async (): Promise<void> => {
+    try {
+      const fetchScope = async (scope: TagScope): Promise<Record<string, string[]>> => {
+        const resp = await fetch(`/api/materials?action=tags&scope=${scope}`);
+        const data = await resp.json();
+        return data?.success && data.tags ? data.tags as Record<string, string[]> : {};
+      };
+      const [materials, homework] = await Promise.all([fetchScope('materials'), fetchScope('homework')]);
+      setFileTags({ materials, homework });
+    } catch {
+      /* 拉取失败不提示 */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentId) {
+      setFileTags({ materials: {}, homework: {} });
+      return;
+    }
+    void loadFileTags();
+  }, [currentId, loadFileTags]);
+
+  /** 保存某文件（资料 / 作业产物）的标签（覆盖式）：先本地生效保证弹层即时反馈，再以服务端规范化结果为准 */
+  const saveFileTags = useCallback(async (scope: TagScope, rel: string, tags: string[]): Promise<void> => {
+    const apply = (list: string[]) => setFileTags((prev) => {
+      const next = { ...prev, [scope]: { ...prev[scope] } };
+      if (list.length > 0) next[scope][rel] = list;
+      else delete next[scope][rel];
+      return next;
+    });
+    apply(tags);
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_tags', scope, path: rel, tags }),
+      });
+      const data = await resp.json();
+      if (data?.success && Array.isArray(data.tags)) apply(data.tags as string[]);
+    } catch (err) {
+      console.error('保存标签失败:', err);
+    }
+  }, []);
+
+  /** 为某文件增删单个标签（大小写不敏感判重，与后端规范化一致） */
+  const toggleFileTag = useCallback((scope: TagScope, rel: string, tag: string, current: string[]): void => {
+    const key = tag.toLowerCase();
+    const has = current.some((t) => t.toLowerCase() === key);
+    void saveFileTags(scope, rel, has ? current.filter((t) => t.toLowerCase() !== key) : [...current, tag]);
+  }, [saveFileTags]);
+
+  /** 标签筛选选择（按作用域，单选）：点击已选项回到 All（''） */
+  const selectTagFilter = useCallback((scope: TagScope, tag: string): void => {
+    setTagFilter((prev) => ({ ...prev, [scope]: prev[scope] === tag ? '' : tag }));
+  }, []);
+
+  /** 某作用域的可选标签：materials 预设标签（原告/被告/法院）在前，其后为该作用域已用过的标签（去重、按本地化排序） */
+  const candidateTagsOf = useCallback((scope: TagScope, extra: string[] = []): string[] => {
+    const presets = scope === 'materials' ? DEFAULT_MATERIAL_TAGS : [];
+    // 归档条目（键以 .archive/ 开头）已从文件树隐藏，其标签不再作为候选
+    const visible = Object.entries(fileTags[scope])
+      .filter(([rel]) => !rel.startsWith('.archive/'))
+      .flatMap(([, tags]) => tags);
+    const used = Array.from(new Set([...visible, ...extra]))
+      .filter((t) => !presets.some((p) => p.toLowerCase() === t.toLowerCase()))
+      .sort((a, b) => a.localeCompare(b));
+    return [...presets, ...used];
+  }, [fileTags]);
+
+  /** 标签 → 色相：两个作用域的候选标签并集，按标签串哈希取色相，冲突时线性探测，
+   *  保证同屏出现的不同标签颜色互不相同，且同一标签的颜色在标签集变化时基本保持稳定 */
+  const tagHueMap = useMemo(() => {
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (const t of [...candidateTagsOf('materials'), ...candidateTagsOf('homework')]) {
+      const k = t.toLowerCase();
+      if (!seen.has(k)) { seen.add(k); keys.push(k); }
+    }
+    const used = new Set<number>();
+    const map = new Map<string, number>();
+    for (const k of keys) {
+      let h = 0;
+      for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+      let idx = h % TAG_COLOR_HUES.length;
+      while (used.has(idx)) idx = (idx + 1) % TAG_COLOR_HUES.length;
+      used.add(idx);
+      map.set(k, TAG_COLOR_HUES[idx]);
+    }
+    return map;
+  }, [candidateTagsOf]);
+  /** 标签文字色：同一色相深色，用于菜单类场景（仅文字上色） */
+  const tagTextColor = (tag: string): string => `hsl(${tagHueMap.get(tag.toLowerCase()) ?? TAG_COLOR_HUES[0]} 52% 36%)`;
+  /** 标签胶囊配色：同色相浅底 + 深字 */
+  const tagChipStyle = (tag: string): { backgroundColor: string; color: string } => ({
+    backgroundColor: `hsl(${tagHueMap.get(tag.toLowerCase()) ?? TAG_COLOR_HUES[0]} 72% 92%)`,
+    color: tagTextColor(tag),
+  });
+  /** 行内标签胶囊组（最多 2 个 + 余量）：interactive=false 时仅作展示（多选态下批量打标签的结果需就地可见） */
+  const renderTagChips = (
+    tags: string[],
+    interactive: boolean,
+    onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void,
+  ): React.ReactNode => {
+    if (tags.length === 0) return null;
+    const chips = (
+      <>
+        {tags.slice(0, 2).map((t) => (
+          <span
+            key={t}
+            className="max-w-[64px] truncate rounded-full px-1 py-px text-9"
+            style={{ ...tagChipStyle(t), boxShadow: 'var(--shadow-sm)' }}
+          >
+            {t}
+          </span>
+        ))}
+        {tags.length > 2 && (
+          <span className="text-9" style={{ color: 'var(--ink-faint)' }}>{`+${tags.length - 2}`}</span>
+        )}
+      </>
+    );
+    const cls = 'flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 transition-colors';
+    return interactive ? (
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(cls, 'hover:bg-[var(--paper-hover)]')}
+        title={tags.join(', ')}
+      >
+        {chips}
+      </button>
+    ) : (
+      <span className={cls} title={tags.join(', ')}>
+        {chips}
+      </span>
+    );
+  };
+
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectCategory, setNewProjectCategory] = useState('');
@@ -317,12 +634,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   const [newProjectTag1, setNewProjectTag1] = useState('');
   const [newProjectTag2, setNewProjectTag2] = useState('');
   const [creating, setCreating] = useState(false);
-  // 编辑分类/标签/备注弹窗（⋮ 菜单入口）
-  const [editMetaProject, setEditMetaProject] = useState<ProjectInfo | null>(null);
-  const [editMetaCategory, setEditMetaCategory] = useState('');
-  const [editMetaTags, setEditMetaTags] = useState<string[]>(['', '']);
-  const [editMetaNote, setEditMetaNote] = useState('');
-  const [savingMeta, setSavingMeta] = useState(false);
 
   // 更新状态（常驻提示迁移至 NodeMap：Sidebar 保留逻辑，广播 update-status-changed 事件）
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'no-update' | 'error'>('idle');
@@ -332,20 +643,141 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   const [installProgress, setInstallProgress] = useState<{ stage: string; message: string; percent?: number } | null>(null);
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Materials 相关状态（上传/新建共用）
-  const [newFolderParent, setNewFolderParent] = useState<string>('');
-  const [newFolderName, setNewFolderName] = useState('');
-  const [newFolderVisible, setNewFolderVisible] = useState(false);
+  // Materials 相关状态（上传共用）
   const [uploadTargetFolder, setUploadTargetFolder] = useState<string>('');
+  // 拖拽上传：拖入文件悬停在 materials 目录上方时高亮
+  const [materialsDragActive, setMaterialsDragActive] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const uploadFolderInputRef = useRef<HTMLInputElement>(null);
+  // 上传后「解析中」提示：后台建索引（文本抽取 / OCR）完成前在文件行显示
+  // key = `${projId}::${materials相对路径}`；deadline 用于兜底（无文字的文件不会永久卡住）
+  const [parsingFiles, setParsingFiles] = useState<Set<string>>(new Set());
+  const parsingDeadlineRef = useRef<Map<string, number>>(new Map());
+  // 后台识别失败：key 同上 → 失败原因；文件行显示重试入口（长扫描件识别失败过去是静默丢弃）
+  const [failedIndexFiles, setFailedIndexFiles] = useState<Map<string, string>>(new Map());
+
+  /** 拉取索引三态并同步到界面（已索引 / 识别中 / 失败） */
+  const syncIndexStatus = useCallback(async (): Promise<{ indexed: Set<string>; pending: Set<string>; failed: Map<string, string> }> => {
+    const empty = { indexed: new Set<string>(), pending: new Set<string>(), failed: new Map<string, string>() };
+    try {
+      const resp = await fetch('/api/materials?action=index_status');
+      const data = await resp.json();
+      return {
+        indexed: new Set<string>(Array.isArray(data?.indexed) ? data.indexed : []),
+        pending: new Set<string>(Array.isArray(data?.pending) ? data.pending : []),
+        failed: new Map<string, string>(Object.entries(data?.failed ?? {}) as [string, string][]),
+      };
+    } catch {
+      return empty; // 网络抖动：调用方下个 tick 重试
+    }
+  }, []);
+
+  // 切换项目时先取一次状态：否则重开后「识别中」与「识别失败」都不会显示
+  useEffect(() => {
+    if (!currentId) return;
+    let cancelled = false;
+    void (async () => {
+      const { pending, failed } = await syncIndexStatus();
+      if (cancelled) return;
+      setFailedIndexFiles(new Map([...failed].map(([rel, err]) => [`${currentId}::${rel}`, err])));
+      if (pending.size > 0) {
+        setParsingFiles((prev) => {
+          const next = new Set(prev);
+          for (const rel of pending) next.add(`${currentId}::${rel}`);
+          return next;
+        });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentId, syncIndexStatus]);
+
+  // 「解析中」轮询：还有待解析文件时，周期性只读 manifest 检查是否已建索引（零开销，不触发抽取/OCR）
+  const parsingActive = parsingFiles.size > 0;
+  useEffect(() => {
+    if (!parsingActive) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      const { indexed, pending, failed } = await syncIndexStatus();
+      if (cancelled) return;
+      const now = Date.now();
+      setParsingFiles((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set(prev);
+        let changed = false;
+        for (const key of prev) {
+          const sep = key.indexOf('::');
+          const pid = sep >= 0 ? key.slice(0, sep) : '';
+          const rel = sep >= 0 ? key.slice(sep + 2) : key;
+          const mine = pid === currentId;
+          const done = mine && indexed.has(rel);
+          // 后台异步识别中：不按 deadline 兜底（长扫描件分钟级），等它落地或转失败
+          const isPending = mine && pending.has(rel);
+          const expired = !isPending && (parsingDeadlineRef.current.get(key) ?? 0) <= now;
+          if (done || expired) {
+            next.delete(key);
+            parsingDeadlineRef.current.delete(key);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      // 失败态同步：失败的从「解析中」摘掉，改在文件行显示重试入口
+      setFailedIndexFiles((prev) => {
+        const next = new Map<string, string>();
+        if (currentId) for (const [rel, err] of failed) next.set(`${currentId}::${rel}`, err);
+        if (next.size === prev.size && [...next].every(([k, v]) => prev.get(k) === v)) return prev;
+        return next;
+      });
+      if (!cancelled) timer = setTimeout(tick, 1500);
+    };
+
+    timer = setTimeout(tick, 1000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [parsingActive, currentId, syncIndexStatus]);
+
+  /** 失败材料重试：清掉失败态、恢复「解析中」，并让后台重新建索引 */
+  const retryMaterialIndex = useCallback(async (rel: string) => {
+    if (!currentId) return;
+    const key = `${currentId}::${rel}`;
+    setFailedIndexFiles((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+    parsingDeadlineRef.current.set(key, Date.now() + PARSING_DEADLINE_MS);
+    setParsingFiles((prev) => new Set(prev).add(key));
+    try {
+      await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retry_index', path: rel }),
+      });
+    } catch {
+      /* 轮询会兜底刷新状态 */
+    }
+  }, [currentId]);
 
   // 右键菜单状态（文件树）
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; filePath: string; fileName: string; isDir: boolean } | null>(null);
   // 列式浏览行 ⋮ 菜单状态（重命名 / 复制 / 删除）；rel 为项目相对路径，用于区分 homework / materials
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; filePath: string; fileName: string; isDir: boolean; rel: string } | null>(null);
-  // 重命名状态
-  const [renaming, setRenaming] = useState<{ filePath: string; oldName: string } | null>(null);
+  // 目录行 ⋮ 菜单状态（materials / homework 根行）：收纳上传 / 授权 / 进入多选等目录级操作
+  const [materialsMenu, setMaterialsMenu] = useState<{ x: number; y: number; rel: string; name: string; isRoot: boolean; scope: TagScope } | null>(null);
+  // 多选态：null 为未进入；进入后锁定单一作用域，rels 为命中行的项目内相对路径集合
+  const [selection, setSelection] = useState<{ scope: TagScope; rels: Set<string> } | null>(null);
+  // 批量打标签弹层（锚点为多选操作条的 Tag 按钮）
+  const [batchTagMenu, setBatchTagMenu] = useState<{ x: number; y: number } | null>(null);
+  // 重命名状态；kind='newFolder' 时 filePath 复用为「materials 根相对的目标目录」（空串即根），oldName 无意义
+  const [renaming, setRenaming] = useState<{ filePath: string; oldName: string; kind?: 'rename' | 'newFolder' } | null>(null);
+  // materials 分组视图：拖拽悬停的分组（值为分组对应的项目内相对路径），用于落点高亮
+  const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState<string | null>(null);
   const renameRef = useRef<HTMLInputElement>(null);
@@ -364,6 +796,40 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [rowMenu]);
+  // 关闭 materials 行 ⋮ 菜单（点击任意位置）
+  useEffect(() => {
+    if (!materialsMenu) return;
+    const close = () => setMaterialsMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [materialsMenu]);
+  // 关闭标签编辑弹层（点击任意位置）；弹层内部点击已由容器 stopPropagation 拦截
+  useEffect(() => {
+    if (!tagEditor) return;
+    const close = () => { setTagEditor(null); setTagDraft(''); };
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [tagEditor]);
+  // 关闭批量打标签弹层（点击任意位置）
+  useEffect(() => {
+    if (!batchTagMenu) return;
+    const close = () => setBatchTagMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [batchTagMenu]);
+  // 多选态下 Esc 退出多选（连同批量标签弹层一并收起）
+  useEffect(() => {
+    if (!selection) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setBatchTagMenu(null);
+      setSelection(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selection]);
+  // 切换项目时退出多选（rels 为项目内相对路径，跨项目复用无意义）
+  useEffect(() => { setSelection(null); setBatchTagMenu(null); }, [currentId]);
 
   // 发送附件到指定节点（复用 LocalFileExplorer 的事件机制）
   const sendAttachmentToNode = useCallback((nodeId: string, attachment: MessageAttachment) => {
@@ -416,31 +882,94 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     }
   }, [onCreateNodeWithFile, sendAttachmentToNode]);
 
-  // 重命名文件/文件夹
+  // 重命名文件/文件夹；kind='newFolder' 时改为在指定目录下真实新建文件夹（分组视图的「新建分组」）
   const handleRename = useCallback(async () => {
     if (!renaming || !renameValue.trim()) return;
+    const creatingFolder = renaming.kind === 'newFolder';
     try {
-      const resp = await fetch('/api/local-files', {
+      const resp = await fetch(creatingFolder ? '/api/materials' : '/api/local-files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'rename',
-          sourcePath: renaming.filePath,
-          newName: renameValue.trim(),
-        }),
+        body: JSON.stringify(
+          creatingFolder
+            ? { action: 'create_folder', folderPath: [renaming.filePath, renameValue.trim()].filter(Boolean).join('/') }
+            : { action: 'rename', sourcePath: renaming.filePath, newName: renameValue.trim() },
+        ),
       });
       const data = await resp.json();
       if (data.success) {
         setRenaming(null);
         setRenameError(null);
         if (currentId) loadProjectFilesRef.current?.(currentId);
+        // materials / homework 内文件重命名会迁移标签表键，需同步本地标签映射
+        void loadFileTags();
       } else {
-        setRenameError(data.error || '重命名失败');
+        setRenameError(data.error || (creatingFolder ? 'Create folder failed' : 'Rename failed'));
       }
     } catch (err) {
-      setRenameError(err instanceof Error ? err.message : '重命名失败');
+      setRenameError(err instanceof Error ? err.message : (creatingFolder ? 'Create folder failed' : 'Rename failed'));
     }
-  }, [renaming, renameValue, currentId]);
+  }, [renaming, renameValue, currentId, loadFileTags]);
+
+  // 分组视图拖拽落点：把资料行移动到目标文件夹（真实移动，标签表键 / 内容索引键随迁）
+  const handleRowMove = useCallback(async (srcRel: string, destDirRel: string) => {
+    const projectPath = projects.find((p) => p.id === currentId)?.path;
+    // 可拖拽的行恒为文件，不存在「移入自身子孙」的风险，故只校验必要项
+    if (!srcRel || !projectPath) return;
+    // 落在原目录（含拖到 Root / 组内互拖）：无变化，静默返回
+    if (srcRel.slice(0, srcRel.lastIndexOf('/')) === destDirRel) return;
+    try {
+      const resp = await fetch('/api/local-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'move',
+          sourcePath: `${projectPath}/${srcRel}`,
+          destDir: `${projectPath}/${destDirRel}`,
+        }),
+      });
+      const data = await resp.json();
+      if (!data?.success) {
+        showImageAiEditToast(data?.error || 'Move failed', 'error');
+        return;
+      }
+      if (currentId) loadProjectFilesRef.current?.(currentId);
+      // 标签表键随移动迁移，需同步本地标签映射
+      void loadFileTags();
+      const target = destDirRel === 'materials' ? 'materials' : destDirRel.slice('materials/'.length);
+      showImageAiEditToast(`Moved "${srcRel.split('/').pop()}" to ${target}`);
+    } catch (err) {
+      console.error('移动资料失败:', err);
+      showImageAiEditToast('Move failed', 'error');
+    }
+  }, [currentId, projects, loadFileTags]);
+
+  // 解散分组：分组内的文件全部移回未分组（materials 根），再删除该空文件夹
+  const handleDissolveGroup = useCallback(async (groupDirRel: string, title: string) => {
+    // groupDirRel 为项目内相对路径（含首段 materials），接口要的是 materials 根相对路径
+    const groupPath = groupDirRel.slice('materials/'.length);
+    if (!groupPath) return;
+    if (!window.confirm(`Delete group "${title}"? Files will be moved to the ungrouped folder.`)) return;
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'dissolve_group', groupPath }),
+      });
+      const data = await resp.json();
+      if (!data?.success) {
+        showImageAiEditToast(data?.error || 'Delete group failed', 'error');
+        return;
+      }
+      if (currentId) loadProjectFilesRef.current?.(currentId);
+      // 标签表键随移动迁移，需同步本地标签映射
+      void loadFileTags();
+      showImageAiEditToast(`Deleted group "${title}"`);
+    } catch (err) {
+      console.error('删除分组失败:', err);
+      showImageAiEditToast('Delete group failed', 'error');
+    }
+  }, [currentId, loadFileTags]);
 
   // 删除文件/文件夹
   const handleDelete = useCallback(async (filePath: string, fileName: string) => {
@@ -659,16 +1188,11 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
 
   // 文件树相关状态
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [projectFiles, setProjectFiles] = useState<Map<string, FileNode[]>>(new Map());
   const [loadingFiles, setLoadingFiles] = useState<Set<string>>(new Set());
-  // homework 按 kind 类别分组的输出文件，key 为项目 id
-  const [homeworkGroups, setHomeworkGroups] = useState<Map<string, HomeworkKindGroup[]>>(new Map());
-  // 类别分组展开状态；key 为 `${projId}:${kind}`。
-  // 默认展开：首次收到某项目的类别分组时全部展开，之后尊重用户手动折叠（见 loadProjectFiles）
-  const [homeworkOpenGroups, setHomeworkOpenGroups] = useState<Set<string>>(new Set());
-  // 已执行过"默认展开"的项目 id（防止后续刷新/重开浮层覆盖用户手动折叠状态）
-  const defaultHomeworkExpandedRef = useRef<Set<string>>(new Set());
+  // homework 归属表：项目 id →（homework 根相对路径 → 来源会话）。由 list_files 的 homework_owners 下发，
+  // 供「按来源会话分组」视图使用；无清册时为 {}（此时全部文件落 Ungrouped）
+  const [homeworkOwners, setHomeworkOwners] = useState<Map<string, Record<string, HomeworkOwner>>>(new Map());
 
   // 项目标星（localStorage 持久化，仅前端；置顶分组展示在 Workspace 浮层顶部）
   const [starredProjects, setStarredProjects] = useState<Set<string>>(() => {
@@ -748,11 +1272,23 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         loadProjectFiles(pid);
       }
     };
+    // 节点成果块被后台自动提炼改写 → 转成窗口事件，由 ChatNodeKernel 自行按 id 匹配刷新状态
+    // （成果块在服务端后台生成，画布不会主动知道；不复用文件树刷新，避免无谓重拉）
+    const onNodeOutcome = (e: MessageEvent) => {
+      try {
+        const { node_id } = JSON.parse(e.data || '{}') as { node_id?: string };
+        if (node_id) window.dispatchEvent(new CustomEvent('node-outcome-refresh', { detail: { node_id } }));
+      } catch {
+        /* 负载非法（心跳/异常）忽略 */
+      }
+    };
     es.addEventListener('projects-changed', onChanged);
     es.addEventListener('files-changed', onFilesChanged);
+    es.addEventListener('node-outcome', onNodeOutcome);
     return () => {
       es.removeEventListener('projects-changed', onChanged);
       es.removeEventListener('files-changed', onFilesChanged);
+      es.removeEventListener('node-outcome', onNodeOutcome);
       es.close();
     };
   }, [loadProjects]);
@@ -768,18 +1304,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceOpen]);
-
-  // 打开 Workspace 且尚未下钻时：自动展开根列第一个目录（文件树加载完成后触发一次）
-  useEffect(() => {
-    if (!workspaceOpen || !currentId) return;
-    const roots = projectFiles.get(currentId) || [];
-    if (roots.length === 0) return;
-    if (wsOpenPath.length > 0) return; // 已下钻/用户已操作则不干预
-    const firstDir = roots.find((r) => r.type === 'directory');
-    if (!firstDir) return;
-    setWsOpenPath([firstDir.name]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceOpen, projectFiles, currentId]);
 
   // 监听 AI 工具文件变更，自动刷新文件树
   useEffect(() => {
@@ -810,7 +1334,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           setCurrentId(projectId);
           // 选中项目自动展开文件树（清空其他项目展开态）
           setExpandedProjects(new Set([projectId]));
-          setExpandedFolders(new Set());
           loadProjectFilesRef.current?.(projectId);
           window.dispatchEvent(new CustomEvent('bobagent:project-switched', { detail: { projectId } }));
         }
@@ -859,54 +1382,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     }
   }, [newProjectName, newProjectCategory, newProjectNote, newProjectTag1, newProjectTag2, handleSwitch]);
 
-  // 打开编辑分类/标签/备注弹窗
-  const openEditMeta = useCallback((p: ProjectInfo) => {
-    setEditMetaProject(p);
-    setEditMetaCategory(p.category || '');
-    setEditMetaTags([p.tags?.[0] || '', p.tags?.[1] || '']);
-    setEditMetaNote(p.note || '');
-  }, []);
-
-  // 保存分类/标签/备注（POST /api/projects action=update_meta，无需整页刷新）
-  const handleSaveProjectMeta = useCallback(async () => {
-    if (!editMetaProject) return;
-    setSavingMeta(true);
-    try {
-      const resp = await fetch('/api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'update_meta',
-          project_id: editMetaProject.id,
-          category: editMetaCategory || '',
-          tags: editMetaTags.map((t) => t.trim()).filter(Boolean).slice(0, PROJECT_TAG_LIMIT),
-          note: editMetaNote.trim(),
-        }),
-      });
-      const data = await resp.json();
-      if (data.success) {
-        setEditMetaProject(null);
-        await loadProjects();
-      } else {
-        alert(data.error || 'Failed to update project');
-      }
-    } catch (err) {
-      console.error('Failed to update project meta:', err);
-      alert('Failed to update project meta');
-    } finally {
-      setSavingMeta(false);
-    }
-  }, [editMetaProject, editMetaCategory, editMetaTags, editMetaNote, loadProjects]);
-
-  // materials 目录行「⋯」操作菜单：锚点位置 + 当前行上下文（菜单项操作跟随上下文执行）
-  const [materialMenu, setMaterialMenu] = useState<{
-    top: number;
-    right: number;
-    projId: string;
-    isRoot: boolean;
-    materialsRelPath: string;
-    folderName: string;
-  } | null>(null);
   // 标题栏项目切换下拉锚点（全部项目：标星置顶、横线分隔）
   const [wsSwitchAnchor, setWsSwitchAnchor] = useState<{ top: number; right: number } | null>(null);
 
@@ -920,25 +1395,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setWsSwitchAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
   }, [wsSwitchAnchor]);
-
-  // 点击 materials 菜单外部 / Esc / 滚动 → 关闭
-  useEffect(() => {
-    if (!materialMenu) return;
-    const close = () => setMaterialMenu(null);
-    const onDocDown = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (t.closest('[data-material-menu]')) return;
-      close();
-    };
-    document.addEventListener('mousedown', onDocDown);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-    return () => {
-      document.removeEventListener('mousedown', onDocDown);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-    };
-  }, [materialMenu]);
 
   // 点击项目切换下拉外部 / Esc / 滚动 → 关闭
   useEffect(() => {
@@ -965,10 +1421,9 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     };
   }, [wsSwitchAnchor]);
 
-  // 浮层关闭时同步关闭 materials 菜单 / 项目切换下拉（portal 独立渲染，不随浮层卸载）
+  // 浮层关闭时同步关闭项目切换下拉（portal 独立渲染，不随浮层卸载）
   useEffect(() => {
     if (!workspaceOpen) {
-      setMaterialMenu(null);
       setWsSwitchAnchor(null);
     }
   }, [workspaceOpen]);
@@ -989,22 +1444,12 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           next.set(pid, data.files);
           return next;
         });
-        setHomeworkGroups((prev) => {
+        // homework 归属表：随文件树一并刷新（缺失 / 无清册时存空对象，分组视图全部落 Ungrouped）
+        setHomeworkOwners((prev) => {
           const next = new Map(prev);
-          next.set(pid, data.homework_kind_groups || []);
+          next.set(pid, (data.homework_owners ?? {}) as Record<string, HomeworkOwner>);
           return next;
         });
-        // 默认展开：首次收到该项目类别分组时全部展开（此后不覆盖用户手动折叠）
-        const groupKeys: string[] = (data.homework_kind_groups || []).map((g: HomeworkKindGroup) => `${pid}:${g.kind}`);
-        if (groupKeys.length > 0 && !defaultHomeworkExpandedRef.current.has(pid)) {
-          setHomeworkOpenGroups((prev) => {
-            if (defaultHomeworkExpandedRef.current.has(pid)) return prev;
-            const next = new Set(prev);
-            groupKeys.forEach((k) => next.add(k));
-            return next;
-          });
-          defaultHomeworkExpandedRef.current.add(pid);
-        }
       }
     } catch (err) {
       console.error('加载文件树失败:', err);
@@ -1018,54 +1463,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   };
   loadProjectFilesRef.current = loadProjectFiles;
 
-  /** 切换文件夹展开 */
-  const toggleFolder = useCallback((folderPath: string) => {
-    setExpandedFolders((prev) => {
-      const next = new Set(prev);
-      if (next.has(folderPath)) next.delete(folderPath);
-      else next.add(folderPath);
-      return next;
-    });
-  }, []);
-
-  /** 切换 homework 节点分组展开（默认折叠，无按钮，点击分组行切换） */
-  const toggleHomeworkGroup = useCallback((key: string) => {
-    setHomeworkOpenGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }, []);
-
-  // 创建文件夹（项目文件树 + materials 共用）
-  const handleCreateFolder = useCallback(async () => {
-    const name = newFolderName.trim();
-    if (!name) return;
-    try {
-      const folderPath = newFolderParent ? newFolderParent + '/' + name : name;
-      const resp = await fetch('/api/materials', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'create_folder', folderPath }),
-      });
-      const data = await resp.json();
-      if (data.success) {
-        setNewFolderVisible(false);
-        setNewFolderName('');
-        if (currentId) loadProjectFiles(currentId);
-      }
-    } catch (err) {
-      console.error('创建文件夹失败:', err);
-    }
-  }, [newFolderName, newFolderParent, currentId]);
-
-  // 上传文件（项目文件树 + materials 共用）
-  const handleUploadMaterial = useCallback(async (file: File, subFolder?: string) => {
+  // 上传文件（项目文件树 + materials 共用）；baseFolder 用于拖拽上传时显式指定目标目录（不依赖 uploadTargetFolder 状态）
+  const handleUploadMaterial = useCallback(async (file: File, subFolder?: string, baseFolder?: string) => {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const targetFolder = subFolder ? (uploadTargetFolder ? uploadTargetFolder + '/' + subFolder : subFolder) : uploadTargetFolder;
+      const base = baseFolder ?? uploadTargetFolder;
+      const targetFolder = subFolder ? (base ? base + '/' + subFolder : subFolder) : base;
       if (targetFolder) {
         formData.append('folder', targetFolder);
       }
@@ -1073,11 +1477,18 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         method: 'POST',
         body: formData,
       });
-      await resp.json();
+      const data = await resp.json();
+      // 后台会异步建索引（文本抽取 / OCR）：可索引文件先标记「解析中」，
+      // 由轮询在 manifest 出现该路径后移除（deadline 兜底，避免解析失败/无文字时永久转圈）
+      if (data?.success && data.file?.indexable && currentId) {
+        const key = `${currentId}::${data.file.path}`;
+        parsingDeadlineRef.current.set(key, Date.now() + PARSING_DEADLINE_MS);
+        setParsingFiles((prev) => new Set(prev).add(key));
+      }
     } catch (err) {
       console.error('上传失败:', err);
     }
-  }, [uploadTargetFolder]);
+  }, [uploadTargetFolder, currentId]);
 
   // 批量上传多个文件（单文件 input 多选）：逐个上传后统一刷新一次
   const handleUploadMultiple = useCallback(async (files: File[]) => {
@@ -1100,6 +1511,54 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     if (currentId) loadProjectFiles(currentId);
   }, [handleUploadMaterial, currentId]);
 
+  // 拖拽上传落点：materials 根（界面已扁平化，不再有可选子目录层级）
+  const materialsDropReady = Boolean(currentId) && wsView === 'files';
+
+  /** 收集拖入的 OS 文件并上传到指定 materials 子目录（target 为相对 materials 的子路径，'' 为根） */
+  const uploadDroppedFiles = async (e: React.DragEvent, target: string) => {
+    // dataTransfer.items 在 await 之后失效，先同步取出各项 entry
+    const entries = Array.from(e.dataTransfer.items)
+      .filter((it) => it.kind === 'file')
+      .map((it) => it.webkitGetAsEntry())
+      .filter((en): en is FileSystemEntry => en !== null);
+    const collected: DroppedFile[] = [];
+    if (entries.length > 0) {
+      for (const en of entries) {
+        // 顶层目录整体作为一层子路径保留目录名，文件直接落到当前目录
+        await collectDropped(en, en.isDirectory ? en.name : '', collected);
+      }
+    } else {
+      // 兜底（浏览器未提供 items）：按普通文件平铺上传
+      Array.from(e.dataTransfer.files).forEach((f) => collected.push({ file: f, subPath: '' }));
+    }
+    if (collected.length === 0) return;
+    for (const { file, subPath } of collected) {
+      await handleUploadMaterial(file, subPath || undefined, target);
+    }
+    if (currentId) loadProjectFiles(currentId);
+  };
+
+  const handleMaterialsDragOver = (e: React.DragEvent) => {
+    if (!materialsDropReady) return;
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setMaterialsDragActive(true);
+  };
+
+  const handleMaterialsDragLeave = (e: React.DragEvent) => {
+    // 在子元素间移动同样触发 dragleave：仅当真正离开拖拽区（relatedTarget 为空或不在区内）才取消高亮
+    const next = e.relatedTarget as Node | null;
+    if (!next || !e.currentTarget.contains(next)) setMaterialsDragActive(false);
+  };
+
+  const handleMaterialsDrop = async (e: React.DragEvent) => {
+    setMaterialsDragActive(false);
+    if (!materialsDropReady) return;
+    e.preventDefault();
+    await uploadDroppedFiles(e, '');
+  };
+
   // 删除文件/文件夹（项目文件树 + materials 共用）
   const handleDeleteMaterial = useCallback(async (path: string, isDir: boolean) => {
     const label = isDir ? 'folder' : 'file';
@@ -1111,11 +1570,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       const data = await resp.json();
       if (data.success) {
         if (currentId) loadProjectFiles(currentId);
+        // 删除会回收该路径（及其子路径）的标签条目，需同步本地标签映射
+        void loadFileTags();
       }
     } catch (err) {
       console.error('删除失败:', err);
     }
-  }, [currentId]);
+  }, [currentId, loadFileTags]);
 
   // 删除 homework 文件（同步清理 .ownership.json 归属清册，节点分组随刷新更新）
   const handleDeleteHomeworkFile = useCallback(async (absPath: string) => {
@@ -1133,33 +1594,304 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       const data = await resp.json();
       if (data.success) {
         if (currentId) loadProjectFiles(currentId);
+        // 删除会回收该 homework 文件的标签条目，需同步本地标签映射
+        void loadFileTags();
       } else {
         console.error('删除失败:', data.error);
       }
     } catch (err) {
       console.error('删除失败:', err);
     }
-  }, [currentId]);
+  }, [currentId, loadFileTags]);
 
-  /** 复制文件/文件夹（项目列式浏览 ⋮ 菜单）：后端递归复制，自动生成 "xxx 的副本" 名称 */
-  const handleRowCopy = useCallback(async (filePath: string) => {
+  /**
+   * 复制（行 ⋮ 菜单）：就地在该条目所在目录生成副本（后端按 Finder 规则追加 " copy"，
+   * 文件夹递归复制），随后刷新文件树。
+   */
+  const handleRowCopy = useCallback(async (menu: { filePath: string; fileName: string; isDir: boolean }) => {
     setRowMenu(null);
     try {
       const resp = await fetch('/api/local-files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'copy', sourcePath: filePath }),
+        body: JSON.stringify({ action: 'copy', sourcePath: menu.filePath }),
+      });
+      const data = await resp.json();
+      if (!data.success) {
+        showImageAiEditToast('Copy failed', 'error');
+        return;
+      }
+      if (currentId) loadProjectFilesRef.current?.(currentId);
+      showImageAiEditToast(`Copied "${String(data.newName || menu.fileName)}"`);
+    } catch {
+      showImageAiEditToast('Copy failed', 'error');
+    }
+  }, [currentId]);
+
+  /**
+   * 下载到本地（行 ⋮ 菜单）：选目标文件夹（桌面 / 下载等）后把源复制过去，完成后在 Finder 中定位，
+   * 便于再拖入微信等外部应用。复用后端 paste 动作（同名时按 Finder 规则追加 " copy"）。
+   */
+  const handleRowDownload = useCallback(async (menu: { filePath: string; fileName: string }) => {
+    setRowMenu(null);
+    if (!isDesktop()) {
+      showImageAiEditToast('Downloading to a local folder requires the desktop app', 'error');
+      return;
+    }
+    const picked = await desktop.selectDirectory();
+    if (!picked.success || !picked.path) return; // 用户取消选择
+    try {
+      const resp = await fetch('/api/local-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'paste', sourcePath: menu.filePath, destDir: picked.path }),
       });
       const data = await resp.json();
       if (data.success) {
-        if (currentId) loadProjectFilesRef.current?.(currentId);
+        showImageAiEditToast(`Saved "${data.newName ?? menu.fileName}"`);
+        void desktop.showItemInFolder(data.newPath);
       } else {
-        console.error('复制失败:', data.error);
+        showImageAiEditToast(`Download failed: ${data.error ?? 'unknown'}`, 'error');
       }
     } catch (err) {
-      console.error('复制失败:', err);
+      showImageAiEditToast(`Download failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
-  }, [currentId]);
+  }, []);
+
+  /** 多选：进入某作用域的多选态（顺带展开该作用域，使勾选框可见） */
+  const startSelection = useCallback((scope: TagScope) => {
+    setMaterialsMenu(null);
+    setRowMenu(null);
+    // 关闭单文件标签弹层：否则它会残留并盖在批量标签弹层上，导致点击落错目标
+    setTagEditor(null);
+    setTagDraft('');
+    updateWsExpanded((prev) => (prev.has(scope) ? prev : new Set([...prev, scope])));
+    setSelection({ scope, rels: new Set() });
+  }, [updateWsExpanded]);
+
+  /** 多选：勾选 / 取消勾选一行（key 为项目内相对路径） */
+  const toggleSelected = useCallback((rel: string) => {
+    setSelection((prev) => {
+      if (!prev) return prev;
+      const rels = new Set(prev.rels);
+      if (rels.has(rel)) rels.delete(rel);
+      else rels.add(rel);
+      return { ...prev, rels };
+    });
+  }, []);
+
+  /** 多选：所选行的路径派生（作用域根相对路径用于标签 / materials 删除，绝对路径用于文件操作） */
+  const selectionPaths = useCallback((): { rel: string; scopeRel: string; absPath: string; name: string }[] => {
+    if (!selection) return [];
+    const rootPath = projects.find((p) => p.id === currentId)?.path ?? '';
+    return Array.from(selection.rels).map((rel) => ({
+      rel,
+      scopeRel: rel.startsWith(selection.scope + '/') ? rel.slice(selection.scope.length + 1) : rel,
+      absPath: `${rootPath}/${rel}`,
+      name: rel.split('/').pop() || rel,
+    }));
+  }, [selection, projects, currentId]);
+
+  /** 多选：当前作用域下的全部文件相对路径（Select all 用，与清单同源的项目文件树遍历） */
+  const allRelsInScope = useCallback((scope: TagScope): string[] => {
+    if (!currentId) return [];
+    const root = (projectFiles.get(currentId) || []).find((n) => (n.rel ?? n.name) === scope);
+    const out: string[] = [];
+    const walk = (nodes: FileNode[], prefix: string[]) => {
+      for (const n of nodes) {
+        if (n.type === 'directory') {
+          if (n.children?.length) walk(n.children, [...prefix, n.name]);
+          continue;
+        }
+        out.push(n.rel ?? (prefix.length ? [...prefix, n.name].join('/') : n.name));
+      }
+    };
+    if (root?.children?.length) walk(root.children, [scope]);
+    return out;
+  }, [currentId, projectFiles]);
+
+  /** 多选：批量下载到本地（只选一次目标文件夹，逐项复制，完成后在 Finder 中定位） */
+  const handleBatchDownload = useCallback(async () => {
+    const items = selectionPaths();
+    if (items.length === 0) return;
+    if (!isDesktop()) {
+      showImageAiEditToast('Downloading to a local folder requires the desktop app', 'error');
+      return;
+    }
+    const picked = await desktop.selectDirectory();
+    if (!picked.success || !picked.path) return; // 用户取消选择
+    let ok = 0;
+    for (const item of items) {
+      try {
+        const resp = await fetch('/api/local-files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'paste', sourcePath: item.absPath, destDir: picked.path }),
+        });
+        const data = await resp.json();
+        if (data.success) ok += 1;
+      } catch {
+        /* 单项失败不阻断其余项 */
+      }
+    }
+    if (ok === 0) {
+      showImageAiEditToast('Download failed', 'error');
+      return;
+    }
+    showImageAiEditToast(`Saved ${ok} ${ok === 1 ? 'item' : 'items'}`);
+    void desktop.showItemInFolder(picked.path);
+  }, [selectionPaths]);
+
+  /** 多选：批量复制（就地在该文件所在目录生成副本；后端按 Finder 规则追加 " copy"） */
+  const handleBatchCopy = useCallback(async () => {
+    const items = selectionPaths();
+    if (items.length === 0) return;
+    let ok = 0;
+    for (const item of items) {
+      try {
+        const resp = await fetch('/api/local-files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'copy', sourcePath: item.absPath }),
+        });
+        const data = await resp.json();
+        if (data.success) ok += 1;
+      } catch {
+        /* 单项失败不阻断其余项 */
+      }
+    }
+    if (ok === 0) {
+      showImageAiEditToast('Copy failed', 'error');
+      return;
+    }
+    if (currentId) loadProjectFilesRef.current?.(currentId);
+    showImageAiEditToast(`Copied ${ok} ${ok === 1 ? 'item' : 'items'}`);
+  }, [selectionPaths, currentId]);
+
+  /** 多选：批量删除（一次确认后逐项删除；materials 走 materials API，homework 走归属清册清理） */
+  const handleBatchDelete = useCallback(async () => {
+    const items = selectionPaths();
+    const scope = selection?.scope;
+    if (items.length === 0 || !scope) return;
+    if (!confirm(`Delete ${items.length} ${items.length === 1 ? 'file' : 'files'}?`)) return;
+    let ok = 0;
+    for (const item of items) {
+      try {
+        if (scope === 'materials') {
+          const resp = await fetch('/api/materials?path=' + encodeURIComponent(item.scopeRel), { method: 'DELETE' });
+          if ((await resp.json()).success) ok += 1;
+          continue;
+        }
+        const i = item.absPath.indexOf('/homework/');
+        if (i === -1) continue;
+        const resp = await fetch('/api/local-files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'delete_homework',
+            targetPath: item.absPath,
+            homeworkRoot: item.absPath.slice(0, i + '/homework'.length),
+          }),
+        });
+        if ((await resp.json()).success) ok += 1;
+      } catch {
+        /* 单项失败不阻断其余项 */
+      }
+    }
+    if (currentId) loadProjectFiles(currentId);
+    void loadFileTags();
+    setSelection(null);
+    if (ok === 0) showImageAiEditToast('Delete failed', 'error');
+    else showImageAiEditToast(`Deleted ${ok} ${ok === 1 ? 'file' : 'files'}`);
+  }, [selection, selectionPaths, currentId, loadFileTags]);
+
+  /** 归档 / 恢复（共用）：rel 为作用域根相对路径，一次请求处理整批；成功后刷新文件树与标签表 */
+  const applyArchive = useCallback(async (scope: TagScope, rels: string[], archived = true): Promise<boolean> => {
+    if (rels.length === 0) return false;
+    const verb = archived ? 'Archive' : 'Restore';
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_archived', scope, items: rels, archived }),
+      });
+      const data = await resp.json();
+      if (!data?.success) {
+        showImageAiEditToast(`${verb} failed`, 'error');
+        return false;
+      }
+      const failed = Array.isArray(data.failed) ? data.failed.length : 0;
+      if (currentId) loadProjectFilesRef.current?.(currentId);
+      void loadFileTags();
+      const done = rels.length - failed;
+      if (failed > 0) showImageAiEditToast(`${verb}d ${done}, ${failed} skipped`);
+      else showImageAiEditToast(`${verb}d ${done} ${done === 1 ? 'item' : 'items'}`);
+      return true;
+    } catch (err) {
+      console.error('归档失败:', err);
+      showImageAiEditToast(`${verb} failed`, 'error');
+      return false;
+    }
+  }, [currentId, loadFileTags]);
+
+  /** 多选：批量归档（移入 <作用域根>/.archive/，保留原相对路径；归档后行从文件树消失，故退出多选） */
+  const handleBatchArchive = useCallback(async () => {
+    const items = selectionPaths();
+    const scope = selection?.scope;
+    if (items.length === 0 || !scope) return;
+    await applyArchive(scope, items.map((it) => it.scopeRel));
+    setSelection(null);
+  }, [applyArchive, selection, selectionPaths]);
+
+  /** 多选：批量打标签（所选全部已有该标签则整体移除，否则整体补齐）。
+   *  一次请求写入（set_tags_bulk）：只提交需变更的条目，避免逐项读改写同一标签表造成覆盖。 */
+  const applyBatchTag = useCallback(async (tag: string) => {
+    const value = tag.trim();
+    const scope = selection?.scope;
+    const items = selectionPaths();
+    if (!value || !scope || items.length === 0) return;
+    const key = value.toLowerCase();
+    const scoped = fileTags[scope] ?? {};
+    const hasTag = (it: { scopeRel: string }) => (scoped[it.scopeRel] ?? []).some((t) => t.toLowerCase() === key);
+    const allHave = items.every(hasTag);
+    // 所选全部已有 → 整体移除（每条都需提交）；否则补齐缺失条目的标签
+    const payload = items
+      .filter((it) => (allHave ? true : !hasTag(it)))
+      .map((it) => {
+        const current = scoped[it.scopeRel] ?? [];
+        return { path: it.scopeRel, tags: allHave ? current.filter((t) => t.toLowerCase() !== key) : [...current, value] };
+      });
+
+    // 弹层保持打开：各标签的「全选/部分/无」勾选态随写入结果即时刷新，作为点击后的可视反馈
+
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_tags_bulk', scope, items: payload }),
+      });
+      const data = await resp.json();
+      if (!data?.success) {
+        showImageAiEditToast('Tagging failed', 'error');
+        return;
+      }
+      // 以服务端规范化结果为准，一次性合并回本地标签表
+      const applied = (data.tags ?? {}) as Record<string, string[]>;
+      setFileTags((prev) => {
+        const next = { ...prev, [scope]: { ...prev[scope] } };
+        for (const [rel, tags] of Object.entries(applied)) {
+          if (tags.length > 0) next[scope][rel] = tags;
+          else delete next[scope][rel];
+        }
+        return next;
+      });
+      if (allHave) showImageAiEditToast(`Removed "${value}"`);
+      else showImageAiEditToast(`Tagged ${payload.length} ${payload.length === 1 ? 'file' : 'files'} with "${value}"`);
+    } catch (err) {
+      console.error('批量保存标签失败:', err);
+      showImageAiEditToast('Tagging failed', 'error');
+    }
+  }, [selection, selectionPaths, fileTags]);
 
   /** 分享文件（项目列式浏览 ⋮ 菜单）：生成局域网分享链接并复制到剪贴板（仅 .md 文档） */
   const handleRowShare = useCallback(async (filePath: string, fileName: string, isDir: boolean) => {
@@ -1204,345 +1936,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     void handleDelete(filePath, fileName);
   }, [handleDeleteHomeworkFile, handleDeleteMaterial, handleDelete]);
 
-  /** 递归渲染文件树 */
-  const renderFileTree = (nodes: FileNode[], depth: number, parentPath: string, projId: string) => {
-    // 将文件树虚拟路径（<projectId>/...）转换为真实文件系统路径
-    const toRealPath = (virtualPath: string): string => {
-      const project = projects.find((p) => p.id === projId);
-      if (!project) return virtualPath;
-      return `${project.path}${virtualPath.slice(projId.length)}`;
-    };
-
-    // homework 子项过滤：输出文件已全部聚合进上方类别分组（doc/sheet/.../image/，含 legacy Image/ 目录），
-    // 不在 Files 树平铺重复展示，避免同一文件出现两次；template/ 与其他自定义子目录仍保留在 Files 树
-    const KIND_DIR_NAMES = new Set(['doc', 'sheet', 'slide', 'pdf', 'image', 'text', 'code', 'other', 'Image']);
-    const filterHomeworkChildren = (children: FileNode[]): FileNode[] => {
-      return children.filter((n) => n.type === 'directory' && !KIND_DIR_NAMES.has(n.name));
-    };
-
-    return nodes.map((node) => {
-      const nodePath = `${parentPath}/${node.name}`;
-      const isExpanded = expandedFolders.has(nodePath);
-      // 真实路径：优先用服务端下发的 rel（摊平展示的 template 文档路径与名称链不一致时仍正确），否则按名称链还原
-      const realPath = node.rel
-        ? `${projects.find((p) => p.id === projId)?.path ?? ''}/${node.rel}`
-        : toRealPath(nodePath);
-
-      if (node.type === 'directory') {
-        const isUnderMaterials = nodePath.startsWith(`${projId}/materials`);
-        const materialsRelPath = isUnderMaterials
-          ? nodePath.slice(`${projId}/materials`.length).replace(/^\//, '') || ''
-          : '';
-        const isMaterialsRoot = isUnderMaterials && materialsRelPath === '';
-        // homework 根目录：展开时先展示 AI 节点目录（每个节点一个文件夹），再展示其余文件系统内容
-        const isHomeworkRoot = nodePath === `${projId}/homework`;
-
-        return (
-          <div key={nodePath}>
-            <div
-              className="group relative flex w-full items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-[var(--paper-hover)]"
-              style={{ paddingLeft: `${15 + levelIndent(depth + 1)}px` }}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setCtxMenu({ x: e.clientX, y: e.clientY, filePath: realPath, fileName: node.name, isDir: true });
-              }}
-            >
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleFolder(nodePath);
-                }}
-                className="flex flex-1 items-center gap-1.5 min-w-0 text-left"
-              >
-                {isExpanded ? (
-                  <FolderOpen className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--primary)' }} />
-                ) : (
-                  <Folder className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                )}
-                <FileName name={node.name} className="text-sm" style={{ color: 'var(--ink)' }} />
-              </button>
-
-              {isUnderMaterials && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    setMaterialMenu({
-                      top: rect.bottom + 4,
-                      right: window.innerWidth - rect.right,
-                      projId,
-                      isRoot: isMaterialsRoot,
-                      materialsRelPath,
-                      folderName: node.name,
-                    });
-                  }}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink)]"
-                  title="Actions"
-                  aria-label="Actions"
-                >
-                  <MoreHorizontal className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-            {isExpanded && node.children && (
-              <div>
-                {isHomeworkRoot && renderProjectKindGroups(projId, depth + 1)}
-                {renderFileTree(
-                  isHomeworkRoot ? filterHomeworkChildren(node.children) : node.children,
-                  depth + 1,
-                  nodePath,
-                  projId,
-                )}
-              </div>
-            )}
-          </div>
-        );
-      }
-
-      // 文件节点 - 可点击打开
-      const icon = fileIcon(node.extension);
-      // 应用内打开路径：优先用 rel（template 摊平文件需带 set_* 等中间目录）
-      const relativePath = node.rel ?? nodePath.replace(`${projId}/`, '');
-      const isUnderMaterials = nodePath.startsWith(`${projId}/materials`);
-      const materialsRelPath = isUnderMaterials
-        ? relativePath.replace(/^materials\//, '')
-        : '';
-
-      return (
-        <div key={nodePath} className="group flex items-center"
-          style={{ paddingLeft: '16px' }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setCtxMenu({ x: e.clientX, y: e.clientY, filePath: realPath, fileName: node.name, isDir: false });
-          }}
-        >
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              bus.publish(BusEvents.fileOpen, { source: 'project', path: relativePath, name: node.name });
-            }}
-            className="flex flex-1 min-w-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
-          >
-            <FileText className="h-3.5 w-3.5 flex-shrink-0" style={{ color: icon.color }} />
-            {node.extension && !nodePath.startsWith(`${projId}/homework`) && (
-              <span
-                className="flex-shrink-0 rounded px-1 py-0 text-xs font-medium"
-                style={{ backgroundColor: `${icon.color}18`, color: icon.color }}
-              >
-                {icon.label}
-              </span>
-            )}
-            <FileName name={node.name} className="flex-1 truncate text-sm" style={{ color: 'var(--ink)' }} />
-          </button>
-          {/* homework 中 markdown 文档：用本地默认软件打开（Finder/系统默认关联应用） */}
-          {isDesktop() && node.extension && /^\.md$/i.test(node.extension) && nodePath.startsWith(`${projId}/homework`) && (
-            <button
-              onClick={async (e) => {
-                e.stopPropagation();
-                const res = await desktop.openFile(realPath);
-                if (!res.success && res.error) console.error('打开文档失败:', res.error);
-              }}
-              className="mr-1 hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--info-soft)] group-hover:block"
-              style={{ color: 'var(--info)' }}
-              title="Open with default app"
-            >
-              <ExternalLink className="h-3 w-3" />
-            </button>
-          )}
-          {/* homework 文件删除（同步清理节点归属清册） */}
-          {nodePath.startsWith(`${projId}/homework`) && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                void handleDeleteHomeworkFile(realPath);
-              }}
-              className="mr-1 hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--danger-soft)] group-hover:block"
-              style={{ color: 'var(--danger)' }}
-              title="Delete from homework"
-            >
-              <Trash className="h-3 w-3" />
-            </button>
-          )}
-          {isUnderMaterials && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!confirm(`Delete file "${node.name}"?`)) return;
-                handleDeleteMaterial(materialsRelPath, false);
-              }}
-              className="hidden group-hover:flex shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--danger-soft)]"
-              style={{ color: 'var(--danger)' }}
-              title="Delete"
-            >
-              <Trash className="h-3 w-3" />
-            </button>
-          )}
-        </div>
-      );
-    });
-  };
-
-
-
-  /** 渲染 homework 类别分组目录：每个 kind 一个目录，目录内含该类别的输出文件（嵌入 homework 目录内，depth 与文件树对齐） */
-  const renderProjectKindGroups = (projId: string, depth: number = 0) => {
-    const groups = homeworkGroups.get(projId) || [];
-    const project = projects.find((p) => p.id === projId);
-    const projectPath = project?.path || '';
-
-    if (groups.length === 0) {
-      return null;
-    }
-
-    // f.path：project 源为项目相对路径（含 homework/ 前缀，如 homework/报告.md）；
-    // local 源为绝对路径（bob-sandbox 小程序文件）。直接用 f.path 作为打开路径。
-    const openGroupFile = (f: { name: string; path: string; source?: 'project' | 'local' }) => {
-      const isLocal = f.source === 'local';
-      bus.publish(BusEvents.fileOpen, {
-        source: isLocal ? 'local' : 'project',
-        path: f.path,
-        name: f.name,
-      });
-    };
-    const groupFilePath = (f: { path: string; source?: 'project' | 'local' }) =>
-      f.source === 'local' ? f.path : `${projectPath}/${f.path}`;
-
-    return (
-      <div className="mt-0.5">
-        {groups.map((g) => {
-          const key = `${projId}:${g.kind}`;
-          const isOpen = homeworkOpenGroups.has(key);
-          return (
-            <div key={key}>
-              {/* 类别目录行：文件夹图标 + 标签 + 文件数 */}
-              <div
-                className="group relative flex cursor-pointer items-center rounded-md py-1 transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ paddingLeft: `${15 + levelIndent(depth + 1)}px` }}
-                onClick={() => {
-                  toggleHomeworkGroup(key);
-                }}
-                title={g.label}
-              >
-                {isOpen ? (
-                  <FolderOpen className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--primary)' }} />
-                ) : (
-                  <Folder className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                )}
-                <span className="min-w-0 flex-1 truncate text-sm" style={{ color: 'var(--ink)' }}>
-                  {g.label}
-                </span>
-                <span
-                  className="flex-shrink-0 text-xs"
-                  style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
-                >
-                  {g.files.length}
-                </span>
-                {/* 打开该类别文件夹按钮（Finder，hover 显示，仅桌面环境） */}
-                {isDesktop() && g.files.length > 0 && (
-                  <button
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      const projFile = g.files.find((f) => f.source !== 'local');
-                      if (!projFile) return;
-                      const abs = groupFilePath(projFile);
-                      const dir = abs.lastIndexOf('/') > 0 ? abs.slice(0, abs.lastIndexOf('/')) : abs;
-                      const res = await desktop.openFile(dir);
-                      if (!res.success && res.error) {
-                        console.error('打开类别文件夹失败:', res.error);
-                      }
-                    }}
-                    className="mr-1 hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--info-soft)] group-hover:block"
-                    style={{ color: 'var(--info)' }}
-                    title="Open homework folder in Finder"
-                  >
-                    <ExternalLink className="h-3 w-3" />
-                  </button>
-                )}
-              </div>
-              {/* 展开：该类别下的文件 */}
-              {isOpen && g.files.length > 0 && (
-                <div>
-                  {g.files.map((f) => {
-                    const fic = fileIcon(f.extension);
-                    return (
-                      <div
-                        key={`${key}:${f.path}`}
-                        className="group flex items-center"
-                        style={{ paddingLeft: '16px' }}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setCtxMenu({
-                            x: e.clientX,
-                            y: e.clientY,
-                            filePath: groupFilePath(f),
-                            fileName: f.name,
-                            isDir: false,
-                          });
-                        }}
-                      >
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openGroupFile(f);
-                          }}
-                          className="flex flex-1 min-w-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
-                        >
-                          <FileText className="h-3.5 w-3.5 flex-shrink-0" style={{ color: fic.color }} />
-                          <span
-                            className="flex-shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{ backgroundColor: `${fic.color}18`, color: fic.color }}
-                          >
-                            {fic.label}
-                          </span>
-                          <FileName name={f.name} className="flex-1 truncate text-sm" style={{ color: 'var(--ink)' }} />
-                        </button>
-                        {/* homework 中 AI 节点输出的 markdown 文档：用本地默认软件打开 */}
-                        {isDesktop() && /^\.md$/i.test(f.extension ?? '') && (
-                          <button
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              const res = await desktop.openFile(groupFilePath(f));
-                              if (!res.success && res.error) console.error('打开文档失败:', res.error);
-                            }}
-                            className="mr-1 hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--info-soft)] group-hover:block"
-                            style={{ color: 'var(--info)' }}
-                            title="Open with default app"
-                          >
-                            <ExternalLink className="h-3 w-3" />
-                          </button>
-                        )}
-                        {/* 节点输出文件删除（同步清理归属清册） */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleDeleteHomeworkFile(groupFilePath(f));
-                          }}
-                          className="mr-1 hidden flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--danger-soft)] group-hover:block"
-                          style={{ color: 'var(--danger)' }}
-                          title="Delete from homework"
-                        >
-                          <Trash className="h-3 w-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
-  // 旧行内展开树渲染已被右栏 Finder 列式浏览取代（保留函数体待后续清理，标记使用以免误报）
-  void renderFileTree;
-  void renderProjectKindGroups;
-
   return (
     <>
       {/* 侧边条 rail 已移除（2026-09-01）：全部按钮迁至 ⌘F 面板底部图标栏；
@@ -1578,19 +1971,36 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             <span style={{ width: 1, height: 16, backgroundColor: 'var(--line-soft)' }} />
             {(() => {
               const cp = projects.find((p) => p.id === currentId) || null;
+              const canOpenFolder = isDesktop() && !!cp?.path;
               return (
-                <button
-                  type="button"
-                  onClick={(e) => toggleWsSwitch(e)}
-                  className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                  title={cp ? `Switch project (${cp.name})` : 'No active project'}
-                >
-                  <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: cp ? 'var(--primary)' : 'var(--ink-muted)' }} />
-                  <span className="max-w-[220px] truncate font-medium" style={{ color: cp ? 'var(--ink)' : 'var(--ink-muted)' }}>
-                    {cp ? cp.name : 'No project'}
-                  </span>
-                  <ChevronDown className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-faint)' }} />
-                </button>
+                <div className="flex min-w-0 items-center rounded-md px-1.5 py-1 transition-colors hover:bg-[var(--paper-hover)]">
+                  {/* 项目图标即「打开项目文件夹」：原右侧 Open in Finder 按钮已并入此图标 */}
+                  <button
+                    type="button"
+                    disabled={!canOpenFolder}
+                    onClick={async () => {
+                      if (!cp?.path) return;
+                      const res = await desktop.openFile(cp.path);
+                      if (!res.success && res.error) console.error('打开文件夹失败:', res.error);
+                    }}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded disabled:cursor-default"
+                    title={canOpenFolder ? 'Open in Finder' : 'No active project'}
+                    aria-label="Open in Finder"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: cp ? 'var(--primary)' : 'var(--ink-muted)' }} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => toggleWsSwitch(e)}
+                    className="flex min-w-0 items-center gap-1 text-left text-sm"
+                    title={cp ? `Switch project (${cp.name})` : 'No active project'}
+                  >
+                    <span className="max-w-[220px] truncate font-medium" style={{ color: cp ? 'var(--ink)' : 'var(--ink-muted)' }}>
+                      {cp ? cp.name : 'No project'}
+                    </span>
+                    <ChevronDown className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-faint)' }} />
+                  </button>
+                </div>
               );
             })()}
             {(() => {
@@ -1606,121 +2016,46 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                       {cp.category}
                     </span>
                   )}
-                  {cp.note && (
-                    <Button
-                      type="button"
-                      onClick={() => openEditMeta(cp)}
-                      variant="ghost"
-                      tone="neutral"
-                      size="icon-sm"
-                      title={cp.note}
-                    >
-                      <StickyNote className="h-3 w-3" />
-                    </Button>
-                  )}
-                  {isDesktop() && cp.path && (
-                    <Button
-                      type="button"
-                      onClick={async () => {
-                        const res = await desktop.openFile(cp.path);
-                        if (!res.success && res.error) console.error('打开文件夹失败:', res.error);
-                      }}
-                      variant="ghost"
-                      tone="neutral"
-                      size="icon-sm"
-                      title="Open in Finder"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                    </Button>
-                  )}
                 </>
               );
             })()}
-            {/* 上下文操作（作用于当前打开的文件夹；仅 materials 下目录时可用） */}
-            {(() => {
-              if (wsView !== 'files' || !currentId || wsOpenPath.length === 0) return null;
-              const roots = projectFiles.get(currentId) || [];
-              if (roots.length === 0) return null;
-              let node: FileNode | null = null;
-              let arr = roots;
-              for (const nm of wsOpenPath) {
-                const f = arr.find((x) => x.type === 'directory' && x.name === nm);
-                if (!f) { node = null; break; }
-                node = f;
-                arr = f.children ?? [];
-              }
-              if (!node) return null;
-              const rel = node.rel ?? wsOpenPath.join('/');
-              if (rel !== 'materials' && !rel.startsWith('materials/')) return null;
-              const matRel = rel.replace(/^materials\/?/, '');
-              const isRoot = rel === 'materials';
-              return (
-                <>
-                  <span style={{ width: 1, height: 16, backgroundColor: 'var(--line-soft)' }} />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    tone="neutral"
-                    size="icon-sm"
-                    title="Upload file to this folder"
-                    onClick={() => {
-                      setUploadTargetFolder(matRel);
-                      setTimeout(() => uploadInputRef.current?.click(), 50);
-                    }}
-                  >
-                    <Upload className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    tone="neutral"
-                    size="icon-sm"
-                    title="Upload folder"
-                    onClick={() => {
-                      setUploadTargetFolder(matRel);
-                      setTimeout(() => uploadFolderInputRef.current?.click(), 50);
-                    }}
-                  >
-                    <FolderUp className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    tone="neutral"
-                    size="icon-sm"
-                    title="New subfolder"
-                    onClick={() => {
-                      setNewFolderParent(matRel);
-                      setNewFolderName('');
-                      setNewFolderVisible(true);
-                    }}
-                  >
-                    <FolderPlus className="h-3.5 w-3.5" />
-                  </Button>
-                  {!isRoot && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      tone="neutral"
-                      size="icon-sm"
-                      title="Delete folder"
-                      onClick={() => {
-                        if (confirm(`Delete folder "${node?.name}" and all its contents?`)) handleDeleteMaterial(matRel, true);
-                      }}
-                    >
-                      <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
-                    </Button>
-                  )}
-                </>
-              );
-            })()}
+            {/* materials 的操作（上传文件 / 上传文件夹 / 新建子文件夹 / 重命名 / 删除）与授权入口，已统一收敛至 materials 文件夹行右侧的 ⋮ 菜单 */}
             <div className="flex-1" />
+            {/* 搜索框：随视图切换目标——Files 搜文件名（全树扁平匹配）/ Log 搜日志条目。
+                onPointerDown 阻止冒泡，否则输入框内点击会触发标题栏拖动把手 */}
+            <div className="relative min-w-[104px] max-w-[240px] flex-[2]" onPointerDown={(e) => e.stopPropagation()}>
+              <Search
+                className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2"
+                style={{ color: 'var(--ink-faint)' }}
+              />
+              <input
+                type="text"
+                value={wsQuery}
+                onChange={(e) => setWsQuery(e.target.value)}
+                placeholder={wsView === 'files' ? 'Search files' : 'Search activity'}
+                aria-label={wsView === 'files' ? 'Search files' : 'Search activity'}
+                className="h-6 w-full cursor-text select-text rounded-md border bg-transparent pl-6 pr-5 text-xs outline-none transition-colors placeholder:text-[var(--ink-faint)]"
+                style={{ borderColor: 'var(--line-soft)', color: 'var(--ink)' }}
+              />
+              {wsQuery && (
+                <button
+                  type="button"
+                  onClick={() => setWsQuery('')}
+                  className="absolute right-0.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded-full transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink-faint)' }}
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
             {/* 视图切换：文件（Finder 列式）/ 日志（项目流水账） */}
             <div
               className="flex shrink-0 items-center gap-0.5 rounded-md p-0.5"
               style={{ backgroundColor: 'var(--paper-soft)' }}
             >
-              {([['files', '文件'], ['log', '日志']] as const).map(([key, label]) => {
+              {([['files', 'Files'], ['log', 'Log']] as const).map(([key, label]) => {
                 const active = wsView === key;
                 return (
                   <button
@@ -1734,13 +2069,25 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                       fontWeight: active ? 500 : 400,
                       boxShadow: active ? '0 1px 2px color-mix(in srgb, var(--ink) 12%, transparent)' : 'none',
                     }}
-                    title={key === 'files' ? '文件树' : '项目流水账'}
+                    title={key === 'files' ? 'File tree' : 'Project activity'}
                   >
                     {label}
                   </button>
                 );
               })}
             </div>
+            {/* 编译文稿（账本）：只读查看档案员归并出的条目，不落盘 */}
+            <Button
+              type="button"
+              onClick={() => setLedgerOpen(true)}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              title="Compiled ledger"
+              aria-label="Compiled ledger"
+            >
+              <BookOpen className="h-3.5 w-3.5" />
+            </Button>
             {/* 回收站（2026-09-12 自左侧栏迁入，替代原刷新按钮）；打开 workspace 已自动刷新，无需手动刷新 */}
             <Button
               type="button"
@@ -1770,15 +2117,20 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           {/* 主体（日志视图）：项目流水账，按日期分组 */}
           {wsView === 'log' && (
             currentId ? (
-              <ProjectActivityLog projectId={currentId} refreshKey={logRefreshKey} />
+              <ProjectActivityLog
+                projectId={currentId}
+                refreshKey={logRefreshKey}
+                query={wsLogQuery}
+                onQueryChange={setWsLogQuery}
+              />
             ) : (
               <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-sm" style={{ color: 'var(--ink-muted)' }}>
-                暂无项目
+                No project
               </div>
             )
           )}
 
-          {/* 主体（文件视图）：Finder 列式浏览（当前项目与切换已入标题栏） */}
+          {/* 主体（文件视图）：materials 扁平清单 + 标签筛选，其余目录为可折叠树（当前项目与切换已入标题栏） */}
           {wsView === 'files' && (
           <div className="flex min-h-0 flex-1">
             {(() => {
@@ -1786,8 +2138,21 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               return (
                 <>
 
-                  {/* ── 右栏：当前项目文件树 ── */}
-                  <div className="flex min-w-0 flex-1 flex-col">
+                  {/* ── 右栏：当前项目文件清单 ──（拖入 OS 文件上传到 materials 根目录） */}
+                  <div
+                    className="relative flex min-w-0 flex-1 flex-col"
+                    onDragOver={handleMaterialsDragOver}
+                    onDragLeave={handleMaterialsDragLeave}
+                    onDrop={handleMaterialsDrop}
+                    style={materialsDragActive ? { outline: '1.5px dashed var(--primary)', outlineOffset: -2, backgroundColor: 'color-mix(in oklab, var(--primary) 5%, transparent)' } : undefined}
+                  >
+                    {materialsDragActive && (
+                      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center pt-2">
+                        <span className="rounded-full px-2.5 py-1 text-xs" style={{ backgroundColor: 'var(--primary)', color: '#fff' }}>
+                          Drop to upload to materials
+                        </span>
+                      </div>
+                    )}
                     {!currentProject ? (
                       <div className="flex flex-1 items-center justify-center p-4">
                         <div className="w-full rounded-md border border-dashed px-3 py-5 text-center" style={{ borderColor: 'var(--line)' }}>
@@ -1812,26 +2177,76 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                       </div>
                     ) : (
                       <>
-                        {/* Finder 列式浏览：每列显示一层内容，点目录推入右侧新列 */}
-                        <div className="flex min-h-0 flex-1 overflow-x-auto">
+                        {/* 项目文件容器：本身不滚动，滚动交给内部列表（标签栏 / 多选条固定在顶部） */}
+                        <div className="flex min-h-0 flex-1 flex-col px-1 py-1">
                           {(() => {
                             const roots = projectFiles.get(currentProject.id) || [];
                             const isLoading = loadingFiles.has(currentProject.id) && roots.length === 0;
-                            const childrenAt = (prefix: string[]): FileNode[] => {
-                              let arr = roots;
-                              for (const nm of prefix) {
-                                const d = arr.find((x) => x.type === 'directory' && x.name === nm);
-                                if (!d || !d.children) return [];
-                                arr = d.children;
-                              }
-                              return arr;
-                            };
-                            const totalCols = 1 + wsOpenPath.length;
 
                             if (roots.length === 0) {
                               return (
                                 <div className="flex w-full items-center justify-center py-6 text-xs" style={{ color: 'var(--ink-muted)' }}>
                                   {isLoading ? 'Loading...' : 'Empty'}
+                                </div>
+                              );
+                            }
+
+                            // 搜索态：全树扁平匹配（目录/文件名 + 会话标题），命中以「文件名 + 所在路径」列表呈现
+                            const fileQuery = wsFileQuery.trim().toLowerCase();
+                            if (fileQuery) {
+                              const hits: {
+                                rel: string;
+                                name: string;
+                                label: string;
+                                isDir: boolean;
+                                extension?: string;
+                                parent: string[];
+                                /** 命中项的所有祖先目录 rel：点击时逐层展开，使结果在树中可见 */
+                                ancestorRels: string[];
+                              }[] = [];
+                              const walk = (nodes: FileNode[], prefix: string[], ancestorRels: string[]) => {
+                                for (const n of nodes) {
+                                  const rel = n.rel ?? (prefix.length ? [...prefix, n.name].join('/') : n.name);
+                                  const label = n.title || n.name;
+                                  if (n.name.toLowerCase().includes(fileQuery) || label.toLowerCase().includes(fileQuery)) {
+                                    hits.push({ rel, name: n.name, label, isDir: n.type === 'directory', extension: n.extension, parent: prefix, ancestorRels });
+                                  }
+                                  if (n.type === 'directory' && n.children?.length) walk(n.children, [...prefix, n.name], [...ancestorRels, rel]);
+                                }
+                              };
+                              walk(roots, [], []);
+                              return (
+                                <div className="flex w-full flex-1 flex-col">
+                                  <div className="shrink-0 px-1.5 py-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                    {hits.length === 0 ? 'No matching files' : `${hits.length} ${hits.length === 1 ? 'match' : 'matches'}`}
+                                  </div>
+                                  {hits.map((h) => (
+                                    <button
+                                      key={h.rel}
+                                      type="button"
+                                      onClick={() => {
+                                        // 目录 → 展开其祖先链与自身；文件 → 展开祖先链并打开
+                                        updateWsExpanded((prev) => new Set([...prev, ...h.ancestorRels, ...(h.isDir ? [h.rel] : [])]));
+                                        if (!h.isDir) bus.publish(BusEvents.fileOpen, { source: 'project', path: h.rel, name: h.name });
+                                      }}
+                                      className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                      title={h.rel}
+                                    >
+                                      {h.isDir ? (
+                                        <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                                      ) : (
+                                        <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fileIcon(h.extension).color }} />
+                                      )}
+                                      <span className="shrink-0 truncate" style={{ color: 'var(--ink)' }}>
+                                        {h.label}
+                                      </span>
+                                      {h.parent.length > 0 && (
+                                        <span className="min-w-0 flex-1 truncate text-[11px]" style={{ color: 'var(--ink-faint)' }}>
+                                          {h.parent.join('/')}
+                                        </span>
+                                      )}
+                                    </button>
+                                  ))}
                                 </div>
                               );
                             }
@@ -1861,116 +2276,793 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                 <MoreVertical className="h-3.5 w-3.5" />
                               </button>
                             );
+                            // materials / homework 目录 ⋮ 按钮：菜单收纳上传 / 授权 / 进入多选等目录级操作。
+                            // 根行内为 hover 渐显；标签栏上常显（alwaysVisible=true）并取更小尺寸（compact=true）
+                            const dirMenuButton = (rel: string, scope: TagScope, alwaysVisible = false, compact = false) => (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setMaterialsMenu({
+                                    x: rect.right - 192,
+                                    y: rect.bottom + 4,
+                                    rel,
+                                    name: rel.split('/').pop() || rel,
+                                    isRoot: true,
+                                    scope,
+                                  });
+                                }}
+                                className={cn(
+                                  'flex shrink-0 items-center justify-center rounded transition-opacity hover:bg-[var(--paper-hover)] hover:opacity-100',
+                                  compact ? 'h-4 w-4' : 'h-5 w-5',
+                                  !alwaysVisible && 'opacity-0 group-hover:opacity-100',
+                                )}
+                                style={{ color: 'var(--ink-muted)' }}
+                                title="More actions"
+                                aria-label="More actions"
+                              >
+                                <MoreVertical className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+                              </button>
+                            );
 
-                            const renderRow = (c: number, node: FileNode, prefix: string[]) => {
-                              const rel = node.rel ?? (prefix.length ? [...prefix, node.name].join('/') : node.name);
-                              const isUnderMaterials = rel === 'materials' || rel.startsWith('materials/');
-                              const materialsRel = rel.startsWith('materials') ? rel.replace(/^materials\/?/, '') : '';
-                              if (node.type === 'directory') {
-                                const isOpen = wsOpenPath[c] === node.name;
-                                const authed = isMaterialsAuthed(currentProject.id);
-                                return (
-                                  <div key={node.name} className="group relative flex items-center rounded-md pr-1" style={isOpen ? { backgroundColor: 'color-mix(in oklab, var(--primary) 9%, transparent)' } : undefined}>
-                                    <button
-                                      type="button"
-                                      onClick={() => setWsOpenPath((prev) => [...prev.slice(0, c), node.name])}
-                                      className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                                      title={node.title || node.name}
-                                    >
-                                      {isOpen ? (
-                                        <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
-                                      ) : (
-                                        <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                                      )}
-                                      <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--ink)' }}>
-                                        {node.title || node.name}
-                                      </span>
-                                    </button>
-                                    {isUnderMaterials && (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          toggleMaterialsAuth(currentProject.id);
-                                        }}
-                                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                                        style={{ color: authed ? 'var(--success)' : 'var(--ink-muted)' }}
-                                        title={authed ? 'AI read/write authorized, click to revoke' : 'Authorize AI read/write for this directory (@ mentions, file tools)'}
-                                        aria-label={authed ? 'Revoke AI access' : 'Authorize AI access'}
-                                      >
-                                        {authed ? (
-                                          <ShieldCheck className="h-3 w-3" />
-                                        ) : (
-                                          <Shield className="h-3 w-3" />
-                                        )}
-                                      </button>
-                                    )}
-                                    {!DEFAULT_ROOT_DIRS.has(rel) && !isUnderHomeworkSystemDir(rel) && rowMenuButton(node, rel, true)}
-                                  </div>
-                                );
+                            // 资料已统一为单一 materials 目录：界面不再分组（树内拖拽随之取消），
+                            // 改为扁平文件清单 + 自定义标签筛选。
+                            const materialsNode = roots.find((n) => (n.rel ?? n.name) === 'materials') || null;
+                            /** 资料行：rel 为项目内相对路径，parent 为所在子目录链（扁平后用于提示历史嵌套） */
+                            interface MaterialRow { rel: string; name: string; parent: string[]; extension?: string }
+                            /** 摊平 materials 子树：目录仅用于定位，最终以文件为单位成列 */
+                            const flattenMaterials = (nodes: FileNode[], prefix: string[]): MaterialRow[] => {
+                              const out: MaterialRow[] = [];
+                              for (const n of nodes) {
+                                const rel = n.rel ?? (prefix.length ? [...prefix, n.name].join('/') : n.name);
+                                if (n.type === 'directory') {
+                                  if (n.children?.length) out.push(...flattenMaterials(n.children, [...prefix, n.name]));
+                                  continue;
+                                }
+                                out.push({ rel, name: n.name, parent: prefix, extension: n.extension });
                               }
-                              const fic = fileIcon(node.extension);
+                              return out;
+                            };
+                            const materialRows = materialsNode?.children?.length
+                              ? flattenMaterials(materialsNode.children, ['materials'])
+                              : [];
+                            /** 作用域根相对路径（即标签表键）：如 materials/a/b.pdf → a/b.pdf */
+                            const scopeRel = (scope: TagScope, rel: string): string =>
+                              rel.startsWith(scope + '/') ? rel.slice(scope.length + 1) : rel;
+                            /** 某文件的标签（标签表键为所在作用域根下的相对路径） */
+                            const tagsOfRel = (scope: TagScope, rel: string): string[] =>
+                              fileTags[scope][scopeRel(scope, rel)] ?? [];
+                            /** 该行是否通过当前标签筛选（单选）：'' 为 All（全部通过），UNTAGGED_FILTER 仅匹配无标签行 */
+                            const matchesTagFilter = (scope: TagScope, rel: string): boolean => {
+                              const sel = tagFilter[scope];
+                              if (!sel) return true;
+                              const tags = tagsOfRel(scope, rel).map((t) => t.toLowerCase());
+                              if (sel === UNTAGGED_FILTER) return tags.length === 0;
+                              return tags.includes(sel.toLowerCase());
+                            };
+                            const visibleMaterialRows = materialRows.filter((row) => matchesTagFilter('materials', row.rel));
+                            /** 收集 materials 下的全部子目录（项目内相对路径）：空文件夹也要作为分组出现，才能拖入 */
+                            const collectMaterialDirs = (nodes: FileNode[], prefix: string[]): string[] => {
+                              const out: string[] = [];
+                              for (const n of nodes) {
+                                if (n.type !== 'directory') continue;
+                                out.push(n.rel ?? [...prefix, n.name].join('/'));
+                                if (n.children?.length) out.push(...collectMaterialDirs(n.children, [...prefix, n.name]));
+                              }
+                              return out;
+                            };
+                            /** 分组视图：按文件所在的来源文件夹归组（直属 materials 根的归入 Root 组，恒排最后）。
+                             *  不做标签筛选时列出全部文件夹（含空文件夹，供拖入）；筛选时只保留有命中文件的分组 */
+                            const materialGroups = (() => {
+                              if (!materialsGrouped) return [] as { dir: string; title: string; rows: MaterialRow[] }[];
+                              const rowsByDir = new Map<string, MaterialRow[]>();
+                              for (const row of visibleMaterialRows) {
+                                const dir = row.parent.join('/'); // 含首段 materials
+                                const list = rowsByDir.get(dir);
+                                if (list) list.push(row);
+                                else rowsByDir.set(dir, [row]);
+                              }
+                              const filtering = tagFilter.materials !== '';
+                              const dirs = filtering
+                                ? [...rowsByDir.keys()]
+                                : ['materials', ...collectMaterialDirs(materialsNode?.children ?? [], ['materials']), ...rowsByDir.keys()];
+                              const groups = [...new Set(dirs)].map((dir) => ({
+                                dir,
+                                title: dir === 'materials' ? 'Root' : dir.slice('materials/'.length),
+                                rows: rowsByDir.get(dir) ?? [],
+                              }));
+                              const root = groups.filter((g) => g.dir === 'materials');
+                              const others = groups
+                                .filter((g) => g.dir !== 'materials')
+                                .sort((a, b) => a.title.localeCompare(b.title, 'zh'));
+                              return [...others, ...root];
+                            })();
+                            /** 打开某作用域的标签编辑弹层（行内 Tag 按钮 / 标签胶囊共用） */
+                            const openTagEditor = (
+                              e: React.MouseEvent<HTMLButtonElement>,
+                              scope: TagScope,
+                              rel: string,
+                            ) => {
+                              e.stopPropagation();
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setTagFilterMenu(null);
+                              setTagDraft('');
+                              setTagEditor({ x: rect.right - 208, y: rect.bottom + 4, scope, rel });
+                            };
+                            /** 根行筛选按钮：点击展开该作用域的标签筛选下拉（有选中项时高亮） */
+                            const tagFilterButton = (scope: TagScope, compact = false) => {
+                              const selected = tagFilter[scope];
+                              const active = selected !== '';
                               return (
-                                <div key={node.name} className="group relative flex items-center rounded-md pr-1">
+                                <button
+                                  type="button"
+                                  data-tag-filter-trigger
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    setTagEditor(null);
+                                    setTagFilterMenu((prev) => (
+                                      prev && prev.scope === scope
+                                        ? null
+                                        : { x: rect.right - 208, y: rect.bottom + 4, scope }
+                                    ));
+                                  }}
+                                  className={cn(
+                                    'flex shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]',
+                                    compact ? 'h-4 w-4' : 'h-5 w-5',
+                                  )}
+                                  style={{ color: active ? 'var(--primary)' : 'var(--ink-muted)' }}
+                                  title={active ? `Filtering by "${selected === UNTAGGED_FILTER ? 'Untagged' : selected}"` : 'Filter by tag'}
+                                  aria-label="Filter by tag"
+                                >
+                                  <Filter className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+                                </button>
+                              );
+                            };
+
+                            /** 多选：当前是否处于该作用域的多选态（仅同作用域的行可勾选） */
+                            const inSelection = (scope: TagScope): boolean => selection?.scope === scope;
+                            /** 多选：勾选框（选中填充主色 + 对勾） */
+                            const selectCheckbox = (checked: boolean) => (
+                              <span
+                                className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border"
+                                style={{
+                                  borderColor: checked ? 'var(--primary)' : 'var(--line)',
+                                  backgroundColor: checked ? 'var(--primary)' : 'transparent',
+                                }}
+                              >
+                                {checked && <Check className="h-2.5 w-2.5" style={{ color: '#fff' }} />}
+                              </span>
+                            );
+
+                            /** 资料根行展开态：与 homework / attachments 共用 wsExpanded（默认展开，按项目持久化）。
+                             *  两栏项目下根行已移除，此态不参与渲染 */
+                            const materialsExpanded = wsExpanded.has('materials');
+
+                            /** 资料根行：可折叠（清单已扁平，折叠即收起文件列表）；上传 / 授权等目录级操作集中在顶部标签栏。
+                             *  仅在单栏项目（无标签栏）下渲染 */
+                            const renderMaterialsRoot = (node: FileNode) => (
+                              <div key="materials" className="group relative flex items-center rounded-md pr-1 transition-colors" style={{ paddingLeft: 6 }}>
+                                {/* 折叠箭头已移除（与内容行首缩进对齐留空）：点击根行名称仍可折叠 / 展开 */}
+                                <span className="h-4 w-4 shrink-0" />
+                                <button
+                                  type="button"
+                                  onClick={() => toggleWsDir('materials')}
+                                  className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                  title={node.title || node.name}
+                                >
+                                  {materialsExpanded ? (
+                                    <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                                  ) : (
+                                    <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                                  )}
+                                  <span className="min-w-0 truncate" style={{ color: 'var(--ink)' }}>
+                                    {node.title || node.name}
+                                  </span>
+                                  {/* 筛选 / 计数 / ⋮ 已移至顶部标签栏；仅单栏项目（无标签栏）时留在根行 */}
+                                  {!tabbedRoots && tagFilterButton('materials')}
+                                  {!tabbedRoots && (
+                                    <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>
+                                      {`(${materialRows.length})`}
+                                    </span>
+                                  )}
+                                  <span className="min-w-0 flex-1" />
+                                </button>
+                                {!tabbedRoots && dirMenuButton('materials', 'materials')}
+                              </div>
+                            );
+
+                            /** 资料文件行：图标 + 文件名 + 归属子目录 + 标签 + 解析中 + 行操作 */
+                            const renderMaterialRow = (row: MaterialRow) => {
+                              const materialsRel = scopeRel('materials', row.rel);
+                              const tags = tagsOfRel('materials', row.rel);
+                              const parsing = parsingFiles.has(`${currentProject.id}::${materialsRel}`);
+                              const indexError = failedIndexFiles.get(`${currentProject.id}::${materialsRel}`);
+                              const parentPath = row.parent.slice(1).join('/'); // 去掉首段 materials
+                              const editTags = (e: React.MouseEvent<HTMLButtonElement>) =>
+                                openTagEditor(e, 'materials', materialsRel);
+                              // 多选态：整行点击改为勾选 / 取消勾选，行内标签与 ⋮ 暂时让位
+                              const selectable = inSelection('materials');
+                              const selected = selectable && (selection?.rels.has(row.rel) ?? false);
+                              return (
+                                <div
+                                  key={row.rel}
+                                  draggable
+                                  onDragStart={(e) => {
+                                    // 侧栏内部拖拽：分组视图把它拖到另一个来源文件夹即为真实移动
+                                    e.dataTransfer.setData(WS_ROW_DRAG_MIME, row.rel);
+                                    e.dataTransfer.effectAllowed = 'move';
+                                  }}
+                                  onDragEnd={() => setDragOverGroup(null)}
+                                  className={cn('group relative flex items-center rounded-md pr-1 pl-[26px] transition-colors', selected && 'bg-[var(--paper-hover)]')}
+                                >
                                   <button
                                     type="button"
-                                    onClick={() => bus.publish(BusEvents.fileOpen, { source: 'project', path: rel, name: node.name })}
-                                    className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                                    title={node.name}
+                                    onClick={() => {
+                                      if (selectable) { toggleSelected(row.rel); return; }
+                                      bus.publish(BusEvents.fileOpen, { source: 'project', path: row.rel, name: row.name });
+                                    }}
+                                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                    title={row.rel}
                                   >
-                                    <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fic.color }} />
-                                    <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--ink)' }}>
-                                      {node.name}
+                                    {selectable ? selectCheckbox(selected) : (
+                                      <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fileIcon(row.extension).color }} />
+                                    )}
+                                    <span className="shrink-0 truncate" style={{ color: 'var(--ink)' }}>
+                                      {row.name}
                                     </span>
+                                    {/* 分组视图下所在文件夹已由分组标题承担，行内不再重复显示 */}
+                                    {parentPath && !materialsGrouped && (
+                                      <span
+                                        className="min-w-0 max-w-[140px] truncate text-9 italic opacity-0 transition-opacity group-hover:opacity-100"
+                                        style={{ color: 'var(--ink-faint)' }}
+                                      >
+                                        {parentPath}
+                                      </span>
+                                    )}
                                   </button>
-                                  {isUnderMaterials && (
+                                  {renderTagChips(tags, !selectable, editTags)}
+                                  {!selectable && (
+                                    <button
+                                      type="button"
+                                      onClick={editTags}
+                                      className={cn(
+                                        'flex h-5 w-5 shrink-0 items-center justify-center rounded transition-opacity hover:bg-[var(--paper-hover)]',
+                                        tags.length > 0 ? 'opacity-60 hover:opacity-100' : 'opacity-0 hover:opacity-100 group-hover:opacity-100',
+                                      )}
+                                      style={{ color: 'var(--ink-muted)' }}
+                                      title="Edit tags"
+                                      aria-label="Edit tags"
+                                    >
+                                      <Tag className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  {parsing && (
+                                    <span
+                                      className="flex shrink-0 items-center gap-1 pr-1 text-10"
+                                      style={{ color: 'var(--ink-muted)' }}
+                                      title="Indexing content (local processing, no token cost)"
+                                    >
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                      Parsing
+                                    </span>
+                                  )}
+                                  {indexError && !parsing && (
                                     <button
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (confirm(`Delete file "${node.name}"?`)) handleDeleteMaterial(materialsRel, false);
+                                        void retryMaterialIndex(row.rel);
                                       }}
-                                      className="hidden shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--danger-soft)] group-hover:block"
+                                      className="flex shrink-0 items-center gap-1 pr-1 text-10 transition-opacity hover:opacity-70"
                                       style={{ color: 'var(--danger)' }}
-                                      title="Delete"
+                                      title={`Content indexing failed: ${indexError}`}
                                     >
-                                      <Trash className="h-3 w-3" />
+                                      <AlertTriangle className="h-3 w-3" />
+                                      Retry
                                     </button>
                                   )}
-                                  {rowMenuButton(node, rel, false)}
+                                  {!selectable && rowMenuButton({ name: row.name, type: 'file', extension: row.extension }, row.rel, false)}
                                 </div>
                               );
                             };
 
-                            const columns: ReactNode[] = [];
-                            for (let c = 0; c < totalCols; c++) {
-                              const prefix = wsOpenPath.slice(0, c);
-                              const children = childrenAt(prefix);
-                              columns.push(
-                                <div
-                                  key={c}
-                                  className={cn(
-                                    'flex flex-col border-r last:border-r-0',
-                                    c === 0 ? 'w-[140px] shrink-0' : 'min-w-[160px] flex-1',
-                                  )}
-                                  style={{
-                                    borderColor: 'var(--line-soft)',
-                                    ...(c === 0 ? { backgroundColor: 'var(--paper-soft)' } : {}),
-                                  }}
-                                >
-                                  <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
-                                    {children.length === 0 ? (
-                                      <div className="px-2 py-3 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
-                                        Empty
+                            /** materials 区块：文件清单（扁平，或按来源文件夹分组）。
+                             *  两栏项目下根行已移除（名称 / 计数由顶部标签栏承担），列表恒展开；
+                             *  单栏项目保留根行，仍可用它折叠列表 */
+                            const renderMaterialsBlock = (node: FileNode) => (
+                              <div key="materials" className="flex flex-col">
+                                {!tabbedRoots && renderMaterialsRoot(node)}
+                                {(tabbedRoots || materialsExpanded) && (
+                                  <>
+                                    {materialRows.length === 0 ? (
+                                      <div className="px-2 pb-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                        No materials yet
                                       </div>
+                                    ) : visibleMaterialRows.length === 0 ? (
+                                      <div className="px-2 pb-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                        No files match the selected tags
+                                      </div>
+                                    ) : materialsGrouped ? (
+                                      materialGroups.map((group, i) => (
+                                        <div
+                                          key={group.dir}
+                                          // 拖拽落点：把侧栏内部拖来的资料行移到该来源文件夹（OS 文件拖入仍走外层容器的既有逻辑）
+                                          onDragOver={(e) => {
+                                            if (!e.dataTransfer.types.includes(WS_ROW_DRAG_MIME)) return;
+                                            e.preventDefault();
+                                            e.dataTransfer.dropEffect = 'move';
+                                            setDragOverGroup(group.dir);
+                                          }}
+                                          onDragLeave={() => setDragOverGroup((prev) => (prev === group.dir ? null : prev))}
+                                          onDrop={(e) => {
+                                            const rel = e.dataTransfer.getData(WS_ROW_DRAG_MIME);
+                                            if (!rel) return; // 非侧栏内部拖拽：交给外层容器处理
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            setDragOverGroup(null);
+                                            void handleRowMove(rel, group.dir);
+                                          }}
+                                          className={cn(
+                                            'flex flex-col rounded-md transition-colors',
+                                            i > 0 && 'mt-1 border-t pt-1',
+                                            dragOverGroup === group.dir && 'bg-[var(--paper-hover)]',
+                                          )}
+                                          style={i > 0 ? { borderColor: 'var(--line-soft)' } : undefined}
+                                        >
+                                          {/* 分组标题：点击折叠 / 展开该分组（无折叠符号），右侧为该来源文件夹下的文件数；root（未分组）不提供删除 */}
+                                          <div className="group/head flex items-center rounded-md transition-colors">
+                                            <button
+                                              type="button"
+                                              onClick={() => toggleWsGroupCollapsed(`${currentProject.id}|m:${group.dir}`)}
+                                              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-0.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                                              title={group.title}
+                                            >
+                                              <Folder className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-faint)' }} />
+                                              <span className="min-w-0 truncate text-11" style={{ color: 'var(--ink-muted)' }}>
+                                                {group.title}
+                                              </span>
+                                              <span className="shrink-0 text-9" style={{ color: 'var(--ink-faint)' }}>
+                                                {`(${group.rows.length})`}
+                                              </span>
+                                            </button>
+                                            {group.dir !== 'materials' && (
+                                              <button
+                                                onClick={() => void handleDissolveGroup(group.dir, group.title)}
+                                                className="shrink-0 rounded p-0.5 opacity-0 transition-opacity group-hover/head:opacity-100"
+                                                style={{ color: 'var(--ink-faint)' }}
+                                                title="Delete group (files move to the ungrouped folder)"
+                                              >
+                                                <Trash className="h-3 w-3" />
+                                              </button>
+                                            )}
+                                          </div>
+                                          {!collapsedWsGroups.has(`${currentProject.id}|m:${group.dir}`) && group.rows.map(renderMaterialRow)}
+                                        </div>
+                                      ))
                                     ) : (
-                                      children.map((ch) => renderRow(c, ch, prefix))
+                                      visibleMaterialRows.map(renderMaterialRow)
                                     )}
-                                  </div>
-                                </div>,
+                                  </>
+                                )}
+                              </div>
+                            );
+
+                            // homework 同为界面扁平化（磁盘保持现状）：目录降级为行内小字归属提示，
+                            // 不再层层展开。深度优先摊平，使同一文件夹内的文件在清单中自然相邻。
+                            const homeworkNode = roots.find((n) => (n.rel ?? n.name) === 'homework') || null;
+                            /** 作业行：rel 为项目内相对路径，parent 为所在子目录链（扁平后用于提示归属） */
+                            interface HomeworkRow { rel: string; name: string; parent: string[]; extension?: string }
+                            /** 摊平 homework 子树：目录仅用于定位，最终以文件为单位成列 */
+                            const flattenHomework = (nodes: FileNode[], prefix: string[]): HomeworkRow[] => {
+                              const out: HomeworkRow[] = [];
+                              for (const n of nodes) {
+                                const rel = n.rel ?? (prefix.length ? [...prefix, n.name].join('/') : n.name);
+                                if (n.type === 'directory') {
+                                  if (n.children?.length) out.push(...flattenHomework(n.children, [...prefix, n.name]));
+                                  continue;
+                                }
+                                out.push({ rel, name: n.name, parent: prefix, extension: n.extension });
+                              }
+                              return out;
+                            };
+                            const homeworkRows = homeworkNode?.children?.length
+                              ? flattenHomework(homeworkNode.children, ['homework'])
+                              : [];
+                            const visibleHomeworkRows = homeworkRows.filter((row) => matchesTagFilter('homework', row.rel));
+
+                            /** 当前项目的 homework 归属表：文件（相对 homework 根）→ 来源会话 */
+                            const homeworkOwnerMap = homeworkOwners.get(currentProject.id) ?? {};
+                            /** 无归属（手动放入 / 老数据无清册条目）的兜底分组键，恒排最后 */
+                            const HOMEWORK_UNGROUPED = '\u0000ungrouped';
+                            /** 分组视图：按来源会话把可见文件行归组，组间以横线分隔 */
+                            const homeworkGroups = (() => {
+                              if (!homeworkGrouped) return [] as { key: string; title: string; rows: HomeworkRow[]; latest: number }[];
+                              const byKey = new Map<string, { key: string; title: string; rows: HomeworkRow[]; latest: number }>();
+                              for (const row of visibleHomeworkRows) {
+                                const owner = homeworkOwnerMap[scopeRel('homework', row.rel)];
+                                const key = owner?.nodeId || HOMEWORK_UNGROUPED;
+                                let group = byKey.get(key);
+                                if (!group) {
+                                  group = {
+                                    key,
+                                    title: owner ? (owner.title?.trim() || owner.nodeId.slice(0, 8)) : 'Ungrouped',
+                                    rows: [],
+                                    latest: 0,
+                                  };
+                                  byKey.set(key, group);
+                                }
+                                group.rows.push(row);
+                                // 组排序依据：该会话最新产出文件的 mtime
+                                if (owner) group.latest = Math.max(group.latest, owner.mtimeMs);
+                              }
+                              // 会话组按最近产出倒序；Ungrouped 恒排最后
+                              const list = [...byKey.values()]
+                                .filter((g) => g.key !== HOMEWORK_UNGROUPED)
+                                .sort((a, b) => b.latest - a.latest);
+                              const ungrouped = byKey.get(HOMEWORK_UNGROUPED);
+                              if (ungrouped) list.push(ungrouped);
+                              return list;
+                            })();
+
+                            /** 作业根行展开态：与 materials / attachments 共用 wsExpanded（首开默认折叠，按项目持久化）。
+                             *  两栏项目下根行已移除，此态不参与渲染 */
+                            const homeworkExpanded = wsExpanded.has('homework');
+
+                            /** 作业根行：可折叠（清单已扁平，折叠即收起文件列表）。仅在单栏项目（无标签栏）下渲染 */
+                            const renderHomeworkRoot = (node: FileNode) => (
+                              <div key="homework" className="group relative flex items-center rounded-md pr-1 transition-colors" style={{ paddingLeft: 6 }}>
+                                {/* 折叠箭头已移除（与内容行首缩进对齐留空）：点击根行名称仍可折叠 / 展开 */}
+                                <span className="h-4 w-4 shrink-0" />
+                                <button
+                                  type="button"
+                                  onClick={() => toggleWsDir('homework')}
+                                  className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                  title={node.title || node.name}
+                                >
+                                  {homeworkExpanded ? (
+                                    <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                                  ) : (
+                                    <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                                  )}
+                                  <span className="min-w-0 truncate" style={{ color: 'var(--ink)' }}>
+                                    {node.title || node.name}
+                                  </span>
+                                  {/* 筛选 / 计数 / ⋮ 已移至顶部标签栏；仅单栏项目（无标签栏）时留在根行。
+                                      会话分组切换（原 MessagesSquare 图标按钮）统一收进 ⋮ 菜单。 */}
+                                  {!tabbedRoots && tagFilterButton('homework')}
+                                  {!tabbedRoots && (
+                                    <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>
+                                      {`(${homeworkRows.length})`}
+                                    </span>
+                                  )}
+                                  <span className="min-w-0 flex-1" />
+                                </button>
+                                {!tabbedRoots && dirMenuButton('homework', 'homework')}
+                              </div>
+                            );
+
+                            /** 作业文件行：图标 + 文件名 + 归属子目录 + 标签 + 行操作 */
+                            const renderHomeworkRow = (row: HomeworkRow) => {
+                              const homeworkRel = scopeRel('homework', row.rel);
+                              const tags = tagsOfRel('homework', row.rel);
+                              const parentPath = row.parent.slice(1).join('/'); // 去掉首段 homework
+                              const editTags = (e: React.MouseEvent<HTMLButtonElement>) =>
+                                openTagEditor(e, 'homework', homeworkRel);
+                              // 多选态：整行点击改为勾选 / 取消勾选，行内标签与 ⋮ 暂时让位
+                              const selectable = inSelection('homework');
+                              const selected = selectable && (selection?.rels.has(row.rel) ?? false);
+                              return (
+                                <div
+                                  key={row.rel}
+                                  className={cn('group relative flex items-center rounded-md pr-1 pl-[26px] transition-colors', selected && 'bg-[var(--paper-hover)]')}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (selectable) { toggleSelected(row.rel); return; }
+                                      bus.publish(BusEvents.fileOpen, { source: 'project', path: row.rel, name: row.name });
+                                    }}
+                                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                    title={row.rel}
+                                  >
+                                    {selectable ? selectCheckbox(selected) : (
+                                      <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fileIcon(row.extension).color }} />
+                                    )}
+                                    <span className="shrink-0 truncate" style={{ color: 'var(--ink)' }}>
+                                      {row.name}
+                                    </span>
+                                    {parentPath && (
+                                      <span
+                                        className="min-w-0 max-w-[140px] truncate text-9 italic opacity-0 transition-opacity group-hover:opacity-100"
+                                        style={{ color: 'var(--ink-faint)' }}
+                                      >
+                                        {parentPath}
+                                      </span>
+                                    )}
+                                  </button>
+                                  {renderTagChips(tags, !selectable, editTags)}
+                                  {!selectable && (
+                                    <button
+                                      type="button"
+                                      onClick={editTags}
+                                      className={cn(
+                                        'flex h-5 w-5 shrink-0 items-center justify-center rounded transition-opacity hover:bg-[var(--paper-hover)]',
+                                        tags.length > 0 ? 'opacity-60 hover:opacity-100' : 'opacity-0 hover:opacity-100 group-hover:opacity-100',
+                                      )}
+                                      style={{ color: 'var(--ink-muted)' }}
+                                      title="Edit tags"
+                                      aria-label="Edit tags"
+                                    >
+                                      <Tag className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  {!selectable && rowMenuButton({ name: row.name, type: 'file', extension: row.extension }, row.rel, false)}
+                                </div>
                               );
-                            }
-                            return columns;
+                            };
+
+                            /** homework 区块：文件清单（扁平，或按来源会话分组）。
+                             *  两栏项目下根行已移除（名称 / 计数由顶部标签栏承担），列表恒展开；
+                             *  单栏项目保留根行，仍可用它折叠列表 */
+                            const renderHomeworkBlock = (node: FileNode) => (
+                              <div key="homework" className="flex flex-col">
+                                {!tabbedRoots && renderHomeworkRoot(node)}
+                                {(tabbedRoots || homeworkExpanded) && (
+                                  homeworkRows.length === 0 ? (
+                                    <div className="px-2 pb-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                      No files yet
+                                    </div>
+                                  ) : visibleHomeworkRows.length === 0 ? (
+                                    <div className="px-2 pb-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                                      No files match the selected tags
+                                    </div>
+                                  ) : homeworkGrouped ? (
+                                    homeworkGroups.map((group, i) => (
+                                      <div
+                                        key={group.key}
+                                        className={cn('flex flex-col', i > 0 && 'mt-1 border-t pt-1')}
+                                        style={i > 0 ? { borderColor: 'var(--line-soft)' } : undefined}
+                                      >
+                                        {/* 分组标题：点击折叠 / 展开该分组（无折叠符号），右侧为该会话产出的文件数 */}
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleWsGroupCollapsed(`${currentProject.id}|h:${group.key}`)}
+                                          className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                                          title={group.title}
+                                        >
+                                          <MessagesSquare className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-faint)' }} />
+                                          <span className="min-w-0 truncate text-11" style={{ color: 'var(--ink-muted)' }}>
+                                            {group.title}
+                                          </span>
+                                          <span className="shrink-0 text-9" style={{ color: 'var(--ink-faint)' }}>
+                                            {`(${group.rows.length})`}
+                                          </span>
+                                        </button>
+                                        {!collapsedWsGroups.has(`${currentProject.id}|h:${group.key}`) && group.rows.map(renderHomeworkRow)}
+                                      </div>
+                                    ))
+                                  ) : (
+                                    visibleHomeworkRows.map(renderHomeworkRow)
+                                  )
+                                )}
+                              </div>
+                            );
+
+                            /** 树行：折叠箭头 + 图标 + 名称 + 行尾操作（attachments 等仍为可折叠树） */
+                            const renderTreeRow = (node: FileNode, prefix: string[], depth: number): ReactNode => {
+                              const rel = node.rel ?? (prefix.length ? [...prefix, node.name].join('/') : node.name);
+                              const isDir = node.type === 'directory';
+                              const hasChildren = isDir && (node.children?.length ?? 0) > 0;
+                              const expanded = isDir && wsExpanded.has(rel);
+                              const rowStyle: React.CSSProperties = {
+                                paddingLeft: 6 + depth * 14,
+                                ...(expanded ? { backgroundColor: 'color-mix(in oklab, var(--primary) 9%, transparent)' } : {}),
+                              };
+                              return (
+                                <div key={rel} className="flex flex-col">
+                                  <div className="group relative flex items-center rounded-md pr-1 transition-colors" style={rowStyle}>
+                                    {isDir ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); if (hasChildren) toggleWsDir(rel); }}
+                                        className="flex h-4 w-4 shrink-0 items-center justify-center rounded"
+                                        style={{ color: 'var(--ink-muted)', visibility: hasChildren ? 'visible' : 'hidden' }}
+                                        title={expanded ? 'Collapse' : 'Expand'}
+                                        aria-label={expanded ? 'Collapse' : 'Expand'}
+                                      >
+                                        <ChevronRight className="h-3 w-3 transition-transform" style={{ transform: expanded ? 'rotate(90deg)' : 'none' }} />
+                                      </button>
+                                    ) : (
+                                      <span className="h-4 w-4 shrink-0" />
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!isDir) {
+                                          bus.publish(BusEvents.fileOpen, { source: 'project', path: rel, name: node.name });
+                                          return;
+                                        }
+                                        // 目录：折叠 / 展开（拖拽归组已取消，选中态不再需要）
+                                        if (hasChildren) toggleWsDir(rel);
+                                      }}
+                                      className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
+                                      title={isDir ? (node.title || node.name) : node.name}
+                                    >
+                                      {isDir ? (
+                                        expanded ? (
+                                          <FolderOpen className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                                        ) : (
+                                          <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                                        )
+                                      ) : (
+                                        <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fileIcon(node.extension).color }} />
+                                      )}
+                                      <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--ink)' }}>
+                                        {isDir ? (node.title || node.name) : node.name}
+                                      </span>
+                                    </button>
+                                    {isDir
+                                      ? (!DEFAULT_ROOT_DIRS.has(rel) && rowMenuButton(node, rel, true))
+                                      : rowMenuButton(node, rel, false)}
+                                  </div>
+                                  {expanded && hasChildren && (
+                                    <div className="flex flex-col">
+                                      {node.children!.map((ch) => renderTreeRow(ch, [...prefix, node.name], depth + 1))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            };
+
+                            /** 根目录标签栏：materials / homework 两栏切换（一次只显示一栏；其他目录仍在下方顺排）。
+                             *  两栏等宽平分，不随选中态伸缩；目录级操作（标签筛选 / 分组切换 / ⋮ 更多）
+                             *  统一收在该栏的标签上，随选中态显示；两栏项目下这两栏的根行不再渲染，名称 / 计数完全由标签承担 */
+                            const renderRootTabs = (active: 'materials' | 'homework') => (
+                              <div
+                                className="mx-2 mb-1 flex items-center gap-0.5 rounded-md p-px"
+                                style={{ backgroundColor: 'color-mix(in oklab, var(--line-soft) 80%, transparent)' }}
+                              >
+                                {(['materials', 'homework'] as const).map((key) => {
+                                  const isActive = key === active;
+                                  const count = key === 'materials' ? materialRows.length : homeworkRows.length;
+                                  return (
+                                    <div
+                                      key={key}
+                                      className="relative flex min-w-0 flex-1 items-center rounded"
+                                      style={isActive ? { backgroundColor: 'var(--paper)', boxShadow: 'var(--shadow-sm)' } : undefined}
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={() => setWsRootTab(key)}
+                                        className={cn(
+                                          'flex min-w-0 flex-1 items-center justify-center gap-1 rounded px-1.5 py-0.5 text-11 transition-colors',
+                                          !isActive && 'hover:bg-[var(--paper-hover)]',
+                                        )}
+                                        style={{ color: isActive ? 'var(--ink)' : 'var(--ink-muted)' }}
+                                        title={isActive ? `Showing ${key}` : `Show ${key}`}
+                                      >
+                                        <span className="min-w-0 truncate">{key === 'materials' ? 'Materials' : 'Homework'}</span>
+                                        <span className="shrink-0 text-9" style={{ color: 'var(--ink-faint)' }}>{`(${count})`}</span>
+                                      </button>
+                                      {/* 目录级操作按钮：绝对贴右（不参与标题居中计算），切栏时标题位置保持不变 */}
+                                      {isActive && (
+                                        <div className="absolute right-0 top-0 flex h-full items-center gap-0.5 pr-0.5">
+                                          {tagFilterButton(key, true)}
+                                          {dirMenuButton(key, key, true, true)}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+
+                            const hasMaterialsRoot = roots.some((n) => (n.rel ?? n.name) === 'materials');
+                            const hasHomeworkRoot = roots.some((n) => (n.rel ?? n.name) === 'homework');
+                            /** 两栏都在才有标签栏；只有一栏时直接用该栏，标签栏隐藏 */
+                            const tabbedRoots = hasMaterialsRoot && hasHomeworkRoot;
+                            const activeRootTab: 'materials' | 'homework' = tabbedRoots
+                              ? wsRootTab
+                              : (hasHomeworkRoot ? 'homework' : 'materials');
+
+                            return (
+                              <>
+                                {/* 标签栏固定在顶部；多选条紧随其下：两者都在滚动列表之外，不随列表滚动 */}
+                                {tabbedRoots && renderRootTabs(activeRootTab)}
+                                {selection && (() => {
+                                  const scope = selection.scope;
+                                  const count = selection.rels.size;
+                                  const allRels = allRelsInScope(scope);
+                                  const allSelected = allRels.length > 0 && allRels.every((rel) => selection.rels.has(rel));
+                                  const barButton = (
+                                    icon: React.ReactNode,
+                                    label: string,
+                                    onClick: (e: React.MouseEvent<HTMLButtonElement>) => void,
+                                    opts?: { disabled?: boolean; danger?: boolean; title?: string },
+                                  ) => (
+                                    <button
+                                      type="button"
+                                      onClick={onClick}
+                                      disabled={opts?.disabled}
+                                      title={opts?.title ?? label}
+                                      className="flex shrink-0 items-center gap-1 rounded-md px-1 py-0.5 text-10 transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                                      style={{ color: opts?.danger ? 'var(--danger)' : 'var(--ink)' }}
+                                    >
+                                      {icon}
+                                      {label}
+                                    </button>
+                                  );
+                                  // 多选条：无背景无边框，仅用下方一条分隔线与列表隔开
+                                  return (
+                                    <div
+                                      className="mb-1 flex shrink-0 flex-wrap items-center gap-0.5 border-b px-1 pb-1"
+                                      style={{ borderColor: 'var(--line-soft)' }}
+                                    >
+                                      <span className="shrink-0 px-1 text-10" style={{ color: 'var(--ink-muted)' }}>
+                                        {count} selected
+                                      </span>
+                                      {barButton(
+                                        <Check className="h-3 w-3" />,
+                                        allSelected ? 'Clear' : 'All',
+                                        () => setSelection((prev) => (prev ? { ...prev, rels: allSelected ? new Set() : new Set(allRels) } : prev)),
+                                        { title: allSelected ? 'Clear selection' : `Select all in ${scope}` },
+                                      )}
+                                      {barButton(
+                                        <Tag className="h-3 w-3" />,
+                                        'Tag',
+                                        (e) => {
+                                          const rect = e.currentTarget.getBoundingClientRect();
+                                          setTagDraft('');
+                                          setBatchTagMenu({ x: rect.right - 176, y: rect.bottom + 4 });
+                                        },
+                                        { disabled: count === 0, title: 'Add or remove a tag on the selected files' },
+                                      )}
+                                      {barButton(
+                                        <Archive className="h-3 w-3" />,
+                                        'Archive',
+                                        () => { void handleBatchArchive(); },
+                                        { disabled: count === 0, title: 'Move selected files to the archive' },
+                                      )}
+                                      {barButton(
+                                        <Copy className="h-3 w-3" />,
+                                        'Copy',
+                                        () => { void handleBatchCopy(); setSelection(null); },
+                                        { disabled: count === 0, title: 'Duplicate the selected files in place' },
+                                      )}
+                                      {barButton(
+                                        <Download className="h-3 w-3" />,
+                                        'Download',
+                                        () => { void handleBatchDownload(); },
+                                        { disabled: count === 0, title: 'Save copies to a local folder (e.g. Desktop)' },
+                                      )}
+                                      {barButton(
+                                        <Trash className="h-3 w-3" />,
+                                        'Delete',
+                                        () => { void handleBatchDelete(); },
+                                        { disabled: count === 0, danger: true, title: 'Delete selected files' },
+                                      )}
+                                      {barButton(
+                                        <X className="h-3 w-3" />,
+                                        'Cancel',
+                                        () => { setBatchTagMenu(null); setSelection(null); },
+                                        { title: 'Exit selection (Esc)' },
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                                {/* 文件清单：唯一的滚动区（隐藏滚动条，仍可滚动） */}
+                                <div className="flex min-h-0 flex-1 flex-col overflow-y-auto hide-scrollbar">
+                                  {roots.map((n) => {
+                                    const rootRel = n.rel ?? n.name;
+                                    if (rootRel === 'materials') return activeRootTab === 'materials' ? renderMaterialsBlock(n) : null;
+                                    if (rootRel === 'homework') return activeRootTab === 'homework' ? renderHomeworkBlock(n) : null;
+                                    return renderTreeRow(n, [], 0);
+                                  })}
+                                </div>
+                              </>
+                            );
                           })()}
                         </div>
                       </>
@@ -1984,14 +3076,11 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
 
           </div>
 
-          {/* 右缘调宽把手（拖动调宽） */}
+          {/* 右缘调宽把手（无可见视觉，仍可拖动调宽） */}
           <div
             data-ws-resize
             onPointerDown={(e) => startResize(e)}
             className="absolute inset-y-0 right-0 z-20 w-1.5 cursor-col-resize touch-none select-none"
-            style={{ transition: 'background-color 0.15s ease' }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'color-mix(in oklab, var(--primary) 25%, transparent)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
             title="Drag to resize"
             aria-label="Drag to resize"
           />
@@ -2084,102 +3173,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                   </div>
                 )}
               </div>
-            );
-          })()}
-        </div>,
-        document.body,
-      )}
-
-      {/* materials 目录「⋯」操作菜单（portal 挂 body，避免被浮层滚动容器裁切） */}
-      {materialMenu && typeof document !== 'undefined' && createPortal(
-        <div
-          data-material-menu
-          className="fixed z-[500] w-56 overflow-hidden rounded-lg border py-1 shadow-xl"
-          style={{ top: materialMenu.top, right: materialMenu.right, backgroundColor: 'var(--popover)', borderColor: 'var(--line)' }}
-        >
-          {(() => {
-            const authed = isMaterialsAuthed(materialMenu.projId);
-            const itemBase = 'flex w-full items-center gap-2 px-3 py-1.5 text-left text-13 transition-colors hover:bg-[var(--paper-hover)]';
-            return (
-              <>
-                {materialMenu.isRoot && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMaterialMenu(null);
-                      toggleMaterialsAuth(materialMenu.projId);
-                    }}
-                    className={itemBase}
-                    style={{ color: authed ? 'var(--success)' : 'var(--ink)' }}
-                  >
-                    {authed ? (
-                      <ShieldCheck className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--success)' }} />
-                    ) : (
-                      <Shield className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                    )}
-                    {authed ? 'Revoke AI access' : 'Authorize AI access'}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMaterialMenu(null);
-                    setUploadTargetFolder(materialMenu.materialsRelPath);
-                    setTimeout(() => uploadInputRef.current?.click(), 50);
-                  }}
-                  className={itemBase}
-                  style={{ color: 'var(--ink)' }}
-                >
-                  <Upload className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--info)' }} />
-                  Upload file
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMaterialMenu(null);
-                    setUploadTargetFolder(materialMenu.materialsRelPath);
-                    setTimeout(() => uploadFolderInputRef.current?.click(), 50);
-                  }}
-                  className={itemBase}
-                  style={{ color: 'var(--ink)' }}
-                >
-                  <FolderUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--info)' }} />
-                  Upload folder
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMaterialMenu(null);
-                    setNewFolderParent(materialMenu.materialsRelPath);
-                    setNewFolderName('');
-                    setNewFolderVisible(true);
-                  }}
-                  className={itemBase}
-                  style={{ color: 'var(--ink)' }}
-                >
-                  <FolderPlus className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
-                  New subfolder
-                </button>
-                {!materialMenu.isRoot && (
-                  <>
-                    <div className="my-1 h-px" style={{ backgroundColor: 'var(--line)' }} />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMaterialMenu(null);
-                        if (confirm(`Delete folder "${materialMenu.folderName}" and all its contents?`)) {
-                          handleDeleteMaterial(materialMenu.materialsRelPath, true);
-                        }
-                      }}
-                      className={itemBase}
-                      style={{ color: 'var(--danger)' }}
-                    >
-                      <Trash className="h-3.5 w-3.5 shrink-0" />
-                      Delete folder
-                    </button>
-                  </>
-                )}
-              </>
             );
           })()}
         </div>,
@@ -2365,135 +3358,24 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         document.body,
       )}
 
-      {/* 编辑分类/标签对话框（portal 到 body，避免被浮层祖先 z-40 stacking context 囚禁在画布 UI 层 z-[1500] 之下） */}
-      {editMetaProject && typeof document !== 'undefined' && createPortal(
-        <div
-          className="fixed inset-0 z-[1600] flex items-center justify-center"
-          style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
-          onClick={() => !savingMeta && setEditMetaProject(null)}
-        >
-          <div
-            className="rounded-2xl p-6 shadow-xl"
-            style={{
-              border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
-              backgroundColor: 'var(--popover)',
-              width: '360px',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="mb-1 text-base font-medium" style={{ color: 'var(--ink)' }}>
-              Project info
-            </h3>
-            <div className="mb-4 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>
-              {editMetaProject.name}
-            </div>
-
-            {/* 分类选择 */}
-            <div className="mb-4">
-              <div className="mb-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-                Category
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {PROJECT_CATEGORIES.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    disabled={savingMeta}
-                    onClick={() => setEditMetaCategory(editMetaCategory === c ? '' : c)}
-                    className="rounded-lg px-2.5 py-1 text-xs transition-colors"
-                    style={
-                      editMetaCategory === c
-                        ? { backgroundColor: 'var(--primary)', color: 'var(--paper)' }
-                        : { backgroundColor: 'var(--paper)', color: 'var(--ink-muted)', border: '1px solid var(--line)' }
-                    }
-                  >
-                    {c}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* 自定义标签（最多 2 个，并排显示） */}
-            <div>
-              <div className="mb-1.5 text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-                Tags (up to {PROJECT_TAG_LIMIT})
-              </div>
-              <div className="flex gap-2">
-                {[0, 1].map((i) => (
-                  <input
-                    key={i}
-                    type="text"
-                    placeholder={`Tag ${i + 1}`}
-                    value={editMetaTags[i] || ''}
-                    onChange={(e) => {
-                      const next = [...editMetaTags];
-                      next[i] = e.target.value;
-                      setEditMetaTags(next);
-                    }}
-                    disabled={savingMeta}
-                    className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-amber-400"
-                    style={{
-                      backgroundColor: 'var(--paper)',
-                      borderColor: 'var(--line)',
-                      color: 'var(--ink)',
-                    }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* 备注（自动字数计数，最多 100 字，空 = 清除） */}
-            <div className="mt-4">
-              <div className="mb-1.5 flex items-center justify-between text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>
-                <span>Note (up to {PROJECT_NOTE_MAX} characters, empty to clear)</span>
-                <span style={{ color: editMetaNote.length >= PROJECT_NOTE_MAX ? 'var(--danger, #e8463a)' : 'var(--ink-faint)' }}>
-                  {editMetaNote.length}/{PROJECT_NOTE_MAX}
-                </span>
-              </div>
-              <textarea
-                value={editMetaNote}
-                onChange={(e) => setEditMetaNote(e.target.value)}
-                disabled={savingMeta}
-                maxLength={PROJECT_NOTE_MAX}
-                rows={3}
-                placeholder="No note yet"
-                className="w-full resize-none rounded-xl border px-3 py-2 text-sm outline-none focus:border-amber-400"
-                style={{
-                  backgroundColor: 'var(--paper)',
-                  borderColor: 'var(--line)',
-                  color: 'var(--ink)',
-                }}
-              />
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                tone="neutral"
-                size="sm"
-                onClick={() => setEditMetaProject(null)}
-                disabled={savingMeta}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="solid"
-                tone="brand"
-                size="sm"
-                onClick={handleSaveProjectMeta}
-                disabled={savingMeta}
-                loading={savingMeta}
-              >
-                {savingMeta ? 'Saving...' : 'Save'}
-              </Button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
-
       {/* 节点回收站对话框 */}
       <TrashDialog open={trashOpen} onOpenChange={setTrashOpen} projectId={projectId} />
+
+      {/* 编译文稿（只读）：账本 wiki 条目现拼成一份文稿，磁盘不落盘 */}
+      <LedgerDocPanel open={ledgerOpen} onOpenChange={setLedgerOpen} projectId={projectId} />
+
+      {/* 归档箱对话框（materials / homework 作用域）：恢复 / 永久删除后刷新文件树与标签表 */}
+      {archiveScope && (
+        <ArchiveDialog
+          open
+          onOpenChange={(v) => { if (!v) setArchiveScope(null); }}
+          scope={archiveScope}
+          onChanged={() => {
+            if (currentId) loadProjectFilesRef.current?.(currentId);
+            void loadFileTags();
+          }}
+        />
+      )}
 
       {/* 隐藏文件上传 input（通过右键菜单触发） */}
       <input
@@ -2523,72 +3405,199 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         }}
       />
 
-      {/* 行内新建文件夹输入框（portal 到 body，避免被浮层祖先 z-40 stacking context 囚禁在画布 UI 层 z-[1500] 之下） */}
-      {newFolderVisible && typeof document !== 'undefined' && createPortal(
-        <div
-          className="fixed inset-0 z-[1600] flex items-center justify-center"
-          style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
-          onClick={() => setNewFolderVisible(false)}
-        >
+      {/* 标签编辑弹层（portal 到 body）：勾选已有标签即时增删，输入框回车可新建 */}
+      {tagEditor && typeof document !== 'undefined' && (() => {
+        const current = fileTags[tagEditor.scope][tagEditor.rel] ?? [];
+        // 候选标签：该作用域预设标签 + 全部已用标签并集，保证「新建过的标签」可被同作用域任何文件复用
+        const known = candidateTagsOf(tagEditor.scope, current);
+        const addTag = () => {
+          const t = tagDraft.trim();
+          if (!t) return;
+          if (!current.some((x) => x.toLowerCase() === t.toLowerCase())) {
+            void saveFileTags(tagEditor.scope, tagEditor.rel, [...current, t]);
+          }
+          setTagDraft('');
+        };
+        return createPortal(
           <div
-            className="rounded-2xl p-5 shadow-xl"
+            data-tag-menu
+            className="fixed z-[1600] w-52 overflow-hidden rounded-xl shadow-2xl"
             style={{
+              left: Math.max(8, Math.min(tagEditor.x, window.innerWidth - 216)),
+              top: Math.min(tagEditor.y, window.innerHeight - 280),
               border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
               backgroundColor: 'var(--popover)',
-              width: '300px',
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="mb-3 text-sm font-medium" style={{ color: 'var(--ink)' }}>
-              New Subfolder
-            </h3>
-            <p className="mb-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
-              Parent directory: {newFolderParent}
-            </p>
+            <div className="max-h-48 overflow-y-auto py-1">
+              {known.length === 0 ? (
+                <div className="px-3 py-1 text-xs" style={{ color: 'var(--ink-faint)' }}>
+                  No tags yet
+                </div>
+              ) : known.map((t) => {
+                const active = current.some((x) => x.toLowerCase() === t.toLowerCase());
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => {
+                      toggleFileTag(tagEditor.scope, tagEditor.rel, t, current);
+                      // 打上 / 取消标签后立即收起弹层（与批量标签弹层行为一致）
+                      setTagEditor(null);
+                      setTagDraft('');
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ color: 'var(--ink)' }}
+                  >
+                    <Check className="h-3.5 w-3.5 shrink-0" style={{ color: active ? 'var(--primary)' : 'var(--ink-faint)', opacity: active ? 1 : 0.35 }} />
+                    <span className="min-w-0 flex-1 truncate" style={{ color: tagTextColor(t) }}>{t}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="border-t p-2" style={{ borderColor: 'var(--line-soft)' }}>
+              <input
+                type="text"
+                value={tagDraft}
+                onChange={(e) => setTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); addTag(); }
+                  if (e.key === 'Escape') { setTagEditor(null); setTagDraft(''); }
+                }}
+                placeholder="New tag, press Enter"
+                className="w-full rounded-md border px-2 py-1 text-xs outline-none"
+                style={{ borderColor: 'var(--input-border)', color: 'var(--ink)', backgroundColor: 'var(--paper)' }}
+              />
+            </div>
+          </div>,
+          document.body,
+        );
+      })()}
+
+      {/* 标签筛选下拉（portal 到 body）：根行右侧筛选按钮触发，单选 All / 具体标签 / Untagged */}
+      {tagFilterMenu && typeof document !== 'undefined' && (() => {
+        const scope = tagFilterMenu.scope;
+        const selected = tagFilter[scope];
+        const known = candidateTagsOf(scope, selected && selected !== UNTAGGED_FILTER ? [selected] : []);
+        /** 单选项行：value 为 '' 时代表 All；labelColor 仅用于具体标签（All / Untagged 保持默认墨色） */
+        const optionRow = (value: string, label: string, title: string, labelColor?: string) => {
+          const active = selected === value;
+          return (
+            <button
+              key={value || '__all'}
+              type="button"
+              onClick={() => {
+                selectTagFilter(scope, value);
+                setTagFilterMenu(null); // 选中即收起下拉（All / 标签 / Untagged 一致）
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+              title={title}
+            >
+              <Check className="h-3.5 w-3.5 shrink-0" style={{ color: active ? 'var(--primary)' : 'var(--ink-faint)', opacity: active ? 1 : 0.35 }} />
+              <span className="min-w-0 flex-1 truncate" style={labelColor ? { color: labelColor } : undefined}>{label}</span>
+            </button>
+          );
+        };
+        return createPortal(
+          <div
+            data-tag-filter-menu
+            className="fixed z-[1600] w-52 overflow-hidden rounded-xl shadow-2xl"
+            style={{
+              left: Math.max(8, Math.min(tagFilterMenu.x, window.innerWidth - 216)),
+              top: Math.min(tagFilterMenu.y, window.innerHeight - 300),
+              border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
+              backgroundColor: 'var(--popover)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-3 pb-1 pt-2">
+              <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
+                {scope === 'materials' ? 'Filter materials' : 'Filter homework'}
+              </span>
+            </div>
+            <div className="max-h-56 overflow-y-auto py-1">
+              {optionRow('', 'All', 'Show all files')}
+              {known.length === 0 ? (
+                <div className="px-3 py-1 text-xs" style={{ color: 'var(--ink-faint)' }}>
+                  No tags yet
+                </div>
+              ) : known.map((t) => optionRow(t, t, `Filter by "${t}"`, tagTextColor(t)))}
+              {optionRow(UNTAGGED_FILTER, 'Untagged', 'Filter files without tags')}
+            </div>
+          </div>,
+          document.body,
+        );
+      })()}
+
+      {/* 批量打标签弹层（portal 到 body）：多选操作条 Tag 按钮触发；所选全部已有该标签则整体移除，否则整体补齐 */}
+      {batchTagMenu && selection && typeof document !== 'undefined' && createPortal(
+        <div
+          data-batch-tag-menu
+          className="fixed z-[1600] w-44 overflow-hidden rounded-xl shadow-2xl"
+          style={{
+            left: Math.max(8, Math.min(batchTagMenu.x, window.innerWidth - 184)),
+            top: Math.min(batchTagMenu.y, window.innerHeight - 300),
+            border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
+            backgroundColor: 'var(--popover)',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 pb-1 pt-2">
+            <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
+              {`Tag ${selection.rels.size} ${selection.rels.size === 1 ? 'file' : 'files'}`}
+            </span>
+          </div>
+          <div className="max-h-56 overflow-y-auto py-1">
+            {(() => {
+              // 各标签在所选集合中的命中情况：全部命中 → 勾选（再点即整体移除）；部分命中 → 半选并标出计数
+              const items = selectionPaths();
+              return candidateTagsOf(selection.scope).map((t) => {
+                const key = t.toLowerCase();
+                const have = items.filter((it) =>
+                  (fileTags[selection.scope][it.scopeRel] ?? []).some((x) => x.toLowerCase() === key),
+                ).length;
+                const all = items.length > 0 && have === items.length;
+                const some = have > 0 && !all;
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => void applyBatchTag(t)}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ color: 'var(--ink)' }}
+                    title={all ? `Remove "${t}" from all selected files` : `Add "${t}" to the selected files`}
+                  >
+                    {all ? (
+                      <Check className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
+                    ) : some ? (
+                      <Minus className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                    ) : (
+                      <Tag className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-faint)' }} />
+                    )}
+                    <span className="min-w-0 flex-1 truncate" style={{ color: tagTextColor(t) }}>{t}</span>
+                    {some && (
+                      <span className="shrink-0 text-9" style={{ color: 'var(--ink-faint)' }}>{`${have}/${items.length}`}</span>
+                    )}
+                  </button>
+                );
+              });
+            })()}
+          </div>
+          <div className="border-t p-2" style={{ borderColor: 'var(--line-soft)' }}>
             <input
               type="text"
-              autoFocus
-              placeholder="Folder name"
-              value={newFolderName}
-              onChange={(e) => setNewFolderName(e.target.value)}
+              value={tagDraft}
+              onChange={(e) => setTagDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && newFolderName.trim()) {
-                  handleCreateFolder();
-                }
-                if (e.key === 'Escape') {
-                  setNewFolderVisible(false);
-                  setNewFolderName('');
-                }
+                if (e.key === 'Enter') { e.preventDefault(); const v = tagDraft; setTagDraft(''); void applyBatchTag(v); }
+                if (e.key === 'Escape') { setBatchTagMenu(null); setTagDraft(''); }
               }}
-              className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:border-amber-400"
-              style={{
-                backgroundColor: 'var(--paper)',
-                borderColor: 'var(--line)',
-                color: 'var(--ink)',
-              }}
+              placeholder="New tag, press Enter"
+              className="w-full rounded-md border px-2 py-1 text-xs outline-none"
+              style={{ borderColor: 'var(--input-border)', color: 'var(--ink)', backgroundColor: 'var(--paper)' }}
             />
-            <div className="mt-4 flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                tone="neutral"
-                size="sm"
-                onClick={() => {
-                  setNewFolderVisible(false);
-                  setNewFolderName('');
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="solid"
-                tone="brand"
-                size="sm"
-                onClick={handleCreateFolder}
-                disabled={!newFolderName.trim()}
-              >
-                Create
-              </Button>
-            </div>
           </div>
         </div>,
         document.body,
@@ -2614,9 +3623,9 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             title={activeNodeIdRef.current ? undefined : 'No node selected — click a node on the canvas first'}
           >
             <ArrowUpCircle className="h-3.5 w-3.5" style={{ color: activeNodeIdRef.current ? 'var(--primary)' : 'var(--ink-muted)' }} />
-            <span className="flex-1">发送到当前节点</span>
+            <span className="flex-1">Send to current node</span>
             {!activeNodeIdRef.current && (
-              <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>无节点</span>
+              <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>No node</span>
             )}
           </button>
           <button
@@ -2625,7 +3634,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             style={{ color: 'var(--ink)' }}
           >
             <PlusCircle className="h-3.5 w-3.5" style={{ color: 'var(--info)' }} />
-            <span className="flex-1">发送到新建节点</span>
+            <span className="flex-1">Send to new node</span>
           </button>
 
           <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
@@ -2642,7 +3651,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             style={{ color: 'var(--ink)' }}
           >
             <Pencil className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
-            <span className="flex-1">重命名</span>
+            <span className="flex-1">Rename</span>
           </button>
           <button
             onClick={() => handleDelete(ctxMenu.filePath, ctxMenu.fileName)}
@@ -2650,7 +3659,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             style={{ color: 'var(--danger)' }}
           >
             <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
-            <span className="flex-1">删除</span>
+            <span className="flex-1">Delete</span>
           </button>
         </div>,
         document.body,
@@ -2663,11 +3672,15 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           className="fixed z-[1600] w-44 overflow-hidden rounded-xl shadow-2xl"
           style={{
             left: Math.max(8, Math.min(rowMenu.x, window.innerWidth - 184)),
-            top: Math.min(rowMenu.y, window.innerHeight - 168),
+            top: Math.min(rowMenu.y, window.innerHeight - 208),
             border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
             backgroundColor: 'var(--popover)',
           }}
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            // 任一项点击后即收起菜单（含 Delete 等未自行关闭的项），避免菜单悬留
+            e.stopPropagation();
+            setRowMenu(null);
+          }}
         >
           <button
             onClick={() => {
@@ -2684,12 +3697,45 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             Rename
           </button>
           <button
-            onClick={() => handleRowCopy(rowMenu.filePath)}
+            onClick={() => { void handleRowCopy({ filePath: rowMenu.filePath, fileName: rowMenu.fileName, isDir: rowMenu.isDir }); }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
             style={{ color: 'var(--ink)' }}
+            title="Duplicate this item in place"
           >
             <Copy className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
             Copy
+          </button>
+          {/* 归档：移入 <作用域根>/.archive/（仅 materials / homework 的非根条目；归档后从文件树消失，可在归档箱恢复） */}
+          {(() => {
+            const rel = rowMenu.rel;
+            const isMaterials = rel.startsWith('materials/');
+            const isHomework = rel.startsWith('homework/');
+            const enabled = isMaterials || isHomework;
+            return (
+              <button
+                onClick={() => {
+                  setRowMenu(null);
+                  if (isMaterials) void applyArchive('materials', [rel.slice('materials/'.length)]);
+                  else if (isHomework) void applyArchive('homework', [rel.slice('homework/'.length)]);
+                }}
+                disabled={!enabled}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                style={{ color: enabled ? 'var(--ink)' : 'var(--ink-muted)' }}
+                title={enabled ? 'Move to the archive' : 'Only materials and homework items can be archived'}
+              >
+                <Archive className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                Archive
+              </button>
+            );
+          })()}
+          <button
+            onClick={() => handleRowDownload({ filePath: rowMenu.filePath, fileName: rowMenu.fileName })}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: 'var(--ink)' }}
+            title="Save a copy to a local folder (e.g. Desktop)"
+          >
+            <Download className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+            Download to…
           </button>
           <button
             onClick={() => handleRowShare(rowMenu.filePath, rowMenu.fileName, rowMenu.isDir)}
@@ -2715,6 +3761,185 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         document.body,
       )}
 
+      {/* materials 行 ⋮ 菜单（portal 到 body）：标题栏与行内的 materials 操作统一收纳于此，悬停 ⋮ 后展开 */}
+      {materialsMenu && typeof document !== 'undefined' && (() => {
+        const rel = materialsMenu.rel;
+        const matRel = rel.replace(/^materials\/?/, '');
+        const authed = currentId ? isMaterialsAuthed(currentId) : false;
+        const projectPath = projects.find((p) => p.id === currentId)?.path;
+        return createPortal(
+          <div
+            data-materials-menu
+            className="fixed z-[1600] w-48 overflow-hidden rounded-xl shadow-2xl"
+            style={{
+              left: Math.max(8, Math.min(materialsMenu.x, window.innerWidth - 200)),
+              top: Math.min(materialsMenu.y, window.innerHeight - 300),
+              border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
+              backgroundColor: 'var(--popover)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => {
+                setMaterialsMenu(null);
+                setUploadTargetFolder(matRel);
+                setTimeout(() => uploadInputRef.current?.click(), 50);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+            >
+              <Upload className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+              Upload file
+            </button>
+            <button
+              onClick={() => {
+                setMaterialsMenu(null);
+                setUploadTargetFolder(matRel);
+                setTimeout(() => uploadFolderInputRef.current?.click(), 50);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+            >
+              <FolderUp className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+              Upload folder
+            </button>
+            {/* 进入多选：勾选该作用域下的文件后执行批量删除 / 打标签 / 下载 / 复制 */}
+            <button
+              onClick={() => startSelection(materialsMenu.scope)}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+              title="Select multiple files for batch actions"
+            >
+              <SquareCheck className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+              Select…
+            </button>
+
+            {/* 归档箱：查看该作用域下已归档的条目，支持批量恢复 / 永久删除 */}
+            <button
+              onClick={() => {
+                const scope = materialsMenu.scope;
+                setMaterialsMenu(null);
+                setArchiveScope(scope);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+              title="View archived items (restore or delete permanently)"
+            >
+              <Archive className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+              Archived…
+            </button>
+
+            {/* 视图切换：按来源会话分组 ↔ 扁平清单（homework 根目录专属，默认按会话分组，按项目记忆） */}
+            {materialsMenu.isRoot && materialsMenu.scope === 'homework' && (
+              <>
+                <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
+                <button
+                  onClick={() => {
+                    setMaterialsMenu(null);
+                    toggleHomeworkGrouped();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink)' }}
+                  title={homeworkGrouped ? 'Currently grouped by source conversation' : 'Currently a flat list'}
+                >
+                  <MessagesSquare className="h-3.5 w-3.5" style={{ color: homeworkGrouped ? 'var(--primary)' : 'var(--ink-muted)' }} />
+                  <span className="min-w-0 flex-1 truncate">Group by conversation</span>
+                </button>
+              </>
+            )}
+
+            {/* 视图切换：按来源文件夹分组 ↔ 扁平清单（materials 根目录专属，默认扁平，按项目记忆） */}
+            {materialsMenu.isRoot && materialsMenu.scope === 'materials' && (
+              <>
+                <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
+                <button
+                  onClick={() => {
+                    setMaterialsMenu(null);
+                    toggleMaterialsGrouped();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink)' }}
+                  title={materialsGrouped ? 'Currently grouped by source folder' : 'Currently a flat list'}
+                >
+                  <Folder className="h-3.5 w-3.5" style={{ color: materialsGrouped ? 'var(--primary)' : 'var(--ink-muted)' }} />
+                  <span className="min-w-0 flex-1 truncate">Group by folder</span>
+                </button>
+                {/* 新建分组：在 materials 下真实新建文件夹（filePath 复用为「materials 根相对的目标目录」，空串即根） */}
+                <button
+                  onClick={() => {
+                    setMaterialsMenu(null);
+                    // 新建的分组只在分组视图可见，顺手切过去，避免「建完看不到」
+                    if (!materialsGrouped) toggleMaterialsGrouped();
+                    setRenaming({ filePath: '', oldName: '', kind: 'newFolder' });
+                    setRenameValue('');
+                    setRenameError(null);
+                    setTimeout(() => renameRef.current?.focus(), 50);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink)' }}
+                  title="Create a folder on disk; drag files onto it to move them in"
+                >
+                  <FolderPlus className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                  <span className="min-w-0 flex-1 truncate">New folder</span>
+                </button>
+              </>
+            )}
+
+            <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
+
+            <button
+              onClick={() => {
+                setMaterialsMenu(null);
+                if (currentId) void toggleMaterialsAuth(currentId);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+              style={{ color: 'var(--ink)' }}
+              title={authed ? 'AI read/write authorized, click to revoke' : 'Authorize AI read/write for this directory (@ mentions, file tools)'}
+            >
+              {authed ? (
+                <ShieldCheck className="h-3.5 w-3.5" style={{ color: 'var(--success)' }} />
+              ) : (
+                <Shield className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+              )}
+              {authed ? 'Revoke AI access' : 'Authorize AI access'}
+            </button>
+
+            {!materialsMenu.isRoot && (
+              <>
+                <div className="mx-2 my-1 border-t" style={{ borderColor: 'var(--line-soft)' }} />
+                <button
+                  onClick={() => {
+                    setMaterialsMenu(null);
+                    if (!projectPath) return;
+                    setRenaming({ filePath: `${projectPath}/${rel}`, oldName: materialsMenu.name });
+                    setRenameValue(materialsMenu.name);
+                    setRenameError(null);
+                    setTimeout(() => renameRef.current?.focus(), 50);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink)' }}
+                >
+                  <Pencil className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                  Rename folder
+                </button>
+                <button
+                  onClick={() => {
+                    setMaterialsMenu(null);
+                    if (confirm(`Delete folder "${materialsMenu.name}" and all its contents?`)) handleDeleteMaterial(matRel, true);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--danger)' }}
+                >
+                  <Trash className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
+                  Delete folder
+                </button>
+              </>
+            )}
+          </div>,
+          document.body,
+        );
+      })()}
+
       {/* 重命名弹窗（portal 到 body：浮层祖先 z-40 会创建 stacking context，不 portal 会被画布 UI 层 z-[1500] 遮挡） */}
       {renaming && typeof document !== 'undefined' && createPortal(
         <div
@@ -2729,7 +3954,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             onClick={(e) => e.stopPropagation()}
           >
             <p className="mb-3 text-sm font-medium font-display" style={{ color: 'var(--ink)' }}>
-              重命名
+              {renaming.kind === 'newFolder' ? 'New folder' : 'Rename'}
             </p>
             <input
               ref={renameRef}
@@ -2745,8 +3970,14 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               }}
               className="mb-3 w-full rounded-md border px-3 py-2 text-sm outline-none"
               style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+              placeholder={renaming.kind === 'newFolder' ? 'Folder name' : undefined}
               autoFocus
               onFocus={(e) => {
+                // 新建文件夹：文件夹名里的点不是扩展名，不做主干选中
+                if (renaming.kind === 'newFolder') {
+                  e.target.select();
+                  return;
+                }
                 const dotIdx = renameValue.lastIndexOf('.');
                 if (dotIdx > 0) {
                   e.target.setSelectionRange(0, dotIdx);
@@ -2767,16 +3998,16 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                 size="sm"
                 onClick={() => { setRenaming(null); setRenameError(null); }}
               >
-                取消
+                Cancel
               </Button>
               <Button
                 variant="solid"
                 tone="brand"
                 size="sm"
                 onClick={handleRename}
-                disabled={!renameValue.trim() || renameValue.trim() === renaming.oldName}
+                disabled={!renameValue.trim() || (renaming.kind !== 'newFolder' && renameValue.trim() === renaming.oldName)}
               >
-                确认
+                Confirm
               </Button>
             </div>
           </div>

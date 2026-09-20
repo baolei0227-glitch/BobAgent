@@ -1,5 +1,6 @@
 /**
- * 附件读取场景工具：read_attachment（附件全文解析）+ read_material（项目参考资料读取）。
+ * 统一资料读取工具：read_attachment 一个入口读全部资料——对话附件（materials/{附件目录}/…，
+ * 历史附件仍在 attachments/{nodeId}/…）、项目资料（materials/…）、以及用户授权目录的绝对路径；索引按内容 hash 寻址，两套资料共用一份识别结果。
  * 从 tools/index.ts 抽出，导入路径保持不变（index.ts 通过 ...attachmentToolDefs 聚合）。
  * 依赖方向单向：./shared（formatSize / auditLog / isReadablePath / READ_CAPACITY / OCR_MAX_LENGTH / truncate）+
  * 仅以 import type 依赖 index.ts 的类型。
@@ -7,16 +8,28 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, writeFile, stat, mkdir } from 'fs/promises';
-import { join, resolve, isAbsolute, sep, extname, basename, dirname } from 'path';
+import { join, resolve, relative, isAbsolute, sep, extname, basename, dirname } from 'path';
 import { homedir } from 'os';
 import { formatSize, auditLog, isReadablePath, READ_CAPACITY, OCR_MAX_LENGTH, truncate } from './shared';
+import { collapseMarkedLines, docxHtmlToText, docxXmlFallbackText, xlsxRowsToLines } from '@/lib/parse/office-text';
 import type { Tool, ToolExecContext } from './index';
+import type { IndexedMaterial, OcrIndexPage } from '@/lib/materials/indexer';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * 内层分片上限：按**请求模型窗口**收缩（与 executeTool 外层上限同源，见 ctx.maxOutputChars）。
+ * 为什么不恒定用 READ_CAPACITY：外层截断砍的是尾巴，而续读 offset 提示在尾巴上——
+ * 内层吐 15 万、外层砍到 1.9 万（128k 模型）时提示被一起切掉，模型只能瞎猜续读点。
+ * 上限对齐后每一段都完整可见、提示不被截，长材料仍能一段段读完（1M 模型按 T_turn 上限 5 万收缩）。
+ */
+function readCapForContext(ctx?: ToolExecContext): number {
+  const outer = ctx?.maxOutputChars;
+  return typeof outer === 'number' && outer > 0 ? Math.min(READ_CAPACITY, outer) : READ_CAPACITY;
+}
+
 /** 附件/文档文本的通用分片返回：从 offset 处截取单次上限，头部标注实际区间；发生截断时给出续读 offset。
- *  读取类工具的内层上限按 1M 模型设定，外层仍会按模型上下文二次截断——
- *  因此只要触发截断就提示模型携带 offset 续读，避免长文档后半内容拿不到。 */
+ *  cap 由调用方按请求窗口传入（readCapForContext），外层不再二次砍掉续读提示。 */
 function chunkedAttachmentReturn(
   path: string,
   size: number,
@@ -32,7 +45,7 @@ function chunkedAttachmentReturn(
   const part = fullText.slice(start, end);
   const header = `Attachment: ${path} (${formatSize(size)}, ${typeLabel}, chars ${start}-${end} of ${total})`;
   if (end >= total) return `${header}\n\n${part}`;
-  return `${header}\n\n${part}\n\n...(本段 ${part.length} 字符，共 ${total} 字符；继续读取后半部分请再次调用本工具并携带 offset="${end}")`;
+  return `${header}\n\n${part}\n\n[truncated] ...(本段 ${part.length} 字符，共 ${total} 字符；继续读取后半部分请再次调用本工具并携带 offset="${end}")`;
 }
 
 /** mammoth 无内置 TS 类型：仅声明 read_attachment 用到的 convertToHtml */
@@ -41,62 +54,6 @@ interface MammothLike {
     input: { path?: string; buffer?: Buffer },
     options?: Record<string, unknown>,
   ) => Promise<{ value: string; messages: unknown[] }>;
-}
-
-/** 把「已用 \n（段落/行尾）与 \u0001（单元格分隔）标记过的 XML/HTML」收敛成紧凑文本行 */
-function collapseMarkedLines(marked: string): string {
-  const s = marked
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;|&#39;/g, "'");
-  const lines: string[] = [];
-  for (const raw of s.split('\n')) {
-    const cells = raw.split('\u0001').map((c) => c.replace(/\s+/g, ' ').trim());
-    // 去掉行尾空列与行首空列标记，避免悬挂分隔符
-    while (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
-    const line = cells.join(' | ').replace(/^\s*\|\s*/, '').trim();
-    if (line.length > 0) lines.push(line);
-  }
-  return lines.join('\n');
-}
-
-/** docx → 结构化文本：mammoth HTML（保留段落/标题/有序列表编号/表格行列）→ 紧凑文本 */
-function docxHtmlToText(html: string): string {
-  let s = html;
-  // 有序列表编号（支持 start 属性），避免列表退化为无编号的 "- "
-  s = s.replace(/<ol([^>]*)>([\s\S]*?)<\/ol>/gi, (_m, attrs: string, inner: string) => {
-    const start = Number((/start="(\d+)"/i.exec(String(attrs)) ?? [])[1] ?? 1);
-    let n = start;
-    const numbered = inner.replace(/<li([^>]*)>([\s\S]*?)<\/li>/gi, (_lm, _la: string, body: string) => `${n++}. ${body}`);
-    return `\n${numbered}`;
-  });
-  s = s.replace(/<table[^>]*>/gi, '\n');
-  s = s.replace(/<\/table>/gi, '\n');
-  s = s.replace(/<\/tr>/gi, '\n');
-  s = s.replace(/<\/td>|<\/th>/gi, '\u0001');
-  s = s.replace(/<li[^>]*>/gi, '\n- ');
-  s = s.replace(/<br\s*\/?>/gi, '\n');
-  s = s.replace(/<\/h([1-6])>/gi, '\n');
-  s = s.replace(/<\/li>/gi, '\n');
-  s = s.replace(/<\/p>/gi, '\n');
-  s = s.replace(/<\/div>/gi, '\n');
-  return collapseMarkedLines(s);
-}
-
-/** docx 兜底（无 mammoth 时）：直接解 document.xml 做轻量结构提取 */
-function docxXmlFallbackText(xml: string): string {
-  return collapseMarkedLines(
-    xml
-      .replace(/<w:tab\/>/g, '\u0001')
-      .replace(/<w:br\/>/g, '\n')
-      .replace(/<\/w:tc>/g, '\u0001')
-      .replace(/<\/w:tr>/g, '\n')
-      .replace(/<\/w:p>/g, '\n'),
-  );
 }
 
 /**
@@ -170,8 +127,9 @@ function splitOcrTextToPages(text: string): OcrPageBlock[] {
 
 /**
  * 组装扫描件 OCR 的 read_attachment 返回：
- * 1. 按 pages 参数筛选页（未指定则读全部）；
- * 2. 超过 OCR_MAX_LENGTH 时按页边界截断，并在**头部**标注已返回的页码区间与续读方式
+ * 1. 按 pages 参数筛选页（未指定则读全部）；命中页默认扩窗为「命中页 ±1」（scope=context），
+ *    scope=exact 只回给定页，scope=full 维持原样（读全份/给定范围）；
+ * 2. 超过上限（min(OCR_MAX_LENGTH, 请求窗口)）时按页边界截断，并在**头部**标注已返回的页码区间与续读方式
  *    （头部而非尾部：外层 maxOutput 会二次截断，标注放尾部会被切掉）。
  */
 function buildOcrAttachmentOutput(
@@ -179,13 +137,21 @@ function buildOcrAttachmentOutput(
   fileSize: number,
   meta: string,
   pages: OcrPageBlock[],
-  opts: { pagesArg?: string; totalPages?: number; rendered?: number },
+  opts: { pagesArg?: string; scope?: string; totalPages?: number; rendered?: number; maxChars?: number },
 ): string {
+  // 请求窗口小于 1M 时同步收缩：否则头部标注的"本次返回第 X-Y 页"会与实际可见内容不符
+  const cap = opts.maxChars && opts.maxChars > 0 ? Math.min(OCR_MAX_LENGTH, opts.maxChars) : OCR_MAX_LENGTH;
   const maxPage = opts.totalPages && opts.totalPages > 0
     ? opts.totalPages
     : Math.max(0, ...pages.map((p) => p.index));
   const wanted = parsePageRange(opts.pagesArg, maxPage);
-  const ordered = (wanted ? pages.filter((p) => wanted.includes(p.index)) : pages)
+  const scope = (opts.scope ?? '').trim().toLowerCase();
+  // 默认范围（scope=context）：命中页 ±1 扩窗（夹在 1..maxPage 内）；exact 严格只回给定页；full 原样
+  const expandDefault = !!wanted && scope !== 'exact' && scope !== 'full';
+  const picked = expandDefault
+    ? [...new Set(wanted.flatMap((p) => [p - 1, p, p + 1]))].filter((p) => p >= 1 && p <= maxPage)
+    : wanted;
+  const ordered = (picked ? pages.filter((p) => picked.includes(p.index)) : pages)
     .slice()
     .sort((a, b) => a.index - b.index);
 
@@ -198,7 +164,7 @@ function buildOcrAttachmentOutput(
       ? `⚠ 本页内容密集（约 ${pageText.length} 字符，接近单页转录上限），转录可能不完整，建议分页复核。\n`
       : '';
     const block = `[Page ${p.index}]\n${denseNote}${pageText}`;
-    if (body.length + block.length + 2 > OCR_MAX_LENGTH) {
+    if (body.length + block.length + 2 > cap) {
       truncatedAt = p.index;
       break;
     }
@@ -208,19 +174,24 @@ function buildOcrAttachmentOutput(
   const firstShown = ordered.length > 0 ? ordered[0].index : 1;
   const shownCount = truncatedAt > 0 ? Math.max(0, truncatedAt - firstShown) : ordered.length;
   const header = `Attachment: ${path} (${formatSize(fileSize)}, ${meta}, ${shownCount}/${opts.rendered ?? maxPage} pages)`;
+  // 默认扩窗（命中页 ±1）时显式告知模型，并给出换路方式；exact/full 时不加
+  const scopeNote = expandDefault
+    ? 'Default range: hit page ±1. Use scope="exact" for only the given page(s), or pass wider pages="a-b" explicitly (counts toward the per-task tool budget).\n'
+    : '';
 
   if (truncatedAt > 0) {
     // 续读提示放头部，确保外层 maxOutput 截断后仍可见
     const lastShown = truncatedAt - 1;
     return (
       `${header}\n` +
-      `⚠ INCOMPLETE: pages ${firstShown}-${lastShown} of ${maxPage} (truncated)\n` +
-      `⚠ 内容已截断：单次读取上限 ${OCR_MAX_LENGTH} 字符，本次返回第 ${firstShown}-${lastShown} 页（共 ${maxPage} 页）。` +
+      scopeNote +
+      `[truncated] INCOMPLETE: pages ${firstShown}-${lastShown} of ${maxPage} (truncated)\n` +
+      `⚠ 内容已截断：单次读取上限 ${cap} 字符，本次返回第 ${firstShown}-${lastShown} 页（共 ${maxPage} 页）。` +
       `如需继续，调用 read_attachment(path="${path}", pages="${truncatedAt}-${maxPage}") 读取剩余页。\n\n${body}`
     );
   }
 
-  return `${header}\n\n${body}`;
+  return `${header}\n${scopeNote}\n${body}`;
 }
 
 /** 读取附件内容 */
@@ -229,10 +200,14 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
   if (!path) return 'Error: path required';
   // 可选：仅扫描件 PDF 生效，按页读取（如 "1-5"、"3"、"6,8-10"），用于长 PDF 分片读取
   const pagesArg = typeof args.pages === 'string' ? args.pages.trim() : undefined;
+  // 可选：仅扫描件 PDF 生效，页范围口径——context（默认，命中页 ±1 扩窗）/ exact（只要给定页）/ full（整份或给定范围原样）
+  const scopeArg = typeof args.scope === 'string' ? args.scope.trim().toLowerCase() : '';
   // 可选：文本/docx/xls/pptx/doc/rtf 类通用续读偏移——内容超单次上限被截断时，返回头会标注下一次 offset，原样传回即可续读
   const offset = Math.max(0, Math.trunc(Number(args.offset))) || 0;
   // 可选：仅 Excel(.xls/.xlsx) 生效，按 sheet 名过滤（不传=全部 sheet）
   const sheetArg = typeof args.sheet === 'string' ? args.sheet.trim() : undefined;
+  // 本请求的单次返回上限（按模型窗口，见 readCapForContext）：所有分片出口共用同一个值
+  const readCap = readCapForContext(ctx);
 
   try {
     // 附件路径是相对于项目目录的，需要获取当前项目路径
@@ -266,7 +241,56 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
       }
     }
     auditLog({ tool: 'read_attachment', path, project: projectRoot, resolved: filePath });
+    // 「五」失败路径确定性：路径不存在 = 硬错误，且在这里就拦下 ——
+    // 不进入任何解析分支，避免调用方把 ENOENT 误读成"文件为空"，也让模型没有按记忆复述的余地。
+    try {
+      const st = await stat(filePath);
+      if (!st.isFile()) {
+        return `Error: 路径不是文件 —— ${path}${st.isDirectory() ? '（这是一个目录，请给出具体文件的项目相对路径）' : ''}。`;
+      }
+    } catch {
+      return `Error: 路径不存在 —— ${path}（已按项目相对路径解析）。禁止按记忆复述该文件内容；请用 search_materials 或 list_directory 确认真实路径后重试。`;
+    }
     const ext = extname(filePath).toLowerCase();
+
+    // 附件/资料识别完成后回写项目内容索引（.materials-index/<内容hash>/）——两套资料共用同一份索引：
+    // 同一份字节无论放在 attachments/ 还是 materials/，之后经任一入口读取都直接命中已识别结果，
+    // 不再重复烧一次 OCR（内容寻址，与所在目录无关；meta.json.sourcePath 仅作溯源备注）。
+    const indexSourcePath = withinProject
+      ? relative(projectRoot, filePath).split(sep).join('/')
+      : path;
+    // 项目资料（materials/）与对话附件（attachments/、assets/、授权目录）的差别只在 manifest：
+    // materials 是项目级资料库、参与正文检索（listIndexedPaths / intern_search），需登记 manifest 条目；
+    // 附件随节点销毁、不进 manifest（不占 MAX_INDEX_FILES_SCANNED 名额，也不牵连节点删除清理）。
+    const relMaterialPath = indexSourcePath === 'materials'
+      ? ''
+      : indexSourcePath.startsWith('materials/') ? indexSourcePath.slice('materials/'.length) : '';
+    /** 把本次识别结果回写内容索引（分页识别不写：只覆盖目标页，会污染整份索引） */
+    const writeAttachmentIndexNow = async (
+      hash: string,
+      pages: OcrIndexPage[] | undefined,
+      fullText?: string,
+      /** 识别引擎回传的文档真实页数（整份解析时 pages 为空但页数有效） */
+      pageCount?: number,
+    ): Promise<void> => {
+      if (!hash || pagesArg) return;
+      try {
+        const { writeAttachmentIndex, indexMaterialFile } = await import('@/lib/materials/indexer');
+        const written = await writeAttachmentIndex(project.path, {
+          hash,
+          sourcePath: indexSourcePath,
+          pages,
+          fullText,
+          pageCount,
+        });
+        // materials 路径补写 manifest：使其进入项目资料检索面。内容索引已落库，
+        // indexMaterialFile 内部按同一 hash 复用，不会重跑抽取/识别。
+        if (relMaterialPath) await indexMaterialFile(project.path, relMaterialPath).catch(() => null);
+        if (written) {
+          console.log(`[read-attachment] 识别结果已回写内容索引: ${basename(filePath)} hash=${hash.slice(0, 10)}…`);
+        }
+      } catch { /* 索引写入失败不影响识别主流程 */ }
+    };
 
     const textExts = ['.txt', '.md', '.markdown', '.json', '.csv', '.xml', '.html', '.css', '.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.yaml', '.yml', '.ini', '.conf', '.log'];
     const isTextFile = textExts.includes(ext);
@@ -288,7 +312,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         }
       }
       content = content.replace(/^\uFEFF/, ''); // 去 BOM
-      return chunkedAttachmentReturn(path, fileStat.size, `${ext.slice(1)} text${encNote}`, content, offset);
+      return chunkedAttachmentReturn(path, fileStat.size, `${ext.slice(1)} text${encNote}`, content, offset, readCap);
     }
 
     // .doc / .rtf / .rtfd（老版 Office）：macOS 自带 textutil 转纯文本
@@ -303,7 +327,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         if (!stdout || !stdout.trim()) {
           return `Attachment: ${path}\nType: ${ext} (${formatSize(fileStat.size)})\n\ntextutil 未能提取到文本（文档可能为空或为图片型）。请另存为 .docx 或 .txt 后重试。`;
         }
-        return chunkedAttachmentReturn(path, fileStat.size, `${ext.slice(1)} via textutil`, stdout, offset);
+        return chunkedAttachmentReturn(path, fileStat.size, `${ext.slice(1)} via textutil`, stdout, offset, readCap);
       } catch (tuErr) {
         return `Attachment: ${path}\nType: ${ext} (${formatSize(fileStat.size)})\n\ntextutil 转换失败：${tuErr instanceof Error ? tuErr.message : String(tuErr)}。请另存为 .docx 或 .txt 后重试。`;
       }
@@ -319,7 +343,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         if (!fullText.trim()) {
           return `Attachment: ${path}\nType: Word (.docx) (${formatSize(fileStat.size)})\n\nmammoth 解析成功但未提取到文本（文档可能为空或内容均在文本框/图片中）。`;
         }
-        return chunkedAttachmentReturn(path, fileStat.size, '.docx text', fullText, offset);
+        return chunkedAttachmentReturn(path, fileStat.size, '.docx text', fullText, offset, readCap);
       } catch (extractErr) {
         // 兜底：直接解 document.xml 做轻量结构提取（不再退化为纯文本时，也要先试一遍）
         try {
@@ -329,7 +353,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
           const xmlContent = zip.readAsText('word/document.xml');
           const fallbackText = docxXmlFallbackText(xmlContent);
           if (fallbackText.trim()) {
-            return chunkedAttachmentReturn(path, fileStat.size, '.docx text (fallback)', fallbackText, offset);
+            return chunkedAttachmentReturn(path, fileStat.size, '.docx text (fallback)', fallbackText, offset, readCap);
           }
         } catch { /* 兜底失败 → 走下方错误 */ }
         return `Attachment: ${path}\nType: Word (.docx)\nUnable to extract text: ${extractErr instanceof Error ? extractErr.message : String(extractErr)}\n\nSuggestion: please provide .txt or .md format.`;
@@ -366,7 +390,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         if (parts.length === 0) {
           return `Attachment: ${path}\nType: PowerPoint (.pptx) (${formatSize(fileStat.size)})\n\n各页未提取到文本（可能为全图型 PPT）。`;
         }
-        return chunkedAttachmentReturn(path, fileStat.size, '.pptx text', parts.join('\n\n'), offset);
+        return chunkedAttachmentReturn(path, fileStat.size, '.pptx text', parts.join('\n\n'), offset, readCap);
       } catch (pptxErr) {
         return `Attachment: ${path}\nType: PowerPoint (.pptx)\n解析失败：${pptxErr instanceof Error ? pptxErr.message : String(pptxErr)}。`;
       }
@@ -393,15 +417,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
           const ws = wb.Sheets[sheetName];
           if (!ws) continue;
           const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false }) as unknown[][];
-          const lines = rows
-            .filter((r) => r.some((c) => c !== '' && c !== null && c !== undefined))
-            .map((r) => {
-              const cells = r.map((c) => String(c ?? '').replace(/[\r\n\t]+/g, ' ').trim());
-              // 去掉行尾空列，避免出现悬挂的分隔符
-              while (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
-              return cells.join(' | ');
-            })
-            .filter((l) => l.length > 0);
+          const lines = xlsxRowsToLines(rows);
           if (lines.length > 0) sheetBlocks.push(`[Sheet: ${sheetName}] (${lines.length} rows)\n${lines.join('\n')}`);
         }
         if (sheetBlocks.length === 0) {
@@ -409,7 +425,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         }
         const fullText = sheetBlocks.join('\n\n');
         const sheetsLabel = sheetArg ? `sheet ${sheetArg}` : `${sheetBlocks.length} sheet${sheetBlocks.length > 1 ? 's' : ''}`;
-        return chunkedAttachmentReturn(path, fileStat.size, `Excel ${ext.slice(1)} (${sheetsLabel})`, fullText, offset);
+        return chunkedAttachmentReturn(path, fileStat.size, `Excel ${ext.slice(1)} (${sheetsLabel})`, fullText, offset, readCap);
       } catch (excelErr) {
         const fileStat = await stat(filePath);
         return `Attachment: ${path}\nType: Excel (${ext})\nSize: ${formatSize(fileStat.size)}\n\nExcel 解析失败：${excelErr instanceof Error ? excelErr.message : String(excelErr)}。若为旧版加密 .xls 或格式损坏，请另存为 .xlsx 或 .csv 后重试。`;
@@ -421,6 +437,31 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
       try {
         const { extractWithPython, extractWithPdfParse } = await import('@/lib/pdf/extractor');
         const fileStat = await stat(filePath);
+
+        // 项目资料（materials/）已建索引 → 直读索引正文（文本层/扫描件在入库时均已抽取过），
+        // 免去重复跑 Python 抽取与整份 OCR，实现「解析一次、统一调用」。
+        // 只读不建：未建索引则照常走下方抽取链路（识别结果会由 writeAttachmentIndexNow 回写索引）。
+        // 分页读取（pages）不走此快路径——需按页组装，由下方既有分页逻辑处理。
+        if (relMaterialPath && !pagesArg) {
+          const { getIndexedMaterial } = await import('@/lib/materials/indexer');
+          const indexed = await getIndexedMaterial(project.path, relMaterialPath).catch(() => null);
+          if (indexed && indexed.fullText.trim()) {
+            const via = indexed.quality === 'vision' ? 'OCR (indexed)' : 'text layer (indexed)';
+            // 整份识别（无分页结构）：页数取自文档真实页数，但正文是一段连续文本。
+            // 必须显式说明，否则模型会把「正文里没有分页标记」误判成识别被截断而重跑 OCR。
+            const pageNote = indexed.textPageCount < indexed.pageCount
+              ? ' (整份识别·无分页结构，正文为连续文本)'
+              : '';
+            return chunkedAttachmentReturn(
+              path,
+              fileStat.size,
+              `PDF via ${via}, ${indexed.pageCount} pages${pageNote}${describePageQuality(indexed)}`,
+              indexed.fullText,
+              offset,
+              readCap,
+            );
+          }
+        }
 
         // 第1+2级：Python pypdf → pdfplumber
         const pyResult = await extractWithPython(filePath);
@@ -435,12 +476,12 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         };
 
         if (pyResult.text && denseLayer(pyResult.text.length, pyResult.pageCount)) {
-          const truncated = pyResult.text.length > READ_CAPACITY
-            ? pyResult.text.slice(0, READ_CAPACITY) + `\n...(${pyResult.pageCount} pages, truncated)`
+          const truncated = pyResult.text.length > readCap
+            ? pyResult.text.slice(0, readCap) + `\n...(${pyResult.pageCount} pages, truncated)`
             : pyResult.text;
           return truncate(
             `Attachment: ${path} (${formatSize(fileStat.size)}, PDF via ${pyResult.method})\n\n${truncated}`,
-            READ_CAPACITY,
+            readCap,
           );
         }
 
@@ -449,11 +490,13 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         if (fallback.text && denseLayer(fallback.text.length, fallback.pageCount)) {
           return truncate(
             `Attachment: ${path} (${formatSize(fileStat.size)}, PDF via pdf-parse)\n\n${fallback.text}`,
-            READ_CAPACITY,
+            readCap,
           );
         }
 
-        // 扫描件：OCR 识别完全走 bob-ocr-mcp（MCP 优先，不可用时返回明确错误）
+        // 扫描件：复用顺序为「项目内容索引 → 主缓存 → bob-ocr-mcp」。
+        // 索引（.materials-index/）与 materials 上传时同源同 hash，优先直接复用；
+        // MCP 不可用时返回明确错误（不再回退本地引擎）。
         // 注意：不依赖 pageCount 来判断是否需要 OCR，因为提取器在某些情况下可能返回 pageCount=0
         // 方案2判定：只要两种提取器都没有产出"有密度的"文字层（稀疏≠可用），就进入 OCR 缓存分支
         const scannedPages = pyResult.pageCount || fallback.pageCount;
@@ -468,6 +511,24 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
             const { computeFileHash } = await import('@/lib/parse/image-parser');
             const { getCache, waitForPdfWarmOrTimeout } = await import('@/lib/parse/cache');
             pdfHash = await computeFileHash(filePath);
+            // 项目内容索引优先：materials 上传/首次读取时已按同一「内容 hash」建好索引。
+            // .materials-index/ 是项目长期资产，不受 .cache/parse 的 2000 条上限与 30 天清理影响；
+            // 命中即直接复用，既免去一次 MCP 往返，也避免插件识别缓存被淘汰后重复烧在线识别。
+            // 判据只有内容 hash，与文件放在 materials / attachments 哪个目录无关。
+            try {
+              const { getIndexedOcrPagesByHash } = await import('@/lib/materials/indexer');
+              const indexedPages = await getIndexedOcrPagesByHash(project.path, pdfHash);
+              if (indexedPages && indexedPages.length > 0) {
+                console.log(`[read-attachment] 命中 materials 内容索引: ${basename(filePath)} hash=${pdfHash.slice(0, 10)}… pages=${indexedPages.length}`);
+                return buildOcrAttachmentOutput(
+                  path,
+                  fileStat.size,
+                  'Scanned PDF, cached OCR (materials index)',
+                  indexedPages.map((p) => ({ index: p.page, text: p.text })),
+                  { pagesArg, scope: scopeArg, totalPages: indexedPages[indexedPages.length - 1].page, rendered: indexedPages.length, maxChars: readCap },
+                );
+              }
+            } catch { /* 索引不可用则按原路径（主缓存 → MCP）继续 */ }
             let pdfCached = await getCache(pdfHash, project.path);
             if (!pdfCached?.result?.extracted_text && !pagesArg) {
               // 缓存未命中：若 PDF Bridge 后台预热正在进行（且非分页读取），等最多 1.2s 收尾，
@@ -498,7 +559,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
                       fileStat.size,
                       'Scanned PDF, cached OCR (secondary index)',
                       parentPages,
-                      { pagesArg, totalPages: parentPages[parentPages.length - 1].index, rendered: parentPages.length },
+                      { pagesArg, scope: scopeArg, totalPages: parentPages[parentPages.length - 1].index, rendered: parentPages.length, maxChars: readCap },
                     );
                   }
                 }
@@ -514,12 +575,12 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
                   fileStat.size,
                   'Scanned PDF, cached OCR',
                   cachedPages,
-                  { pagesArg, totalPages: cachedPages[cachedPages.length - 1].index, rendered: cachedPages.length },
+                  { pagesArg, scope: scopeArg, totalPages: cachedPages[cachedPages.length - 1].index, rendered: cachedPages.length, maxChars: readCap },
                 );
               }
               return truncate(
                 `Attachment: ${path} (${formatSize(fileStat.size)}, Scanned PDF, cached OCR)\n\n${pdfCached.result.extracted_text}`,
-                OCR_MAX_LENGTH,
+                readCap,
               );
             }
             console.log(`[read-attachment] PDF cache MISS: ${basename(filePath)} hash=${pdfHash.slice(0, 10)}… wait=${Date.now() - cacheT0}ms → start full OCR`);
@@ -544,7 +605,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
                       upgrade: 'auto',
                       onDone: async (_rec, result) => {
                         // 任务完成：写主缓存 + 二级索引（与同步路径一致），模型下轮直接命中
-                        const r = result as { success?: boolean; text?: string; pages?: Array<{ index: number; text: string }> };
+                        const r = result as { success?: boolean; text?: string; pageCount?: number; pages?: Array<{ index: number; text: string }> };
                         if (!r?.success || !r.text?.trim()) return;
                         const { setCache } = await import('@/lib/parse/cache');
                         await setCache(pdfHash, {
@@ -556,6 +617,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
                           parsed_at: new Date().toISOString(),
                           file_hash: pdfHash,
                         }, project.path);
+                        await writeAttachmentIndexNow(pdfHash, r.pages, r.text, r.pageCount);
                         const ocrPages = (r.pages ?? []).map((p) => ({ index: p.index, text: p.text }));
                         if (ocrPages.length > 0) {
                           const { registerOcrPages } = await import('@/lib/parse/derive-index');
@@ -610,6 +672,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
             const mcpResult = await tryOcrViaMcp(filePath, 'auto', ctx?.onOcrProgress);
             if (mcpResult?.success && mcpResult.text) {
               await cachePdf(mcpResult.text).catch(() => {});
+              await writeAttachmentIndexNow(pdfHash, mcpResult.pages, mcpResult.text, mcpResult.pageCount);
               const ocrPages: OcrPageBlock[] = (mcpResult.pages ?? []).map((p) => ({
                 index: p.index,
                 text: p.text,
@@ -638,13 +701,13 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
                   fileStat.size,
                   'Scanned PDF, OCR via MCP',
                   ocrPages,
-                  { pagesArg, totalPages: total, rendered: ocrPages.length },
+                  { pagesArg, scope: scopeArg, totalPages: total, rendered: ocrPages.length, maxChars: readCap },
                 );
               }
               // 无结构化页（如 GLM-OCR 整份解析）→ 原样返回全文
               return truncate(
                 `Attachment: ${path} (${formatSize(fileStat.size)}, Scanned PDF, OCR via MCP)\n\n${mcpResult.text}`,
-                OCR_MAX_LENGTH,
+                readCap,
               );
             }
           } catch { /* MCP 不可用 → 下方返回明确错误 */ }
@@ -671,6 +734,28 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         const { computeFileHash } = await import('@/lib/parse/image-parser');
         const { getCache, setCache } = await import('@/lib/parse/cache');
         imgHash = await computeFileHash(filePath);
+        // 项目内容索引优先（与扫描件 PDF 分支同口径）：materials 上传图片时只写 .materials-index/、
+        // 不写 .cache/parse/，而图片分支此前只查主缓存 → 「上传时已识别」的图片在此必然失配，
+        // 又同步调一次 MCP 重识别（长任务超时的主要来源之一）。索引按内容 hash 寻址、与所在目录无关。
+        try {
+          const { getIndexedOcrPagesByHash } = await import('@/lib/materials/indexer');
+          const indexedPages = await getIndexedOcrPagesByHash(project.path, imgHash);
+          if (indexedPages && indexedPages.length > 0) {
+            const INDEX_PAGE_PLACEHOLDER_RE = /\[Page \d+\]|!\[[^\]]*\]\([^)]*\)/g;
+            const indexedText = indexedPages
+              .map((p) => (p.text ?? '').replace(INDEX_PAGE_PLACEHOLDER_RE, '').trim())
+              .filter((t) => t.length > 0)
+              .join('\n\n')
+              .trim();
+            if (indexedText) {
+              console.log(`[read-attachment] 命中 materials 内容索引(图片): ${basename(filePath)} hash=${imgHash.slice(0, 10)}… pages=${indexedPages.length}`);
+              return truncate(
+                `Attachment: ${path} (${formatSize(fileStat.size)}, image, OCR via MCP, cached)\n\n${indexedText}`,
+                8000,
+              );
+            }
+          }
+        } catch { /* 索引不可用则按原路径（主缓存 → MCP）继续 */ }
         const imgCached = await getCache(imgHash, project.path);
         if (imgCached?.result?.extracted_text) {
           console.log(`[read-attachment] Image OCR cache HIT: ${basename(filePath)} chars=${imgCached.result.extracted_text.length}`);
@@ -720,6 +805,10 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
           if (mcpResult.guidance && !hasRealText) {
             return `Attachment: ${path} (${formatSize(fileStat.size)}, image)\n\n${mcpResult.guidance}`;
           }
+          // 有真实文字的图片：识别结果同样回写内容索引（纯照片/仅图像引用则跳过，避免写入空壳索引）
+          if (hasRealText && imgHash) {
+            await writeAttachmentIndexNow(imgHash, mcpResult.pages, mcpResult.text, mcpResult.pageCount);
+          }
           return truncate(
             `Attachment: ${path} (${formatSize(fileStat.size)}, image, OCR via MCP)\n\n${ocrText}`,
             8000,
@@ -766,7 +855,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
           const segNote = frameRange ? `（帧段 ${frameRange[0]}-${frameRange[frameRange.length - 1]}，帧缓存命中）` : '';
           return truncate(
             `Attachment: ${path} (${formatSize(stat2.size)}, video, ${result.frame_count} 帧抽帧分析，MCP 识别${segNote})\n\n${result.extracted_text}`,
-            READ_CAPACITY,
+            readCap,
           );
         }
         return `Attachment: ${path}\nType: Video (${ext})\nSize: ${formatSize(stat2.size)}\n\n视频抽帧分析返回空结果。`;
@@ -872,118 +961,57 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
     return `Attachment: ${path}\nType: Binary file (${ext || 'unknown'})\nSize: ${formatSize(fileStat.size)}\n\nThis is a non-text file and cannot be read directly. Please provide a text version of the content.`;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('ENOENT')) return `Attachment not found: ${path}`;
-    if (msg.includes('EISDIR')) return `Path is a directory, not a file: ${path}`;
+    if (msg.includes('ENOENT')) return `Error: 路径不存在 —— ${path}。禁止按记忆复述该文件内容；请用 search_materials 或 list_directory 确认真实路径后重试。`;
+    if (msg.includes('EISDIR')) return `Error: 路径不是文件 —— ${path}（这是一个目录，请给出具体文件的项目相对路径）。`;
     return `Attachment read failed: ${msg}`;
   }
 }
-/** 读取 materials 文件夹中的参考资料 */
-async function toolReadMaterial(args: Record<string, unknown>): Promise<string> {
-  const path = args.path as string;
-  if (!path) return 'Error: path required';
-  try {
-    const { getCurrentProject } = await import('@/lib/project/project-manager');
-    const project = await getCurrentProject();
-    const filePath = join(project.path, path);
-    const ext = extname(filePath).toLowerCase();
+/** 低于该分的本地识别页视为不可信（对齐 ocr_document auto 升级门限 qualityScore<0.30） */
+const LOW_QUALITY_SCORE = 0.3;
 
-    // 安全检查：确保在 materials 目录内
-    if (!filePath.startsWith(join(project.path, 'materials'))) {
-      return 'Error: Invalid material path';
-    }
-
-    const textExts = ['.txt', '.md', '.markdown', '.json', '.csv', '.xml', '.html', '.css', '.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.yaml', '.yml', '.ini', '.conf', '.log'];
-    const isTextFile = textExts.includes(ext);
-
-    if (isTextFile) {
-      const content = await readFile(filePath, 'utf-8');
-      const fileStat = await stat(filePath);
-      return truncate(
-        `Material: ${path} (${formatSize(fileStat.size)})\n\n${content}`,
-        READ_CAPACITY,
-      );
-    }
-
-    // .docx 提取
-    if (ext === '.docx') {
-      try {
-        const { exec } = await import('child_process');
-        const { promisify } = await import('util');
-        const execAsync = promisify(exec);
-        const tmpDir = `/tmp/bob-work-docx-${Date.now()}`;
-        await execAsync(`mkdir -p "${tmpDir}" && unzip -o "${filePath}" word/document.xml -d "${tmpDir}"`, { timeout: 10000 });
-        const xmlContent = await readFile(`${tmpDir}/word/document.xml`, 'utf-8');
-        const text = xmlContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-        const fileStat = await stat(filePath);
-        await execAsync(`rm -rf "${tmpDir}"`).catch(() => {});
-        return truncate(
-          `Material: ${path} (${formatSize(fileStat.size)}, .docx text extracted)\n\n${text}`,
-          READ_CAPACITY,
-        );
-      } catch {
-        return `Material: ${path}\nType: Word (.docx)\nUnable to extract text.`;
-      }
-    }
-
-    // PDF
-    if (ext === '.pdf') {
-      try {
-        const { extractWithPython, extractWithPdfParse } = await import('@/lib/pdf/extractor');
-        const fileStat = await stat(filePath);
-        const pyResult = await extractWithPython(filePath);
-        if (pyResult.text && pyResult.text.length > 20) {
-          return truncate(
-            `Material: ${path} (${formatSize(fileStat.size)}, PDF via ${pyResult.method})\n\n${pyResult.text}`,
-            READ_CAPACITY,
-          );
-        }
-        const fallback = await extractWithPdfParse(filePath);
-        if (fallback.text && fallback.text.length > 20) {
-          return truncate(
-            `Material: ${path} (${formatSize(fileStat.size)}, PDF via pdf-parse)\n\n${fallback.text}`,
-            READ_CAPACITY,
-          );
-        }
-        return `Material: ${path}\nType: PDF (scanned/image-based)\nUnable to extract text automatically.`;
-      } catch {
-        return `Material: ${path}\nType: PDF\nUnable to extract text.`;
-      }
-    }
-
-    // Images - return basic info
-    const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'];
-    if (imageExts.includes(ext)) {
-      const fileStat = await stat(filePath);
-      return `Material: ${path}\nType: Image (${ext})\nSize: ${formatSize(fileStat.size)}\nImages in materials are for reference.`;
-    }
-
-    // 其他二进制文件
-    const fileStat = await stat(filePath);
-    return `Material: ${path}\nType: Binary (${ext})\nSize: ${formatSize(fileStat.size)}\nCannot read binary file content.`;
-  } catch (e) {
-    return `Error reading material: ${e instanceof Error ? e.message : String(e)}`;
+/** L0 页级标注 → 一行质量提示：只拼接进 header，正文（fullText）保持纯净不被污染 */
+function describePageQuality(indexed: IndexedMaterial): string {
+  const notes: string[] = [];
+  const scores = indexed.pageMeta
+    .map((p) => p.qualityScore)
+    .filter((n): n is number => typeof n === 'number');
+  if (scores.length > 0) {
+    notes.push(`avg quality ${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(2)}`);
   }
+  const low = indexed.pageMeta
+    .filter((p) => typeof p.qualityScore === 'number' && p.qualityScore < LOW_QUALITY_SCORE)
+    .map((p) => p.index);
+  if (low.length > 0) {
+    notes.push(`low-confidence p.${low.join(',')} (if critical, re-check via ocr_document)`);
+  }
+  if (indexed.hasScannedPages) notes.push('includes scanned page(s) recognized via OCR');
+  return notes.length > 0 ? `, ${notes.join('; ')}` : '';
 }
 
 export const attachmentToolDefs: Tool[] = [
   {
     name: 'read_attachment',
-    description: 'Read a user-uploaded attachment (path from the attachment list in the user message). Formats: text/code (GBK auto-detect), Excel (.xls/.xlsx), Word (.docx; legacy .doc/.rtf via textutil), PowerPoint, PDF (native extract or scanned OCR), images (OCR/vision), video frames, audio (STT), .zip (unpacked to homework/.unpacks/). Long content truncates with a next-offset marker — re-call with the returned offset=<value> to continue reading. Reads cache by content hash (re-reading the same file returns instantly). For scanned PDFs prefer pages="x-y" reads. Large scanned PDFs (>=15 pages or >=5MB full read) recognize in background: the first call returns a "⏳ recognizing in background" notice — call this tool again on the same path after a moment to get the result from cache (do NOT treat the notice as failure).',
+    description: 'STEP 3 of 3 (ledger → materials index → original). Read a user-provided source file — one tool for BOTH conversation attachments (materials/{attachmentFolder}/{filename}; legacy ones sit under attachments/{nodeId}/{filename}) and project materials (materials/{filename}, i.e. the "--- 资料列表 ---" @ references). Use it to fetch the ORIGINAL once read_ledger (router) has named a path or search_materials (locator) has pointed at a page; do not read originals to answer "what exists". A path that does not exist is a HARD ERROR — report "该路径不存在" as-is and never retell content from memory. Formats: text/code (GBK auto-detect), Excel (.xls/.xlsx), Word (.docx; legacy .doc/.rtf via textutil), PowerPoint, PDF (native extract or scanned OCR), images (OCR/vision), video frames, audio (STT), .zip (unpacked to homework/.unpacks/). Long content truncates with a next-offset marker — re-call with the returned offset=<value> to continue reading. Reads cache by content hash (re-reading the same file returns instantly, whichever folder it sits in). For scanned PDFs prefer pages="x-y" reads; by default only the hit page ±1 is returned (scope="context") — pass scope="exact" for just the given page, and declare scope="full" explicitly when you really need the whole document (a full read spends the per-task tool budget). Large scanned PDFs (>=15 pages or >=5MB full read) recognize in background: the first call returns a "⏳ recognizing in background" notice — call this tool again on the same path after a moment to get the result from cache (do NOT treat the notice as failure). NOTE: materials live at <project>/materials/, NOT the workspace root (which only holds scripts/) — never list_directory/read_file on the workspace root to find them.',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'Attachment path: attachments/{nodeId}/{filename} from the attachment list in the user message (already copied into the project attachments/ folder — do NOT ask permission or a Downloads path, and do NOT emit AUTH_REQ). Absolute / ~/ paths inside a user-authorized directory are also resolved and read directly.',
+          description: 'Source path — any of: (1) materials/{attachmentFolder}/{filename} for a conversation attachment (already copied into the project materials/ folder — do NOT ask permission or a Downloads path, and do NOT emit AUTH_REQ; legacy attachments keep the attachments/{nodeId}/{filename} form); (2) materials/{filename} for a project material referenced via @ in the user message; (3) an absolute / ~/ path inside a user-authorized directory (resolved and read directly).',
         },
         pages: {
           type: 'string',
           description: '可选，仅扫描件 PDF：按页读取，如 "1-5" / "3" / "6,8-10"。长 PDF 分片用——返回头部会标注已返回页码区间并提示续读剩余页（如 pages="6-14"）。',
         },
+        scope: {
+          type: 'string',
+          enum: ['context', 'exact', 'full'],
+          description: 'Optional, scanned PDFs only. Page scope: "context" (default) = the hit page plus ±1 for surrounding context; "exact" = only the given page(s), no expansion; "full" = the whole document (or the given range) as-is. Reading a whole long document up front spends the per-task tool budget — declare it explicitly only when you really need it.',
+        },
         offset: {
           type: 'integer',
           minimum: 0,
-          description: '可选，通用续读偏移（文本/Word/Excel/PPT）：内容超限截断时头部标注 "offset=<数值>"，原样传回即可续读后半；不传=从头读。',
+          description: '可选，通用续读偏移（文本/Word/Excel/PPT）：内容超限时返回尾部标注 "offset=<数值>"，原样传回即可续读后半；不传=从头读。单次返回量按当前模型窗口自动收缩，因此长文件请连续多次带 offset 读完，不要以为一次就能拿全。',
         },
         sheet: {
           type: 'string',
@@ -994,23 +1022,6 @@ export const attachmentToolDefs: Tool[] = [
     },
     category: '文件',
     execute: toolReadAttachment,
-    maxOutput: 8000,
-  },
-  {
-    name: 'read_material',
-    description: 'Read a material file from the project materials folder (reference docs the user uploaded: PDFs, reports, images, code). Call when the user refers to "@filename". NOTE: materials live at <project>/materials/, NOT the workspace root (which only holds scripts/) — always use THIS tool; never list_directory/read_file on the workspace root to find them.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Material file path, format: materials/{filename}. Get from the material reference list in user message.',
-        },
-      },
-      required: ['path'],
-    },
-    category: '文件',
-    execute: toolReadMaterial,
     maxOutput: 8000,
   },
 ];

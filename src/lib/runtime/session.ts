@@ -6,7 +6,7 @@
 //     后续请求仍粘住），仅 nodeId 存在的会话持久化；无 nodeId 的会话不落库（仅当轮生效）。
 //   - 保留全局态（module 级单例导出）：迁移前为 route.ts 模块顶层 Map，进程内所有 chat
 //     请求共享；本服务以单例实例承载同一全局语义，仅把读写点收进 service 方法。
-//   - 写点① 每请求首帧合并写回：读回已有 sticky 并入 activeScenes，再过滤 general/coding
+//   - 写点① 每请求首帧合并写回：读回已有 sticky 并入 activeScenes，再过滤 general/coding/team
 //     后替换写回（同 nodeId 跨请求聚合，sticky 只增不减）——mergeStickyScenes；
 //   - 写点② 场景中途激活 sticky：search_capabilities / load_skill 经 TakeoverServices
 //     .addStickyScene 追加（就地 add 去重）——addStickyScene；
@@ -34,8 +34,10 @@ export class SessionRuntime {
   }
 
   /** 会话 sticky 追加一个场景（就地 add 去重；不存在时建集合后写入）。
-   *  等价原 takeoverServices.addStickyScene 闭包语义：nodeId 存在守卫在 route 侧，跨请求保持。 */
+   *  等价原 takeoverServices.addStickyScene 闭包语义：nodeId 存在守卫在 route 侧，跨请求保持。
+   *  'team' 例外：多智能体唯一入口是「Multi-agent mode」开关（per-request），永不落 sticky。 */
   addStickyScene(key: string, scene: ToolScene): void {
+    if (scene === 'team') return;
     const cur = this.stickyScenes.get(key) ?? new Set<ToolScene>();
     cur.add(scene);
     this.stickyScenes.set(key, cur);
@@ -43,14 +45,16 @@ export class SessionRuntime {
 
   /** 每请求首帧合并写回（等价原 route 内联块 3219-3230 语义）：
    *   ① 读回该会话已有 sticky 并入 activeScenes（sticky 场景保持激活，本轮工具集不抖）；
-   *   ② 把 activeScenes 中非 general/coding 的场景作为该会话新 sticky 替换写回——
-   *      已 sticky 场景因步骤①重新并入 activeScenes 而持续保留（同 nodeId 聚合、只增不减）。 */
+   *   ② 把 activeScenes 中非 general/coding/team 的场景作为该会话新 sticky 替换写回——
+   *      已 sticky 场景因步骤①重新并入 activeScenes 而持续保留（同 nodeId 聚合、只增不减）。
+   *  'team' 与 general/coding 同列：不落 sticky、读回时也剔除——开关是 per-request 语义，
+   *  若 sticky 常驻 team，关掉「Multi-agent mode」后 team_run 仍在工具面 = 绕过开关的第二条入口。 */
   mergeStickyScenes(key: string, activeScenes: Set<ToolScene>): void {
     const sticky = this.stickyScenes.get(key);
-    if (sticky) for (const s of sticky) activeScenes.add(s);
+    if (sticky) for (const s of sticky) { if (s !== 'team') activeScenes.add(s); }
     const merged = new Set<ToolScene>();
     for (const s of activeScenes) {
-      if (s !== 'general' && s !== 'coding') merged.add(s);
+      if (s !== 'general' && s !== 'coding' && s !== 'team') merged.add(s);
     }
     this.stickyScenes.set(key, merged);
   }

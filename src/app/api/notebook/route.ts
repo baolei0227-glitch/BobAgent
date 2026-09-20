@@ -1,11 +1,12 @@
 /**
  * /api/notebook — 笔记宿主转发门面（bob-notes-mcp）
  *
- * 与 /api/team 同构：笔记实现全部在 bob-notes-mcp 插件域，本路由只做
+ * 与 /api/bobby 同构：笔记实现全部在 bob-notes-mcp 插件域，本路由只做
  * HTTP 契约 → notes_* 工具的语义转发，宿主零笔记实现代码。
  *
  * 前端 / executor / 微信桥均经此路由访问笔记库：
  *   GET    /api/notebook?q&tag&type&from&to&mode → notes_query（分层检索）
+ *   GET    /api/notebook?action=types           → notes_types（页面类型清单，SCHEMA.md 驱动）
  *   POST   { text, title?, source?, raw_only? }  → notes_add_raw（URL 自动抓正文）
  *                                                   非 raw_only 追加 notes_ingest 编译
  *   POST   { entry_id, content }                 → notes_update（仅改正文，保留标题/类型/标签）
@@ -170,6 +171,12 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const sp = request.nextUrl.searchParams;
+    // action=types → notes_types：笔记页面类型清单（SCHEMA.md「页面类型」段驱动）
+    if (sp.get('action') === 'types') {
+      const r = await callNotes('types', {});
+      if (!r.ok) return NextResponse.json({ success: false, error: r.error }, { status: 500 });
+      return NextResponse.json({ success: true, ...r.data });
+    }
     const q = sp.get('q') || '';
     const tag = sp.get('tag') || '';
     const type = sp.get('type') || '';

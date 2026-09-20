@@ -30,6 +30,7 @@ import {
   LayoutGrid,
   Check,
   Eye,
+  StickyNote,
 } from 'lucide-react';
 import type { PdfAnnotation } from '@/app/api/pdf-annotations/route';
 import {
@@ -63,9 +64,20 @@ interface PdfViewerProps {
   fileName: string;
   /** PDF 绝对路径（sidecar 批注读写用；为空时禁用批注功能） */
   filePath?: string;
+  /** 外部深链：打开后跳转到指定页（1-based） */
+  initialPage?: number;
+  /** 外部深链：打开后自动检索并高亮的定位关键词 */
+  initialQuery?: string;
 }
 
 type AnnotationMode = 'none' | 'highlight' | 'textbox';
+
+/** OCR 单一事实源：status（过程）/ meta（持久标记）/ pages（逐页正文）永远一起更新 */
+interface OcrState {
+  status: 'idle' | 'running' | 'done' | 'error';
+  meta: OcrStatusMeta | null;
+  pages: OcrPageText[] | null;
+}
 
 /** pdfjs-dist 按需使用的最小接口（动态导入包未带精细类型声明） */
 interface PdfjsPage {
@@ -282,6 +294,23 @@ function PdfPageView({
     registerRef(pageNo, wrapRef.current);
     return () => registerRef(pageNo, null);
   }, [pageNo, registerRef]);
+
+  // 预置页面尺寸（只量尺寸、不渲染 canvas）：连续滚动下所有页需具备真实高度，
+  // 否则未进入视口的页仅有 100px 占位，跨页跳转（深链 page=N）会落到错误位置
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const page = await doc.getPage(pageNo);
+        const vp = page.getViewport({ scale });
+        if (cancelled) return;
+        const w = Math.floor(vp.width);
+        const h = Math.floor(vp.height);
+        setPageSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+      } catch { /* 页面元数据不可用时保持占位尺寸 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [doc, pageNo, scale]);
 
   // 可见性观察：进入视口时渲染；缩放/文档变化时可见页自动重渲染
   useEffect(() => {
@@ -618,7 +647,7 @@ function PdfPageView({
   );
 }
 
-export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
+export function PdfViewer({ url, fileName, filePath, initialPage, initialQuery }: PdfViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const pdfDocRef = useRef<PdfjsDocument | null>(null);
   /** 已加载的 pdfjs 文档（渲染经 props 分发给各页子组件 PdfPageView） */
@@ -643,6 +672,8 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   // 文字批注字号偏好（新建文字框默认字号；选中文字框时调整会同步写入批注）
   const [fontSizePref, setFontSizePref] = useState(12);
+  /** 批注列表侧栏开关（全文档批注一览 + 点击跳转） */
+  const [annotsOpen, setAnnotsOpen] = useState(false);
   const dirtyRef = useRef(false);
 
   // ---- 全文检索状态 ----
@@ -652,12 +683,9 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
   const [cursor, setCursor] = useState(-1); // 当前命中下标，-1 表示无
   const [indexing, setIndexing] = useState(false); // 文本层索引构建中
   const [isScanned, setIsScanned] = useState(false); // 疑似扫描件（文本层缺失）
-  const [ocrLoading, setOcrLoading] = useState(false);
   const [ocrMsg, setOcrMsg] = useState<string | null>(null);
-  // ---- OCR 感知状态：入口提示 / 过程反馈 / 结果浮层 / 持久标记 / 文本层 ----
-  const [ocrStage, setOcrStage] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  /** 持久化「已识别」标记（<pdf>.ocr.json，重开恢复） */
-  const [ocrMeta, setOcrMeta] = useState<OcrStatusMeta | null>(null);
+  // ---- OCR 单一事实源：入口提示 / 过程反馈 / 持久标记 / 文本层都从 ocrState 派生 ----
+  const [ocrState, setOcrState] = useState<OcrState>({ status: 'idle', meta: null, pages: null });
   /** 本次会话 OCR 完成浮层是否展示过（自动消失 + 手动关闭） */
   const [ocrResultShown, setOcrResultShown] = useState(false);
   const [scanBannerDismissed, setScanBannerDismissed] = useState(false);
@@ -667,9 +695,11 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
   const [ocrElapsedSec, setOcrElapsedSec] = useState(0);
   const ocrStartRef = useRef(0);
   const ocrSimTimerRef = useRef<number | null>(null);
-  // 文本层索引与 OCR 结果不参与渲染，用 ref 持有（归一化坐标对缩放不变，一次构建全档复用）
+  // 文本层索引不参与渲染，用 ref 持有（归一化坐标对缩放不变，一次构建全档复用）
   const pageIndexRef = useRef<{ entries: PageTextIndexEntry[]; viewports: Array<ViewportMeta | undefined> } | null>(null);
-  const ocrPagesRef = useRef<OcrPageText[] | null>(null);
+  /** 外部深链锚点已应用标记（文档加载完成后仅生效一次，避免检索/滚动过程反复触发） */
+  const initialPageAppliedRef = useRef(false);
+  const initialQueryAppliedRef = useRef(false);
 
   // ---- 页面缩略图侧栏 ----
   const [thumbsOpen, setThumbsOpen] = useState(false);
@@ -822,16 +852,12 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
         setCursor(-1);
         setIsScanned(false);
         pageIndexRef.current = null;
-        ocrPagesRef.current = null;
-        // 换文件后清空 OCR 感知状态
-        setOcrStage('idle');
-        setOcrMeta(null);
-        setOcrResultShown(false);
-        setScanBannerDismissed(false);
-        setShowTextLayer(false);
-        setOcrSimPage(0);
-        setOcrElapsedSec(0);
-        setOcrMsg(null);
+        // 换文件后重置深链锚点应用标记（新文档允许再次定位）
+        initialPageAppliedRef.current = false;
+        initialQueryAppliedRef.current = false;
+        // 注：OCR 状态（ocrState）由下方「读取 OCR 持久化标记」effect 负责重置，
+        // 此处不得清除 —— 本 effect 的 await 晚于状态读取返回，在此重置会把「已识别」状态清掉，
+        // 导致已解析的扫描件重开仍提示要解析。
         // 换文件后清空缩略图缓存
         renderedThumbsRef.current = new Set();
         setThumbUrls([]);
@@ -902,14 +928,21 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
   // 读取 OCR 持久化标记（<pdf>.ocr.json）：已识别过的扫描件重开即显示「已识别」，并恢复检索 / 文本层
   useEffect(() => {
     let cancelled = false;
+    // 换文件 → 先清空 OCR 状态（此处是唯一重置点，避免与文档加载流程的时序竞争）
+    setOcrState({ status: 'idle', meta: null, pages: null });
+    setOcrResultShown(false);
+    setScanBannerDismissed(false);
+    setShowTextLayer(false);
+    setOcrSimPage(0);
+    setOcrElapsedSec(0);
+    setOcrMsg(null);
     if (!filePath) return;
     (async () => {
       try {
         const resp = await fetch(`/api/pdf-ocr-status?path=${encodeURIComponent(filePath)}`);
         const data = await resp.json();
         if (!cancelled && data.success && data.meta?.done && Array.isArray(data.pages) && data.pages.length > 0) {
-          ocrPagesRef.current = data.pages as OcrPageText[];
-          setOcrMeta(data.meta as OcrStatusMeta);
+          setOcrState({ status: 'done', meta: data.meta as OcrStatusMeta, pages: data.pages as OcrPageText[] });
         }
       } catch { /* 读取失败视为未识别过 */ }
     })();
@@ -1074,7 +1107,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
   };
 
   // ---- 全文检索 ----
-  const runSearch = useCallback((q: string) => {
+  const runSearch = useCallback((q: string, ocrPagesOverride?: OcrPageText[] | null) => {
     const trimmed = q.trim();
     setCursor(-1);
     if (!trimmed) { setHits([]); return; }
@@ -1087,14 +1120,15 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
       found = searchPageIndexes(idx.entries, trimmed, { viewports: idx.viewports });
     }
     if (found.length === 0) {
-      const pages = ocrPagesRef.current;
+      // OCR 刚写入时 state 尚未提交，调用方可显式传入刚拿到的 pages（见 handleRunOcr）
+      const pages = ocrPagesOverride ?? ocrState.pages;
       if (pages && pages.length > 0) {
         found = searchOcrPages(pages, trimmed);
       }
     }
     setHits(found);
     if (found.length > 0) setCursor(0);
-  }, [isScanned]);
+  }, [isScanned, ocrState.pages]);
 
   /** 上/下一条命中（Enter=下一条、Shift+Enter=上一条），循环绕回 */
   const jumpToOffset = (delta: number) => {
@@ -1116,12 +1150,53 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
     }
   }, [currentHitPage, pageNum, scrollToPage]);
 
-  /** 一键 BOB OCR：识别全文后写入 ocrPagesRef，持久化「已识别」标记，并自动重跑当前关键词 */
+  // 外部深链锚点①：文档就绪后跳转到 initialPage。
+  // 各页初始为 100px 占位、缩放又由容器宽度异步计算，故需等目标页具备稳定真实高度
+  // （连续 2 帧尺寸不变）后再滚动，否则 scrollIntoView 会落在错误的页。
+  useEffect(() => {
+    if (!initialPage || totalPages <= 0 || initialPageAppliedRef.current) return;
+    if (initialPage < 1 || initialPage > totalPages) return;
+    initialPageAppliedRef.current = true;
+    let raf = 0;
+    let frames = 0;
+    let lastH = -1;
+    let stable = 0;
+    const tick = () => {
+      frames += 1;
+      const el = pageElsRef.current[initialPage];
+      const h = el?.offsetHeight ?? 0;
+      stable = el && h > 150 && h === lastH ? stable + 1 : 0;
+      lastH = h;
+      // 布局稳定（或超时兜底）后再滚动
+      if (stable >= 2 || frames > 120) {
+        scrollToPage(initialPage);
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [initialPage, totalPages, scrollToPage]);
+
+  // 外部深链锚点②：文本层索引就绪后按 initialQuery 自动检索并高亮（命中即经上面的跟随逻辑跳页）
+  useEffect(() => {
+    const q = (initialQuery || '').trim();
+    if (!q || !pdfDoc || indexing) return;
+    if (initialQueryAppliedRef.current) {
+      // 已应用过：仅当此前 0 命中且扫描件 OCR 结果刚到（ocrState.meta 变化）时补跑一次
+      if (hits.length > 0 || !ocrState.meta) return;
+    }
+    initialQueryAppliedRef.current = true;
+    setSearchOpen(true);
+    setQuery(q);
+    runSearch(q);
+  }, [initialQuery, pdfDoc, indexing, ocrState.meta, hits.length, runSearch]);
+
+  /** 一键 BOB OCR：识别全文后写入 ocrState，持久化「已识别」标记，并自动重跑当前关键词 */
   const handleRunOcr = async () => {
-    if (!filePath || ocrLoading) return;
-    setOcrLoading(true);
+    if (!filePath || ocrState.status === 'running') return;
     setOcrMsg(null);
-    setOcrStage('running');
+    setOcrState((s) => ({ ...s, status: 'running' }));
     setOcrResultShown(false);
     setOcrSimPage(0);
     setOcrElapsedSec(0);
@@ -1159,9 +1234,8 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
         }
         if (pages.length === 0) {
           setOcrMsg('OCR found no text');
-          setOcrStage('error');
+          setOcrState((s) => ({ ...s, status: 'error' }));
         } else {
-          ocrPagesRef.current = pages;
           const meta: OcrStatusMeta = {
             done: true,
             pageCount: pages.length,
@@ -1169,12 +1243,12 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
             elapsedMs: Date.now() - ocrStartRef.current,
             ocrAt: new Date().toISOString(),
           };
-          setOcrMeta(meta);
-          setOcrStage('done');
+          setOcrState({ status: 'done', meta, pages });
           setOcrResultShown(true);
           setOcrSimPage(totalPages);
           setOcrMsg(`OCR finished (${pages.length} pages)`);
-          if (query.trim()) runSearch(query);
+          // state 尚未提交，显式把刚识别出的 pages 交给检索，避免用旧值搜
+          if (query.trim()) runSearch(query, pages);
           // 持久化 sidecar：重开该 PDF 直接恢复「已识别」+ 检索 + 文本层，无需二次 OCR
           void fetch('/api/pdf-ocr-status', {
             method: 'POST',
@@ -1184,14 +1258,13 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
         }
       } else {
         setOcrMsg(`OCR failed: ${data.error || 'Unknown error'}`);
-        setOcrStage('error');
+        setOcrState((s) => ({ ...s, status: 'error' }));
       }
     } catch (err) {
       setOcrMsg(`OCR failed: ${err instanceof Error ? err.message : String(err)}`);
-      setOcrStage('error');
+      setOcrState((s) => ({ ...s, status: 'error' }));
     } finally {
       if (ocrSimTimerRef.current !== null) { window.clearInterval(ocrSimTimerRef.current); ocrSimTimerRef.current = null; }
-      setOcrLoading(false);
     }
   };
 
@@ -1228,19 +1301,22 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
     pageHitRects.set(h.page, arr);
   });
 
-  const hasOcrPages = !!(ocrPagesRef.current && ocrPagesRef.current.length > 0);
+  const ocrPages = ocrState.pages;
+  const hasOcrPages = !!(ocrPages && ocrPages.length > 0);
   const scanNeedsOcr = isScanned && !hasOcrPages;
+  // 批注列表导航：按页码 + 页内纵向位置排序（点击跳转到所在页并选中该条）
+  const sortedAnns = [...annotations].sort((a, b) => a.page - b.page || a.y - b.y);
   // 文本层可能只有水印/页脚（如工商内档）：搜不到时也给 OCR 出口，不依赖 isScanned 判定
   const noHitNeedsOcr = !hasOcrPages && !indexing && !!query.trim() && hits.length === 0;
 
-  const ocrDone = ocrStage === 'done' || !!ocrMeta;
-  const ocrRunning = ocrStage === 'running';
+  const ocrDone = ocrState.status === 'done' || !!ocrState.meta;
+  const ocrRunning = ocrState.status === 'running';
   // 扫描件 OCR 提示条：检测到扫描件且未识别过且未手动关闭时显示 CTA（识别中转为进度条）
   const showScanBanner = !!filePath && isScanned && !ocrDone && !scanBannerDismissed;
   // 文本层可视化：OCR 行级骨架（归一化 0~1，Vision 左下原点 → 翻转为左上原点）
   const textLayerByPage = new Map<number, TextLayerBlock[]>();
-  if (showTextLayer && ocrPagesRef.current) {
-    for (const pg of ocrPagesRef.current) {
+  if (showTextLayer && ocrPages) {
+    for (const pg of ocrPages) {
       const blocks = pg.blocks;
       if (!blocks || blocks.length === 0) continue;
       textLayerByPage.set(pg.page, blocks.map((b) => ({ x: b.x, y: 1 - b.y - b.h, w: b.w, h: b.h, text: b.text })));
@@ -1314,7 +1390,7 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
           <>
             <button
               onClick={handleRunOcr}
-              disabled={ocrLoading}
+              disabled={ocrRunning}
               className="flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-60"
               style={{
                 color: ocrDone ? 'var(--success)' : isScanned ? 'var(--warn)' : 'var(--ink-muted)',
@@ -1322,8 +1398,8 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
               }}
               title={ocrDone ? 'Already OCR\u2019d (click to re-run)' : isScanned ? 'Scan detected — click to OCR so the text becomes searchable' : 'BOB OCR full-text recognition (makes scans searchable)'}
             >
-              {ocrLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : ocrDone ? <Check className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
-              <span>{ocrLoading ? 'OCR…' : ocrDone ? 'OCR done' : 'OCR'}</span>
+              {ocrRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : ocrDone ? <Check className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
+              <span>{ocrRunning ? 'OCR…' : ocrDone ? 'OCR done' : 'OCR'}</span>
             </button>
             {/* 文本层可视化：OCR 完成后可切换显示识别文字覆盖层 */}
             {ocrDone && (
@@ -1373,6 +1449,28 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                 <option key={s} value={s}>{s}px</option>
               ))}
             </select>
+
+            {/* 批注列表开关：一览全文档批注，点击可跳回所在页 */}
+            <div className="w-px h-4 bg-[var(--line)] mx-1" />
+            <button
+              onClick={() => setAnnotsOpen((o) => !o)}
+              className="relative rounded-md p-1.5 transition-colors hover:bg-[var(--paper-hover)]"
+              style={{
+                color: annotsOpen ? 'var(--primary)' : 'var(--ink-muted)',
+                backgroundColor: annotsOpen ? 'color-mix(in oklab, var(--primary) 10%, transparent)' : 'transparent',
+              }}
+              title={`Annotations (${annotations.length}) — jump back to any highlight or note`}
+            >
+              <StickyNote className="h-4 w-4" />
+              {annotations.length > 0 && (
+                <span
+                  className="absolute -right-0.5 -top-0.5 rounded-full px-1 tabular-nums"
+                  style={{ fontSize: 9, lineHeight: 1.5, backgroundColor: 'var(--warn)', color: '#fff' }}
+                >
+                  {annotations.length}
+                </span>
+              )}
+            </button>
 
             {/* 选中批注：删除 + 颜色 */}
             {selectedId && (
@@ -1628,14 +1726,14 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
                 {(scanNeedsOcr || noHitNeedsOcr) && (
                   <button
                     onClick={handleRunOcr}
-                    disabled={ocrLoading}
+                    disabled={ocrRunning}
                     className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed px-2 py-1.5 transition-colors hover:bg-[var(--paper-hover)] disabled:opacity-50"
                     style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}
                   >
-                    {ocrLoading
+                    {ocrRunning
                       ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       : <Zap className="h-3.5 w-3.5" style={{ color: 'var(--warn)' }} />}
-                    {ocrLoading ? 'Running BOB OCR…' : scanNeedsOcr ? 'Run BOB OCR to enable search' : 'No matches? Run BOB OCR, then search again'}
+                    {ocrRunning ? 'Running BOB OCR…' : scanNeedsOcr ? 'Run BOB OCR to enable search' : 'No matches? Run BOB OCR, then search again'}
                   </button>
                 )}
               </div>
@@ -1681,8 +1779,63 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
           </aside>
         )}
 
+        {/* 批注列表侧栏：一览全文档高亮/文字框，点击跳转到所在页并选中该条 */}
+        {annotsOpen && filePath && (
+          <aside className="flex w-64 shrink-0 flex-col border-l"
+            style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}>
+            <div className="flex shrink-0 items-center justify-between px-2.5 py-1.5 text-11 font-medium"
+              style={{ color: 'var(--ink-muted)', borderBottom: '1px solid var(--line-soft)' }}>
+              <span>Annotations · {annotations.length}</span>
+              <button
+                onClick={() => setAnnotsOpen(false)}
+                className="rounded p-0.5 transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)' }}
+                title="Close annotations"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="ai-canvas-scroll min-h-0 flex-1 overflow-y-auto px-2 py-1">
+              {sortedAnns.length === 0 ? (
+                <p className="px-1 py-3 text-11 leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+                  No annotations yet. Highlight or add a note, then click an entry here to jump back to it.
+                </p>
+              ) : (
+                sortedAnns.map((a) => {
+                  const active = a.id === selectedId;
+                  const isText = a.type === 'textbox';
+                  const label = isText ? (a.text?.trim() || 'Empty text note') : 'Highlight';
+                  return (
+                    <button
+                      key={a.id}
+                      onClick={() => { scrollToPage(a.page); setSelectedId(a.id); }}
+                      className="mb-1 flex w-full items-start gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                      style={{
+                        backgroundColor: active ? 'color-mix(in oklab, var(--info) 12%, transparent)' : 'transparent',
+                        outline: active ? '1px solid var(--info)' : 'none',
+                      }}
+                      title={`Go to page ${a.page}`}
+                    >
+                      <span className="mt-0.5 inline-block shrink-0 rounded px-1 text-10 font-medium tabular-nums"
+                        style={{ backgroundColor: 'var(--paper-soft)', color: active ? 'var(--info)' : 'var(--ink-muted)' }}>
+                        P{a.page}
+                      </span>
+                      <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border"
+                        style={{ backgroundColor: a.color, borderColor: 'var(--line)' }} />
+                      <span className="min-w-0 flex-1 text-xs leading-snug break-words"
+                        style={{ color: isText && a.text?.trim() ? 'var(--ink)' : 'var(--ink-muted)' }}>
+                        {label}
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </aside>
+        )}
+
         {/* OCR 完成浮层（结果感知）：识别页数 / 耗时 / 升级页数，引导检索与文本层 */}
-        {ocrResultShown && ocrMeta && (
+        {ocrResultShown && ocrState.meta && (
           <div
             className="absolute bottom-4 right-4 z-20 flex items-start gap-3 rounded-xl border p-3.5 text-xs shadow-xl"
             style={{ maxWidth: 380, borderColor: 'var(--line)', backgroundColor: 'var(--popover)' }}
@@ -1694,9 +1847,9 @@ export function PdfViewer({ url, fileName, filePath }: PdfViewerProps) {
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>OCR complete</div>
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5" style={{ color: 'var(--ink-muted)' }}>
-                <span className="tabular-nums">{ocrMeta.pageCount} pages</span>
-                {ocrMeta.upgradedCount > 0 && <span>{ocrMeta.upgradedCount} pages upgraded to the vision model</span>}
-                <span className="tabular-nums">{(ocrMeta.elapsedMs / 1000).toFixed(1)}s</span>
+                <span className="tabular-nums">{ocrState.meta.pageCount} pages</span>
+                {ocrState.meta.upgradedCount > 0 && <span>{ocrState.meta.upgradedCount} pages upgraded to the vision model</span>}
+                <span className="tabular-nums">{(ocrState.meta.elapsedMs / 1000).toFixed(1)}s</span>
               </div>
               <div className="mt-1.5 flex items-center gap-3">
                 <button

@@ -26,7 +26,7 @@ describe('tool layer: SCENED_TOOLS 场景门控工具归 ondemand（修复前默
   });
 
   it('核心常驻锚点工具保持 core（不误伤）', () => {
-    for (const name of ['read_file', 'write_file', 'edit_code', 'run_command', 'execute_script', 'web_search', 'web_fetch', 'read_attachment', 'todo_write', 'finish_task', 'ask_user_questions', 'read_preferences', 'load_skill', 'read_skill_resource', 'search_capabilities', 'read_material']) {
+    for (const name of ['read_file', 'write_file', 'edit_code', 'run_command', 'execute_script', 'web_search', 'web_fetch', 'read_attachment', 'todo_write', 'finish_task', 'ask_user_questions', 'read_preferences', 'load_skill', 'read_skill_resource', 'search_capabilities']) {
       expect(getToolLayer(name), name).toBe('core');
     }
   });
@@ -46,7 +46,7 @@ describe('CacheGuard 豁免边界（修复后：场景切换不误报，core 真
   });
 
   it('core 常驻锚点工具 = 非动态 → 不豁免（真漂移仍告警）', () => {
-    for (const name of ['read_file', 'write_file', 'edit_code', 'run_command', 'execute_script', 'web_search', 'web_fetch', 'read_attachment', 'todo_write', 'finish_task', 'search_capabilities', 'read_material']) {
+    for (const name of ['read_file', 'write_file', 'edit_code', 'run_command', 'execute_script', 'web_search', 'web_fetch', 'read_attachment', 'todo_write', 'finish_task', 'search_capabilities']) {
       expect(isDynamicSceneTool(name), name).toBe(false);
     }
   });

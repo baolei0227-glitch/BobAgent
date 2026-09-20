@@ -34,7 +34,7 @@ export interface GraphNodeInfo {
   measuredHeight?: number;
   /** 节点实际渲染宽度（同上，缺省时排版回退占位宽度）。 */
   measuredWidth?: number;
-  /** 宿主节点 type：'aiChat' / 'imageGen' / 'bobby' / 'agentTeams' / 'agent-<id>' 等 */
+  /** 宿主节点 type：'aiChat' / 'imageGen' / 'bobby' / 'agent-<id>' 等 */
   type: string;
   /** 绑定 Bob Sandbox 小程序 id（AI Coding 节点），用于与普通 chat 节点区分颜色 / 徽章 */
   sandboxAppId?: string;

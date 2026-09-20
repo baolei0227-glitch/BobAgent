@@ -1,53 +1,66 @@
 'use client';
 
 import { useState, useMemo, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore } from 'react';
-import { MapPinned as MapIcon, Pin, Inbox } from 'lucide-react';
+import { MapPinned as MapIcon, Pin, Inbox, Tags, Orbit } from 'lucide-react';
 import type { GraphGateway, NodeKind } from '@/lib/graph/graph-gateway';
-import { computeForceLayout } from '@/lib/graph/nodemap-layout';
+import { computeRadialLayout } from '@/lib/graph/nodemap-layout';
 
-/** 锚点方位常量（语义同旧 React Flow 的 Position，仅用于锚点与曲线控制点方向） */
-const Position = { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' } as const;
-type Position = (typeof Position)[keyof typeof Position];
-
-/** 三次贝塞尔控制点：沿锚点方位偏移 curvature × 轴向距离（等价旧 getBezierPath 的 withCurvature 规则） */
-function bezierControl(
-  pos: Position,
-  x1: number, y1: number,
-  x2: number, y2: number,
-  curvature: number,
-): { x: number; y: number } {
-  switch (pos) {
-    case Position.Left: return { x: x1 - Math.abs(x2 - x1) * curvature, y: y1 };
-    case Position.Right: return { x: x1 + Math.abs(x2 - x1) * curvature, y: y1 };
-    case Position.Top: return { x: x1, y: y1 - Math.abs(y2 - y1) * curvature };
-    case Position.Bottom: return { x: x1, y: y1 + Math.abs(y2 - y1) * curvature };
+/** 径向连线（辐条）：端点各取"圆心 → 对方圆心"方向上的圆缘点，控制点沿同方向等距内推。
+ *  四点共线 → 观感是一条干净的直线辐条；辐射布局下不再像旧 Left/Right 锚点那样互相绕圈。
+ *  @returns [pathD, midX, midY] —— SVG path 与 t=0.5 处中点（供"拖断把手"命中） */
+function radialEdgePath(
+  sx0: number, sy0: number,
+  tx0: number, ty0: number,
+  half: number,
+): [string, number, number] {
+  const dx = tx0 - sx0;
+  const dy = ty0 - sy0;
+  const len = Math.hypot(dx, dy);
+  // 两圆心重合（异常/极近）：退化为一条极短直线，避免除零
+  if (len < 0.001) return [`M${sx0},${sy0} L${tx0},${ty0}`, sx0, sy0];
+  const ux = dx / len;
+  const uy = dy / len;
+  let sx = sx0 + ux * half;
+  let sy = sy0 + uy * half;
+  let tx = tx0 - ux * half;
+  let ty = ty0 - uy * half;
+  // 两个圆点相交（锚点越过对方圆心）时回落到圆心连线，避免端点反向
+  if ((tx - sx) * ux + (ty - sy) * uy <= 0) {
+    sx = sx0; sy = sy0; tx = tx0; ty = ty0;
   }
-}
-
-/** 自实现平滑贝塞尔连线（替代旧 getBezierPath）：
- *  @returns [pathD, midX, midY] —— SVG path 与 t=0.5 处中点（旧实现 labelX/labelY 供命中判定/把手） */
-function smoothBezierPath(opts: {
-  sourceX: number;
-  sourceY: number;
-  sourcePosition: Position;
-  targetX: number;
-  targetY: number;
-  targetPosition: Position;
-  curvature?: number;
-}): [string, number, number] {
-  const curvature = opts.curvature ?? 0.25;
-  const c1 = bezierControl(opts.sourcePosition, opts.sourceX, opts.sourceY, opts.targetX, opts.targetY, curvature);
-  const c2 = bezierControl(opts.targetPosition, opts.targetX, opts.targetY, opts.sourceX, opts.sourceY, curvature);
-  const d = `M${opts.sourceX},${opts.sourceY} C ${c1.x},${c1.y} ${c2.x},${c2.y} ${opts.targetX},${opts.targetY}`;
+  const k = Math.hypot(tx - sx, ty - sy) * 0.25; // 控制点内推量（同旧 curvature 0.25 手感）
+  const c1x = sx + ux * k, c1y = sy + uy * k;
+  const c2x = tx - ux * k, c2y = ty - uy * k;
+  const d = `M${sx},${sy} C ${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`;
   // 三次贝塞尔 t=0.5：P = (P0 + 3P1 + 3P2 + P3)/8
-  const midX = (opts.sourceX + 3 * c1.x + 3 * c2.x + opts.targetX) / 8;
-  const midY = (opts.sourceY + 3 * c1.y + 3 * c2.y + opts.targetY) / 8;
+  const midX = (sx + 3 * c1x + 3 * c2x + tx) / 8;
+  const midY = (sy + 3 * c1y + 3 * c2y + ty) / 8;
   return [d, midX, midY];
 }
 
 /** 单焦点画布：可被桌面"单节点 + 导航圆点"收纳的 AI 研究节点类型（与 CanvasFlow isFocusableResearch 同口径） */
 function isFocusFlowType(type?: string): boolean {
   return type === 'aiChat' || type === 'aiCoding' || (!!type && type.startsWith('agent-'));
+}
+
+/** 名称浮层定位（圆点中心 → 面板 local 坐标）：优先落在圆点上方/下方（prefer），
+ *  该侧放不下则翻到另一侧，并始终夹紧在面板可视区内（面板 overflow-hidden）。
+ *  悬停浮层（prefer='above'）与常驻名称标签（prefer='below'）共用，避免两份定位数学漂移。 */
+function labelBox(
+  cx: number, cy: number, half: number,
+  prefer: 'above' | 'below',
+  w: number, h: number,
+  containerW: number, containerH: number, pad: number,
+): { left: number; top: number } {
+  const gap = 6; // 浮层与圆点的间距
+  const above = cy - half - gap - h;
+  const below = cy + half + gap;
+  const overflow = prefer === 'above' ? above < pad + 1 : below + h > containerH - pad - 1;
+  let top = overflow ? (prefer === 'above' ? cy + half + gap + 1 : above) : prefer === 'above' ? above : below;
+  let left = cx - w / 2;
+  if (w) left = Math.min(Math.max(left, pad + 1), containerW - w - pad - 1);
+  top = Math.min(Math.max(top, pad + 1), Math.max(pad + 1, containerH - h - pad - 1));
+  return { left, top };
 }
 
 /** 迷你节点圆点几何基准：以固定 400×400 占位缩放，直径收敛到 [12,16]px——
@@ -183,6 +196,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const [pinned, setPinned] = useState(false);
+  /** 名称标签开关（标题栏按钮）：打开后所有圆点常驻显示名称浮层 */
+  const [showAllLabels, setShowAllLabels] = useState(false);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   // 当前鼠标悬停的连线 id：命中连线后中点显示可拖拽"断开"把手；离开整组才清除
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
@@ -251,6 +266,21 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     const h = tip.offsetHeight;
     setHoverTipSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
   }, [hoveredNodeId, connectFrom]);
+  // 常驻名称标签尺寸实测：所有标签共用一个稳定 ref 回调（按 data-label-node 取 id），
+  // 仅在实测尺寸变化时写入 state（尺寸相同则原样返回），据此完成居中/夹紧且不会形成渲染循环。
+  const [labelSizes, setLabelSizes] = useState<Record<string, { w: number; h: number }>>({});
+  const measureLabelRef = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    const id = el.dataset.labelNode;
+    if (!id) return;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    setLabelSizes((prev) => {
+      const cur = prev[id];
+      if (cur && Math.abs(cur.w - w) < 0.5 && Math.abs(cur.h - h) < 0.5) return prev;
+      return { ...prev, [id]: { w, h } };
+    });
+  }, []);
   // 连线悬停清除：若指针仍停留在此连线组内（线→中点把手等相邻元素），保持高亮；彻底离开才清除。
   // 复刻真实画布 FloatingEdge 的"线 + 中点把手"同组 hover 语义，避免把手消失/闪烁。
   const clearEdgeHover = (e: React.PointerEvent<SVGElement>) => {
@@ -313,38 +343,15 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
 
   // 画布 zoom 恒 1（单焦点宿主 2026-09）：旧"zoom 偏离 1 时拉回"的 setViewport 死逻辑已移除。
 
-  // 锚定增量排版：以"节点结构签名"为键缓存上次落定位置。
-  // ① 纯边增删（拉线/断边）不改动节点集合 → 复用缓存位置，圆圈位置不变化（解决"拉线后位置会变化"）；
-  // ② 仅节点增删（结构签名变化）才重新排版，且以缓存位置为锚点：已有节点保持不动，只落位新增节点。
-  const layoutStateRef = useRef<{
-    structureKey: string;
-    positions: Record<string, { cx: number; cy: number }>;
-    bounds: { minX: number; minY: number; maxX: number; maxY: number };
-  } | null>(null);
+  // 径向轨道排版（2026-09-17 起替代力导向）：
+  // 关系（边）本身即排版依据 —— 增删连线会重新分环/分扇区，让"从哪个节点分出来"一眼可读；
+  // 纯函数 + 确定性，故直接 useMemo 缓存（无锚点缓存/增量模式）。手动拖拽定位仍然优先（见下方覆盖）。
   const { dots, bounds, centers } = useMemo(() => {
     const layoutNodes = nodes.filter((n) => n.type !== 'annotation');
     if (layoutNodes.length === 0) {
-      layoutStateRef.current = null;
       return { dots: [], bounds: null, centers: {} as Record<string, { cx: number; cy: number }> };
     }
-    const structureKey = layoutNodes
-      .map((n) => n.id)
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-      .join('|');
-    let positions: Record<string, { cx: number; cy: number }>;
-    let fbounds: { minX: number; minY: number; maxX: number; maxY: number };
-    const cached = layoutStateRef.current;
-    if (cached && cached.structureKey === structureKey) {
-      // 节点集合未变（纯边增删 / 元数据变化）→ 复用原落定位置，避免拉线后跳动
-      positions = cached.positions;
-      fbounds = cached.bounds;
-    } else {
-      // 节点集合变化：以缓存位置为锚点增量排版（无缓存 → 首次全量力导向）
-      const res = computeForceLayout(nodes, edges, cached ? { previousPositions: cached.positions } : {});
-      positions = res.positions;
-      fbounds = res.bounds;
-      layoutStateRef.current = { structureKey, positions, bounds: fbounds };
-    }
+    const { positions, bounds: fbounds } = computeRadialLayout(nodes, edges);
     // 手工拖拽 + 实时拖拽覆盖：手动定位优先于自动排版，拖拽中实时跟随、落定后持久不回落
     const effective: Record<string, { cx: number; cy: number }> = {};
     for (const id of Object.keys(positions)) effective[id] = positions[id];
@@ -385,6 +392,28 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     }
   }, [gateway, projectId]);
 
+  // ———— 一键排序（标题栏按钮 / ⌘R）————
+  // 自动排版是确定性纯函数（见 nodemap-layout），"排序"= 丢弃手动拖拽的位置覆盖，回到自动排版；
+  // 折叠态下触发时顺手展开面板，让结果可见。
+  const arrangeNow = useCallback(() => {
+    setManualPositions({});
+    setDragDot(null);
+    setHoveredEdgeId(null);
+    setCollapsed(false);
+  }, []);
+  // ⌘R / Ctrl+R：一键排序（替换旧 React Flow 时代的"Fit canvas & arrange sticky notes"，该处理器早已下线）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== 'r') return;
+      // 始终拦住默认行为：避免 Chromium/Electron 的整页刷新把排序动作吞掉
+      e.preventDefault();
+      arrangeNow();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [arrangeNow]);
+
   const mapW = 360 * mapZoom;
   const mapH = 240 * mapZoom;
   const pad = 8;
@@ -392,7 +421,11 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
   const containerH = mapH + pad * 2;
   const bw = bounds ? bounds.maxX - bounds.minX : 0;
   const bh = bounds ? bounds.maxY - bounds.minY : 0;
-  const scale = bw > 0 && bh > 0 ? Math.min(mapW / bw, mapH / bh) : 0;
+  // 单轴跨度为 0 时（径向排版下"一条纯链"会呈正放射状单轴展开）用另一轴定比例，
+  // 避免 scale 归零把整图压成一个点；两轴都无跨度（单节点）才回落到 0（居中显示）。
+  const scaleX = bw > 0 ? mapW / bw : Infinity;
+  const scaleY = bh > 0 ? mapH / bh : Infinity;
+  const scale = Number.isFinite(Math.min(scaleX, scaleY)) ? Math.min(scaleX, scaleY) : 0;
 
   // 统一以容器（含内边距）中心为基准的映射，确保连线/圆点/临时拖线在同一坐标系精确对齐
   const toMapX = (x: number) => (bounds ? (x - (bounds.minX + bounds.maxX) / 2) * scale + containerW / 2 : 0);
@@ -400,6 +433,21 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
 
   // 迷你卡片边长：按固定 400×400 占位 × 整体比例收敛到 [CARD_MIN, CARD_MAX]
   const cardSize = Math.min(Math.max(400 * scale, CARD_MIN), CARD_MAX);
+
+  // 常驻名称标签（标题栏开关打开时）：所有圆点显示名称，默认落在圆点下方（避让左右拖拽把手），
+  // 越界自动翻面 + 夹紧在面板可视区内。依赖 labelSizes：尺寸实测后重算一次完成居中。
+  const allLabelBoxes = useMemo(() => {
+    if (!showAllLabels) return [];
+    const half = Math.max(cardSize, 14) / 2;
+    return dots.map((d) => {
+      const size = labelSizes[d.id] ?? { w: 0, h: 0 };
+      const { left, top } = labelBox(
+        toMapX(d.cx), toMapY(d.cy), half, 'below',
+        size.w, size.h, containerW, containerH, pad,
+      );
+      return { id: d.id, name: d.name, left, top };
+    });
+  }, [dots, showAllLabels, labelSizes, cardSize, containerW, containerH, pad, toMapX, toMapY]);
 
   // ———— 拖拽建边辅助：坐标换算 / 命中判定 / 锚点 pointer 事件 ————
   const connectTargetRef = useRef<string | null>(null);
@@ -469,28 +517,10 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
       const tx0 = toMapX(t.cx);
       const ty0 = toMapY(t.cy);
       const half = cardSize / 2;
-      const dx = tx0 - sx0;
-      let sx: number; let sy: number; let tx: number; let ty: number;
-      let sourcePosition: Position;
-      let targetPosition: Position;
-      if (Math.abs(dx) < 0.001) {
-        sx = sx0; sy = sy0 + half; tx = tx0; ty = ty0 - half;
-        sourcePosition = Position.Bottom; targetPosition = Position.Top;
-      } else if (dx > 0) {
-        sx = sx0 + half; sy = sy0; tx = tx0 - half; ty = ty0;
-        sourcePosition = Position.Right; targetPosition = Position.Left;
-      } else {
-        sx = sx0 - half; sy = sy0; tx = tx0 + half; ty = ty0;
-        sourcePosition = Position.Left; targetPosition = Position.Right;
-      }
       // 取贝塞尔真实中点（mx/my）作为命中折线的中间顶点，
       // 让中点"断开"把手始终落在命中区域内，避免线↔把手往返时闪退
-      const [, mx, my] = smoothBezierPath({
-        sourceX: sx, sourceY: sy, sourcePosition,
-        targetX: tx, targetY: ty, targetPosition,
-        curvature: 0.25,
-      });
-      out.push({ id: edge.id, sx, sy, mx, my, tx, ty });
+      const [, mx, my] = radialEdgePath(sx0, sy0, tx0, ty0, half);
+      out.push({ id: edge.id, sx: sx0, sy: sy0, mx, my, tx: tx0, ty: ty0 });
     }
     return out;
   }, [edges, centers, cardSize, toMapX, toMapY]);
@@ -621,7 +651,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     dragLiveRef.current = next;
     setDragDot(next);
   };
-  // 落定：位移超阈值 → 写入手动覆盖 + 排版缓存（后续增量排版以此为锚点，不回弹），
+  // 落定：位移超阈值 → 写入手动覆盖（手动定位优先于自动排版，拖后不回弹），
   // 并抑制紧随的 click；否则视为点击（focusNode 仍正常触发）。
   const endDrag = () => {
     const start = dragStartRef.current;
@@ -632,10 +662,6 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     if (start && live && start.moved > 3) {
       suppressClickRef.current = true;
       setManualPositions((prev) => ({ ...prev, [live.id]: { cx: live.cx, cy: live.cy } }));
-      if (layoutStateRef.current) {
-        // 同步到排版缓存：使后续增量排版（结构变化）以拖拽后的位置为锚点，避免回弹
-        layoutStateRef.current.positions[live.id] = { cx: live.cx, cy: live.cy };
-      }
     }
   };
 
@@ -731,6 +757,27 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
               </button>
               {/* 分组分隔线：通知 │ 工具（固定） */}
               <div className="mx-1 h-4 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
+              {/* 一键排序：丢弃手动拖拽的位置覆盖，回到自动排版（等价的快捷键 ⌘R） */}
+              <button
+                onClick={arrangeNow}
+                className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink-muted)' }}
+                title="Auto arrange (⌘R)"
+              >
+                <Orbit className="h-3 w-3" />
+              </button>
+              {/* 名称标签开关：打开后所有圆点常驻显示名称浮层（透明底 + 灰框） */}
+              <button
+                onClick={() => setShowAllLabels((v) => !v)}
+                className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
+                style={{
+                  color: showAllLabels ? '#fff' : 'var(--ink-muted)',
+                  backgroundColor: showAllLabels ? 'var(--primary)' : 'transparent',
+                }}
+                title={showAllLabels ? 'Hide node names' : 'Show node names'}
+              >
+                <Tags className="h-3 w-3" />
+              </button>
               <button
                 onClick={() => setPinned((p) => !p)}
                 className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
@@ -759,9 +806,9 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
               touchAction: 'none',
             }}
           >
-            {/* 节点间连线：贝塞尔曲线 + 迷你箭头（复刻真实画布 FloatingEdge 观感——
-                按卡片中心横向方位取 Left/Right 出边、curvature 0.25；
-                普通连线 = 暖棕虚线 + 端点迷你箭头，断开 = 淡灰虚线，执行中 = 琥珀电流光晕） */}
+            {/* 节点间连线：径向辐条（端点沿两圆心连线方向落在圆缘）+ 迷你箭头。
+                辐射布局下连线呈放射状，不再像旧 Left/Right 锚点那样互相绕圈；
+                普通连线 = 暖棕虚线 + 端点迷你箭头，断开 = 淡灰虚线，执行中 = 琥珀电流光晕 */}
             <svg
               className="nodemap-edges absolute inset-0 pointer-events-none"
               style={{ width: containerW, height: containerH, zIndex: 0 }}
@@ -787,34 +834,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                 const sy0 = toMapY(s.cy);
                 const tx0 = toMapX(t.cx);
                 const ty0 = toMapY(t.cy);
-                // 与真实 FloatingEdge 同规则：按中心横向方位取 Left/Right 出边；
-                // 仅当中心几乎垂直重叠时退化为上→下连接，避免曲线横穿卡片
-                const half = cardSize / 2;
-                const dx = tx0 - sx0;
-                let sx: number; let sy: number; let tx: number; let ty: number;
-                let sourcePosition: Position;
-                let targetPosition: Position;
-                if (Math.abs(dx) < 0.001) {
-                  sx = sx0; sy = sy0 + half;
-                  tx = tx0; ty = ty0 - half;
-                  sourcePosition = Position.Bottom;
-                  targetPosition = Position.Top;
-                } else if (dx > 0) {
-                  sx = sx0 + half; sy = sy0;
-                  tx = tx0 - half; ty = ty0;
-                  sourcePosition = Position.Right;
-                  targetPosition = Position.Left;
-                } else {
-                  sx = sx0 - half; sy = sy0;
-                  tx = tx0 + half; ty = ty0;
-                  sourcePosition = Position.Left;
-                  targetPosition = Position.Right;
-                }
-                const [d, labelX, labelY] = smoothBezierPath({
-                  sourceX: sx, sourceY: sy, sourcePosition,
-                  targetX: tx, targetY: ty, targetPosition,
-                  curvature: 0.25,
-                });
+                // 径向辐条：端点沿两圆心连线方向落在圆缘，控制点同向 —— 与 edgeGeom 同一套几何
+                const [d, labelX, labelY] = radialEdgePath(sx0, sy0, tx0, ty0, cardSize / 2);
                 const disconnected = Boolean(edge.disconnected);
                 const executing = !disconnected && (executingIds.has(edge.source) || executingIds.has(edge.target));
                 // 标题链接图标 reveal 高亮：与高亮节点直接相连的边强调显示
@@ -927,7 +948,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                       if (suppressClickRef.current) { suppressClickRef.current = false; e.stopPropagation(); return; }
                       focusNode(dot.id);
                     }}
-                    title={dot.name}
+                    // 名称标签全量显示时不再叠原生 tooltip（避免与常驻标签重复显示同一名称）
+                    title={showAllLabels ? undefined : dot.name}
                 >
                   <span
                     className="block"
@@ -1098,25 +1120,38 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                 </svg>
               );
             })()}
-            {/* 悬停标题浮层（拖线建边期间隐藏）：水平居中于圆点、垂直落在圆点正上方——
-                浮层的垂直范围与左右拖拽把手（圆点两侧同一横向高度带）错开，不遮挡把手；
-                面板顶部空间不足时翻到圆点下方，并始终夹紧在面板可视区内（面板 overflow-hidden） */}
-            {hoveredNodeId && !connectFrom && (() => {
+            {/* 常驻名称标签（标题栏"名称"开关打开时全量显示）：透明底 + 灰框，
+                默认落在圆点下方（避让左右拖拽把手），越界自动翻面并夹紧在面板内 */}
+            {allLabelBoxes.map((lb) => (
+              <div
+                key={lb.id}
+                ref={measureLabelRef}
+                data-label-node={lb.id}
+                className="absolute max-w-[132px] truncate rounded px-1.5 py-0.5 text-xs leading-tight pointer-events-none whitespace-nowrap"
+                style={{
+                  left: lb.left,
+                  top: lb.top,
+                  backgroundColor: 'transparent',
+                  border: '1px solid var(--line)',
+                  color: 'var(--ink)',
+                  zIndex: 9,
+                }}
+              >
+                {lb.name}
+              </div>
+            ))}
+            {/* 悬停标题浮层（拖线建边期间隐藏；标签全量显示时名称已在场，故不再叠一层）：
+                水平居中于圆点、垂直落在圆点正上方——浮层的垂直范围与左右拖拽把手
+                （圆点两侧同一横向高度带）错开，不遮挡把手；顶部放不下翻到下方并夹紧在面板内 */}
+            {hoveredNodeId && !connectFrom && !showAllLabels && (() => {
               const d = dots.find((x) => x.id === hoveredNodeId);
               if (!d) return null;
-              const cx = toMapX(d.cx);
-              const cy = toMapY(d.cy);
               const half = Math.max(cardSize, 14) / 2;
-              const gap = 6; // 浮层与圆点的间距
               const { w = 0, h = 0 } = hoverTipSize ?? {};
-              // 默认：浮层底边紧贴圆点顶部上方（留 gap），水平居中于圆点
-              let left = cx - w / 2;
-              let top = cy - half - gap - h;
-              // 面板顶部放不下 → 翻到圆点下方
-              if (top < pad + 1) top = cy + half + gap + 1;
-              // 水平/垂直夹紧：保证浮层完整落在面板可视区内
-              if (w) left = Math.min(Math.max(left, pad + 1), containerW - w - pad - 1);
-              top = Math.min(Math.max(top, pad + 1), Math.max(pad + 1, containerH - h - pad - 1));
+              const { left, top } = labelBox(
+                toMapX(d.cx), toMapY(d.cy), half, 'above',
+                w, h, containerW, containerH, pad,
+              );
               return (
                 <div
                   ref={hoverTipRef}
@@ -1124,8 +1159,9 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
                   style={{
                     left,
                     top,
-                    backgroundColor: 'var(--ink)',
-                    color: '#fff',
+                    backgroundColor: 'transparent',
+                    border: '1px solid var(--line)',
+                    color: 'var(--ink)',
                     zIndex: 10,
                   }}
                 >

@@ -64,4 +64,8 @@ export interface FileOpenPayload {
   source: FileSourceKind;
   path: string;
   name: string;
+  /** 可选定位锚点：跳转到 PDF 指定页（1-based，来自检索命中/对话引用/批注） */
+  page?: number;
+  /** 可选定位锚点：在文档内检索并高亮的关键词片段 */
+  query?: string;
 }

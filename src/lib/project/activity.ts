@@ -146,7 +146,7 @@ async function collectTaskItems(projectPath: string): Promise<ActivityItem[]> {
         id: `task:${nodeId}:${turn.anchor || turn.taskId || index}`,
         kind: 'task',
         ts,
-        title: '执行任务',
+        title: 'Task executed',
         detail: question.length > 90 ? `${question.slice(0, 90)}…` : question || nodeTitle,
         nodeId,
       });
@@ -193,7 +193,7 @@ export async function collectProjectActivity(
       id: `project:created:${project.id}`,
       kind: 'project',
       ts: project.created_at,
-      title: '创建项目',
+      title: 'Project created',
       detail: project.name,
     });
   }
@@ -204,7 +204,7 @@ export async function collectProjectActivity(
       id: `lifecycle:archived:${project.id}`,
       kind: 'lifecycle',
       ts: project.archived_at,
-      title: '归档项目',
+      title: 'Project archived',
       detail: project.name,
     });
   }
@@ -213,7 +213,7 @@ export async function collectProjectActivity(
       id: `lifecycle:trashed:${project.id}`,
       kind: 'lifecycle',
       ts: project.trashed_at,
-      title: '移入回收站',
+      title: 'Moved to trash',
       detail: project.name,
     });
   }
@@ -228,7 +228,7 @@ export async function collectProjectActivity(
       kind: 'attachment',
       ts: f.mtime.toISOString(),
       title: f.name,
-      detail: '添加附件',
+      detail: 'Attachment added',
       path: f.rel,
       size: f.size,
       extension: f.extension,
@@ -242,7 +242,7 @@ export async function collectProjectActivity(
       kind: 'document',
       ts: f.mtime.toISOString(),
       title: f.name,
-      detail: '生成文档',
+      detail: 'Document generated',
       path: f.rel,
       size: f.size,
       extension: f.extension,

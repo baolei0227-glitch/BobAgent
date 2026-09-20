@@ -12,6 +12,10 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { loadSettings, saveSettings, getImageModelCandidates, findProviderForModel } from '@/lib/settings';
+import { parseDoc, hashText, inlineText } from '@/lib/md-export/ir';
+import { checkDoc } from '@/lib/md-export/check';
+import { XHS_GEOMETRY, XHS_SPEC } from '@/lib/md-export/targets/xhs';
+import { CheckReport } from './CheckReport';
 
 /**
  * XhsPanel — 3:4 竖版小红书风格分享卡。
@@ -93,10 +97,7 @@ export const PAPER_STYLES: XhsPaper[] = [
   { key: 'cream', label: 'Cream', bg: '#FFF8F3' },
   { key: 'white', label: 'White', bg: '#FFFFFF' },
   { key: 'kraft', label: 'Kraft', bg: '#F6ECDD' },
-  { key: 'blush', label: 'Blush', bg: '#FFF2F3' },
   { key: 'sky', label: 'Sky', bg: '#F0F6FB' },
-  { key: 'mint', label: 'Mint', bg: '#F0F8F3' },
-  { key: 'lemon', label: 'Lemon', bg: '#FFF9E8' },
 ];
 
 export function resolvePaper(key: string | undefined): XhsPaper {
@@ -112,11 +113,12 @@ function hexToRgba(hex: string, alpha: number): string {
 }
 
 /* ============ 内容处理与分页 ============ */
-const XHS_W = 414; // 3:4 设计宽度；导出 pixelRatio 3 → 1242×1656
-const XHS_H = 552;
-const EXPORT_RATIO = 3;
-const PAD = 24;
-const CAP_BODY = 420; // 正文页内容区高度预算（px，含首尾留白余量）
+/* 卡片几何与正文容量统一从 target 模块派生（lib/md-export/targets/xhs.ts），不再散落硬编码 */
+const XHS_W = XHS_GEOMETRY.width; // 3:4 设计宽度；导出 pixelRatio 3 → 1242×1656
+const XHS_H = XHS_GEOMETRY.height;
+const EXPORT_RATIO = XHS_GEOMETRY.exportRatio;
+const PAD = XHS_GEOMETRY.pad;
+const CAP_BODY = XHS_GEOMETRY.bodyCap; // 正文页内容区高度预算（px，含首尾留白余量）
 const FONT = "ui-sans-serif, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif";
 
 /** XHS 正文页内 Markdown 表格的渲染/测量共用几何常量（颜色可随主题，但尺寸必须一致，
@@ -144,13 +146,17 @@ const fieldStyle: CSSProperties = {
   fontFamily: FONT,
 };
 
-function mdToLines(md: string): string[] {
+/** Markdown → 卡片文本行。
+ *  keepHeadings=false（封面要点用）：标题剥掉 `#`，只留文字；
+ *  keepHeadings=true（正文用）：保留 `#` 语义标记，分页时据此做「标题与后块同页」。 */
+function mdToLines(md: string, keepHeadings = false): string[] {
   const out: string[] = [];
   let fence = false;
   for (const raw of md.split(/\r?\n/)) {
     if (/^\s*```/.test(raw)) { fence = !fence; continue; }
     if (fence) continue;
-    const s = raw
+    const heading = keepHeadings ? /^\s*(#{1,6})\s+/.exec(raw) : null;
+    let s = raw
       .replace(/^\s*(#{1,6})\s+/, '')
       .replace(/^>\s?/, '')
       .replace(/^\s*[-*+]\s+/, '• ')
@@ -160,7 +166,10 @@ function mdToLines(md: string): string[] {
       .replace(/\*([^*]+)\*/g, '$1')
       .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
       .replace(/!\[([^\]]*)\]\([^)]*\)/g, '')
+      // 带尺寸的图片在分享卡里是 <img … width> 形式（见 ShareCard 的 ShareImage 序列化），一并忽略
+      .replace(/<img\b[^>]*>/gi, '')
       .trim();
+    if (heading && s) s = `${heading[1]} ${s}`;
     // 保留段间空行（''）→ 卡片正文以此产生段落间距
     out.push(s);
   }
@@ -189,10 +198,20 @@ function extractCoverItems(lines: string[]): string[] | null {
   return items.length >= 2 ? items : null;
 }
 
-/** 正文页块：文本段（可含内部换行）或整块表格（原子块，分页不拆行） */
+/** 正文页块（语义块 = 分页最小单位，块内不拆）：
+ *  text 段落 / heading 标题 / list 列表（整组）/ table 表格（整块） */
 type XhsBodyBlock =
   | { kind: 'text'; text: string }
+  | { kind: 'heading'; text: string }
+  | { kind: 'list'; items: string[] }
   | { kind: 'table'; header: string[]; rows: string[][] };
+
+/** 块的展示文本：渲染与测高共用同一份，保证「测出来的高度」= 「渲染出来的高度」 */
+function blockText(b: XhsBodyBlock): string {
+  if (b.kind === 'table') return '';
+  if (b.kind === 'list') return b.items.map((it) => `• ${it}`).join('\n');
+  return b.text;
+}
 
 interface XhsPageData {
   kind: 'cover' | 'content';
@@ -262,7 +281,12 @@ const isPipeRow = (line: string) => {
   return t.startsWith('|') && t.endsWith('|');
 };
 
-/** 把正文文本（可能含 markdown 表格行）解析为顺序块列表：文本段 / 表格原子块 */
+/** 保留语义标记的标题行（正文里 `## 标题`） */
+const HEADING_RE = /^(#{1,6})\s+(.*)$/;
+/** 列表项行（mdToLines 已把 -/*/+/1. 统一为 `• `） */
+const BULLET_RE = /^•\s?(.*)$/;
+
+/** 把正文文本解析为顺序的语义块：标题 / 列表整组 / 段落 / 表格原子块 */
 function splitBodyToBlocks(body: string): XhsBodyBlock[] {
   const lines = body.split('\n');
   const out: XhsBodyBlock[] = [];
@@ -282,6 +306,23 @@ function splitBodyToBlocks(body: string): XhsBodyBlock[] {
     if (raw.trim() === '') {
       flushText();
       i++;
+      continue;
+    }
+    const h = HEADING_RE.exec(raw.trim());
+    if (h) {
+      flushText();
+      out.push({ kind: 'heading', text: h[2].trim() });
+      i++;
+      continue;
+    }
+    if (BULLET_RE.test(raw.trim())) {
+      flushText();
+      const items: string[] = [];
+      while (i < lines.length && BULLET_RE.test(lines[i].trim())) {
+        items.push(BULLET_RE.exec(lines[i].trim())![1].trim());
+        i++;
+      }
+      out.push({ kind: 'list', items });
       continue;
     }
     if (isPipeRow(raw)) {
@@ -307,7 +348,11 @@ function splitBodyToBlocks(body: string): XhsBodyBlock[] {
   return out;
 }
 
-/** 块级分页：文本段/表格均为原子块不跨页；超长文本段按行切分（沿用旧兜底），超长表格整表独占一页 */
+/** 块级分页（语义块边界，见方案 §7.2）：
+ *  - 语义块为最小单位，块内不拆；剩余空间不足整块下移；
+ *  - 标题与其后首个块必须同页（放不下则整组下移）；
+ *  - table / list 整块不跨页；
+ *  - 仅当单块自身超高时，才回退到 fitPrefix 行内切（保留兜底）。 */
 function paginateBlocks(
   blocks: XhsBodyBlock[],
   cap: number,
@@ -324,10 +369,20 @@ function paginateBlocks(
       curH = 0;
     }
   };
+  const heightOf = (b: XhsBodyBlock) =>
+    b.kind === 'table' ? measureTable(b.header, b.rows) : measureText(blockText(b));
 
-  for (const b of blocks) {
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+
+    // 标题 keep-with-next：与其后首个块同页，放不下整组下移（连续标题逐个链式判断）
+    if (b.kind === 'heading' && i + 1 < blocks.length) {
+      const need = heightOf(b) + heightOf(blocks[i + 1]);
+      if (cur.length && curH + need > cap) flush();
+    }
+
+    const h = heightOf(b);
     if (b.kind === 'table') {
-      const h = measureTable(b.header, b.rows);
       if (h > cap) {
         // 超大表格：独占一页（仍超高则允许渲染端裁剪，保底不拆行）
         flush();
@@ -342,16 +397,15 @@ function paginateBlocks(
       continue;
     }
 
-    const h = measureText(b.text);
     if (h <= cap) {
       if (cur.length && curH + h > cap) flush();
       cur.push(b);
       curH += h;
       continue;
     }
-    // 单文本段超高 → 按行切分（兼容旧分页兜底）
-    for (const line of b.text.split('\n')) {
-      let lh = measureText(line);
+    // 单块自身超高 → 按行切分（保留旧兜底）
+    for (const line of blockText(b).split('\n')) {
+      const lh = measureText(line);
       if (cur.length && curH + lh > cap) flush();
       if (lh <= cap) {
         cur.push({ kind: 'text', text: line });
@@ -408,11 +462,9 @@ interface EditableContent {
   body: string;
 }
 
-/** 草稿存储键：按问题内容哈希隔离（不同问答互不覆盖） */
-function draftKey(question: string): string {
-  let h = 0;
-  for (let i = 0; i < question.length; i++) h = (h * 31 + question.charCodeAt(i)) | 0;
-  return `bobwork-xhs-draft-${Math.abs(h).toString(36)}`;
+/** 草稿存储键：md 文档场景用 docKey（路径/内容哈希），否则按问题内容哈希隔离（不同问答互不覆盖） */
+function draftKey(question: string, docKey?: string): string {
+  return `bobwork-xhs-draft-${docKey ? `doc-${hashText(docKey)}` : hashText(question)}`;
 }
 
 /** 由 Q+A 自动推导初始内容，供编辑态初始化与"重置"回滚 */
@@ -425,7 +477,39 @@ function computeAuto(question: string, answer: string): EditableContent {
     title: question.trim() || 'AI 问答',
     points: items ?? clean.slice(0, 3).map((l) => l.slice(0, 40)),
     tags: [autoTag(question), '', ''],
-    body: lines.join('\n'),
+    // 正文保留标题 `#` 语义标记，供分页做「标题与后块同页」
+    body: mdToLines(answer, true).join('\n'),
+  };
+}
+
+/**
+ * 由 md 文档自动推导初始内容（md 阅读器路径）。
+ * 与 computeAuto 同构，只把来源从 Q+A 换成 DocIR：
+ * 标题取首个 h1，封面要点优先取列表项，正文去掉重复的标题行。
+ */
+function computeAutoFromMarkdown(markdown: string): EditableContent {
+  const ir = parseDoc(markdown);
+  const lines = mdToLines(markdown);
+  const firstList = ir.blocks.find((b) => b.t === 'list');
+  let points = firstList && firstList.t === 'list'
+    ? firstList.items.slice(0, 3).map((i) => inlineText(i).trim()).filter(Boolean)
+    : [];
+  if (points.length < 2) {
+    // 列表项不足 2 个 → 退回前 3 条非表格行（与聊天路径的封面兜底一致）
+    points = lines
+      .filter((l) => l.trim() !== '' && !isPipeRow(l))
+      .slice(0, 3)
+      .map((l) => l.slice(0, 40));
+  }
+  const title = ir.title || ir.hook || '未命名文档';
+  // 正文保留标题 `#` 语义标记（供分页 keep-with-next），并去掉与封面标题重复的首行
+  const bodyLines = mdToLines(markdown, true)
+    .filter((l, i) => !(i === 0 && l.replace(/^#{1,6}\s+/, '').trim() === title));
+  return {
+    title,
+    points,
+    tags: [autoTag(`${ir.title} ${ir.hook}`), '', ''],
+    body: bodyLines.join('\n'),
   };
 }
 
@@ -656,7 +740,8 @@ function BuiltinDoodle({ index, style }: { index: number; style?: CSSProperties 
 }
 
 /* ============ AI 插画风格预设 ============ */
-const ILLUST_STYLES: Array<{ key: string; label: string; prompt: string }> = [
+/** 风格库：3:4 卡封面插画与分享弹窗正文配图共用（导出供 ShareCard 复用，避免两处各维护一套） */
+export const ILLUST_STYLES: Array<{ key: string; label: string; prompt: string }> = [
   { key: 'watercolor', label: 'Watercolor', prompt: '治愈系手绘水彩风，柔和暖色调、细腻水彩笔触、温暖治愈的质感' },
   { key: 'flat', label: 'Flat cartoon', prompt: '扁平卡通漫画风，简洁线条、明快色块' },
   { key: '3d', label: '3D cute', prompt: '3D 卡通盲盒风，圆润立体、柔和质感、精致渲染' },
@@ -1052,12 +1137,12 @@ function ContentPage({ data, idx, total, theme, paper, stamp, innerRef }: PageVi
       </div>
       <div style={{ marginTop: 18, flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {blocks.map((b, i) =>
-          b.kind === 'text' ? (
-            <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '1rem', lineHeight: 1.8, color: '#3A3A3A' }}>
-              {b.text}
-            </div>
-          ) : (
+          b.kind === 'table' ? (
             <XhsTableBlock key={i} header={b.header} rows={b.rows} theme={theme} />
+          ) : (
+            <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '1rem', lineHeight: 1.8, color: '#3A3A3A' }}>
+              {blockText(b)}
+            </div>
           ),
         )}
       </div>
@@ -1075,8 +1160,14 @@ function PageView(props: PageViewProps) {
 
 /* ============ 面板 ============ */
 export interface XhsPanelProps {
-  question: string;
-  answer: string;
+  /** 聊天路径：用户问题文本（纯文本或 Markdown）；md 阅读器路径可省略 */
+  question?: string;
+  /** 聊天路径：AI 回答内容（Markdown）；md 阅读器路径可省略 */
+  answer?: string;
+  /** 新增：任意 md 字符串（md 阅读器路径）。提供时优先于 question/answer */
+  markdown?: string;
+  /** 新增：草稿身份（md 场景传文件路径等稳定标识，替代 question 哈希） */
+  docKey?: string;
   open: boolean;
   onClose: () => void;
 }
@@ -1112,7 +1203,7 @@ function ConfigTabs({ active, onSelect }: { active: string; onSelect: (k: string
   );
 }
 
-export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
+export function XhsPanel({ question = '', answer = '', markdown, docKey, open, onClose }: XhsPanelProps) {
   const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('style');
   const [themeVal, setThemeVal] = useState<string | undefined>(undefined);
@@ -1138,7 +1229,7 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
   const [busy, setBusy] = useState<'copy' | 'download' | 'all' | null>(null);
   const [flash, setFlash] = useState<'' | 'copy' | 'download'>('');
   const [stamp, setStamp] = useState(() => new Date());
-  const [brandLogoSrc, setBrandLogoSrc] = useState('/bobwork-logo.png');
+  const [brandLogoSrc, setBrandLogoSrc] = useState('/hippo-line.png');
   const [editable, setEditable] = useState<EditableContent | null>(null);
   const measureRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -1147,10 +1238,31 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
   const theme = useMemo(() => resolveTheme(themeVal), [themeVal]);
   const paper = useMemo(() => resolvePaper(paperVal), [paperVal]);
   const total = pages.length;
+  /** md 阅读器路径：提供非空 markdown 时优先于 question/answer */
+  const markdownSource = typeof markdown === 'string' && markdown.trim() !== '' ? markdown : null;
+
+  /** 初始内容推导：md 走 DocIR，聊天走原 Q+A 路径（保证聊天侧行为不变） */
+  const buildAuto = useCallback(
+    () => (markdownSource ? computeAutoFromMarkdown(markdownSource) : computeAuto(question, answer)),
+    [markdownSource, question, answer],
+  );
+
+  /** 导出前平台体检（方案 §6）：正文按 DocIR 解析后套 XHS_SPEC 的字数/图片/块类型约束。
+   *  卡片本身就是图片产物 → 图片数量类检查对卡片路径不适用，过滤掉避免误报。 */
+  const checks = useMemo(() => {
+    if (!open || !editable) return [];
+    const ir = parseDoc(editable.body);
+    return checkDoc({ ...ir, title: editable.title }, XHS_SPEC)
+      .filter((c) => c.key !== 'image' && c.key !== 'image-min');
+  }, [open, editable]);
+
+  /** 插画主题/取材：md 路径用文档标题与正文，聊天路径用原 Q+A */
+  const illustTopic = markdownSource ? (editable?.title ?? '') : question;
+  const illustBody = markdownSource ? (editable?.body ?? '') : answer;
 
   useEffect(() => { setMounted(true); }, []);
 
-  // 品牌标识：默认 /bobwork-logo.png；设置自定义 brandLogo 时从头像池匹配 dataUrl（与 Sidebar 一致）
+  // 品牌标识：默认 /hippo-line.png；设置自定义 brandLogo 时从头像池匹配 dataUrl（与 Sidebar 一致）
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1159,15 +1271,15 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
         const s = await api?.settings?.load();
         if (cancelled) return;
         const brandId = s?.brandLogo;
-        if (!brandId) { setBrandLogoSrc('/bobwork-logo.png'); return; }
+        if (!brandId) { setBrandLogoSrc('/hippo-line.png'); return; }
         if (api?.avatar?.list) {
           const list = await api.avatar.list();
-          setBrandLogoSrc(list.find((x) => x.id === brandId)?.dataUrl ?? '/bobwork-logo.png');
+          setBrandLogoSrc(list.find((x) => x.id === brandId)?.dataUrl ?? '/hippo-line.png');
           return;
         }
-        setBrandLogoSrc('/bobwork-logo.png');
+        setBrandLogoSrc('/hippo-line.png');
       } catch {
-        if (!cancelled) setBrandLogoSrc('/bobwork-logo.png');
+        if (!cancelled) setBrandLogoSrc('/hippo-line.png');
       }
     })();
     return () => { cancelled = true; };
@@ -1195,24 +1307,24 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
     return () => { cancelled = true; };
   }, []);
 
-  // 打开时初始化内容：优先恢复本问答的草稿（自动保存），无草稿则 Q+A 自动推导；默认 Built-in 装饰
+  // 打开时初始化内容：优先恢复本问答/本文档的草稿（自动保存），无草稿则自动推导；默认 Built-in 装饰
   useEffect(() => {
     if (!open) return;
     let draft: EditableContent | null = null;
     try {
-      const raw = localStorage.getItem(draftKey(question));
+      const raw = localStorage.getItem(draftKey(question, docKey));
       if (raw) {
         const parsed = JSON.parse(raw) as EditableContent;
         if (parsed && typeof parsed.title === 'string' && Array.isArray(parsed.points)) draft = parsed;
       }
     } catch { /* 草稿损坏则忽略 */ }
-    setEditable(draft ?? computeAuto(question, answer));
+    setEditable(draft ?? buildAuto());
     setDoodleIdx(Math.floor(Math.random() * DOODLE_BODIES.length));
     setPageIdx(0);
     setIllustMode('builtin');
     setIllustError('');
     setIllustState('idle');
-  }, [open, question, answer]);
+  }, [open, question, docKey, buildAuto]);
 
   // 草稿自动保存（防抖 500ms）：编辑内容变化后写入 localStorage，重开面板自动恢复
   const draftTimer = useRef<number | null>(null);
@@ -1220,10 +1332,10 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
     if (!open || !editable) return;
     if (draftTimer.current) window.clearTimeout(draftTimer.current);
     draftTimer.current = window.setTimeout(() => {
-      try { localStorage.setItem(draftKey(question), JSON.stringify(editable)); } catch { /* 存储失败不阻断 */ }
+      try { localStorage.setItem(draftKey(question, docKey), JSON.stringify(editable)); } catch { /* 存储失败不阻断 */ }
     }, 500);
     return () => { if (draftTimer.current) window.clearTimeout(draftTimer.current); };
-  }, [open, editable, question]);
+  }, [open, editable, question, docKey]);
 
   // 内容/正文变化时重新分页（利用离屏测量节点按真实行高切分）
   useLayoutEffect(() => {
@@ -1311,7 +1423,7 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          prompt: buildIllustPrompt(illustStyle, illustPrompt, question),
+          prompt: buildIllustPrompt(illustStyle, illustPrompt, illustTopic),
           size: '2688x2048',
           model: illustModel || undefined,
           provider: illustModels.find((m) => m.modelId === illustModel)?.provider || undefined,
@@ -1333,7 +1445,7 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
     } finally {
       clearTimeout(timer);
     }
-  }, [illustState, illustStyle, illustPrompt, question, illustModel, illustModels]);
+  }, [illustState, illustStyle, illustPrompt, illustTopic, illustModel, illustModels]);
 
   const persistTheme = useCallback(async (v: string) => {
     setThemeVal(v);
@@ -1393,8 +1505,8 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question,
-          answer,
+          question: illustTopic,
+          answer: illustBody,
           title: editable?.title,
           points: editable?.points,
           tags: editable?.tags,
@@ -1414,7 +1526,7 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
     } finally {
       setPromptLoading(false);
     }
-  }, [promptLoading, question, answer, editable, illustStyle]);
+  }, [promptLoading, illustTopic, illustBody, editable, illustStyle]);
 
   /** 输入文字修改当前 AI/上传图（i2i 编辑，走 /api/ai-edit/image） */
   const handleModify = useCallback(async () => {
@@ -1673,10 +1785,10 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
   /** 批量下载（打包 zip） */
   const handleDownloadZip = useCallback(() => saveAllPages('zip'), [saveAllPages]);
 
-  /** 重置为 Q+A 自动推导的内容 */
+  /** 重置为自动推导的内容（md 文档路径走 DocIR） */
   const handleReset = useCallback(() => {
-    setEditable(computeAuto(question, answer));
-  }, [question, answer]);
+    setEditable(buildAuto());
+  }, [buildAuto]);
 
   const updateEditable = useCallback((patch: Partial<EditableContent>) => {
     setEditable((v) => (v ? { ...v, ...patch } : v));
@@ -1980,6 +2092,10 @@ export function XhsPanel({ question, answer, open, onClose }: XhsPanelProps) {
                   placeholder="Body text — editing re-paginates automatically"
                   style={fieldStyle}
                 />
+              </div>
+              {/* 导出前体检（仅提示不阻断） */}
+              <div className="mt-4">
+                <CheckReport items={checks} />
               </div>
               </div>
             )}

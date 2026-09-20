@@ -51,7 +51,7 @@ function BobbyNodeInner({ id, data, selected }: {
   selected?: boolean;
 }) {
   const nodeHost = useNodeHost();
-  const { ask: confirmAsk, askChoices, render: confirmRender } = useConfirm();
+  const { ask: confirmAsk, render: confirmRender } = useConfirm();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [lastUpdated, setLastUpdated] = useState('');
   // 本次任务临时放行状态（target=null 表示放行全部）
@@ -76,8 +76,6 @@ function BobbyNodeInner({ id, data, selected }: {
   // 授权管理（默认折叠）
   const [grantsOpen, setGrantsOpen] = useState(false);
 
-  // 已弹过授权确认的 target（避免重复弹窗）
-  const promptedRef = useRef<Set<string>>(new Set());
   // 上一轮 running 状态（变化时广播给画布控制连线电流）
   const runningRef = useRef<boolean | null>(null);
 
@@ -164,27 +162,9 @@ function BobbyNodeInner({ id, data, selected }: {
     return () => { clearInterval(fast); clearInterval(slow); };
   }, [loadStatus, loadGrants, loadHistory, loadPermissions]);
 
-  // 首次授权弹窗：检测到待授权目标且未提示过 → 弹窗询问（三选项：拒绝 / 同意 / 同意且本次不再询问）
-  useEffect(() => {
-    if (!pendingGrant || promptedRef.current.has(pendingGrant)) return;
-    promptedRef.current.add(pendingGrant);
-    askChoices({
-      title: 'Bobby 请求授权',
-      message: `主 Agent 正在操作「${pendingGrant}」，但该软件尚未授权。\n是否允许 Bobby 自动操作它？`,
-      choices: [
-        { label: '拒绝', value: 'reject' },
-        { label: '同意', value: 'allow' },
-        { label: '同意且本次不再询问', value: 'allow_silent' },
-      ],
-    }).then((choice) => {
-      if (choice === 'allow' || choice === 'allow_silent') {
-        doGrant(pendingGrant);
-        if (choice === 'allow_silent') doTempAllow();
-      }
-      // reject：仅本次跳过（pendingGrant 在下次调用时会重新触发）
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingGrant]);
+  // 2026-09-18：授权弹窗已迁出本节点，由全局宿主 BobbyAuthHost（挂在 layout.tsx）统一接管。
+  // 原因：CanvasFlow 改为单焦点 world 后画布已不存在，本节点可能位于视口外，弹窗用户看不到
+  // → 主 Agent 会一直卡在等待授权。此处若继续弹会与全局浮层重复弹窗，故整体移除。
 
   // 删除节点（宿主统一负责后端档案删除 + 本地移除节点/关联边）
   const handleDelete = useCallback(async () => {

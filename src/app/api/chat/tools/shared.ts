@@ -96,15 +96,15 @@ export function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen) + `\n...(truncated, ${text.length} chars total)`;
 }
 
-/** 扫描件 PDF OCR 单次返回上限：超过时按页边界截断，提示模型用 pages 参数续读。
- *  与 READ_CAPACITY 对齐（1M 上下文工具输出上限 15 万字符），不再用旧的 5 万死值。 */
+/** 扫描件 PDF OCR 单次返回上限（**1M 窗口模型的上限**）：超过时按页边界截断，提示模型用 pages 参数续读。
+ *  实际取值由调用方按请求窗口收缩（read_attachment 的 buildOcrAttachmentOutput：min(本值, ctx.maxOutputChars)），
+ *  小窗口模型下头部标注的"本次返回第 X-Y 页"才会与实际可见内容一致。 */
 export const OCR_MAX_LENGTH = 150000;
 
-/** 读取类工具内部返回上限（read_file / read_attachment / read_material / run_command 等）。
- * 等于 1M 上下文模型的动态输出上限（context-limits.toolOutputMaxForContext ×15%），
- * 让 1M 模型下能一次读到更多内容；最终按请求模型的外层 maxOutput 二次截断（见 executeTool），
- * 小模型自动收缩到 8000，无需在内部硬编码模型差异。
- */
+/** 读取类工具内部返回上限的**天花板**（read_file / read_attachment / run_command 等，1M 窗口模型用满）。
+ *  实际单次上限由 T_turn 收紧（context-limits.toolOutputMaxForContext，1M→5 万）与 T_task 累计预算
+ *  （taskToolOutputMaxForContext）决定：读取类工具经 ctx.maxOutputChars 取二者更小值
+ *  （attachment.ts readCapForContext），避免续读提示被外层截断吞掉。 */
 export const READ_CAPACITY = 150000;
 
 /** 从当前项目的 .local-roots.json 读取用户授权给 AI 的目录 */

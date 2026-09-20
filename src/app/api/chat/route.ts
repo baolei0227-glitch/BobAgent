@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 import {
   PROVIDER_PRESETS,
+  isDeclaredV4Model,
   type ProviderType,
   type ThinkingLevel,
   type OutputFileItem,
@@ -19,9 +20,13 @@ import { ToolRuntime } from '@/lib/runtime/tools';
 import { sessionRuntime } from '@/lib/runtime/session';
 // K2-S3 动态上下文链 runtime service 抽取，行为不变：路径/授权/偏好/OCR 文本生成收敛进 ContextRuntime
 import { contextRuntime } from '@/lib/runtime/context';
+// 项目级后台调度：用户对话 > 成果块提炼 > 账本编译（本轮请求是最高优先级，持有期间后台让位）
+import { enterUserTurn } from '@/lib/runtime/project-scheduler';
 import type { AgentId } from '@/lib/agents/profiles';
 import { codingPhaseForTool } from '@/lib/agents/profiles';
 import { resolveAgentProfile } from '@/lib/agents/store';
+import { loadInstalledAgentProfiles } from '@/lib/agents/market-server';
+import { MCP_PRESETS } from '@/lib/mcp/types';
 import { getCurrentProject, getProjectById, listProjects, type ProjectConfig } from '@/lib/project/project-manager';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { DEFAULT_CONFIRM_TOOLS } from '@/lib/settings';
@@ -189,7 +194,9 @@ import { getAgentSkills, getEnabledSkillsForAgent, hasAgentConfig } from '@/lib/
 import type { SkillMatchResult } from '@/lib/skills/types';
 import { LEGAL_GUARD_PROMPT, isLegalSkill } from '@/lib/skills/legal-guard';
 import { getAncestorChain, loadNodeById } from '@/lib/nodes/ancestors';
-import { renderOutcome } from '@/lib/nodes/outcome';
+import { renderOutcome, renderOutcomeBrief, MEMORY_AUTHORITY_RULE, MEMORY_AUTHORITY_BRIEF } from '@/lib/nodes/outcome';
+// P0-a 锁定外部锚点台账（.ledger/locks.md）/ P0-b 缓存前缀失效留痕（.ledger/log.md）
+import { appendEntryLog, readLockTape, latestLockOf } from '@/lib/mcp/ledger';
 import {
   runCompaction,
   extractHardFacts,
@@ -203,9 +210,10 @@ import {
   serializeNode,
   updateNodeFile,
   findNodeFileById,
+  outcomeContentHash,
   type ConversationTurn,
 } from '@/lib/node-markdown';
-import { inferContextWindow, contextGateForContext, toolOutputMaxForContext, modelOutputTokenMaxForModel, compactLookaheadHighCharsForContext, compactLookaheadLowCharsForContext } from '@/lib/context-limits';
+import { inferContextWindow, contextGateForContext, toolOutputMaxForContext, taskToolOutputMaxForContext, modelOutputTokenMaxForModel, compactLookaheadHighCharsForContext, compactLookaheadLowCharsForContext, BRIEF_MAX_CHARS_PER_UPSTREAM } from '@/lib/context-limits';
 import { deriveCompactionTurnsFromLogs } from '@/lib/nodes/compact-source';
 import { readManifest, extractKeywords } from '@/lib/nodes/manifest';
 import { internSearchNode } from '@/lib/nodes/intern';
@@ -270,7 +278,7 @@ function classifySystemChange(
 
 /**
  * 从 allToolCalls 中提取本次交互产生的输出文件（写文件/重命名/脚本产物），
- * 仅保留位于项目 homework/ 或 attachments/ 目录下的文件。
+ * 仅保留位于项目 homework/ 或 materials/ 目录下的文件（历史附件在 attachments/ 下，同样兼容）。
  */
 function extractOutputFiles(
   allToolCalls: Array<{ toolName: string; arguments: Record<string, unknown>; result: string; success: boolean }>,
@@ -287,7 +295,7 @@ function extractOutputFiles(
       if (rawPath.startsWith('~')) abs = join(homedir(), rawPath.slice(1));
       else if (resolve(rawPath) === rawPath) abs = resolve(rawPath);
       else {
-        // homework/ 和 attachments/ 相对路径应从项目根解析，而非 .ai-workspace
+        // homework/、materials/（含历史 attachments/）相对路径应从项目根解析，而非 .ai-workspace
         const np = rawPath.replace(/\\/g, '/');
         if (np.startsWith('homework/') || np === 'homework') {
           // 存储平铺：产物直接落在 homework/ 根目录，不生成 kind 子文件夹；
@@ -295,7 +303,7 @@ function extractOutputFiles(
           const relInHomework = np === 'homework' ? '' : np.slice('homework/'.length);
           abs = relInHomework ? resolve(projectRoot, 'homework', relInHomework) : resolve(projectRoot, 'homework');
         }
-        else if (np.startsWith('attachments/') || np === 'attachments') abs = resolve(projectRoot, rawPath);
+        else if (np.startsWith('materials/') || np === 'materials' || np.startsWith('attachments/') || np === 'attachments') abs = resolve(projectRoot, rawPath);
         else if (np.startsWith('.sandbox/') || np === '.sandbox' || np.startsWith('bob-sandbox/') || np === 'bob-sandbox') abs = resolve(resolveAppRoot(), rawPath);
         else abs = resolve(workspacePath, rawPath);
       }
@@ -316,10 +324,10 @@ function extractOutputFiles(
       if (seen.has(rel)) return;
       seen.add(rel);
 
-      // 过滤：只展示 homework/、attachments/ 开头（或用户根目录下的 homework/.sandbox）
+      // 过滤：只展示 homework/、materials/ 开头（含历史 attachments/；或用户根目录下的 homework/.sandbox）
       const normalized = rel.replace(/\\/g, '/');
       const isInHomework = normalized.startsWith('homework/') || normalized.startsWith('.sandbox/') || normalized.startsWith('bob-sandbox/') || normalized.includes('/homework/') || normalized.includes('BobWork/.sandbox') || normalized.includes('BobWork/bob-sandbox') || normalized.includes('.sandbox/apps') || normalized.includes('bob-sandbox/apps');
-      const isInAttachments = normalized.startsWith('attachments/');
+      const isInAttachments = normalized.startsWith('materials/') || normalized.startsWith('attachments/');
       const isInWorkspaceTmp = normalized.includes('.ai-workspace/') && !isInHomework;
       if (!isInHomework && !isInAttachments) return;
       if (isInWorkspaceTmp) return; // 临时脚本工作区不展示
@@ -565,7 +573,8 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - 正文只输出**最终结论与交付物**（摘要、汇总、结论、OutputFile 行）；执行过程、操作步骤、中间推理（如"开始执行第一步…""已读取到附件…""裁剪复核…"）一律不写入正文——这些属于思考过程，自行省略或放进思考区；不要在正文里汇报"我调了什么工具/我发现了什么 bug/我修正了什么"——直接给用户能用的结果
 - 长篇明细/完整报告 → 写文件，正文只给摘要 + OutputFile 行
 - **多步任务结论必须落盘（交付物 = 文档）**：通过多步工具链产出了「完整结论/报告/分析意见」这类可保存、可转发、需存档的交付物（法律分析、调研报告、方案设计、代码审查、清单整理等）时，**必须在结束任务前**用 write_file 将完整内容落盘为 \`homework/<关键词>.md\`（文件名 1~6 个简短关键词、≤30 字符），并在正文末尾单独一行输出 \`OutputFile: homework/<文件名>.md\` 作为产物声明；正文只给精炼结论 + OutputFile 行，不重复全文。简短问答/单点答复（一句话结论即可）无需落盘
-- **OutputFile 声明通用铁律（所有交付物，2026-08-30 新增）**：任何落盘到 homework/（或 attachments/，**排除 .evidence/ 内部原始数据与 .ai-workspace/ 临时文件**）的交付物——报告、图表、**下载的图片/文件/资料**、脚本产物——都必须在正文末尾单独一行打印 \`OutputFile: homework/<路径>\`（路径无空格、文件真实存在、扩展名完整）；结束任务前自查：本轮已落盘用户要求的交付物但正文无 OutputFile 行 → 先补上再结束。禁止用"已保存到 homework""文件已下载"等无路径的模糊表述代替
+- **终答自含铁律（防空壳答复）**：所有工具执行完之后的**最终一条消息必须自含给用户看的结论正文**（至少是精炼结论，可独立阅读），\`OutputFile:\` 只能作为正文**末尾附加的一行**；严禁最终消息只有一行 OutputFile 而没有任何正文。注意：调用 write_file 那一轮随工具调用一起输出的文字**不会作为答复保留**，结论必须在工具返回后的最终消息里重新给出
+- **OutputFile 声明通用铁律（所有交付物，2026-08-30 新增）**：任何落盘到 homework/（或 materials/，**排除 .evidence/ 内部原始数据与 .ai-workspace/ 临时文件**）的交付物——报告、图表、**下载的图片/文件/资料**、脚本产物——都必须在正文末尾单独一行打印 \`OutputFile: homework/<路径>\`（路径无空格、文件真实存在、扩展名完整）；结束任务前自查：本轮已落盘用户要求的交付物但正文无 OutputFile 行 → 先补上再结束。禁止用"已保存到 homework""文件已下载"等无路径的模糊表述代替
 
 ⚠️ **结束机制（DSH：正文即交付物）**：
 - 当所有任务步骤已完成且已输出最终答案/交付物时，**输出正文后停止调用任何工具即可**——本轮会在正文收尾处自然结束，无需额外仪式。
@@ -592,8 +601,8 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 
 
 工具使用说明（tools 参数中的工具按需加载，只调用 tools 参数里实际存在的工具名，不要调用未列出的工具）：
-- 核心常驻工具：文件/编辑（read_file、write_file、edit_code、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、网页（web_search、web_fetch）、附件/材料（read_attachment、read_material）、规划/结束（todo_write、finish_task）、提问（ask_user_questions）、偏好（read_preferences）、技能（load_skill、read_skill_resource）
-- 其余能力（OCR 识别、音频转写、记忆/待办/偏好写入、界面主题、Word 模板、配置/模型管理、网页浏览、企业查询、团队协作、本地软件操控等）**按需自动加载**：宿主会随本轮意图自动注入对应工具；若本轮 tools 中缺少所需工具，调用 \`search_capabilities\` 激活，禁止凭空调用 tools 中不存在的工具名
+- 核心常驻工具：文件/编辑（read_file、write_file、edit_code、rename_file、delete_file、list_directory、search_files）、命令/脚本（run_command、execute_script）、网页（web_search、web_fetch）、资料/附件（read_attachment，统一读对话附件与项目资料）、规划/结束（todo_write、finish_task）、提问（ask_user_questions）、偏好（read_preferences）、技能（load_skill、read_skill_resource）
+- 其余能力（OCR 识别、音频转写、记忆/待办/偏好写入、界面主题、Word 模板、配置/模型管理、网页浏览、企业查询、本地软件操控等）**按需自动加载**：宿主会随本轮意图自动注入对应工具；若本轮 tools 中缺少所需工具，调用 \`search_capabilities\` 激活，禁止凭空调用 tools 中不存在的工具名
 - 工具参数 schema 以 tools 参数为准，不要猜测参数
 - read_skill_resource 读技能资源：禁止用 read_file 直接读技能目录（会被权限门控挡掉），必须走本工具
 
@@ -602,7 +611,6 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 |---|---|---|
 | 网页浏览/抓取 | "打开这个网页/去这个网站/抓取页面数据" | 真实浏览器自动化，含反爬站点 |
 | 企业工商查询 | "查一下这家公司的工商信息/股权结构" | 工商/股权/司法风险/招投标 |
-| 多智能体团队 | "让团队协作处理/分配任务给成员" | 多成员编排，非单 Agent 可完成时用 |
 | 本地软件操控 | "打开微信应用/操控本地软件" | 本地应用自动化，非网页 |
 | 法律检索 | "查一下相关法条/这份合同的法律风险" | 法条检索+判例，可追溯原文 |
 | 音频转写 | "转写这段录音" | 真实转写，禁止凭元数据编造 |
@@ -611,6 +619,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 | 界面主题/前端 | "按当前主题配色做一个页面" | 读取真实主题 CSS 变量 |
 | 技能按需加载 | "用 slide-craft/docx 技能做 PPT" | 仅已下载技能可 load_skill；缺技能去 设置→技能→Download |
 | 知识库/笔记 | "查一下笔记里的X/把这段存进知识库" | 笔记能力由「知识库（Kar）节点」专职承载，本对话不注入笔记工具 → 引导打开画布 Kar 节点，或使用 ⌘F / 微信的 /note 指令（/note check 查阅） |
+| 想法/灵感/思维导图 | "记一下这个想法/我之前记过的点子呢/理一理脑海里的几条思路" | 思维导图能力（BobMind）由「Mind（Buzan）节点」专职承载，本对话不注入 mind 工具 → 引导打开画布 Mind 节点，或去 Extensions Store 安装 Buzan 并启用 bob-mind-mcp 插件 |
 若不确定某能力是否就绪、或本轮 tools 中缺少对应工具，**唯一确定性动作是调用 \`search_capabilities\` 工具进行能力检视与激活**（该工具常驻可用）；禁止凭空调用 tools 中不存在的工具名，也不要靠"说一句自然语言"等待注入——意图驱动只是宿主的自动感知机制，缺工具时以 \`search_capabilities\` 为准。
 
 任务执行纪律（多步任务）：
@@ -635,7 +644,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 工具边界：
 - read_file/list_directory/search_files 仅限当前项目+已授权目录；禁读个人目录（桌面/文档/下载/图片等）与系统文件（~/.ssh、~/.bashrc、/etc/passwd 等）
 - write_file/run_command 仅可写：homework/（含 homework/.ai-workspace/ 临时区，仅脚本与中间产物；无激活项目兜底 ~/BobWork/.sandbox）、~/BobWork/skills/、用户授权可写目录
-- 最终产出默认 .md，必须 homework/ 前缀（homework/ 与 attachments/ → 项目根，不进 .ai-workspace）；.html/.docx/.pdf/.xlsx 等仅当用户明确要求；未加前缀 → 临时区，不出现在输出卡片
+- 最终产出默认 .md，必须 homework/ 前缀（homework/ 与 materials/ → 项目根，不进 .ai-workspace）；.html/.docx/.pdf/.xlsx 等仅当用户明确要求；未加前缀 → 临时区，不出现在输出卡片
 - 中间产物（裁剪图/切片/临时脚本/中间数据等非最终交付文件）一律写 homework/.ai-workspace/（隐藏临时区，侧边栏不显示），禁止散落到 homework/ 根或其他位置；任务完成、交付物就绪后，必须用 execute_script / run_command 清理本轮自己生成的中间产物（如 rm -rf homework/.ai-workspace/xxx），只保留最终交付物
 - 产出存储位置默认 homework/，除用户明确指定外，禁止主动询问"是否可以保存到某文件夹"、禁止对写入目录发起 AUTH_REQ
 - **存储平铺**：homework/ 所有产物直接落在根目录，不生成类别子文件夹；侧边栏按文件类别标签（doc/sheet/slide/pdf/image/text/code/other）分组展示。**平铺仅适用于用户直接查看的最终交付物**：结构化证据归档（homework/.evidence/）与临时执行空间（homework/.ai-workspace/）按专属目录结构留存、不受平铺限制，且证据层（.evidence/）绝不静默删除
@@ -647,11 +656,11 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - 需读项目外目录但未授权 → 回复末尾一次性列 AUTH_REQ:/完整绝对路径，每行一条（用途在正文说明）；前端会弹出授权请求卡片，用户批准后才生效；严禁逐个索要、严禁混排、严禁对超大范围（整个家目录/个人目录根/系统目录）发起
 - AUTH_REQ 授权规则：用户在本轮对话中粘贴/明确给出的路径即视为用户授权，系统自动加入 AI 可读写白名单（无需再手动点授权）；对用户未给出的路径，AI 可主动发起 AUTH_REQ 请求授权（前端展示授权请求卡片，用户一键批准后才生效）；严禁声明无关目录或自动扫描到的目录
 - 「找不到技能」≠「读个人目录」：技能补缺（检索/安装/自建）可自主推进；读本地文件必须用户给路径且已授权，未给路径不得猜测尝试
-- 附件处理：用户附带的文件已自动复制到项目 attachments/ 目录（路径格式 attachments/{nodeId}/{文件名}），文本/图片/PDF 内容已自动解析注入——通常无需额外操作；当消息明确提示"使用 read_attachment"或需以文件路径方式深入处理附件时，直接调用 read_attachment 读取（禁止索要附件路径）；禁止询问"是否可以访问下载/文档等文件夹"、禁止对附件发起 AUTH_REQ（附件在项目内，无需任何授权）；不忽略任何附件
+- 附件处理：用户附带的文件已自动复制到项目 materials/ 目录（路径格式 materials/{附件目录}/{文件名}，历史附件仍在 attachments/），文本/图片/PDF 内容已自动解析注入——通常无需额外操作；当消息明确提示"使用 read_attachment"或需以文件路径方式深入处理附件时，直接调用 read_attachment 读取（禁止索要附件路径）；禁止询问"是否可以访问下载/文档等文件夹"、禁止对附件发起 AUTH_REQ（附件在项目内，无需任何授权）；不忽略任何附件
 - 扫描件级联：印刷体（正文/证件/印章）用 ocr_document 识别（经 bob-ocr-mcp）；仅手写字段升视觉模型；不反复整页重试，改 crop_image 裁可疑区复核或标【需人工复核】
 - **图片处理路由（重要，禁止绕路）**：① 提取/识别图中**文字** → ocr_document（经 bob-ocr-mcp）；② 描述**画面内容/视觉理解**（物体/场景/颜色/风格/图表数据/UI 状态/自由提问）→ 直接调用 bob-ocr-mcp 的视觉理解工具 ocr_image_understand（工具清单名，即 ocr.image_understand），只需传**原图路径** + 可选 prompt，**禁止**用 crop_image / 嵌 HTML 预览 / 浏览器截图 / 像素统计等中间步骤拼凑画面描述；③ 视觉引擎的具体型号与可用性以本轮注入的「OCR/视觉引擎现状」事实行为准，本提示词不作静态断言：事实行显示已配置 → **「OCR 未检出文字」≠「无法描述画面」**，纯照片/无文字图直接走视觉理解，不要只给像素/色温推断当画面描述，也不要引导用户去重复配置；未注入事实行 → 如实回答"当前无法确认视觉引擎状态"，禁止虚构某个型号"已配置"、也不要武断宣称"未配置"
 - 音频：系统已注入转写则直接用；只有文件名/大小或"转写失败"提示时，必须调 transcribe_audio 真实转写，禁止凭元数据编造
-- 引用资料（--- 引用资料列表 --- 开头的 @ 引用）→ read_material 读，每资料只读一次，不猜内容
+- 项目资料（--- 资料列表 --- 中 @ 引用的参考资料，路径形如 materials/{文件名}）→ 同样用 read_attachment 读取，每份只读一次，不猜内容；资料位于 <项目目录>/materials/，不在工作区根（工作区根只有 scripts/），禁止用 list_directory/read_file 去工作区根找
 
 能力缺口处理：
 - 缺程序（ffmpeg/rembg 等）→ run_command 安装；缺信息 → web_search；缺专业/流程 → 先基于自身知识推理
@@ -689,13 +698,67 @@ const REPORT_RULES = `
 - **配图由你根据报告内容自动判断，无需用户点名**：报告含数据趋势/对比/占比/流程/结构等适合可视化的内容时，自动生成图表插图（widget 仅对话内联展示，落盘插图用 matplotlib/脚本）；纯文字叙事报告不强配图；用户明确要求"带图/配图"时必配
 - **带插图的报告以文件夹形式交付**：报告文件与插图同放 \`homework/<报告名>/\` 目录下（如 \`homework/市场分析/报告.md\` + \`homework/市场分析/图1.png\`），正文末尾输出 \`OutputFile: homework/<报告名>/报告.md\`；无插图的报告平铺为 \`homework/<关键词>.md\`
 - 报告内引用插图一律用**相对路径**：\`![图1](图1.png)\`（同目录）或 \`images/图1.png\`
-- 图表类插图：execute_script 用 matplotlib 落盘到 \`$BOB_PROJECT_HOMEWORK/<报告名>/\` 下，与报告同目录（先建目录再写文件）；用户附件插图经 read_attachment 读取后复制到报告文件夹再引用，或直接引用 \`../attachments/{nodeId}/{文件名}\`
+- 图表类插图：execute_script 用 matplotlib 落盘到 \`$BOB_PROJECT_HOMEWORK/<报告名>/\` 下，与报告同目录（先建目录再写文件）；用户附件插图经 read_attachment 读取后复制到报告文件夹再引用，或按资料列表中的 materials/{附件目录}/{文件名} 换算相对路径直接引用（如 \`../../materials/{附件目录}/{文件名}\`）
 - **插图保存/引用路径由你自动决定，禁止向用户询问"图片保存路径"**；插图无来源（无附件且非图表类）时如实告知"对话节点不生成照片/实拍图"，不得用占位图或编造路径
 `;
+
+/** 项目档案软指针（存在激活项目时注入，约 130 token）：
+ *  只交代「三级跳入口 + 短路规则 + 失败口径」，不做硬门禁——索引为空/未维护时，agent 行为与今日一致。
+ *  首轮另有 **结构性预取**（见 lib/runtime/project-brief.ts）把账本索引与材料清单直接摆进上下文，
+ *  本指针负责「怎么走」，预取快照负责「有什么」。
+ *  与 BROWSER_RULES / REPORT_RULES 同法 prepend 到当前轮 user 消息，不进 system（守住前缀缓存）。 */
+const LEDGER_HINT = `
+## 项目档案（三级跳：账本 → 材料索引 → 取原件）
+需要项目资料/背景时按固定顺序走，不要跳着猜：
+1. **\`read_ledger\`（路由器，给结论与项目相对路径）**：省略参数=索引；\`ids\`/\`topics\`=批量取多条元信息；\`id\`=单条正文；\`query\`=关键词；\`rules:true\`=账本规则。
+2. **\`search_materials\`（定位器，给页码与片段）**：带 \`query\`=正文命中；不带 \`query\`=已索引材料清单。
+3. **\`read_attachment\`（取件）**：按项目相对路径读原文。
+**短路**：账本条目已给出明确出处路径时，跳过第 2 步直接取件。
+证据链只认真实路径：路径不存在就是**硬错误**，如实说"该路径不存在"，禁止按记忆复述内容。索引只覆盖 \`materials/\`，\`homework/\` 产出不在内。索引为空时照常直接检索项目文件。
+`;
+
+// 注：账本「待编译」提醒不再注入对话 —— 编译已改为材料到达后由宿主起后台会话完成
+// （见 @/lib/mcp/ledger-compile）：编译是一串串行工具往返，放在对话里会拖慢用户等待。
 
 // （K2-S1 工具面 service 抽取，行为不变：确定性排序 buildAndSortToolDefs（P4 + 来源分组，
 //  MCP 段按 settings serverId 分组）与 CacheGuard 守卫随迁 src/lib/runtime/tools.ts，
 //  由 ToolRuntime.assemble 统一调用——首轮初始化与场景中途激活重建共用同一排序管线。）
+
+/** 多智能体协作规则（chat 界面「Multi-agent mode」开关打开时注入）：
+ *  主 agent 只做**用户代理**：把需求写成清晰 goal 交给 team_run，宿主拉起独立「队长（captain）」会话
+ *  做规划、复核与整合，主 agent 只需如实转述返回的整合稿。
+ *  与 BROWSER_RULES / REPORT_RULES 同法：prepend 到当前轮 user 消息，不进 system（守住前缀缓存）。
+ *  成员名单段（用户弹窗选定的预设 Agent）**不再注入主 agent**——它由 route 经 team_run 的执行上下文
+ *  直接交给队长（见 multiAgentRosterSection 的调用处），主 agent 与名单解耦。 */
+const MULTI_AGENT_RULES = `
+## 多智能体协作模式（Multi-agent mode 已开启）
+- **你只是用户代理，不是编排者**：你不需要拆分角色、不需要设计任务 DAG、不需要挑选成员——这些由宿主的「队长（captain）」会话负责
+- **你唯一要做的事**：把用户需求写成一段清晰、自洽的 \`goal\`（目标 / 范围 / 交付形态 / 约束 / 引用的材料），然后调用一次 \`team_run\`。goal 是队长唯一能看到的需求来源，写具体、写全，不要指望后续补充
+- **只调用一次 team_run**：它在队长完成规划、团队执行完毕、队长复核整合之后才返回；返回后不要再补充调用，也不要再拆任务
+- **返回的即是最终答案**：team_run 的返回值已经是队长整合好的完整回答。请**原样转述**给用户，不要自己二次总结、不要改写结论、不要罗列内部编排细节（团队 id、成员调度、消息往来、谁做了哪个任务）
+- **如实交代缺口**：返回文本里若说明某部分因成员失败/超时缺失，转述时如实保留，禁止编造
+`;
+
+/** 成员名单段（交给**队长**，不再给主 agent）：把用户在弹窗选定的预设 Agent 交给队长规划时参考，
+ *  并交代「名单外补充成员必须先经用户批准」——与 team-run 的强制审批门禁是同一件事的两面。
+ *  调用处：route 在 team_run 的执行上下文里注入（ctx.teamRosterSection → 队长规划消息），
+ *  不进主 agent 的 user 消息（主 agent 已与名单解耦，见 MULTI_AGENT_RULES）。 */
+function multiAgentRosterSection(roster: Array<{ id: string; label: string }>): string {
+  if (roster.length === 0) {
+    return `
+## 本次成员名单（用户未选定）
+用户没有指定成员，成员由你按任务自行编排。**宿主会在团队启动前弹卡把完整方案（成员 + 任务 DAG）交用户批准**，用户不批准则整套方案作废、协作不启动。因此：只拆真正必要的角色（宁少勿滥，2-5 个），并在每个成员的 role 里写清分工，便于用户判断。
+`;
+  }
+  return `
+## 本次成员名单（用户已选定，优先使用）
+用户从已安装的 Agent 包中选定了本次协作的成员，请**优先**使用它们，并用 identity 引用其 id：
+${roster.map((r) => `- ${r.label}（identity: \`${r.id}\`）`).join('\n')}
+- 名单内成员能覆盖任务时就不要另加成员（某个成员没有对应任务时，只派名单内的一部分成员即可）
+- 若任务确实需要名单外的角色（名单内都覆盖不到），可以补充成员，但**补充的成员必须先经用户批准**：宿主会弹卡把完整方案交用户批准，用户不批准则整套方案作废、协作不启动。故补充要克制，并在该成员的 role 里写清为什么必须补
+- **名单改动一律会告知用户**：只要没用上用户选的某个成员（弃用），或补充了名单外成员，宿主都会弹卡把改动逐条列给用户裁决。因此弃用也要有理由（如该角色与任务无关），必要时在保留成员的 role 里体现分工调整
+`;
+}
 
 /** 提取最后一条用户消息的纯文本内容 */
 function extractLastUserContent(messages: ChatMessage[]): string {
@@ -733,10 +796,10 @@ export function detectSceneHints(text: string): Set<ToolScene> {
     scenes.add('legal');
   }
   // audio：音频转写（关键词或音频附件）
-  // 附件路径可能含空格/中文目录（如 attachments/8ec9_AI Chat/录音.m4a），
+  // 附件路径可能含空格/中文目录（如 materials/8ec9_AI Chat/录音.m4a），
   // 不能限定 [^\s)，否则空格后匹配中断 → 场景不激活 → 音频工具不注入。
   if (/转写|录音|语音|音频|字幕|听写|转录|transcrib|庭审.*(录音|语音)|会议.*(纪要|录音)/i.test(text) ||
-      /路径:\s*(?:attachments|assets)\/[^\n"']+\.(?:mp3|wav|m4a|aac|ogg|flac|opus|amr)\b/i.test(text)) {
+      /路径:\s*(?:materials|attachments|assets)\/[^\n"']+\.(?:mp3|wav|m4a|aac|ogg|flac|opus|amr)\b/i.test(text)) {
     scenes.add('audio');
   }
   // skill：技能检索/安装
@@ -753,10 +816,10 @@ export function detectSceneHints(text: string): Set<ToolScene> {
     scenes.add('design');
   }
   // ocr：图片/PDF 文字识别（关键词或图片/PDF 附件）
-  // 附件路径可能含空格/中文目录（如 attachments/8ec9_AI Chat/小狗.png），
+  // 附件路径可能含空格/中文目录（如 materials/8ec9_AI Chat/小狗.png），
   // 不能限定 [^\s)，否则空格后匹配中断 → ocr 场景不激活 → 视觉/OCR 工具不注入。
   if (/扫描|识别.*(文字|图片|图像)|ocr|截图.*文字|提取.*(文字|图片).*字|转文字|文字识别|图片.*字|票据|证件|票据识别/i.test(text) ||
-      /路径:\s*(?:attachments|assets)\/[^\n"']+\.(?:png|jpe?g|gif|webp|pdf)\b/i.test(text)) {
+      /路径:\s*(?:materials|attachments|assets)\/[^\n"']+\.(?:png|jpe?g|gif|webp|pdf)\b/i.test(text)) {
     scenes.add('ocr');
   }
   // office：Word 模板批量填充/占位符扫描（文档/模板意图；与 legal 的"模板"词可同时激活）
@@ -777,10 +840,10 @@ export function detectSceneHints(text: string): Set<ToolScene> {
   if (/查.*(企业|公司|工商)|工商|法定代表人|股权|股东|天眼查|企业信息|注册资本|经营范围|企业.*(详情|资料|报告)|公司.*(背景|注册|资质)|信用代码/i.test(text)) {
     scenes.add('company');
   }
-  // team：多智能体团队协作（Agent Teams）
-  if (/团队|协作|分工|分配.*(任务|成员)|组队|multi.?agent|多.?智能体|多人协作/i.test(text)) {
-    scenes.add('team');
-  }
+  // team：多智能体团队协作（Agent Teams）—— 刻意不在此做意图探测。
+  // 多智能体是重操作（每个成员起独立 /api/chat 会话，成本 ≈ N 倍），唯一开启入口是
+  // chat 界面的 Multi-agent mode 开关（见下方 activeScenes.add('team')）。
+  // 若此处按关键词自动激活，开关即形同虚设、且与「用户显式开启才触发」的产品决定冲突。
   // local：本地软件操控（bobby）——"应用"单独不触发；"打开"后跟应用名（如"打开微信应用"）也算
   if (/操控|打开.{0,6}?(?:应用|软件|程序|\bapp\b)|本地软件|自动化.*(应用|软件)|bobby|控制.*(应用|软件|mac)|操作.*(应用|软件)|启动.*(应用|软件)/i.test(text)) {
     scenes.add('local');
@@ -801,7 +864,6 @@ interface CapabilityEntry {
 const CAPABILITY_CATALOG: CapabilityEntry[] = [
   { scene: 'browser', name: '网页浏览/抓取', keywords: ['网页', '浏览器', '抓取', '爬取', '网站', '网址', '链接', '反爬', '页面', '上网'], description: '真实浏览器自动化（含反爬站点）：打开网页、提取正文、截图、填表、登录', triggerPhrase: '"打开这个网页" / "抓取页面数据"' },
   { scene: 'company', name: '企业工商查询', keywords: ['企业', '公司', '工商', '股权', '股东', '天眼查', '注册资本', '法定代表人', '招投标', '工商信息', '信用代码', '社会信用代码'], description: '工商信息、股权结构、司法风险、招投标', triggerPhrase: '"查一下这家公司的工商信息"' },
-  { scene: 'team', name: '多智能体团队', keywords: ['团队', '协作', '分工', '分配', '组队', '多智能体', 'multi-agent', '多人'], description: '多成员编排，分配任务并行执行', triggerPhrase: '"让团队协作处理"' },
   { scene: 'local', name: '本地软件操控', keywords: ['本地', '软件', '应用', '操控', '自动化', 'mac', '打开应用'], description: '本地应用自动化控制', triggerPhrase: '"打开微信应用"' },
   { scene: 'legal', name: '法律检索/咨询', keywords: ['法律', '法条', '合同', '诉讼', '律师', '法规', '判例', '文书', '起诉', '司法', '执行', '清偿', '本金', '利息', '债权', '迟延履行', '加倍', '抵充'], description: '法条检索、判例查询、文书起草（含防幻觉约束）', triggerPhrase: '"查一下相关法条"' },
   { scene: 'audio', name: '音频转写', keywords: ['音频', '录音', '转写', '语音', '字幕', '听写'], description: '真实音频转写，禁止凭元数据编造', triggerPhrase: '"转写这段录音"' },
@@ -824,7 +886,7 @@ export function matchCapabilities(query: string): CapabilityEntry[] {
 function buildCapabilityResultText(query: string, matched: CapabilityEntry[], newlyActivated: ToolScene[]): string {
   if (matched.length === 0) {
     return (
-      `未在能力目录中找到匹配「${query}」的能力。可用能力：网页浏览/抓取、企业工商查询、多智能体团队、本地软件操控、` +
+      `未在能力目录中找到匹配「${query}」的能力。可用能力：网页浏览/抓取、企业工商查询、本地软件操控、` +
       `法律检索、音频转写、图片/PDF 文字识别、记忆/待办/偏好、界面主题/前端、技能检索/安装、Word 模板、配置/模型管理。` +
       `请尝试用更明确的意图短语描述（如"查企业""转写音频""识别扫描件"）。`
     );
@@ -1559,6 +1621,52 @@ function prependDynamicContext(messages: ChatMessage[], text: string): ChatMessa
   return result;
 }
 
+/** Bob-Mind 插件面板地址（宿主 iframe 嵌入同一实例；面板未运行时 fetch 失败即跳过） */
+const MIND_PANEL_URL = MCP_PRESETS.find((p) => p.id === 'bob-mind-mcp')?.panel?.url ?? '';
+
+/**
+ * Bob-Mind（Buzan）面板改动回看注入：
+ * 用户在插件面板手动增删改导图走插件的 REST，插件侧把它登记为「未回看改动」流水
+ * （见 bob-mind-mcp/src/web/server.ts）。Buzan 是回合制的，收不到任何推送 ——
+ * 所以仅当本轮是 mind agent 时，服务端取走这批流水（consume=1，取走即视为已回看）
+ * 并拼成紧凑摘要 prepend 到本轮 user 消息，让它先 mind_query 再就改动表态。
+ * 插件未运行/超时一律静默跳过，绝不阻塞对话。
+ */
+async function buildMindChangesInjection(agentId: string): Promise<string> {
+  if (agentId !== 'mind' || !MIND_PANEL_URL) return '';
+  const VERB: Record<string, string> = {
+    save: 'added',
+    update: 'edited',
+    delete: 'deleted',
+    move: 'moved',
+    star: 'starred',
+  };
+  try {
+    const resp = await fetch(`${MIND_PANEL_URL}/api/changes?consume=1`, {
+      signal: AbortSignal.timeout(2000),
+      cache: 'no-store',
+    });
+    if (!resp.ok) return '';
+    const data = (await resp.json()) as { changes?: Array<{ action?: unknown; title?: unknown }> };
+    const list = Array.isArray(data?.changes) ? data.changes : [];
+    if (!list.length) return '';
+    const lines = list.slice(-12).map((c) => {
+      const verb = VERB[String(c.action)] || String(c.action || 'changed');
+      return `- ${verb}: ${String(c.title || '').slice(0, 60)}`;
+    });
+    let block =
+      `[Bob-Mind panel changes since your last review — ${list.length} edit(s), newest last]\n` +
+      'The user edited the mind map in the Bob-Mind panel after you last looked. Call mind_query first ' +
+      'to see the current tree, then give your take on these edits (agree or disagree, with reasons) ' +
+      '— as a partner, not a passive recorder.\n' +
+      lines.join('\n');
+    if (block.length > 800) block = `${block.slice(0, 800)}…`;
+    return block;
+  } catch {
+    return ''; // 插件未运行/超时：静默跳过，不影响本轮对话
+  }
+}
+
 /**
  * 工具循环不设轮数硬上限：任务只要在推进，就一直做下去直到完成。
  * 仅保留「停滞保护」安全网（不是轮数限制）：
@@ -1571,6 +1679,19 @@ const MAX_DUPLICATE_CALLS = 2;
 /** OCR 识别重试预算：同一文件被 ocr_document/crop_image 反复识别的最大次数。
  * 超过即判定手写字段识别不收敛，注入提示要求停止重试并报 NEED_REVIEW（治"15+ 轮空转"）。 */
 const OCR_REOCR_BUDGET = 4;
+/** 工具收敛护栏：同一工具连续「主导」的轮数上限。
+ * 与停滞保护互补 —— 停滞保护抓「连续多轮无实质进展」，抓不住另一种卡法：每轮都有成功工具调用
+ * （被判为推进、stallCount 反复清零），但方向永不收敛（逐条穷举检索 / 反复重写同一文件），
+ * 最终只能烧到时间预算才被迫收口。超过本阈值即注入「停止穷举」指令并强制收尾。
+ *
+ * 取 3（原 6）：模型每轮可**并行**发起多个工具调用（实测一次复现为「3 轮 × 6 次 get_article」），
+ * 而本护栏按「轮」自增，轮数远小于调用数 —— 原阈值 6 轮在并行形态下要烧到 30+ 次调用才够得着，
+ * 与「12 次调用附近收口」的设计意图不符，真实穷举因此逃逸（实测 18 次连续调用零触发）。 */
+const TOOL_CONVERGENCE_ROUNDS = 3;
+/** 触发收敛护栏所需的同一工具累计调用次数（与轮数双阈值，避免正常多文件读取等短程重复被误判）。
+ * 取 20（原 12）：实测合法的「逐条核对民法典 577~594 条」正是 18 次调用后自然收尾 —— 阈值必须高于它，
+ * 否则会截断本可正常完成的批读任务；而真实卡死样本为 71 次调用（143s 无结论），20 次即拦。 */
+const TOOL_CONVERGENCE_MIN_CALLS = 20;
 /** 声明真实性校验：最多注入纠偏消息的次数（防止无限纠偏循环） */
 const MAX_CLAIM_MISMATCH_CORRECTIONS = 2;
 
@@ -1761,7 +1882,7 @@ async function applyVisionBridge(
   const hasImageAttachment = messages.some((m) => {
     if (m.role !== 'user') return false;
     const c = m.content || '';
-    return c.includes('图片') && (c.includes('路径: attachments/') || c.includes('路径: assets/'));
+    return c.includes('图片') && (c.includes('路径: materials/') || c.includes('路径: attachments/') || c.includes('路径: assets/'));
   });
 
   if (!hasImageAttachment) {
@@ -1774,7 +1895,7 @@ async function applyVisionBridge(
     const imagePaths: string[] = [];
     messages.forEach((m) => {
       if (m.role === 'user') {
-        const matches = (m.content || '').match(/路径: ((?:attachments|assets)\/[^\\n]+)/g);
+        const matches = (m.content || '').match(/路径: ((?:materials|attachments|assets)\/[^\\n]+)/g);
         if (matches) {
           matches.forEach((match) => {
             const path = match.replace('路径: ', '');
@@ -1829,7 +1950,7 @@ async function applyVisionBridge(
     const modifiedMessages: ChatMessage[] = [];
     for (const m of messages) {
       if (m.role === 'user') {
-        const hasImage = (m.content || '').includes('图片') && ((m.content || '').includes('路径: attachments/') || (m.content || '').includes('路径: assets/'));
+        const hasImage = (m.content || '').includes('图片') && ((m.content || '').includes('路径: materials/') || (m.content || '').includes('路径: attachments/') || (m.content || '').includes('路径: assets/'));
         if (hasImage) {
           modifiedMessages.push({
             ...m,
@@ -1871,7 +1992,7 @@ const DIRECT_VISION_MIME: Record<string, string> = {
 const DIRECT_VISION_MAX_BYTES = 12 * 1024 * 1024;
 /** 直连时注入模型侧的说明：图片已直接可见，避免模型对已附像素的图片再跑 read_attachment */
 const DIRECT_VISION_NOTE =
-  '[本消息的图片附件已以多模态图像直接提供，可直接查看图片内容，无需对它们调用 read_attachment；附件列表中的 PDF/Office/表格等文件如需读取，仍请使用 read_attachment。]';
+  '[本消息的图片附件已以多模态图像直接提供，可直接查看图片内容，无需对它们调用 read_attachment；资料列表中的 PDF/Office/表格等文件如需读取，仍请使用 read_attachment。]';
 
 /** 单个 OpenAI 兼容 image_url content 段 */
 interface DirectVisionImagePart {
@@ -1887,11 +2008,11 @@ interface DirectVisionPayload {
   parts: DirectVisionImagePart[];
 }
 
-/** 提取消息文本中「路径: attachments|assets/…」的栅格图相对路径（去重） */
+/** 提取消息文本中「路径: materials|attachments|assets/…」的栅格图相对路径（去重） */
 function extractDirectVisionRelPaths(content: string): string[] {
   const rels: string[] = [];
   const seen = new Set<string>();
-  const re = /路径:\s*((?:attachments|assets)\/[^\n]+)/g;
+  const re = /路径:\s*((?:materials|attachments|assets)\/[^\n]+)/g;
   let mm: RegExpExecArray | null;
   while ((mm = re.exec(content))) {
     const rel = mm[1].trim();
@@ -2340,7 +2461,7 @@ async function applyHistoryProjectionHook(
  *  - R-14-C 预算前瞻（T2）：hook 在 chain 判断之前执行（孤立节点同样可折叠），见上
  *  - R-12 直接上游（深度 1）成果块全文注入，不截断不递归
  *  - R-17 祖先（深度 ≥2）只注入存在性声明一行
- *  - R-14 注入总长超限自动回退（裁剪旧对话），注入独占时才拒绝
+ *  - R-14 注入总长超限自动回退（方案 A：先裁本节点旧对话 + 增量压缩 → 仍超才把上游全文降级为结论档 brief → 最后才拒绝）
  *  - Step 9：托管模型（无工具能力）自动派发实习生，命中关键词交集 ≥2 的祖先取回原文注入
  */
 async function applyUpstreamNodeBridge(
@@ -2368,7 +2489,15 @@ async function applyUpstreamNodeBridge(
   }
   if (chain.depth1.length === 0 && chain.depthPlus.length === 0) return messages;
 
-  const parts: string[] = [];
+  // 注入分两档：full = 上游成果块全文；brief = 同一份只留「结论 + 确定性等级 + 来源 id」。
+  // 溢出处理顺序（R-14，方案 A）：本节点旧对话（有压缩记忆兜底）先裁，上游 full 是低频稳定段、
+  // 且是已签字的前提，最后才降级 —— 上游在 full/brief 间抖动会反复击穿 C8 缓存前缀。
+  const partsFull: string[] = [];
+  const partsBrief: string[] = [];
+  const addPart = (full: string, brief?: string): void => {
+    partsFull.push(full);
+    partsBrief.push(brief ?? full);
+  };
 
   // 加载当前节点自身，用于注入自身成果块和压缩记忆
   const current = await loadNodeById(nodeId, project.path);
@@ -2379,40 +2508,83 @@ async function applyUpstreamNodeBridge(
   if (current?.outcome) {
     const isUserEdited = current.frontmatter.outcome_user_edited === true;
     if (isUserEdited) {
-      parts.push(`## 本节点成果块（已由用户手动修正，请以此为准，不可随意更改）\n\n${renderOutcome(current.outcome)}`);
+      addPart(`## 本节点成果块（已由用户手动修正，请以此为准，不可随意更改）\n\n${renderOutcome(current.outcome)}`);
     } else {
-      parts.push(`## 本节点已填写的成果块（你的前序认定，可引用但非既定前提）\n\n${renderOutcome(current.outcome)}`);
+      addPart(`## 本节点已填写的成果块（你的前序认定，可引用但非既定前提）\n\n${renderOutcome(current.outcome)}`);
     }
   }
 
   // 当前节点压缩记忆（长对话产物的精炼摘要）
   if (current?.compressedMemory?.trim() && !/^（无|暂无）/.test(current.compressedMemory.trim())) {
-    parts.push(`## 本节点压缩记忆（对话超过阈值后的精炼摘要）\n\n${current.compressedMemory.trim()}`);
+    addPart(`## 本节点压缩记忆（对话超过阈值后的精炼摘要）\n\n${current.compressedMemory.trim()}`);
   }
 
   // R-12: 直接上游成果块全文（仅 locked 才作为既定前提注入）
+  let injectedLockedUpstream = false;
+  // P0-a 外部锚点：读一次锁定台账（.ledger/locks.md），逐上游比对「节点 frontmatter + 台账最新一条」
+  const lockTape = readLockTape(project.path);
   for (const d of chain.depth1) {
     const node = await loadNodeById(d.nodeId, project.path);
     if (node?.frontmatter.outcome_status === 'locked' && node.outcome) {
+      // P0-a 双锚点校验（锁与钥匙不再放同一抽屉）：
+      //  ① 内容哈希须等于节点 frontmatter 留痕 —— 挡「改正文忘改哈希」；
+      //  ② 台账最新一条须同时匹配哈希与版本号 —— 挡「正文与哈希一并重写」；
+      //  ③ 台账中该节点无记录（存量老项目）→ 显式提示「无外部锚点，无法确认完整签署链」，不静默通过。
+      const stampedHash = node.frontmatter.outcome_content_hash;
+      const actualHash = outcomeContentHash(node.outcome);
+      const hashMismatch = !!stampedHash && stampedHash !== actualHash;
+      const tapeRec = latestLockOf(project.path, d.nodeId);
+      const anchorBroken = !hashMismatch
+        && (!tapeRec || tapeRec.action === 'unlock' || tapeRec.hash !== stampedHash || tapeRec.version !== node.frontmatter.outcome_version);
+      if (hashMismatch || anchorBroken) {
+        // 台账不连续（被截断/被删行）也在这里留 warn，供事后排查
+        console.warn(
+          `[chat:inject] 上游锚点校验未通过 node=${d.nodeId} hashMismatch=${hashMismatch} anchorBroken=${anchorBroken} tapeTruncated=${lockTape.truncated} stamped=${stampedHash ?? '-'} actual=${actualHash}`,
+        );
+      }
+      if (hashMismatch) {
+        // 哈希不一致 = 签字已被破坏：不再作为「既定前提」，降级为显式警告 + 仅供参考的内容
+        addPart(
+          `## 上游节点「${d.title}」（n_${d.nodeId}）警告：成果块在锁定后被修改（内容哈希与签署留痕不一致）\n\n以下内容**仅供参考，不得作为既定前提**（须回原文核实；如需确认请让用户重新锁定该节点）：\n\n${renderOutcome(node.outcome)}`,
+          `## 上游节点「${d.title}」（n_${d.nodeId}）警告：成果块在锁定后被修改（哈希不一致，不得作为既定前提 · 因上下文预算已精简，仅给结论）\n\n${renderOutcomeBrief(node.outcome, BRIEF_MAX_CHARS_PER_UPSTREAM, `n_${d.nodeId}`)}\n\n（详细推理已因预算裁剪；如需依据请回原节点 n_${d.nodeId} 查看）`,
+        );
+        continue;
+      }
       // 标题带节点 id（n_ 前缀），供下游成果块引用时写 [来源: n_xxx#q-yyy] 规范来源
-      parts.push(`## 上游节点「${d.title}」（n_${d.nodeId}）已锁定成果（既定前提）\n\n${renderOutcome(node.outcome)}`);
+      injectedLockedUpstream = true;
+      // 存量项目（v3 之前锁定，台账里没有该节点记录）：内容仍作既定前提，但必须明注签署链无法确认
+      const anchorNote = anchorBroken
+        ? `（无外部锚点，无法确认完整签署链：项目锁定台账中没有该节点的连续签署记录。本机留痕，非密码学签署，不构成对外举证。）\n\n`
+        : '';
+      addPart(
+        `## 上游节点「${d.title}」（n_${d.nodeId}）已锁定成果（既定前提${anchorBroken ? ' · 无外部锚点，无法确认完整签署链' : ''}）\n\n${anchorNote}${renderOutcome(node.outcome)}`,
+        // 降级档（P0-c）：结论全文 + 每条确定性等级 + 来源 id，硬上限 BRIEF_MAX_CHARS_PER_UPSTREAM，
+        // 并显式告知模型「上游推理链已因预算裁剪」
+        `## 上游节点「${d.title}」（n_${d.nodeId}）已锁定成果（既定前提${anchorBroken ? ' · 无外部锚点，无法确认完整签署链' : ''} · 因上下文预算已精简，仅给结论）\n\n${renderOutcomeBrief(node.outcome, BRIEF_MAX_CHARS_PER_UPSTREAM, `n_${d.nodeId}`)}\n\n（详细推理已因预算裁剪；如需依据请回原节点 n_${d.nodeId} 查看）`,
+      );
     } else if (node?.frontmatter.outcome_status === 'stale') {
-      parts.push(`## 上游节点「${d.title}」（警告：上游成果块已变更，此前注入的内容可能过时，请优先调用 intern_search 取最新原文）`);
+      // R-10 级联失效：带出原因链，让模型知道「哪条前提已废」，而不是笼统的「已变更」
+      const why = node.frontmatter.outcome_stale_reason?.trim();
+      addPart(`## 上游节点「${d.title}」（警告：上游成果块已失效，此前注入的内容不得作为既定前提。${why || '上游成果块已变更，请优先调用 intern_search 取最新原文'}）`);
     } else {
-      parts.push(`## 上游节点「${d.title}」（${node ? '成果块未锁定，未注入成果内容' : '无法读取'}）`);
+      addPart(`## 上游节点「${d.title}」（${node ? '成果块未锁定，未注入成果内容' : '无法读取'}）`);
     }
   }
+
+  // P0-1 记忆源权威顺序：仅在**本节点确实注入了上游锁定成果**时注入（条件段，不常驻）——
+  // 这正是「上游成果块 vs 项目账本/压缩记忆」可能冲突的场景，此时才值得付这段 token。
+  if (injectedLockedUpstream) addPart(MEMORY_AUTHORITY_RULE);
 
   // R-17: 祖先存在性声明（不注入目录/原文）
   if (chain.depthPlus.length > 0) {
     const lines = chain.depthPlus.map((d) => {
       const statusText = d.outcomeStatus === 'locked' ? '已锁定'
-        : d.outcomeStatus === 'stale' ? 'stale（上游已变更）'
+        : d.outcomeStatus === 'stale' ? 'stale（前提已失效）'
         : (d.outcomeStatus || '未知');
       return `  ${d.nodeId}「${d.title}」· ${statusText} · ${(d.updatedAt || '').slice(0, 10)}`;
     });
     const truncatedNote = chain.truncated > 0 ? `\n  （另有 ${chain.truncated} 个更早祖先）` : '';
-    parts.push(
+    addPart(
       `上游祖先（非直接父，内容未注入）：\n${lines.join('\n')}${truncatedNote}\n需要时调用 read_manifest(node_id) 查看目录，再调用 intern_search 取原文。`,
     );
   }
@@ -2420,85 +2592,107 @@ async function applyUpstreamNodeBridge(
   // Step 9: 托管模型自动派发实习生（无工具能力 → 后端自动取回，输出同样带 [原始对话·未认定]）
   if (isManagedModel) {
     const auto = await autoDispatchIntern(messages, chain, nodeId, project);
-    if (auto) parts.push(auto);
+    if (auto) addPart(auto);
   }
 
-  parts.push(UPSTREAM_GUIDE_PROMPT);
-  let injection = '\n\n' + parts.join('\n\n');
+  addPart(UPSTREAM_GUIDE_PROMPT);
+  let injection = '\n\n' + partsFull.join('\n\n');
 
-  // R-14: 上下文超长时自动回退（方案 C），不静默截断、也不直接拒绝
-  // 策略：对话历史过大 → 从最旧开始成对丢弃（user+assistant），保留 system（含压缩记忆）+ 最近轮次；
-  //       仅上游注入本身过大（无法裁剪对话解决）时才拒绝并给出可操作提示。
-  const totalLen = messages.reduce(
-    (s, m) => s + (typeof m.content === 'string' ? m.content.length : 0),
-    0,
-  ) + injection.length;
+  // R-14: 上下文超长时自动回退（**方案 A**：先裁本节点旧对话 + 增量压缩 → 仍超才降级上游 full → brief → 最后才拒绝）
+  // 定案理由：C8 把上游成果块归入「低频变化段（稳定缓存前缀）」，而上游是已签字的前提——
+  // 它若随对话长度在 full/brief 间抖动，既反复击穿前缀缓存，又让下游重复推翻已定结论。
+  // 因此优先牺牲「有压缩记忆兜底的本节点旧对话」，把上游推理链留到最后才动；不静默截断、也不直接拒绝。
+  const messagesLenOf = (msgs: ChatMessage[]): number =>
+    msgs.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0);
   const contextGate = contextGateForContext(contextWindow);
-  if (totalLen > contextGate) {
+  if (messagesLenOf(messages) + injection.length > contextGate) {
+    // ① 先裁本节点未压缩的旧对话（含 R-14-C 增量压缩）。
+    //    注入已独占闸值时（gateForMessages <= 0）裁剪救不了，跳过 ① 直接进 ② 的上游降级。
     const gateForMessages = contextGate - injection.length;
-    if (gateForMessages <= 0) {
-      // 注入部分已占满闸值：对话裁剪救不了，必须用户侧拆节点/减少上游
-      throw new Error(`R-14 上游注入后上下文超长（约 ${Math.round(totalLen / 1000)}k 字符，当前模型闸值约 ${Math.round(contextGate / 1000)}k），且主要为上游/成果块注入占用，无法自动裁剪对话。请拆分节点或减少上游关联后再试。`);
-    }
-    // 从最旧开始成对丢弃 user+assistant，直到 ≤ 闸值的 80%（至少保留最近 2 轮 + 当前轮）
-    const target = Math.floor(gateForMessages * 0.8);
-    const originalMessages = messages;
-    let trimmed = messages;
-    let len = messages.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0);
-    while (trimmed.length > 4 && len > target) {
-      if (trimmed[0]?.role === 'user' && trimmed[1]?.role === 'assistant') {
-        trimmed = trimmed.slice(2);
-      } else {
-        trimmed = trimmed.slice(1);
-      }
-      len = trimmed.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0);
-    }
-    // ===== 缓存感知压缩（R-14-C）=====
-    // 被裁轮次 → 增量压缩进节点记忆并推进 memory_compacted_until（持久化）：
-    //   - 信息不丢：压缩记忆兜底被裁内容（模型仍可读）；
-    //   - 前缀稳定：下一轮前端 compactedUntilRef 读到新游标 → 跳过这些轮次不再发送 →
-    //     请求前缀与裁剪后一致 → 命中 DeepSeek 前缀缓存（否则每轮重新裁剪、前缀漂移、全价重算）。
-    const trimmedTurns = extractTrimmedTurns(originalMessages, trimmed);
-    // 缓存稳定化：压缩记忆不混入 system injection（会改 system 字节 → 缓存头整段失效），
-    // 改为收集后 prepend 到当前轮最后一条 user 消息（尾部变化保头缓存，见下方注入点）
-    let compactedMemoryInjection = '';
-    if (trimmedTurns.length > 0) {
-      try {
-        // T2 折叠源切换：请求与 .md 对齐时经 .trajectory 日志派生权威压缩输入（含 reasoning），
-        // 否则沿用被裁 request 文本（现网语义）；两轨与 /api/nodes append 共用同一派生函数
-        const foldTurns = await resolveHistoryFoldTurns(nodeId, project, originalMessages, trimmedTurns);
-        const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog, compactModelCfg);
-        if (newMemory) {
-          compactedMemoryInjection = '\n\n## 本节点压缩记忆（本轮裁剪后更新）\n\n' + newMemory.trim();
+    if (gateForMessages > 0) {
+      // 从最旧开始成对丢弃 user+assistant，直到 ≤ 闸值的 80%（至少保留最近 2 轮 + 当前轮）
+      const target = Math.floor(gateForMessages * 0.8);
+      const originalMessages = messages;
+      let trimmed = messages;
+      let len = messages.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0);
+      while (trimmed.length > 4 && len > target) {
+        if (trimmed[0]?.role === 'user' && trimmed[1]?.role === 'assistant') {
+          trimmed = trimmed.slice(2);
+        } else {
+          trimmed = trimmed.slice(1);
         }
-      } catch (e) {
-        console.warn('[R-14-压缩] 被裁轮次压缩失败，已降级为直接裁剪:', e instanceof Error ? e.message : String(e));
+        len = trimmed.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0);
+      }
+      // ===== 缓存感知压缩（R-14-C）=====
+      // 被裁轮次 → 增量压缩进节点记忆并推进 memory_compacted_until（持久化）：
+      //   - 信息不丢：压缩记忆兜底被裁内容（模型仍可读）；
+      //   - 前缀稳定：下一轮前端 compactedUntilRef 读到新游标 → 跳过这些轮次不再发送 →
+      //     请求前缀与裁剪后一致 → 命中 DeepSeek 前缀缓存（否则每轮重新裁剪、前缀漂移、全价重算）。
+      const trimmedTurns = extractTrimmedTurns(originalMessages, trimmed);
+      // 缓存稳定化：压缩记忆不混入 system injection（会改 system 字节 → 缓存头整段失效），
+      // 改为收集后 prepend 到当前轮最后一条 user 消息（尾部变化保头缓存，见下方注入点）
+      let compactedMemoryInjection = '';
+      if (trimmedTurns.length > 0) {
+        try {
+          // T2 折叠源切换：请求与 .md 对齐时经 .trajectory 日志派生权威压缩输入（含 reasoning），
+          // 否则沿用被裁 request 文本（现网语义）；两轨与 /api/nodes append 共用同一派生函数
+          const foldTurns = await resolveHistoryFoldTurns(nodeId, project, originalMessages, trimmedTurns);
+          const newMemory = await compactTrimmedHistoryForCache(nodeId, project, foldTurns, taskId, eventLog, compactModelCfg);
+          if (newMemory) {
+            compactedMemoryInjection = '\n\n## 本节点压缩记忆（本轮裁剪后更新）\n\n' + newMemory.trim();
+          }
+        } catch (e) {
+          console.warn('[R-14-压缩] 被裁轮次压缩失败，已降级为直接裁剪:', e instanceof Error ? e.message : String(e));
+        }
+      }
+      console.warn(
+        `[R-14] 上下文超长自动回退：对话从 ${messages.length} 条裁剪到 ${trimmed.length} 条（约 ${Math.round(len / 1000)}k / 闸值 ${Math.round(contextGate / 1000)}k）。被裁剪的旧对话由压缩记忆+成果块兜底，模型可 intern_search 按需检索。`,
+      );
+      messages = trimmed;
+
+      // 缓存稳定化：压缩记忆 prepend 到当前轮最后一条 user 消息（与技能上下文/思考指令同策略），
+      // 而非注入 system——system 字节一旦变化，缓存头整段失效，历史缓存全部作废。
+      // 本轮即生效：裁剪后 system 不变、历史已收敛，本轮请求即可命中缓存。
+      if (compactedMemoryInjection) {
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user') {
+          const prev = last.content || '';
+          messages[messages.length - 1] = { ...last, content: compactedMemoryInjection + '\n\n' + prev };
+        } else {
+          // 兜底：最后一条不是 user（历史重放等边界）→ 追加一条 user 消息，仍不进 system
+          messages.push({ role: 'user', content: compactedMemoryInjection });
+        }
       }
     }
-    console.warn(
-      `[R-14] 上下文超长自动回退：对话从 ${messages.length} 条裁剪到 ${trimmed.length} 条（约 ${Math.round(len / 1000)}k / 闸值 ${Math.round(contextGate / 1000)}k）。被裁剪的旧对话由压缩记忆+成果块兜底，模型可 intern_search 按需检索。`,
-    );
-    messages = trimmed;
 
-    // 缓存稳定化：压缩记忆 prepend 到当前轮最后一条 user 消息（与技能上下文/思考指令同策略），
-    // 而非注入 system——system 字节一旦变化，缓存头整段失效，历史缓存全部作废。
-    // 本轮即生效：裁剪后 system 不变、历史已收敛，本轮请求即可命中缓存。
-    if (compactedMemoryInjection) {
-      const last = messages[messages.length - 1];
-      if (last && last.role === 'user') {
-        const prev = last.content || '';
-        messages[messages.length - 1] = { ...last, content: compactedMemoryInjection + '\n\n' + prev };
-      } else {
-        // 兜底：最后一条不是 user（历史重放等边界）→ 追加一条 user 消息，仍不进 system
-        messages.push({ role: 'user', content: compactedMemoryInjection });
+    // ② 对话裁到底后仍超闸 → 才把上游全文降级为结论档 brief。
+    //    每次 full→brief 切换都会改变注入段字节 = 缓存前缀失效，必须可观测（console + .ledger/log.md 留痕）。
+    if (messagesLenOf(messages) + injection.length > contextGate) {
+      const briefInjection = '\n\n' + partsBrief.join('\n\n');
+      if (briefInjection.length < injection.length) {
+        const beforeLen = injection.length;
+        console.warn(
+          `[R-14] 上下文超长：本节点对话已裁到底仍超闸，上游成果块全文降级为结论档（注入 ${Math.round(beforeLen / 1000)}k → ${Math.round(briefInjection.length / 1000)}k）；上游 full→brief 使缓存前缀失效`,
+        );
+        appendEntryLog(project.path, [
+          `[r14] upstream=full→brief inject=${Math.round(beforeLen / 1000)}k→${Math.round(briefInjection.length / 1000)}k gate=${Math.round(contextGate / 1000)}k cache_prefix=invalidated`,
+        ]);
+        injection = briefInjection;
       }
+    }
+
+    // ③ 仍超（上游 brief 独占闸值）：对话裁剪救不了，必须用户侧拆节点/减少上游
+    if (messagesLenOf(messages) + injection.length > contextGate) {
+      throw new Error(`R-14 上游注入后上下文超长（约 ${Math.round((messagesLenOf(messages) + injection.length) / 1000)}k 字符，当前模型闸值约 ${Math.round(contextGate / 1000)}k），且主要为上游/成果块注入占用（已降级为结论档仍不足），无法自动裁剪对话。请拆分节点或减少上游关联后再试。`);
     }
   }
 
-  // 缓存前缀稳定化（C8）：上游成果块 / 本节点成果块 / 压缩记忆 / 祖先声明属于「低频变化」
-  // 动态内容（上游锁定/修改、成果块更新、压缩发生都会变）。不再追加到 system——system 字节
-  // 一旦变化，缓存头整段失效，作废所有下游节点请求的前缀缓存。改为 prepend 到当前轮最后
-  // 一条 user 消息（每轮必 miss 段，不影响历史缓存）；与技能上下文/思考指令/上游摘要同策略。
+  // 缓存前缀稳定化（C8）：「低频变化段」= 按事件变化、不按轮变化的内容 —— 上游成果块（仅锁定/重锁才变）、
+  // 本节点成果块、压缩记忆（折叠发生才变）、祖先声明。它们不进 system——system 字节一旦变化，
+  // 缓存头整段失效，作废所有下游节点请求的前缀缓存；改为 prepend 到当前轮最后一条 user 消息
+  // （每轮必 miss 段，不影响历史缓存）；与技能上下文/思考指令同策略。
+  // 与 R-14 降级顺序的一致性（方案 A）：正因为上游成果块属低频稳定段，溢出时**最后才**降级为 brief ——
+  // 否则上游会随对话长度在 full/brief 间抖动，等于每轮改写本段字节、前缀反复失效。
   const last = messages[messages.length - 1];
   if (last && last.role === 'user') {
     const prev = last.content || '';
@@ -2693,7 +2887,7 @@ const TOOL_RESULT_HEAD_RATIO = 0.4;
 /** 目录/列表/搜索结果类工具：返回多为多条记录，压缩时按条目（换行）对齐保头部，避免切断单条记录 */
 const LIST_LIKE_TOOLS = new Set([
   'read_manifest', 'list_directory', 'search_files', 'web_search',
-  'read_todo', 'read_notebook', 'read_raw_inbox', 'read_material', 'read_note_history',
+  'read_todo', 'read_notebook', 'read_raw_inbox', 'read_note_history',
 ]);
 
 function compactToolResult(result: string, toolName?: string): { text: string; compacted: boolean } {
@@ -2865,6 +3059,12 @@ interface KernelContext {
   forceFinalRound: boolean;
   /** OCR 重试预算门控：已触发后不再重复注入「停止重试」指令 */
   ocrBudgetExceeded: boolean;
+  /** 收敛护栏：当前连续主导的工具名（本轮调用占比 ≥ 80% 者；null 表示尚未建立） */
+  convergenceTool: string | null;
+  /** 收敛护栏：同一工具连续主导的轮数 */
+  convergenceRounds: number;
+  /** 收敛护栏门控：已触发后不再重复注入「停止穷举」指令 */
+  toolConvergenceExceeded: boolean;
   /** 工具循环思考降级遥测：执行轮降级计数（对照 done hitRate 判断 thinking 降级是否影响缓存命中） */
   thinkingDowngradedRounds: number;
   /** 思考决策可见性（方向 D）：每轮实际模式/降级/C1 命中记录，done 帧带出供前端展示 */
@@ -2902,6 +3102,17 @@ export async function POST(request: NextRequest) {
       projectId?: string;
       /** 沙盒模式（如 wanted Node 模式）：过滤写类工具，禁止 AI 产生文件/待办/日历等副作用 */
       sandbox?: boolean;
+      /** 多智能体协作模式（chat 界面开关）：激活 team 场景并注入「用户代理」规则，主 agent 用 team_run 交
+       *  goal，宿主拉起队长（captain）会话做规划与整合 */
+      multiAgentMode?: boolean;
+      /** 本次执行的成员名单（Multi-agent mode 弹窗选定的已安装 agent id）：不落盘，仅本轮生效；
+       *  服务端把它交给队长（captain）规划时参考，并在队长补充名单外成员时强制弹卡请用户批准 */
+      presetAgentIds?: string[];
+      /** team 模式队长模型（Team 分栏「Main model」显式选择，provider:modelId）：宿主注入 team_run 的
+       *  执行上下文，只读模型池与节点 frontmatter，**绝不回写节点模型** */
+      teamMainModel?: string;
+      /** team 模式成员模型（Team 分栏「Worker model」显式选择，provider:modelId）：一刀切覆盖全部成员 */
+      teamWorkerModel?: string;
       /** 轻量单轮问答（Bob WebBridge 侧边栏等外部客户端）：跳过工具循环，模型直接基于上下文回答 */
       lite?: boolean;
       /** 续写请求携带的初始产物（如模板填充面板生成的文件），补进本轮 output_files 卡片 */
@@ -2921,6 +3132,9 @@ export async function POST(request: NextRequest) {
       identity,
       projectId,
       sandbox,
+      multiAgentMode,
+      teamMainModel,
+      teamWorkerModel,
       lite,
       initialOutputFiles,
     } = body;
@@ -3008,11 +3222,21 @@ export async function POST(request: NextRequest) {
 
     // 判断当前模型是否支持推理（用于决定是否传 reasoning_effort 参数）
     const isCustom = !!(apiKey && baseUrl && providerModelId);
-    // DeepSeek V4 识别：baseUrl 含 deepseek（直连 api.deepseek.com），或模型名含 deepseek + v4
-    // （agentplan/ark 等订阅网关模型名即 deepseek-v4-*，baseUrl 不含 deepseek，必须按模型名识别）
+    // DeepSeek V4 家族识别（deepseek-harness C2/C7 的适用条件）：判据是「模型标识属于 V4 家族」，
+    // 不看 baseUrl —— agentplan/ark 等订阅网关的 baseUrl 不含 deepseek 而模型名仍是 deepseek-v4-*；
+    // 直连 api.deepseek.com 的模型名同样是 deepseek-*。
+    // 不能用 `/v4/i`：本项目预设把 V4 Flash 的显示名标准化为 `deepseek-flash`（不含 "v4"），
+    // 纯名字判定会漏掉它 → 工具循环不回传 reasoning_content → 上游 400
+    // "The `reasoning_content` in the thinking mode must be passed back to the API"（2026-09-15 实测）。
+    // 2026-09-15 改为「声明优先」：预设里标了 `family: 'deepseek-v4'` 的模型直接命中（不改模型名，
+    // 厂商再改 id 只需改 presets.ts 一处）；名字正则降级为未知型号兜底 —— 排除非 V4 旧型号
+    // （deepseek-chat / deepseek-reasoner(R1) / deepseek-coder / deepseek-vl2 / DeepSeek-V3 系）：
+    // 它们不需要（reasoner 反而禁止）回传 reasoning_content，也不能套 1M 硬上下文校验。
+    const dsModelName = providerModelId ?? '';
+    const isDeepseekLegacy =
+      /deepseek[\w./-]*(?:chat|reasoner|coder|r1|vl)|deepseek[\w./-]*v?3\b/i.test(dsModelName);
     const isDeepseekV4 =
-      isCustom && !!providerModelId && /v4/i.test(providerModelId) &&
-      (baseUrl?.includes('deepseek') || /deepseek/i.test(providerModelId));
+      isCustom && (isDeclaredV4Model(dsModelName) || (/deepseek/i.test(dsModelName) && !isDeepseekLegacy));
 
     // R-14 动态闸值依据：按当前请求模型推断 contextWindow（自定义模型优先用 providerModelId，托管用 modelId）
     const requestContextWindow = inferContextWindow(providerModelId || modelId || '', thinking === 'enabled');
@@ -3166,6 +3390,14 @@ export async function POST(request: NextRequest) {
       finalMessages = prependDynamicContext(finalMessages, sandboxCodingInjection);
     }
 
+    // ===== Bob-Mind 面板改动回看注入（仅 mind agent） =====
+    // 有「用户已改、Buzan 未回看」的导图改动时才注入（consume=1 取走即清零）；
+    // 无改动/插件未运行 → 空串，不产生任何注入。同样走 prepend 而非 system（缓存头字节稳定）。
+    const mindChangesInjection = await buildMindChangesInjection(profile.id);
+    if (mindChangesInjection) {
+      finalMessages = prependDynamicContext(finalMessages, mindChangesInjection);
+    }
+
     const encoder = new TextEncoder();
 
     if (isCustom) {
@@ -3175,7 +3407,17 @@ export async function POST(request: NextRequest) {
       // K2-S1 工具面 service 抽取，行为不变：注册（自定义 + MCP 快照/排除 + syncServers）收敛进
       // ToolRuntime.register；每次请求 new（只读快照），settings 每请求读取一次与迁移前一致
       const settingsForTools = await readSettingsFromFile();
-      const toolRuntime = new ToolRuntime({ settings: settingsForTools, profile, sandbox: !!sandbox, enabledMcpIds });
+      // 「ledger 判据统一」的一半：fixed 画像（coding / 市场 agent）的工具面由 fixedScenes 决定
+      // （ToolRuntime.computeActiveToolDefs），下面往 activeScenes 加的 'ledger' 对它们一律无效，
+      // 于是出现「指引有、工具没有」的反向错位。有激活项目即把只读入口并集给全体 agent：
+      // 只并 'ledger'（read_ledger / search_materials），不并 'ledger-keeper'（写工具只归档案员 Archivist）。
+      // 只对**已有非空 fixedScenes** 的画像并集：fixedScenes 缺失时不动（空集合原本只给内核工具，
+      // 若在这里补 ['general'] 会顺带把 general 场景工具也放进来——那是另一件事，不顺手做）。
+      const fixedScenes = profile.scenes === 'fixed' ? profile.fixedScenes : undefined;
+      const toolProfile = projectRoot && fixedScenes && fixedScenes.length > 0 && !fixedScenes.includes('ledger')
+        ? { ...profile, fixedScenes: [...fixedScenes, 'ledger' as ToolScene] }
+        : profile;
+      const toolRuntime = new ToolRuntime({ settings: settingsForTools, profile: toolProfile, sandbox: !!sandbox, enabledMcpIds });
       await toolRuntime.register();
 
       // mcpManager 宿主侧调用（bobby 急停清除 / 浏览器当前页 URL 指纹）仍留在 route 原位
@@ -3199,6 +3441,11 @@ export async function POST(request: NextRequest) {
       }
       if (sandbox) activeScenes.add('butler');
       if (nodeId) activeScenes.add('node');
+      // ledger：项目账本只读入口（read_ledger）随「存在激活项目」放行 —— 画布下恒真，
+      // 使全体 agent（含团队成员的固定画像）都能先读档案再取原文。无项目时不激活（无库可读）。
+      // 注意：本行只对 scenes='dynamic' 画像生效；fixed 画像的工具面另由 toolProfile 并集 'ledger' 补齐。
+      // 写工具归 ledger-keeper 场景：只有档案员画像（Archivist）的 fixedScenes 含它（账本由档案员维护，其他 agent 只读）。
+      if (projectRoot) activeScenes.add('ledger');
       try {
         const sceneHintText = extractLastUserContent(messagesWithNodeBridge);
         for (const s of detectSceneHints(sceneHintText)) activeScenes.add(s);
@@ -3232,12 +3479,72 @@ export async function POST(request: NextRequest) {
       // 场景/画像过滤组装 + mergeForcedMcp + 确定性排序 + CacheGuard 已收敛进 ToolRuntime.assemble
       // （K2-S1 工具面 service 抽取，行为不变）：toolDefs / loopToolDefs 于 REPORT_RULES 注入后统一组装，见下。
 
+      // 多智能体协作模式（chat 界面「Multi-agent mode」开关）：
+      //   1) 强制激活 team 场景 → team_run（scenes:['team']）对模型可见；裸 mcp__team__* 不注入
+      //      （见 tools/index.ts MCP_SERVER_SCENES 注释），模型侧唯一入口就是 team_run；
+      //   2) 编排规则随当前轮 user 消息注入（与 BROWSER_RULES 同法，不进 system）。
+      // 这是 team 场景的**唯一入口**：意图探测（detectSceneHints）、search_capabilities 能力目录、
+      // 节点「强制使用」勾选均不产出 team。多智能体是重操作（每成员一条独立 /api/chat 会话，
+      // 成本 ≈ N 倍），必须由用户显式开关开启，不接受任何自动触发路径。
+      // 注意：本段在 sticky 合并之后 —— 开关是 per-request 语义，不写入会话 sticky，关掉即恢复单 agent。
+      // 本次成员名单（chat 节点「Multi-agent mode」弹窗选定的已安装 agent id）：不落盘、仅本轮生效。
+      // 两处消费：① 队长规划消息（优先用名单内成员）；② team_run 的执行上下文（名单外补充成员强制弹卡）。
+      const presetAgentIds = multiAgentMode && Array.isArray(body.presetAgentIds)
+        ? body.presetAgentIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+        : [];
+      // 队长（captain）规划时参考的成员名单段：**只交给队长**（经 team_run 的执行上下文注入，
+      // 见下方 ctx.teamRosterSection），不进主 agent 的 user 消息——主 agent 已退化为纯用户代理。
+      let teamRosterSection = '';
+      if (multiAgentMode) {
+        activeScenes.add('team');
+        // 注入「用户代理」规则（队长规则由宿主在 captain 会话里注入，主 agent 不参与编排）
+        finalMessages = prependDynamicContext(finalMessages, MULTI_AGENT_RULES);
+        // 名单 label 从已安装 agent 包取，与弹窗候选同源；名单里的 id 未装/已卸载时回退显示 id，
+        // 规则仍按 identity 引用它——成员装配端亦回退 chat 画像
+        const labels = new Map<string, string>();
+        if (presetAgentIds.length > 0) {
+          for (const a of loadInstalledAgentProfiles()) labels.set(a.id, a.label);
+        }
+        const roster = presetAgentIds.map((id) => ({ id, label: labels.get(id) ?? id }));
+        teamRosterSection = multiAgentRosterSection(roster);
+      }
+
       // 浏览器专精规则按需注入（browser 场景激活 / coding 专项 Agent 强制注入）：
       // 已从 system 移出以省固定 token，随当前轮 user 消息动态注入（不破坏 system 前缀缓存）；
       // browser 工具随 tools 注入时，模型同步获得完整操作纪律。
       if (activeScenes.has('browser') || profile.forceBrowserTools) {
         finalMessages = prependDynamicContext(finalMessages, BROWSER_RULES);
       }
+
+      // 「ledger 判据统一」的另一半：有激活项目即注入 —— 与工具放行（上面的 activeScenes.add('ledger')
+      // 以及 toolProfile 对 fixed 画像并集 'ledger'）**同一条判据**，不再按画像/沙盒分叉。
+      // 两边一致后不存在「工具到手、指引没有」，也不存在「指引有、工具没有」。
+      const ledgerVisible = !!projectRoot;
+      if (ledgerVisible) {
+        // 「一」结构性预取：把账本索引 + 材料清单摘要直接摆进上下文——
+        // 零模型调用、零决策成本，不依赖模型自觉去调 read_ledger / search_materials。
+        // 必须**每轮**注入：前端每轮用本地消息重建 messages（ChatNodeKernel），服务端 prepend
+        // 的动态上下文不回传前端，首轮注入的快照第 2 轮即消失。成本靠紧凑版压住：
+        // 首轮全量（≤2400 字符，含出处与逐份清单），后续轮紧凑版（≤800 字符，账本只留标题+id、
+        // 材料只留一级目录汇总）。清单是"有哪些可选"，不是"该看哪些"，不替模型做相关性判断。
+        const isFirstTurn = messages.filter((m) => m.role === 'user').length <= 1;
+        let archiveBrief = '';
+        try {
+          const { buildProjectArchiveBrief } = await import('@/lib/runtime/project-brief');
+          archiveBrief = await buildProjectArchiveBrief(projectRoot as string, { compact: !isFirstTurn });
+        } catch (e) {
+          // 预取失败不影响对话：退回纯软指针（无快照）
+          console.warn('[chat] 项目档案预取失败（已降级为软指针）:', e instanceof Error ? e.message : String(e));
+        }
+        finalMessages = prependDynamicContext(
+          finalMessages,
+          // P0-1 权威顺序紧凑版挂在快照头：模型读到账本索引/材料清单时就先知道「账本不出结论」
+          archiveBrief ? `${LEDGER_HINT}\n${MEMORY_AUTHORITY_BRIEF}\n${archiveBrief}` : `${LEDGER_HINT}\n${MEMORY_AUTHORITY_BRIEF}`,
+        );
+      }
+
+      // 账本编译不由对话触发：材料登记后宿主自起后台会话（lib/mcp/ledger-compile.ts）
+      // —— 编译是串行工具往返，份数多则慢，放进对话轮次只会拖慢用户等待。
 
       // 报告插图约定按需注入（报告/调研类交付物才注入）：
       // 已从 system 移出，仅生成报告类交付物时需要，避免常驻浪费固定 token。
@@ -3258,6 +3565,11 @@ export async function POST(request: NextRequest) {
       const isMoonshotThinking = !!baseUrl && baseUrl.includes('moonshot') && !!providerModelId && /kimi-k\d/i.test(providerModelId);
       const finalTemp = isMoonshotThinking || isDeepseekV4 ? 1 : (temperature ?? 0.7);
 
+      // 用户对话优先级最高（见 @/lib/runtime/project-scheduler）：持有期间后台任务（成果块提炼 /
+      // 账本编译）不启动 —— 不抢模型、不同时写项目文件。整轮结束（正常/异常/断开）在流收尾释放。
+      // 放在这里而不是更早：此前还有 R-14 拒绝执行等提前 return 的分支，那样会漏释放、把后台永久挡死。
+      const leaveUserTurn = projectRoot ? enterUserTurn(projectRoot) : () => {};
+
       const readableStream = new ReadableStream({
         async start(controller) {
           // P4c-1 压缩事件化：taskId/eventLog 已提前创建（Node Bridge 压缩事件需同日志），此处直接复用
@@ -3272,9 +3584,38 @@ export async function POST(request: NextRequest) {
               /* stream closed —— 静默忽略迟到帧 */
             }
           };
+          // 关闭 SSE 流（2026-09-15）：客户端断开后底层流可能已被 cancel，此时 close() 抛
+          // ERR_INVALID_STATE → uncaughtException。正常/异常收尾统一走这里。
+          const closeStream = () => {
+            try {
+              controller.close();
+            } catch {
+              /* 流已关闭/已取消 —— 忽略 */
+            }
+          };
           eventLog.mark(CORE_EVENT.TURN_START, taskId, { nodeId, identity, model: providerModelId || modelId || '', userInput: initialUserInput ?? '' });
           eventLog.mark(CORE_EVENT.USER_MESSAGE, taskId, { role: 'user', content: initialUserInput ?? '' });
 
+          // 空闲看门狗心跳（2026-09-15）：前端 90s 超时是「空闲」语义——收到任一 SSE 帧即重置计时器。
+          // 但上游单轮模型调用可能长时间静默（实测有 506s 才返回首帧、期间服务端一帧不发的场景），
+          // 前端会在 90s 处误判超时 abort 并渲染 "Request timed out"，而服务端仍在继续跑（继续烧 token）。
+          // 这里在整轮生命周期内每 20s 推一个轻量心跳帧，保证任意静默窗口都远小于 90s
+          // （与 vision_progress 进度帧、ask_user_questions 挂起心跳同一思路，见本文件 L1801 视觉识别心跳）。
+          // 心跳不进 EventLog（轨迹只记业务事件）；前端对未识别帧静默忽略（ChatNodeKernel 解析区按 key 匹配）。
+          const watchdogId = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ watchdog: Date.now(), nodeId })}\n\n`));
+            } catch {
+              /* stream closed —— 静默忽略迟到帧（与 send 一致） */
+            }
+          }, 20_000);
+
+          // 客户端断开（2026-09-15）：前端 90s 空闲看门狗 abort / 用户点"停止"后连接断开，
+          // Next.js 会在 request.signal 上触发 abort。据此做三件事，避免被抛弃的轮次继续跑完烧 token：
+          //   ① 模型请求传 signal → 上游 HTTP 立即中断（SDK 抛 APIUserAbortError，isRetryableCompletionError 判不可重试）；
+          //   ② 重试退避后、每轮工具循环开头检查 aborted → 及时退出，不再发起新的模型调用；
+          //   ③ catch 中识别为断开 → 不再推错误帧，仅持久化轨迹（保留被打断现场）。
+          // 注：工具执行中（如 ask_user_questions 挂起 600s）的即时中断不在此范围，需等该工具返回后于轮次边界退出。
           try {
             // === ② Skills / MCP 概览提前推送：SSE 第 1 条就发，不让用户等到整轮结束 ===
             //   - matchedSkills: 后端注入的技能名（含 强制+自动 合并）
@@ -3326,7 +3667,7 @@ export async function POST(request: NextRequest) {
             // 慢识别（多图 × 多候选模型降级）不再被误判为"请求超时"；同时用户可看到识别进度。
             let effectiveMessages: ChatMessage[] = finalMessages;
             const visionNeeded = finalMessages.some(
-              (m) => m.role === 'user' && /图片/.test(m.content || '') && /路径: (?:attachments|assets)\//.test(m.content || ''),
+              (m) => m.role === 'user' && /图片/.test(m.content || '') && /路径: (?:materials|attachments|assets)\//.test(m.content || ''),
             );
             // 直连多模态：当前对话模型本身支持视觉且项目路径可解析时，把图片附件以
             // image_url 段直接随消息发送（buildDirectVisionPayloads → 每轮 materialize），
@@ -3382,6 +3723,10 @@ export async function POST(request: NextRequest) {
               forceFinalRound: !!lite,
               // OCR 重试预算门控标志：已触发后不再重复注入「停止重试」指令
               ocrBudgetExceeded: false,
+              // 收敛护栏（与停滞保护互补）：同一工具连续主导轮数 + 累计次数双阈值，治「有进展但不收敛」
+              convergenceTool: null,
+              convergenceRounds: 0,
+              toolConvergenceExceeded: false,
               // 工具循环思考降级遥测（item 4 验证）：执行轮降级轮数（对照 done 日志 hitRate）
               thinkingDowngradedRounds: 0,
               // 思考决策可见性（方向 D）：每轮实际模式入账
@@ -3496,6 +3841,8 @@ export async function POST(request: NextRequest) {
             };
 
             for (let round = 0; ; round++) {
+              // 客户端已断开（前端看门狗 abort / 用户点停止）→ 不再发起新一轮模型调用
+              if (request.signal.aborted) throw new Error('客户端已断开连接，本轮已中止。');
               // 场景中途激活（search_capabilities / load_skill 法律技能）→ 用最新 activeScenes
               // 重算 toolDefs 再重建 loopToolDefs，下一轮模型请求携带新工具集；
               // 重建后本会话场景已 sticky，后续轮次字节稳定。
@@ -3631,12 +3978,15 @@ export async function POST(request: NextRequest) {
                 };
               }>;
               for (let attempt = 1; ; attempt++) {
+                // 客户端已断开 → 不再重试（重试只会把 token 烧在被抛弃的轮次上）
+                if (request.signal.aborted) throw new Error('客户端已断开连接，本轮已中止。');
                 try {
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  completion = (await (client.chat.completions.create as any)({
-                    ...requestBody,
-                    stream: true,
-                  })) as AsyncIterable<{
+                  completion = (await (client.chat.completions.create as any)(
+                    { ...requestBody, stream: true },
+                    // 客户端断开时立即中止上游请求（SDK 抛 APIUserAbortError，不可重试）
+                    { signal: request.signal },
+                  )) as AsyncIterable<{
                     choices?: Array<{
                       delta?: {
                         content?: string | null;
@@ -3682,6 +4032,8 @@ export async function POST(request: NextRequest) {
                   console.warn(`[chat] 模型请求失败，第 ${attempt}/${COMPLETION_MAX_ATTEMPTS} 次重试（${Math.round(delay)}ms 后）: ${createErr instanceof Error ? createErr.message : String(createErr)}`);
                   send({ retry: { attempt, maxAttempts: COMPLETION_MAX_ATTEMPTS, delayMs: Math.round(delay), reason: createErr instanceof Error ? createErr.message : String(createErr) }, nodeId });
                   await sleepMs(delay);
+                  // 退避等待期间客户端断开 → 立即停止重试（退避上限 8s，不值得改成可中断 sleep）
+                  if (request.signal.aborted) throw new Error('客户端已断开连接，本轮已中止。');
                 }
               }
 
@@ -4208,6 +4560,14 @@ export async function POST(request: NextRequest) {
                 //     consult 后 usesButlerCard → noop 的照常执行，无任何副作用差异）；仅 butler
                 //     verdict === 'noop'（含卡片构建失败 → usesButlerCard 冗余判定在 handleToolConfirm
                 //     内保留，保证仍不弹通用确认）或 butler 未命中时本 consult 才执行。
+                // 本轮生效的审批策略（identity 级 perAgent 覆盖 > 全局 defaultStrategy > allow_scope）：
+                // 同一次工具轮里被两处消费 —— tool_confirm 接管（下方 ctx.approvalStrategy，名单/写类
+                // 判定）与多智能体门禁（executeTool ctx，team_run 的 allow/request/deny 形态），
+                // 取值必须同源（默认 allow_scope 与现网逐位一致）。
+                const effectiveApprovalStrategy =
+                  (identity ? settingsForTools.approval?.perAgent?.[identity] : undefined)
+                  ?? settingsForTools.approval?.defaultStrategy
+                  ?? 'allow_scope';
                 // K3 hook: tool_confirm (consult seq #4 · before_execute_running；butler 卡覆盖后跳过)
                 const confirmTakeover = hostTakeoverFor(toolName, 'tool_confirm', 'pre');
                 if (confirmTakeover && !butlerCardCovered) {
@@ -4220,14 +4580,11 @@ export async function POST(request: NextRequest) {
                     spanId: toolSpanId,
                     startAt: toolStartAt,
                     // 请求作用域注入：身份（butler 卡覆盖判定）+ 当前生效手动确认名单 + 审批策略
-                    // （P4b-1：settings.approval?.defaultStrategy ?? 'allow_scope'，默认档与现网
-                    // 逐位一致）+ 挂起登记用原始参数串
+                    // （P4b-1：复用上面同一取值的 effectiveApprovalStrategy，默认档与现网逐位一致）
+                    // + 挂起登记用原始参数串
                     identity,
                     confirmTools: settingsForTools.confirmTools ?? DEFAULT_CONFIRM_TOOLS,
-                    approvalStrategy:
-                      (identity ? settingsForTools.approval?.perAgent?.[identity] : undefined)
-                      ?? settingsForTools.approval?.defaultStrategy
-                      ?? 'allow_scope',
+                    approvalStrategy: effectiveApprovalStrategy,
                     execArgs,
                     // 结果落账：approved 走 handled_fallback 落回下方通用执行（executeTool 成功落账在
                     // 通用路径完成，此处不产成功落账）；denied/timeout 的 error 三连由 commitToolError
@@ -4311,14 +4668,25 @@ export async function POST(request: NextRequest) {
                 if (toolName.startsWith('mcp__bobby__')) {
                   send({ bobby_trigger: { tool: toolName }, nodeId });
                 }
-                // Agent Teams 触发事件：主 Agent 调用团队编排工具（mcp__team__*）→ SSE 推送
-                // team_trigger，画布据此自动打开（创建/激活）AgentTeamsNode 实时展示团队执行过程。
-                if (toolName.startsWith('mcp__team__')) {
-                  send({ team_trigger: { tool: toolName }, nodeId });
-                }
                 let execResult: { result: string; durationMs: number; success: boolean; cardHtml?: string };
+                // P0-d 工具返回预算：T_turn（单次上限，按请求窗口）× T_task（单任务累计上限，防多轮下钻爆窗）。
+                // 累计量直接从本轮对话历史里的 tool 消息就地统计（不另设计数器，避免各处更新不同步）；
+                // 剩余预算不足时按剩余量收紧本次上限，下限 2000 —— 截断仍由工具内部显式提示（不静默截断）。
+                const turnCap = toolOutputMaxForContext(requestContextWindow);
+                const taskBudget = taskToolOutputMaxForContext(requestContextWindow);
+                const taskUsedChars = kctx.conversationMessages.reduce(
+                  (s, m) => s + (m.role === 'tool' && typeof m.content === 'string' ? m.content.length : 0),
+                  0,
+                );
+                const callCap = Math.max(2000, Math.min(turnCap, taskBudget - taskUsedChars));
+                if (taskUsedChars >= taskBudget) {
+                  console.warn(`[工具预算 T_task] 单任务工具返回累计已达上限（${Math.round(taskUsedChars / 1000)}k ≥ ${Math.round(taskBudget / 1000)}k），本次调用上限收紧至 ${callCap} 字符`);
+                }
                 try {
-                  execResult = await executeTool(toolName, execArgs, toolOutputMaxForContext(requestContextWindow), {
+                  execResult = await executeTool(toolName, execArgs, callCap, {
+                    // 内层分片上限跟外层同源：read_attachment 等读取类工具按此收缩单次返回，
+                    // 保证续读 offset 提示不被外层截断（小窗口模型也能一段段读完长材料）
+                    maxOutputChars: callCap,
                     // OCR 过程级进度（read_attachment 扫描件/图片识别走 bob-ocr-mcp）：插件实时上报引擎/页码
                     // → 转为 vision_progress(phase='ocr') SSE 事件，前端显示"正在识别 第N/M页 · 本地 Vision"等
                     onOcrProgress: (p) =>
@@ -4332,6 +4700,57 @@ export async function POST(request: NextRequest) {
                         },
                         nodeId,
                       }),
+                    // 多智能体协作过程级进度（team_run 编排期间按轮询节奏外推）：转 subagent_update SSE，
+                    // 前端据此渲染「成员分支卡片」（默认折叠，展开看每个成员的任务与产出）；同一帧可附带
+                    // 「群聊流」增量事件（subagent_events，形态 A 呈现层）——前端按时间线累积，与快照互为补充。
+                    // onProgress 每次回调的 events 只含**本次新增**（可能为空数组），快照则始终是全量。
+                    onTeamProgress: (p, events) =>
+                      send({ subagent_update: p, subagent_events: events, nodeId }),
+                    // 多智能体人类审批门禁（team_run 在 approve 之前回调本函数）：复用工具确认的挂起容器
+                    // （createPendingConfirm 生成 confirmId + Promise，前端弹审阅卡后经 POST
+                    // /api/chat/confirm 回传 resolve），另发一条 team_confirm 帧携带草案（goal + 成员
+                    // 清单 + 任务 DAG）供前端展示。等待期间 SSE 无数据，但本轮 keepalive 已在按 20s 发
+                    // tool_call_update(running) 心跳，故此处不再另起心跳。
+                    onTeamConfirm: async (draft) => {
+                      const { confirmId, promise } = createPendingConfirm('team_run', JSON.stringify(draft), nodeId);
+                      // 被弃用的名单成员（AI 最终方案未指派）：id → 已安装 agent 的 label，未装/已卸载
+                      // 回退显示 id（与名单段同口径）——用户名单被改动时前端据此在卡上点名
+                      const droppedLabels = new Map(loadInstalledAgentProfiles().map((a) => [a.id, a.label]));
+                      send({
+                        team_confirm: {
+                          confirmId,
+                          // 团队 id：团队在 approve 之前才推 subagent_update 帧，若此处不携带，
+                          // 前端在「待批准」阶段就无从把团队绑到节点——页面一刷新团队即失联（回空状态）
+                          teamId: draft.teamId,
+                          goal: draft.goal,
+                          members: draft.members,
+                          tasks: draft.tasks,
+                          // 名单外补充成员（AI 推荐补人触发审批时非空）：前端弹卡单独点名，便于用户判断
+                          extraMemberNames: draft.extraMemberNames,
+                          droppedMemberNames: (draft.droppedMemberIds ?? []).map(
+                            (id) => droppedLabels.get(id) ?? id,
+                          ),
+                          timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
+                        },
+                        nodeId,
+                      });
+                      const res = await promise;
+                      return res.verdict;
+                    },
+                    // 审批策略档位（与上方 tool_confirm 接管同源，单一取值）：team_run 据此经
+                    // decideTeamApproval 决定门禁形态 —— allow_scope 不打断用户直接 approve & run /
+                    // ask 在 approve 前弹审阅卡 / never 在入口直接拒绝（不建团队、零 MCP 副作用）
+                    approvalStrategy: effectiveApprovalStrategy,
+                    // 本次成员名单（用户弹窗选定）：名单外补充成员一律强制弹卡请用户批准
+                    presetAgentIds,
+                    // team 模式一主一次两个模型（Team 分栏显式选择）：队长用主模型、成员一刀切用次模型；
+                    // 只读模型池与节点 frontmatter，**绝不回写节点模型**（与主 chat 完全隔离）
+                    teamMainModel: typeof teamMainModel === 'string' ? teamMainModel : undefined,
+                    teamWorkerModel: typeof teamWorkerModel === 'string' ? teamWorkerModel : undefined,
+                    // 队长规划时参考的成员名单段（主 agent 看不到名单，见 MULTI_AGENT_RULES）
+                    teamRosterSection,
+                    // 当前项目上下文：透传给队长会话的 /api/chat
+                    projectId,
                   });
                 } finally {
                   clearInterval(keepalive);
@@ -4450,9 +4869,11 @@ export async function POST(request: NextRequest) {
                 eventLog.mark('tool_span', toolSpanId, { name: toolName, phase: finalPhase, durationMs: execResult.durationMs }, toolStartAt, toolEndAt);
 
                 // 附件解析结果持久化到所属节点引用区（供下游 intern_search 溯源命中）
+                // 项目资料（materials/）不走这里：它已登记进项目资料 manifest，由 intern_search 直接检索，
+                // 再往节点引用区写一份摘要是同一内容的二次登记（仅对话附件/授权目录文件需要节点级溯源）。
                 if (toolName === 'read_attachment' && execResult.success && projectRoot) {
                   const attPath = typeof parsedArgs.path === 'string' ? parsedArgs.path : '';
-                  if (attPath) {
+                  if (attPath && !attPath.startsWith('materials/')) {
                     try {
                       const { persistAttachmentReference } = await import('@/lib/nodes/references');
                       await persistAttachmentReference(attPath, execResult.result, projectRoot);
@@ -4525,6 +4946,49 @@ export async function POST(request: NextRequest) {
                 }
               }
 
+              // ===== 工具收敛护栏：有进展但不收敛（穷举型 / 空想型）→ 停止空转，基于已有结果作答 =====
+              // 停滞保护抓的是「连续多轮无实质进展」；抓不住另一种卡法：每轮都有成功的工具调用
+              // （被判为推进、stallCount 反复清零），但方向永不收敛 —— 例如逐条穷举检索法条、
+              // 反复重写同一个文件，最终只能烧到时间预算才被迫收口，UI 表现为「一直转但不动」。
+              // 判据（双阈值，避免误伤正常的多文件读取）：同一工具连续主导 ≥ TOOL_CONVERGENCE_ROUNDS 轮，
+              // 且该工具累计调用 ≥ TOOL_CONVERGENCE_MIN_CALLS 次 → 判定不收敛，注入停止指令并强制收尾。
+              if (!kctx.toolConvergenceExceeded) {
+                const roundCalls = kctx.allToolCalls.slice(roundStartToolCount);
+                // 本轮主导工具：出现次数最多者
+                const perTool = new Map<string, number>();
+                for (const c of roundCalls) perTool.set(c.toolName, (perTool.get(c.toolName) ?? 0) + 1);
+                const dominant = [...perTool.entries()].sort((a, b) => b[1] - a[1])[0];
+                // 主导判定：该工具占本轮调用 ≥ 80%（单工具轮次天然满足），避免并行多工具被误判
+                if (dominant && roundCalls.length > 0 && dominant[1] / roundCalls.length >= 0.8) {
+                  if (dominant[0] === kctx.convergenceTool) {
+                    kctx.convergenceRounds++;
+                  } else {
+                    kctx.convergenceTool = dominant[0];
+                    kctx.convergenceRounds = 1;
+                  }
+                  const totalOfTool = kctx.allToolCalls.filter((t) => t.toolName === dominant[0]).length;
+                  if (
+                    kctx.convergenceRounds >= TOOL_CONVERGENCE_ROUNDS &&
+                    totalOfTool >= TOOL_CONVERGENCE_MIN_CALLS
+                  ) {
+                    kctx.toolConvergenceExceeded = true;
+                    kctx.conversationMessages.push({
+                      role: 'user',
+                      content: `你已连续 ${kctx.convergenceRounds} 轮反复调用工具「${dominant[0]}」（累计 ${totalOfTool} 次），调用次数只增、结论始终没有落地，疑似陷入不收敛的穷举循环。请立即停止继续调用该工具，基于已经取得的结果直接给出最终回答；确实缺失的部分不要再以同一方式反复重试，在回答末尾用【未完成项】列出未能完成的部分及原因。`,
+                    });
+                    send({
+                      tool_convergence: true,
+                      tool: dominant[0],
+                      rounds: kctx.convergenceRounds,
+                      calls: totalOfTool,
+                      nodeId,
+                    });
+                    kctx.forceFinalRound = true;
+                    continue;
+                  }
+                }
+              }
+
               // ===== OCR 重试预算门控：同一文件反复识别不收敛 → 停止空转，报 NEED_REVIEW =====
               // 手写字段（姓名/身份证/日期）VLM 每次可能给出不同候选，推进但不收敛，停滞保护抓不住。
               // 这里对 ocr_document/crop_image 针对同一文件的累计调用计数，超预算即注入"停止重试"指令。
@@ -4566,7 +5030,7 @@ export async function POST(request: NextRequest) {
               });
             }
 
-            // 发送本次交互中产生的输出文件卡片（homework/、attachments/）
+            // 发送本次交互中产生的输出文件卡片（homework/、materials/）
             try {
               const workspacePath = projectRoot
                 ? join(projectRoot, 'homework', '.ai-workspace')
@@ -4574,11 +5038,11 @@ export async function POST(request: NextRequest) {
               const _pr = projectRoot || join(homedir(), 'BobWork', SANDBOX_DIRNAME);
               const outputFiles = extractOutputFiles(kctx.allToolCalls, _pr, workspacePath);
               // 合并续写请求携带的初始产物（如模板填充面板生成的文件）：
-              // 仅接受项目内 homework/、attachments/ 相对路径，拒绝路径穿越
+              // 仅接受项目内 homework/、materials/ 相对路径（含历史 attachments/），拒绝路径穿越
               if (Array.isArray(initialOutputFiles)) {
                 for (const f of initialOutputFiles) {
                   const raw = String((f as { path?: unknown })?.path || '').replace(/\\/g, '/');
-                  if (!/^(homework|attachments)\//.test(raw) || raw.includes('..')) continue;
+                  if (!/^(homework|materials|attachments)\//.test(raw) || raw.includes('..')) continue;
                   if (outputFiles.some((o) => o.path === raw)) continue;
                   let size = Number((f as { size?: unknown })?.size) || 0;
                   try {
@@ -4707,28 +5171,61 @@ export async function POST(request: NextRequest) {
                 .callTool('mcp__bob-browser-mcp__browser_disconnect', {})
                 .catch((e: unknown) => console.warn('[chat] browser auto-disconnect on turn end failed:', e));
             }
-            controller.close();
+            closeStream();
           } catch (error) {
             let errorMessage =
               error instanceof Error ? error.message : 'Unknown error';
-            if (errorMessage.includes('model') && (errorMessage.includes('not found') || errorMessage.includes('does not exist'))) {
-              errorMessage = `模型 "${providerModelId}" 不可用，请检查该模型是否已在当前 API Key 下开通。可在设置中重新获取模型列表并选择可用模型。`;
+            const rawMessage = errorMessage;
+            // 客户端已断开：连接已关闭，推错误帧无意义（前端已渲染超时/已取消），
+            // 仅停止心跳与持久化轨迹，保留被打断的现场。上游在飞请求已由 request.signal 中止。
+            if (request.signal.aborted) {
+              console.warn(`[chat] 客户端已断开，本轮中止: ${rawMessage}`);
+            } else {
+              if (errorMessage.includes('model') && (errorMessage.includes('not found') || errorMessage.includes('does not exist'))) {
+                errorMessage = `模型 "${providerModelId}" 不可用，请检查该模型是否已在当前 API Key 下开通。可在设置中重新获取模型列表并选择可用模型。`;
+              }
+              if (errorMessage.includes('401') || errorMessage.includes('Authentication')) {
+                errorMessage = 'API Key 认证失败，请检查设置中的 API Key 是否正确。';
+              }
+              if (errorMessage.includes('402') || errorMessage.includes('insufficient')) {
+                errorMessage = 'API 账户余额不足，请充值后重试。';
+              }
+              if (errorMessage.includes('429') || errorMessage.includes('rate limit')) {
+                errorMessage = '请求过于频繁，请稍后再试。';
+              }
+              // 上游 400 可读化（2026-09-15）：此前只有 401/402/429 有映射，400 会把上游英文原文
+              // 原样推给前端（实测：`400 The 'reasoning_content' in the thinking mode must be passed back
+              // to the API.` 直接渲染成 [400 The 'reasoning_content' ...]，用户无法自查）。
+              const status = typeof error === 'object' && error !== null
+                ? (error as { status?: number }).status
+                : undefined;
+              if (status === 400 || /\b400\b/.test(errorMessage)) {
+                if (/reasoning_content/i.test(errorMessage)) {
+                  // thinking 模式下，工具循环重发历史 assistant 消息必须原样回传 reasoning_content
+                  errorMessage = '模型拒绝了本次请求：思考模式下的历史消息缺少 reasoning 字段（思考协议不同步）。请重试；若持续出现，可在设置中把该模型切换为非思考模式。';
+                } else if (/max_tokens|maximum context length|context length|too long/i.test(errorMessage)) {
+                  errorMessage = '本轮内容超出模型的上下文/输出上限，请精简当前对话或清理历史后重试。';
+                } else if (/model/i.test(errorMessage)) {
+                  errorMessage = `模型 "${providerModelId}" 拒绝了本次请求，请检查模型名与账号权限。`;
+                } else {
+                  errorMessage = `模型返回请求错误（400）：${errorMessage}`;
+                }
+              } else if (errorMessage === rawMessage && !/[\u4e00-\u9fa5]/.test(rawMessage)) {
+                // 通用兜底：未命中任何映射的英文原文加前缀，至少让用户知道是上游返回的错误
+                errorMessage = `AI 服务返回错误：${rawMessage}`;
+              }
+              send({ error: errorMessage, nodeId, taskId });
             }
-            if (errorMessage.includes('401') || errorMessage.includes('Authentication')) {
-              errorMessage = 'API Key 认证失败，请检查设置中的 API Key 是否正确。';
-            }
-            if (errorMessage.includes('402') || errorMessage.includes('insufficient')) {
-              errorMessage = 'API 账户余额不足，请充值后重试。';
-            }
-            if (errorMessage.includes('429') || errorMessage.includes('rate limit')) {
-              errorMessage = '请求过于频繁，请稍后再试。';
-            }
-            send({ error: errorMessage, nodeId, taskId });
             // P0 轨迹：异常结束时也持久化已有事件日志
             if (projectRoot) {
               persistEventLog(`${projectRoot}/.trajectory/${nodeId}/${taskId}.jsonl`, eventLog.finalize());
             }
-            controller.close();
+            closeStream();
+          } finally {
+            // 看门狗心跳随整轮生命周期结束（正常/异常都要停，避免定时器泄漏持续 enqueue）
+            clearInterval(watchdogId);
+            // 释放「用户对话」占用：后台任务（成果块提炼 / 账本编译）恢复调度
+            leaveUserTurn();
           }
         },
       });

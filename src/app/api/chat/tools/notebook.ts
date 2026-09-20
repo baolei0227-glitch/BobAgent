@@ -223,7 +223,8 @@ async function toolWriteNotebookAnswer(args: Record<string, unknown>): Promise<s
   if (!title && !content) return 'Error: title / content required（回填需要标题 title 或内容 content 至少一个）';
   const tags = Array.isArray(args.tags) ? args.tags.filter((s): s is string => typeof s === 'string') : [];
   const links = Array.isArray(args.links) ? args.links.filter((s): s is string => typeof s === 'string') : [];
-  const type = (['concept', 'source', 'note', 'todo'].includes(String(args.type)) ? args.type : 'note') as string;
+  // 类型白名单不在这里判断：原样透传给插件，由插件按 SCHEMA.md「页面类型」段校验/回退缺省
+  const type = typeof args.type === 'string' && args.type.trim() ? args.type.trim() : 'synthesis';
   const mergeInto = typeof args.merge_into === 'string' ? args.merge_into.trim() : '';
   try {
     const { callNotes } = await import('@/lib/mcp/notes-bridge');
@@ -556,13 +557,13 @@ export const notebookToolDefs: Tool[] = [
   },
   {
     name: 'write_notebook_answer',
-    description: 'Backfill an answer/analysis into the personal wiki — the "answers compound into knowledge" loop. Call AFTER answering from read_notebook, when the user says 把答案记下来/存进笔记/沉淀一下 or the answer is worth keeping. Stored directly (no re-compile). MERGE-AWARE: exact same title (or merge_into) updates that note — new content first, old kept below a divider; brand-new topics create a note. type: concept/note/source/todo (default note).',
+    description: 'Backfill an answer/analysis into the personal wiki — the "answers compound into knowledge" loop. Call AFTER answering from read_notebook, when the user says 把答案记下来/存进笔记/沉淀一下 or the answer is worth keeping. Stored directly (no re-compile). MERGE-AWARE: exact same title (or merge_into) updates that note — new content first, old kept below a divider; brand-new topics create a note. Inline [[note title]] links in the body are merged into links automatically. type: note type key defined by SCHEMA.md "页面类型" (page types) section in the notes plugin (built-ins: concept/entity/source/note/synthesis/todo; default synthesis).',
     parameters: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'Short title of the note (<=20 chars). Required if content present.' },
-        content: { type: 'string', description: 'The answer/analysis body (markdown). Required if title present.' },
-        type: { type: 'string', enum: ['concept', 'source', 'note', 'todo'], description: 'Note type. Default note.' },
+        content: { type: 'string', description: 'The answer/analysis body (markdown). Reference other notes as [[their title]].' },
+        type: { type: 'string', description: 'Note type key defined by the notes plugin SCHEMA.md page-types section (built-ins: concept/entity/source/note/synthesis/todo). Default synthesis; unknown keys are rejected by the plugin.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Free topic tags (0-5, 2-6 char words). e.g. ["证据链"]' },
         links: { type: 'array', items: { type: 'string' }, description: 'Linked note titles or ids (the knowledge this answer builds on).' },
         merge_into: { type: 'string', description: 'Optional: title of an existing note to merge this answer into (updates it, does not create a duplicate). Omit to create a new note.' },

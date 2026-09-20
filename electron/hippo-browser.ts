@@ -331,6 +331,20 @@ function toggleAdBlock(): boolean {
   return adBlockEnabled;
 }
 
+/**
+ * 打开方式：true=新开标签（默认），false=覆盖当前标签。
+ * 仅本次会话有效（不落盘），作用于书签点击、页面内链接点击与 target=_blank/window.open。
+ */
+let openLinkInNewTab = true;
+
+/** 切换「打开链接」方式（工具菜单调用） */
+function toggleOpenLinkInNewTab(): boolean {
+  openLinkInNewTab = !openLinkInNewTab;
+  logHippo(`Open links in ${openLinkInNewTab ? 'new tab' : 'current tab'}`);
+  applyLinkModeToTabs();
+  return openLinkInNewTab;
+}
+
 /** 当前激活标签（无有效标签时返回 null） */
 function activeTab(): BrowserTab | null {
   const wc = view;
@@ -349,16 +363,35 @@ function isAllowedUrl(raw: string): boolean {
 
 /** 本地文档扩展名 → 内置查看页：pdf → 批注阅读器 /pdf-viewer；图片 → 查看/标注/AI 编辑 /image-viewer */
 const VIEWER_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'];
+/** 从 file:// 的 hash（#page=3&q=xx）或查询串解析查看页定位锚点（hash 优先） */
+function parseFileAnchor(u: URL): URLSearchParams {
+  const raw = (u.hash.startsWith('#') ? u.hash.slice(1) : u.hash) || u.search.replace(/^\?/, '');
+  return new URLSearchParams(raw);
+}
 function localFileToViewerUrl(target: string): string | null {
   if (!/^file:\/\//i.test(target)) return null;
-  const m = target.match(/\.([a-z0-9]+)(\?.*)?$/i);
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return null;
+  }
+  const m = u.pathname.match(/\.([a-z0-9]+)$/i);
   const ext = m ? m[1].toLowerCase() : '';
   if (ext !== 'pdf' && !VIEWER_IMAGE_EXTS.includes(ext)) return null;
   try {
-    const fp = fileURLToPath(target);
-    return ext === 'pdf'
-      ? `${aiServerUrl}/pdf-viewer?path=${encodeURIComponent(fp)}`
-      : `${aiServerUrl}/image-viewer?path=${encodeURIComponent(fp)}`;
+    const fp = fileURLToPath(u);
+    if (ext !== 'pdf') {
+      return `${aiServerUrl}/image-viewer?path=${encodeURIComponent(fp)}`;
+    }
+    // PDF 查看页透传定位锚点：&page=N（跳页）/ &q=<片段>（文档内检索高亮）
+    const a = parseFileAnchor(u);
+    const page = Number(a.get('page') || '');
+    if (Number.isFinite(page) && page > 0) u.searchParams.set('page', String(Math.floor(page)));
+    const q = (a.get('q') || '').trim();
+    if (q) u.searchParams.set('q', q);
+    const anchor = u.searchParams.toString();
+    return `${aiServerUrl}/pdf-viewer?path=${encodeURIComponent(fp)}${anchor ? `&${anchor}` : ''}`;
   } catch {
     return null;
   }
@@ -552,6 +585,30 @@ async function capture(opts: { fullPage?: boolean } = {}): Promise<string> {
   const data = img.toDataURL();
   copyDataUrlToClipboard(data);
   return data;
+}
+
+/**
+ * 打印当前页：调用系统打印面板（silent:false，走系统打印机选择）。
+ * macOS 打印面板依附于前台窗口：先显示并聚焦浏览器窗口，避免点了没反应。
+ */
+async function printPage(): Promise<{ ok: boolean; error?: string }> {
+  const wc = view?.webContents;
+  if (!wc || wc.isDestroyed()) return { ok: false, error: 'Not initialized' };
+  try {
+    reveal();
+    await new Promise((r) => setTimeout(r, 150));
+    const res = (await wc.print({ silent: false, printBackground: true })) as
+      | { success: boolean; failureReason?: string }
+      | undefined;
+    if (res && res.success === false) {
+      // 用户取消打印面板：正常结束，不算失败
+      if (res.failureReason === 'cancelled') return { ok: true };
+      return { ok: false, error: res.failureReason || 'Print failed (system)' };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** 把截图 dataURL 拷贝到系统剪贴板（截图给人"可用"，先落剪贴板最直观） */
@@ -980,6 +1037,13 @@ function toolbarHtml(): string {
   /* iframe 内元素级编辑：悬停/选中高亮 */
   .bob-insp-hover { outline: 2px dashed #6b5cf0 !important; outline-offset: -2px; background: rgba(107,92,240,.12) !important; cursor: pointer; }
   .bob-insp-selected { outline: 2px solid #e0483d !important; outline-offset: -1px; background: rgba(224,72,61,.12) !important; cursor: pointer; }
+  /* ===== 指针统一：本窗口只用箭头指针，不用手型 pointer =====
+     工具栏/书签栏/标签栏是 -webkit-app-region: drag 的窗口拖拽区，其内的
+     no-drag 按钮若声明 cursor: pointer，鼠标在「拖拽区 ↔ 按钮」之间移动时
+     Chromium 命中测试来回切换，指针在箭头/手型间反复变化，产生闪烁感；
+     统一为箭头即可消除。文本输入域保留 I 形光标。 */
+  html * { cursor: default !important; }
+  input, textarea { cursor: auto !important; }
 </style></head>
 <body>
 <div class="progbar" id="progbar"></div>
@@ -1065,10 +1129,14 @@ function toolbarHtml(): string {
       alert(r && r.markdown ? (r.ready ? 'Markdown copied to clipboard' : 'Page may not be fully loaded; copied the current skeleton') : (r && r.error || 'Nothing extracted')); },
     shot: async () => { if (!BAPI) return; const r = await BAPI.capture({ fullPage: true });
       alert(r && r.ok ? 'Full-page screenshot captured (copied to clipboard)' : (r && r.error || 'Screenshot failed')); },
+    print: async () => { if (!BAPI) return; const r = await BAPI.print();
+      if (r && !r.ok) alert(r.error || 'Print failed'); },
     extopen: () => BAPI && BAPI.openExternal(),
     edit: () => enterEdit(),
     adblockOn: () => alert('Ad / tracker blocking enabled'),
     adblockOff: () => alert('Ad / tracker blocking disabled'),
+    linkNewTab: () => alert('Links will open in new tabs'),
+    linkCurrentTab: () => alert('Links will open in the current tab'),
   };
   // 主进程回传的菜单动作：工具有 act 表；书签右键菜单用 bm: 前缀单独分发
   if (BAPI && BAPI.onMenuCmd) BAPI.onMenuCmd((a) => {
@@ -1189,7 +1257,8 @@ function toolbarHtml(): string {
       else fav.style.visibility = 'hidden';
       const t = document.createElement('span'); t.className = 't'; t.textContent = b.title || b.url;
       tab.appendChild(fav); tab.appendChild(t);
-      tab.addEventListener('click', () => { if (BAPI) BAPI.navigate(b.url); });
+      // 按工具菜单的「打开方式」开关：默认新标签，切到当前标签时覆盖本页
+      tab.addEventListener('click', () => { if (BAPI) BAPI.openLink(b.url); });
       // 重命名 / 删除改由右键原生菜单触发（主进程弹菜单，动作经 menu-cmd 回传）
       tab.addEventListener('contextmenu', (ev) => {
         ev.preventDefault(); ev.stopPropagation();
@@ -1669,6 +1738,8 @@ ipcMain.handle('hippo-browser:navigate', (_e, url: string) => {
   }
   return { ok: true };
 });
+// 书签栏点击：按「打开方式」开关决定新标签还是覆盖当前标签（地址栏仍走 navigate 覆盖当前标签）
+ipcMain.handle('hippo-browser:open-link', (_e, url: string) => openLinkByMode(url));
 ipcMain.handle('hippo-browser:back', () => { back(); return { ok: true }; });
 ipcMain.handle('hippo-browser:forward', () => { forward(); return { ok: true }; });
 ipcMain.handle('hippo-browser:reload', () => { requireView().reload(); return { ok: true }; });
@@ -1704,6 +1775,7 @@ ipcMain.handle('hippo-browser:capture', async (_e, opts?: { fullPage?: boolean }
   try { return { ok: true, dataUrl: await capture(opts ?? {}) }; }
   catch (err) { return { ok: false, error: err instanceof Error ? err.message : String(err) }; }
 });
+ipcMain.handle('hippo-browser:print', () => printPage());
 ipcMain.handle('hippo-browser:html-edit-start', async () => {
   const wc = view?.webContents;
   if (!wc || wc.isDestroyed()) return { ok: false, error: 'Hippo Browser is not initialized' };
@@ -2020,6 +2092,14 @@ export function isHippoReady(): boolean {
   return !!win && !win.isDestroyed() && !!view && !view.webContents.isDestroyed();
 }
 
+/** 收编应用内外部链接（http/https）：在内置浏览器打开（新标签，首开时复用初始空标签）。
+ *  Hippo 不可用或非法 URL 返回 false，调用方退回系统默认浏览器。 */
+export function openUrlInHippo(url: string): boolean {
+  if (!isHippoReady() || !isAllowedUrl(url)) return false;
+  openInNewTab(url);
+  return true;
+}
+
 /** 网页区跟随窗口尺寸：始终占工具栏(chromeTop)下方全部区域 */
 function relayoutView(): void {
   if (!win || win.isDestroyed() || !view) return;
@@ -2091,6 +2171,10 @@ const AIEDIT_HTML = `
   .st { min-height:16px; font-size:11px; color:#6b5cf0; }
   .st.err { color:#e0483d; }
   .st.ok { color:#2e9e5b; }
+  /* 指针统一为箭头：顶栏是 -webkit-app-region: drag 拖拽区，其内按钮若用
+     cursor: pointer，鼠标在拖拽区与按钮间移动时会因命中测试切换而闪烁 */
+  html * { cursor: default !important; }
+  textarea { cursor: auto !important; }
 </style></head><body>
   <div class="top"><span class="dot"></span><span class="sel" id="sel">Click a page element to select…</span><button class="x" id="deselect" title="Clear selection">×</button></div>
   <div class="wrap">
@@ -2196,13 +2280,17 @@ const TOOLMENU_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8
   .mi .lbl { flex:1; }
   .sep { height:1px; background:#f0f0f6; margin:5px 6px; }
   .tt { padding:4px 10px 6px; font-size:11px; color:#9a9aac; }
+  /* 指针统一为箭头，与本窗口其余界面一致 */
+  html * { cursor: default !important; }
 </style></head><body>
   <div class="tt">Tools</div>
   <div class="mi" data-a="ext"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path></svg><span class="lbl">Extract Markdown</span></div>
   <div class="mi" data-a="shot"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg><span class="lbl">Full-page Screenshot</span></div>
+  <div class="mi" data-a="print"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg><span class="lbl">Print…</span></div>
   <div class="mi" data-a="extopen"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg><span class="lbl">Open in System Browser</span></div>
   <div class="mi" data-a="edit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z"></path></svg><span class="lbl">Edit HTML</span></div>
   <div class="sep"></div>
+  <div class="mi" data-a="linkmode"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="13" height="13" rx="2"></rect><path d="M8 21h11a2 2 0 0 0 2-2V8"></path></svg><span class="lbl">__OPENLINK__</span></div>
   <div class="mi" data-a="adblock"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg><span class="lbl">__ADBLOCK__</span></div>
   <script>
     const BAPI = window.api && window.api.hippoBrowser;
@@ -2223,7 +2311,9 @@ function openToolMenu(): void {
   });
   toolMenuWin.setAlwaysOnTop(true, 'floating');
   const adLabel = `Block Ads/Trackers: ${adBlockEnabled ? 'ON' : 'OFF'}${adBlockCount ? ` (${adBlockCount} blocked)` : ''}`;
-  toolMenuWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(TOOLMENU_HTML.replace('__ADBLOCK__', adLabel)));
+  const openLabel = `Open Links: ${openLinkInNewTab ? 'New Tab' : 'Current Tab'}`;
+  toolMenuWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+    TOOLMENU_HTML.replace('__ADBLOCK__', adLabel).replace('__OPENLINK__', openLabel)));
   const cb = bw.getContentBounds();
   const H = Math.min(300, Math.max(200, cb.height - 64));
   toolMenuWin.setBounds({ x: cb.x + cb.width - 218, y: cb.y + chromeTop, width: 210, height: H });
@@ -2308,6 +2398,14 @@ export function setupHippoBrowser(): void {
       const on = toggleAdBlock();
       if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send('hippo-browser:menu-cmd', on ? 'adblockOn' : 'adblockOff');
+      }
+      return true;
+    }
+    // 打开方式开关同样在主进程侧生效（书签 / 页面内链接 / window.open 均在主进程收口）
+    if (action === 'linkmode') {
+      const on = toggleOpenLinkInNewTab();
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send('hippo-browser:menu-cmd', on ? 'linkNewTab' : 'linkCurrentTab');
       }
       return true;
     }
@@ -2410,11 +2508,13 @@ function spawnTab(): BrowserTab {
   });
   // 默认载入本机新建标签页（避免白屏）；data: URL 不触发 will-navigate/window-open，无网络依赖
   v.webContents.loadURL(newTabDataUrl()).catch(() => {});
-  // 新窗口一律收编为本标签导航；本地文档（PDF/图片）重定向到内置查看页
+  // 新窗口（target=_blank / window.open，含页面内链接拦截后的转发）：
+  // 打开方式 = 新标签 → 新开标签；= 当前标签 → 收编为本标签导航；本地文档（PDF/图片）重定向到内置查看页
   v.webContents.setWindowOpenHandler(({ url }) => {
-    const viewerUrl = localFileToViewerUrl(url);
-    if (viewerUrl) v.webContents.loadURL(viewerUrl).catch(() => {});
-    else if (isAllowedUrl(url)) v.webContents.loadURL(url).catch(() => {});
+    const target = localFileToViewerUrl(url) || (isAllowedUrl(url) ? url : '');
+    if (!target) return { action: 'deny' };
+    if (openLinkInNewTab) openInNewTab(target);
+    else v.webContents.loadURL(target).catch(() => {});
     return { action: 'deny' };
   });
   v.webContents.on('will-navigate', (e, url) => {
@@ -2422,6 +2522,8 @@ function spawnTab(): BrowserTab {
     if (viewerUrl) { e.preventDefault(); v.webContents.loadURL(viewerUrl).catch(() => {}); return; }
     if (!isAllowedUrl(url)) e.preventDefault();
   });
+  // 每次文档加载完成后注入页面内链接点击拦截（打开方式为「新标签」时生效）
+  v.webContents.on('dom-ready', () => applyLinkModeTo(v.webContents));
   // 状态事件转发（工具栏据此刷新）
   const wc = v.webContents;
   // 先拿到 id，供 favicon / 右键菜单等事件回调引用
@@ -2511,6 +2613,61 @@ function openInNewTab(url: string): void {
   reveal();
 }
 
+/** 按「打开方式」开关打开链接：新标签模式 → openInNewTab；当前标签模式 → 覆盖当前标签 */
+function openLinkByMode(rawUrl: string): { ok: boolean; error?: string } {
+  const target = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!isAllowedUrl(target)) return { ok: false, error: 'Only http/https/file links are supported' };
+  if (openLinkInNewTab) {
+    openInNewTab(target);
+  } else {
+    requireView().loadURL(target).catch(() => {});
+    reveal();
+  }
+  return { ok: true };
+}
+
+/**
+ * 页面内链接点击的拦截脚本（注入到每个网页的主世界）。
+ * 只在「打开方式 = 新标签」时拦截：被页面脚本接管（defaultPrevented）、带修饰键、
+ * target≠_self、download、同页锚点等一律放行。拦截后用 window.open 交给
+ * setWindowOpenHandler 收编为新标签 —— 不改动 will-navigate，避免表单 POST / JS 跳转
+ * 被误判成链接点击。
+ */
+function linkModeScript(on: boolean): string {
+  return `(() => { try {
+  window.__bobHippoLinkNewTab = ${on ? 'true' : 'false'};
+  if (window.__bobHippoLinkBound) return true;
+  window.__bobHippoLinkBound = true;
+  document.addEventListener('click', (e) => { try {
+    if (!window.__bobHippoLinkNewTab) return;
+    if (window.top !== window) return;
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a || a.hasAttribute('download')) return;
+    const tgt = (a.getAttribute('target') || '').toLowerCase();
+    if (tgt && tgt !== '_self') return;
+    let u; try { u = new URL(a.href, location.href); } catch (_) { return; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:' && u.protocol !== 'file:') return;
+    if (u.href === location.href) return;
+    e.preventDefault();
+    window.open(u.href, '_blank');
+  } catch (_) { /* 忽略 */ } });
+  return true;
+} catch (_) { return false; } })()`;
+}
+
+/** 把当前「打开方式」注入指定网页（每次文档加载后都需重新注入） */
+function applyLinkModeTo(wc: Electron.WebContents): void {
+  if (!wc || wc.isDestroyed()) return;
+  wc.executeJavaScript(linkModeScript(openLinkInNewTab), false).catch(() => {});
+}
+
+/** 把当前「打开方式」注入全部标签（切换开关时调用） */
+function applyLinkModeToTabs(): void {
+  for (const t of tabs) applyLinkModeTo(t.view.webContents);
+}
+
 /**
  * 统一的浏览器级快捷键处理（工具栏与网页两个 webContents 共用）。
  * 命中时消费按键（preventDefault）并返回 true；否则返回 false 交由页面自行处理。
@@ -2571,6 +2728,12 @@ function handleBrowserShortcut(event: Electron.Event, input: Electron.Input): bo
     case 'r': {
       if (!view || view.webContents.isDestroyed()) return false;
       view.webContents.reload();
+      event.preventDefault();
+      return true;
+    }
+    case 'p': {
+      if (!view || view.webContents.isDestroyed()) return false;
+      void printPage();
       event.preventDefault();
       return true;
     }
@@ -2646,6 +2809,7 @@ function popupPageContextMenu(wc: Electron.WebContents, params: Electron.Context
   sep();
   items.push({ label: 'Extract Markdown (copy to clipboard)', click: () => void copyExtractedMarkdown() });
   items.push({ label: 'Full-page Screenshot (copy to clipboard)', click: () => void capture({ fullPage: true }).catch(() => {}) });
+  items.push({ label: 'Print…', click: () => void printPage().catch(() => {}) });
   sep();
   items.push({ label: 'Inspect Element', click: () => wc.inspectElement(params.x, params.y) });
 

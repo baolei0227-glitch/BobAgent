@@ -228,6 +228,9 @@ export interface FileOrganizerSettings {
   inboxDir?: string;
   /** 分类目录清单：模型只能从中择一，避免目录发散；空/缺省 = 使用内置默认分类 */
   categories?: string[];
+  /** AI 自动新建分类文件夹：true = 清单都不合适时允许模型自创分类名并直接建目录；
+   *  undefined/false = 严格限定在清单内（越界落清单末位兜底项） */
+  autoCreateCategories?: boolean;
   /** 命名规则（字段顺序 / 分隔符 / 版本号补零）；缺省 = {版本号}{主题}_{日期} */
   naming?: NamingRule;
 }
@@ -295,7 +298,7 @@ export interface AppSettings {
   mcpServers: McpServerConfig[];
   /** 欢迎窗口头像设置；undefined = 默认随机 */
   avatar?: AvatarSettings;
-  /** 侧边栏品牌 logo：头像池中的 id（如 'builtin/xxx.png'），空字符串/undefined = 使用默认 bobwork-logo.png */
+  /** 侧边栏品牌 logo：头像池中的 id（如 'builtin/xxx.png'），空字符串/undefined = 使用默认 hippo-line.png */
   brandLogo?: string;
   /** 主题 id：'warm'（统一单一品牌色）；undefined = 'warm' */
   theme?: string;
@@ -307,6 +310,8 @@ export interface AppSettings {
   xhsPaper?: string;
   /** 3:4 竖版分享卡标签笔刷样式：oil/calligraphy/marker/crayon/watercolor/paint/bristle；undefined = oil */
   xhsBrush?: string;
+  /** 分享卡正文字体（ShareCard SHARE_FONTS 的 key，如 sans/songti/kaiti…）；undefined = sans */
+  shareFont?: string;
   /** 全局截图 OCR（Cmd+Shift+O）功能开关；undefined = 启用。
    *  enabled=false 时热键回退内置截屏链路（不使用 BobWorkCapture 助手）。 */
   screenOcr?: {

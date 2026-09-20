@@ -20,6 +20,24 @@ type ErrorCb = (info: { message: string; manual: boolean }) => void;
 /** 截图 OCR 事件回调类型 */
 type ScreenOcrErrorCb = (payload: { message: string }) => void;
 
+/** 窗口几何：屏幕 / 系统区域 / 可吸附窗口（CG 全局坐标，原点 = 主屏左上角，单位 = 点） */
+export interface ScreenOcrScreenRect { x: number; y: number; w: number; h: number; scale: number }
+export interface ScreenOcrRegionRect { kind: 'menubar' | 'dock'; x: number; y: number; w: number; h: number }
+export interface ScreenOcrWindowRect { id: number; owner: string; name: string; x: number; y: number; w: number; h: number }
+export interface ScreenOcrGeometry {
+  screens: ScreenOcrScreenRect[];
+  regions: ScreenOcrRegionRect[];
+  windows: ScreenOcrWindowRect[];
+}
+/** 截图完成载荷：dataUrl + 选区来源 + 窗口几何（整屏链路才有 geometry） */
+type ScreenOcrShotPayload = {
+  dataUrl: string;
+  mode?: 'region' | 'full';
+  geometry?: ScreenOcrGeometry | null;
+  /** 画面属于哪一屏（geometry.screens 下标）；null/-1 = 全部屏幕并集 */
+  screenIndex?: number | null;
+};
+
 /** 获取原始 window.api（Electron 环境下存在，web 环境下为 undefined） */
 function raw(): typeof window.api | undefined {
   return typeof window !== 'undefined' ? window.api : undefined;
@@ -151,12 +169,12 @@ export const desktop = {
       return typeof unsub === 'function' ? unsub : () => {};
     },
     /** 监听：截图完成（dataUrl 为截图 PNG，渲染层弹编辑面板；mode 标注选区来源） */
-    onCaptured(callback: (payload: { dataUrl: string; mode?: 'region' | 'full' }) => void): () => void {
+    onCaptured(callback: (payload: ScreenOcrShotPayload) => void): () => void {
       const unsub = raw()?.screenOcr?.onCaptured?.(callback);
       return typeof unsub === 'function' ? unsub : () => {};
     },
     /** 监听：覆盖编辑窗口收到新的待编辑截图（常驻窗口复用，免重载） */
-    onNewShot(callback: (payload: { dataUrl: string; mode?: 'region' | 'full' }) => void): () => void {
+    onNewShot(callback: (payload: ScreenOcrShotPayload) => void): () => void {
       const unsub = raw()?.screenOcr?.onNewShot?.(callback);
       return typeof unsub === 'function' ? unsub : () => {};
     },
@@ -177,7 +195,7 @@ export const desktop = {
       return raw()?.screenOcr?.ocrRegion?.(dataUrl) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
     },
     /** 覆盖编辑窗口：拉取当前待编辑截图 */
-    getEditorShot(): Promise<{ dataUrl: string; mode?: 'region' | 'full' } | null> {
+    getEditorShot(): Promise<ScreenOcrShotPayload | null> {
       return raw()?.screenOcr?.getEditorShot?.() ?? Promise.resolve(null);
     },
     /** 覆盖编辑窗口：编辑结束，关闭窗口 */

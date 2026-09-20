@@ -21,6 +21,8 @@ export interface ConfirmDialogChoice {
 export interface ConfirmDialogOptions {
   title: string;
   message: string;
+  /** 可选：默认折叠的补充详情（如完整协作计划），点 View details 展开；展开区内部滚动，卡片不会高过视口 */
+  details?: string;
   confirmLabel?: string; // default 'Delete'
   cancelLabel?: string; // default 'Cancel'
   /** 可选锚点（如对话输入框顶部中心）：传入时在锚点上方弹出并等宽于 anchor.w，否则视口居中 */
@@ -55,6 +57,13 @@ export function ConfirmDialog({
   onCancel: () => void;
   onChoice: (value: string) => void;
 }) {
+  /** 详情区展开态：每张新卡片重置为收起（同一卡片生命周期内保持用户选择） */
+  const [showDetails, setShowDetails] = useState(false);
+
+  useEffect(() => {
+    setShowDetails(false);
+  }, [options]);
+
   useEffect(() => {
     if (!options) return;
     const onKey = (e: KeyboardEvent) => {
@@ -101,6 +110,33 @@ export function ConfirmDialog({
         >
           {options.message}
         </div>
+        {options.details ? (
+          <>
+            <div className="px-4 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDetails((v) => !v)}
+                className="text-xs underline underline-offset-2"
+                style={{ color: 'var(--ink-muted)' }}
+              >
+                {showDetails ? 'Hide details' : 'View details'}
+              </button>
+            </div>
+            {showDetails ? (
+              // 展开区自带高度上限 + 滚动：长计划也不会把卡片顶出视口
+              <div
+                className="mx-4 mb-1 max-h-[40vh] overflow-y-auto whitespace-pre-line break-words rounded-lg border px-3 py-2 text-xs leading-relaxed"
+                style={{
+                  color: 'var(--ink-muted)',
+                  borderColor: 'var(--line)',
+                  backgroundColor: 'var(--paper-soft)',
+                }}
+              >
+                {options.details}
+              </div>
+            ) : null}
+          </>
+        ) : null}
         <div className="flex items-center justify-end gap-2 px-4 pb-4 pt-3">
           {Array.isArray(options.choices) && options.choices.length > 0 ? (
             // 多选模式：选项按钮 + Cancel（忽略 confirmLabel/cancelLabel）

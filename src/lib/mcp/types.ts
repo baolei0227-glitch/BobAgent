@@ -216,11 +216,18 @@ export const MCP_PRESETS: McpServerConfig[] = [
   {
     id: 'bobby',
     name: 'Bobby node',
-    // Phase 2 开发期用绝对路径指向工作区内的 MCP 构建产物；发布版应改为全局安装路径或相对路径。
-    // 编排 MCP 提供 detect_agents / set_agent_whitelist / get_agent_status / orchestrate 四个工具。
+    // 随包分发的本地 MCP 插件（桌面软件控制中枢）：args 用 {BUNDLED}: 占位符，
+    // server 端（settings-server.ts bundledPluginPath）按运行环境解析为绝对路径：
+    //   安装版 cwd = next-standalone → <cwd>/bobby-mcp/dist/cli.js
+    //   dev 模式 cwd = projects      → <仓库根>/bobby-mcp/dist/cli.js
+    // 2026-09-18 修正：原硬编码 /Users/baolei/Desktop/BobAgent/bobby-mcp/dist/cli.js
+    // 指向的工作区已迁移为 BobWork，绝对路径永久失效（bundledPluginPath 有 existsSync 校验，
+    // 用占位符可随环境自适应，不会再因目录改名而断链）。
+    // 桌面控制工具：ui_act（CGEvent 键鼠 + AX 语义树定位）/ run_command / dispatch_desktop
+    // / check_permissions / grant_app 等授权管理 / abort 急停 / get_status · list_history。
     transport: 'stdio',
     command: 'node',
-    args: ['/Users/baolei/Desktop/BobAgent/bobby-mcp/dist/cli.js'],
+    args: ['{BUNDLED}:bobby-mcp/dist/cli.js'],
     timeout: 300, // orchestrate 可能触发本地模型长推理
     enabled: false, // 需要先构建 bobby-mcp（npm run build），在设置面板开启
     // 插件启用即对主 Agent 开放（2026-08-25 简化：不再单独控制 exposeToChatNodes）
@@ -235,12 +242,15 @@ export const MCP_PRESETS: McpServerConfig[] = [
     //   安装版 cwd = next-standalone → <cwd>/bob-team-mcp/dist/cli.js
     //   dev 模式 cwd = projects      → <仓库根>/bob-team-mcp/dist/cli.js
     // 提供 team_create/plan/approve/status、task_add/status、msg_*、quality_* 等 17 个工具，
-    // 侧边栏 Agent Teams 面板经 /api/team 转调。
+    // 仅供宿主内置工具 team_run（lib/chat/team-run.ts）内部闭环调用；这些裸工具不注入模型。
     transport: 'stdio',
     command: 'node',
     args: ['{BUNDLED}:bob-team-mcp/dist/cli.js'],
     timeout: 300, // 成员任务执行可能达分钟级（/api/chat 长推理）
-    enabled: false, // 默认关闭：多成员编排较重，需时在 Installed · Plugins 手动开启
+    // 系统插件，默认启用：仅代表插件进程随宿主待命，**不等于**会自动发起多智能体协作——
+    // 协作的唯一入口是 chat 节点「Multi-agent mode」开关（激活 team 场景注入 team_run），
+    // 关掉开关即恢复单 agent。仍可在 Installed · Plugins 手动关掉本插件（关后开关会提示未启用）。
+    enabled: true,
   },
   {
     id: 'bob-preview-mcp',
@@ -272,7 +282,7 @@ export const MCP_PRESETS: McpServerConfig[] = [
     // 自带 Web 面板（--serve 默认 9480）：宿主右侧预览面板通用插件 Tab 的内嵌入口（注册表数据源）
     panel: { mode: 'serve', url: 'http://127.0.0.1:9480', statusPath: '/api/status' },
     // 工具不注入普通 chat 节点（避免与宿主已有的 read_notebook 等别名工具重复）；
-    // 仅宿主 /api/notebook 门面经 mcpManager 转发调用（同 /api/team 模式）。
+    // 仅宿主 /api/notebook 门面经 mcpManager 转发调用（同 bob-team-mcp 走 team_run 的模式）。
     exposeToChatNodes: false,
   },
   {
@@ -282,7 +292,7 @@ export const MCP_PRESETS: McpServerConfig[] = [
     // 数据与 UI 全部在插件域（宿主注入数据根 ~/BobWork/extensions/bob-mind-mcp；
     // --serve 拉起插件自带 web 面板，默认 9482，供宿主 iframe 嵌入），
     // 宿主不内置任何便签实现，仅注册本服务 + ⌘F 面板壳。
-    // 提供 mind_save/query/get/update/delete/move/star/status 工具（场景注入见 tools.ts）。
+    // 提供 mind_save/save_tree/query/get/update/delete/move/star/export/status 工具（场景注入见 tools.ts）。
     transport: 'stdio',
     command: 'node',
     args: ['{BUNDLED}:bob-mind-mcp/dist/cli.js', '--serve'],

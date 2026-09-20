@@ -54,8 +54,14 @@ export type StickyTodoOps = {
   onTitleInput: (noteId: string, value: string) => void;
   commitTitle: (noteId: string) => void;
   deleteNote: (noteId: string) => void;
-  /** 手动把某行未入日历的待办加入日历（默认时段、项目作用域）；成功 true（事件锚点已回填） */
-  addToCalendar: (noteId: string, pageId: string, lineIndex: number, text: string) => Promise<boolean>;
+  /** 手动把某行未入日历的待办加入日历；给了 schedule 按其时间建，否则用默认时段。成功 true（事件锚点已回填） */
+  addToCalendar: (
+    noteId: string,
+    pageId: string,
+    lineIndex: number,
+    text: string,
+    schedule?: { start_time?: string; end_time?: string; reminder_minutes?: number[] },
+  ) => Promise<boolean>;
   /** 提交开庭/事项：追加一行待办并**按所选时间**直接建日历事件绑定该行；成功 true */
   submitCourt: (
     noteId: string,
@@ -104,6 +110,28 @@ function NoteCardEditor({
   /** 每行「Add to calendar」瞬时状态（key = `${pageId}:${lineIndex}`；busy/error，成功即撤销） */
   const [addStates, setAddStates] = useState<Record<string, 'busy' | 'error'>>({});
 
+  /** 最新 note / addStates 引用。TodoLineItem 是 memo 行（comparator 刻意不比 text，防光标重置），
+   *  行文本键入只走 setNotes（不 bump rev）→ 行组件不重渲染、仍持有挂载时的旧闭包。
+   *  故点击「加入日历」时按 ref 取当前值，否则会用「键入前的空文本」调用而被静默丢弃。 */
+  const noteRef = useRef(note);
+  noteRef.current = note;
+  const addStatesRef = useRef(addStates);
+  addStatesRef.current = addStates;
+
+  /** 「加入日历」弹窗：点行尾 + 先确认文本/日期/时间/提醒，再按所选时间建事件 */
+  const [calOpen, setCalOpen] = useState(false);
+  const [calLineIndex, setCalLineIndex] = useState(-1);
+  const [calText, setCalText] = useState('');
+  const [calDate, setCalDate] = useState('');
+  const [calTime, setCalTime] = useState('');
+  const [calReminder, setCalReminder] = useState('0'); // 分钟；'0' = 不提醒（与静默清单项语义一致）
+  const [calSaving, setCalSaving] = useState(false);
+  /** 自动识别（/api/sticky-notes/parse-time）：从待办文本解析日期/时刻预填；用户手改过则不覆盖 */
+  const [calDetecting, setCalDetecting] = useState(false);
+  const [calDetected, setCalDetected] = useState(false);
+  const calTouchedRef = useRef(false);
+  const calReqRef = useRef(0);
+
   const linesContainerRef = useRef<HTMLDivElement | null>(null);
 
   const focusLine = (index: number) => {
@@ -131,26 +159,121 @@ function NoteCardEditor({
     return removed;
   };
 
-  /** 手动入日历：行文本可能是最近键入、尚未防抖落盘的最新值，随请求一并带给服务端 */
-  const handleAddToCalendar = async (lineIndex: number, textRaw: string) => {
-    const text = (textRaw || '').trim();
-    if (!text) return;
+  /** 弹窗预填的默认开始时间（与日历面板/服务端默认时段一致：1 小时后的整点） */
+  const defaultCalStart = (): { date: string; time: string } => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const d = new Date(Date.now() + 3600 * 1000);
+    if (d.getMinutes() > 0 || d.getSeconds() > 0 || d.getMilliseconds() > 0) {
+      d.setMinutes(0, 0, 0);
+      d.setHours(d.getHours() + 1);
+    }
+    return {
+      date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+      time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+    };
+  };
+
+  /** 从待办文本自动识别时间并预填弹窗：正则快路径命不中时服务端回退 LLM。
+   *  用户已手改日期/时间则丢弃结果；识别不到/失败静默沿用默认时段，不打扰用户。 */
+  const detectCalTime = async (text: string) => {
+    const reqId = ++calReqRef.current;
+    try {
+      const res = await fetch('/api/sticky-notes/parse-time', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const d = (await res.json().catch(() => null)) as
+        | { success?: boolean; date?: string; time?: string }
+        | null;
+      // 过期响应（弹窗已关 / 用户又点了别的行）直接丢弃
+      if (reqId !== calReqRef.current) return;
+      if (!d?.success || typeof d.date !== 'string' || calTouchedRef.current) return;
+      setCalDate(d.date);
+      if (typeof d.time === 'string' && d.time) setCalTime(d.time);
+      setCalDetected(true);
+    } catch {
+      /* 识别失败：沿用默认时段 */
+    } finally {
+      if (reqId === calReqRef.current) setCalDetecting(false);
+    }
+  };
+
+  /** 关闭弹窗（并作废进行中的识别请求，避免响应回填到已关闭的弹窗） */
+  const closeAddToCalendar = () => {
+    calReqRef.current += 1;
+    setCalDetecting(false);
+    setCalOpen(false);
+  };
+
+  /** 行尾「+」：行文本可能是最近键入、尚未防抖落盘的最新值，且行组件 memo 后闭包陈旧，
+   *  故取 noteRef 里的实时文本预填弹窗；空行则给瞬时失败反馈（不留静默出口）。 */
+  const openAddToCalendar = (lineIndex: number) => {
     const addKey = `${page.id}:${lineIndex}`;
-    if (addStates[addKey] === 'busy') return;
+    if (addStatesRef.current[addKey] === 'busy') return;
+    const liveLines = parseTodoLines(hydratePages(noteRef.current).pages[0]?.content ?? '');
+    const text = (liveLines[lineIndex]?.text ?? '').trim();
+    if (!text) {
+      setAddStates((p) => ({ ...p, [addKey]: 'error' }));
+      window.setTimeout(() => {
+        setAddStates((p) => {
+          if (p[addKey] !== 'error') return p;
+          const n = { ...p };
+          delete n[addKey];
+          return n;
+        });
+      }, 1600);
+      return;
+    }
+    const def = defaultCalStart();
+    setCalLineIndex(lineIndex);
+    setCalText(text);
+    setCalDate(def.date);
+    setCalTime(def.time);
+    setCalReminder('0');
+    setCalDetected(false);
+    calTouchedRef.current = false;
+    setCalOpen(true);
+    setCalDetecting(true);
+    void detectCalTime(text);
+  };
+
+  /** 弹窗确认：按所选时间/提醒建事件并回填锚点（失败保留行尾红标可重试） */
+  const submitAddToCalendar = async () => {
+    const text = calText.trim();
+    const startTime = calDate.trim() ? localDateTimeToIso(calDate.trim(), calTime.trim()) : null;
+    if (!text || calLineIndex < 0) return;
+    if (!startTime) {
+      showImageAiEditToast('Invalid date/time.', 'error');
+      return;
+    }
+    const addKey = `${page.id}:${calLineIndex}`;
+    const minutes = Number(calReminder);
+    setCalSaving(true);
     setAddStates((p) => ({ ...p, [addKey]: 'busy' }));
     try {
-      const ok = await ops.addToCalendar(note.id, page.id, lineIndex, text);
+      const ok = await ops.addToCalendar(note.id, page.id, calLineIndex, text, {
+        start_time: startTime,
+        reminder_minutes: Number.isFinite(minutes) && minutes > 0 ? [minutes] : [],
+      });
       if (ok) {
         setAddStates((p) => {
           const n = { ...p };
           delete n[addKey];
           return n;
         });
+        closeAddToCalendar();
+        // 弹窗里可能改过文本：服务端已按新文本落盘，本地同步改行（adoptServerNote 不回传 content）
+        ops.onTodoText(note.id, calLineIndex, text);
       } else {
         setAddStates((p) => ({ ...p, [addKey]: 'error' }));
+        showImageAiEditToast('Failed to add to calendar.', 'error');
       }
     } catch {
       setAddStates((p) => ({ ...p, [addKey]: 'error' }));
+      showImageAiEditToast('Failed to add to calendar.', 'error');
+    } finally {
+      setCalSaving(false);
     }
   };
 
@@ -453,7 +576,7 @@ function NoteCardEditor({
                   addState={addStates[`${page.id}:${i}`] ?? null}
                   onAddToCalendar={
                     !line.done && !isLineCalendared(page, i)
-                      ? () => void handleAddToCalendar(i, line.text)
+                      ? () => openAddToCalendar(i)
                       : undefined
                   }
                 />
@@ -462,6 +585,100 @@ function NoteCardEditor({
           </div>
         </div>
       </div>
+
+      {/* 加入日历弹窗（全英文 UI）：先确认文本与时间，再按所选时间建事件 */}
+      {calOpen && (
+        <div
+          className="fixed inset-0 z-[4000] flex items-center justify-center p-6"
+          style={{ background: 'rgba(0,0,0,0.4)' }}
+          onClick={closeAddToCalendar}
+        >
+          <div
+            className="w-[372px] max-w-full space-y-3 rounded-xl border p-4 shadow-2xl"
+            style={{ background: 'var(--paper, #fff)', borderColor: 'var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+              Add to calendar
+            </div>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Todo</span>
+              <input
+                value={calText}
+                onChange={(e) => setCalText(e.target.value)}
+                autoFocus
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Date</span>
+              <input
+                type="date"
+                value={calDate}
+                onChange={(e) => {
+                  calTouchedRef.current = true;
+                  setCalDate(e.target.value);
+                }}
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Time</span>
+              <input
+                type="time"
+                value={calTime}
+                onChange={(e) => {
+                  calTouchedRef.current = true;
+                  setCalTime(e.target.value);
+                }}
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              />
+            </label>
+            {(calDetecting || calDetected) && (
+              <div className="text-[10px]" style={{ color: 'var(--ink-muted)' }}>
+                {calDetecting ? 'Reading time from text…' : 'Time detected from text — edit to override'}
+              </div>
+            )}
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              <span className="w-16 shrink-0">Remind</span>
+              <select
+                value={calReminder}
+                onChange={(e) => setCalReminder(e.target.value)}
+                className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
+              >
+                <option value="0">No reminder</option>
+                <option value="5">5 minutes before</option>
+                <option value="15">15 minutes before</option>
+                <option value="30">30 minutes before</option>
+                <option value="60">1 hour before</option>
+              </select>
+            </label>
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <span className="shrink-0 text-[10px]" style={{ color: 'var(--ink-muted)' }}>
+                Lasts 1 hour
+              </span>
+              <div className="flex justify-end gap-2">
+                <Button variant="soft" tone="neutral" size="md" onClick={closeAddToCalendar}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="solid"
+                  tone="brand"
+                  size="md"
+                  onClick={() => void submitAddToCalendar()}
+                  disabled={calSaving || !calText.trim() || !calDate.trim()}
+                >
+                  {calSaving ? 'Adding…' : 'OK'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Court 开庭录入弹窗（全英文 UI） */}
       {courtOpen && (
@@ -953,7 +1170,13 @@ export default function StickyTodoDock() {
   /** 手动把某行待办加入日历（action add_to_calendar，单事务：最新行文本 + 建事件 + 写回锚点）。
    *  成功 → 采用服务端回填的 lineEventIds（行变闹钟），并广播画布/日历面板刷新 */
   const addToCalendar = useCallback(
-    async (noteId: string, pageId: string, lineIndex: number, text: string): Promise<boolean> => {
+    async (
+      noteId: string,
+      pageId: string,
+      lineIndex: number,
+      text: string,
+      schedule?: { start_time?: string; end_time?: string; reminder_minutes?: number[] },
+    ): Promise<boolean> => {
       const pid = projectIdRef.current;
       const note = notesRef.current.find((n) => n.id === noteId);
       if (!pid || !note) return false;
@@ -992,6 +1215,9 @@ export default function StickyTodoDock() {
             page_id: pageId,
             line_index: cleanIndex,
             text,
+            start_time: schedule?.start_time ?? null,
+            end_time: schedule?.end_time ?? null,
+            reminder_minutes: schedule?.reminder_minutes,
           }),
         });
         const d = await resp.json().catch(() => ({ success: false }));

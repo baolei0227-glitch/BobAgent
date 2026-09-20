@@ -5,6 +5,13 @@
  * 名单外一律自动放行；路径授权为 scope gate 不在本层）。ask / never 为本层新增档位（默认不启用，
  * 由 settings.approval.defaultStrategy 开启，见 settings.ts）。
  *
+ * 本层含两个咨询点（同源策略、不同时机）：
+ *   1. decideToolApproval —— 单次工具调用的「执行前」裁决（tool_confirm 接管，route 咨询点注入
+ *      ctx.approvalStrategy），名单内/写类判定；
+ *   2. decideTeamApproval —— 多智能体协作（team_run）的「过程级」裁决：团队已 plan（成员清单 + 任务
+ *      DAG 就绪）、尚未 approve 时判定是否把草案交用户审批。team_run 既不在 confirmTools 名单、
+ *      也不是写类工具（spawn 出的成员各自再走自己的工具轮），故不复用第 1 点，单列一档。
+ *
  * 边界说明（本层不处理，均属其它层）：
  *   1. butler 结构化卡（butler 身份 + BUTLER_CARD_TOOLS 的可编辑确认卡片）视为强于 confirm 的
  *      人工审批 —— 卡片本身带用户可见、可编辑、可拒绝的确认 UI，任何 strategy 均保留该流程，
@@ -143,4 +150,22 @@ export function decideToolApproval(input: ApprovalDecisionInput): ToolApprovalVe
   }
   // never
   return inConfirmList || isWriteKindTool(name) ? 'deny' : 'allow';
+}
+
+/** 多智能体协作（team_run）的门禁裁决：allow = 自动批准（直接 approve & run，不打断用户）；
+ *  request = 挂起，把草案（goal + 成员清单 + 任务 DAG）交用户审批；deny = 拒绝，不建团队、
+ *  不 plan（零 MCP 副作用，团队记录都不产生）。 */
+export type TeamApprovalVerdict = 'allow' | 'request' | 'deny';
+
+/**
+ * 多智能体协作门禁裁决（纯函数）：
+ *  - allow_scope（现网默认，行为零变化）：'allow' —— 与 v0.5.422 之前一致，宿主持草案直接 approve；
+ *  - ask：'request' —— 用户批准后才 approve & run（拒绝 / 超时则 team_discard 作废草案）；
+ *  - never：'deny' —— 直接收口（team_run 属编排类重操作，never 档一律不自动执行）。
+ * 与 decideToolApproval 的档位语义一致（默认档 = 不打断用户），仅判定对象与时机不同（见文件头）。
+ */
+export function decideTeamApproval(strategy: ApprovalStrategy): TeamApprovalVerdict {
+  if (strategy === 'ask') return 'request';
+  if (strategy === 'never') return 'deny';
+  return 'allow';
 }

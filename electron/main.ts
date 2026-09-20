@@ -16,7 +16,8 @@ import * as fs from 'fs';
 import { autoUpdater } from 'electron-updater';
 import { readSettingsFromFile, writeSettingsToFile, settingsFileExists } from '../src/lib/settings-server';
 import { captureRegionToFile, cleanupShotFile, ocrRecognize, ensureScreenRecordingPermission as checkScreenRecordingPermission, requestScreenRecordingPermission, buildScreenPermissionError } from '../src/lib/screen-ocr/capture';
-import { setupHippoBrowser, openHtmlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener } from './hippo-browser';
+import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener } from './hippo-browser';
+import type { ScreenOcrGeometry } from './preload';
 
 let nextServerProc: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -488,13 +489,20 @@ function createWindow(): BrowserWindow {
     },
   });
 
-  // 外部链接在系统浏览器中打开
+  // 外部链接（http/https）统一在内置 Hippo Browser 打开；Hippo 不可用时退回系统默认浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http://') || url.startsWith('https://')) {
-      shell.openExternal(url);
+      if (!openUrlInHippo(url)) shell.openExternal(url);
       return { action: 'deny' };
     }
     return { action: 'allow' };
+  });
+
+  // 应用窗口内未走 window.open 的普通 <a> 跳转：外部站点同样收编到内置浏览器，避免主窗口被导航到外部站点
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!/^https?:\/\//i.test(url) || url.startsWith(SERVER_URL)) return;
+    e.preventDefault();
+    if (!openUrlInHippo(url)) shell.openExternal(url);
   });
 
   // 渲染进程崩溃监听：任何窗口（含 activate 重建的）都记录崩溃原因到日志；
@@ -540,38 +548,31 @@ function cleanupPendingShot(): void {
 /** 截图编辑覆盖窗口（微信式）：截图后在独立全屏窗口内编辑，不切走 BobWork 主界面 */
 let ocrEditorWindow: BrowserWindow | null = null;
 /** 待编辑截图：覆盖窗口页挂载后主动拉取（避免 send 时序竞争） */
-let pendingEditorShot: { dataUrl: string; mode: 'region' | 'full' } | null = null;
+type ScreenOcrEditorShot = {
+  dataUrl: string;
+  mode: 'region' | 'full';
+  geometry?: ScreenOcrGeometry | null;
+  /** 画面属于哪一屏（geometry.screens 下标）；-1/null = 全部屏幕并集 */
+  screenIndex?: number | null;
+};
+let pendingEditorShot: ScreenOcrEditorShot | null = null;
 
-/** 创建/复用截图编辑覆盖窗口（透明置顶、覆盖光标所在显示器）；失败返回 null（调用方回退主窗口编辑）。
- *  窗口常驻复用：编辑完成仅 hide 不销毁，下次截图直接 show + 下发新截图，
- *  省去每次新建窗口 + 重新加载 Next 页面（消除"截图→出现编辑画面"的卡顿）。 */
-function openScreenOcrEditorWindow(dataUrl: string, mode: 'region' | 'full'): BrowserWindow | null {
+/** 创建覆盖窗口（不显示）：预加载与首次使用共用。透明置顶、覆盖光标所在显示器 */
+function createOcrEditorWindow(): BrowserWindow | null {
   try {
-    if (ocrEditorWindow && !ocrEditorWindow.isDestroyed() && !ocrEditorWindow.webContents.isCrashed()) {
-      // 复用常驻窗口：移到光标所在显示器 → 显示 → 下发新截图
-      pendingEditorShot = { dataUrl, mode };
-      try {
-        const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-        ocrEditorWindow.setBounds(display.bounds);
-      } catch { /* ignore */ }
-      ocrEditorWindow.show();
-      ocrEditorWindow.focus();
-      try { app.focus({ steal: true }); } catch { /* ignore */ }
-      try { ocrEditorWindow.webContents.focus(); } catch { /* ignore */ }
-      // 常驻复用：前端已监听 new-shot 直接更新画面，无需 reload。
-      // 旧实现每次截图都 webContents.reload()（整页重载 + Next 重新水合），
-      // 导致「按快捷键→出现编辑画面」明显迟滞/白闪——已移除。
-      try { ocrEditorWindow.webContents.send('screen-ocr:new-shot', { dataUrl, mode }); } catch { /* ignore */ }
-      return ocrEditorWindow;
-    }
-    if (ocrEditorWindow && !ocrEditorWindow.isDestroyed()) ocrEditorWindow.close();
-    pendingEditorShot = { dataUrl, mode };
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    ocrEditorWindow = new BrowserWindow({
-      x: display.bounds.x,
-      y: display.bounds.y,
-      width: display.bounds.width,
-      height: display.bounds.height,
+    // 优先用助手给的权威点尺寸（NSScreen），回退 Electron 的 display.bounds
+    const preferred = ocrEditorBoundsFromGeometry(screenGeometryCache);
+    const bounds = preferred ?? { x: display.bounds.x, y: display.bounds.y, width: display.bounds.width, height: display.bounds.height };
+    log(
+      `[ocr-geom] window=${Math.round(bounds.x)},${Math.round(bounds.y)} ${Math.round(bounds.width)}x${Math.round(bounds.height)} ` +
+        `source=${preferred ? 'nsscreen' : 'electron'} display.bounds=${display.bounds.width}x${display.bounds.height} scaleFactor=${display.scaleFactor}`,
+    );
+    const win = new BrowserWindow({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
       frame: false,
       transparent: true,
       backgroundColor: '#00000000',
@@ -583,6 +584,14 @@ function openScreenOcrEditorWindow(dataUrl: string, mode: 'region' | 'full'): Br
       maximizable: false,
       fullscreenable: false,
       skipTaskbar: true,
+      show: false,
+      // 关键：允许窗口突破工作区，真正盖住菜单栏与 Dock。
+      // 实测（Electron 实测脚本，主屏 1512x982 / workArea y=33 h=890）：
+      //   不带此开关：请求 (0,0,1512x982) → show 后实际 (0,33,1512x982)，
+      //     即窗口被下移一个菜单栏高度、底部再压到 Dock 上，
+      //     画面 1:1 铺开时「真实菜单栏/Dock」与「照片里的菜单栏/Dock」同时出现（用户反馈的重复）。
+      //   带上此开关：实际 (0,0,1512x982)，与屏幕逐点重合，只剩照片里那一套，蒙版错觉成立。
+      enableLargerThanScreen: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
@@ -590,32 +599,89 @@ function openScreenOcrEditorWindow(dataUrl: string, mode: 'region' | 'full'): Br
         sandbox: false,
       },
     });
-    ocrEditorWindow.setAlwaysOnTop(true, 'screen-saver');
-    ocrEditorWindow.on('closed', () => {
+    win.setAlwaysOnTop(true, 'screen-saver');
+    // 覆盖所有虚拟桌面（Space）：显示在当前活动桌面，不把用户切回 BobWork 所在桌面。
+    // visibleOnFullScreen 让覆盖层能盖在全屏应用之上（在全屏 Space 里也能截图）。
+    // 窗口平时隐藏，仅截图编辑期间出现，因此「所有桌面可见」不会造成常驻干扰。
+    try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch { /* ignore */ }
+    win.on('closed', () => {
       ocrEditorWindow = null;
       pendingEditorShot = null;
     });
     // 覆盖窗口 console 转发（排查编辑器交互问题；主窗口日志同前缀文件）
-    ocrEditorWindow.webContents.on('console-message', (_e, level, message) => {
+    win.webContents.on('console-message', (_e, level, message) => {
       try {
         fs.appendFileSync(path.join(os.homedir(), '.bobwork-renderer.log'), `[OCR-WIN:${level}] ${message}\n`);
       } catch { /* ignore */ }
     });
-    ocrEditorWindow.webContents.on('render-process-gone', (_e, details) => {
+    win.webContents.on('render-process-gone', (_e, details) => {
       try {
         fs.appendFileSync(path.join(os.homedir(), '.bobwork-renderer.log'), `[OCR-WIN:gone] ${JSON.stringify(details)}\n`);
       } catch { /* ignore */ }
     });
-    ocrEditorWindow.loadURL(`${SERVER_URL}/ocr-editor`);
-    ocrEditorWindow.show();
-    ocrEditorWindow.focus();
-    // 覆盖窗口需键盘焦点（文字输入框 / Esc 退出）：截图时 BobWork 可能在后台，
-    // 必须把应用强制激活为前台，否则 textarea 无法聚焦输入
-    try { app.focus({ steal: true }); } catch { /* ignore */ }
-    try { ocrEditorWindow.webContents.focus(); } catch { /* ignore */ }
-    return ocrEditorWindow;
+    win.loadURL(`${SERVER_URL}/ocr-editor`);
+    return win;
   } catch (e) {
-    log(`创建截图编辑覆盖窗口失败，回退主窗口编辑: ${e instanceof Error ? e.message : String(e)}`);
+    log(`创建截图编辑覆盖窗口失败: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/** 预加载覆盖窗口：server 就绪后提前创建并加载页面（保持隐藏）。
+ *  消除首次截图那一段「建窗口 + loadURL + React 水合」耗时——这是「按快捷键→出蒙版」的主要延迟来源。 */
+function prewarmOcrEditorWindow(): void {
+  try {
+    if (ocrEditorWindow && !ocrEditorWindow.isDestroyed() && !ocrEditorWindow.webContents.isCrashed()) return;
+    const win = createOcrEditorWindow();
+    if (!win) return;
+    ocrEditorWindow = win;
+    log('OCR editor window prewarmed.');
+  } catch (e) {
+    log(`预加载截图编辑覆盖窗口失败: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** 显示覆盖窗口并下发待编辑截图（常驻复用：仅 show + send，不重建窗口/不重载页面）。
+ *  旧实现每次截图都 webContents.reload()（整页重载 + Next 重新水合），
+ *  导致「按快捷键→出现编辑画面」明显迟滞/白闪——已移除。 */
+function openScreenOcrEditorWindow(shot: ScreenOcrEditorShot): BrowserWindow | null {
+  try {
+    let win = ocrEditorWindow;
+    if (win && (win.isDestroyed() || win.webContents.isCrashed())) {
+      try { win.close(); } catch { /* ignore */ }
+      win = null;
+      ocrEditorWindow = null;
+    }
+    if (!win) {
+      win = createOcrEditorWindow();
+      if (!win) return null;
+      ocrEditorWindow = win;
+    }
+    // 移到光标所在显示器 → 显示 → 下发新截图（同样优先用权威点尺寸）
+    try {
+      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+      // 用本次 shot 命中的屏（不是上一次的 pendingEditorShot）
+      const want = ocrEditorBoundsFromGeometry(screenGeometryCache, shot.screenIndex) ?? display.bounds;
+      win.setBounds(want);
+      // 校验：macOS 是否把窗口夹回工作区（y 应为屏幕原点 0；若出现 y=33 说明
+      // enableLargerThanScreen 未生效，会重现「菜单栏/Dock 重复」）
+      const got = win.getBounds();
+      log(
+        `[ocr-geom] setBounds want=${Math.round(want.x)},${Math.round(want.y)} ${Math.round(want.width)}x${Math.round(want.height)} ` +
+          `got=${Math.round(got.x)},${Math.round(got.y)} ${Math.round(got.width)}x${Math.round(got.height)}`,
+      );
+    } catch { /* ignore */ }
+    pendingEditorShot = shot;
+    win.show();
+    // 不再调用 app.focus({ steal: true })：强激活应用会把用户切回 BobWork 主窗口所在的 Space。
+    // 覆盖窗口已 setVisibleOnAllWorkspaces，show + focus 即在当前桌面成为关键窗口并拿到键盘焦点
+    // （文字输入框 / Esc 退出依赖此焦点；若端上实测焦点不足，再退化为 app.focus）。
+    win.focus();
+    try { win.webContents.focus(); } catch { /* ignore */ }
+    try { win.webContents.send('screen-ocr:new-shot', shot); } catch { /* ignore */ }
+    return win;
+  } catch (e) {
+    log(`显示截图编辑覆盖窗口失败，回退主窗口编辑: ${e instanceof Error ? e.message : String(e)}`);
     ocrEditorWindow = null;
     pendingEditorShot = null;
     return null;
@@ -726,7 +792,11 @@ function sendScreenPermGuide(message?: string): void {
  * 策略：仅当 BobWorkCapture 功能/代码确实变更时才 bump；BobWork 常规更新不 bump
  * （同版本直接复用已安装助手，授权长期保留，不会反复索要）。
  */
-const CAPTURE_HELPER_VERSION = '1.0.5';
+// 1.0.7：助手新增 windows 动作（只枚举屏幕/窗口几何，不截图），供启动时预热权威屏幕点尺寸
+// 1.0.7 → 1.0.8：fullscreen 只抓光标所在单屏（screencapture -D，带像素尺寸回验），
+// result.json 增加 screen 字段（-1 = 并集兜底），供覆盖窗口与画面坐标基准对齐
+// 1.0.8 → 1.0.9：窗口枚举不再排除 BobWork 自身（画面保留自身 ↔ 自身可作为吸附目标保持一致）
+const CAPTURE_HELPER_VERSION = '1.0.9';
 
 /** 助手安装目录：~/Library/Application Support/BobWorkCapture/（打包版）| BobWorkCapture-Dev/（dev）。
  *  必须独立于 BobWork 包内（嵌套在父包 Resources 的 .app 经 open 启动时，
@@ -904,10 +974,94 @@ function resolveCaptureHelperApp(): string | null {
  * 关键：必须用 open（LaunchServices）启动，不能直接 spawn 二进制——
  * 直接 spawn 会让 screencapture 的责任进程归因回 BobWork，失去独立 TCC 身份的意义。
  */
-async function captureRegionViaHelper(helperApp: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }> {
+type CaptureHelperResult = {
+  ok: boolean;
+  path?: string;
+  canceled?: boolean;
+  error?: string;
+  geometry?: ScreenOcrGeometry | null;
+  /** 本次截图命中的屏幕下标（对应 geometry.screens[screenIndex]）；
+   *  null = 未知；-1 = 抓的是全部屏幕并集（兜底）。多屏时画面只含这一屏。 */
+  screenIndex?: number | null;
+};
+
+/** 最近一次从助手拿到的屏幕几何（权威点尺寸，来自 NSScreen）；启动时预热一次 */
+let screenGeometryCache: ScreenOcrGeometry | null = null;
+
+/** 覆盖窗口的 bounds（点/DIP）。
+ *
+ * 背景：用户反馈「整张蒙版显示在屏幕中间、比真实屏幕小」。BrowserWindow 的 x/y/width/height
+ * 单位是 DIP，若直接拿 display.bounds 建窗而该值不是点尺寸，窗口就会与屏幕不等大，
+ * 画面再按窗口尺寸 fit 就会偏大/偏小并居中留白。这里以助手给出的权威点尺寸为准。 */
+function ocrEditorBoundsFromGeometry(
+  geo: ScreenOcrGeometry | null,
+  preferIndex?: number | null,
+): { x: number; y: number; width: number; height: number } | null {
+  const screens = geo?.screens;
+  if (!screens || screens.length === 0) return null;
+  // 助手已回传「实际抓到的是哪一屏」时以它为准：覆盖窗口必须与画面同源，
+  // 否则（窗口在 A 屏、画面是 B 屏）会出现画面被缩放/错位的老问题。
+  if (typeof preferIndex === 'number' && preferIndex >= 0 && screens[preferIndex]) {
+    const s = screens[preferIndex];
+    return { x: s.x, y: s.y, width: s.w, height: s.h };
+  }
+  // display.bounds 与光标点同单位；与权威点尺寸一比即可得出换算系数（1 = 点，2 = 物理像素）
+  let unit = 1;
+  try {
+    const primary = screen.getPrimaryDisplay();
+    if (primary?.bounds?.width && screens[0]?.w) unit = primary.bounds.width / screens[0].w;
+  } catch { /* ignore */ }
+  const u = unit >= 1.5 ? 2 : 1;
+  let cursor = { x: 0, y: 0 };
+  try { cursor = screen.getCursorScreenPoint(); } catch { /* ignore */ }
+  const cx = cursor.x / u;
+  const cy = cursor.y / u;
+  const hit = screens.find((s) => cx >= s.x && cx <= s.x + s.w && cy >= s.y && cy <= s.y + s.h) ?? screens[0];
+  return { x: hit.x, y: hit.y, width: hit.w, height: hit.h };
+}
+
+/** 向助手请求一次屏幕几何（只枚举，不截图），用于启动时预热权威点尺寸 */
+async function fetchScreenGeometry(helperApp: string): Promise<ScreenOcrGeometry | null> {
+  try {
+    const staging = path.join(os.homedir(), 'Library', 'Caches', 'bobwork-capture');
+    const windowsFile = path.join(staging, 'windows.json');
+    try { fs.mkdirSync(staging, { recursive: true }); } catch { /* ignore */ }
+    try { fs.rmSync(windowsFile, { force: true }); } catch { /* ignore */ }
+    try { fs.writeFileSync(path.join(staging, 'request.json'), JSON.stringify({ action: 'windows' })); } catch { return null; }
+    const launched = await new Promise<boolean>((resolve) => {
+      execFile('/usr/bin/open', [helperApp], { timeout: 10_000 }, (err) => resolve(!err));
+    });
+    if (!launched) return null;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const g = readWindowsGeometry(windowsFile);
+      if (g) return g;
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 读取助手产出的窗口几何（windows.json）；缺失/损坏返回 null（前端退化为不吸附） */
+function readWindowsGeometry(file: string): ScreenOcrGeometry | null {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as ScreenOcrGeometry;
+    if (!parsed || !Array.isArray(parsed.screens) || !Array.isArray(parsed.windows)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function captureRegionViaHelper(helperApp: string): Promise<CaptureHelperResult> {
+  const t0 = Date.now();
   const staging = path.join(os.homedir(), 'Library', 'Caches', 'bobwork-capture');
   const jsonFile = path.join(staging, 'result.json');
   const shotFile = path.join(staging, 'shot.jpg');
+  const windowsFile = path.join(staging, 'windows.json');
 
   // 上一轮编辑面板若仍在处理同一固定目录的暂存截图，先挪到独立临时路径，避免被本次清理覆盖
   if (pendingShotPath && path.dirname(pendingShotPath) === staging) {
@@ -917,9 +1071,10 @@ async function captureRegionViaHelper(helperApp: string): Promise<{ ok: boolean;
       pendingShotPath = keep;
     } catch { /* ignore */ }
   }
-  // 清理上一次残留，保证轮询到的是本次结果
+  // 清理上一次残留，保证读到的是本次结果
   try { fs.rmSync(jsonFile, { force: true }); } catch { /* ignore */ }
   try { fs.rmSync(shotFile, { force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(windowsFile, { force: true }); } catch { /* ignore */ }
   // 微信式：整屏捕获（JPEG，快）→ 前端覆盖窗口全屏显示原位画面并拖选；不再用 -i 原生选区
   try { fs.writeFileSync(path.join(staging, 'request.json'), JSON.stringify({ action: 'fullscreen' })); } catch { /* ignore */ }
 
@@ -927,23 +1082,59 @@ async function captureRegionViaHelper(helperApp: string): Promise<{ ok: boolean;
     execFile('/usr/bin/open', [helperApp], { timeout: 10_000 }, (err) => resolve(!err));
   });
   if (!launched) return { ok: false, error: '无法启动截图助手 BobWorkCapture（open 失败）' };
+  const t1 = Date.now();
 
-  // 轮询结果（整屏捕获秒回，30s 足够；超时按失败处理）
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
+  /** 读一次结果；原子写未完成时返回 null（稍后重试） */
+  const parseResult = (): CaptureHelperResult | null => {
     try {
-      if (fs.existsSync(jsonFile)) {
-        const parsed = JSON.parse(fs.readFileSync(jsonFile, 'utf8')) as { ok?: boolean; canceled?: boolean; error?: string };
-        if (parsed.ok && fs.existsSync(shotFile)) return { ok: true, path: shotFile };
-        if (parsed.canceled) return { ok: false, canceled: true };
-        return { ok: false, error: parsed.error || '截图失败' };
-      }
+      if (!fs.existsSync(jsonFile)) return null;
+      const parsed = JSON.parse(fs.readFileSync(jsonFile, 'utf8')) as {
+        ok?: boolean;
+        canceled?: boolean;
+        error?: string;
+        screen?: number;
+      };
+      // screen：-1 = 整屏并集（兜底）；>=0 = 命中第 N 屏（与 geometry.screens 下标一致）
+      const screenIndex = typeof parsed.screen === 'number' ? parsed.screen : null;
+      if (parsed.ok && fs.existsSync(shotFile)) return { ok: true, path: shotFile, screenIndex };
+      if (parsed.canceled) return { ok: false, canceled: true };
+      return { ok: false, error: parsed.error || '截图失败' };
     } catch {
-      /* JSON 原子写中，重试 */
+      return null; // result.json 原子写中
     }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  return { ok: false, error: '截图助手超时未返回结果' };
+  };
+
+  // 结果监听：fs.watch 即时感知（取代 150ms 定长轮询，省 0–150ms 的粒度等待）；
+  // 保留 40ms 兜底轮询（watch 在部分环境不触发，同时兼作超时检查）。整屏捕获秒回，30s 超时按失败处理。
+  const deadline = Date.now() + 30_000;
+  const result = await new Promise<CaptureHelperResult>((resolve) => {
+    let done = false;
+    let watcher: fs.FSWatcher | null = null;
+    let timer: NodeJS.Timeout | null = null;
+    const cleanup = () => {
+      try { watcher?.close(); } catch { /* ignore */ }
+      if (timer) { clearInterval(timer); timer = null; }
+    };
+    const finish = (r: CaptureHelperResult) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(r);
+    };
+    const check = () => {
+      if (done) return;
+      const r = parseResult();
+      if (r) finish(r);
+      else if (Date.now() > deadline) finish({ ok: false, error: '截图助手超时未返回结果' });
+    };
+    try { watcher = fs.watch(staging, () => check()); } catch { /* watch 不可用则退化为纯轮询 */ }
+    timer = setInterval(check, 40);
+    check(); // 立即查一次（结果可能已就绪）
+  });
+
+  const t2 = Date.now();
+  log(`[ocr-perf] helper open=${t1 - t0}ms capture=${t2 - t1}ms`);
+  return { ...result, geometry: readWindowsGeometry(windowsFile) };
 }
 
 /** 助手权限引导：授权对象是「BobWork Capture」（已自动安装到 Application Support，稳定实体）。
@@ -979,13 +1170,19 @@ async function isCapturePluginEnabled(): Promise<boolean> {
 async function handleGlobalScreenOcr(): Promise<void> {
   if (screenOcrBusy) return;
   screenOcrBusy = true;
+  const t0 = Date.now();
   try {
     const helperApp = resolveCaptureHelperApp();
     const useHelper = helperApp !== null && (await isCapturePluginEnabled());
     // 通知渲染层「选区进行中」（前端可据此弱化输入框焦点状态）
     mainWindow?.webContents.send('screen-ocr:start');
 
-    let shot: { ok: boolean; path?: string; canceled?: boolean; error?: string };
+    // 主窗口**不再隐藏/置透明**：过去用 setOpacity(0) 把自身排除出快照（"避开拍到自己"），
+    // 副作用是用户看到的「按快捷键 → BobWork 先消失一下，冻结照片里也没有 BobWork」。
+    // 现改为保留自身：冻结画面与截图前所见逐帧一致，且能截 BobWork 自己的内容。
+    // 历史教训（勿回退）：更不能用 hide()/show()——show 一个位于其他虚拟桌面的窗口，
+    // 会让 macOS 直接切回那个桌面（用户曾反馈「按快捷键后跳回 BobWork 所在桌面」）。
+    let shot: CaptureHelperResult;
     if (useHelper) {
       // 插件助手：独立 .app 拥有稳定屏幕录制授权，首次使用弹窗归因「BobWork Capture」，
       // 授权一次即永久生效，不受 BobWork 重建/更新影响。
@@ -1026,15 +1223,23 @@ async function handleGlobalScreenOcr(): Promise<void> {
     // 微信式：截图一律为整屏画面（helper fullscreen 或内置全屏均同）→ mode 'full'，
     // 编辑覆盖窗口全屏显示（画面即原屏幕位置，无需居中），前端覆盖层变暗蒙版 → 用户拖选选区 → 标注。
     pendingShotPath = shot.path ?? null;
+    const t3 = Date.now();
     const dataUrl = await fileToDataUrl(shot.path!);
+    const t4 = Date.now();
+    log(`[ocr-perf] shortcut→shot=${t3 - t0}ms dataUrl=${t4 - t3}ms (${Math.round(dataUrl.length / 1024)}KB base64)`);
+    // 每次截图顺带刷新权威屏幕几何（助手已随本次截图产出）
+    if (shot.geometry) screenGeometryCache = shot.geometry;
     const mode = 'full' as 'full';
-    const edWin = openScreenOcrEditorWindow(dataUrl, mode);
+    const geometry = shot.geometry ?? null;
+    const screenIndex = shot.screenIndex ?? null;
+    const edWin = openScreenOcrEditorWindow({ dataUrl, mode, geometry, screenIndex });
     if (!edWin) {
-      // 覆盖窗口创建失败兜底：回退主窗口内编辑（ScreenOcrHost 渲染编辑面板）
+      // 覆盖窗口创建失败兜底：回退主窗口内编辑（ScreenOcrHost 渲染编辑面板）。
+      // 此路径必须显示主窗口才能编辑，切换桌面属预期（仅覆盖窗口创建失败时才会走到这里）
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
-      mainWindow.webContents.send('screen-ocr:captured', { dataUrl, mode });
+      mainWindow.webContents.send('screen-ocr:captured', { dataUrl, mode, geometry, screenIndex });
     }
   } catch (e) {
     log(`Screen OCR error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1042,6 +1247,7 @@ async function handleGlobalScreenOcr(): Promise<void> {
       message: e instanceof Error ? e.message : String(e),
     });
   } finally {
+    // 主窗口不再临时置透明（截图保留自身，见上），此处只复位忙标志
     screenOcrBusy = false;
   }
 }
@@ -1150,14 +1356,14 @@ function setupGlobalScreenOcr(): void {
 
 // ============ 启动欢迎窗口（独立小窗口，主界面就绪后关闭） ============
 
-/** 南瓜表情包 logo 目录（开发/打包双路径），用于欢迎窗口每次启动随机更换 logo */
-function resolveSplashLogoDir(): string {
+/** 内置头像目录（开发/打包双路径），供头像池的内置项使用 */
+function resolveBuiltinAvatarDir(): string {
   if (isDev) {
     // 开发模式：直接读取项目 assets 目录
-    return path.resolve(__dirname, '../../assets/南瓜表情包_裁切/去除背景_新');
+    return path.resolve(__dirname, '../../assets/avatars');
   }
-  // 打包模式：构建脚本已复制到 Resources/splash-logos/
-  return path.join(process.resourcesPath, 'splash-logos');
+  // 打包模式：构建脚本已复制到 Resources/avatars/
+  return path.join(process.resourcesPath, 'avatars');
 }
 
 /** 欢迎窗口品牌图标（固定使用 public/welcome-icon.png）
@@ -1383,8 +1589,8 @@ function listAllAvatars(): AvatarItem[] {
   const items: AvatarItem[] = [];
   const seen = new Set<string>();
 
-  // 内置头像（南瓜表情包）
-  const builtinDir = resolveSplashLogoDir();
+  // 内置头像
+  const builtinDir = resolveBuiltinAvatarDir();
   try {
     if (fs.existsSync(builtinDir)) {
       for (const f of fs.readdirSync(builtinDir).sort()) {
@@ -2161,7 +2367,7 @@ app.whenReady().then(async () => {
     return await settingsFileExists();
   });
 
-  // ===== 头像管理 IPC（内置南瓜表情包 + 用户自定义） =====
+  // ===== 头像管理 IPC（内置头像 + 用户自定义） =====
 
   ipcMain.handle('avatar:list', async () => {
     return listAllAvatars();
@@ -2512,6 +2718,23 @@ app.whenReady().then(async () => {
 
     log('Server is ready. Loading app URL...');
     mainWindow.loadURL(SERVER_URL);
+    // 预加载截图编辑覆盖窗口（保持隐藏）：首次 Cmd+Shift+O 直接 show + 下发截图，
+    // 省去「建窗口 + loadURL + React 水合」这段——它是「按快捷键→出蒙版」延迟的最大头
+    prewarmOcrEditorWindow();
+    // 预热屏幕几何：让助手枚举 NSScreen 拿到权威点尺寸，覆盖窗口据此创建（异步，不阻塞启动）
+    void (async () => {
+      try {
+        const helper = resolveCaptureHelperApp();
+        if (!helper) return;
+        const g = await fetchScreenGeometry(helper);
+        if (g) {
+          screenGeometryCache = g;
+          log(`[ocr-geom] cached screens=${g.screens.map((s) => `${Math.round(s.w)}x${Math.round(s.h)}@${s.scale}`).join(', ')}`);
+        } else {
+          log('[ocr-geom] 预热屏幕几何失败，回退 Electron display.bounds');
+        }
+      } catch { /* ignore */ }
+    })();
     // 运行期服务看门狗：闲置期间服务若崩溃/被回收，自动重启自愈（仅生产）
     startServerWatchdog();
 

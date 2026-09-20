@@ -14,12 +14,14 @@ import {
 interface OutcomeEditorProps {
   nodeMdId: string;
   outcomeStatus: OutcomeStatus | null;
+  /** 失效原因链（stale 期间）：展示「因哪条上游、哪条前提已废」，而不是笼统文案 */
+  staleReason?: string | null;
   onStatusChange?: (status: OutcomeStatus | null) => void;
   /** 只读预览模式：字段以文本展示，隐藏编辑操作按钮 */
   readonly?: boolean;
 }
 
-export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonly = false }: OutcomeEditorProps) {
+export function OutcomeEditor({ nodeMdId, outcomeStatus, staleReason, onStatusChange, readonly = false }: OutcomeEditorProps) {
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -29,6 +31,15 @@ export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonl
   const isLocked = outcomeStatus === 'locked';
   // 强制锁定标记（frontmatter outcome_force_locked）：校验未通过但用户自主确认锁定
   const [forceLocked, setForceLocked] = useState(false);
+  // 签署留痕（P0-2）：谁签的（outcome_locked_by）/ 何时签的 / 第几版。
+  // 属"自称"留痕（本机用户名），用于事后追溯签字人，不宣称密码学意义上的不可否认。
+  const [lockTrace, setLockTrace] = useState<{ by?: string; at?: string; version?: number } | null>(null);
+  // P0-a 双锚点：节点侧锁定历史镜像（frontmatter outcome_lock_history）+ 项目级台账（.ledger/locks.md）
+  // 里是否存在该节点的锚点记录；两者都在时才认为签字链完整。
+  const [lockHistory, setLockHistory] = useState<Array<{ version: number; hash: string; by?: string; at: string; prev?: string }>>([]);
+  const [lockAnchored, setLockAnchored] = useState(false);
+  // 锁定历史列表折叠（默认折叠）
+  const [historyOpen, setHistoryOpen] = useState(false);
   // 编辑态：只读模式下内部可切换"编辑模式/完成"（floating 预览面板头部无编辑按钮时兜底）
   const [editing, setEditing] = useState(!readonly);
   // 打开时成果块为空则自动提取一次（防重复）
@@ -47,8 +58,25 @@ export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonl
       const resp = await fetch(`/api/nodes?id=${encodeURIComponent(nodeMdId)}&action=raw`);
       const data = await resp.json();
       if (data.success && data.content) {
+        const raw = data.content as string;
         // 强制锁定标记：frontmatter 中 outcome_force_locked: true
-        setForceLocked(/outcome_force_locked:\s*true/.test(data.content as string));
+        setForceLocked(/outcome_force_locked:\s*true/.test(raw));
+        // 签署留痕（frontmatter）：outcome_locked_by / outcome_locked_at / outcome_version
+        const byMatch = raw.match(/^outcome_locked_by:\s*(.+)$/m);
+        const atMatch = raw.match(/^outcome_locked_at:\s*(.+)$/m);
+        const verMatch = raw.match(/^outcome_version:\s*(\d+)$/m);
+        setLockTrace(
+          byMatch || atMatch || verMatch
+            ? {
+                by: byMatch?.[1]?.trim().replace(/^["']|["']$/g, ''),
+                at: atMatch?.[1]?.trim().replace(/^["']|["']$/g, ''),
+                version: verMatch ? Number(verMatch[1]) : undefined,
+              }
+            : null,
+        );
+        // P0-a：锁定历史镜像 + 外部台账锚点标记（与 content 同一次 raw 响应，无新增接口调用）
+        setLockHistory(Array.isArray(data.lock_history) ? data.lock_history : []);
+        setLockAnchored(data.lock_anchored === true);
         // 提取 ## 成果块 section
         const outcomeMatch = (data.content as string).match(/## 成果块\n([\s\S]*?)(?=\n## |$)/);
         if (outcomeMatch) {
@@ -220,6 +248,38 @@ export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonl
               已锁定{forceLocked ? '·强制' : ''}
             </span>
           )}
+          {/* 签署留痕（P0-2）：谁签的 · 何时签的 · 第几版；属"自称"留痕，可追溯不宣称不可否认 */}
+          {isLocked && lockTrace && (lockTrace.by || lockTrace.at) && (
+            <span
+              className="text-xs"
+              style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+              title={`签署留痕：${lockTrace.by ?? 'unknown'}${lockTrace.at ? ` · ${lockTrace.at}` : ''}${lockTrace.version ? ` · v${lockTrace.version}` : ''}`}
+            >
+              签署留痕 {lockTrace.by ?? 'unknown'}
+              {lockTrace.at ? ` · ${lockTrace.at.slice(0, 10)}` : ''}
+              {lockTrace.version ? ` · v${lockTrace.version}` : ''}
+            </span>
+          )}
+          {/* P0-a 定位说明：无论台账是否在，都明确「这是本机自称留痕，不是密码学签名」 */}
+          {isLocked && lockTrace && (lockTrace.by || lockTrace.at) && (
+            <span
+              className="text-xs"
+              style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+              title="Recorded on this machine only — a self-declared trace, not a cryptographic signature and not admissible as evidence for third parties."
+            >
+              Local record only · not a cryptographic signature
+            </span>
+          )}
+          {/* 双锚点缺口：项目级台账里找不到该节点的锚点（.ledger/locks.md 缺失/被删/该节点无记录） */}
+          {isLocked && !lockAnchored && (
+            <span
+              className="text-xs"
+              style={{ color: 'color-mix(in oklab, var(--danger) 70%, transparent)' }}
+              title="No lock record found in the project ledger (.ledger/locks.md) — the signature chain cannot be verified against an external anchor."
+            >
+              No external anchor · signature chain unverified
+            </span>
+          )}
           {saveMsg && (
             <span
               className="rounded-full px-1.5 py-0 text-xs font-medium"
@@ -258,6 +318,23 @@ export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonl
       {/* 字段列表 + 操作按钮（折叠时隐藏） */}
       {!collapsed && (
         <>
+          {/* 失效原因链横幅（stale）：把前提失效链原样展示，不只说"已变更" */}
+          {outcomeStatus === 'stale' && (
+            <div
+              className="flex items-start gap-1.5 rounded border px-2 py-1.5 text-xs leading-relaxed"
+              style={{
+                borderColor: 'color-mix(in oklab, var(--primary-strong) 40%, transparent)',
+                backgroundColor: 'color-mix(in oklab, var(--primary-strong) 8%, transparent)',
+                color: 'var(--primary-strong)',
+              }}
+            >
+              <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+              <span>
+                {staleReason || '上游成果块已变更，本条前提可能已失效。'}
+                <span className="opacity-70">（重新锁定后本提示清除）</span>
+              </span>
+            </div>
+          )}
           {/* 强制锁定警示横幅 */}
           {isLocked && forceLocked && (
             <div
@@ -300,6 +377,41 @@ export function OutcomeEditor({ nodeMdId, outcomeStatus, onStatusChange, readonl
                 <Save className="h-2.5 w-2.5" />
                 {saving ? '保存中...' : '保存'}
               </Button>
+            </div>
+          )}
+
+          {/* P0-a 锁定历史（节点侧镜像，最新在前）：默认折叠；数据来自同一次 action=raw 响应 */}
+          {lockHistory.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <div
+                className="flex items-center gap-1 cursor-pointer select-none text-xs font-medium"
+                style={{ color: 'var(--ink)' }}
+                onClick={(e) => { e.stopPropagation(); setHistoryOpen(v => !v); }}
+                title={historyOpen ? 'Collapse lock history' : 'Expand lock history'}
+              >
+                <ChevronDown
+                  className="h-3 w-3 transition-transform"
+                  style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)', transform: historyOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+                />
+                Lock history
+                <span className="font-normal" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }}>
+                  ({lockHistory.length})
+                </span>
+              </div>
+              {historyOpen && (
+                <div className="flex flex-col gap-0.5 pl-4">
+                  {[...lockHistory].reverse().map((h, i) => (
+                    <div
+                      key={`${h.version}-${h.at}-${i}`}
+                      className="text-xs"
+                      style={{ color: 'color-mix(in oklab, var(--ink-muted) 80%, transparent)' }}
+                      title={`hash: ${h.hash}${h.prev ? `\nprev: ${h.prev}` : ''}`}
+                    >
+                      v{h.version} · {h.hash.slice(0, 8)}… · {h.by ?? 'unknown'} · {h.at.slice(0, 10)}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

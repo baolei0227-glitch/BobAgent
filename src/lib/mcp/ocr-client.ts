@@ -61,6 +61,10 @@ export interface OcrMcpResult {
   /** 自动视觉理解所用模型 */
   understandingModel?: string;
   understandingMode?: string;
+  /** 插件侧识别缓存命中（本次未重新识别，正文/notes 均为历史结果） */
+  cached?: boolean;
+  /** 缓存写入时间（ISO），仅 cached=true 时有值 */
+  cachedAt?: string;
 }
 
 /** OCR 过程级进度（插件 ocr-service 上报，经 MCP notifications/progress 透传） */

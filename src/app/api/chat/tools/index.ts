@@ -21,7 +21,13 @@ import type { McpToolInfo } from '@/lib/mcp/types';
 import type { OcrProgressEvent } from '@/lib/mcp/ocr-client';
 import { resolveAppRoot, SANDBOX_DIRNAME, BOB_SANDBOX_DIRNAME } from '@/lib/app-root';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
+import { renameFileTags, removeFileTags } from '@/lib/files/tags';
 import { writeAppFileAtomic } from '@/lib/sandbox/apps';
+import type { TeamRunDraft, TeamRunProgress } from '@/lib/chat/team-run';
+/** 多智能体「群聊流」事件（形态 A 呈现层）：与 team_run 的进度快照同帧下发 */
+import type { TeamChatEvent } from '@/lib/types';
+import type { ConfirmVerdict } from '@/lib/chat/confirm-pending';
+import type { ApprovalStrategy } from '@/lib/chat/approval';
 import { recordPipInstall } from '@/lib/python/pkg-usage';
 import { getProjectRootPath, getWorkspacePath, resolvePath, truncate, SANDBOX_APPS_DIR, READ_CAPACITY, formatSize, auditLog, isReadablePath, getLocalAuthorizedRoots } from './shared';
 import { butlerToolDefs } from './butler';
@@ -30,6 +36,8 @@ import { officeToolDefs } from './office';
 import { audioToolDefs } from './audio';
 import { adminToolDefs } from './admin';
 import { notebookToolDefs } from './notebook';
+import { ledgerToolDefs } from './ledger';
+import { materialsToolDefs } from './materials';
 import { nodeToolDefs } from './node';
 import { skillToolDefs, SKILLS_DIR } from './skill';
 import { agentPackageToolDefs, setAgentCoreToolNames } from './agent-package';
@@ -75,7 +83,7 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   // 文件 / 编辑
   if (has('write_file', 'create_file', 'create_code')) return `写入 ${path() ?? name}`;
   if (has('edit_code')) return `修改 ${path() ?? ''}${(() => { const b = take(['begin_line', 'line_start']); return b ? `（第${b}行起）` : ''; })()}`;
-  if (has('read_file', 'read_attachment', 'read_material')) return `读取 ${path() ?? text() ?? '内容'}`;
+  if (has('read_file', 'read_attachment')) return `读取 ${path() ?? text() ?? '内容'}`;
   if (has('delete_file')) return `删除 ${path() ?? ''}`;
   if (has('rename_file', 'move_file')) {
     const oldP = path();
@@ -84,6 +92,12 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   }
   if (has('list_directory', 'list_dir', 'list_files')) return `浏览目录 ${path() ?? '工作区'}`;
   if (has('search_files', 'grep', 'find_file')) return `搜索文件 ${query() ?? path() ?? ''}`;
+  if (has('search_materials')) return `检索项目材料 ${query() ?? path() ?? ''}`;
+  if (has('read_ledger')) return `查阅项目账本 ${query() ?? ''}`;
+  if (has('ledger_record')) return `登记项目账本 ${take(['title']) ?? ''}`;
+  if (has('ledger_pending')) return `查看账本待编译登记`;
+  if (has('ledger_lint')) return `项目账本自检`;
+  if (has('ledger_project')) return `项目页 ${take(['title']) ?? take(['action']) ?? ''}`;
 
   // OCR / 图像
   if (has('ocr_document', 'ocr')) return `OCR 识别 ${path() ?? text() ?? '文件'}`;
@@ -150,6 +164,12 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
     return '向用户提问';
   }
   if (has('search_capabilities')) return `激活能力：${query() ?? text() ?? ''}`;
+  if (has('team_run')) {
+    // 多智能体协作：描述本次编排的实质内容（目标 + 成员数），便于 UI 折叠卡片显示
+    const goal = take(['goal']);
+    const memberCount = Array.isArray((args ?? {}).members) ? ((args as { members: unknown[] }).members.length) : 0;
+    return `多智能体协作${goal ? `：${goal}` : ''}${memberCount > 0 ? `（${memberCount} 名成员）` : ''}`;
+  }
   if (has('todo_write')) return '更新任务步骤';
   if (has('finish_task')) return '任务收尾';
   if (has('read_upstream_node')) return `读取上游节点 ${text() ?? ''}`;
@@ -269,8 +289,12 @@ export type ToolCategory = '文件' | '系统' | '网络' | '技能' | '配置' 
  *  - audio:     对话涉及音频转写（转写/录音/语音关键词或音频附件）才暴露
  *  - skill:     对话涉及技能检索/安装（技能/能力/skill 关键词）才暴露
  *  - design:    对话涉及主题/前端界面（coding 节点自动放行）才暴露
- *  - ocr:       对话涉及图片/PDF 文字识别（OCR/扫描关键词或图片附件）才暴露 */
-export type ToolScene = 'general' | 'coding' | 'legal' | 'node' | 'audio' | 'skill' | 'design' | 'ocr' | 'admin' | 'office' | 'browser' | 'company' | 'team' | 'local' | 'notebook' | 'butler';
+ *  - ocr:       对话涉及图片/PDF 文字识别（OCR/扫描关键词或图片附件）才暴露
+ *  - ledger:    存在激活项目（画布下恒真）才暴露——项目档案只读入口（read_ledger / search_materials）
+ *  - ledger-keeper: 账本维护者（档案员 Archivist）专属——账本写工具只给 keeper，其他 agent 只读
+ *  - mind:      思维导图/灵感（BobMind）——Bob-Mind MCP 工具只给 Buzan（mind）画像，
+ *               普通 chat/其他 agent 不再随 general 常驻注入 */
+export type ToolScene = 'general' | 'coding' | 'legal' | 'node' | 'audio' | 'skill' | 'design' | 'ocr' | 'admin' | 'office' | 'browser' | 'company' | 'team' | 'local' | 'notebook' | 'butler' | 'ledger' | 'ledger-keeper' | 'mind';
 
 /** OpenAI function calling 格式的工具定义 */
 export interface ToolDefinition {
@@ -285,10 +309,36 @@ export interface ToolDefinition {
 /** 工具执行函数签名 */
 type ToolExecutor = (args: Record<string, unknown>, ctx?: ToolExecContext) => Promise<string | EnhancedToolResult>;
 
-/** 工具执行上下文（宿主传入，透传给工具执行器）：目前承载 OCR 过程级进度回调 */
+/** 工具执行上下文（宿主传入，透传给工具执行器）：承载过程级进度回调 */
 export interface ToolExecContext {
+  /** 请求级外层输出上限（字符，= context-limits.toolOutputMaxForContext(当前模型窗口)）。
+   *  读取类工具据此把**内层**分片上限收缩到同一数量级，避免"内层吐 15 万、外层砍到 1.9 万"
+   *  把续读 offset 提示一起截掉（小模型上表现为读完第一段就接不上）。未传 = 按 1M 大窗口处理。 */
+  maxOutputChars?: number;
   /** 识别过程级进度（read_attachment 扫描件/图片 OCR 走 MCP 时实时上报引擎/页码，宿主转 SSE 给前端） */
   onOcrProgress?: (p: OcrProgressEvent) => void;
+  /** 多智能体协作进度（team_run 编排期间实时上报成员状态/任务进度，宿主转 SSE subagent_update 给前端）：
+   *  events 为同一帧附带的「群聊流」增量事件（形态 A 呈现层，可能缺省 = 本帧只有快照无新事件） */
+  onTeamProgress?: (p: TeamRunProgress, events?: TeamChatEvent[]) => void;
+  /** 多智能体人类审批门禁（team_run 在 approve 之前回调）：宿主在此弹确认卡（成员清单 + 任务 DAG）
+   *  等用户裁决，返回三分裁决交回 team-run 决定是否 approve & run。未注入 = 自动批准 */
+  onTeamConfirm?: (draft: TeamRunDraft) => Promise<ConfirmVerdict>;
+  /** 本轮生效的审批策略档位（route 按 identity 级覆盖 > 全局默认 注入）：team_run 据此决定门禁形态
+   *  （allow_scope 不打断 / ask 弹卡审批 / never 入口拒绝），与 tool_confirm 咨询点同一取值 */
+  approvalStrategy?: ApprovalStrategy;
+  /** 本次执行的成员名单（用户在 chat 节点「Multi-agent mode」弹窗选定的已安装 agent id，不落盘）：
+   *  team_run 据此判定「名单外补充成员」——凡补充成员一律强制弹卡请用户批准（见 lib/chat/team-run.ts ④） */
+  presetAgentIds?: string[];
+  /** team 模式队长模型（Team 分栏「Main model」显式选择，provider:modelId）：team_run 用它跑队长会话
+   *  （规划 + 复核/整合）。只读模型池与节点 frontmatter，绝不回写节点模型 */
+  teamMainModel?: string;
+  /** team 模式成员模型（Team 分栏「Worker model」显式选择，provider:modelId）：team_run 用它一刀切覆盖
+   *  全部成员。只读模型池与节点 frontmatter，绝不回写节点模型 */
+  teamWorkerModel?: string;
+  /** team 模式的成员名单段（route 已算好的 multiAgentRosterSection 文本）：交给队长规划时参考 */
+  teamRosterSection?: string;
+  /** 当前项目 id（透传给队长会话的 /api/chat，用于项目上下文） */
+  projectId?: string;
 }
 
 /** 增强工具结果：给 LLM 的精简文本 + 给用户的结构化卡片 HTML（方案 B：数据驱动渲染，绕过 LLM 转述） */
@@ -351,12 +401,15 @@ const MCP_SERVER_SCENES: Record<string, ToolScene[]> = {
   'lark': ['butler'],
   // ---- Bobby（本地软件操控 + AI 助手派发）：本地操控意图才注入（"操控/打开应用/本地软件"），不再常驻 ----
   'bobby': ['local'],
-  // ---- Agent Teams（多成员团队编排）：团队/协作意图才注入，不再常驻 ----
-  'team': ['team'],
+  // ---- Agent Teams（多成员团队编排）：**刻意不登记** ----
+  // 裸 mcp__team__* 工具不注入模型：多智能体的唯一入口是内置工具 team_run（scenes: ['team']），
+  // 由它内部闭环调用 mcp__team__*（lib/chat/team-run.ts）并把成员产出汇总为一条回答。
+  // 不登记 → 该 server 的工具有效场景为空 → 注册循环显式跳过（见 registerMcpTools 内的 team 分支）。
   // ---- Bob Preview（真实 Chromium 预览渲染/交互测试）：前端/网页意图（design）与 coding 节点注入 ----
   'bob-preview-mcp': ['design', 'coding'],
-  // ---- Bob-Mind（独立思维便签库）：通用捕获/回忆，随 general 常驻注入 ----
-  'bob-mind-mcp': ['general'],
+  // ---- Bob-Mind（独立思维导图库）：**专属 mind 场景** —— 只给 Buzan（mind）画像注入，
+  //      普通 chat/其他 agent 不再随 general 常驻背这 8 个工具（2026-09-17 专职化）----
+  'bob-mind-mcp': ['mind'],
 };
 
 /** 按 MCP serverId/工具名推断适用场景（兜底：无法识别 → general） */
@@ -789,7 +842,7 @@ async function toolRunCommand(args: Record<string, unknown>): Promise<string> {
   const personalPath = await checkPersonalDirRead(cmd);
   if (personalPath) {
     auditLog({ tool: 'run_command', blocked: true, reason: 'personal-dir', reasonDetail: personalPath, cmd: truncate(cmd, 500) });
-    return `BLOCKED: 命令涉及访问个人目录 "${personalPath}"（下载/桌面/文稿/图片/Library 等）。读取个人目录须用户先授权，禁止通过 shell 访问。附件已在项目 attachments/ 内，请用 read_attachment 读取；产出请写入项目 homework/。`;
+    return `BLOCKED: 命令涉及访问个人目录 "${personalPath}"（下载/桌面/文稿/图片/Library 等）。读取个人目录须用户先授权，禁止通过 shell 访问。附件已在项目 materials/ 内，请用 read_attachment 读取；产出请写入项目 homework/。`;
   }
   auditLog({ tool: 'run_command', cmd: truncate(cmd, 500) });
 
@@ -831,7 +884,9 @@ async function toolRunCommand(args: Record<string, unknown>): Promise<string> {
     const err = e as { killed?: boolean; stdout?: string; stderr?: string; message?: string };
 
     if (err.killed) {
-      return `Command timed out (${timeout / 1000}s)`;
+      return isInstall
+        ? `Command timed out (${timeout / 1000}s)。安装类命令超时多为网络慢或包体积大：可重试一次，或换镜像源（如 pip -i https://pypi.tuna.tsinghua.edu.cn/simple）。`
+        : `Command timed out (${timeout / 1000}s)。请缩小范围后重试：全盘搜索（find /、find ~、grep -r /）必然超时，请改用项目内定向路径、ls/glob，或给 find 加 -maxdepth 并限定具体目录；同一命令不要原样重试。`;
     }
 
     let output = err.stdout || '';
@@ -873,9 +928,26 @@ async function toolExecuteScript(args: Record<string, unknown>): Promise<string>
   const tmpPath = join(await getWorkspacePath(), tmpFileName);
   const SCRIPT_TIMEOUT = 30_000;
 
+  // Python 源码规范化：BOM 去除 → 损坏字符拦截 → 补编码声明。
+  // 历史故障：脚本体含非法字节时 python3 解析首个非 ASCII 字节即报
+  // `SyntaxError: Non-UTF-8 code starting with '\xe6'`，整轮白跑。
+  let scriptBody = script;
+  if (isPython) {
+    scriptBody = scriptBody.replace(/^\uFEFF/, '');
+    const bad = scriptBody.match(/[\uFFFD\uD800-\uDFFF]/);
+    if (bad) {
+      const badLine = scriptBody.slice(0, scriptBody.indexOf(bad[0])).split('\n').length;
+      return `Error: 脚本第 ${badLine} 行含损坏字符（无效 Unicode / 孤立代理项），疑似生成时转义丢失，已拒绝执行。请重写该行（不要手拼 \\x/\\u 转义，非 ASCII 文本直接原样书写）后重试。`;
+    }
+    // 前两行无 coding 声明则补上，避免解释器按非 UTF-8 解析
+    if (!/coding[:=]\s*[-\w.]+/.test(scriptBody.split('\n', 2).join('\n'))) {
+      scriptBody = `# -*- coding: utf-8 -*-\n${scriptBody}`;
+    }
+  }
+
   try {
     // 写入脚本文件
-    await writeFile(tmpPath, script, 'utf-8');
+    await writeFile(tmpPath, scriptBody, 'utf-8');
     if (isPython) {
       try { await execAsync(`chmod +x "${tmpPath}"`); } catch { /* ignore */ }
     }
@@ -1070,6 +1142,13 @@ async function toolRenameFile(args: Record<string, unknown>): Promise<string> {
         }
       } catch { /* 归属登记失败不影响 rename 本身 */ }
     }
+    // 标签随路径迁移：homework/ 内重命名后原标签需跟随新路径，否则用户在侧栏打的标签会丢失
+    try {
+      const projectRoot = await getProjectRootPath();
+      const srcRel = getHomeworkRelativePath(sourcePath, projectRoot);
+      const tgtRel = getHomeworkRelativePath(targetPath, projectRoot);
+      if (srcRel && tgtRel) await renameFileTags(projectRoot, 'homework', srcRel, tgtRel);
+    } catch { /* 标签迁移失败不影响 rename 本身 */ }
     return `Renamed: ${source} → ${target}`;
   } catch (e) {
     return `Rename failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -1108,6 +1187,12 @@ async function toolDeleteFile(args: Record<string, unknown>): Promise<string> {
         }
       } catch { /* 清册清理失败不影响删除本身 */ }
     }
+    // 回收标签：homework/ 内文件删除后其标签条目一并清除，避免残留脏数据
+    try {
+      const projectRoot = await getProjectRootPath();
+      const relPath = getHomeworkRelativePath(filePath, projectRoot);
+      if (relPath) await removeFileTags(projectRoot, 'homework', relPath);
+    } catch { /* 标签回收失败不影响删除本身 */ }
     return `Deleted: ${path}`;
   } catch (e) {
     return `Delete failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -1186,13 +1271,13 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read file content (source code, configs, documents). Relative paths resolve from the workspace root; "homework/…" and "attachments/…" map to the project root; absolute and ~/ paths supported. .docx files are auto-extracted to plain text (paragraphs/tables preserved), so generated Word files can be read directly to verify.',
+    description: 'Read file content (source code, configs, documents). Relative paths resolve from the workspace root; "homework/…", "materials/…" (and legacy "attachments/…") map to the project root; absolute and ~/ paths supported. .docx files are auto-extracted to plain text (paragraphs/tables preserved), so generated Word files can be read directly to verify.',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'File path: relative to workspace root ("src/main.ts"), "homework/<file>" or "attachments/…" for project-root paths, or absolute / ~/ path.',
+          description: 'File path: relative to workspace root ("src/main.ts"), "homework/<file>", "materials/…" or legacy "attachments/…" for project-root paths, or absolute / ~/ path.',
         },
       },
       required: ['path'],
@@ -1203,7 +1288,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'write_file',
-    description: 'Write or create a file (parent dirs auto-created) for code/config/docs. Deliverables MUST use a path starting with "homework/" (e.g. "homework/报告.html") to land in the project homework/ folder and show as an output card; paths not starting with "homework/" or "attachments/" are scratch files in the temporary workspace.',
+    description: 'Write or create a file (parent dirs auto-created) for code/config/docs. Deliverables MUST use a path starting with "homework/" (e.g. "homework/报告.html") to land in the project homework/ folder and show as an output card; paths not starting with "homework/", "materials/" or "attachments/" are scratch files in the temporary workspace.',
     parameters: {
       type: 'object',
       properties: {
@@ -1230,7 +1315,7 @@ const toolDefs: Tool[] = [
       properties: {
         path: {
           type: 'string',
-          description: 'File path (same rules as write_file: homework/, attachments/, bob-sandbox/apps/<appId>/, absolute or ~/ path).',
+          description: 'File path (same rules as write_file: homework/, materials/, attachments/, bob-sandbox/apps/<appId>/, absolute or ~/ path).',
         },
         search: {
           type: 'string',
@@ -1326,7 +1411,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'run_command',
-    description: 'Execute a shell command and return output (tests, builds, git, process inspection). Runs in the workspace root. Timeout: install commands (pip/npm/brew/cargo…) get 180s, others 30s. Files generated land in the workspace root unless the path is absolute or "homework/"-prefixed (project deliverables should use "homework/…").',
+    description: 'Execute a shell command and return output (tests, builds, git, process inspection). Runs in the workspace root. Timeout: install commands (pip/npm/brew/cargo…) get 180s, others 30s. Files generated land in the workspace root unless the path is absolute or "homework/"-prefixed (project deliverables should use "homework/…"). 搜索请限定范围：全盘搜索（find /、find ~、grep -r /）必然 30s 超时，改用项目内定向路径 / ls / glob 工具，find 必须加 -maxdepth 并限定具体目录。',
     parameters: {
       type: 'object',
       properties: {
@@ -1344,7 +1429,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'execute_script',
-    description: 'Write and execute a Python/Shell script (30s timeout) for data processing / automation / analysis that single tools cannot do. IMPORTANT PATH RULE: script CWD = homework/.ai-workspace/ (hidden temp area, NOT the project root) — a relative "homework/xxx" path inside the script lands there and is invisible to the UI. To write a visible deliverable or read project homework files, use the absolute env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: "$BOB_PROJECT_HOMEWORK") and print "OutputFile: homework/<filename>" so the file is shown to the user.',
+    description: 'Write and execute a Python/Shell script (30s timeout) for data processing / automation / analysis that single tools cannot do. IMPORTANT PATH RULE: script CWD = homework/.ai-workspace/ (hidden temp area, NOT the project root) — a relative "homework/xxx" path inside the script lands there and is invisible to the UI. To write a visible deliverable or read project homework files, use the absolute env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: "$BOB_PROJECT_HOMEWORK") and print "OutputFile: homework/<filename>" so the file is shown to the user. Python: 脚本按 UTF-8 落盘并自动补 `# -*- coding: utf-8 -*-`，中文等非 ASCII 文本直接原样书写即可，不要手拼 \\x/\\u 转义（易产生损坏字符，解释器会报 Non-UTF-8 错误而整轮白跑）。',
     parameters: {
       type: 'object',
       properties: {
@@ -1371,6 +1456,8 @@ const toolDefs: Tool[] = [
   ...nodeToolDefs,
 
   ...notebookToolDefs,
+  ...ledgerToolDefs,
+  ...materialsToolDefs,
 
 
   ...officeToolDefs,
@@ -1414,7 +1501,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'search_capabilities',
-    description: 'Search the on-demand capability catalog (browser, company lookup, team orchestration, local app control, legal, audio, OCR, memory/todo, theme, skills…). Use when unsure a capability exists or which intent activates it — the host activates the match (its tools become available next rounds) and returns the result.',
+    description: 'Search the on-demand capability catalog (browser, company lookup, local app control, legal, audio, OCR, memory/todo, theme, skills…). Use when unsure a capability exists or which intent activates it — the host activates the match (its tools become available next rounds) and returns the result.',
     parameters: {
       type: 'object',
       properties: {
@@ -1432,6 +1519,47 @@ const toolDefs: Tool[] = [
   },
   ...butlerToolDefs,
   ...agentPackageToolDefs,
+  {
+    name: 'team_run',
+    description:
+      'Run a FULL multi-agent collaboration in one call (host-orchestrated). YOU ARE ONLY THE USER PROXY: just hand over a clear team goal — the host runs a dedicated captain session that plans the member list + task DAG, drives the team, reviews every member output, asks members to clarify contradictions/gaps (bounded), and returns ONE integrated answer. If the approval policy is "ask", the host first asks the user to approve the captain\'s plan (member list + task DAG); the collaboration is skipped when the user denies or does not respond, and under "never" the call is refused outright. The host streams each member\'s live progress to the UI. When the tool returns, relay the returned answer to the user as-is (it is already the integrated final answer — do NOT re-summarize it yourself, do NOT mention internal orchestration). Call it once per user request — it returns only when the team is done (or the time budget is hit).',
+    parameters: {
+      type: 'object',
+      properties: {
+        goal: {
+          type: 'string',
+          description:
+            'The team goal: what the team must deliver, plus scope / deliverable form / constraints / referenced materials. Be specific and self-contained — the captain only sees this goal (and, when configured, the user-selected member roster).',
+        },
+        budgetMs: { type: 'number', description: 'Optional time budget in ms (default 480000 = 8 minutes). On timeout the host returns what is already done.' },
+      },
+      required: ['goal'],
+    },
+    scenes: ['team'],
+    category: '系统',
+    execute: async (args, ctx) => {
+      const { runTeam } = await import('@/lib/chat/team-run');
+      const outcome = await runTeam({
+        goal: typeof args.goal === 'string' ? args.goal : '',
+        budgetMs: typeof args.budgetMs === 'number' ? args.budgetMs : undefined,
+        // 一主一次两个模型（Team 分栏显式选择，宿主注入；只读模型池，绝不回写节点模型）
+        captainModelRef: ctx?.teamMainModel,
+        workerModelRef: ctx?.teamWorkerModel,
+        // 队长规划时参考的成员名单段 + 项目上下文
+        rosterSection: ctx?.teamRosterSection,
+        projectId: ctx?.projectId,
+        onProgress: ctx?.onTeamProgress,
+        // 审批策略档位（drive 门禁形态：allow_scope 不打断 / ask 弹卡审批 / never 入口拒绝）
+        approvalStrategy: ctx?.approvalStrategy,
+        // 本次执行的成员名单（用户弹窗选定）：名单外补充成员强制弹卡审批
+        presetAgentIds: ctx?.presetAgentIds,
+        // 人类审批门禁：ask 档 approve 之前的用户裁决回调（宿主注入；未注入 = 自动批准）
+        onConfirm: ctx?.onTeamConfirm,
+      });
+      return outcome.summary;
+    },
+    maxOutput: 24000,
+  },
 ];
 
 /** 常驻内核工具名集合：无场景标注且未在 SCENED_TOOLS 表 = core 层（coreExclusions 只对这类工具生效） */
@@ -1482,6 +1610,10 @@ const BUILTIN_LAYER: Record<string, ToolLayer> = {
   scan_docx_templates: 'ondemand', read_manifest: 'ondemand',
   get_app_config: 'ondemand', get_current_theme: 'ondemand',
   delete_preference: 'ondemand', draw: 'ondemand',
+  // team_run 自带 scenes:['team'] 门控（仅「Multi-agent mode」开关激活该场景时注入）：显式标 ondemand，
+  // 否则按「未列出默认 core」落入常驻锚点段——开关切换时增减会作废 core 段前缀缓存，
+  // 并被 CacheGuard 误报为异常漂移（与 2026-09-09 SCENED_TOOLS 修复同一动机）。
+  team_run: 'ondemand',
 };
 
 /** 查询内置工具分层（供排序/过滤用）：
@@ -1807,6 +1939,9 @@ export async function registerMcpTools(opts?: { excludeServerIds?: Set<string>; 
     // （ocr_document 内部经 bob-ocr-mcp 走同一识别管线，且带 quality/勾稽/upgrade 增值与
     // 本地 OCR 兜底），保留内置即可，避免模型在两个识别工具间误选。
     if (/^ocr\.recognize$/.test(mcpTool.name)) continue;
+    // Agent Teams 裸工具不注册：多智能体唯一入口是内置 team_run（见 MCP_SERVER_SCENES 注释）。
+    // 在此显式跳过而非依赖「未知场景」兜底，避免每次装配刷 console.warn 噪声。
+    if (mcpTool.serverId === 'team') continue;
     // 浏览器类 MCP 工具需要更大的输出限制
     const isBrowser = /browser/i.test(mcpTool.serverId) || /browser/i.test(mcpTool.serverName);
     const maxOutput = isBrowser ? 200000 : 10000;

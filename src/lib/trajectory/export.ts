@@ -13,6 +13,7 @@
 
 import type { TrajectoryEvent } from './event-log';
 import { CORE_EVENT } from './event-log';
+import { stripThinkTags } from '@/lib/bus';
 
 export interface ExportedToolStep {
   toolName: string;
@@ -148,6 +149,19 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
 
 /* ==================== append 摘要派生（batch3-b 方案 A/C 共用） ==================== */
 
+/** OutputFile 产物声明行（与前端 extractOutputFileBlocks 同口径） */
+const OUTPUT_FILE_LINE_RE = /^\s*OutputFile:\s*\S/;
+
+/** 剥离思考块与 OutputFile 标记行后的「用户可见正文」；无任何正文时返回空串。 */
+export function visibleAnswerBody(content: string | undefined): string {
+  if (!content) return '';
+  return stripThinkTags(content)
+    .split(/\r?\n/)
+    .filter((ln) => !OUTPUT_FILE_LINE_RE.test(ln))
+    .join('\n')
+    .trim();
+}
+
 export interface AppendDerivedPayload {
   question?: string;
   answer?: string;
@@ -163,7 +177,10 @@ export interface AppendDerivedPayload {
  * 把一次任务的事件日志派生为「前端 append 等价摘要」——方案 A 的 derive 分支核心，
  * 也是方案 C 一致性单测的比对对象：
  *  - question：首条 user/message 原文
- *  - answer/reasoning：末条 assistant/message（终答）；无终答（中断）返回空 answer
+ *  - answer/reasoning：末条 assistant/message（终答）；无终答（中断）返回空 answer。
+ *    例外兜底：终答为「空壳」（剥掉 think 与 OutputFile 行后无正文，典型即工具返回后
+ *    只回一行 OutputFile）时，answer 改用此前 assistant/attempt 轮打捞到的可见正文 +
+ *    终答 OutputFile 行，防止模型写在工具调用轮的完整答复落盘时丢失。
  *  - toolCalls：全部工具轮步骤（按事件序）
  *  - outputFiles：output_files SSE 帧（最终一次）files
  */
@@ -173,6 +190,25 @@ export function appendPayloadFromEvents(events: TrajectoryEvent[]): AppendDerive
   const firstUser = msgs.find((m) => m.role === 'user');
   let finalAssistant: ExportedMessage | undefined = msgs[msgs.length - 1];
   if (!finalAssistant || finalAssistant.role !== 'assistant') finalAssistant = undefined;
+
+  // ── 空壳终答打捞（2026-09-16 事故修复）────────────────────────────────────
+  // 事故形态：模型把完整答复写在「带 write_file 工具调用的那一轮」assistant 文本里，
+  // 工具返回后的终答只输出一行 OutputFile。落盘 answer 只取终答 → 正文全丢、只剩产物卡片。
+  // 兜底：终答剥掉 think/OutputFile 行后无任何可见正文时，从本轮此前的 assistant/attempt
+  // 文本中打捞可见正文（保序、整块去重），末尾保留终答的 OutputFile 行供产物卡片解析。
+  let answer = finalAssistant?.content || undefined;
+  if (answer !== undefined && visibleAnswerBody(answer) === '') {
+    const salvaged: string[] = [];
+    for (const m of msgs) {
+      if (m.role !== 'assistant' || m === finalAssistant) continue;
+      const body = visibleAnswerBody(m.content);
+      if (body && !salvaged.includes(body)) salvaged.push(body);
+    }
+    if (salvaged.length > 0) {
+      const finalTail = stripThinkTags(answer).trim(); // 保留 OutputFile 标记行
+      answer = finalTail ? `${salvaged.join('\n\n')}\n${finalTail}` : salvaged.join('\n\n');
+    }
+  }
 
   const toolCalls: ExportedToolStep[] = [];
   for (const m of msgs) {
@@ -194,7 +230,7 @@ export function appendPayloadFromEvents(events: TrajectoryEvent[]): AppendDerive
 
   return {
     question: firstUser?.content || undefined,
-    answer: finalAssistant?.content || undefined,
+    answer,
     reasoning: finalAssistant?.reasoning || undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     outputFiles,

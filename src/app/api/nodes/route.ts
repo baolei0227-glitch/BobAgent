@@ -15,10 +15,17 @@ import {
   clearCurrentProjectPath,
   readVersionToken,
   bumpUpdatedAt,
+  outcomeContentHash,
 } from '@/lib/node-markdown';
 import { getCurrentProject, getProjectById } from '@/lib/project/project-manager';
 import { initDb, deleteEdgesByNode, listActiveEdges } from '@/lib/db';
-import { validateOutcome, renderOutcome, parseOutcome, OUTCOME_FIELD_DEFS, OUTCOME_MAX_LENGTH, type Outcome } from '@/lib/nodes/outcome';
+import { validateOutcome, renderOutcome, parseOutcome, OUTCOME_MAX_LENGTH } from '@/lib/nodes/outcome';
+import { generateOutcomeForNode, isOutcomeBlank } from '@/lib/nodes/outcome-generate';
+import { notifyNodeConversationAppended } from '@/lib/nodes/outcome-auto';
+import { notifyResearchNoteIngest } from '@/lib/nodes/note-ingest-auto';
+// 入口留痕（六）：本轮工具调用 → `.ledger/log.md` 一行极简指标
+import { deriveTurnTrace } from '@/lib/runtime/entrypoint-metrics';
+import { appendEntryLog, appendLockRecord, latestLockOf } from '@/lib/mcp/ledger';
 import { invalidateManifest, syncManifestAfterWrite } from '@/lib/nodes/manifest';
 import {
   shouldCompact,
@@ -30,186 +37,17 @@ import {
 } from '@/lib/nodes/compact';
 import { inferContextWindow, modelOutputTokenMaxForModel } from '@/lib/context-limits';
 import { readSettingsFromFile } from '@/lib/settings-server';
-import { resolveTaskModel, resolveOutcomeModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel } from '@/lib/wanted/task-model';
 import { promises as fs } from 'fs';
 import { join, resolve, sep, basename } from 'path';
+import { userInfo } from 'os';
 import OpenAI from 'openai';
 import { PROJECT_DB_FILENAME } from '@/lib/app-root';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 import { readEventLog } from '@/lib/trajectory/event-log';
 import { appendPayloadFromEvents, type AppendDerivedPayload } from '@/lib/trajectory/export';
 import { deriveCompactionTurnsFromLogs } from '@/lib/nodes/compact-source';
-
-/** 在请求处理前设置当前项目路径 */
-async function withProjectContext<T>(handler: () => Promise<T>): Promise<T> {
-  const project = await getCurrentProject();
-  setCurrentProjectPath(project.path);
-  try {
-    return await handler();
-  } finally {
-    clearCurrentProjectPath();
-  }
-}
-
-/** 成果块提取模型解析：统一复用任务/成果块模型解析（分层回退：chatModel → pool → taskModel → providers） */
-
-/** 将节点标记为 stale（R-10：直接下游失效标记，UI 显示告警但不阻断使用） */
-async function markStale(nodeId: string, projectPath: string): Promise<void> {
-  try {
-    const childPath = await findNodeFileById(nodeId, projectPath);
-    if (!childPath) return;
-    const childContent = await fs.readFile(childPath, 'utf-8');
-    const child = parseNodeMarkdown(childContent);
-    child.frontmatter.outcome_status = 'stale';
-    child.frontmatter.updated_at = new Date().toISOString();
-    await updateNodeFile(childPath, serializeNode(child));
-  } catch (e) {
-    console.warn('[nodes:lock] 标记下游 stale 失败 nodeId:', nodeId, e instanceof Error ? e.message : String(e));
-  }
-}
-
-// ==================== 成果块懒生成 ====================
-
-/** 判定成果块是否仍为空模板（8 字段全为空值标记「无」/「无已知限制」/空串），用于决定锁定时是否需要懒生成 */
-function isOutcomeBlank(outcome: Outcome | null | undefined): boolean {
-  if (!outcome) return true;
-  const record = outcome as unknown as Record<string, string>;
-  return OUTCOME_FIELD_DEFS.every((def) => {
-    const val = (record[def.key] ?? '').trim();
-    return val === '' || val === '无' || val === '无已知限制';
-  });
-}
-
-/**
- * 懒生成成果块（锁定/连线自动锁定时调用）：用模型从当前对话记录提炼成果块并写回文件。
- * - 未配置模型 / 无对话 / 模型返回空 / 解析失败 → 返回 { ok:false, error }，调用方不阻塞，转由成果块校验兜底。
- * - 写回时推进 outcome_turns 覆盖全部对话轮次，供后续锁定校验「是否已覆盖最新轮次」。
- */
-async function generateOutcomeForNode(filePath: string): Promise<{ ok: boolean; outcome?: Outcome | null; error?: string }> {
-  try {
-    const cfg = await resolveOutcomeModel();
-    if (!cfg) return { ok: false, error: '未配置模型，无法生成成果块' };
-
-    const latestContent = await fs.readFile(filePath, 'utf-8');
-    const latestParsed = parseNodeMarkdown(latestContent);
-    if (latestParsed.conversations.length === 0) return { ok: false, error: '节点无对话记录，无法生成成果块' };
-    // R-9: 已锁定节点不重写成果块（保护签字；继续对话须先解锁）
-    if (latestParsed.frontmatter.outcome_status === 'locked') return { ok: true, outcome: latestParsed.outcome ?? null };
-
-    const conversationText = latestParsed.conversations
-      .map((t, i) => {
-        const parts: string[] = [];
-        parts.push(`### 第 ${i + 1} 轮`);
-        parts.push(`用户: ${t.question}`);
-        if (t.questionAttachments && t.questionAttachments.length > 0) {
-          parts.push(`(附件: ${t.questionAttachments.map(a => a.name).join(', ')})`);
-        }
-        parts.push(`AI: ${t.answer}`);
-        return parts.join('\n');
-      })
-      .join('\n\n');
-
-    // 检查是否有用户手动修改的成果块需要保护
-    const isUserEdited = latestParsed.frontmatter.outcome_user_edited === true;
-    const existingOutcome = latestParsed.outcome;
-    const preservationNote = isUserEdited && existingOutcome
-      ? [
-          '',
-          '## 当前成果块（已被用户手动修正，以下字段内容必须保留，不可修改）',
-          renderOutcome(existingOutcome),
-          '',
-          '重要：上述成果块中的字段已被用户手动修正过。',
-          '请在提炼新的成果块时，严格保留这些手动修正的内容，',
-          '仅更新其他字段以反映新增对话信息。',
-          '尤其是用户填写过非「无」值的字段，一个字都不能改。',
-        ].join('\n')
-      : '';
-
-    const OUTCOME_EXTRACT_SYSTEM = [
-      '你是法律成果提炼器。请根据对话记录，提炼出以下 8 个字段的结构化成果块。',
-      '',
-      '输出格式（严格按以下 8 节，每节以 ### 标题开头）：',
-      '### 事实认定',
-      '### 法律依据',
-      '### 分析推理',
-      '### 结论',
-      '### 明确排除',
-      '### 适用限制',
-      '### 待确认',
-      '### 用户补充',
-      '',
-      '规则：',
-      '- 每个字段如无内容，必须写「无」而非留空或省略；不得写「（暂无）」「暂无」等变体。',
-      '- 事实认定和法律依据中的每条信息须带 [来源: 本节点] 标记（本节点对话记录中提炼；若内容来自上游节点成果块，则写 [来源: n_上游节点id#q-锚点]）。',
-      '- 法律依据中的每条须可定位（含条款号/案例编号/法释编号），无法定位的标 [待核实]。',
-      '- 结论中的每条须带确定性等级：[确定] / [倾向性] / [存疑]。',
-      '- 待确认的每条须写明所需内容与责任方（如「需用户提供xxx」）。',
-      '- 适用限制如无，写「无已知限制」。',
-      '- 用户补充始终写「无」（仅用户可填写）。',
-      '- 每条以 "- " 列表项格式书写。',
-      '- 仅输出上述 8 节内容，不要输出其他解释、引言或总结。',
-      ...(isUserEdited ? ['', '重要：当前成果块中的部分字段已被用户手动修正。你必须严格保留用户修正过的内容，不得覆盖或修改。只有用户未修正的字段（内容仅为「无」或空）才可以根据新增对话内容更新。'] : []),
-    ].join('\n');
-
-    const userPrompt = [
-      '## 对话记录',
-      '',
-      conversationText,
-      preservationNote,
-      '',
-      '请提炼成果块：',
-    ].join('\n');
-
-    const client = new OpenAI({
-      apiKey: cfg.apiKey,
-      baseURL: cfg.baseUrl,
-      timeout: 60_000,
-    });
-    const resp = await client.chat.completions.create({
-      model: cfg.model,
-      messages: [
-        { role: 'system', content: OUTCOME_EXTRACT_SYSTEM },
-        { role: 'user', content: userPrompt },
-      ],
-      stream: false,
-      temperature: 0.1,
-    });
-    const rawText = (resp.choices[0]?.message?.content || '').trim();
-    if (!rawText) return { ok: false, error: '模型未返回成果块内容' };
-
-    let newOutcome = parseOutcome(rawText);
-    if (!newOutcome) return { ok: false, error: '成果块解析失败' };
-
-    // 再次读取（生成期间文件可能已被并发修改）
-    const finalContent = await fs.readFile(filePath, 'utf-8');
-    const node = parseNodeMarkdown(finalContent);
-
-    // 合并保护：用户手动修改过的非空字段 → 保留用户值，不覆盖
-    if (node.frontmatter.outcome_user_edited && node.outcome) {
-      const record = node.outcome as unknown as Record<string, string>;
-      const newRecord = newOutcome as unknown as Record<string, string>;
-      for (const key of OUTCOME_FIELD_DEFS.map(d => d.key)) {
-        const userVal = (record[key] ?? '').trim();
-        // 用户填写过非空且非空标记「无」的字段 → 保留
-        if (userVal && userVal !== '无' && userVal !== '无已知限制' && key !== 'user_notes') {
-          newRecord[key] = record[key];
-        }
-      }
-    }
-
-    node.outcome = newOutcome as typeof node.outcome;
-    if (!node.frontmatter.outcome_status || node.frontmatter.outcome_status === 'legacy') {
-      node.frontmatter.outcome_status = 'draft';
-    }
-    // 记录成果块已覆盖的对话轮次：锁定前据此判断是否有未提炼的新对话（防竞态锁旧成果块）
-    node.frontmatter.outcome_turns = node.conversations.length;
-    node.frontmatter.updated_at = new Date().toISOString();
-    await updateNodeFile(filePath, serializeNode(node));
-    return { ok: true, outcome: newOutcome };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
+import { markStaleCascade } from '@/lib/nodes/stale';
 
 // ==================== think 分离工具 ====================
 
@@ -239,6 +77,19 @@ function stripThink(content: string): string {
 }
 
 // ==================== POST: 创建/更新节点 ====================
+
+/**
+ * 锁定操作的签署人标识（P0-2 锁定留痕）。
+ * 取本机登录用户名（白拿，不新增表单项）；取不到时记 'unknown'。
+ * 属"自称"留痕：用于事后追溯谁点的锁定，不是密码学意义上的不可否认证据。
+ */
+function localOperatorName(): string {
+  try {
+    return userInfo().username || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 
 export async function POST(request: NextRequest) {
   // body 提升到函数级：finally 中按 action 做写时维护（manifest 同步）
@@ -393,7 +244,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'append') {
-      const { node_id, question, answer, questionTime, answerTime, summary, question_attachments, title, compact_model_config, model_id, thinking_level, reasoning, process_narration, tool_calls, task_id, output_files, derive } = body;
+      const { node_id, question, answer, questionTime, answerTime, summary, question_attachments, question_references, compact_model_config, model_id, thinking_level, reasoning, process_narration, tool_calls, task_id, output_files, subagents, derive } = body;
       if (!node_id) {
         return NextResponse.json({ error: 'node_id is required' }, { status: 400 });
       }
@@ -456,6 +307,7 @@ export async function POST(request: NextRequest) {
       const updatedContent = appendConversation(content, questionText, cleanAnswer, {
         questionTime, answerTime, summary,
         questionAttachments: question_attachments,
+        questionReferences: Array.isArray(question_references) && question_references.length > 0 ? question_references : undefined,
         modelId: typeof model_id === 'string' ? model_id : undefined,
         thinkingLevel: typeof thinking_level === 'string' ? thinking_level as 'off' | 'low' | 'medium' | 'high' | 'max' : undefined,
         reasoning: reasoningText && reasoningText.trim() ? reasoningText : undefined,
@@ -463,6 +315,8 @@ export async function POST(request: NextRequest) {
         taskId: typeof task_id === 'string' && task_id.trim() ? task_id : undefined,
         toolCalls: toolCallsFinal && toolCallsFinal.length > 0 ? toolCallsFinal : undefined,
         outputFiles: outputFilesFinal && outputFilesFinal.length > 0 ? outputFilesFinal : undefined,
+        // 多智能体协作分支面板（前端流式结束后随本轮一并落盘；无成员时不写）
+        subagents: subagents && Array.isArray(subagents.members) && subagents.members.length > 0 ? subagents : undefined,
       });
       await updateNodeFile(filePath, updatedContent);
       const parsedAfterAppend = parseNodeMarkdown(updatedContent);
@@ -497,23 +351,30 @@ export async function POST(request: NextRequest) {
           //   2) settings 中第一个自定义 provider + 它的默认聊天模型
           //   3) 托管模型（无 Key）→ 跳过模型，只写硬事实直写版，游标照样推进
           let modelCfg: CompactModelConfig | null = null;
+          const cfgView = compact_model_config as Partial<CompactModelConfig> | null;
           if (
             compact_model_config &&
             typeof compact_model_config === 'object' &&
-            typeof (compact_model_config as any).apiKey === 'string' &&
-            typeof (compact_model_config as any).baseURL === 'string' &&
-            typeof (compact_model_config as any).model === 'string'
+            typeof cfgView?.apiKey === 'string' &&
+            typeof cfgView?.baseURL === 'string' &&
+            typeof cfgView?.model === 'string'
           ) {
-            modelCfg = compact_model_config as CompactModelConfig;
+            modelCfg = cfgView as CompactModelConfig;
           } else {
             try {
               const settings = await readSettingsFromFile();
-              const providers = (settings as any).providers || [];
-              const firstEnabled = providers.find((p: any) => p.enabled !== false && p.apiKey && p.baseUrl);
+              const providers = (settings as { providers?: Array<{
+                enabled?: boolean;
+                apiKey: string;
+                baseUrl: string;
+                defaultModel?: string;
+                models?: Array<{ enabled?: boolean; id?: string }>;
+              }> }).providers || [];
+              const firstEnabled = providers.find((p) => p.enabled !== false && p.apiKey && p.baseUrl);
               if (firstEnabled) {
                 const defaultModel =
                   firstEnabled.defaultModel ||
-                  firstEnabled.models?.find((m: any) => m.enabled)?.id ||
+                  firstEnabled.models?.find((m) => m.enabled)?.id ||
                   firstEnabled.models?.[0]?.id;
                 if (defaultModel) {
                   modelCfg = {
@@ -529,7 +390,7 @@ export async function POST(request: NextRequest) {
           }
 
           // 避免重复 fs 读取：用刚刚更新过的内容再 parse 一次
-          let existingParsed = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));
+          const existingParsed = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));
 
           if (modelCfg) {
             const result = await runCompaction(
@@ -598,6 +459,26 @@ export async function POST(request: NextRequest) {
         } catch (e) {
           console.warn('[nodes:append] 清除 route 折叠回声标记失败（下轮 append 会再回声一次）:', e instanceof Error ? e.message : String(e));
         }
+      }
+
+      // 成果块自动生成（后台、不阻塞本轮响应）：对话落盘后交给静默窗触发器，
+      // 等该节点闲下来再提炼一次（连续追问不逐轮调模型，见 @/lib/nodes/outcome-auto）。
+      // project.path 用于项目级调度：用户对话 > 成果块提炼 > 账本编译。
+      notifyNodeConversationAppended(filePath, project.path);
+
+      // 研究结论回流（后台、不阻塞本轮响应）：研究型轮次（联网检索/材料检索）的结论
+      // 沉淀成个人知识库条目，同样等节点闲下来再跑；非研究轮次零成本跳过。
+      notifyResearchNoteIngest(filePath, project.path);
+
+      // 入口留痕（六）：本轮工具调用 → 一行极简指标（turn / 工具 / 参数摘要 / 命中 source ids），
+      // 追加进 `.ledger/log.md`（无账本则跳过）。三个指标即对**首调**这些行计数：
+      // 读账本首调命中率、材料检索首调命中率、检索命中后真取件（fetch）比例。
+      // 纯闲聊轮（一个工具都没调）不写 —— 不进分母。失败不影响落盘。
+      try {
+        const trace = deriveTurnTrace(parsedAfterAppend.conversations);
+        if (trace) appendEntryLog(project.path, [trace]);
+      } catch (e) {
+        console.warn('[nodes:append] 入口留痕失败（不影响落盘）:', e instanceof Error ? e.message : String(e));
       }
 
       const finalParsed = parseNodeMarkdown(await fs.readFile(filePath, 'utf-8'));
@@ -683,6 +564,23 @@ export async function POST(request: NextRequest) {
       }
       if ('selectedSkills' in body) {
         node.frontmatter.selectedSkills = body.selectedSkills ?? undefined;
+      }
+      // 多智能体协作模式开关（chat 节点「Multi-agent mode」）：显式 true 开启，其余（false/null）清除
+      if ('multiAgentMode' in body) {
+        node.frontmatter.multi_agent_mode = body.multiAgentMode === true ? true : undefined;
+      }
+      // team 模式两档模型（Team 分栏「Main model」/「Worker model」）：显式字符串写盘，其余清除
+      if ('teamMainModel' in body) {
+        node.frontmatter.team_main_model = typeof body.teamMainModel === 'string' && body.teamMainModel ? body.teamMainModel : undefined;
+      }
+      if ('teamWorkerModel' in body) {
+        node.frontmatter.team_worker_model = typeof body.teamWorkerModel === 'string' && body.teamWorkerModel ? body.teamWorkerModel : undefined;
+      }
+      // 节点关联的团队 id 清单（团队工作台）：显式数组时写盘（空数组=解绑全部），null/undefined 清除
+      if ('teamIds' in body) {
+        node.frontmatter.team_ids = Array.isArray(body.teamIds)
+          ? (body.teamIds as unknown[]).map((x) => String(x))
+          : undefined;
       }
       node.frontmatter.updated_at = new Date().toISOString();
       const updatedContent = serializeNode(node);
@@ -791,7 +689,7 @@ export async function POST(request: NextRequest) {
     // ===== v3：锁定 / 解锁（规格 v3 §六 R-1~R-11）=====
 
     if (action === 'lock') {
-      const { node_id, max_length, force } = body;
+      const { node_id, max_length, force, locked_by } = body;
       if (!node_id) {
         return NextResponse.json({ error: 'node_id is required' }, { status: 400 });
       }
@@ -844,11 +742,32 @@ export async function POST(request: NextRequest) {
         }, { status: 400 });
       }
 
-      // R-10: 锁定即签字，outcome_version 递增
+      // R-10: 锁定即签字，outcome_version 递增；P0-a：同时 push 节点侧锁定历史（外部台账的镜像）
       const now = new Date().toISOString();
+      const prevVersion = node.frontmatter.outcome_version ?? 0;
+      const prevHash = node.frontmatter.outcome_content_hash;
+      // P0-2 锁定非否认要素：签署人留痕（自称）——与外部台账 by 同源
+      const signer = typeof locked_by === 'string' && locked_by.trim() ? locked_by.trim() : localOperatorName();
+      const contentHash = outcomeContentHash(node.outcome);
       node.frontmatter.outcome_status = 'locked';
       node.frontmatter.outcome_locked_at = now;
-      node.frontmatter.outcome_version = (node.frontmatter.outcome_version ?? 0) + 1;
+      node.frontmatter.outcome_version = prevVersion + 1;
+      // P0-2 锁定非否认要素：签署人留痕 + 所签内容哈希（注入/继承前据此校验内容未被改）
+      node.frontmatter.outcome_locked_by = signer;
+      node.frontmatter.outcome_content_hash = contentHash;
+      // P0-a 追加式锁定历史（节点侧镜像）：每次锁定/重锁 push 一条，随 serializeNode 一起落盘
+      node.frontmatter.outcome_lock_history = [
+        ...(node.frontmatter.outcome_lock_history ?? []),
+        {
+          version: prevVersion + 1,
+          hash: contentHash,
+          by: signer,
+          at: now,
+          ...(prevHash ? { prev: prevHash } : {}),
+        },
+      ];
+      // 重新签字 → 旧的前提失效原因作废
+      delete node.frontmatter.outcome_stale_reason;
       // 强制锁定标记：校验未通过但用户自主决定 → 记录；校验通过 → 清除
       if (forceLock) {
         node.frontmatter.outcome_force_locked = true;
@@ -859,17 +778,37 @@ export async function POST(request: NextRequest) {
       const updatedContent = serializeNode(node);
       await updateNodeFile(filePath, updatedContent);
 
-      // R-10: 全部直接下游节点标记 stale（有边才标记，首次锁定无出边则无副作用）
+      // P0-a：向项目级锁定台账（.ledger/locks.md）追加一条锚点记录。
+      // 台账是锁定的**外部锚点**：与节点侧 outcome_lock_history 双向比对，「正文与哈希被一并重写」也能检出。
+      // 放在写盘之后 —— 写盘失败（校验/IO 报错）不应在台账里留下从未生效的锁定记录。
+      // 追加内部已 try/catch + console.warn，写失败不阻断锁定。
+      appendLockRecord(project.path, {
+        at: now,
+        action: forceLock ? 'force_lock' : prevVersion > 0 ? 'relock' : 'lock',
+        nodeId: node_id,
+        version: prevVersion + 1,
+        hash: contentHash,
+        by: signer,
+        prevHash,
+      });
+
+      // R-10: 全部下游节点级联标记 stale（含原因链；有边才标记，首次锁定无出边则无副作用）
       let staleChildren = 0;
       try {
         const dbPath = join(project.path, PROJECT_DB_FILENAME);
         const db = await initDb(dbPath);
         const edges = await listActiveEdges(db, project.id);
-        for (const edge of edges) {
-          if (edge.from_node_id !== node_id) continue;
-          await markStale(edge.to_node_id, project.path);
-          staleChildren++;
-        }
+        staleChildren = await markStaleCascade(
+          edges
+            .filter((edge) => edge.from_node_id === node_id)
+            .map((edge) => ({
+              nodeId: edge.to_node_id,
+              upstreamId: node_id,
+              upstreamTitle: node.frontmatter.title,
+              cause: 'relocked' as const,
+            })),
+          project,
+        );
       } catch (err) {
         console.warn('[nodes:lock] 标记下游 stale 失败:', err instanceof Error ? err.message : String(err));
       }
@@ -885,7 +824,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'unlock') {
-      const { node_id } = body;
+      const { node_id, locked_by } = body;
       if (!node_id) {
         return NextResponse.json({ error: 'node_id is required' }, { status: 400 });
       }
@@ -901,21 +840,43 @@ export async function POST(request: NextRequest) {
       node.frontmatter.outcome_status = 'draft';
       delete node.frontmatter.outcome_locked_at;
       delete node.frontmatter.outcome_force_locked;
+      // P0-2：outcome_locked_by / outcome_content_hash 解锁时**保留**——它们是历史签署证据
+      // （谁签的、签的是哪一份），重锁时被新值覆盖；删掉就等于抹掉上一次签字的痕迹。
+      // outcome_lock_history 同样保留（只增不减的节点侧镜像，不删历史）。
+      // P0-a：解锁也在项目级台账追加一条（append-only 留痕），哈希/签署人用保留中的旧值。
+      appendLockRecord(project.path, {
+        at: new Date().toISOString(),
+        action: 'unlock',
+        nodeId: node_id,
+        version: node.frontmatter.outcome_version ?? 0,
+        hash: node.frontmatter.outcome_content_hash ?? '-',
+        by:
+          (typeof locked_by === 'string' && locked_by.trim()) ||
+          node.frontmatter.outcome_locked_by ||
+          localOperatorName(),
+        prevHash: node.frontmatter.outcome_content_hash,
+      });
       node.frontmatter.updated_at = new Date().toISOString();
       const updatedContent = serializeNode(node);
       await updateNodeFile(filePath, updatedContent);
 
-      // 解锁时标记直接下游为 stale（上游成果块可能被修改）
+      // 解锁时级联标记下游为 stale（上游成果块可能被修改）
       let staleChildren = 0;
       try {
         const dbPath = join(project.path, PROJECT_DB_FILENAME);
         const db = await initDb(dbPath);
         const edges = await listActiveEdges(db, project.id);
-        for (const edge of edges) {
-          if (edge.from_node_id !== node_id) continue;
-          await markStale(edge.to_node_id, project.path);
-          staleChildren++;
-        }
+        staleChildren = await markStaleCascade(
+          edges
+            .filter((edge) => edge.from_node_id === node_id)
+            .map((edge) => ({
+              nodeId: edge.to_node_id,
+              upstreamId: node_id,
+              upstreamTitle: node.frontmatter.title,
+              cause: 'unlocked' as const,
+            })),
+          project,
+        );
       } catch (err) {
         console.warn('[nodes:unlock] 标记下游 stale 失败:', err instanceof Error ? err.message : String(err));
       }
@@ -1066,6 +1027,11 @@ export async function POST(request: NextRequest) {
           if (t.questionAttachments && t.questionAttachments.length > 0) {
             parts.push(`(附件: ${t.questionAttachments.map(a => a.name).join(', ')})`);
           }
+          // 本轮引用的项目材料路径（成果块要写 `[来源: 材料:…]` 时须有真实路径，防模型编造）
+          const materialRefs = (t.questionReferences ?? [])
+            .filter((r) => r.path && r.path.startsWith('materials/'))
+            .map((r) => r.path as string);
+          if (materialRefs.length > 0) parts.push(`(本轮引用材料: ${materialRefs.join(', ')})`);
           parts.push(`AI: ${t.answer}`);
           return parts.join('\n');
         })
@@ -1102,7 +1068,8 @@ export async function POST(request: NextRequest) {
         '',
         '规则：',
         '- 每个字段如无内容，必须写「无」而非留空或省略；不得写「（暂无）」「暂无」等变体。',
-        '- 事实认定和法律依据中的每条信息须带 [来源: 本节点] 标记（本节点对话记录中提炼；若内容来自上游节点成果块，则写 [来源: n_上游节点id#q-锚点]）。',
+        '- 事实认定和法律依据中的每条信息必须带来源标记，三种之一：本节点对话提炼 → [来源: 本节点]；引用上游节点成果块 → [来源: n_上游节点id#q-锚点]；依据项目材料原文（材料索引命中或 read_attachment 读到） → [来源: 材料:materials/相对路径#p页码]。',
+        '- 材料出处只能用「本轮引用材料」列出的路径或对话中出现过的真实路径，页码用检索命中的真实页码；没有页码时省略 #p页码，直接写 [来源: 材料:materials/相对路径]。禁止编造路径与页码。',
         '- 法律依据中的每条须可定位（含条款号/案例编号/法释编号），无法定位的标 [待核实]。',
         '- 结论中的每条须带确定性等级：[确定] / [倾向性] / [存疑]。',
         '- 待确认的每条须写明所需内容与责任方（如「需用户提供xxx」）。',
@@ -1155,9 +1122,16 @@ export async function POST(request: NextRequest) {
 
       // 6. 解析 LLM 输出为 Outcome
       // 在输出前加 ## 成果块 标题以便 parseOutcome 解析
-      const newOutcome = parseOutcome(rawText);
-      if (!newOutcome) {
+      const parsedOutcome = parseOutcome(rawText);
+      if (!parsedOutcome) {
         return NextResponse.json({ error: '无法从模型输出中解析成果块' }, { status: 500 });
+      }
+
+      // R-3 补强：材料来源页码必须落在该文件索引的可寻址页集合内，不命中降级为「#p页码待核实」
+      const { checkOutcomeSourcePages } = await import('@/lib/nodes/outcome-source-check');
+      const { outcome: newOutcome, degraded: degradedPages } = await checkOutcomeSourcePages(parsedOutcome, project.path);
+      if (degradedPages > 0) {
+        console.warn(`[nodes:extract_outcome] R-3 页码校验：${degradedPages} 处材料来源页码不在索引命中页内，已降级为「页码待核实」`);
       }
 
       // 7. 写入 .md 文件
@@ -1280,37 +1254,113 @@ async function removeNodeDiskArchive(
   await fs.unlink(filePath);
 
   // 同步删除该节点的附件目录（上传时目录名为 {node_id前4位}_{标题}，与 node_id 不一致，需从附件路径精确解析）
+  // 附件自 2026-09 起物理统一写入 materials/ 下，历史附件仍在 attachments/（更早为 assets/）；
   // 解析失败不阻断清理：兜底 nodeId 与前端上报的目录仍会执行
-  const folderNames = new Set<string>();
+  const legacyFolderNames = new Set<string>();
+  const materialFolderNames = new Set<string>();
+  const shortId = nodeId.slice(0, 4);
+  /** materials/ 下的附件目录命名规则：{nodeId前4位}_{标题}，无标题时直接为 nodeId。
+   *  用户自建分组不满足此前缀 → 不删，避免误删用户已手动归类的资料。 */
+  const isAttachmentFolder = (name: string): boolean => name === nodeId || name.startsWith(`${shortId}_`);
   try {
     const parsed = parseNodeMarkdown(content);
     for (const turn of parsed.conversations || []) {
       for (const att of turn.questionAttachments || []) {
-        // path 形如 attachments/{folder}/{fileName}（兼容旧格式 assets/）
-        const m = att.path?.match(/^(?:attachments|assets)\/([^/]+)\//);
-        if (m) folderNames.add(m[1]);
+        // path 形如 materials/{folder}/{fileName}（兼容旧格式 attachments/ 与更早的 assets/）
+        const legacy = att.path?.match(/^(?:attachments|assets)\/([^/]+)\//);
+        if (legacy) legacyFolderNames.add(legacy[1]);
+        const material = att.path?.match(/^materials\/([^/]+)\//);
+        if (material && isAttachmentFolder(material[1])) materialFolderNames.add(material[1]);
       }
     }
   } catch {
     // 解析失败时忽略，仍保留兜底目录清理
   }
   // 兜底：无标题时目录名可能直接等于 node_id
-  folderNames.add(nodeId);
+  legacyFolderNames.add(nodeId);
+  materialFolderNames.add(nodeId);
   // 合并前端上报的附件目录（覆盖"附件未持久化到 md 即删除节点"的场景）
   if (Array.isArray(extraAttachmentFolders)) {
     for (const f of extraAttachmentFolders) {
-      if (typeof f === 'string' && f) folderNames.add(f);
+      if (typeof f !== 'string' || !f) continue;
+      legacyFolderNames.add(f);
+      if (isAttachmentFolder(f)) materialFolderNames.add(f);
     }
   }
   const removedAttachmentDirs: string[] = [];
-  for (const folder of folderNames) {
+  // 删除前登记目录内文件的内容 hash：附件不写 manifest，删除后其独享的 .materials-index/<hash>/ 需据此回收
+  const removedContentHashes: string[] = [];
+  const collectHashes = async (abs: string) => {
+    try {
+      const { collectDirContentHashes } = await import('@/lib/materials/indexer');
+      return await collectDirContentHashes(abs);
+    } catch {
+      return []; // 登记失败不影响删除
+    }
+  };
+  for (const folder of legacyFolderNames) {
     try {
       const abs = join(project.path, 'attachments', folder);
+      removedContentHashes.push(...(await collectHashes(abs)));
       await fs.rm(abs, { recursive: true, force: true });
       removedAttachmentDirs.push(abs);
     } catch {
       // 单个目录删除失败时忽略
     }
+  }
+  // materials 下的附件目录可能已被用户拖入自建分组 → 根层命中失败时，在 materials 子树中按目录名兜底查找
+  let materialDeepDirs: string[] | null = null;
+  const findMaterialDeepDirs = async (): Promise<string[]> => {
+    if (materialDeepDirs) return materialDeepDirs;
+    const found: string[] = [];
+    const walk = async (dirAbs: string, relPrefix: string) => {
+      let entries: import('node:fs').Dirent[];
+      try {
+        entries = await fs.readdir(dirAbs, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
+        const rel = relPrefix ? `${relPrefix}/${ent.name}` : ent.name;
+        if (isAttachmentFolder(ent.name)) found.push(rel);
+        await walk(join(dirAbs, ent.name), rel);
+      }
+    };
+    await walk(join(project.path, 'materials'), '');
+    materialDeepDirs = found;
+    return found;
+  };
+  for (const folder of materialFolderNames) {
+    // 解析实际相对路径：根层优先；未命中（已被拖入分组）→ 在子树中兜底匹配同名附件目录
+    const rels: string[] = [];
+    if (await fs.stat(join(project.path, 'materials', folder)).catch(() => null)) {
+      rels.push(folder);
+    } else {
+      rels.push(...(await findMaterialDeepDirs()).filter((rel) => rel.split('/').pop() === folder));
+    }
+    for (const rel of rels) {
+      try {
+        const abs = join(project.path, 'materials', rel);
+        removedContentHashes.push(...(await collectHashes(abs)));
+        await fs.rm(abs, { recursive: true, force: true });
+        removedAttachmentDirs.push(abs);
+        // 附件被 read_attachment 读取过时会写入 materials manifest，随删除同步回收其条目
+        try {
+          const { removeMaterialsIndex } = await import('@/lib/materials/indexer');
+          await removeMaterialsIndex(project.path, rel, true);
+        } catch { /* 索引回收失败不影响删除 */ }
+      } catch {
+        // 单个目录删除失败时忽略
+      }
+    }
+  }
+  // 回收附件独享的内容索引（仍被 materials manifest 或其他附件引用的 hash 会保留）
+  if (removedContentHashes.length > 0) {
+    try {
+      const { pruneAttachmentIndexes } = await import('@/lib/materials/indexer');
+      await pruneAttachmentIndexes(project.path, removedContentHashes);
+    } catch { /* 索引回收失败不影响删除 */ }
   }
   // 联动清理：附件目录内的文档（曾被 DocEditor 打开批注的 md/docx）随节点删除一并清理
   if (removedAttachmentDirs.length > 0) {
@@ -1425,7 +1475,21 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: '节点文件不存在: ' + nodeId }, { status: 404 });
       }
       const content = await fs.readFile(filePath, 'utf-8');
-      return NextResponse.json({ success: true, content });
+      // P0-a：把节点侧锁定历史（frontmatter 镜像）与「项目级台账里是否存在该节点的锚点」
+      // 一并回传，供 OutcomeEditor 展示双锚点状态；既有 content 原样保留。
+      const parsedNode = (() => {
+        try {
+          return parseNodeMarkdown(content);
+        } catch {
+          return null; // 解析失败（frontmatter 残缺）→ 视为无历史，不影响 raw 读取
+        }
+      })();
+      return NextResponse.json({
+        success: true,
+        content,
+        lock_history: parsedNode?.frontmatter.outcome_lock_history ?? [],
+        lock_anchored: !!latestLockOf(project.path, nodeId),
+      });
     }
 
     if (action === 'version') {
@@ -1503,6 +1567,8 @@ export async function GET(request: NextRequest) {
                 mood: undefined as never,
                 tags: node.frontmatter.tags,
                 outcome_status: node.frontmatter.outcome_status,
+                // 失效原因链（stale 期间有意义）：卡片悬浮提示据此展示「哪条前提已废」
+                outcome_stale_reason: node.frontmatter.outcome_stale_reason,
                 position_x: node.frontmatter.position_x,
                 position_y: node.frontmatter.position_y,
                 sandbox_app_id: node.frontmatter.sandbox_app_id,
@@ -1516,6 +1582,13 @@ export async function GET(request: NextRequest) {
                 annotations: node.annotations,
                 enabledMcpIds: node.frontmatter.enabledMcpIds,
                 selectedSkills: node.frontmatter.selectedSkills,
+                // 多智能体协作模式开关（frontmatter multi_agent_mode）
+                multiAgentMode: node.frontmatter.multi_agent_mode === true ? true : undefined,
+                // team 模式两档模型（frontmatter team_main_model / team_worker_model）
+                teamMainModel: node.frontmatter.team_main_model,
+                teamWorkerModel: node.frontmatter.team_worker_model,
+                // 节点关联的团队 id 清单（frontmatter team_ids）：团队工作台据此列出本会话的团队
+                teamIds: node.frontmatter.team_ids,
                 // 压缩游标：已压缩轮次数（前端据此在请求时跳过已压缩的历史，真正减小上下文）
                 compacted_until: node.frontmatter.memory_compacted_until,
               };
@@ -1552,6 +1625,8 @@ export async function GET(request: NextRequest) {
         tags: node.frontmatter.tags,
         outcome_status: node.frontmatter.outcome_status,
         outcome_force_locked: node.frontmatter.outcome_force_locked,
+        // 失效原因链（UI 据它在卡片悬浮提示与成果块面板展示「哪条前提已废」）
+        outcome_stale_reason: node.frontmatter.outcome_stale_reason,
         sandbox_app_id: node.frontmatter.sandbox_app_id,
         summary: node.summary,
         conversations: node.conversations,

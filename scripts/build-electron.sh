@@ -134,11 +134,11 @@ echo "✅ static 资源已就绪: $(ls "$_STATIC_CHUNKS" | wc -l | tr -d ' ') ch
 # 内置技能（assets/skills）随包分发：打包版 cwd 为 next-standalone，loader 读取 ./assets/skills
 cp -R "$PROJECT_DIR/assets/skills" "$APP_DIR/Contents/Resources/next-standalone/assets/skills"
 
-# 启动欢迎窗口南瓜表情包 logo（每次启动随机更换）
-if [ -d "$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新" ]; then
-    mkdir -p "$APP_DIR/Contents/Resources/splash-logos"
-    cp "$PROJECT_DIR/assets/南瓜表情包_裁切/去除背景_新/"*.png "$APP_DIR/Contents/Resources/splash-logos/" 2>/dev/null || true
-    echo "✅ Splash logos copied (南瓜表情包)"
+# 内置头像（随包分发，供头像池内置项使用）
+if [ -d "$PROJECT_DIR/assets/avatars" ]; then
+    mkdir -p "$APP_DIR/Contents/Resources/avatars"
+    cp "$PROJECT_DIR/assets/avatars/"*.png "$APP_DIR/Contents/Resources/avatars/" 2>/dev/null || true
+    echo "✅ Built-in avatars copied"
 fi
 
 # Replace Info.plist

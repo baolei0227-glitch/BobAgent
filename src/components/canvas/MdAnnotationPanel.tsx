@@ -240,7 +240,7 @@ export function MdAnnotationPanel({
               boxShadow: view === 'revisions' ? '0 1px 2px rgba(23,23,23,0.1)' : 'none',
               color: view === 'revisions' ? 'var(--primary)' : 'var(--ink-muted)',
             }}
-            title="Revisions view（修订前 → 修订后）"
+            title="Revisions view (before → after)"
           >
             <FileDiff className="h-3 w-3" />
             修订{totalPending > 0 ? ` ${totalPending}` : ''}
@@ -274,7 +274,7 @@ export function MdAnnotationPanel({
             tone="neutral"
             size="xs"
             className="flex-1"
-            title="按批注意见逐条修改（AI 结合上下文修改批注内容，结果进修订面板可回退）"
+            title="Revise all per annotations (AI edits with context; results go to Revisions for review/rollback)"
           >
             {revising ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
             {revising ? 'Revising…' : '按批注修订'}
@@ -386,7 +386,7 @@ export function MdAnnotationPanel({
                       disabled={rewritingIndex >= 0 && a.id !== rewritingId}
                       className={`flex items-center gap-1 rounded px-1 py-0.5 text-10 font-medium transition-opacity hover:bg-[var(--paper-hover)] ${a.id === rewritingId ? '' : 'opacity-0 group-hover:opacity-100'}`}
                       style={{ color: 'var(--primary)' }}
-                      title="AI 按批注意见修改该内容（结合上下文），结果进修订面板可审阅/回退"
+                      title="AI revises this per the annotation (context-aware; result goes to Revisions for review/rollback)"
                     >
                       {a.id === rewritingId ? (
                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -465,7 +465,7 @@ export function MdAnnotationPanel({
                     <button
                       onClick={() => onSelectRound(r.id)}
                       className="flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
-                      title={`${ts.toLocaleString()} — 点击切换文档到该轮状态`}
+                      title={`${ts.toLocaleString()} — click to switch the document to this round`}
                     >
                       <span
                         className="flex h-5 w-7 shrink-0 items-center justify-center rounded text-10 font-bold"
@@ -540,7 +540,7 @@ export function MdAnnotationPanel({
                               backgroundColor: allAccepted || allRejected ? 'var(--paper-soft)' : 'var(--paper)',
                               opacity: allAccepted || allRejected ? 0.55 : 1,
                             }}
-                            title="点击定位到正文中被修改处"
+                            title="Click to jump to the change in the document"
                           >
                             <div className="mb-0.5 flex items-center justify-between">
                               <span className="text-10 font-medium uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>

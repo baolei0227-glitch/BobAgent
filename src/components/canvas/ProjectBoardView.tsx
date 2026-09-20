@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, Search, LayoutGrid, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText } from 'lucide-react';
+import { FolderOpen, Search, LayoutGrid, List, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText } from 'lucide-react';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { localDateTimeToIso } from '@/lib/utils';
@@ -103,6 +103,9 @@ type SortKey = 'recent' | 'created' | 'nodes' | 'name';
 
 /** 分组方式 */
 type GroupMode = 'none' | 'category' | 'tag';
+
+/** 视图模式：网格卡片（默认）/ 列表 */
+type BoardViewMode = 'grid' | 'list';
 
 interface ProjectBoardViewProps {
   open: boolean;
@@ -718,6 +721,8 @@ function TodoPopup({
 /** 项目看板：全屏大视图，卡片网格总览所有项目（含归档/垃圾桶），支持搜索与状态筛选 */
 /** 启动时是否自动打开项目面板（Projects 看板）的持久化开关；默认开启（保留历史启动行为） */
 export const LAUNCH_BOARD_KEY = 'bobwork.board-open-on-launch';
+/** 视图模式（网格/列表）持久化键：属于用户偏好，不随面板每次打开重置 */
+const BOARD_VIEW_KEY = 'bobwork.board-view';
 
 export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
   // “Open on launch”开关：开 = 每次打开 BobWork 从项目面板进入；关 = 直接进入上次关闭时的项目
@@ -736,6 +741,14 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
   const [catFilter, setCatFilter] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('created');
   const [groupBy, setGroupBy] = useState<GroupMode>('none');
+  // 视图模式：网格卡片 / 列表（读写 localStorage；打开面板时重置筛选与排序，但保留视图偏好）
+  const [viewMode, setViewMode] = useState<BoardViewMode>(() => {
+    try { return localStorage.getItem(BOARD_VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; }
+  });
+  const setViewModePersist = (v: BoardViewMode) => {
+    setViewMode(v);
+    try { localStorage.setItem(BOARD_VIEW_KEY, v); } catch { /* ignore */ }
+  };
   const [selected, setSelected] = useState<BoardProject | null>(null);
   const [editCategory, setEditCategory] = useState('');
   // 编辑项目：两个独立标签输入框（最多 2 个）
@@ -1743,6 +1756,33 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
           ))}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          {/* 视图切换：网格卡片 / 列表（偏好持久化） */}
+          <div
+            className="flex shrink-0 items-center gap-0.5 rounded-lg p-0.5"
+            style={{ border: '1px solid var(--border)' }}
+          >
+            {([
+              { key: 'grid' as const, label: 'Grid view', Icon: LayoutGrid },
+              { key: 'list' as const, label: 'List view', Icon: List },
+            ]).map(({ key, label, Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setViewModePersist(key)}
+                title={label}
+                aria-label={label}
+                aria-pressed={viewMode === key}
+                className="rounded-md p-1 transition-colors"
+                style={
+                  viewMode === key
+                    ? { color: 'var(--primary-strong, #5b48d8)', background: 'color-mix(in oklab, var(--primary, #7c5cff) 12%, transparent)' }
+                    : { color: 'var(--ink-faint)' }
+                }
+              >
+                <Icon className="h-3.5 w-3.5" />
+              </button>
+            ))}
+          </div>
           <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--ink-faint)' }}>
             <span>Sort</span>
             <select
@@ -1853,7 +1893,17 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
             </div>
           ) : (
             <div className="flex flex-col gap-5">
-              {groups.map((g) => (
+              {groups.map((g) => {
+                // 每项的展示态：网格与列表两种视图共用同一份推导，避免两处逻辑漂移
+                const items = g.items.map((p) => ({
+                  p,
+                  isCurrent: p.id === currentId,
+                  isArchived: !!p.archived,
+                  isTrashed: !!p.trashed,
+                  isSelected: selected?.id === p.id,
+                  breath: !p.archived && !p.trashed && p.hearing_date ? hearingDaysLeft(p.hearing_date) : -1,
+                }));
+                return (
                 <section key={g.key}>
                   {groupBy !== 'none' && (
                     <div
@@ -1871,14 +1921,9 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                       </span>
                     </div>
                   )}
+                  {viewMode === 'grid' ? (
                   <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
-                    {g.items.map((p) => {
-                      const isCurrent = p.id === currentId;
-                      const isArchived = !!p.archived;
-                      const isTrashed = !!p.trashed;
-                      const isSelected = selected?.id === p.id;
-                      const breath = !isArchived && !isTrashed && p.hearing_date ? hearingDaysLeft(p.hearing_date) : -1;
-                      return (
+                    {items.map(({ p, isCurrent, isArchived, isTrashed, isSelected, breath }) => (
                         <div
                           key={p.id}
                           role="button"
@@ -2035,17 +2080,194 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                               }}
                               title={isArchived || isTrashed ? 'Restore to open' : 'Open project'}
                               className="shrink-0 rounded-md px-2.5 py-0.5 text-11 font-semibold transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-40"
-                              style={{ color: '#fff', background: 'var(--primary-strong, #5b48d8)' }}
+                              style={
+                                /* 不选中：透明底 + 无边框 + 淡灰字（与左侧统计/时间同色）；卡片被选中时改为浅灰底深色文字 + 黑色描边 */
+                                isSelected
+                                  ? { color: 'var(--ink)', background: 'var(--paper-hover, #e8e8ec)', border: '1px solid #000' }
+                                  : { color: 'var(--ink-faint)' }
+                              }
                             >
                               Open
                             </button>
                           </div>
                         </div>
-                      );
-                    })}
+                    ))}
                   </div>
+                  ) : (
+                  /* 列表视图：一行一项目，列信息与卡片对齐（筛选/排序/分组与网格共用同一份数据） */
+                  <div className="flex flex-col gap-1.5">
+                    {items.map(({ p, isCurrent, isArchived, isTrashed, isSelected, breath }) => (
+                      <div
+                        key={p.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          // 与卡片一致：拖选文字时不打开详情，保证文字可正常复制
+                          if (hasTextSelection()) return;
+                          openDetail(p);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            openDetail(p);
+                          }
+                        }}
+                        title="Open details"
+                        className="board-row group flex items-center gap-3 rounded-lg px-3 py-2 text-left"
+                        data-current={isCurrent}
+                        data-selected={isSelected}
+                        style={{
+                          // 状态以左侧色条表达（列表行不使用卡片阴影/上移）
+                          borderWidth: '1px',
+                          borderStyle: 'solid',
+                          borderColor: 'var(--border)',
+                          borderLeftWidth: '3px',
+                          borderLeftColor: isCurrent
+                            ? '#2fa97a'
+                            : isSelected
+                              ? 'var(--primary-strong, #5b48d8)'
+                              : isTrashed
+                                ? 'var(--danger, #e8463a)'
+                                : isArchived
+                                  ? 'var(--ink-faint)'
+                                  : 'transparent',
+                          // 仅当前/选中态写内联底色（普通行底色交给 CSS，保证 :hover 生效）
+                          ...(isCurrent
+                            ? { background: 'color-mix(in oklab, #2fa97a 8%, var(--paper, #ffffff))' }
+                            : isSelected
+                              ? { background: 'color-mix(in oklab, var(--primary, #7c5cff) 6%, var(--paper, #ffffff))' }
+                              : {}),
+                          opacity: isTrashed ? 0.6 : 1,
+                        }}
+                      >
+                        {/* 名称 + 当前/归档/回收站徽标 + 开庭徽标 + 恢复操作 */}
+                        <span className="flex min-w-0 flex-1 items-center gap-2">
+                          <span className="min-w-0 truncate text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                            {p.name}
+                          </span>
+                          {isCurrent && (
+                            <span
+                              className="shrink-0 rounded-full px-1.5 py-px text-10 font-semibold"
+                              style={{ color: 'var(--primary-strong, #5b48d8)', background: 'color-mix(in oklab, var(--primary, #7c5cff) 12%, transparent)' }}
+                            >
+                              Current
+                            </span>
+                          )}
+                          {!isArchived && !isTrashed && p.hearing_date && (
+                            <span
+                              title={`开庭：${p.hearing_date}`}
+                              className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-10 font-semibold"
+                              style={{
+                                color: 'var(--danger, #e8463a)',
+                                border: '1px dashed var(--danger, #e8463a)',
+                                ...(breath >= 0
+                                  ? { animation: `court-breathe-${breath} var(--court-dur, ${BREATH_DUR[breath]}s) ease-in-out infinite` }
+                                  : {}),
+                              }}
+                            >
+                              <CalendarDays className="h-3 w-3 shrink-0" />
+                              {hearingLabel(p.hearing_date)} 开庭
+                            </span>
+                          )}
+                          {(isArchived || isTrashed) && (
+                            <span
+                              className="shrink-0 rounded-full px-2 py-0.5 text-10 font-medium"
+                              style={{
+                                color: isTrashed ? 'var(--danger, #e8463a)' : 'var(--ink-muted)',
+                                background: isTrashed
+                                  ? 'color-mix(in oklab, var(--danger, #e8463a) 10%, transparent)'
+                                  : 'var(--paper-hover, #f0f0f3)',
+                              }}
+                            >
+                              {isTrashed ? 'Trash' : 'Archived'}
+                            </span>
+                          )}
+                          {(isArchived || isTrashed) && (
+                            <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  mutateProject(p.id, isTrashed ? 'restore' : 'unarchive');
+                                }}
+                                title={isTrashed ? 'Restore project' : 'Unarchive project'}
+                                className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
+                                style={{ color: 'var(--ink-muted)' }}
+                              >
+                                <ArchiveRestore className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          )}
+                        </span>
+                        {/* 分类 + 标签（窄屏隐藏；详情侧栏仍可查看与编辑） */}
+                        <span className="hidden shrink-0 items-center gap-1.5 lg:flex">
+                          <span
+                            className="rounded px-1.5 py-px text-11 font-medium"
+                            style={{ color: 'var(--ink-muted)', background: 'var(--paper-hover, #f0f0f3)' }}
+                          >
+                            {p.category || 'Uncategorized'}
+                          </span>
+                          {(p.tags || []).map((t) => (
+                            <span key={t} className="rounded-full px-1.5 py-px text-10" style={{ color: 'var(--ink-faint)', border: '1px solid var(--border)' }}>
+                              {t}
+                            </span>
+                          ))}
+                        </span>
+                        {/* 节点数 + Sticky 未完成待办 */}
+                        <span className="flex shrink-0 items-center gap-2.5 text-11" style={{ color: 'var(--ink-faint)' }}>
+                          <span className="flex items-center gap-1">
+                            <MessageSquareText className="h-3 w-3" />
+                            ×{p.node_count ?? 0}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openTodos(p);
+                            }}
+                            title="View sticky todos"
+                            className={`flex items-center gap-1 rounded px-1 py-px transition-colors hover:bg-[var(--paper-hover)]${(p.todo_count ?? 0) > 0 ? ' todo-breathing' : ''}`}
+                            style={{
+                              color: (p.todo_count ?? 0) > 0 ? 'var(--danger, #e8463a)' : 'var(--ink-faint)',
+                              ...((p.todo_count ?? 0) >= 3 ? { animationDuration: '1.1s' } : {}),
+                            }}
+                          >
+                            <ListTodo className="h-3 w-3" />
+                            {p.todo_count ?? 0}
+                          </button>
+                        </span>
+                        {/* 最近使用（窄屏隐藏） */}
+                        <span className="hidden w-[96px] shrink-0 text-right text-11 md:block" style={{ color: 'var(--ink-faint)' }}>
+                          {relTime(p.last_accessed_at || p.created_at)}
+                        </span>
+                        {/* 打开/进入项目（当前项目点击返回画布） */}
+                        <button
+                          type="button"
+                          disabled={isArchived || isTrashed}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (isArchived || isTrashed) return;
+                            if (isCurrent) onClose();
+                            else void switchTo(p.id);
+                          }}
+                          title={isArchived || isTrashed ? 'Restore to open' : 'Open project'}
+                          className="shrink-0 rounded-md px-2.5 py-0.5 text-11 font-semibold transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-40"
+                          style={
+                            /* 不选中：透明底 + 无边框 + 淡灰字（与左侧统计/时间同色）；行被选中时改为浅灰底深色文字 + 黑色描边 */
+                            isSelected
+                              ? { color: 'var(--ink)', background: 'var(--paper-hover, #e8e8ec)', border: '1px solid #000' }
+                              : { color: 'var(--ink-faint)' }
+                          }
+                        >
+                          Open
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  )}
                 </section>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

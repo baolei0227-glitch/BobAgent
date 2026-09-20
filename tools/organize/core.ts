@@ -10,27 +10,34 @@ import { extname, join } from 'path';
 
 import { extract } from './extract';
 import {
-  LOW_CONFIDENCE,
   PENDING_DIR,
-  classifyImage,
-  classifyText,
+  classifyPage,
   resolveModel,
+  reviewPage,
+  type ClassifyOptions,
   type FileInsight,
+  type PageContent,
   type ResolvedModel,
+  type Verdict,
 } from './model';
 import {
   DEFAULT_NAMING,
   buildTargetName,
   formatVersion,
+  reconcileCorrections,
   resolveVersionIndex,
   safeDirName,
   shouldSkip,
+  type Correction,
   type MoveRecord,
   type NamingRule,
 } from './naming';
 
 /** 新写入的文件需静置多久才处理（毫秒），避免读到写一半的文件 */
 export const SETTLE_MS = 3000;
+
+/** few-shot 注入上限：人工纠正簿只取最近这么多条写进提示词（多了会淹没本次内容） */
+const CORRECTION_FEWSHOT = 8;
 
 /** 单个文件的去向规划（尚未落盘） */
 export interface Plan {
@@ -40,13 +47,17 @@ export interface Plan {
   category: string;
   topic: string;
   version: string;
-  confidence: number;
-  modelName: string;
+  /** 判定档：confident=确定 / unsure=存疑 / unknown=无法判断 */
+  verdict: Verdict;
+  /** 是否经过第二轮复核（首轮存疑才复核） */
+  reviewed: boolean;
+  /** 判定依据或失败原因（写入日志，供人工复核） */
   note: string;
+  modelName: string;
 }
 
 /**
- * 主题兜底：解析失败/低置信度时用原文件名当主题。
+ * 主题兜底：判定不出/解析失败时用原文件名当主题。
  * 先剥掉文件名里的日期、版本标识与旧版命名残留，只留核心词，
  * 使兜底结果同样符合当前命名规范。
  */
@@ -85,7 +96,14 @@ async function isSettled(filePath: string): Promise<boolean> {
   }
 }
 
-/** 规划单个文件的去向（不落盘）；naming = 设置里的命名规则（缺省用默认形态） */
+/**
+ * 规划单个文件的去向（不落盘）。
+ *   naming      = 设置里的命名规则（缺省用默认形态）
+ *   autoCreate  = 允许模型自创分类（清单都不合适时新建同名子目录）
+ *   corrections = 人工纠正 few-shot（最近若干条，注入提示词）
+ * 判定分两遍：首轮 confident 直接用；unsure 时带首页内容复核一遍；
+ * 两遍都判不出（unknown）才落 _待处理 交人工。
+ */
 export async function planOne(
   root: string,
   name: string,
@@ -94,6 +112,8 @@ export async function planOne(
   modelCache: Map<string, ResolvedModel | null>,
   override?: string,
   naming: NamingRule = DEFAULT_NAMING,
+  autoCreate = false,
+  corrections: readonly Correction[] = [],
 ): Promise<Plan> {
   const from = join(root, name);
   const ext = extname(name).toLowerCase();
@@ -105,28 +125,50 @@ export async function planOne(
   const model = modelCache.get(cacheKey) ?? null;
 
   let insight: FileInsight | null = null;
-  let note = '';
+  let failure = ''; // 未能判定的原因（未找到模型 / 不支持 / 模型没返回 / 调用出错）
+  let reviewed = false;
   if (!model) {
-    note = '未找到可用模型';
+    failure = '未找到可用模型';
   } else if (extracted.kind === 'unsupported') {
-    note = extracted.reason;
+    failure = extracted.reason;
   } else {
+    const page: PageContent = extracted.kind === 'image'
+      ? { kind: 'image', dataUrl: extracted.dataUrl }
+      : { kind: 'text', text: extracted.text };
+    const opts: ClassifyOptions = { categories, autoCreate, corrections };
     try {
-      insight = extracted.kind === 'image'
-        ? await classifyImage(model, name, extracted.dataUrl, categories)
-        : await classifyText(model, name, extracted.text, categories);
-      if (!insight) note = '模型未返回有效结果';
+      insight = await classifyPage(model, name, page, opts);
+      if (!insight) failure = '模型未返回有效结果';
     } catch (e) {
-      note = `模型调用失败：${(e as Error)?.message || e}`;
+      failure = `模型调用失败：${(e as Error)?.message || e}`;
+    }
+    // 首轮存疑 → 带首页内容再复核一遍
+    if (insight?.verdict === 'unsure') {
+      const first = insight;
+      try {
+        const second = await reviewPage(model, name, page, first, opts);
+        if (second) {
+          insight = second;
+          reviewed = true;
+        }
+      } catch (e) {
+        failure = `复核失败，沿用初判：${(e as Error)?.message || e}`;
+      }
     }
   }
 
-  // 低置信度或识别失败 → 落 _待处理，交由人工
-  const usable = !!insight && !!insight.topic && insight.confidence >= LOW_CONFIDENCE;
+  // 判定可用性：必须给出主题，且判定档不是「无法判断」
+  const usable = !!insight && !!insight.topic && insight.verdict !== 'unknown';
   const category = usable ? insight!.category : PENDING_DIR;
   const topic = usable ? insight!.topic : topicFromFileName(name);
   const docVersion = usable ? insight!.version : null;
-  const confidence = insight?.confidence ?? 0;
+  const verdict: Verdict = insight?.verdict ?? 'unknown';
+  if (!usable && !failure) failure = '模型判定为无法判断';
+
+  // 备注 = 失败原因 + 判定依据（复核过的标注出来）+ 次选分类，写入日志供人工复核
+  const evidence = insight ? (reviewed ? `复核·${insight.reason || '—'}` : insight.reason) : '';
+  const alt = insight && insight.alternatives.length > 0 ? `次选：${insight.alternatives.join('、')}` : '';
+  const note = [failure, evidence, alt].filter(Boolean).join('；');
 
   const targetDir = join(root, safeDirName(category));
   const versionIndex = await resolveVersionIndex(targetDir, topic, docVersion, naming);
@@ -139,9 +181,10 @@ export async function planOne(
     category,
     topic,
     version: formatVersion(versionIndex, naming.padVersion),
-    confidence,
-    modelName: model?.model ?? '',
+    verdict,
+    reviewed,
     note,
+    modelName: model?.model ?? '',
   };
 }
 
@@ -154,7 +197,7 @@ export interface Planned {
   writing: string[];
 }
 
-/** 扫描 + 逐文件规划（不落盘） */
+/** 扫描 + 逐文件规划（不落盘）；跑之前先对账人工纠正，把结果作为 few-shot 注入提示词 */
 export async function scanAndPlan(opts: {
   root: string;
   categories: readonly string[];
@@ -165,7 +208,18 @@ export async function scanAndPlan(opts: {
   settle?: boolean;
   /** 命名规则；缺省 = 默认 {版本号}{主题}_{日期} */
   naming?: NamingRule;
+  /** 允许模型自创分类（清单都不合适时新建同名子目录）；缺省 false = 严格限定在清单内 */
+  autoCreate?: boolean;
 }): Promise<Planned> {
+  const naming = opts.naming ?? DEFAULT_NAMING;
+  // 人工纠正对账（仅在跑整理时做一次）：判错过的主题下次能沿用人工归入的分类
+  const corrections = await reconcileCorrections(opts.root, PENDING_DIR, naming)
+    .catch(() => [] as Correction[]);
+  // 只带当前清单里仍存在的分类（避免提示词里出现已被删掉的历史分类，与枚举规则打架）
+  const fewShot = corrections
+    .filter((c) => opts.autoCreate === true || opts.categories.includes(c.category))
+    .slice(-CORRECTION_FEWSHOT);
+
   const files = await listFiles(opts.root);
   const modelCache = new Map<string, ResolvedModel | null>();
   const plans: Plan[] = [];
@@ -175,7 +229,10 @@ export async function scanAndPlan(opts: {
       writing.push(name);
       continue;
     }
-    plans.push(await planOne(opts.root, name, opts.stamp, opts.categories, modelCache, opts.model, opts.naming));
+    plans.push(await planOne(
+      opts.root, name, opts.stamp, opts.categories, modelCache, opts.model, naming,
+      opts.autoCreate, fewShot,
+    ));
   }
   return { plans, total: files.length, writing };
 }
@@ -192,7 +249,8 @@ export async function commitPlan(plan: Plan): Promise<MoveRecord> {
     category: plan.category,
     topic: plan.topic,
     version: plan.version,
-    confidence: plan.confidence,
+    verdict: plan.verdict,
+    note: plan.note,
     model: plan.modelName,
   };
 }

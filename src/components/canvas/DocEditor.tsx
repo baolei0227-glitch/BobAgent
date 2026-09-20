@@ -5,16 +5,16 @@
 // highlight.js 语言子模块缺少独立类型声明，补充 ambient 声明以通过 strict 模式
 declare module 'highlight.js/lib/languages/*';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useEditor, EditorContent, type Editor } from '@tiptap/react';
 import { Extension, type JSONContent } from '@tiptap/core';
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
-import { DOMParser as PMDOMParser } from '@tiptap/pm/model';
+import { DOMParser as PMDOMParser, type Node as PMNode } from '@tiptap/pm/model';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import TurndownService from 'turndown';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
-import Image from '@tiptap/extension-image';
+import { createResizableImage } from './extensions/ResizableImage';
 import { Table } from '@tiptap/extension-table';
 import TableRow from '@tiptap/extension-table-row';
 import TableCell from '@tiptap/extension-table-cell';
@@ -55,11 +55,12 @@ import {
   Columns3,
   Link as LinkIcon,
   Image as ImageIcon,
-  Undo,
-  Redo,
+  RotateCcw,
+  RotateCw,
   X,
   ListTree,
-  FileDown,
+  FileText,
+  Package,
   ChevronDown,
   Heading,
   CheckSquare,
@@ -83,6 +84,7 @@ import { bus, BusEvents } from '@/lib/bus';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { extractQuestionnaires, QuestionnairePanel, type QuestionnaireBlock } from './QuestionnairePanel';
 import { ExportDocxDialog } from './ExportDocxDialog';
+import { ExportMenu } from './ExportMenu';
 import { convertMarkdownToDocx, type DocxExportConfig } from '@/lib/md-to-docx';
 import { MdAnnotationPanel, ANNOTATION_INTENTS, type MdAnnotation, type AnnotationIntent, type Revision, type RevisionRound, type RevisionOp } from './MdAnnotationPanel';
 // track-changes：AI 修订注入为原生 ProseMirror mark（替代文本标记模拟），接受/拒绝/读取原生支持
@@ -127,6 +129,8 @@ export interface DocEditorProps {
   editable?: boolean;
   /** 文件来源（配合 filePath 决定保存通道：project → 项目 write_file；local → 本地文件 write） */
   source?: string;
+  /** 可选：文档标题。打印时用作默认文件名「标题_v1_年月日」；缺省时回退文件名、再回退 document */
+  docTitle?: string;
   /** 可选：隐藏目录按钮与左侧目录栏（如嵌入节点对话框时）；默认显示 */
   hideToc?: boolean;
   /** 可选：绑定到笔记库条目（notes/wiki/{id}.md），保存走 /api/notebook entry_id 通道 */
@@ -174,6 +178,23 @@ function findQuoteWithContext(fullText: string, quote: string, prefix?: string, 
     if (idx2 >= 0) return { from: idx2 + 1, to: idx2 + 1 + quote.length };
   }
   return null;
+}
+
+/** 纯文本索引 → 文档位置（精确）。
+ *  项目里常见写法是「textBetween(…, '\n') 的索引 + 1」，但每个块边界在文档位置里占 2 个、
+ *  在文本里只占 1 个，长文档下累计偏差可达一整段（跳转到相邻段落）。这里用二分查真实位置：
+ *  textBetween(0, pos, '')（无块分隔符）的长度对 pos 单调不减，取首个长度 ≥ index+1 的位置。 */
+function posAtTextIndex(doc: PMNode, index: number): number | null {
+  const size = doc.content.size;
+  if (index < 0 || index >= size) return null;
+  let lo = 0;
+  let hi = size;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (doc.textBetween(0, mid, '').length >= index + 1) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
 }
 
 function resolveAnnotationPos(editor: Editor, a: MdAnnotation): { from: number; to: number } | null {
@@ -801,6 +822,7 @@ export function DocEditor({
   filePath,
   projectId,
   source,
+  docTitle,
   editable = true,
   hideToc = false,
   notebookEntryId,
@@ -852,10 +874,23 @@ export function DocEditor({
       setActiveNodeId(detail?.node_id ?? null);
     };
     window.addEventListener('node-selected', handler);
-    // 挂载时主动请求当前选中节点：画布可能在 DocEditor 挂载前就已广播 node-selected，
-    // 被动监听会错过初始状态导致 activeNodeId 误判为 null（“发送到当前节点”被禁用）
-    window.dispatchEvent(new CustomEvent('node-selected-request'));
     return () => window.removeEventListener('node-selected', handler);
+  }, []);
+
+  // 中间区域可见的会话（画布单焦点节点）：node-selected 为空时「发送到当前会话」的兜底投递目标。
+  // 用户点进节点输入框 / 打开文档面板后 React Flow 的选中态会丢失，仅靠 node-selected 会让按钮恒为禁用；
+  // 与文件面板「发送到当前节点」同口径（都取 CanvasFlow 的活跃节点）。
+  const [activeSessionNodeId, setActiveSessionNodeId] = useState<string | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ node_id: string | null }>).detail;
+      setActiveSessionNodeId(detail?.node_id ?? null);
+    };
+    window.addEventListener('active-node-changed', handler);
+    // 两个监听器都就位后再请求重播：画布可能在 DocEditor 挂载前就已广播，被动监听会错过初始状态
+    // 导致 activeNodeId / activeSessionNodeId 误判为 null（“发送到当前节点”被禁用）
+    window.dispatchEvent(new CustomEvent('node-selected-request'));
+    return () => window.removeEventListener('active-node-changed', handler);
   }, []);
 
   // 右键命令菜单（⌘K 命令面板改为正文右键触发）：记录打开时的视口坐标（null = 关闭）
@@ -903,6 +938,9 @@ export function DocEditor({
   // DOCX 导出弹窗
   const [showExportDialog, setShowExportDialog] = useState(false);
 
+  // 统一导出入口（图片卡片 / DOCX / PDF 分组菜单）
+  const [showExportMenu, setShowExportMenu] = useState(false);
+
   // ===== 批注 + 修订 =====
   const [annotations, setAnnotations] = useState<MdAnnotation[]>([]);
   /** 批注结尾图标点击 → 弹出查看卡片（纯查看）：记录批注 id + 触发图标坐标（卡片定位用） */
@@ -920,6 +958,9 @@ export function DocEditor({
   const [focusedRevision, setFocusedRevision] = useState<{ roundId: string; oldText: string; newText: string } | null>(null);
   /** 聚焦定位需要滚动一次的标记（跨轮切换时，文档重建完成后再滚动） */
   const pendingRevisionScrollRef = useRef(false);
+  /** 刚刚就地应用的改动文字（AI 修订/重写成功）→ 全文重建后据此把视口停回改动处，
+   *  否则整篇 setContent 重置选区会让视图漂到别处（"AI 修订完成后跳到别的段落"） */
+  const justAppliedAnchorRef = useRef('');
   /** 定位提示（修订文字未在文档中找到时给可见反馈，避免"点了没反应"） */
   const [locateHint, setLocateHint] = useState('');
   useEffect(() => {
@@ -1179,7 +1220,8 @@ export function DocEditor({
         openOnClick: true,
         HTMLAttributes: { target: '_blank', rel: 'noopener noreferrer nofollow' },
       }),
-      Image,
+      // 图片：左右手柄拖拽改尺寸（等比），尺寸以 <img width> 落进 Markdown（样式见 globals.css）
+      createResizableImage(),
       Table.configure({ resizable: true }),
       TableRow,
       // 单元格对齐：textAlign attribute（表格浮动工具栏「对齐」按钮经 setCellAttribute 写入，style 内联控制渲染）
@@ -1397,6 +1439,8 @@ export function DocEditor({
       ...(annotationId ? { annotationId } : {}),
     };
     setRevisionRounds((prev) => [...prev, round]);
+    // 标记"刚就地应用的改动"：该轮设为活动轮会触发整篇重建，重建后据此把视口停回改动处
+    justAppliedAnchorRef.current = newText || oldText;
     setActiveRoundId(round.id);
   }, []);
 
@@ -1835,17 +1879,42 @@ export function DocEditor({
     setActiveRoundId(id);
   }, []);
 
-  // 活动轮变化 → 重建编辑器内容（mark 轮次按 baseMd+ops 重放；patch 轮次按 diff 渲染；旧 segments 轮次按状态渲染）
+  // 活动轮变化 → 重建编辑器内容（mark 轮次按 baseMd+ops 重放；patch 轮次按 diff 渲染；旧 segments 轮次按状态渲染）。
+  // 整篇 setContent 会把编辑器选区重置到重建后的落点（文首附近），视图随之漂移 —— 这就是
+  // 「AI 修改完成后跳到文档别的段落」的根因。这里：重建前记住视口 + 刚就地应用的改动锚点，
+  // 重建后优先滚回改动处，无锚点时还原原视口；跨轮聚焦由下方聚焦 effect 负责滚动，此处不插手。
   useEffect(() => {
     if (!editor) return;
     const round = revisionRounds.find((r) => r.id === activeRoundId);
     if (!round) return;
+    const scroller = editor.view.dom.parentElement;
+    const prevScrollTop = scroller?.scrollTop ?? 0;
+    const anchor = justAppliedAnchorRef.current;
+    justAppliedAnchorRef.current = '';
+    const focusScrollPending = pendingRevisionScrollRef.current;
     if (round.ops && round.baseMd !== undefined) {
       replayOps(editor, round.baseMd, round.ops);
-      return;
+    } else {
+      const md = round.patch ? renderPatchRound(round) : renderRevisedMd(round.segments, round.revisions);
+      editor.chain().setContent(md).run();
     }
-    const md = round.patch ? renderPatchRound(round) : renderRevisedMd(round.segments, round.revisions);
-    editor.chain().setContent(md).run();
+    if (focusScrollPending) return;
+    // rAF：等重建后的布局与浏览器自身的滚动补偿落定再恢复视口，避免被覆盖
+    requestAnimationFrame(() => {
+      const el = editor.view.dom.parentElement;
+      if (!el) return;
+      // 锚点取改动文字的首个非空行（单行锚点才能与无分隔符的纯文本对齐做精确索引）
+      const needle = anchor.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+      const flat = editor.state.doc.textBetween(0, editor.state.doc.content.size, '');
+      const idx = needle ? flat.indexOf(needle) : -1;
+      const pos = idx >= 0 ? posAtTextIndex(editor.state.doc, idx) : null;
+      if (pos == null) {
+        el.scrollTop = prevScrollTop;
+        return;
+      }
+      const coords = editor.view.coordsAtPos(pos);
+      el.scrollTo({ top: coords.top - el.getBoundingClientRect().top + el.scrollTop - 80 });
+    });
   }, [revisionRounds, activeRoundId, editor]);
 
   /** 滚动编辑器到指定位置（视图中部） */
@@ -2093,6 +2162,25 @@ export function DocEditor({
     URL.revokeObjectURL(url);
   }, [editor]);
 
+  /** 打印期临时替换 document.title 前的原标题（恢复由 restorePrintTitle 统一负责） */
+  const prevTitleRef = useRef<string | null>(null);
+
+  /** 打印文件名：标题_v1_年月日（标题取文档标题 → 文件名 → document；日期用本地时间 YYYY-MM-DD） */
+  const printFileName = useCallback(() => {
+    const base = (docTitle || filePath?.split('/').pop()?.replace(/\.[^.]+$/, '') || 'document').trim();
+    const d = new Date();
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    return `${base}_v1_${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }, [docTitle, filePath]);
+
+  /** 还原被打印临时改写的 window 标题（幂等：未替换过则不动） */
+  const restorePrintTitle = useCallback(() => {
+    if (prevTitleRef.current !== null) {
+      document.title = prevTitleRef.current;
+      prevTitleRef.current = null;
+    }
+  }, []);
+
   /** 填充隐藏打印容器（doc-print-root）：打印 / PDF 导出 / HTML 导出共用 */
   const ensurePrintContent = useCallback((): HTMLElement | null => {
     if (!editor) return null;
@@ -2109,6 +2197,18 @@ export function DocEditor({
       document.body.appendChild(printRoot);
     }
     printRoot.innerHTML = '';
+    // 页眉：左侧品牌（图标 + BobWork 词标），最右侧打印时间（本地时间，YYYY-MM-DD HH:mm）
+    const now = new Date();
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const header = document.createElement('div');
+    header.className = 'doc-print-header';
+    header.innerHTML =
+      // 用 welcome-icon.png：与 welcome 屏同一个品牌标，且带 alpha 通道。
+      // bobwork-logo.png 是不透明白底（WelcomeScreen 需 mix-blend-mode 融底），
+      // 放进打印页眉会在白纸上留出明显的白色方块 → 不用。
+      '<span class="doc-print-brand"><img src="/welcome-icon.png" alt="" />BobWork</span>'
+      + `<span class="doc-print-time">${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}</span>`;
+    printRoot.appendChild(header);
     const clone = contentEl.cloneNode(true) as HTMLElement;
     clone.removeAttribute('contenteditable');
     // 克隆体脱离 ProseMirror 交互态：清掉占位符提示与选中态装饰，避免打印出多余残留
@@ -2119,7 +2219,21 @@ export function DocEditor({
 
   /** 打印：克隆文档正文到隐藏打印容器，调用系统打印面板（@media print 只显示该容器） */
   const handlePrint = useCallback(async () => {
-    if (!ensurePrintContent()) return;
+    const printRoot = ensurePrintContent();
+    if (!printRoot) return;
+    // 页眉 logo 是呼出打印面板前才插入的 DOM：等它解码完再打印，
+    // 否则打印快照里会留下一个空白框（图片尚未加载/解码）。
+    const logo = printRoot.querySelector('img');
+    if (logo) {
+      await Promise.race([
+        logo.decode().catch(() => undefined),
+        new Promise((resolve) => window.setTimeout(resolve, 1200)),
+      ]);
+    }
+    // 打印文件名：浏览器「存储为 PDF」与系统打印面板都取 document.title 作为默认名 →
+    // 打印期临时替换为「标题_v1_年月日」，打印结束后还原（见下方 restorePrintTitle）
+    prevTitleRef.current = document.title;
+    document.title = printFileName();
     // Electron：先走主进程 webContents.print 弹系统打印面板；浏览器（dev）回退 window.print()
     const api = (window as unknown as { api?: { print?: () => Promise<{ success?: boolean; error?: string }> } }).api;
     if (api?.print) {
@@ -2138,7 +2252,22 @@ export function DocEditor({
     } else {
       window.print();
     }
-  }, [ensurePrintContent]);
+    restorePrintTitle();
+  }, [ensurePrintContent, printFileName, restorePrintTitle]);
+
+  /** 打印结束 / 编辑器卸载时移除克隆容器，避免残留节点长期挂在 body 下 */
+  useEffect(() => {
+    const dropPrintRoot = () => {
+      document.getElementById('doc-print-root')?.remove();
+      // 兜底还原标题：某些环境（Electron 系统面板）不触发 afterprint
+      restorePrintTitle();
+    };
+    window.addEventListener('afterprint', dropPrintRoot);
+    return () => {
+      window.removeEventListener('afterprint', dropPrintRoot);
+      dropPrintRoot();
+    };
+  }, [restorePrintTitle]);
 
   /** 新建 md 文档：在当前文档所在目录创建 untitled.md 并打开。
    *  支持本地文件（绝对路径父目录）与项目文件（项目内相对目录）两种场景；
@@ -2268,40 +2397,38 @@ export function DocEditor({
     if (formatted !== md) editor.chain().setContent(formatted).run();
   }, [editor]);
 
+  /** 导出用 markdown 快照：卡片 / 文档产物统一取源（惰性求值，点导出时才序列化） */
+  const getExportMarkdown = useCallback(() => (editor ? getMarkdown(editor) : ''), [editor]);
+
+  /** 导出草稿身份：优先文件路径，其次节点 id（同一文档复用草稿；都没有时由 ExportMenu 退化为内容哈希） */
+  const exportDocKey = filePath || nodeMdId || undefined;
+
   /** 命令集：右键菜单统一入口（格式/段落/插入/历史/工具） */
   const paletteCommands = useMemo<PaletteCommand[]>(() => {
     if (!editor) return [];
     const cmds: PaletteCommand[] = [];
+    // 注意：push 顺序决定右键菜单各行的排列顺序（下方 ctxRows 按此顺序过滤挑选）
     const push = (group: string, id: string, label: string, hint: string | undefined, run: () => void) =>
       cmds.push({ id: `${group}:${id}`, group, label, hint, run });
-    // 格式（撤销/重做并入组首，渲染时以竖线与后续格式按钮隔开）
+    // 历史
     push('Format', 'undo', 'Undo', '⌘Z', () => editor.chain().focus().undo().run());
     push('Format', 'redo', 'Redo', '⇧⌘Z', () => editor.chain().focus().redo().run());
-    push('Format', 'bold', 'Bold', '⌘B', () => editor.chain().focus().toggleBold().run());
-    push('Format', 'italic', 'Italic', '⌘I', () => editor.chain().focus().toggleItalic().run());
-    push('Format', 'strike', 'Strikethrough', '', () => editor.chain().focus().toggleStrike().run());
-    push('Format', 'code', 'Inline Code', '', () => editor.chain().focus().toggleCode().run());
-    // 段落
-    push('Block', 'h1', 'Heading 1', '', () => editor.chain().focus().toggleHeading({ level: 1 }).run());
-    push('Block', 'h2', 'Heading 2', '', () => editor.chain().focus().toggleHeading({ level: 2 }).run());
-    push('Block', 'h3', 'Heading 3', '', () => editor.chain().focus().toggleHeading({ level: 3 }).run());
-    push('Block', 'paragraph', 'Paragraph', '', () => editor.chain().focus().setParagraph().run());
-    push('Block', 'bullet', 'Bullet List', '', () => editor.chain().focus().toggleBulletList().run());
-    push('Block', 'ordered', 'Ordered List', '', () => editor.chain().focus().toggleOrderedList().run());
-    push('Block', 'task', 'Task List', '', () => editor.chain().focus().toggleTaskList().run());
-    push('Block', 'quote', 'Blockquote', '', () => editor.chain().focus().toggleBlockquote().run());
-    push('Block', 'codeblock', 'Code Block', '', () => editor.chain().focus().toggleCodeBlock().run());
-    push('Block', 'hr', 'Divider', '', () => editor.chain().focus().setHorizontalRule().run());
+    // 段落：标题 1-3 / 正文、字符格式、列表、引用、代码块已移至划词气泡顶部工具栏（分隔线留在此菜单）
     // 插入（链接/图片/文档/脚注改为粘贴自动识别，不再提供按钮）
-    push('Insert', 'table', 'Table (3×3)', '', () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run());
-    push('Insert', 'columns2', 'Two Columns', '', () => editor.chain().focus().insertBobColumns(2).run());
-    push('Insert', 'columns3', 'Three Columns', '', () => editor.chain().focus().insertBobColumns(3).run());
+    // label 为右键菜单竖向条目的可见文字：统一压到单个单词（最多的 "2-Column"/"3-Column" 用连字符区分栏数）
+    push('Insert', 'table', 'Table', '', () => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run());
+    push('Insert', 'columns2', '2-Column', '', () => editor.chain().focus().insertBobColumns(2).run());
+    push('Insert', 'columns3', '3-Column', '', () => editor.chain().focus().insertBobColumns(3).run());
+    // 分隔线从划词气泡工具栏移回此处（会替换选中文字 / 在光标处插入一条 ---）
+    push('Insert', 'hr', 'Divider', '', () => editor.chain().focus().setHorizontalRule().run());
     // 工具
-    push('Tools', 'format', 'Format Document', '', handleFormatMarkdown);
+    push('Tools', 'format', 'Format', '', handleFormatMarkdown);
     push('Tools', 'annotations', 'Annotations', '', () => setAnnotationPanelOpen((v) => !v));
-    push('Tools', 'docx', 'Export…', 'DOCX/HTML/PDF', () => setShowExportDialog(true));
+    push('Tools', 'export', 'Export', 'Card/Poster/Article/HTML', () => setShowExportMenu(true));
+    // DOCX 从导出菜单里提出来单独成键（少一层弹窗）；PDF 不设条目，用系统打印面板另存
+    push('Tools', 'docx', 'Word', '.docx', () => setShowExportDialog(true));
     push('Tools', 'print', 'Print', '', handlePrint);
-    push('Tools', 'share', 'Share…', '', handleShareDocument);
+    push('Tools', 'share', 'Share', '', handleShareDocument);
     return cmds;
   }, [editor, handleFormatMarkdown, handlePrint, handleShareDocument]);
 
@@ -2487,7 +2614,8 @@ export function DocEditor({
       // canvas 上的 React Flow 选中（node-selected）可能与文档归属不一致——用户打开/阅读 A 的
       // 文档时画布可能仍停留在 B 的选中态，导致引用错落到 B（“点击发送到节点，不是当前节点”）。
       // 与划词引用同口径：以文档归属节点为准。
-      const targetNodeId = nodeMdId || activeNodeId;
+      // 兜底链：本文档所属节点 → 画布 live 选中 → 中间区域可见的会话（用户点进输入框后选中态会丢）
+      const targetNodeId = nodeMdId || activeNodeId || activeSessionNodeId;
       if (!targetNodeId) return;
       window.dispatchEvent(new CustomEvent('node-ask-question', { detail: { nodeId: targetNodeId, text: quote } }));
       // 目标节点 ≠ 画布当前选中节点时，把它切换为当前打开节点：输入框 + 引用标签在目标节点上可见，
@@ -2496,7 +2624,7 @@ export function DocEditor({
         window.dispatchEvent(new CustomEvent('canvas-focus-node', { detail: { nodeId: nodeMdId } }));
       }
     },
-    [nodeMdId, activeNodeId],
+    [nodeMdId, activeNodeId, activeSessionNodeId],
   );
 
 
@@ -2505,36 +2633,30 @@ export function DocEditor({
     return <div className="doc-editor-loading p-4 text-sm" style={{ color: 'var(--ink-muted)' }}>Loading editor...</div>;
   }
 
-  // 右键菜单命令分组（按 Format/Block/Insert/Tools 四类归拢，供下方合成三行）
+  // 右键菜单命令分组（按 Format/Insert/Tools 三类归拢，供下方合成两行）
   const ctxGroups: { items: PaletteCommand[] }[] = (() => {
-    const g = { fmt: [], blk: [], ins: [], tls: [] } as Record<string, PaletteCommand[]>;
+    const g = { fmt: [], ins: [], tls: [] } as Record<string, PaletteCommand[]>;
     for (const c of paletteCommands) {
       if (c.group === 'Format') g.fmt.push(c);
-      else if (c.group === 'Block') g.blk.push(c);
       else if (c.group === 'Insert') g.ins.push(c);
       else if (c.group === 'Tools') g.tls.push(c);
     }
-    return [g.fmt, g.blk, g.ins, g.tls].map((items) => ({ items }));
+    return [g.fmt, g.ins, g.tls].map((items) => ({ items }));
   })();
 
-  // 右键菜单行（工具并入插入行 → 三段图标行）：
-  // 第一行：撤销/重做 + H1-H3 + 加粗斜体删除线；第二行：其余段落命令（行内代码紧跟代码块右侧）；第三行：插入+工具
-  const ctxShort = (id: string) => (id.includes(':') ? id.slice(id.indexOf(':') + 1) : id);
-  const fmtItems = ctxGroups[0]?.items ?? [];
-  const blkItems = ctxGroups[1]?.items ?? [];
-  const hItems = blkItems.filter((c) => ['h1', 'h2', 'h3'].includes(ctxShort(c.id)));
-  const blkRest = blkItems.filter((c) => !['h1', 'h2', 'h3'].includes(ctxShort(c.id)));
-  // 行内代码（Format:code）从第一行移出，插到第二行“代码块”右侧
-  const inlineCode = fmtItems.find((c) => ctxShort(c.id) === 'code');
-  if (inlineCode) {
-    const at = blkRest.findIndex((c) => ctxShort(c.id) === 'codeblock');
-    blkRest.splice(at >= 0 ? at + 1 : blkRest.length, 0, inlineCode);
-  }
-  const ctxRows: { key: string; items: PaletteCommand[] }[] = [
-    { key: 'fmt', items: [...fmtItems.slice(0, 2), ...hItems, ...fmtItems.slice(2).filter((c) => ctxShort(c.id) !== 'code')] },
-    { key: 'blk', items: blkRest },
-    { key: 'ins-tools', items: [...(ctxGroups[2]?.items ?? []), ...(ctxGroups[3]?.items ?? [])] },
-  ];
+  // 右键菜单结构：顶行图标（撤销/重做 ｜ 打印/分享…）+ 其余命令竖向「图标 + 文字」依次排开
+  //（标题 1-3、字符格式、列表、引用、代码块、分隔线已移至划词气泡顶部工具栏）
+  const ctxRows: { key: string; items: PaletteCommand[] }[] = (() => {
+    const cmdId = (c: PaletteCommand) => c.id.slice(c.id.indexOf(':') + 1);
+    const tools = ctxGroups[2]?.items ?? [];
+    // 顺序由 paletteCommands 的 push 顺序决定，这里的 ids 只做筛选
+    const pickTools = (ids: string[]) => tools.filter((c) => ids.includes(cmdId(c)));
+    const topIds = ['undo', 'redo', 'print', 'share'];
+    return [
+      { key: 'top-icons', items: [...(ctxGroups[0]?.items ?? []), ...pickTools(['print', 'share'])] },
+      { key: 'vertical', items: paletteCommands.filter((c) => !topIds.includes(cmdId(c))) },
+    ];
+  })();
 
   return (
     <div
@@ -2845,7 +2967,7 @@ export function DocEditor({
                     {intentDef.label}
                   </span>
                 ) : (
-                  <span className="md-annotation-card-intent" title="批注">
+                  <span className="md-annotation-card-intent" title="Annotation">
                     <MessageSquare className="h-2.5 w-2.5" />
                   </span>
                 )}
@@ -2856,8 +2978,8 @@ export function DocEditor({
                   <button
                     type="button"
                     className="md-annotation-card-del"
-                    title="删除批注"
-                    aria-label="删除批注"
+                    title="Delete annotation"
+                    aria-label="Delete annotation"
                     onClick={(e) => {
                       e.stopPropagation();
                       void deleteAnnotation(ann.id);
@@ -2885,7 +3007,7 @@ export function DocEditor({
           onAdd={handleAnnotate}
           onAsk={handleAskInNode}
           onDirectRevise={directRevise}
-          canAskCurrent={!!(nodeMdId || activeNodeId)}
+          canAskCurrent={!!(nodeMdId || activeNodeId || activeSessionNodeId)}
         />
       )}
 
@@ -2909,6 +3031,19 @@ export function DocEditor({
         /* 去掉聚焦时的品牌紫描边（用户反馈"选中后出现紫色边框"）；保留 :focus 无描边即可 */
         .doc-editor-content:focus-visible {
           outline: none;
+        }
+        /* 指针统一（消除「I 形光标 ↔ 箭头」闪烁）：可编辑面上显式声明 I 形文本光标，
+           其余后代继承之。成因：cursor 为 auto 时浏览器只在"命中文字"处返回 I 形，
+           段落间隙 / 行尾空白 / 左内边距列这些非文字位置解析为箭头，鼠标横移时两种形态
+           高频来回切换 → 视觉闪烁（与画布、Hippo Browser 的指针统一策略同源）。
+           只读渲染（消息文本块）不在此列，保持画布统一箭头。 */
+        .doc-editor-content:not(.doc-editor-readonly),
+        .doc-editor-content:not(.doc-editor-readonly) > * {
+          cursor: text;
+        }
+        /* 例外：图片保持放大镜（点击走 Lightbox）——需在统一规则之后显式声明覆盖之 */
+        .doc-editor-content:not(.doc-editor-readonly) img {
+          cursor: zoom-in;
         }
         /* 覆盖 [data-canvas-ui="overlay"] 的透明 ::selection（便签防干扰规则误伤预览面板）：
            编辑器内选中文字保持品牌紫，与 @chip / 输入框紫底形成"正文↔面板"联动 */
@@ -3114,9 +3249,9 @@ export function DocEditor({
           border-radius: 2px;
         }
         .doc-editor-content p { margin: 0 0 14px; }
-        .doc-editor-content h1 { margin: 34px 0 14px; font-size: 28px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; }
-        .doc-editor-content h2 { margin: 26px 0 12px; font-size: 22px; font-weight: 680; letter-spacing: -0.015em; line-height: 1.35; }
-        .doc-editor-content h3 { margin: 18px 0 10px; font-size: 17px; font-weight: 650; line-height: 1.4; }
+        .doc-editor-content h1 { margin: 34px 0 14px; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; }
+        .doc-editor-content h2 { margin: 26px 0 12px; font-size: 19px; font-weight: 680; letter-spacing: -0.015em; line-height: 1.35; }
+        .doc-editor-content h3 { margin: 18px 0 10px; font-size: 16px; font-weight: 650; line-height: 1.4; }
         .doc-editor-content a { color: var(--primary); text-decoration: none; }
         .doc-editor-content a:hover { text-decoration: underline; }
         .doc-editor-content ul, .doc-editor-content ol { margin: 0 0 14px; padding-left: 1.6em; }
@@ -3498,7 +3633,12 @@ export function DocEditor({
           background: color-mix(in oklab, var(--primary) 40%, transparent);
           pointer-events: none;
         }
-        .doc-editor-content.resize-cursor { cursor: col-resize; }
+        /* 列宽拖拽指示：ProseMirror 在 view.dom 上加 .resize-cursor，靠「继承」传到表内热区
+           （.column-resize-handle 为 pointer-events:none，命中测试落在其下的单元格上）。
+           上方指针统一规则在顶级块上声明了 cursor，会截断该继承链 → 表内不再显示 col-resize，
+           故此处连同后代一并覆盖（权重同、位置更后 → 生效）。 */
+        .doc-editor-content.resize-cursor,
+        .doc-editor-content.resize-cursor * { cursor: col-resize; }
         /* 占位符 */
         .doc-editor-content p.is-editor-empty:first-child::before {
           content: attr(data-placeholder);
@@ -3508,19 +3648,21 @@ export function DocEditor({
           height: 0;
           font-style: italic;
         }
-        /* 打印：克隆容器平时隐藏；打印时隐藏应用 UI，仅输出文档正文（白底黑字） */
-        #doc-print-root { display: none; }
+        /* 打印：打印时隐藏应用 UI，仅输出文档正文（白底黑字）。
+           平时隐藏 #doc-print-root 的规则在 globals.css 全局声明：若只写在这里，
+           DocEditor 卸载后规则消失，残留克隆体会撑高 body 使整个窗口可滚动。 */
         @media print {
           body > *:not(#doc-print-root) { display: none !important; }
+          /* 页边距由 globals.css 的 @page 提供（A4，左侧 30mm 装订边），
+             容器内边距归零，避免与 @page 叠加后边距变窄 */
           #doc-print-root {
             display: block !important;
-            padding: 24px;
-            color: #111 !important;
+            padding: 0;
+            color: #000 !important;
             font-family: "Times New Roman", Times, 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', 'Liberation Serif', serif;
-            font-size: 14px;
-            line-height: 1.75;
           }
-          /* 克隆正文打印时剥离编辑器卡片样式（边框/阴影/圆角/背景），纯白纸输出 */
+          /* 克隆正文打印时剥离编辑器卡片样式（边框/阴影/圆角/背景），纯白纸输出。
+             正文按中文出版惯例排版：五号（10.5pt）、1.5 倍行距、两端对齐、段首缩进 2 字符 */
           #doc-print-root .doc-editor-content {
             max-width: none !important;
             margin: 0 !important;
@@ -3529,8 +3671,116 @@ export function DocEditor({
             box-shadow: none !important;
             border-radius: 0 !important;
             background: #fff !important;
-            color: #111 !important;
-            font-size: 14px !important;
+            color: #000 !important;
+            font-size: 10.5pt !important;
+            line-height: 1.5 !important;
+            text-align: justify;
+            orphans: 2;
+            widows: 2;
+          }
+          #doc-print-root .doc-editor-content p {
+            margin: 0 !important;
+            line-height: 1.5 !important;
+            text-indent: 2em;
+          }
+          /* 缩进只给正文段落：列表 / 引用 / 表格 / 脚注 / 图注内不缩进 */
+          #doc-print-root .doc-editor-content li p,
+          #doc-print-root .doc-editor-content blockquote p,
+          #doc-print-root .doc-editor-content th p,
+          #doc-print-root .doc-editor-content td p,
+          #doc-print-root .doc-editor-content .footnotes p,
+          #doc-print-root .doc-editor-content figcaption {
+            text-indent: 0 !important;
+          }
+          /* 标题：改用无衬线（黑体族）与正文宋体形成字族对比；三号 / 四号 / 小四，纯黑 */
+          #doc-print-root .doc-editor-content h1,
+          #doc-print-root .doc-editor-content h2,
+          #doc-print-root .doc-editor-content h3,
+          #doc-print-root .doc-editor-content h4 {
+            font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', ui-sans-serif, -apple-system, 'Helvetica Neue', sans-serif !important;
+            color: #000 !important;
+            font-weight: 700 !important;
+            line-height: 1.35 !important;
+            text-indent: 0 !important;
+            break-after: avoid-page;
+            page-break-after: avoid;
+          }
+          #doc-print-root .doc-editor-content h1 { font-size: 16pt !important; margin: 0 0 12pt !important; }
+          #doc-print-root .doc-editor-content h1:not(:first-child) { margin-top: 18pt !important; }
+          #doc-print-root .doc-editor-content h2 { font-size: 14pt !important; margin: 18pt 0 8pt !important; }
+          #doc-print-root .doc-editor-content h3 { font-size: 12pt !important; margin: 14pt 0 6pt !important; }
+          /* 表格：三线表（顶线 / 表头下线 / 底线），去掉灰底、隔行底色与竖线，小五 9pt */
+          #doc-print-root .doc-editor-content .table-wrapper { overflow: visible !important; }
+          #doc-print-root .doc-editor-content table {
+            width: 100% !important;
+            min-width: 0 !important;
+            font-size: 9pt !important;
+            line-height: 1.3 !important;
+            border-collapse: collapse !important;
+            border-top: 1.2pt solid #000 !important;
+            border-bottom: 1.2pt solid #000 !important;
+          }
+          #doc-print-root .doc-editor-content th,
+          #doc-print-root .doc-editor-content td {
+            padding: 4px 6px !important;
+            border: none !important;
+            background: transparent !important;
+            color: #000 !important;
+            text-transform: none !important;
+            letter-spacing: 0 !important;
+            text-align: left !important;
+          }
+          #doc-print-root .doc-editor-content thead th,
+          #doc-print-root .doc-editor-content tr:first-child td,
+          #doc-print-root .doc-editor-content tr:first-child th {
+            font-weight: 600 !important;
+            border-bottom: 0.8pt solid #000 !important;
+          }
+          /* 分页保护：块级内容不被拆断（标题不落单在页底见上方 break-after） */
+          #doc-print-root .doc-editor-content blockquote,
+          #doc-print-root .doc-editor-content pre,
+          #doc-print-root .doc-editor-content .table-wrapper,
+          #doc-print-root .doc-editor-content figure,
+          #doc-print-root .doc-editor-content li {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          #doc-print-root .doc-editor-content pre { text-align: left !important; text-indent: 0 !important; }
+          #doc-print-root .doc-editor-content img { max-width: 100% !important; height: auto !important; }
+          /* 页眉：左品牌（图标 + BobWork）、右打印时间；与正文用一条细线分隔。
+             用无衬线字体，和正文的衬线体区分开，读起来像页边信息而不是正文。 */
+          #doc-print-root .doc-print-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.14);
+            font-family: ui-sans-serif, -apple-system, 'Helvetica Neue', 'PingFang SC', sans-serif;
+          }
+          #doc-print-root .doc-print-brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: #111;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+          }
+          #doc-print-root .doc-print-brand img {
+            width: 16px;
+            height: 16px;
+            object-fit: contain;
+            border-radius: 4px;
+            /* 兜底：万一换用不透明白底的品牌图（如 bobwork-logo.png），
+               multiply 把白底融进白纸，不至于出现白色方块 */
+            mix-blend-mode: multiply;
+          }
+          #doc-print-root .doc-print-time {
+            color: #666;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
           }
         }
       `}</style>
@@ -3620,6 +3870,14 @@ export function DocEditor({
           </div>
       )}
 
+      {/* 统一导出入口：分组菜单（Image / Article / Document-HTML），统一从编辑器 markdown 取源 */}
+      <ExportMenu
+        open={showExportMenu}
+        onClose={() => setShowExportMenu(false)}
+        getMarkdown={getExportMarkdown}
+        docKey={exportDocKey}
+      />
+
       <ExportDocxDialog
         open={showExportDialog}
         onClose={() => setShowExportDialog(false)}
@@ -3687,43 +3945,64 @@ export function DocEditor({
         </div>
       )}
 
-      {/* 右键命令菜单：正文右键弹出，所有分类命令图标横向分行展示（无切换）；作用于选中文字 / 所在段落 */}
+      {/* 右键命令菜单：顶行图标（撤销/重做 ｜ 打印/分享…）+ 下方竖向「图标 + 文字」条目；作用于选中文字 / 所在段落 */}
       {ctxMenu && (
         <div
-          className="md-ctx-menu fixed w-72 overflow-y-auto ai-canvas-scroll rounded-xl border py-1 [&_button_svg]:h-[13px] [&_button_svg]:w-[13px] [&_button_svg]:shrink-0"
+          className="md-ctx-menu fixed w-[9rem] overflow-y-auto ai-canvas-scroll rounded-xl border p-1 [&_button_svg]:h-[13px] [&_button_svg]:w-[13px] [&_button_svg]:shrink-0"
           style={{
-            left: Math.min(ctxMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 0) - 296),
+            // 最宽内容为顶行 4 个图标按钮（约 135px@1×，紧凑成排后不再留白）；右边缘钳制按 9rem+16px 换算
+            left: Math.min(ctxMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 0) - 160),
             top: ctxMenu.y,
             maxHeight: 380,
             backgroundColor: 'var(--popover)',
             borderColor: 'var(--line)',
-            boxShadow: '0 16px 48px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.08)',
+            boxShadow: '0 12px 32px -8px rgba(0,0,0,0.20), 0 2px 6px rgba(0,0,0,0.06)',
             zIndex: 12000,
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {ctxRows.map((row, ri) =>
-            row.items.length === 0 ? null : (
-              <div key={row.key}>
-                {ri > 0 && <div className="mx-2 my-1" style={{ borderTop: '1px solid var(--line-soft)' }} />}
-                {/* 分组命令图标横排（无文字，hover 显示名称） */}
-                <div className="flex flex-wrap items-center gap-0.5 px-2 py-0.5">
-                  {row.items.map((cmd) => (
-                    <button
-                      key={cmd.id}
-                      type="button"
-                      title={cmd.hint ? `${ctxLabel(cmd.id)} (${cmd.hint})` : ctxLabel(cmd.id)}
-                      onClick={() => runPaletteCommand(cmd)}
-                      onMouseDown={(e) => e.preventDefault()}
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-                      style={{ color: 'var(--ink-muted)' }}
-                    >
-                      {commandGlyph(cmd.id)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ),
+          {/* 顶行：撤销/重做 ｜ 打印/分享，四个图标靠左紧凑成排（与下方图标列对齐），重做与打印之间竖线分隔 */}
+          {ctxRows[0].items.length > 0 && (
+            <div className="flex items-center gap-0.5">
+              {ctxRows[0].items.map((cmd, ci) => (
+                <Fragment key={cmd.id}>
+                  {ci === 2 && (
+                    <span className="mx-1 h-4 w-px shrink-0" style={{ backgroundColor: 'var(--line)' }} />
+                  )}
+                  <button
+                    type="button"
+                    title={cmd.hint ? `${ctxLabel(cmd.id)} (${cmd.hint})` : ctxLabel(cmd.id)}
+                    onClick={() => runPaletteCommand(cmd)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink)]"
+                  >
+                    {commandGlyph(cmd.id)}
+                  </button>
+                </Fragment>
+              ))}
+            </div>
+          )}
+
+          {/* 其余命令：竖向排列，图标 + 名称（等行高，图标列与顶行按钮基本对齐；文字已可见，不再挂 tooltip） */}
+          {ctxRows[1].items.length > 0 && (
+            <>
+              <div className="mx-1 my-1 h-px" style={{ backgroundColor: 'var(--line-soft)' }} />
+              {ctxRows[1].items.map((cmd) => (
+                <button
+                  key={cmd.id}
+                  type="button"
+                  onClick={() => runPaletteCommand(cmd)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  className="group flex h-7 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink)' }}
+                >
+                  <span className="flex w-4 shrink-0 items-center justify-center text-[var(--ink-muted)] transition-colors group-hover:text-[var(--ink)]">
+                    {commandGlyph(cmd.id)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-12">{cmd.label}</span>
+                </button>
+              ))}
+            </>
           )}
         </div>
       )}
@@ -3856,28 +4135,22 @@ function commandGlyph(id: string): React.ReactNode {
     case 'table': return <TableIcon className="h-4 w-4" />;
     case 'columns2': return <Columns2 className="h-4 w-4" />;
     case 'columns3': return <Columns3 className="h-4 w-4" />;
-    case 'undo': return <Undo className="h-4 w-4" />;
-    case 'redo': return <Redo className="h-4 w-4" />;
+    case 'undo': return <RotateCcw className="h-4 w-4" />;
+    case 'redo': return <RotateCw className="h-4 w-4" />;
     case 'format': return <Wand2 className="h-4 w-4" />;
     case 'annotations': return <MessageSquare className="h-4 w-4" />;
     case 'toc': return <ListTree className="h-4 w-4" />;
-    case 'docx': return <FileDown className="h-4 w-4" />;
+    case 'export': return <Package className="h-4 w-4" />;
+    case 'docx': return <FileText className="h-4 w-4" />;
     case 'print': return <Printer className="h-4 w-4" />;
     case 'share': return <Share2 className="h-4 w-4" />;
     default: return null;
   }
 }
 
-/** 右键菜单命令中文名：命令 id → 中文 label（用于按钮 tooltip） */
+/** 右键菜单顶行图标按钮的 tooltip 文案（竖向条目已有可见文字，不再需要映射） */
 const CTX_LABELS: Record<string, string> = {
-  undo: '撤销', redo: '重做',
-  bold: '加粗', italic: '斜体', strike: '删除线', code: '行内代码',
-  h1: '标题 1', h2: '标题 2', h3: '标题 3', paragraph: '正文',
-  bullet: '无序列表', ordered: '有序列表', task: '任务列表',
-  quote: '引用', codeblock: '代码块', hr: '分隔线',
-  table: '表格 (3×3)', columns2: '双栏', columns3: '三栏',
-  format: '格式化文档', annotations: '批注',
-  docx: '导出…', print: '打印', share: '分享…',
+  undo: 'Undo', redo: 'Redo', print: 'Print', share: 'Share',
 };
 function ctxLabel(id: string): string {
   const key = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;

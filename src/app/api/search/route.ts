@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { getCurrentProject, listProjects, getProjectsDir } from '@/lib/project/project-manager';
+import { searchMaterialsIndex } from '@/lib/materials/indexer';
 
 /**
  * 文件名检索 API
@@ -13,7 +14,9 @@ import { getCurrentProject, listProjects, getProjectsDir } from '@/lib/project/p
  *   - 当前项目的 materials 文件夹
  *   - scope=global：BobWork 项目（按名称）+ BobWorkspace 各项目的 homework/materials/attachments 子目录（⌘F 全局搜索）
  *
- * 检索方式：文件名包含关键词（不区分大小写），不做内容索引。
+ * 检索方式：文件名包含关键词（不区分大小写），不做内容索引；
+ * 例外：当前项目 materials 额外走 .materials-index/ 内容检索（读取已落盘的抽取/OCR 正文，检索本身不再调用模型），
+ * 命中返回 matchType='content' 与 snippet/page 字段。
  */
 
 /** 获取项目级授权根配置文件路径 */
@@ -56,6 +59,12 @@ interface SearchResult {
   /** 项目结果专用：项目 ID（切换项目用） */
   projectId?: string;
   projectName?: string;
+  /** 命中方式：name=文件名匹配（默认）；content=materials 正文内容命中 */
+  matchType?: 'name' | 'content';
+  /** 内容命中时的上下文片段 */
+  snippet?: string;
+  /** 内容命中时的页码（1-based，非分页文件恒为 1） */
+  page?: number;
 }
 
 function formatSize(bytes: number): string {
@@ -208,6 +217,35 @@ export async function GET(request: NextRequest) {
 
       await walkDir(attachmentsDir, keyword, 'attachment', '附件', results, maxResults, 5, 0);
       await walkDir(materialsDir, keyword, 'material', '素材', results, maxResults, 5, 0);
+
+      // materials 内容检索：读 .materials-index/（抽取/OCR 正文已落盘），检索本身不再调用模型
+      const budget = maxResults - results.length;
+      if (budget > 0) {
+        const hits = await searchMaterialsIndex(project.path, keyword, budget).catch(() => []);
+        const nameMatched = new Set(results.map((r) => r.path));
+        const seen = new Set<string>();
+        for (const hit of hits) {
+          if (results.length >= maxResults) break;
+          const abs = join(materialsDir, hit.relPath);
+          // 已按文件名命中该文件的，不再重复插入内容条目
+          if (nameMatched.has(abs)) continue;
+          const key = `${abs}#${hit.page}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          results.push({
+            name: hit.name,
+            path: abs,
+            source: 'material',
+            sourceLabel: '素材内容',
+            type: 'file',
+            size: formatSize(hit.size),
+            extension: hit.name.split('.').pop()?.toLowerCase(),
+            matchType: 'content',
+            snippet: hit.snippet,
+            page: hit.page,
+          });
+        }
+      }
     } catch { /* 无项目时跳过 */ }
   }
 

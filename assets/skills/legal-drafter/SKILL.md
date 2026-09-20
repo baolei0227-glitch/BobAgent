@@ -20,6 +20,8 @@ agent_created: true
 - 合同审查、合同风险排查、合同审核 → 转 `legal-contract-reviewer-cn`
 - 深度法律研究、类案检索、裁判规则梳理 → 转 `deep-legal-research`
 
+> **技能内资源读取**：本文件中出现的相对路径（如 `references/xxx.md`、`scripts/xxx.py`）均相对本技能目录，一律用 `read_skill_resource(skill_name="legal-drafter", resource="<相对路径>")` 读取（可加 `section` 只读某一节）；不要用 `read_file` / `list_directory` 拼绝对路径（如 `~/.trae-cn/skills/…`），那不在可读范围、会被直接拒绝。
+
 ## 基本原则
 
 - 专业严谨：使用准确的法律概念和规范表述，尽量引用具体法律名称及条文编号。
@@ -94,7 +96,7 @@ agent_created: true
 - 生成文书正文后自动生成正式文件并通过 `present_files` 工具呈现，无需用户额外要求。
 - 用户未指定格式时默认生成 Word `.docx` 文件。
 - Word 排版标准：标题黑体（H1 居中二号 22pt / H2 三号 16pt / H3 四号 14pt），正文仿宋小四号 12pt，行间距 1.5 倍，首行缩进 2 字符，落款右对齐，表格表头蓝灰色底纹五号 10.5pt。
-- 可使用 `scripts/generate_docx.py` 脚本生成符合上述标准的 .docx 文件。
+- 可使用 `scripts/generate_docx.py` 脚本生成符合上述标准的 .docx 文件：先用 `read_skill_resource(skill_name="legal-drafter", resource="scripts/generate_docx.py")` 取出源码，需要执行时用 `write_file` 把它落到项目内（如 `homework/scripts/generate_docx.py`），再用 `run_command` 执行，避免直接引用技能目录的绝对路径。
 
 > **完整导出规范**：格式选择、PDF/飞书文档生成、文件命名与交付规则，见 `references/export-format-rules.md`。
 

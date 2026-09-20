@@ -3,8 +3,8 @@
  * 默认档零变化证明：allow_scope 下名单内 → request、写类/读类（名单外）→ allow（不 consult 写类判定）。
  */
 import { describe, expect, it } from 'vitest';
-import { decideToolApproval, isWriteKindTool } from './approval';
-import type { ApprovalStrategy, ToolApprovalVerdict } from './approval';
+import { decideTeamApproval, decideToolApproval, isWriteKindTool } from './approval';
+import type { ApprovalStrategy, TeamApprovalVerdict, ToolApprovalVerdict } from './approval';
 
 const STRATEGIES: ApprovalStrategy[] = ['allow_scope', 'ask', 'never'];
 
@@ -153,5 +153,30 @@ describe('decideToolApproval 三策略 ×（名单内/写类/读类）矩阵', (
       // 名单外读类
       expect(decideToolApproval({ name: 'read_file', inConfirmList: false, strategy })).toBe('allow');
     }
+  });
+});
+
+describe('decideTeamApproval 多智能体协作门禁（team_run 过程级裁决）', () => {
+  const CASES: Array<{ strategy: ApprovalStrategy; expected: TeamApprovalVerdict }> = [
+    // 默认档零变化：allow_scope 不打断用户，宿主持草案直接 approve & run
+    { strategy: 'allow_scope', expected: 'allow' },
+    // ask：草案交用户审批（批准才 approve & run）
+    { strategy: 'ask', expected: 'request' },
+    // never：不建团队、不 plan，直接收口
+    { strategy: 'never', expected: 'deny' },
+  ];
+  it.each(CASES)('$strategy → $expected', ({ strategy, expected }) => {
+    expect(decideTeamApproval(strategy)).toBe(expected);
+  });
+
+  it('与 decideToolApproval 的档位语义一致（默认档均不打断用户）', () => {
+    // team_run 既不在名单、也非写类：tool 侧裁决在 allow_scope/ask 下都是 allow（不重复弹确认），
+    // 门禁只由 decideTeamApproval 决定 —— 两处不冲突、不叠加双卡
+    for (const strategy of STRATEGIES) {
+      expect(decideToolApproval({ name: 'team_run', inConfirmList: false, strategy })).toBe('allow');
+    }
+    expect(decideTeamApproval('allow_scope')).toBe('allow');
+    expect(decideTeamApproval('ask')).toBe('request');
+    expect(decideTeamApproval('never')).toBe('deny');
   });
 });

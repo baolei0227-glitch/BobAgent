@@ -227,6 +227,18 @@ export async function applyPdfBridge<T extends { role: string; content?: string 
               parsed_at: new Date().toISOString(),
               file_hash: hash,
             }, projectPath);
+            // 同时回写项目内容索引（.materials-index/<内容hash>/）：与 materials 共用同一份索引，
+            // 同一份字节之后被上传/读取到 materials 时直接复用本次识别结果，不再重复 OCR。
+            try {
+              const { writeAttachmentIndex } = await import('@/lib/materials/indexer');
+              await writeAttachmentIndex(projectPath, {
+                hash,
+                sourcePath: r.path,
+                pages: res.pages,
+                fullText: res.text,
+                pageCount: res.pageCount,
+              });
+            } catch { /* 索引写入失败不影响预热主流程 */ }
             console.log(`[pdf-bridge-prewarm] ${basename(fullPath)} cache-written in ${Date.now() - t0}ms, ${res.text.length} chars, upgraded=${res.upgradedCount}/${res.pageCount}p`);
           } else {
             console.log(`[pdf-bridge-prewarm] ${basename(fullPath)} ocrFile returned empty in ${Date.now() - t0}ms`);

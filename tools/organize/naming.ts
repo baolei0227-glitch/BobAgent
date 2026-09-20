@@ -11,7 +11,8 @@
  * 拼名与反解共用同一份规则（composeName / parseName），改规则不会让版本累加失效。
  */
 import { promises as fs } from 'fs';
-import { extname, join } from 'path';
+import type { Dirent } from 'fs';
+import { basename, extname, join } from 'path';
 
 import {
   DEFAULT_NAMING,
@@ -19,6 +20,8 @@ import {
   parseName,
   type NamingRule,
 } from '@/lib/file-organizer/naming-rule';
+// 判定档由模型层定义（type-only 引入，编译后不产生依赖）
+import type { Verdict } from './model';
 
 export {
   DEFAULT_NAMING,
@@ -36,6 +39,12 @@ export const LOG_NAME = '.整理日志.json';
 /** 旧版日志文件名（无隐藏前缀）；仅用于兼容读取历史日志 */
 export const LEGACY_LOG_NAME = '_整理日志.json';
 
+/** 人工纠正簿文件名（放投递箱根部）；前缀点 = 默认隐藏 */
+export const CORRECTION_NAME = '.整理纠正.json';
+
+/** 纠正簿最多保留的条数（规划时只取最近若干条作 few-shot） */
+const CORRECTION_LIMIT = 30;
+
 export interface MoveRecord {
   at: string;
   from: string;
@@ -43,7 +52,10 @@ export interface MoveRecord {
   category: string;
   topic: string;
   version: string;
-  confidence: number;
+  /** 判定档：落 _待处理 的记录通常为 unsure / unknown */
+  verdict: Verdict;
+  /** 判定依据或失败原因（供人工复核） */
+  note: string;
   model: string;
 }
 
@@ -185,6 +197,112 @@ export async function undo(root: string): Promise<{ restored: number; skipped: n
   );
   await removeLegacyLog(root); // 回滚结果已写入新文件
   return { restored, skipped };
+}
+
+/* ==================== 人工纠正（few-shot 依据） ==================== */
+
+/** 人工纠正记录：被模型判为待处理的文件，后来出现在某个正常分类目录 → 视为人工归位 */
+export interface Correction {
+  /** 主题（沿用整理日志里的 topic） */
+  topic: string;
+  /** 人工归入的分类目录名 */
+  category: string;
+  /** 归位后的文件名（不含扩展名，便于核对） */
+  file: string;
+  at: string;
+}
+
+export interface CorrectionBook {
+  version: 1;
+  entries: Correction[];
+}
+
+/** 读取纠正簿（不存在/损坏 → 空） */
+export async function readCorrections(root: string): Promise<Correction[]> {
+  try {
+    const raw = await fs.readFile(join(root, CORRECTION_NAME), 'utf-8');
+    const parsed = JSON.parse(raw) as CorrectionBook;
+    return Array.isArray(parsed?.entries) ? parsed.entries.filter((c) => c?.topic && c?.category) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 对账人工纠正（仅在跑整理时调用一次，不做常驻监听）：
+ * 整理日志里判为 pendingDir 的记录，若其主题 / 原文件名如今出现在某个正常分类目录里，
+ * 且原文件已不在 pendingDir，即视为用户手动归位 → 记入纠正簿，供下次规划做 few-shot。
+ * 返回合并后的完整纠正簿（去重、按最近保留上限截断）。
+ */
+export async function reconcileCorrections(
+  root: string,
+  pendingDir: string,
+  rule: NamingRule = DEFAULT_NAMING,
+): Promise<Correction[]> {
+  const stored = await readCorrections(root);
+  const log = await readLog(root);
+  const pendings = log.entries.filter((e) => e.category === pendingDir && e.topic);
+  if (pendings.length === 0) return stored;
+
+  // 分类目录内现存文件 → 「主题 / 原文件名」到分类 的索引
+  let dirs: Dirent[] = [];
+  try {
+    dirs = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return stored;
+  }
+  const byTopic = new Map<string, string>();
+  const byBase = new Map<string, string>();
+  for (const d of dirs) {
+    if (!d.isDirectory() || d.name.startsWith('.') || d.name === pendingDir) continue;
+    for (const f of await fs.readdir(join(root, d.name)).catch(() => [] as string[])) {
+      const base = f.slice(0, f.length - extname(f).length);
+      byBase.set(base, d.name);
+      const parsed = parseName(base, rule);
+      if (parsed?.topic) byTopic.set(parsed.topic, d.name);
+    }
+  }
+
+  const seen = new Set(stored.map((c) => `${c.topic}\u0000${c.category}`));
+  const fresh: Correction[] = [];
+  for (const rec of pendings) {
+    const base = basename(rec.to).replace(/\.[^.]+$/, '');
+    const category = byTopic.get(rec.topic) ?? byBase.get(base);
+    if (!category) continue;
+    if (await exists(rec.to)) continue; // 原文件还在 _待处理 里 → 用户尚未归位
+    const key = `${rec.topic}\u0000${category}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fresh.push({ topic: rec.topic, category, file: base, at: new Date().toISOString() });
+  }
+  if (fresh.length === 0) return stored;
+
+  // 同主题只留最近一条（用户可能改过归入的分类，新旧两条会互相打架）
+  const latest = new Map<string, Correction>();
+  for (const c of [...stored, ...fresh]) {
+    latest.delete(c.topic);
+    latest.set(c.topic, c);
+  }
+  const merged = [...latest.values()].slice(-CORRECTION_LIMIT);
+  try {
+    await fs.writeFile(
+      join(root, CORRECTION_NAME),
+      JSON.stringify({ version: 1, entries: merged } satisfies CorrectionBook, null, 2),
+      'utf-8',
+    );
+  } catch {
+    /* 写入失败不阻塞整理，本次仍按内存结果做 few-shot */
+  }
+  return merged;
 }
 
 /** 是否应当跳过（隐藏文件、日志、本工具产物） */

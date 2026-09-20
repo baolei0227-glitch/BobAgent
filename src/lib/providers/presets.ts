@@ -50,6 +50,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         description: 'DeepSeek-V4.1-Flash · 1M Context · Agent & Coding',
         thinking: true,
         temperature: 1,
+        family: 'deepseek-v4',
         spec: {
           capabilities: ['conversation', 'coding', 'reasoning', 'analysis', 'multilingual', 'long-context'],
           strengths: ['Fast response', 'Strong code generation', 'Agent capability', '1M context', 'Supports thinking mode'],
@@ -69,6 +70,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         description: '1.6T MoE · 1M Context · Deep Reasoning',
         thinking: true,
         temperature: 1,
+        family: 'deepseek-v4',
         spec: {
           capabilities: ['reasoning', 'analysis', 'coding', 'conversation', 'long-context', 'creative'],
           strengths: ['Strongest logical reasoning', 'Deep thinking mode', 'Excellent math ability', '1M context', 'SWE-bench 80.6%'],
@@ -683,6 +685,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         description: 'Agent Plan · 标准，1024k 超长上下文',
         thinking: true,
         temperature: 0.7,
+        family: 'deepseek-v4',
         spec: {
           capabilities: ['conversation', 'coding', 'reasoning', 'analysis', 'long-context', 'multilingual'],
           strengths: ['1M context window', 'Fast responses', 'Cost-effective', 'Supports thinking mode'],
@@ -696,6 +699,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         description: 'Agent Plan · 进阶，1024k 超长上下文，深度推理',
         thinking: true,
         temperature: 0.7,
+        family: 'deepseek-v4',
         spec: {
           capabilities: ['reasoning', 'analysis', 'coding', 'conversation', 'long-context', 'creative'],
           strengths: ['Strongest logical reasoning', 'Deep thinking mode', '1M context', 'SWE-bench 80.6%'],
@@ -769,6 +773,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         description: 'Coding Plan · 标准，1024k 超长上下文',
         thinking: true,
         temperature: 0.7,
+        family: 'deepseek-v4',
         spec: {
           capabilities: ['conversation', 'coding', 'reasoning', 'analysis', 'long-context', 'multilingual'],
           strengths: ['1M context window', 'Fast responses', 'Cost-effective', 'Supports thinking mode'],
@@ -782,6 +787,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         description: 'Coding Plan · 进阶，1024k 超长上下文，深度推理',
         thinking: true,
         temperature: 0.7,
+        family: 'deepseek-v4',
         spec: {
           capabilities: ['reasoning', 'analysis', 'coding', 'conversation', 'long-context', 'creative'],
           strengths: ['Strongest logical reasoning', 'Deep thinking mode', '1M context', 'SWE-bench 80.6%'],

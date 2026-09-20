@@ -25,7 +25,7 @@ import {
 } from '@/app/api/chat/tools';
 import type { ToolDefinition, ToolScene } from '@/app/api/chat/tools';
 import type { AgentProfile } from '@/lib/agents/profiles';
-import type { McpServerConfig } from '@/lib/mcp/types';
+import { NODE_MCP_TOOL_IDS, type McpServerConfig } from '@/lib/mcp/types';
 import { resolveAppRoot } from '@/lib/app-root';
 import type { AppSettings } from '@/lib/settings';
 
@@ -308,11 +308,13 @@ export class ToolRuntime {
     this.settings = opts.settings;
     this.profile = opts.profile;
     this.sandbox = opts.sandbox;
-    // 节点"强制使用"MCP（复选框）：仅对 Store 中全局 enabled 的 server 生效，语义=无视场景/画像过滤保留
+    // 节点"强制勾选"MCP（复选框）：仅对 Store 中全局 enabled 的 server 生效，语义=无视场景/画像过滤保留。
+    // 再与 NODE_MCP_TOOL_IDS 交叉校验：节点下拉只列 MCP 类服务，Plugins 类（Teams/Notes/Preview/Browser/Bobby）
+    // 不在其中——勾选不得成为绕过场景门控的旁路（如 team 会绕开「Multi-agent mode」开关直接拉起多智能体）。
     this.mcpForceIds = Array.isArray(opts.enabledMcpIds) && opts.enabledMcpIds.length > 0
       ? new Set(
           (this.settings.mcpServers || [])
-            .filter((s) => s.enabled !== false && opts.enabledMcpIds!.includes(s.id))
+            .filter((s) => s.enabled !== false && NODE_MCP_TOOL_IDS.has(s.id) && opts.enabledMcpIds!.includes(s.id))
             .map((s) => s.id),
         )
       : new Set<string>();

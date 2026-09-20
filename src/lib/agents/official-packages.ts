@@ -11,7 +11,11 @@
 import {
   NOTE_BASE_SYSTEM_PROMPT,
   NOTE_CORE_EXCLUSIONS,
+  MIND_BASE_SYSTEM_PROMPT,
+  MIND_CORE_EXCLUSIONS,
   BUTLER_BASE_SYSTEM_PROMPT,
+  ARCHIVIST_BASE_SYSTEM_PROMPT,
+  ARCHIVIST_CORE_EXCLUSIONS,
 } from './profiles';
 import type { AgentPackageManifest } from './market-server';
 
@@ -64,18 +68,38 @@ export const OFFICIAL_PACKAGES: AgentPackageManifest[] = [
     description:
       'Personal knowledge base keeper (Karpathy LLM Wiki). Collects raw notes, compiles interlinked wiki entries, rescues/retires old notes, lint checks, and answers by citing sources. Specialized sub-agent of the bob-notes plugin — the only place with full note read/write/maintain tools.',
     version: '1.0.0',
-    fixedScenes: ['general', 'legal', 'node', 'notebook'],
+    fixedScenes: ['general', 'legal', 'node', 'notebook', 'ledger'],
     coreExclusions: [...NOTE_CORE_EXCLUSIONS],
     prompt: NOTE_BASE_SYSTEM_PROMPT,
+  },
+  {
+    id: 'mind',
+    name: 'Buzan',
+    description:
+      'Mind-map partner for BobMind (a nestable thought tree). Captures stray ideas as entries, writes a whole branch in one call, organizes them by parent/child structure, stars what matters, recalls them on demand, and exports the map into the active project. Keeps the map\'s main thread in view, sees what you changed in the panel, and says whether it agrees or disagrees — while still recording your words verbatim. Specialized sub-agent of the bob-mind-mcp plugin — the only place with the mind_* tools; enable that plugin in the Store for the tools to appear.',
+    version: '1.0.0',
+    fixedScenes: ['general', 'node', 'mind'],
+    coreExclusions: [...MIND_CORE_EXCLUSIONS],
+    prompt: MIND_BASE_SYSTEM_PROMPT,
   },
   {
     id: 'butler',
     name: 'Butler',
     description:
-      'Conversational to-do & schedule assistant. Records statements as private stickytodo rows (never auto-added to the calendar) and only creates calendar events when you schedule an item at a concrete time — queries merge those unscheduled rows so nothing is lost. Guards duplicates/conflicts and reuses scheduling preferences. Optional plan-tree for multi-step goals.',
+      'Conversational to-do & schedule assistant. Records statements as private stickytodo rows (never auto-added to the calendar) and only creates calendar events when you schedule an item at a concrete time — queries merge those unscheduled rows so nothing is lost. Guards duplicates/conflicts and reuses scheduling preferences. Optional plan-tree for multi-step goals. Reads the project ledger to locate materials, but does not write it — project archive maintenance (ledger entries, claim checks, project pages) belongs to the Archivist package; it points you there instead.',
     version: '1.0.0',
-    fixedScenes: ['general', 'node', 'butler'],
+    fixedScenes: ['general', 'node', 'butler', 'ledger'],
     prompt: BUTLER_BASE_SYSTEM_PROMPT,
+  },
+  {
+    id: 'archivist',
+    name: 'Archivist',
+    description:
+      'Project archive keeper (Karpathy LLM Wiki) for the current project\'s ledger at .ledger/ — the only agent with ledger write/maintenance tools. Registers material facts and user-stated conventions as typed entries — judgment entries (issues, side-by-side comparisons, analysis) are written only when you explicitly ask for them, so nothing lands in the ledger that cannot be checked back against the source, compiles pending material registrations, runs mechanical lint, keeps project pages for work to produce, flags entries whose source material changed as needs-review, and runs claim checks: given a claim, it searches BOTH sides (ours/theirs) and always reports supporting facts, adverse facts and coverage gaps — it compares the two sides and never adjudicates. Specialized counterpart of Kar: Kar keeps the personal library that follows you, Archivist keeps the project ledger that follows the project.',
+    version: '1.0.0',
+    fixedScenes: ['general', 'node', 'ledger', 'ledger-keeper'],
+    coreExclusions: [...ARCHIVIST_CORE_EXCLUSIONS],
+    prompt: ARCHIVIST_BASE_SYSTEM_PROMPT,
   },
   {
     id: 'legal-intern',
@@ -83,7 +107,7 @@ export const OFFICIAL_PACKAGES: AgentPackageManifest[] = [
     description:
       'Legal research intern for agent teams (identity="legal-intern"). Retrieval + first-pass screener: pulls statutes/cases from pkulaw and company facts from Tianyancha, dumps raw hits to disk, filters/screens (script-based when large) and emits clean evidence cards (case number, holding, key facts, links, validity status) for the partner to reason over. Narrow tool surface — retrieval + file/script only, no web browsing, no team/canvas tools.',
     version: '1.0.0',
-    fixedScenes: ['legal', 'company'],
+    fixedScenes: ['legal', 'company', 'ledger'],
     coreExclusions: ['web_search', 'web_fetch'],
     prompt: LEGAL_INTERN_BASE_SYSTEM_PROMPT,
   },
@@ -93,7 +117,7 @@ export const OFFICIAL_PACKAGES: AgentPackageManifest[] = [
     description:
       'Legal reviewer for agent teams (identity="legal-reviewer"). Reads intern-produced evidence cards and verifies every citation against pkulaw — statute still in force/amended/repealed, case number & holding match, authority level correct, summary faithful to the original. Returns a per-card structured review (pass / questionable / stale) without rewriting the cards.',
     version: '1.0.0',
-    fixedScenes: ['legal', 'company'],
+    fixedScenes: ['legal', 'company', 'ledger'],
     prompt: LEGAL_REVIEWER_BASE_SYSTEM_PROMPT,
   },
 ];

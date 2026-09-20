@@ -4,7 +4,7 @@
  * node-host —— 单焦点宿主（2026-09 布局重构）节点注入通道
  *
  * 画布渲染层从 React Flow 迁移为宿主自绘（CanvasFlow 内 world 层绝对定位渲染）后，
- * 节点组件（ChatNodeKernel / ImageGenNode / BobbyNode / AgentTeamsNode / AnnotationNode）
+ * 节点组件（ChatNodeKernel / ImageGenNode / BobbyNode / AnnotationNode）
  * 不再访问 RF store，一律经本 Context 获取画布数据与宿主原语：
  *  - 读：edges / readNode / readNodes / readEdges；
  *  - 写：updateNodes（等价旧 setNodes 函数式语义）/ addNodes / addEdges /

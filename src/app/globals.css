@@ -53,6 +53,10 @@
   --paper-hover: #e8e8ec;
   --paper-muted: #ececef;
 
+  /* 面板/弹层背景 — 实体不透明：弹窗、下拉菜单、侧栏；
+     比 --paper 更亮以浮在表面之上（此前未定义，导致 var() 回落 transparent） */
+  --panel-bg: #ffffff;
+
   /* 文字色系 — 中性灰黑 */
   --ink: #171717;
   --ink-strong: #0f0f11;
@@ -353,6 +357,18 @@ body {
 }
 [data-project-board] .board-card[data-selected='true'] {
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary, #7c5cff) 14%, transparent);
+}
+
+/* 项目面板：列表视图行。行内不使用卡片的浮起/上移，只保留浅阴影 + hover 底色；
+   当前/选中/归档/回收站态由行内联的左侧色条表达，此处不重复描边。
+   底色写在这里而非内联，避免内联样式压掉 :hover（当前/选中态仍由内联底色接管）。 */
+[data-project-board] .board-row {
+  background: var(--paper, #fff);
+  box-shadow: 0 1px 2px rgb(23 23 23 / 6%);
+}
+[data-project-board] .board-row:hover {
+  background: var(--paper-hover, #f0f0f3);
+  box-shadow: 0 2px 8px rgb(23 23 23 / 10%);
 }
 
 /* 项目面板待办按钮呼吸灯：未完成待办 > 0 时红色脉冲呼吸（透明度 + 红色外发光），提醒待处理；
@@ -766,22 +782,73 @@ body {
 /* 图片 */
 .html-renderer img {
   border-radius: 4px;
-  /* 彻底方案：压制模型输出内联 width/height 属性（markdown 图片常带固定尺寸，
-     按固有尺寸渲染会撑破容器产生横向拖拽条）；宽高强制自适应容器，保持比例 */
   max-width: 100% !important;
-  height: auto !important;
-  width: auto !important;
   cursor: zoom-in; /* 提示可点击放大预览 */
 }
 
+/* 彻底方案：压制模型输出内联 width/height 属性（markdown 图片常带固定尺寸，
+   按固有尺寸渲染会撑破容器产生横向拖拽条）；宽高强制自适应容器，保持比例。
+   例外：图片可拖拽调整大小的两个界面——分享卡（.bw-share-card）与文档编辑器
+   （.doc-editor-content）——尺寸由用户拖拽决定（带尺寸的 <img width> 或编辑器
+   NodeView 的内联样式），必须让位，否则拖拽无效、自定义尺寸被压回 auto。 */
+.html-renderer img:where(:not(.bw-share-card *, .doc-editor-content *)) {
+  height: auto !important;
+  width: auto !important;
+}
+
 /* 图片限高（AI 回复等展示场景）：过高图片等比缩小，避免撑出外层消息容器的纵向滚动条；
-   文档编辑器（doc-editor-content）为整页编辑面，不限制，保持原始尺寸。
+   文档编辑器（doc-editor-content）为整页编辑面，不限制，保持原始尺寸；分享卡内同理不限制
+   —— 图片已按用户设定宽度渲染，再限高会破坏比例。
    45vh：收敛到节点消息可视区内，单图 + 上下文文字一屏可见（无需上下滑动）；
    细节需要放大查看时点击图片（cursor: zoom-in）走 Lightbox。 */
-.html-renderer:not(.doc-editor-content) img {
+.html-renderer:not(.doc-editor-content) img:where(:not(.bw-share-card *)) {
   max-height: 45vh;
   width: auto;
   object-fit: contain;
+}
+
+/* 可拖拽调整大小的正文图片（分享卡就地编辑 / 文档编辑器，扩展见 extensions/ResizableImage.ts）：
+   1) 居中：无论图片是 markdown 语法还是带尺寸的 <img> HTML，都整块居中；
+      分享卡是外层卡包住 .html-renderer，文档编辑器的根元素同时挂着两个类名，故写法不同。
+   2) 手柄：resize NodeView 只生成无样式的空 div（内联只有 position 与 top/bottom/left/right），
+      尺寸/配色/显隐/光标由这里给；左右手柄内联贴的是上下边，回到垂直居中需 !important。 */
+.bw-share-card .html-renderer img,
+.html-renderer.doc-editor-content img {
+  display: block;
+  margin: 8px auto;
+}
+
+/* 容器/包裹层是 flex 项，不设上限时按图片原始宽度撑开（大图溢出编辑区）；
+   限到 100% 后，图片自身的 max-width:100% 才有可解析的参照宽度 */
+:is(.bw-share-card, .doc-editor-content) [data-resize-container],
+:is(.bw-share-card, .doc-editor-content) [data-resize-wrapper] { max-width: 100%; }
+:is(.bw-share-card, .doc-editor-content) [data-resize-container] { justify-content: center; }
+:is(.bw-share-card, .doc-editor-content) [data-resize-handle] {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--panel-bg, #fff);
+  border: 1.5px solid var(--primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+/* 只读渲染（消息文本块 / 阅读态）隐藏手柄：ResizableNodeView 不判断 editable，
+   手柄只是普通 DOM 监听，在只读态拖拽仍会写回节点属性、改动正文 */
+.doc-editor-content.doc-editor-readonly [data-resize-handle] {
+  display: none;
+}
+:is(.bw-share-card, .doc-editor-content) [data-resize-container]:hover [data-resize-handle],
+:is(.bw-share-card, .doc-editor-content) [data-resize-container][data-resize-state='true'] [data-resize-handle] {
+  opacity: 1;
+}
+:is(.bw-share-card, .doc-editor-content) [data-resize-handle='left'],
+:is(.bw-share-card, .doc-editor-content) [data-resize-handle='right'] {
+  top: 50% !important;
+  bottom: auto !important;
+  transform: translateY(-50%);
+  cursor: ew-resize;
 }
 
 /* WidgetRenderer 自适应：SVG 收缩到容器内。
@@ -987,7 +1054,8 @@ body {
   -webkit-user-select: none;
 }
 
-/* @文件引用 chip（contentEditable=false 整块删除，含 × 移除按钮） */
+/* @文件引用 chip（contentEditable=false 整块删除，含 × 移除按钮）
+   叉号用伪元素绘制而非按钮文本：输入框正文取的是 el.textContent，按钮文字会被一并读走 */
 .node-file-chip {
   display: inline-flex;
   align-items: center;
@@ -1028,6 +1096,9 @@ body {
 .node-file-chip button:hover {
   background-color: color-mix(in oklab, var(--primary) 35%, transparent);
   color: #fff;
+}
+.node-file-chip button::after {
+  content: '×';
 }
 
 /* ============================================================
@@ -1503,4 +1574,28 @@ body {
 @keyframes hippo-capsule-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
+}
+
+/* 打印克隆容器（#doc-print-root）挂在 body 下、位于应用根容器（h-screen overflow-hidden）之外，
+   隐藏规则必须放全局：放在组件内联样式里会随 DocEditor 卸载消失，残留克隆体把 body 撑高，
+   导致整个窗口可向下滚动并露出文档正文。 */
+#doc-print-root {
+  display: none;
+}
+
+/* 打印页底色：body 用的是画布灰底（--canvas-bg = #e4e4ea），而打印与导 PDF 都是
+   printBackground=true（electron/main.ts），灰底会在白纸正文四周透出一圈灰边 ——
+   即用户看到的「点击打印有灰色的边」。打印时把页面底色统一压成纯白。 */
+@media print {
+  html,
+  body {
+    background: #fff !important;
+  }
+}
+
+/* 打印页面规格：A4 + 中文字档常用版心（上/下 25.4mm、右 25mm、左 30mm 留装订边）。
+   打印面板选「默认边距」时以此为准；若用户手动选「无边距/自定义」会覆盖这里的设置。 */
+@page {
+  size: A4;
+  margin: 25.4mm 25mm 25.4mm 30mm;
 }
