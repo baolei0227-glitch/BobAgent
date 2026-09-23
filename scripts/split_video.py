@@ -302,8 +302,8 @@ def locate_ocr_script(explicit):
     if explicit and os.path.exists(explicit):
         return explicit
     cands = [
-        str(Path.home() / 'Desktop' / 'BobWork' / 'projects' / 'src' / 'lib' / 'pdf' / 'ocr_vision.swift'),
-        str(Path.cwd() / 'src' / 'lib' / 'pdf' / 'ocr_vision.swift'),
+        str(Path.home() / 'Desktop' / 'BobWork' / 'projects' / 'src' / 'lib' / 'pdf' / 'core' / 'ocr_vision.swift'),
+        str(Path.cwd() / 'src' / 'lib' / 'pdf' / 'core' / 'ocr_vision.swift'),
         str(Path.cwd() / 'scripts' / 'ocr_vision.swift'),
     ]
     for c in cands:

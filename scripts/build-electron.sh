@@ -95,15 +95,15 @@ fi
 rm -rf "$APP_DIR/Contents/Resources/next-standalone/release" "$APP_DIR/Contents/Resources/next-standalone/release-dist" 2>/dev/null
 rm -rf "$APP_DIR/Contents/Resources/next-standalone/.next/standalone" 2>/dev/null
 
-# Copy Python PDF extractor for PDF Bridge
+# Copy Python PDF extractor for PDF Bridge（T1-1 修复：从 core/ 真源复制；顶层曾是 172B 占位 stub，
+# 打包版 standalone 下 extractor 会探测到 scripts/pdf_extractor.py 并执行注释文件导致文本提取必败。
+# pdf_to_images.py / crop_regions.swift：projects 瘦壳已不引用，不再分发）
 mkdir -p "$APP_DIR/Contents/Resources/next-standalone/scripts"
-cp "$PROJECT_DIR/src/lib/pdf/pdf_extractor.py" "$APP_DIR/Contents/Resources/next-standalone/scripts/pdf_extractor.py"
-cp "$PROJECT_DIR/src/lib/pdf/pdf_to_images.py" "$APP_DIR/Contents/Resources/next-standalone/scripts/pdf_to_images.py"
+cp "$PROJECT_DIR/src/lib/pdf/core/pdf_extractor.py" "$APP_DIR/Contents/Resources/next-standalone/scripts/pdf_extractor.py"
 # OOXML 修订引擎脚本（docx track changes）复制到 standalone scripts/
 cp "$PROJECT_DIR/src/lib/docx/ooxml-revise.py" "$APP_DIR/Contents/Resources/next-standalone/scripts/ooxml-revise.py"
 # 本地 OCR（macOS Vision）Swift 脚本：存在则复制（缺少 swift 环境时运行时自动降级）
-cp "$PROJECT_DIR/src/lib/pdf/ocr_vision.swift" "$APP_DIR/Contents/Resources/next-standalone/scripts/ocr_vision.swift" 2>/dev/null || true
-cp "$PROJECT_DIR/src/lib/pdf/crop_regions.swift" "$APP_DIR/Contents/Resources/next-standalone/scripts/crop_regions.swift" 2>/dev/null || true
+cp "$PROJECT_DIR/src/lib/pdf/core/ocr_vision.swift" "$APP_DIR/Contents/Resources/next-standalone/scripts/ocr_vision.swift" 2>/dev/null || true
 # 独立 docx-template-mcp 包脚本（scan_placeholders / fill_template）随包分发：
 # 复制到 next-standalone/docx-template-mcp/assets/scripts/（匹配 resolveDocxTemplateScript 的 cwd 候选）
 if [ -d "$PROJECT_DIR/../docx-template-mcp/assets/scripts" ]; then

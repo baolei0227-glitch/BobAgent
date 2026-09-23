@@ -8,7 +8,20 @@
  */
 
 import type { CellVerification } from '../core/layout-score';
-import type { StatementRowKind } from '../statement/control-rows';
+
+/**
+ * 流水行分类（T1-1 前实现在 statement/control-rows.ts；statement/ 死代码清除后内联至此，
+ * 定义逐字照搬，仅供 StatementLedgerRow.kind 使用）。
+ */
+export type StatementRowKind =
+  | 'transaction'       // 普通交易（参与勾稽）
+  | 'control_subtotal'  // 小计/本页合计/本期合计（不参与勾稽）
+  | 'control_total'     // 本年累计/总计（不参与勾稽）
+  | 'opening_balance'   // 期初余额/承上页：重置 prevBalance，不参与「inc/exp→bal」勾稽
+  | 'closing_balance'   // 期末余额/过次页：作为 prevBalance 传递给下一页，不参与 inc/exp 勾稽
+  | 'header_repeat'     // 跨页重复表头（跳过）
+  | 'separator'         // 纯横线/空行/分隔行
+  | 'noise';            // 无法分类的其它噪音行
 
 export type PageRoute = 'coordinate_text' | 'ocr' | 'hybrid' | 'failed';
 

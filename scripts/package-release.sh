@@ -284,12 +284,11 @@ cp -R "$PROJECT_DIR/.next/static" "$STAGING/next-standalone/.next/"
 cp -R "$PROJECT_DIR/public" "$STAGING/next-standalone/"
 # 内置技能（assets/skills）随包分发：打包版 cwd 为 next-standalone，loader 读取 ./assets/skills
 cp -R "$PROJECT_DIR/assets/skills" "$STAGING/next-standalone/assets/skills"
-# PDF 提取脚本（pypdf/pdfplumber/渲染 + 本地 Vision OCR）复制到 standalone scripts/
+# PDF 提取脚本复制到 standalone scripts/（T1-1 修复：从 core/ 真源复制；顶层曾是 172B 占位 stub。
+# pdf_to_images.py / crop_regions.swift：projects 瘦壳已不引用，不再分发）
 mkdir -p "$STAGING/next-standalone/scripts"
-cp "$PROJECT_DIR/src/lib/pdf/pdf_extractor.py" "$STAGING/next-standalone/scripts/pdf_extractor.py"
-cp "$PROJECT_DIR/src/lib/pdf/pdf_to_images.py" "$STAGING/next-standalone/scripts/pdf_to_images.py"
-cp "$PROJECT_DIR/src/lib/pdf/ocr_vision.swift" "$STAGING/next-standalone/scripts/ocr_vision.swift" 2>/dev/null || true
-cp "$PROJECT_DIR/src/lib/pdf/crop_regions.swift" "$STAGING/next-standalone/scripts/crop_regions.swift" 2>/dev/null || true
+cp "$PROJECT_DIR/src/lib/pdf/core/pdf_extractor.py" "$STAGING/next-standalone/scripts/pdf_extractor.py"
+cp "$PROJECT_DIR/src/lib/pdf/core/ocr_vision.swift" "$STAGING/next-standalone/scripts/ocr_vision.swift" 2>/dev/null || true
 # OOXML 修订引擎脚本（docx track changes）复制到 standalone scripts/
 cp "$PROJECT_DIR/src/lib/docx/ooxml-revise.py" "$STAGING/next-standalone/scripts/ooxml-revise.py"
 # Python 包生命周期清理脚本（AI 安装包超过30天未使用自动卸载）
