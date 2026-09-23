@@ -101,6 +101,10 @@ const OCR_ENGINE_OPTIONS: Array<{ value: ScreenOcrEngine; label: string; hint: s
  * 静态 bundled 卡：无 mcp 服务实例——启停读写 settings.screenOcr.enabled；
  * 状态点/副标题反映 BobWork Capture 屏幕录制授权，「检测 + 开关」直接在卡上操作，无弹窗。
  */
+
+/** OCR 条目图标（模块级常量：mcpEntryIcon 返回稳定引用，避免 render 内创建组件） */
+const OCR_ENTRY_ICON = mcpEntryIcon('OCR');
+
 function ScreenshotOcrCard() {
   const [enabled, setEnabled] = useState(true);
   const [engine, setEngine] = useState<ScreenOcrEngine>('auto');
@@ -161,7 +165,6 @@ function ScreenshotOcrCard() {
     } catch { /* 保存失败保持本地状态 */ }
   };
 
-  const EntryIcon = mcpEntryIcon('OCR');
   const meta = OCR_PERM_META[perm];
   const dotColor = enabled ? meta.color : 'var(--line)';
   const subtitle = enabled ? meta.label : 'Disabled';
@@ -172,7 +175,7 @@ function ScreenshotOcrCard() {
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
           style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)', color: 'var(--primary)' }}
         >
-          <EntryIcon className="h-[18px] w-[18px]" />
+          <OCR_ENTRY_ICON className="h-[18px] w-[18px]" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -1037,7 +1040,7 @@ export function McpStorePanel() {
                 })}
               </div>
               <p className="mt-1 text-11 leading-snug" style={{ color: 'var(--ink-faint)' }}>
-                Click a scene keyword to append it to the name (e.g. Sogou Search-legal) so BobWork recognizes and injects this MCP's tools; click again to remove or switch.
+                Click a scene keyword to append it to the name (e.g. Sogou Search-legal) so BobWork recognizes and injects this MCP&apos;s tools; click again to remove or switch.
               </p>
             </div>
             <div>

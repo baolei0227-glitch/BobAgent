@@ -17,6 +17,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdtemp, writeFile, readFile, rm } from 'fs/promises';
+import { accessSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -53,7 +54,7 @@ const PYTHON = '/usr/bin/python3';
 function resolveScript(): string {
   const standalone = join(process.cwd(), 'scripts', 'ooxml-revise.py');
   try {
-    require('fs').accessSync(standalone);
+    accessSync(standalone);
     return standalone;
   } catch { /* 回退 dev 路径 */ }
   return join(process.cwd(), 'src', 'lib', 'docx', 'ooxml-revise.py');

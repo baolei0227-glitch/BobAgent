@@ -11,6 +11,7 @@
  */
 
 import type { CalendarAccountRow } from '@/lib/db';
+import type { DAVCalendar, DAVCalendarObject } from 'tsdav';
 
 export interface DavCalendar {
   url: string;
@@ -22,6 +23,20 @@ export interface DavEvent {
   href: string;
   etag: string;
   ical: string;
+}
+
+/** tsdav 运行时结果中存在的兼容回退字段（类型声明未覆盖 url/href、data/content） */
+type TsdavCalendar = DAVCalendar & { href?: string };
+type TsdavCalendarObject = DAVCalendarObject & { href?: string; content?: string };
+
+/** 从 tsdav / fetch 抛出的错误对象中提取 HTTP 状态码（412 等） */
+function davErrorStatus(e: unknown): number | undefined {
+  if (!e || typeof e !== 'object') return undefined;
+  const o = e as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } };
+  for (const c of [o.status, o.response?.status, o.statusCode]) {
+    if (typeof c === 'number' && c) return c;
+  }
+  return undefined;
 }
 
 /** 从 tsdav 客户端拉取日历列表 */
@@ -40,9 +55,9 @@ export async function discoverCalendars(
     defaultAccountType: 'caldav',
   });
   const calendars = await client.fetchCalendars({});
-  return (calendars ?? []).map((c: any) => ({
+  return (calendars ?? []).map((c: TsdavCalendar) => ({
     url: c.url || c.href || '',
-    displayName: c.displayName || 'Untitled calendar',
+    displayName: (typeof c.displayName === 'string' ? c.displayName : '') || 'Untitled calendar',
     color: c.calendarColor || null,
   }));
 }
@@ -66,7 +81,7 @@ export async function fetchCalendarEvents(
     timeRange: { start: rangeStart, end: rangeEnd },
   });
   return (events ?? [])
-    .map((e: any) => ({
+    .map((e: TsdavCalendarObject) => ({
       href: e.url || e.href || '',
       etag: e.etag || '',
       ical: e.data || e.content || '',
@@ -100,8 +115,8 @@ export async function pushEvent(
       headers: etag ? { 'If-Match': etag } : {},
     });
     return true;
-  } catch (e: any) {
-    const code = (e as any)?.status || (e as any)?.response?.status || (e as any)?.statusCode;
+  } catch (e) {
+    const code = davErrorStatus(e);
     if (code === 412) return false;
     throw e;
   }
@@ -126,8 +141,8 @@ export async function deleteDavEvent(
       calendarObject: { url: hrefPath, etag: etag || undefined },
     });
     return true;
-  } catch (e: any) {
-    const code = (e as any)?.status || (e as any)?.response?.status || (e as any)?.statusCode;
+  } catch (e) {
+    const code = davErrorStatus(e);
     if (code === 412) return false;
     throw e;
   }

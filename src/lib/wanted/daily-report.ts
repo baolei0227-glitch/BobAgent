@@ -162,8 +162,8 @@ async function tryAcquireSendMarker(type: DailyReportType): Promise<boolean> {
       const { writeFile } = await import('fs/promises');
       await writeFile(markerPath(type), new Date().toISOString(), { encoding: 'utf-8', flag: 'wx' });
       return true;
-    } catch (e: any) {
-      if (e && (e.code === 'EEXIST' || e.code === 'EACCES')) return false;
+    } catch (e) {
+      if (e && typeof e === 'object' && 'code' in e && (e.code === 'EEXIST' || e.code === 'EACCES')) return false;
       throw e;
     }
   } finally {
@@ -253,7 +253,7 @@ async function pushPending(
         const { rename } = await import('fs/promises');
         await rename(tmp, PENDING_FILE);
         renamed = true;
-      } catch (e: any) {
+      } catch (e) {
         if (attempt === 2) throw e;
         await new Promise((r) => setTimeout(r, 50));
       }

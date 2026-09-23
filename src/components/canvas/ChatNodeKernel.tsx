@@ -31,7 +31,6 @@ import {
 } from '@/lib/types';
 import { loadSettings, getQuickPrompts, updateQuickPrompts, type QuickPrompt } from '@/lib/settings';
 import type { McpServerConfig } from '@/lib/mcp/types';
-import { analyzeTask, selectBestModel } from '@/lib/model-matcher';
 import { isVisionModel } from '@/lib/model-tags';
 import { outcomeMaxLengthForModel, inferContextWindow, compactTriggerTokensForContext } from '@/lib/context-limits';
 import { WidgetRenderer, WidgetSkeleton } from './WidgetRenderer';
@@ -450,6 +449,9 @@ export interface ChatNodeKernelProps {
   data: AiChatNodeData;
   selected?: boolean;
   identity: ChatNodeIdentity;
+  /** 环境上下文：每轮自动前置进用户消息的模型侧内容（如 Hippo 侧边栏的当前页 URL/标题）。
+   *  只进 effectiveContent，不进气泡正文、不落盘、发送后不清除 —— 与 referenceTag 的单槽位语义互不干扰。 */
+  ambientContext?: string;
 }
 
 // Context: 节点点击 .md 附件时通知画布打开阅读器
@@ -1036,7 +1038,7 @@ function TaskStepsPanel({
   );
 }
 
-export function ChatNodeKernel({ id, data, selected, identity }: ChatNodeKernelProps) {
+export function ChatNodeKernel({ id, data, selected, identity, ambientContext }: ChatNodeKernelProps) {
   // 宿主注入通道（单焦点宿主 2026-09）：替代 useReactFlow()/useStore(s=>s.edges)
   const nodeHost = useNodeHost();
   /** 等价旧 useReactFlow().setNodes（函数式语义；本文件 15 处 setNodes 全为"只改本节点 data"的 map） */
@@ -3061,8 +3063,8 @@ ${rows.join('\n')}
     }
 
     let currentModelId = modelId;
-    // 本轮实际思考等级：auto 模式推断值优先，否则当前用户设置
-    let actualThinkingLevel: ThinkingLevel = thinkingLevel;
+    // 本轮实际思考等级：直接采用节点当前设置（不再由模型/任务推断）
+    const actualThinkingLevel: ThinkingLevel = thinkingLevel;
 
     if (isContinuation && (!currentModelId || currentModelId === DEFAULT_MODEL_ID)) {
       // P3-3b：追问（continuation）延续上一轮实际模型 —— 修正历史"跳过 Auto 决策后
@@ -3072,39 +3074,23 @@ ${rows.join('\n')}
     }
 
     if (!currentModelId || currentModelId === DEFAULT_MODEL_ID) {
-      const taskAnalysis = analyzeTask(userInput);
       // 本轮上下文是否携带图片附件（新挂的附件 + 发送窗口内历史 user 消息仍带图的）。
-      // 命中时 Auto 优先选视觉模型，使后端能把图片以多模态直连喂给模型（而非描述注入兜底）。
       const hasImageInContext =
         (turnAttachments?.length > 0 && turnAttachments.some((a) => a.type === 'image')) ||
         messages.some(
           (m) => m.role === 'user' && !!m.attachments && m.attachments.some((a) => a.type === 'image'),
         );
-      // Auto 模式选模型：直接在主对话候选池（settings.chatModel.pool）内按任务类型智能匹配。
-      // 历史"星标模型"优先级（chatModel.defaultModel 排最前并直接使用）已移除，
-      // 一律由 selectBestModel 按任务类型打分；候选池为空/匹配不到 → 回退全部可用模型。
+      // Auto 模式选模型只做两件事（不做任务类型/能力打分）：
+      //   ① 候选池有序首选 —— 取主对话候选池（settings.chatModel.pool）首项，池为空则取全部可用模型首项，
+      //      语义等同服务端 resolveMainChat；
+      //   ② 带图视觉优先 —— 上下文含图片且开关打开时，在候选中取第一个视觉模型，
+      //      使后端能把图片以多模态直连喂给模型（而非描述注入兜底）；候选中无视觉模型则仍取首项。
       let bestModel: AvailableModel | null = null;
       try {
         const settings = await loadSettings();
         const pool = settings.chatModel?.pool ?? [];
-        // P3-3a：Auto 任务类型智能匹配开关（settings.chatModel.auto，默认开）——
-        // 关 → 静态首选（候选池首项，等同服务端 resolveMainChat 语义）；开 → 按任务类型 selectBestModel 打分
-        const autoModelRouting = settings.chatModel?.auto !== false;
-        // Auto 视觉优先开关（settings.chatModel.autoVisionOnImage，默认开）；关 = 带图也不为视觉模型加权
+        // Auto 视觉优先开关（settings.chatModel.autoVisionOnImage，默认开）；关 = 带图也不选视觉模型
         const autoVisionOnImage = settings.chatModel?.autoVisionOnImage !== false;
-        // Auto + 上下文带图片 → 只在视觉模型子集内按任务打分选模；
-        // 候选池没有视觉模型时返回 null，交由上层正常任务打分（图片走描述/read_attachment 兜底）。
-        const pickBest = (list: AvailableModel[]): AvailableModel | null => {
-          if (list.length === 0) return null;
-          if (autoModelRouting && hasImageInContext && autoVisionOnImage) {
-            const visionList = list.filter((m) => {
-              const parsed = parseCustomModel(m.modelId);
-              return isVisionModel(parsed ? parsed.modelId : m.modelId);
-            });
-            if (visionList.length > 0) return selectBestModel(visionList, taskAnalysis);
-          }
-          return selectBestModel(list, taskAnalysis);
-        };
         // availableModels 的 modelId 是 `provider:modelId` 格式，配置存的是裸 modelId
         const findInAvailable = (modelId: string, provider?: string) =>
           availableModels.find((m) => {
@@ -3112,19 +3098,23 @@ ${rows.join('\n')}
             if (!parsed) return m.modelId === modelId;
             return provider ? parsed.provider === provider && parsed.modelId === modelId : parsed.modelId === modelId;
           });
-        // 候选池（去重）
+        // 候选池（去重）→ 池为空则整个可用模型列表
         const poolModels: AvailableModel[] = [];
         const seen = new Set<string>();
         for (const item of pool) {
           const m = findInAvailable(item.modelId, item.provider);
           if (m && !seen.has(m.modelId)) { poolModels.push(m); seen.add(m.modelId); }
         }
-        if (poolModels.length > 0) {
-          bestModel = autoModelRouting ? pickBest(poolModels) : poolModels[0];
+        const candidates = poolModels.length > 0 ? poolModels : availableModels;
+        if (hasImageInContext && autoVisionOnImage) {
+          bestModel =
+            candidates.find((m) => {
+              const parsed = parseCustomModel(m.modelId);
+              return isVisionModel(parsed ? parsed.modelId : m.modelId);
+            }) ?? null;
         }
-        if (!bestModel) bestModel = autoModelRouting ? pickBest(availableModels) : (availableModels[0] ?? null);
+        bestModel = bestModel ?? candidates[0] ?? null;
       } catch { /* 读取失败则回退自动选择 */ }
-      bestModel = bestModel ?? selectBestModel(availableModels, taskAnalysis);
 
       if (!bestModel) {
         alert('Please configure at least one model in settings');
@@ -3165,7 +3155,7 @@ ${rows.join('\n')}
     // 续写模式：复用已有的（合并了补充信息的）用户消息，不创建新 userMsg
     const now = new Date();
     let userMsg: ChatMessage;
-    let materialFileMap: Record<string, MaterialItem> = {};
+    const materialFileMap: Record<string, MaterialItem> = {};
 
     if (isContinuation) {
       // 续写模式：最后一条用户消息是补充内容（独立消息，不合并到原始问题）
@@ -3175,7 +3165,7 @@ ${rows.join('\n')}
         return;
       }
       userMsg = lastUser;
-      // effectiveContent 合并原始问题 + 补充信息（用于 analyzeTask 和持久化，UI 中保持独立消息）
+      // effectiveContent 合并原始问题 + 补充信息（用于请求与持久化，UI 中保持独立消息）
       const ctx = continuationContextRef.current;
       if (ctx) {
         effectiveContent = ctx.originalUserContent + '\n\n--- 补充信息 ---\n' + ctx.supplementText + '\n--- 补充信息结束 ---';
@@ -3238,6 +3228,13 @@ ${rows.join('\n')}
             : `以上目录已授权给 AI，可读可写。请使用 list_directory / read_file / write_file 等文件工具在该目录内完成用户要求的操作（路径使用完整绝对路径）。\n`) +
           `--- 操作目录结束 ---`;
       }
+    }
+
+    // 环境上下文（Hippo 侧边栏的当前页 URL/标题）：每轮自动前置，随页面切换跟随。
+    // 放在引用标签/资料引用拼接之后，避免被后续赋值覆盖；只进模型侧的 effectiveContent，
+    // 气泡正文与落盘用 displayContent，因此不会污染用户消息（见 questionForPersist）。
+    if (ambientContext && ambientContext.trim()) {
+      effectiveContent = `${ambientContext.trim()}\n\n${effectiveContent}`;
     }
 
     const assistantId = `msg-${Date.now() + 1}`;
@@ -3764,13 +3761,21 @@ ${rows.join('\n')}
                   // 未批准（Discard，或卡片超时自动作废）→ 方案作废：右侧步骤面板收口为 DISCARDED
                   if (!approved) setTeamPlanDiscarded(true);
                   try {
-                    await fetch('/api/chat/confirm', {
+                    const res = await fetch('/api/chat/confirm', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ confirmId: tc.confirmId, approved }),
                     });
+                    // 409 = 该审批挂起项已失效（超时收口 / 本轮已断开 / 卡片来自上一次会话）：
+                    // 本次点击没生效，必须把计划收口为作废并留痕 —— 否则用户以为「已批准」，
+                    // 而服务端根本没收门禁，团队永远停在 planning，面板一直空着。
+                    if (!res.ok) {
+                      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+                      setTeamPlanDiscarded(true);
+                      console.warn('[team_confirm] 审批回传未生效:', body?.error ?? `HTTP ${res.status}`);
+                    }
                   } catch {
-                    /* 回传失败：服务端超时按未批准处理 */
+                    /* 回传失败：服务端按未批准（超时）收口，草案由 team_run 作废 */
                   }
                   setConfirmPending(false);
                 })();
@@ -4254,7 +4259,7 @@ ${rows.join('\n')}
           if (cleanAnswer.length < 10 && assistantContent.length > 100) {
             console.warn('[AiChatNode:save] 解析后答案异常短，可能 <think> 未闭合，使用原文兜底');
             // 尝试只去除已知安全的部分：TITLE 注释
-            let fallback = assistantContent
+            const fallback = assistantContent
               .replace(/<!--\s*TITLE:\s*.+?\s*-->/gi, '')
               .trim();
             if (fallback.length > cleanAnswer.length) {
@@ -4318,7 +4323,8 @@ ${rows.join('\n')}
           }
 
           let appendSuccess = false;
-          let appendRespJson: any = null;
+          // 落盘接口的响应体：仅当返回 compacted 字段时用于日志（未返回/解析失败保持 null）
+          let appendRespJson: { compacted?: { new_compacted_until: number; appended_facts: number } } | null = null;
           // 开始持久化：置进行中标志，期间锁定输入避免并发写同一节点文件
           setPersisting(true);
           persistingRef.current = true;

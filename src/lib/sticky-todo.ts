@@ -19,6 +19,7 @@
  *     sticky-notes GET 惰性迁移到 notebook.json；索引继续跳过 note 页（兼容迁移前数据）
  */
 import { join } from 'path';
+import { promises as fs } from 'fs';
 
 /* ────────────────────────────────────────────────────────────
  * 空行归一化（跨调用方共用：/api/sticky-notes 与 AI 直写工具）
@@ -180,7 +181,6 @@ export async function writeTodoIndexFile(
   projectDir: string,
   notes: Array<Record<string, unknown>>,
 ): Promise<void> {
-  const fs = require('fs/promises') as typeof import('fs/promises');
   const dir = join(projectDir, 'sticky-notes');
   await fs.mkdir(dir, { recursive: true });
   const target = join(dir, TODO_INDEX_FILE);
@@ -192,7 +192,6 @@ export async function writeTodoIndexFile(
 
 /** 读 todo-index.json；文件缺失/损坏/版本不符 → 返回 null（调用方回退扫描主文档） */
 export async function readTodoIndexFile(projectDir: string): Promise<StickyTodoIndex | null> {
-  const fs = require('fs/promises') as typeof import('fs/promises');
   try {
     const raw = await fs.readFile(join(projectDir, 'sticky-notes', TODO_INDEX_FILE), 'utf-8');
     const data = JSON.parse(raw) as StickyTodoIndex;
@@ -211,7 +210,6 @@ export async function readTodoIndexFile(projectDir: string): Promise<StickyTodoI
  * 返回去重后的行文本（按出现顺序）。
  */
 export async function listUncalendaredOpenRows(projectDir: string): Promise<string[]> {
-  const fs = require('fs/promises') as typeof import('fs/promises');
   let raw: string;
   try {
     raw = await fs.readFile(join(projectDir, 'sticky-notes', 'sticky-notes.json'), 'utf-8');

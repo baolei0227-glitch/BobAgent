@@ -2207,7 +2207,7 @@ export function WantedNoticeCenter({
       const isTyping =
         target &&
         (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' ||
-          (target as any).isContentEditable);
+          target.isContentEditable);
       // R / Esc / ⌘⇧D / ⌘↵ 允许在 reply textarea 中生效；其余仅在非输入焦点时
       const typingOk = (k: string) =>
         k === 'R' || k === 'Escape' || (k === 'D' && e.metaKey && e.shiftKey) ||

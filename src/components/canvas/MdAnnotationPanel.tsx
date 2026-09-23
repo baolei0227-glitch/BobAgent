@@ -6,8 +6,11 @@
 // - 修订列表：修订后逐条展示（删除/新增），支持逐条 + 整体 接受/拒绝
 
 import { useState } from 'react';
-import { MessageSquare, X, Wand2, Loader2, Check, Trash2, CornerDownRight, Plus, Minus, FileDiff, ArrowRight, LocateFixed, Eye, Pencil } from 'lucide-react';
+import { MessageSquare, X, Wand2, Loader2, Check, Trash2, CornerDownRight, Plus, Minus, FileDiff, ArrowRight, LocateFixed, Eye, Pencil, ListChecks } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { CheckReport } from './CheckReport';
+import { summarizeChecks } from '@/lib/md-export/check';
+import type { ConsistencyItem } from '@/lib/md-consistency/check';
 
 export interface MdAnnotation {
   id: string;
@@ -93,6 +96,20 @@ export interface RevisionRound {
   };
   /** 来源批注 id（单条「AI 修改」生成的轮次记录对应批注；该轮修订被接受时自动标记批注已解决） */
   annotationId?: string;
+  /** 「改了什么」的一句话说明（由 old/new 差异确定性生成，不额外调模型；随轮次持久化到 sidecar） */
+  note?: string;
+}
+
+/** 一轮「按批注修订」的结果回报：改了几条、哪几条失败及原因（失败原因可见，不再静默丢弃） */
+export interface ReviseReport {
+  /** 本轮参与修订的未解决批注总数 */
+  total: number;
+  /** 改写成功、已生成修订轮次的批注（annotationId → 对应轮次 id） */
+  revised: { annotationId: string; roundId: string }[];
+  /** 改写失败的批注与原因 */
+  failed: { annotationId: string; quote: string; reason: string }[];
+  /** 生成时间（ISO） */
+  at: string;
 }
 
 interface MdAnnotationPanelProps {
@@ -125,9 +142,19 @@ interface MdAnnotationPanelProps {
   rewritingAll?: boolean;
   /** 当前正在重写的批注 id：对应卡片显示进度百分比（null = 无进行中） */
   rewritingId?: string | null;
-  /** 视图模式：annotations=批注列表；revisions=修订视图（修订前 → 修订后） */
-  view: 'annotations' | 'revisions';
-  onViewChange: (view: 'annotations' | 'revisions') => void;
+  /** 最近一轮「按批注修订」的结果回报（改了几条 / 哪几条失败及原因）；null = 尚未跑过 */
+  reviseReport?: ReviseReport | null;
+  /** 一致性检查结果（Checks 视图）：编号 / 交叉引用 / 术语 */
+  consistencyItems?: ConsistencyItem[];
+  /** 一致性检查进行中 */
+  checking?: boolean;
+  /** 触发一致性检查（仅当前文档） */
+  onRunChecks?: () => void;
+  /** 点击检查项 → 跳转到正文对应位置 */
+  onJumpToCheck?: (item: ConsistencyItem) => void;
+  /** 视图模式：annotations=批注列表；revisions=修订视图（修订前 → 修订后）；checks=一致性检查 */
+  view: 'annotations' | 'revisions' | 'checks';
+  onViewChange: (view: 'annotations' | 'revisions' | 'checks') => void;
 }
 
 /** 修订配对展示：相邻 delete+insert 合并为一行「修订前 → 修订后」，其余独立显示 */
@@ -189,7 +216,12 @@ export function MdAnnotationPanel({
   onRewriteAll,
   rewritingAll,
   rewritingId,
+  reviseReport,
   onFocusRevision,
+  consistencyItems,
+  checking,
+  onRunChecks,
+  onJumpToCheck,
   view,
   onViewChange,
 }: MdAnnotationPanelProps) {
@@ -207,6 +239,8 @@ export function MdAnnotationPanel({
   // 批量重写进度：当前重写条在待重写列表中的序号（用于禁用其他卡片按钮 + 卡片呼吸灯）
   const rewriteQueue = annotations.filter((a) => !a.resolved && a.quote.trim() && a.content.trim());
   const rewritingIndex = rewritingId ? rewriteQueue.findIndex((x) => x.id === rewritingId) : -1;
+  // 一致性检查汇总（Checks tab 徽章 = fail + warn 数）
+  const checkIssues = consistencyItems ? summarizeChecks(consistencyItems).fail + summarizeChecks(consistencyItems).warn : 0;
 
   return (
     <div
@@ -245,6 +279,19 @@ export function MdAnnotationPanel({
             <FileDiff className="h-3 w-3" />
             修订{totalPending > 0 ? ` ${totalPending}` : ''}
           </button>
+          <button
+            onClick={() => onViewChange('checks')}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-10 font-medium transition-colors"
+            style={{
+              backgroundColor: view === 'checks' ? 'var(--paper)' : 'transparent',
+              boxShadow: view === 'checks' ? '0 1px 2px rgba(23,23,23,0.1)' : 'none',
+              color: view === 'checks' ? 'var(--primary)' : 'var(--ink-muted)',
+            }}
+            title="Consistency checks (numbering · cross-references · terminology)"
+          >
+            <ListChecks className="h-3 w-3" />
+            Checks{checkIssues > 0 ? ` ${checkIssues}` : ''}
+          </button>
         </div>
         <Button
           onClick={onClose}
@@ -277,8 +324,43 @@ export function MdAnnotationPanel({
             title="Revise all per annotations (AI edits with context; results go to Revisions for review/rollback)"
           >
             {revising ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
-            {revising ? 'Revising…' : '按批注修订'}
+            {revising ? 'Revising…' : 'Revise all per annotations'}
           </Button>
+        </div>
+      )}
+
+      {/* 最近一轮「按批注修订」的结果回报：改了几条 / 哪几条失败及原因（失败项可点击跳回该批注） */}
+      {reviseReport && (
+        <div className="shrink-0 border-b px-2 py-1.5" style={{ borderColor: 'var(--line)' }}>
+          <div className="flex items-center gap-1.5 text-10 font-medium">
+            <Check className="h-3 w-3 shrink-0" style={{ color: 'var(--success)' }} />
+            <span style={{ color: 'var(--success)' }}>{reviseReport.revised.length} revised</span>
+            {reviseReport.failed.length > 0 && (
+              <span style={{ color: 'var(--danger)' }}>· {reviseReport.failed.length} failed</span>
+            )}
+            <span className="ml-auto" style={{ color: 'var(--ink-faint)' }}>{reviseReport.total} total</span>
+          </div>
+          {reviseReport.failed.length > 0 && (
+            <div className="mt-1 flex flex-col gap-1">
+              {reviseReport.failed.map((f) => {
+                const ann = annotations.find((a) => a.id === f.annotationId);
+                return (
+                  <button
+                    key={f.annotationId}
+                    onClick={() => ann && onJumpToAnnotation(ann)}
+                    className="rounded-md border px-1.5 py-1 text-left transition-colors hover:bg-[var(--paper-hover)]"
+                    style={{ borderColor: 'var(--line-soft)' }}
+                    title="Click to jump to the annotation"
+                  >
+                    <span className="block truncate text-10 font-medium" style={{ color: 'var(--danger)' }}>
+                      &ldquo;{f.quote.length > 24 ? `${f.quote.slice(0, 24)}…` : f.quote}&rdquo;
+                    </span>
+                    <span className="block text-10 leading-snug" style={{ color: 'var(--ink-muted)' }}>{f.reason}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -444,14 +526,17 @@ export function MdAnnotationPanel({
                 const timeLabel = sameDay
                   ? `${String(ts.getHours()).padStart(2, '0')}:${String(ts.getMinutes()).padStart(2, '0')}`
                   : `${ts.getMonth() + 1}/${ts.getDate()} ${String(ts.getHours()).padStart(2, '0')}:${String(ts.getMinutes()).padStart(2, '0')}`;
-                // 每轮摘要：优先关联批注意见，其次修改内容（明确"改的是哪里"，避免 V 序号被误读为同一处迭代）
+                // 每轮摘要：优先关联批注意见，其次「改了什么」回报（note，由差异确定性生成），
+                // 再退到修改内容截断（明确"改的是哪里"，避免 V 序号被误读为同一处迭代）
                 const srcAnn = annotations.find((a) => a.id === r.annotationId);
                 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
                 const summary = srcAnn?.content
-                  ? `批注：${clip(srcAnn.content, 18)}`
-                  : r.patch
-                    ? `改「${clip(r.patch.oldText || '', 10)}」${r.patch.newText ? `→「${clip(r.patch.newText, 10)}」` : ''}`
-                    : `${r.ops?.length ?? r.revisions.length} 处修订`;
+                  ? `批注：${clip(srcAnn.content, 18)}${r.note ? ` · ${r.note}` : ''}`
+                  : r.note
+                    ? r.note
+                    : r.patch
+                      ? `改「${clip(r.patch.oldText || '', 10)}」${r.patch.newText ? `→「${clip(r.patch.newText, 10)}」` : ''}`
+                      : `${r.ops?.length ?? r.revisions.length} 处修订`;
                 return (
                   <div
                     key={r.id}
@@ -604,6 +689,44 @@ export function MdAnnotationPanel({
             </div>
           )}
         </div>
+      )}
+
+      {/* 一致性检查视图：编号 / 交叉引用 / 术语（仅当前文档） */}
+      {view === 'checks' && (
+        <>
+          <div className="flex shrink-0 items-center gap-1.5 border-b px-2 py-1.5" style={{ borderColor: 'var(--line)' }}>
+            <Button
+              onClick={onRunChecks}
+              disabled={checking}
+              variant="soft"
+              tone="neutral"
+              size="micro"
+              title="Check numbering, cross-references and terminology in this document"
+            >
+              {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <ListChecks className="h-3 w-3" />}
+              {checking ? 'Checking…' : 'Run checks'}
+            </Button>
+            {consistencyItems && consistencyItems.length > 0 && (
+              <span className="text-10" style={{ color: 'var(--ink-faint)' }}>
+                {consistencyItems.length} item{consistencyItems.length > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto ai-canvas-scroll px-2 py-2">
+            {!consistencyItems || consistencyItems.length === 0 ? (
+              <div className="text-11 leading-relaxed" style={{ color: 'var(--ink-faint)' }}>
+                {checking
+                  ? 'Scanning this document…'
+                  : 'Run checks to find numbering errors, broken cross-references and inconsistent terminology.'}
+              </div>
+            ) : (
+              <CheckReport
+                items={consistencyItems}
+                onLocate={onJumpToCheck ? (it) => onJumpToCheck(it as ConsistencyItem) : undefined}
+              />
+            )}
+          </div>
+        </>
       )}
     </div>
   );

@@ -227,10 +227,10 @@ export async function installSkill(opts: InstallOptions): Promise<InstallResult>
         path: targetDir,
       },
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     // 清理临时目录
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    return { success: false, error: err?.message || 'Unknown install error' };
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown install error' };
   }
 }
 
@@ -359,9 +359,9 @@ export async function installSkillFromZip(
       success: true,
       skill: { ...meta, path: targetDir },
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    return { success: false, error: err?.message || 'Unknown install error' };
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown install error' };
   }
 }
 

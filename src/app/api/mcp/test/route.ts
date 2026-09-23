@@ -52,10 +52,10 @@ export async function POST(request: Request) {
     const result = await mcpManager.testConnection(resolved);
 
     return NextResponse.json(result);
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('POST /api/mcp/test error:', e);
     return NextResponse.json(
-      { success: false, toolsCount: 0, error: e?.message || 'Test failed' },
+      { success: false, toolsCount: 0, error: e instanceof Error ? e.message : 'Test failed' },
       { status: 500 },
     );
   }

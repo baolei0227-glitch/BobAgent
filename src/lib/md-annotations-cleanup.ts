@@ -18,7 +18,7 @@ import { promises as fs } from 'fs';
 import { join, resolve, sep } from 'path';
 import { createHash } from 'crypto';
 import { resolveAppRoot } from '@/lib/app-root';
-import { listProjects } from '@/lib/project/project-manager';
+import { readProjectRefs } from '@/lib/project/project-config';
 
 const ANNOTATIONS_DIR = () => join(resolveAppRoot(), 'md-annotations');
 
@@ -69,8 +69,7 @@ export async function cleanupMdAnnotationSidecars(opts: MdAnnotationCleanupOptio
     // 项目 id → 项目根路径映射（key 前缀可能是项目 id，也可能是目录名）
     let projects: { id: string; path: string }[] = [];
     try {
-      const listed = await listProjects();
-      projects = listed.projects.map((p) => ({ id: p.id, path: resolve(p.path) }));
+      projects = await readProjectRefs();
     } catch { /* 无项目配置时按绝对路径处理 */ }
 
     const targets = (opts.targets || []).map((t) => ({ abs: resolve(t.abs), isDir: !!t.isDir }));

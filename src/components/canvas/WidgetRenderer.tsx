@@ -190,7 +190,8 @@ function SvgWidget({ code, title, onRendered }: { code: string; title?: string; 
 function HtmlWidget({ code, title, onRendered }: { code: string; title?: string; onRendered?: () => void }) {
   const dark = useWidgetTheme();
   const t = getWidgetTokens(dark);
-  const scopeId = useMemo(() => `ws-${Math.random().toString(36).slice(2, 9)}`, []);
+  // 唯一作用域 id：不在 render 内取随机数（保持纯函数），用 useState 惰性初始化一次
+  const [scopeId] = useState(() => `ws-${Math.random().toString(36).slice(2, 9)}`);
 
   const { scopedStyles, safeHtml } = useMemo(() => {
     // ① 提取 widget 自带的 <style> 块（模型按协议写的首行主题变量），其余内容进入净化

@@ -23,13 +23,15 @@ import { contextRuntime } from '@/lib/runtime/context';
 // 项目级后台调度：用户对话 > 成果块提炼 > 账本编译（本轮请求是最高优先级，持有期间后台让位）
 import { enterUserTurn } from '@/lib/runtime/project-scheduler';
 import type { AgentId } from '@/lib/agents/profiles';
-import { codingPhaseForTool } from '@/lib/agents/profiles';
+import { AGENT_IDS, codingPhaseForTool } from '@/lib/agents/profiles';
 import { resolveAgentProfile } from '@/lib/agents/store';
 import { loadInstalledAgentProfiles } from '@/lib/agents/market-server';
 import { MCP_PRESETS } from '@/lib/mcp/types';
+import { getPanelPort } from '@/lib/mcp/panel-ports';
 import { getCurrentProject, getProjectById, listProjects, type ProjectConfig } from '@/lib/project/project-manager';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { DEFAULT_CONFIRM_TOOLS } from '@/lib/settings';
+import { getHippoPageUrl } from '@/lib/browser-tools';
 import { isVisionModel } from '@/lib/model-tags';
 import { isDeclaredVisionModel } from '@/lib/model-capabilities';
 // P4b-1 审批策略层：tool_confirm 名单判定后走 decideToolApproval（纯函数裁决，见 approval.ts）
@@ -219,7 +221,7 @@ import { readManifest, extractKeywords } from '@/lib/nodes/manifest';
 import { internSearchNode } from '@/lib/nodes/intern';
 import { matchTerms } from '@/lib/legal/synonyms';
 import { SANDBOX_DIRNAME, resolveAppRoot } from '@/lib/app-root';
-import { resolveProviderModel, resolveTaskModel, resolveAgentRoleModel, resolveAutoTaskModel } from '@/lib/wanted/task-model';
+import { resolveProviderModel, resolveTaskModel, resolveAgentRoleModel } from '@/lib/wanted/task-model';
 import { EventLog, genSpanId, genTaskId, persistEventLog, CORE_EVENT } from '@/lib/trajectory/event-log';
 
 interface ChatMessage {
@@ -688,6 +690,43 @@ const BROWSER_RULES = `
 - **登录墙处理（重要，禁止绕路）**：浏览器操作遇登录墙（browser.detect_login 返回 needsLogin=true、页面提示"登录后查看"/登录弹窗、或访问受限）时，**必须立即调用 browser.login 发起登录**——BobWork 会在应用内弹出登录窗，用户输入账号密码后系统自动代填提交。**禁止**停下来请求用户手动登录、**禁止**断言"自动登录不可用/扩展版本过旧/组件缺失"、**禁止**跳过登录墙直接放弃。登录完成后继续原任务
 - 列表页批量抓取（搜索结果/笔记列表/目录等）：先一次性收集全部目标条目（snapshot 分页拿完所有卡片与链接），再逐个 navigate 打开；取链接阶段优先区分图文 vs 视频类条目，先读图文详情，视频条目仅在必要时读评论区
 - **收尾纪律（任务结束自动释放浏览器，禁止残留 attached）**：全部步骤完成、输出最终答复前，若本任务用浏览器打开/操作过页面且不再需要该页面，主动调用 \`mcp__bob-browser-mcp__browser_disconnect\`（简称 \`browser.disconnect\`）解除 Bob WebBridge 对标签的附着——页面保留在 Chrome、不物理关闭（用户可自行查看），只释放 debugger/附着占用。禁止把 attached 标签留着空转：残留标签会持续 30s 心跳、旧标签若处于 loading/僵尸状态会让下一个浏览器任务的导航复用时卡满 CDP 30s 超时。宿主也会在回合结束自动 disconnect 兜底，模型侧先主动收尾
+`;
+
+/** 浏览器专精规则 — Hippo 通道版（通道解析为 hippo（缺省即 hippo）时替代 BROWSER_RULES 注入）：
+ *  工具面换成内置 browser_*（无 mcp__ 前缀），且 P0 只有 10 个核心工具——
+ *  原规则里的 page_script / browser.login / disconnect / read_article 等在此通道不存在，
+ *  照搬会诱导模型调用不存在的工具，故按通道分别注入。 */
+const BROWSER_RULES_HIPPO = `
+## 浏览器操作规则（Hippo Browser 通道已激活，按此执行）
+- **浏览器工具命名**：本轮浏览器能力来自应用内 Hippo Browser，工具为内置 \`browser_*\`（如 \`browser_navigate\`），**直接调用、不带任何 \`mcp__\` 前缀**；本轮工具列表**不存在** \`mcp__bob-browser-mcp__*\`，不要尝试调用它
+- **标准闭环**：\`browser_navigate\` 打开页面 → \`browser_snapshot\` 拿可交互元素（带 ref）→ \`browser_click\` / \`browser_type\` / \`browser_fill_form\` / \`browser_press_key\` 操作（用 ref 定位）→ \`browser_extract_text\` 读正文 / \`browser_screenshot\` 留证。页面跳转或 DOM 大改后 ref 失效，**重新 snapshot 再操作**
+- **ref 命名空间（shadow DOM / 子帧已打通）**：ref 可能是 \`e3\`（主文档）、\`s1-e2\`（页面里 web component 的 shadow root 内）、\`f1-e4\`（页面内 iframe 的子帧）、\`f1-s2-e5\`（子帧内的 shadow root）—— 前缀即作用域路径，直接原样传回 \`browser_click\` / \`browser_type\` 即可，**不要**试图去掉前缀或自己拼选择器。子帧元素由宿主在帧内执行（返回里带 \`frame\` 与 \`via: 'in-frame'\`）；页内脚本 \`bb.$\` 跨不到子帧，这些元素只能用工具层操作。返回里的 \`frames\` 一节列出本次扫到的子帧及其元素数，是「有 iframe 但没内容」时的判断依据
+- **常用增强**：页面是异步渲染时用 \`browser_wait_for\`（等元素）/ \`browser_wait_for_text\`（等文本）/ \`browser_wait_network_idle\`（等请求静默）；多标签用 \`browser_list_tabs\` / \`browser_switch_tab\` / \`browser_open_tab\` / \`browser_close_tab\`；需要归档页面用 \`browser_export_pdf\`（落盘 homework/.evidence/），读已打开的 PDF 用 \`browser_read_pdf\`
+- **PDF 页换工具，不要判空（重要）**：当前页是 PDF（地址以 \`.pdf\` 结尾，或落在内置 pdf-viewer 查看页）时 \`browser_extract_text\` 拿不到正文 —— 直接调 \`browser_read_pdf\` 取文本（无需参数＝读当前页，长文件传 \`maxChars\`），**不要因为提取为空就断言"页面没有内容"**
+- **\`browser_extract_text\` 带 \`note\` 时按它执行**：返回里的 \`[PDF]\` / \`[LOGIN]\` / \`[EMPTY]\` 前缀即成因分类 —— \`PDF\` → 改用 \`browser_read_pdf\`；\`LOGIN\` → 登录墙，按上面凭据红线如实告知用户手动登录；\`EMPTY\` → 页面可能尚未渲染完，先 \`browser_wait_for_text\` / \`browser_wait_network_idle\` 再重试。\`note\` 是成因提示，**不要把它当成页面正文写进答复**
+- **脚本优先（PTC for browser，重要）**：同一页面要连续 ≥3 步交互（多字段表单、"展开更多"、翻找列表），或**只要页面里的某些字段**（列表 / 价格 / 链接 / 计数 / 表格行）时，用 \`browser_page_script\` 在页内一次做完并只返回需要的字段——**不要用 \`browser_extract_text\` 把整页正文灌进上下文**，整页文本是回答窄问题最贵的做法。脚本里可用 \`bb.$(refOrSelector)\` / \`bb.ref(ref)\` 定位（ref 就是 \`browser_snapshot\` 给的那些）、\`bb.fill(target, text)\` 填写（原生 setter + input/change，受控组件能正常同步）、\`bb.click(target)\` / \`bb.press(key)\` / \`bb.scroll(...)\` 交互、\`bb.text(target, {maxChars})\` 只取需要的段落、\`bb.waitFor\` / \`bb.waitText\` 等渲染、\`bb.snapshot()\` 在脚本内取元素表。定位先确认锚点存在再取值；\`bb.click\` 走页内合成点击，页面若无视它（坐标派发 / isTrusted 校验）就改用 \`browser_click\`。整页正文只在确实要通读全文时用（合同、长文、判决书）
+- **跨页面流程**：常规做法是 \`browser_navigate\` / \`browser_open_tab\` / \`browser_switch_tab\` 切页，然后在**新页面上重新下发一次脚本**——导航会让页内 ref 与脚本内的引用全部失效。脚本内的 \`bb.goto(url)\` 需要对该次调用显式传 \`allowNav=true\`，且它会**终止脚本**（其后语句一律不执行），跳转由宿主完成并返回 \`{ navigated, url, title }\`；脚本里 \`bb.click\` 点到链接触发跳转时同样以 \`{ navigated, url, title }\` 收尾（其后语句未执行）。不要把 \`bb.goto\` 或会跳转的点击放在脚本中间指望后面的语句生效
+- **脚本返回值直接给对象，不必自己兜底**：\`bb.$(...)\` / \`bb.ref(...)\` 拿到的 DOM 元素、\`NodeList\`、\`Map\` / \`Set\`、带循环引用的对象都可以直接 \`return\`，宿主会归一化成可读记录（元素带 \`tag\` / \`text\` / \`href\` / \`value\` / \`ref\` 等字段），不用手写 \`el.innerText\` 兜底。**但 helper 的失败是返回而不是抛错**：\`{ ok: false, error }\` 表示这一步**没做成**（目标不存在 / \`disabled\` / 只读 / 零尺寸 / \`pointer-events:none\`），必须判 \`ok\` 再往下走 —— 无视它等于在坏状态上继续跑完剩下的步骤
+- **失败续跑纪律（重要）**：\`browser_page_script\` 报 \`phase=script\` 时，\`warnings\` 里会带**失败前已完成的操作轨迹**和「只补跑剩余步骤」提示 —— 照它改脚本、从断点继续，**不要重跑整个脚本**（重跑会把已完成的点击/提交再做一遍）。\`warnings\` 说「脚本因页面跳转中断」或「bb.goto 终止了脚本」时，含义是**其后语句一律未执行**：重新 snapshot 后从断点写新脚本
+- 抓取网页正文优先用 web_fetch；遇强反爬站点（百度系/知乎/小红书等）被 403/风控拦截时，改用 \`browser_navigate\` + \`browser_extract_text\` / \`browser_snapshot\` 走真实浏览器会话，不要反复重试 web_fetch
+- **失败纪律**：\`browser_navigate\` 已内置加载等待；报 inject（元素不存在/不可交互）时不要盲目重试同一 ref，先重新 snapshot 确认；报 driver（桥不可用）时如实告知用户"Hippo Browser 未运行，请打开 BobWork 的 Hippo Browser 窗口"，不要假装成功
+- **凭据红线**：禁止用 \`browser_run_js\` 读取或回显密码、验证码等敏感输入框的值；遇登录墙时如实告知用户"请在 Hippo Browser 窗口内完成登录后告诉我继续"，不要索要凭据、不要臆造自动登录能力
+- **能力边界（如实告知，不臆造）**：本通道提供浏览器操作的全部常规能力（导航 / 等待 / 元素交互 / 内容提取 / 脚本 / 截图与 PDF 导出 / 标签页 / cookie 与 storage / 网络与 console 监控 / 阅读）。**本通道不提供**：站内搜索与 research 宏、笔记沉淀、应用内登录弹窗（detect_login / login / login_fill）、操作录播（record_start / record_stop / playback）、视频字幕提取（extract_video_text）——这是两个通道的分工（Hippo 免装扩展、Bob Browser 操作用户真实 Chrome），不是临时缺失。遇到这类需求如实说明"该能力由 Bob Browser 通道提供"，不要假装调用不存在的工具、也不要把缺失说成待修问题
+- **收尾**：页面保留在 Hippo Browser 窗口内供用户查看，无需 disconnect 之类收尾调用
+`;
+
+/** 调研档规则（Research 模式专用，随 BROWSER_RULES_HIPPO 之后注入）：
+ *  工具面与 Browse 档完全相同，这里只补「多源取证」的作业纪律 —— 同一批工具，
+ *  目标从「顺手给个摘要」变成「产出可核查的结论」。 */
+const BROWSER_RESEARCH_RULES = `
+## 调研作业纪律（Research 模式已开启）
+- **先拆子问题再动手**：把问题拆成 2-5 个可独立核查的子问题，逐个取证；清单不必给用户看，但每一步都要对着某个子问题
+- **多源交叉，不靠单一页面**：关键结论至少要有两个**相互独立**的来源（不同站点/机构，不是同一篇稿子的转载）；只拿到一个来源时，如实标注「单一来源，未交叉验证」
+- **搜索结果不是证据**：搜索页摘要只用来挑候选来源，结论必须落到打开后的正文；引用一律给完整可点击 URL
+- **读全文而非片段**：抓正文按页面类型分流 —— 网页用 \`browser_extract_text\`（返回 \`note\` 时按其指示换工具）、PDF 用 \`browser_read_pdf\`；长文按返回的 offset 续读到 EOF（续读必须回到同一个工具，字数口径不可混用）；只要若干字段时用 \`browser_page_script\` 只取字段，不要整页灌进上下文
+- **记录反证**：遇到与主结论冲突的材料一并写进答复（「与此相反的说法是…，来源…」），不要只留支持自己判断的部分
+- **区分事实与推断**：来源里写明的标「据来源」，你自己推的标「据此推断」并说明依据；数字/时间/口径都要挂出处
+- **收尾给三件事**：结论（每条挂来源）、不确定之处（哪里证据薄）、下一步建议（若继续查该查什么）
 `;
 
 /** 报告插图约定（2026-08-30 从 BASE_SYSTEM_PROMPT 移出）：
@@ -1463,7 +1502,6 @@ function injectSkillContext(
 
   const defMap = new Map(allDefs.map(d => [d.meta.name, d]));
 
-  let skillCtx: string;
   let matchedNames: string[] = [];
 
   // DSH 模式（重构）：不再做关键词自动匹配。技能加载决策权交给模型——
@@ -1491,7 +1529,7 @@ function injectSkillContext(
 
   // 4. 构建上下文：L1 始终传入完整 availableSkills，确保目录完整
   //    修复"L1目录不完整"漏洞
-  skillCtx = buildSkillContext(allMatches, defMap, availableSkills);
+  const skillCtx = buildSkillContext(allMatches, defMap, availableSkills);
 
   console.log(
     '[技能注入] 最终注入(DSH模式):', matchedNames,
@@ -1621,8 +1659,15 @@ function prependDynamicContext(messages: ChatMessage[], text: string): ChatMessa
   return result;
 }
 
-/** Bob-Mind 插件面板地址（宿主 iframe 嵌入同一实例；面板未运行时 fetch 失败即跳过） */
-const MIND_PANEL_URL = MCP_PRESETS.find((p) => p.id === 'bob-mind-mcp')?.panel?.url ?? '';
+/**
+ * Bob-Mind 插件面板地址（宿主 iframe 嵌入同一实例；面板未运行时 fetch 失败即跳过）。
+ * 端口由宿主编排时按实例分配（见 mcp manager），运行时表优先，未登记时回退预置固定地址。
+ */
+function mindPanelUrl(): string {
+  const port = getPanelPort('bob-mind-mcp');
+  if (port) return `http://127.0.0.1:${port}`;
+  return MCP_PRESETS.find((p) => p.id === 'bob-mind-mcp')?.panel?.url ?? '';
+}
 
 /**
  * Bob-Mind（Buzan）面板改动回看注入：
@@ -1633,7 +1678,9 @@ const MIND_PANEL_URL = MCP_PRESETS.find((p) => p.id === 'bob-mind-mcp')?.panel?.
  * 插件未运行/超时一律静默跳过，绝不阻塞对话。
  */
 async function buildMindChangesInjection(agentId: string): Promise<string> {
-  if (agentId !== 'mind' || !MIND_PANEL_URL) return '';
+  if (agentId !== 'mind') return '';
+  const panelUrl = mindPanelUrl();
+  if (!panelUrl) return '';
   const VERB: Record<string, string> = {
     save: 'added',
     update: 'edited',
@@ -1642,7 +1689,7 @@ async function buildMindChangesInjection(agentId: string): Promise<string> {
     star: 'starred',
   };
   try {
-    const resp = await fetch(`${MIND_PANEL_URL}/api/changes?consume=1`, {
+    const resp = await fetch(`${panelUrl}/api/changes?consume=1`, {
       signal: AbortSignal.timeout(2000),
       cache: 'no-store',
     });
@@ -3008,6 +3055,20 @@ function toolDisplaySiteName(url?: string): string {
 }
 
 /**
+ * MCP 自带说明书 → 注入文本（宿主只加壳，不改写、不裁剪正文）。
+ *
+ * 正文来自各 server 的 InitializeResult.instructions —— 它是「这个服务怎么用」的唯一权威来源，
+ * 过去该字段被整体丢弃，第三方 MCP 只剩逐工具 description，没有整体用法与作业纪律。
+ * 只对**工具真的在册**的 server 注入（判据见注入点），杜绝「指引有、工具没有」。
+ */
+function buildMcpInstructionsText(
+  items: Array<{ serverId: string; serverName: string; instructions: string }>,
+): string {
+  const sections = items.map((it) => `### ${it.serverName}（${it.serverId}）\n${it.instructions}`);
+  return ['## MCP 服务自带说明书（由各服务自行声明，供调用其工具时参考）', ...sections].join('\n\n');
+}
+
+/**
  * K1 会话上下文（会话上下文收敛，K 系列第一步，零行为变化 refactor）：
  * 把「每轮工具循环（r0-r19）及其子流程共享的请求级状态」从 ReadableStream.start()
  * 内散落声明归组为一个局部对象字面量 kctx（见 start() 内 `const kctx: KernelContext`）。
@@ -3147,14 +3208,13 @@ export async function POST(request: NextRequest) {
 
     // 兜底解析：
     //  - providerModelId 形如 "provider:modelId" → 从已配置 providers 按供应商解析 apiKey/baseUrl
-    //  - 未显式指定 → P3-3b：先按请求 identity 查 agentModels 专属池（resolveAgentRoleModel），
-    //    再回退默认聊天模型（resolveTaskModel）——与前端 Auto/默认选路一致
+    //  - 未显式指定 → 先按请求 identity 查 agentModels 专属池（resolveAgentRoleModel），
+    //    再回退默认聊天模型（resolveTaskModel = 候选池有序首选）——与前端 Auto 选路语义一致
     //  - 显式指定但供应商未配置 → 明确 400（不悄悄降级默认模型，避免用户以为选模型已生效）
     if (!apiKey || !baseUrl || !providerModelId) {
       const resolved = providerModelId
         ? await resolveProviderModel(String(providerModelId))
         : ((await resolveAgentRoleModel(profile?.id ?? identity))
-            ?? (await resolveAutoTaskModel(messages))
             ?? (await resolveTaskModel()));
       if (resolved) {
         apiKey = resolved.apiKey;
@@ -3512,8 +3572,22 @@ export async function POST(request: NextRequest) {
       // 浏览器专精规则按需注入（browser 场景激活 / coding 专项 Agent 强制注入）：
       // 已从 system 移出以省固定 token，随当前轮 user 消息动态注入（不破坏 system 前缀缓存）；
       // browser 工具随 tools 注入时，模型同步获得完整操作纪律。
-      if (activeScenes.has('browser') || profile.forceBrowserTools) {
-        finalMessages = prependDynamicContext(finalMessages, BROWSER_RULES);
+      // 规则文本按 AI Browser 通道分流：hippo 通道的工具面无 mcp__ 前缀且能力面不同（见 BROWSER_RULES_HIPPO）。
+      // 缺省（undefined）= hippo（默认通道）：仅显式 'chrome' 才注入 Bob Browser 版规则。
+      // 判据口径：fixed 画像（浏览器对话栏 Ask/Browse/Research、市场 agent）的浏览器能力由 fixedScenes 决定，
+      // 动态场景检测对它无效 —— 仍按 activeScenes 判定会出现「指引有、工具没有」（如 Ask 档命中网页词被灌操作纪律）。
+      const browserSceneActive = profile.scenes === 'fixed'
+        ? (profile.fixedScenes ?? []).includes('browser')
+        : activeScenes.has('browser');
+      if (browserSceneActive || profile.forceBrowserTools) {
+        finalMessages = prependDynamicContext(
+          finalMessages,
+          settingsForTools.aiBrowser === 'chrome' ? BROWSER_RULES : BROWSER_RULES_HIPPO,
+        );
+        // Research 档：浏览器操作纪律之外再叠一层调研纪律（工具面与 Browse 档完全相同，只差提示词）
+        if (profile.id === AGENT_IDS.browserResearch) {
+          finalMessages = prependDynamicContext(finalMessages, BROWSER_RESEARCH_RULES);
+        }
       }
 
       // 「ledger 判据统一」的另一半：有激活项目即注入 —— 与工具放行（上面的 activeScenes.add('ledger')
@@ -3561,6 +3635,29 @@ export async function POST(request: NextRequest) {
       const assembledTools = toolRuntime.assemble(activeScenes);
       let toolDefs = assembledTools.toolDefs;
       let loopToolDefs = assembledTools.loopToolDefs;
+
+      // MCP 自带说明书按需注入（与工具面同一条判据）：只对**工具真的在册**的 server 注入它的
+      // instructions —— 按 toolDefs 里的 `mcp__<serverId>__` 前缀对齐，杜绝「指引有、工具没有」。
+      // 走 prependDynamicContext（随当前轮 user 消息，不进 system、不回传前端即不落盘）；
+      // 服务未声明说明书时整段不出现，零常驻成本。
+      try {
+        const inRegistry = new Set<string>();
+        for (const d of toolDefs) {
+          const n = (d as { function?: { name?: string }; name?: string })?.function?.name ?? (d as { name?: string })?.name ?? '';
+          const m = /^mcp__[a-zA-Z0-9_-]+?__/.exec(n);
+          if (m) inRegistry.add(m[0]);
+        }
+        if (inRegistry.size > 0) {
+          const { mcpManager } = await import('@/lib/mcp/manager');
+          const briefs = (await mcpManager.discoverServerInstructions()).filter((b) => inRegistry.has(b.toolPrefix));
+          if (briefs.length > 0) {
+            finalMessages = prependDynamicContext(finalMessages, buildMcpInstructionsText(briefs));
+          }
+        }
+      } catch (e) {
+        // 说明书注入失败不阻断对话（与账本预取同一降级姿态）
+        console.warn('[chat] MCP 说明书注入失败（已跳过）:', e instanceof Error ? e.message : String(e));
+      }
 
       const isMoonshotThinking = !!baseUrl && baseUrl.includes('moonshot') && !!providerModelId && /kimi-k\d/i.test(providerModelId);
       const finalTemp = isMoonshotThinking || isDeepseekV4 ? 1 : (temperature ?? 0.7);
@@ -3631,7 +3728,9 @@ export async function POST(request: NextRequest) {
               // toApiFormat 返回 { type, function: { name, ... } }，工具名在 td.function.name（td.name 为 undefined）
               const mcpToolCountsMap: Record<string, number> = {};
               for (const td of toolDefs) {
-                const name = ((td as any).function?.name ?? (td as any).name) as string;
+                // 宽松视图：兼容个别 MCP 下发的非标准定义（缺 function 或仅有 name）
+                const tdView = td as { function?: { name?: string }; name?: string };
+                const name = tdView.function?.name ?? tdView.name;
                 if (name && name.startsWith('mcp__')) {
                   const parts = name.split('__');
                   const srv = parts[1] || '';
@@ -3746,9 +3845,13 @@ export async function POST(request: NextRequest) {
             };
 
             // 浏览器工具去重用的「页面 URL 指纹」（状态本体见 kctx.lastPageUrl）：
-            // 每次 browser 工具成功执行后经 active_tab 刷新；页面跳转后 kctx.lastPageUrl 变化
-            // → 相同参数的调用不再被误判为「重复调用」
+            // 每次 browser 工具成功执行后刷新；页面跳转后 kctx.lastPageUrl 变化
+            // → 相同参数的调用不再被误判为「重复调用」。
+            // 通道分流（与工具面注入一致，settings.aiBrowser；缺省 = hippo）：
+            //   chrome → Bob Browser MCP 的 browser_active_tab；
+            //   hippo  → 内置通道无 active_tab 工具，改由 HippoDriver 查桥 /state
             const fetchCurrentPageUrl = async (): Promise<string | null> => {
+              if (settingsForTools.aiBrowser !== 'chrome') return getHippoPageUrl();
               try {
                 const raw = await mcpManager.callTool('mcp__bob-browser-mcp__browser_active_tab', {});
                 const m = String(raw || '').match(/"url"\s*:\s*"(https?:\/\/[^"]*)"/);
@@ -4712,7 +4815,15 @@ export async function POST(request: NextRequest) {
                     // 清单 + 任务 DAG）供前端展示。等待期间 SSE 无数据，但本轮 keepalive 已在按 20s 发
                     // tool_call_update(running) 心跳，故此处不再另起心跳。
                     onTeamConfirm: async (draft) => {
-                      const { confirmId, promise } = createPendingConfirm('team_run', JSON.stringify(draft), nodeId);
+                      // 第 4 参传本轮请求的 signal：客户端断开即按未批准收口，team_run 随即 team_discard
+                      // 作废草案 —— 不这样做的话门禁会一直等到 CONFIRM_TIMEOUT_MS（10 分钟）才收口，
+                      // 期间团队停在 planning（成员/任务未物化），工作台看着就是「只有队长第一步、后面全空」。
+                      const { confirmId, promise } = createPendingConfirm(
+                        'team_run',
+                        JSON.stringify(draft),
+                        nodeId,
+                        request.signal,
+                      );
                       // 被弃用的名单成员（AI 最终方案未指派）：id → 已安装 agent 的 label，未装/已卸载
                       // 回退显示 id（与名单段同口径）——用户名单被改动时前端据此在卡上点名
                       const droppedLabels = new Map(loadInstalledAgentProfiles().map((a) => [a.id, a.label]));
@@ -4749,6 +4860,10 @@ export async function POST(request: NextRequest) {
                     teamWorkerModel: typeof teamWorkerModel === 'string' ? teamWorkerModel : undefined,
                     // 队长规划时参考的成员名单段（主 agent 看不到名单，见 MULTI_AGENT_RULES）
                     teamRosterSection,
+                    // 触发本次协作的用户原文（本轮请求体的 last user 消息，未经任何宿主注入加工——
+                    // 与 TURN_START/USER_MESSAGE 事件同源）：随 team_plan 落进 team_start 事件，
+                    // 工作台群聊流据此在右侧渲染「我的发言」气泡
+                    teamQuestionText: initialUserInput || undefined,
                     // 当前项目上下文：透传给队长会话的 /api/chat
                     projectId,
                   });

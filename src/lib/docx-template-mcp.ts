@@ -11,6 +11,7 @@
  *   3) 打包态：<appRoot>/docx-template-mcp/ 或其上级
  */
 import { homedir } from 'os';
+import * as fs from 'fs';
 import { join } from 'path';
 import { resolveAppRoot } from '@/lib/app-root';
 
@@ -27,7 +28,6 @@ export function sanitizeDocxScene(scene: string): string {
 
 /** 定位独立包 assets/scripts/<scriptFile>；找不到返回 null */
 export function resolveDocxTemplateScript(scriptFile: string): string | null {
-  const fs = require('fs');
   const candidates = [
     process.env.DOCX_TEMPLATE_MCP_DIR ? join(process.env.DOCX_TEMPLATE_MCP_DIR, 'assets', 'scripts', scriptFile) : null,
     // 开发态：docx-template-mcp/ 与 projects/ 同级

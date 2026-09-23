@@ -18,6 +18,7 @@ import { readFile, writeFile, mkdir, rename } from 'fs/promises';
 import { join } from 'path';
 import { writeTodoIndexFile } from '@/lib/sticky-todo';
 import { callNotes } from '@/lib/mcp/notes-bridge';
+import { readProjectRefs } from '@/lib/project/project-config';
 
 const STICKY_DIR = 'sticky-notes';
 const STICKY_FILE = 'sticky-notes.json';
@@ -105,11 +106,10 @@ export async function migrateStickyNotePages(projectDir: string): Promise<{ migr
  * 启动全量清扫（幂等）：遍历所有项目，把仍残留在各项目 sticky-notes/sticky-notes.json
  * 中的 note 页（kind='note'）迁入全局笔记库 notebook.json。
  * 兜底处理从未触发过 GET 惰性迁移的存量项目——它们的 note 页若不迁移，删除项目即丢失。
- * 内部动态 import project-manager，避免与 deleteProject 形成静态循环依赖。
+ * 经 project-config 只读读取项目引用，避免与 project-manager 形成循环依赖。
  */
 export async function sweepAllStickyNotePages(): Promise<{ projects: number; migrated: number }> {
-  const { listProjects } = await import('@/lib/project/project-manager');
-  const { projects } = await listProjects();
+  const projects = await readProjectRefs();
   let migrated = 0;
   for (const p of projects) {
     const res = await migrateStickyNotePages(p.path);

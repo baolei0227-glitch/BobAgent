@@ -197,7 +197,9 @@ export const MCP_PRESETS: McpServerConfig[] = [
     transport: 'streamable-http',
     url: 'http://127.0.0.1:9473/mcp?token=TOKEN_PLACEHOLDER',
     timeout: 60,
-    // 默认开启：浏览器自动化常用；需要全局安装 bob-browser-mcp（--serve 常驻）+ 浏览器扩展绑定，
+    // 非出厂默认项：不在 SYSTEM_MCP_IDS，仅用户从 MCP 市场手动添加时装配；
+    // enabled=true 只表示「添加后默认启用」。定位：Hippo 缺「真实 Chrome 身份」时的互补通道
+    // （登录态/书签/密码管理），需全局安装 bob-browser-mcp（--serve 常驻）+ 浏览器扩展绑定，
     // 未就绪时连接失败自动自愈重试（设置面板可关闭）
     enabled: true,
   },

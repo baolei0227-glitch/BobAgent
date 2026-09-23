@@ -26,6 +26,13 @@ export const AGENT_IDS = {
   note: 'note',
   butler: 'butler',
   mind: 'mind',
+  /** Hippo Browser 右侧对话栏（ChatSidebar）专用身份：非画布节点，不出现在 Agent 创建菜单。
+   *  三个身份对应对话栏工具栏的「模式」下拉（Ask / Browse / Research），工具面由 fixedScenes 决定。 */
+  browser: 'browser',
+  /** Ask 档（纯问答）：不给 browser 场景 → 无 browser_* 工具、不注入浏览器操作纪律 */
+  browserAsk: 'browser-ask',
+  /** Research 档（调研）：浏览器能力同 Browse，额外注入多源取证纪律（见 route.ts BROWSER_RESEARCH_RULES） */
+  browserResearch: 'browser-research',
 } as const;
 
 /** AI Coding 专项任务循环阶段（改码 → 预览自检 → 测试 → 迭代 → 完成） */
@@ -84,6 +91,13 @@ export interface AgentProfile {
    * 要么在不需要它的画像 coreExclusions 里显式排除；chat 不排除 = 只背场景工具与内核。
    */
   coreExclusions?: readonly string[];
+  /**
+   * 是否从 Agent 列表（listAgents → /api/agents、画布创建菜单、团队选人）中隐藏。
+   * 用于「存在但非画布身份」的画像：Hippo Browser 的 ChatSidebar 需要一个固定工具画像
+   * （resolveAgentProfile 只能从 AGENT_PROFILES 命中），但浏览器对话栏不是画布节点类型，
+   * 不应出现在 Agent 创建菜单里。隐藏只影响列表枚举，不影响 identity 解析。
+   */
+  hidden?: boolean;
 }
 
 /** 通用对话 Agent */
@@ -347,12 +361,67 @@ export const ARCHIVIST_BASE_SYSTEM_PROMPT =
 通用引用规则：
 - 引用具体数字/时间/事实必须能够指明来源；不确定使用"据我了解""我不确定"等限定语，不要编造细节。`;
 
+/** 浏览器对话栏（Hippo ChatSidebar）常驻内核剔除清单（P2 专职化）：
+ *  边看边问时不该误动本地文件 —— 文件读写/编辑/目录 + 命令/脚本执行一律不挂（解锁重活即切回 chat 画像）。
+ *  与 Kar/Archivist 不同：**保留网页检索**（web_search / web_fetch 是浏览器助手的本职补充），
+ *  故这里只剔文件与命令两类。 */
+export const BROWSER_CORE_EXCLUSIONS = [
+  // 文件读写/编辑/目录
+  'read_file', 'write_file', 'edit_code', 'rename_file', 'delete_file', 'list_directory', 'search_files',
+  // 命令/脚本执行
+  'run_command', 'execute_script',
+] as const;
+
+/** 浏览器助手（Hippo Browser 右侧 ChatSidebar）：
+ *  固定画像 = `browser` 场景（HippoDriver 的 browser_* 工具）+ 只读 `ledger`（有激活项目时读项目档案）；
+ *  文件/命令类内核按 coreExclusions 剔除；不配 baseSystemPrompt → 沿用通用 BASE，
+ *  保证账本/成果块/引用规范与画布会话完全一致（两套事实来源是明令禁止的）。
+ *  hidden：非画布节点身份，不进 Agent 创建菜单与市场列表。 */
+const BROWSER_PROFILE: AgentProfile = {
+  id: 'browser',
+  label: 'Browser Assistant',
+  scenes: 'fixed',
+  fixedScenes: ['browser', 'ledger'],
+  forceBrowserTools: true,
+  coreExclusions: BROWSER_CORE_EXCLUSIONS,
+  hidden: true,
+};
+
+/** 浏览器助手 —— Ask 档（纯问答）：fixedScenes 不含 'browser' → 工具面无 browser_*（也无 hippo_browser_*），
+ *  规则侧因 forceBrowserTools=false 不注入浏览器操作纪律。仍保留只读账本；联网检索（web_search / web_fetch）
+ *  是无场景标注的内核工具，三个档位都可用 —— 档位切的是「是否驱动浏览器」，不是「是否联网」。 */
+const BROWSER_ASK_PROFILE: AgentProfile = {
+  id: AGENT_IDS.browserAsk,
+  label: 'Browser Assistant (Ask)',
+  scenes: 'fixed',
+  fixedScenes: ['ledger'],
+  forceBrowserTools: false,
+  coreExclusions: BROWSER_CORE_EXCLUSIONS,
+  hidden: true,
+};
+
+/** 浏览器助手 —— Research 档：工具面与 Browse 完全相同（浏览器操作 + 只读账本），
+ *  差异只在提示词层：额外注入多源取证纪律（route.ts BROWSER_RESEARCH_RULES），
+ *  避免为「同一批工具」再维护第二套工具面。 */
+const BROWSER_RESEARCH_PROFILE: AgentProfile = {
+  id: AGENT_IDS.browserResearch,
+  label: 'Browser Assistant (Research)',
+  scenes: 'fixed',
+  fixedScenes: ['browser', 'ledger'],
+  forceBrowserTools: true,
+  coreExclusions: BROWSER_CORE_EXCLUSIONS,
+  hidden: true,
+};
+
 /** 全部系统内置 Agent 配置注册表（2026-09-06 架构定稿：chat/coding 为系统内置；
  *  Kar(note) / Butler 等专项已全部迁入 Agent 市场（official-packages.ts 官方源），
  *  需在 Extensions Store → Agents 安装后才成为可用会话身份；未知 identity 一律回退 chat）。 */
 export const AGENT_PROFILES: Record<AgentId, AgentProfile> = {
   chat: CHAT_PROFILE,
   coding: CODING_PROFILE,
+  browser: BROWSER_PROFILE,
+  [AGENT_IDS.browserAsk]: BROWSER_ASK_PROFILE,
+  [AGENT_IDS.browserResearch]: BROWSER_RESEARCH_PROFILE,
 };
 
 /** 按 Agent 标识取配置（未知/缺省回退到通用对话 Agent） */
@@ -376,7 +445,8 @@ export function isAgentNodeType(nodeType: string | undefined): boolean {
   return !!nodeType && /^agent-/.test(nodeType);
 }
 
-/** 列出全部已注册 Agent（创建入口/路由等按注册表迭代，而非硬编码） */
+/** 列出全部已注册 Agent（创建入口/路由/市场列表按注册表迭代，而非硬编码）；
+ *  hidden 画像（如浏览器对话栏身份）不参与枚举，但仍可被 resolveAgentProfile 解析。 */
 export function listAgents(): AgentProfile[] {
-  return Object.values(AGENT_PROFILES);
+  return Object.values(AGENT_PROFILES).filter((a) => !a.hidden);
 }

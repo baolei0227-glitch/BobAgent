@@ -39,6 +39,24 @@ const CONFIG_FILE = join(APP_ROOT, '.projects.json');
 /** 默认项目 ID */
 const DEFAULT_PROJECT_ID = 'default';
 
+/**
+ * 配置文件读改写串行队列。
+ *
+ * `.projects.json` 的每次变更都是「读快照 → 改内存 → 整体回写」，本身不是原子操作。
+ * 并发请求（用户切换项目 vs 磁盘对账 syncProjectsFromDisk / 归档 / 重命名等）若不排队，
+ * 后写的旧快照会覆盖先写的新值，导致丢更新 —— 典型现象是「切换了项目，但界面仍显示旧项目」。
+ * 所有会写配置的入口都必须经此队列，才能保证「读-改-写」整体互斥。
+ */
+let configQueue: Promise<unknown> = Promise.resolve();
+function withConfigLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = configQueue.then(task, task);
+  configQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
@@ -325,7 +343,14 @@ export async function validateProjectParentDir(dir: string): Promise<string> {
 }
 
 /** 创建新项目（opts.hidden = true 时不显示在侧边栏，也不抢占当前项目；默认保存位置取自 config.default_project_dir） */
-export async function createProject(
+export function createProject(
+  name: string,
+  opts?: { hidden?: boolean; category?: string; note?: string; tags?: string[] },
+): Promise<ProjectConfig> {
+  return withConfigLock(() => createProjectLocked(name, opts));
+}
+
+async function createProjectLocked(
   name: string,
   opts?: { hidden?: boolean; category?: string; note?: string; tags?: string[] },
 ): Promise<ProjectConfig> {
@@ -395,7 +420,11 @@ export async function createProject(
 }
 
 /** 切换当前项目 */
-export async function switchProject(projectId: string): Promise<ProjectConfig> {
+export function switchProject(projectId: string): Promise<ProjectConfig> {
+  return withConfigLock(() => switchProjectLocked(projectId));
+}
+
+async function switchProjectLocked(projectId: string): Promise<ProjectConfig> {
   const config = await readConfig();
   const target = config.projects.find((p) => p.id === projectId);
   if (!target) {
@@ -420,7 +449,11 @@ export async function switchProject(projectId: string): Promise<ProjectConfig> {
 }
 
 /** 归档项目 */
-export async function archiveProject(projectId: string): Promise<ProjectConfig> {
+export function archiveProject(projectId: string): Promise<ProjectConfig> {
+  return withConfigLock(() => archiveProjectLocked(projectId));
+}
+
+async function archiveProjectLocked(projectId: string): Promise<ProjectConfig> {
   const config = await readConfig();
   const target = config.projects.find((p) => p.id === projectId);
   if (!target) {
@@ -449,7 +482,11 @@ export async function archiveProject(projectId: string): Promise<ProjectConfig> 
 }
 
 /** 取消归档项目 */
-export async function unarchiveProject(projectId: string): Promise<ProjectConfig> {
+export function unarchiveProject(projectId: string): Promise<ProjectConfig> {
+  return withConfigLock(() => unarchiveProjectLocked(projectId));
+}
+
+async function unarchiveProjectLocked(projectId: string): Promise<ProjectConfig> {
   const config = await readConfig();
   const target = config.projects.find((p) => p.id === projectId);
   if (!target) {
@@ -496,7 +533,11 @@ export async function getProjectStats(projectId: string): Promise<{ nodeCount: n
  *  - 标记 trashed（与 archived 互斥），不移除配置条目、不删文件夹
  *  - 删除的是当前项目时自动切换到第一个活跃项目
  */
-export async function deleteProject(projectId: string): Promise<ProjectConfig> {
+export function deleteProject(projectId: string): Promise<ProjectConfig> {
+  return withConfigLock(() => deleteProjectLocked(projectId));
+}
+
+async function deleteProjectLocked(projectId: string): Promise<ProjectConfig> {
   const config = await readConfig();
 
   const idx = config.projects.findIndex((p) => p.id === projectId);
@@ -539,7 +580,11 @@ export async function deleteProject(projectId: string): Promise<ProjectConfig> {
 }
 
 /** 从垃圾桶恢复项目（取消软删除标记） */
-export async function restoreProject(projectId: string): Promise<ProjectConfig> {
+export function restoreProject(projectId: string): Promise<ProjectConfig> {
+  return withConfigLock(() => restoreProjectLocked(projectId));
+}
+
+async function restoreProjectLocked(projectId: string): Promise<ProjectConfig> {
   const config = await readConfig();
   const target = config.projects.find((p) => p.id === projectId);
   if (!target) {
@@ -562,7 +607,11 @@ export async function restoreProject(projectId: string): Promise<ProjectConfig> 
  *  - 删除前仍兜底迁移便签 note 页到全局笔记库（防丢笔记）
  *  - 删除项目文件夹 + 移除配置条目（无回收站，谨慎调用）
  */
-export async function purgeProject(projectId: string): Promise<void> {
+export function purgeProject(projectId: string): Promise<void> {
+  return withConfigLock(() => purgeProjectLocked(projectId));
+}
+
+async function purgeProjectLocked(projectId: string): Promise<void> {
   const config = await readConfig();
 
   const idx = config.projects.findIndex((p) => p.id === projectId);
@@ -616,7 +665,11 @@ export async function purgeProject(projectId: string): Promise<void> {
 }
 
 /** 重命名项目（仅修改显示名称，不改变文件夹路径） */
-export async function renameProject(projectId: string, newName: string): Promise<ProjectConfig> {
+export function renameProject(projectId: string, newName: string): Promise<ProjectConfig> {
+  return withConfigLock(() => renameProjectLocked(projectId, newName));
+}
+
+async function renameProjectLocked(projectId: string, newName: string): Promise<ProjectConfig> {
   const config = await readConfig();
   const target = config.projects.find((p) => p.id === projectId);
   if (!target) {
@@ -630,7 +683,14 @@ export async function renameProject(projectId: string, newName: string): Promise
 }
 
 /** 更新项目元信息（分类 / 自定义标签 / 备注）：仅修改配置条目，不影响磁盘文件 */
-export async function updateProjectMeta(
+export function updateProjectMeta(
+  projectId: string,
+  meta: { category?: string; tags?: string[]; note?: string },
+): Promise<ProjectConfig> {
+  return withConfigLock(() => updateProjectMetaLocked(projectId, meta));
+}
+
+async function updateProjectMetaLocked(
   projectId: string,
   meta: { category?: string; tags?: string[]; note?: string },
 ): Promise<ProjectConfig> {
@@ -713,7 +773,11 @@ let syncInFlight: Promise<boolean> | null = null;
  *  仅这类项目在目录重新出现时自动复活；UI 软删除（目录仍在磁盘）不自动复活。 */
 const diskDeletedIds = new Set<string>();
 
-async function doSyncProjectsFromDisk(): Promise<boolean> {
+function doSyncProjectsFromDisk(): Promise<boolean> {
+  return withConfigLock(() => doSyncProjectsFromDiskLocked());
+}
+
+async function doSyncProjectsFromDiskLocked(): Promise<boolean> {
   const config = await readConfig();
   let changed = false;
   const now = new Date().toISOString();
@@ -834,7 +898,11 @@ export async function getDefaultProjectDir(): Promise<string> {
 /** 设置新建项目的默认保存位置（写入前需调用方完成 validateProjectParentDir 校验）；
  *  统一落在所选位置下的 BobWorkspace 大文件夹中；与内置 BobWorkspace 相同时等价于恢复默认，
  *  并立即创建大文件夹目录，让用户选完位置即可在文件系统看到。 */
-export async function setDefaultProjectDir(dir: string): Promise<string> {
+export function setDefaultProjectDir(dir: string): Promise<string> {
+  return withConfigLock(() => setDefaultProjectDirLocked(dir));
+}
+
+async function setDefaultProjectDirLocked(dir: string): Promise<string> {
   const config = await readConfig();
   const projectsDir = resolveProjectsWorkspace(dir);
   if (projectsDir === PROJECTS_DIR) {
@@ -849,7 +917,11 @@ export async function setDefaultProjectDir(dir: string): Promise<string> {
 }
 
 /** 清除自定义默认保存位置，恢复为内置 BobWorkspace（新项目重新回到统一大文件夹） */
-export async function resetDefaultProjectDir(): Promise<string> {
+export function resetDefaultProjectDir(): Promise<string> {
+  return withConfigLock(() => resetDefaultProjectDirLocked());
+}
+
+async function resetDefaultProjectDirLocked(): Promise<string> {
   const config = await readConfig();
   if (config.default_project_dir !== undefined) {
     delete config.default_project_dir;
@@ -872,7 +944,14 @@ export async function getProjectAnalysisModel(projectId: string): Promise<string
   return project?.analysis_model ?? DEFAULT_ANALYSIS_MODEL;
 }
 
-export async function setProjectAnalysisModel(
+export function setProjectAnalysisModel(
+  projectId: string,
+  modelId: string
+): Promise<void> {
+  return withConfigLock(() => setProjectAnalysisModelLocked(projectId, modelId));
+}
+
+async function setProjectAnalysisModelLocked(
   projectId: string,
   modelId: string
 ): Promise<void> {

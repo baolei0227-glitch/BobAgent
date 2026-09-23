@@ -62,21 +62,38 @@ const MOCK_SETTINGS = {
   brandLogo: 'custom/my-logo.png',
 };
 
+/** mock 头像条目（与 window.api.avatar 返回结构一致） */
+interface MockAvatar {
+  id: string;
+  name: string;
+  dataUrl: string;
+  builtin: boolean;
+}
+
+/** mock window.api 的 avatar 子集（仅测试用；真实 window.api 类型庞大，这里只声明被测到的部分） */
+interface MockAvatarApi {
+  avatar: {
+    list: () => Promise<MockAvatar[]>;
+    add: () => Promise<{ success: boolean; avatars: MockAvatar[] }>;
+    delete: (id: string) => Promise<{ success: boolean; avatars: MockAvatar[] }>;
+  };
+}
+
 test('settings: 四面板切换 / 厂商tab / 角色联动 / 图标 / 架构图 / 保存 / 取消确认', async ({ page }) => {
   // ── 注入 mock 环境 ──
   await page.addInitScript(
-    ([avatars, settings]) => {
-      (window as any).localStorage.setItem('bob-work-settings', JSON.stringify(settings));
+    ([avatars, settings]: readonly [MockAvatar[], typeof MOCK_SETTINGS]) => {
+      window.localStorage.setItem('bob-work-settings', JSON.stringify(settings));
       // 确保旧迁移键不存在（migrateOldSettingsIfNeeded 走空路径）
-      (window as any).localStorage.removeItem('ai-canvas-providers');
-      (window as any).localStorage.removeItem('ai-canvas-search');
-      (window as any).api = {
+      window.localStorage.removeItem('ai-canvas-providers');
+      window.localStorage.removeItem('ai-canvas-search');
+      (window as unknown as { api: MockAvatarApi }).api = {
         avatar: {
           list: async () => avatars,
           add: async () => ({ success: true, avatars }),
           delete: async (id: string) => ({
             success: true,
-            avatars: avatars.filter((a: any) => a.id !== id),
+            avatars: avatars.filter((a) => a.id !== id),
           }),
         },
       };

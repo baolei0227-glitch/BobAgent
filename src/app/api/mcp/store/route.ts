@@ -159,9 +159,9 @@ export async function GET() {
     };
 
     return NextResponse.json({ entries: [...entries, ...customs, screenshotPlugin] });
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('GET /api/mcp/store error:', e);
-    return NextResponse.json({ entries: [], error: e?.message || 'Failed to load MCP store' }, { status: 500 });
+    return NextResponse.json({ entries: [], error: e instanceof Error ? e.message : 'Failed to load MCP store' }, { status: 500 });
   }
 }
 
@@ -289,8 +289,8 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         );
     }
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('POST /api/mcp/store error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'MCP store operation failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : 'MCP store operation failed' }, { status: 500 });
   }
 }

@@ -7,7 +7,7 @@
  * 扫描件 OCR 已完全收敛到 bob-ocr-mcp 插件（见 core/ocr-service.ts），本文件不再承载任何本地识别引擎。
  */
 
-import { promises as fs } from 'fs';
+import { promises as fs, accessSync } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
@@ -40,15 +40,15 @@ function getScriptsDir(): string {
   const standaloneDir = join(process.cwd(), 'scripts');
   // standalone 模式下 scripts/ 包含 Python 脚本副本（由 build-electron.sh 复制）
   try {
-    require('fs').accessSync(join(standaloneDir, 'pdf_extractor.py'));
+    accessSync(join(standaloneDir, 'pdf_extractor.py'));
     return standaloneDir;
   } catch {}
   try {
-    require('fs').accessSync(join(devDir, 'pdf_extractor.py'));
+    accessSync(join(devDir, 'pdf_extractor.py'));
     return devDir;
   } catch {}
   try {
-    require('fs').accessSync(join(devDirLegacy, 'pdf_extractor.py'));
+    accessSync(join(devDirLegacy, 'pdf_extractor.py'));
     return devDirLegacy;
   } catch {}
   return standaloneDir; // 兜底
@@ -144,9 +144,14 @@ export async function extractWithPython(
 export async function extractWithPdfParse(pdfPath: string): Promise<ExtractResult> {
   try {
     const dataBuffer = await fs.readFile(pdfPath);
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pdfParse = require('pdf-parse');
-    const data = await pdfParse(dataBuffer);
+    // pdf-parse 是按需加载的兜底依赖：仅在 Python 提取失败时动态引入
+    const pdfParseMod = await import('pdf-parse');
+    type PdfParseFn = (buffer: Buffer) => Promise<{ text?: string; numpages?: number }>;
+    const candidate: unknown = (pdfParseMod as { default?: unknown }).default;
+    if (typeof candidate !== 'function') {
+      return { text: '', pageCount: 0, method: 'empty' };
+    }
+    const data = await (candidate as PdfParseFn)(dataBuffer);
 
     return {
       text: data.text || '',

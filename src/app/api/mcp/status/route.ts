@@ -14,10 +14,10 @@ export async function GET() {
     const settings = await readSettingsFromFile();
     await mcpManager.syncServers(settings.mcpServers || []);
     return NextResponse.json({ statuses: mcpManager.getPluginStatuses() });
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('GET /api/mcp/status error:', e);
     return NextResponse.json(
-      { statuses: [], error: e?.message || 'Failed to load MCP status' },
+      { statuses: [], error: e instanceof Error ? e.message : 'Failed to load MCP status' },
       { status: 500 },
     );
   }

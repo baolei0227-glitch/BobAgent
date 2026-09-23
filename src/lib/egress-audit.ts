@@ -10,6 +10,7 @@
  */
 
 import { join } from 'path';
+import * as fs from 'fs';
 import { resolveAppRoot } from './app-root';
 
 export interface EgressAuditEvent {
@@ -41,7 +42,6 @@ function auditPath(): string {
 /** 追加一条数据出口审计记录（永不抛错） */
 export function logEgressUpload(ev: Omit<EgressAuditEvent, 'ts'>): void {
   try {
-    const fs = require('fs');
     const path = auditPath();
     fs.mkdirSync(join(resolveAppRoot(), '.logs'), { recursive: true });
     try {

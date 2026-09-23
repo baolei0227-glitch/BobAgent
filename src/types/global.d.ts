@@ -16,6 +16,8 @@ declare global {
       showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
       selectDirectory: () => Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>;
       getHomeDir: () => string;
+      /** 画布：外部（Hippo 对话栏「投送画布」）投送会话后，把新节点挂进画布并置焦点 */
+      onCanvasFocusNode?: (callback: (payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void) => () => void;
     };
     /** "发送到节点"事件缓冲：新建节点尚未挂载时暂存附件，挂载后消费，防止事件先于监听器注册而丢失 */
     __pendingNodeAttachments?: Record<string, MessageAttachment[]>;

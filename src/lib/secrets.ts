@@ -12,6 +12,7 @@
 import { createCipheriv, createDecipheriv, scryptSync, randomBytes } from 'crypto';
 import { hostname, userInfo } from 'os';
 import { execSync } from 'child_process';
+import { readFileSync } from 'fs';
 
 const PREFIX = 'enc::v1::';
 const KEYLEN = 32; // AES-256
@@ -33,7 +34,7 @@ function getMachineFingerprint(): string {
     }
     // Linux: machine-id
     if (process.platform === 'linux') {
-      const id = require('fs').readFileSync('/etc/machine-id', 'utf-8').trim();
+      const id = readFileSync('/etc/machine-id', 'utf-8').trim();
       if (id) return `machine-id:${id}`;
     }
   } catch {}
@@ -103,12 +104,16 @@ const SENSITIVE_PATHS: Array<Array<string | '*'>> = [
   ['mcpServers', '*', 'env'],
 ];
 
+/** 叶子变换：输入输出均为 unknown，由调用方在叶子处按实际类型收窄 */
+type LeafFn = (leaf: unknown) => unknown;
+
+/** 按路径遍历（'*' 通配数组元素）：命中路径末尾时对叶子执行 fn，其余结构原样深拷贝保留 */
 function walk(
-  obj: any,
+  obj: unknown,
   path: Array<string | '*'>,
   depth: number,
-  fn: (leaf: any) => any,
-): any {
+  fn: LeafFn,
+): unknown {
   if (depth === path.length) return fn(obj);
   const key = path[depth];
   if (key === '*') {
@@ -116,18 +121,20 @@ function walk(
     return obj.map((item) => walk(item, path, depth + 1, fn));
   }
   if (obj === null || obj === undefined || typeof obj !== 'object') return obj;
-  if (!(key in obj)) return obj;
+  const record = obj as Record<string, unknown>;
+  if (!(key in record)) return obj;
   return {
-    ...obj,
-    [key]: walk(obj[key], path, depth + 1, fn),
+    ...record,
+    [key]: walk(record[key], path, depth + 1, fn),
   };
 }
 
-function applyToSensitive<T>(obj: T, fn: (leaf: any) => any): T {
-  let out: any = obj;
+function applyToSensitive<T>(obj: T, fn: LeafFn): T {
+  let out: unknown = obj;
   for (const path of SENSITIVE_PATHS) {
     out = walk(out, path, 0, fn);
   }
+  // 遍历按路径原位替换叶子、保持整体结构形状，故可安全还原为输入类型 T
   return out as T;
 }
 
@@ -137,7 +144,7 @@ export function encryptSettings<T>(settings: T): T {
     if (typeof leaf === 'string') return encryptSecret(leaf) ?? leaf;
     if (typeof leaf === 'object' && leaf !== null) {
       // Record<string, string>（headers / env）→ 逐值加密
-      const out: Record<string, any> = {};
+      const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(leaf)) {
         out[k] = typeof v === 'string' ? encryptSecret(v) ?? v : v;
       }
@@ -152,7 +159,7 @@ export function decryptSettings<T>(settings: T): T {
     if (leaf === undefined || leaf === null) return leaf;
     if (typeof leaf === 'string') return decryptSecret(leaf) ?? leaf;
     if (typeof leaf === 'object' && leaf !== null) {
-      const out: Record<string, any> = {};
+      const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(leaf)) {
         out[k] = typeof v === 'string' ? decryptSecret(v) ?? v : v;
       }

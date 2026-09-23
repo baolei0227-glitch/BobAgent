@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
     }
     const results = await syncAllAccounts();
     return NextResponse.json({ ok: true, results });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Sync failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Sync failed' }, { status: 500 });
   }
 }

@@ -21,6 +21,14 @@ interface WechatState {
   error?: string;
 }
 
+/** /api/wechat?action=status 响应体 */
+interface WechatStatusResponse {
+  success?: boolean;
+  bound?: boolean;
+  running?: boolean;
+  binding?: WechatState;
+}
+
 /**
  * 微信 iLink 绑定弹窗
  * 供 ⌘F 统一面板（UnifiedPalette）与侧边栏设置菜单共用。
@@ -37,7 +45,7 @@ export function WechatBindModal({ open, onOpenChange, onBoundChange, embedded }:
   }, [onBoundChange]);
 
   /** 统一应用后端状态：bound / sessionDead（有凭证但轮询已死）/ binding */
-  const applyStatus = useCallback((data: any) => {
+  const applyStatus = useCallback((data: WechatStatusResponse) => {
     setBoundSafe(!!data.bound);
     setSessionDead(!!data.bound && !data.running);
     if (data.binding) {
@@ -87,8 +95,8 @@ export function WechatBindModal({ open, onOpenChange, onBoundChange, embedded }:
       } else {
         setState({ phase: 'error', error: data.error || 'Binding failed' });
       }
-    } catch (err: any) {
-      setState({ phase: 'error', error: err?.message || 'Network error' });
+    } catch (err) {
+      setState({ phase: 'error', error: err instanceof Error ? err.message : 'Network error' });
     }
   }, [setBoundSafe]);
 

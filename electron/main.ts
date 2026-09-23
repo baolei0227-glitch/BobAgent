@@ -13,10 +13,10 @@ import * as http from 'http';
 import * as https from 'https';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import { autoUpdater } from 'electron-updater';
+import { autoUpdater, type UpdateInfo } from 'electron-updater';
 import { readSettingsFromFile, writeSettingsToFile, settingsFileExists } from '../src/lib/settings-server';
 import { captureRegionToFile, cleanupShotFile, ocrRecognize, ensureScreenRecordingPermission as checkScreenRecordingPermission, requestScreenRecordingPermission, buildScreenPermissionError } from '../src/lib/screen-ocr/capture';
-import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener } from './hippo-browser';
+import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener, setHippoChatCanvasNotifier } from './hippo-browser';
 import type { ScreenOcrGeometry } from './preload';
 
 let nextServerProc: ChildProcess | null = null;
@@ -236,7 +236,7 @@ function startNextServer(): ChildProcess & { startupReady: Promise<void> } {
       const childPath = buildChildPath();
       log(`Child PATH: ${childPath}`);
 
-      let sandboxPath = path.join(app.getPath('home'), 'BobWork', '.sandbox');
+      const sandboxPath = path.join(app.getPath('home'), 'BobWork', '.sandbox');
       // 限制 V8 old space 上限为 1GB，避免长时间运行后堆膨胀到 1.49GB+ 触发 macOS jetsam 杀进程
       // （历史崩溃：node 24h 写 137GB + Footprint 1.49GB → jetsam → 应用闪退）
       const proc = spawn('node', ['--max-old-space-size=1024', serverPath], {
@@ -316,7 +316,7 @@ function startNextServer(): ChildProcess & { startupReady: Promise<void> } {
       // 若再经 Reflect.get(live=nextServerProc,...) 会再次进入本 trap → 无限递归 → 栈溢出。
       // 直接用 Proxy 的 target（即最新 curProc 原始子进程）即可。
       const v = Reflect.get(target, prop, receiver);
-      return typeof v === 'function' ? (v as Function).bind(target) : v;
+      return typeof v === 'function' ? (v as (...args: unknown[]) => unknown).bind(target) : v;
     },
   }) as ChildProcess & { startupReady: Promise<void> };
 }
@@ -1229,7 +1229,7 @@ async function handleGlobalScreenOcr(): Promise<void> {
     log(`[ocr-perf] shortcut→shot=${t3 - t0}ms dataUrl=${t4 - t3}ms (${Math.round(dataUrl.length / 1024)}KB base64)`);
     // 每次截图顺带刷新权威屏幕几何（助手已随本次截图产出）
     if (shot.geometry) screenGeometryCache = shot.geometry;
-    const mode = 'full' as 'full';
+    const mode = 'full';
     const geometry = shot.geometry ?? null;
     const screenIndex = shot.screenIndex ?? null;
     const edWin = openScreenOcrEditorWindow({ dataUrl, mode, geometry, screenIndex });
@@ -1982,7 +1982,7 @@ async function startResumableDownload(meta: { version: string; url: string; size
 }
 
 /** 从 electron-updater 的 update-available 信息提取下载元数据并启动续传下载 */
-async function startResumableDownloadFromInfo(info: any): Promise<boolean> {
+async function startResumableDownloadFromInfo(info: UpdateInfo): Promise<boolean> {
   const file = info?.files?.[0];
   const size = typeof file?.size === 'number' ? file.size : 0;
   const sha512 = typeof file?.sha512 === 'string' ? file.sha512 : '';
@@ -2674,6 +2674,14 @@ app.whenReady().then(async () => {
     try {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('hippo-browser:capsule', capsule);
+      }
+    } catch { /* 主窗口未就绪或已销毁时忽略 */ }
+  });
+  // Hippo 对话栏「投送画布」：把浏览器会话投给主窗口，由画布挂载新节点并置焦点
+  setHippoChatCanvasNotifier((payload) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('bob:focus-canvas-node', payload);
       }
     } catch { /* 主窗口未就绪或已销毁时忽略 */ }
   });

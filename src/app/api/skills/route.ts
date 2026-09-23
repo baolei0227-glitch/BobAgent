@@ -8,7 +8,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getAllSkills, getDownloadableSkills, hasUserSkill, invalidateSkillsCache } from '@/lib/skills/loader-server';
-import { installSkill, installBuiltinSkill, uninstallSkill } from '@/lib/skills/installer-server';
+import { installSkill, installBuiltinSkill, uninstallSkill, type InstallOptions } from '@/lib/skills/installer-server';
 import {
   enableSkillForAgent,
   disableSkillForAgent,
@@ -102,7 +102,7 @@ export async function POST(request: NextRequest) {
         }
         break;
       case 'install': {
-        const { source, url, localPath, autoEnable, force } = body as any;
+        const { source, url, localPath, autoEnable, force } = body as InstallOptions;
         if (!source) {
           return NextResponse.json({ success: false, error: '"source" is required (github|local|url)' }, { status: 400 });
         }
@@ -124,7 +124,7 @@ export async function POST(request: NextRequest) {
         if (!skillName) {
           return NextResponse.json({ success: false, error: 'skillName required' }, { status: 400 });
         }
-        const force = (body as any).force === true;
+        const force = (body as { force?: unknown }).force === true;
         const result = await installBuiltinSkill(skillName, { force });
         if (!result.success) {
           const status = result.detail?.includes('already installed') ? 409 : 400;

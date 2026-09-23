@@ -28,6 +28,17 @@ interface ScheduleParseResult {
   model_used?: string;
 }
 
+/** 模型返回的原始时间范围 JSON（未经校验，字段可能缺失） */
+interface RawRangeJson {
+  label?: string;
+  range_start?: string;
+  range_end?: string;
+  overdue?: boolean;
+  keyword?: string;
+  all_time?: boolean;
+  unclear?: boolean;
+}
+
 /** 系统当前时间（UTC ISO），作为相对时间解析锚点 */
 function nowIso(): string {
   return new Date().toISOString();
@@ -115,9 +126,9 @@ ${userText}
     cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
   }
 
-  let parsed: any;
+  let parsed: RawRangeJson;
   try {
-    parsed = JSON.parse(cleaned);
+    parsed = JSON.parse(cleaned) as RawRangeJson;
   } catch (e) {
     if (attempt < 2) {
       return callModelForRange(cfg, userText + `\n\n（提示：上一次返回的不是合法 JSON，请只输出 JSON 文本）`, attempt + 1);
@@ -183,8 +194,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Could not recognize a query from the description' });
     }
     return NextResponse.json(result);
-  } catch (e: any) {
+  } catch (e) {
     console.error('wanted/schedule-parse error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'Time parse failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: e instanceof Error && e.message ? e.message : 'Time parse failed' }, { status: 500 });
   }
 }

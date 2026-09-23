@@ -88,6 +88,15 @@ export interface QrPollResult {
   credentials?: WechatCredentials;
 }
 
+/** get_qrcode_status 原始响应（iLink 字段原样，未归一化） */
+interface QrStatusResponse {
+  status?: string;
+  bot_token?: string;
+  ilink_bot_id?: string;
+  ilink_user_id?: string;
+  baseurl?: string;
+}
+
 // ============================================================
 // 凭证存储
 // ============================================================
@@ -165,7 +174,7 @@ function isSessionExpired(err: unknown): boolean {
 }
 
 /** POST 到 iLink API，支持超时 */
-async function apiPost<T = any>(
+async function apiPost<T = unknown>(
   path: string,
   body: unknown,
   token?: string,
@@ -220,9 +229,9 @@ export async function getQrcode(): Promise<QrCodeData> {
 
 /** ② 单次查询扫码状态（40s 长轮询，超时静默返回 waiting） */
 export async function pollQrStatus(qrcodeId: string): Promise<QrPollResult> {
-  let res: any;
+  let res: QrStatusResponse;
   try {
-    res = await apiPost(
+    res = await apiPost<QrStatusResponse>(
       `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcodeId)}`,
       {},
       undefined,
@@ -256,7 +265,7 @@ export async function pollQrStatus(qrcodeId: string): Promise<QrPollResult> {
     case 'expired':
       return { status: 'expired' };
     default:
-      return { status: res?.status || 'waiting' };
+      return { status: 'waiting' };
   }
 }
 
@@ -285,9 +294,46 @@ export async function waitForScan(
 // 消息收发：长轮询 + 游标
 // ============================================================
 
+/** iLink 入站消息中的媒体载荷（字段名随网关/类型而异，做兼容提取） */
+interface IlinkRawMediaPayload {
+  download_url?: string;
+  downloadUrl?: string;
+  url?: string;
+  media_url?: string;
+  resource_url?: string;
+  file_name?: string;
+  name?: string;
+  file_type?: string;
+  file_size?: number;
+  size?: number;
+}
+
+/** iLink 入站消息中的 item（文本/媒体等） */
+interface IlinkRawItem {
+  type?: number;
+  text_item?: { text?: string };
+  image_item?: IlinkRawMediaPayload;
+  voice_item?: IlinkRawMediaPayload;
+  file_item?: IlinkRawMediaPayload;
+  video_item?: IlinkRawMediaPayload;
+}
+
+/** iLink getupdates 返回的单条原始消息 */
+interface IlinkRawMessage {
+  from_user_id?: string;
+  item_list?: IlinkRawItem[];
+  message_id?: string;
+  msg_id?: string;
+  msgid?: string;
+  id?: string;
+  client_msg_id?: string;
+  client_id?: string;
+  context_token?: string;
+}
+
 interface GetUpdatesResponse {
   get_updates_buf?: string;
-  msgs?: any[];
+  msgs?: IlinkRawMessage[];
 }
 
 /**
@@ -350,21 +396,21 @@ export async function pollLoop(
 }
 
 /** 解析入站消息：提取文本、跳过 bot 自身、缓存 context_token */
-function parseInbound(msg: any): InboundMessage | null {
+function parseInbound(msg: IlinkRawMessage): InboundMessage | null {
   const from = String(msg?.from_user_id ?? '');
   if (!from || from.endsWith('@im.bot')) return null; // 跳过 bot 自己
 
   const text =
     (msg?.item_list ?? [])
-      .filter((i: any) => i?.type === ILINK_MSG_TYPE.TEXT)
-      .map((i: any) => i?.text_item?.text ?? '')
+      .filter((i) => i?.type === ILINK_MSG_TYPE.TEXT)
+      .map((i) => i?.text_item?.text ?? '')
       .join('') ?? '';
 
   // 提取媒体类型（非文本 item）与下载/元信息
-  const mediaItem = (msg?.item_list ?? []).find((i: any) => i?.type && i.type !== ILINK_MSG_TYPE.TEXT);
+  const mediaItem = (msg?.item_list ?? []).find((i) => i?.type && i.type !== ILINK_MSG_TYPE.TEXT);
   const mediaType = mediaItem?.type ?? null;
   let media: InboundMedia | undefined;
-  if (mediaItem) {
+  if (mediaItem && typeof mediaItem.type === 'number') {
     const type = mediaItem.type;
     const key =
       type === ILINK_MSG_TYPE.IMAGE ? 'image_item'

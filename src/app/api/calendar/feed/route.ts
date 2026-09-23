@@ -26,8 +26,8 @@ export async function GET() {
     const projectId = await safeProjectId();
     const token = await getOrCreateFeedToken(db, projectId);
     return NextResponse.json({ ok: true, token });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Failed' }, { status: 500 });
   }
 }
 
@@ -38,7 +38,7 @@ export async function POST() {
     const projectId = await safeProjectId();
     const token = await rotateFeedToken(db, projectId);
     return NextResponse.json({ ok: true, token });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Failed' }, { status: 500 });
   }
 }

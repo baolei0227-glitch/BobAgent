@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
     }
     const calendars = await discoverCalendars(principalUrl, username, password);
     return NextResponse.json({ ok: true, calendars });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Discover failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Discover failed' }, { status: 500 });
   }
 }

@@ -5,6 +5,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, unlink } from 'fs/promises';
+import { readdirSync, statSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { resolveDocxTemplateScript } from '@/lib/docx-template-mcp';
 import type { Tool } from './index';
@@ -25,16 +26,15 @@ function _pruneScanCache(now: number) {
 }
 /** 计算 scene-dir 下所有 docx 的最新 mtime + 文件列表签名（作为 cache key 一部分） */
 function _scanDirSig(dir: string): string {
-  const fs = require('fs');
   let files: string[];
-  try { files = fs.readdirSync(dir); } catch { return `nodir`; }
+  try { files = readdirSync(dir); } catch { return `nodir`; }
   const docxs = files
     .filter((f: string) => /\.docx$/i.test(f) && !f.startsWith('~$'))
     .sort();
   let latest = 0;
   for (const f of docxs) {
     try {
-      const s = fs.statSync(join(dir, f));
+      const s = statSync(join(dir, f));
       if (s.mtimeMs > latest) latest = s.mtimeMs;
     } catch { /* ignore */ }
   }
@@ -126,8 +126,6 @@ async function toolFillDocxTemplates(args: Record<string, unknown>): Promise<str
     : undefined;
 
   const ws = await getWorkspacePath();
-  const path = require('path');
-  const fs = require('fs');
 
   // 组装 python 命令参数：dir/files 指定模板目录/文件（附件场景）
   const argParts: string[] = [script];
@@ -139,12 +137,12 @@ async function toolFillDocxTemplates(args: Record<string, unknown>): Promise<str
   let dataFile: string | null = null;
   try {
     if (rows && Array.isArray(rows)) {
-      const rowsPath = path.join(ws, `.bob_docx_rows_${ts}.json`);
+      const rowsPath = join(ws, `.bob_docx_rows_${ts}.json`);
       await writeFile(rowsPath, JSON.stringify(rows, null, 2), 'utf-8');
       dataFile = rowsPath;
       argParts.push('--rows-json', `"${rowsPath}"`);
     } else if (context && typeof context === 'object') {
-      const ctxPath = path.join(ws, `.bob_docx_ctx_${ts}.json`);
+      const ctxPath = join(ws, `.bob_docx_ctx_${ts}.json`);
       await writeFile(ctxPath, JSON.stringify(context, null, 2), 'utf-8');
       dataFile = ctxPath;
       argParts.push('--data-json', `"${ctxPath}"`);
@@ -159,10 +157,10 @@ async function toolFillDocxTemplates(args: Record<string, unknown>): Promise<str
   // AI 工具产物放在 docx_fill_<scene>_<stamp>/ 子目录，避免与插件模式根目录文件重名冲突。
   const projectRoot = await getProjectRootPath();
   const templateRoot = join(projectRoot, 'homework', 'template');
-  try { fs.mkdirSync(templateRoot, { recursive: true }); } catch { /* ignore */ }
+  try { mkdirSync(templateRoot, { recursive: true }); } catch { /* ignore */ }
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '') + '_' + Date.now().toString().slice(-6);
   const outDir = join(templateRoot, `docx_fill_custom_${stamp}`);
-  try { fs.mkdirSync(outDir, { recursive: true }); } catch { /* ignore */ }
+  try { mkdirSync(outDir, { recursive: true }); } catch { /* ignore */ }
   argParts.push('--out-dir', `"${outDir}"`);
   const zipPath = join(templateRoot, `docx_fill_custom_${stamp}.zip`);
   argParts.push('--zip', `"${zipPath}"`);

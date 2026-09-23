@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { homedir } from 'os';
 import { renderOutcome, parseOutcome, createEmptyOutcome, type Outcome } from '@/lib/nodes/outcome';
 import { collectAnchorIds, generateAnchorId } from '@/lib/nodes/anchor';
 import type { SubagentPanel } from '@/lib/types';
@@ -232,7 +233,7 @@ function getWorkspaceRoot(): string {
   // 优先使用当前请求上下文中的项目路径
   const currentProjectPath = (globalThis as { CURRENT_PROJECT_PATH?: string }).CURRENT_PROJECT_PATH;
   if (currentProjectPath) return currentProjectPath;
-  return process.env.COZE_WORKSPACE_PATH || require('os').homedir();
+  return process.env.COZE_WORKSPACE_PATH || homedir();
 }
 
 /** 显式设置当前项目路径（在 API 请求处理开始时调用） */

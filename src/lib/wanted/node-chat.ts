@@ -192,11 +192,14 @@ export async function askTempNode(
     }
 
     return { ok: true, reply: combinedAnswer, messages: fullMessages, threadId };
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
-      return { ok: false, reply: e.message || '请求超时，请稍后重试', threadId };
+  } catch (e) {
+    if (e instanceof Error) {
+      if (e.name === 'AbortError') {
+        return { ok: false, reply: e.message || '请求超时，请稍后重试', threadId };
+      }
+      return { ok: false, reply: e.message || String(e) || '网络错误', threadId };
     }
-    return { ok: false, reply: e?.message || String(e) || '网络错误', threadId };
+    return { ok: false, reply: String(e) || '网络错误', threadId };
   } finally {
     clearTimeout(timeoutTimer);
   }

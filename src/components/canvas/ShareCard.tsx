@@ -427,7 +427,10 @@ function ShareAnswerEditor({
   const lastMdRef = useRef(value);
   const editorRef = useRef<Editor | null>(null);
   const uploadRef = useRef(uploadImage);
-  uploadRef.current = uploadImage;
+  // 同步最新 uploadImage 到 ref（不在 render 内写 ref，改在提交后同步）
+  useEffect(() => {
+    uploadRef.current = uploadImage;
+  }, [uploadImage]);
 
   const editor = useEditor({
     extensions: createShareAnswerExtensions(),

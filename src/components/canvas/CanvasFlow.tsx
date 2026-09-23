@@ -1383,6 +1383,29 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('canvas-focus-node', onFocus);
   }, [graphGateway, switchFocusNode]);
 
+  // 外部投送画布（Hippo 对话栏「Send to canvas」）：主进程转发 → 把浏览器会话挂成画布节点并置焦点。
+  // 会话本体已由对话栏写入 /api/nodes（node_type='chat'），此处只补内存挂载；刷新后走 loadProjectData 恢复。
+  useEffect(() => {
+    const off = window.api?.onCanvasFocusNode?.((payload) => {
+      if (!payload?.nodeId) return;
+      if (nodesRef.current.some((n) => n.id === payload.nodeId)) {
+        switchFocusNode(payload.nodeId);
+        return;
+      }
+      const flowNode = restoredNodeToFlowNode(
+        {
+          node_id: payload.nodeId,
+          title: payload.title?.trim() || 'Browser Chat',
+          conversations: (payload.conversations ?? []) as Parameters<typeof restoredNodeToFlowNode>[0]['conversations'],
+        },
+        nodesRef.current.length,
+      );
+      setNodes((prev) => [...prev, flowNode]);
+      openNewlyCreatedNode(payload.nodeId);
+    });
+    return () => { off?.(); };
+  }, [openNewlyCreatedNode, switchFocusNode]);
+
   // 单焦点左侧会话列表数据：研究节点按创建时间降序（新建会话始终排在最上面）。
   // 2026-09-17：去掉链分组/父子归属表达——列表不再嵌套分组，只按时间排列；
   // 节点间关系改由每行标题右侧的关系符号表达（一层上游/下游，见 RailRelationMarks）。
@@ -3083,14 +3106,22 @@ function CanvasFlowInner() {
 
   // 加载当前项目节点与连线（启动 + 无刷新切换项目时复用）。
   // 先加载节点，再加载连线，避免边引用不存在的节点；空项目自动创建初始节点。
+  // 序号守卫：并发触发（启动加载 / 连续切换项目）时只允许最后一次发起的结果落盘，
+  // 避免旧项目的慢响应晚到后覆盖新项目数据（表现为"切换了项目但左栏会话列表与会话界面没刷新"）。
+  const loadProjectDataSeqRef = useRef(0);
   const loadProjectData = useCallback(async () => {
+    const seq = ++loadProjectDataSeqRef.current;
+    const isLatest = () => seq === loadProjectDataSeqRef.current;
     const resp = await fetch('/api/nodes?action=list');
     const data = await resp.json();
+    if (!isLatest()) return;
 
     if (data.success && data.nodes && data.nodes.length > 0) {
       const restoredNodes = data.nodes
         // Agent Teams 观察节点已退役（多智能体改为对话式 team_run，不再有画布节点）→ 忽略存量记录
         .filter((n: Record<string, unknown>) => n.node_type !== 'agentTeams')
+        // Hippo Browser 对话栏会话（node_type='browser'）只在 /browser-chat 面板内呈现，不进画布
+        .filter((n: Record<string, unknown>) => n.node_type !== 'browser')
         .map((n: Record<string, unknown>, i: number) =>
           n.node_type === 'bobby'
             ? restoredBobbyToFlowNode(n as Parameters<typeof restoredBobbyToFlowNode>[0], i)
@@ -3104,6 +3135,7 @@ function CanvasFlowInner() {
       try {
         const edgeResp = await fetch('/api/edges?include_disconnected=true');
         const edgeData = await edgeResp.json();
+        if (!isLatest()) return;
         if (edgeData.success && edgeData.edges && edgeData.edges.length > 0) {
           const restoredEdges: Edge[] = edgeData.edges.map((e: { edge_id: string; from: string; to: string; edge_type: string; disconnected: boolean }) => ({
             id: e.edge_id,
@@ -3137,6 +3169,7 @@ function CanvasFlowInner() {
           }),
         });
         const createData = await createResp.json();
+        if (!isLatest()) return;
         if (createData.success) {
           const newNode: Node<AiChatNodeData> = {
             id: createData.node_id,

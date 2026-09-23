@@ -29,8 +29,6 @@ export interface TaskModelSettings {
   defaultModel?: string;
   apiKey?: string;
   baseUrl?: string;
-  /** Auto 模式任务类型智能选模开关（默认开；关 = 静态首选池首项，等同服务端 resolveMainChat 语义） */
-  auto?: boolean;
   /** Auto 模式「上下文带图片附件 → 优先选视觉模型」开关（默认开；关 = 即使带图也不为视觉模型加权） */
   autoVisionOnImage?: boolean;
   /** 候选池：该角色可用模型（多选，默认取候选池首个 defaultModel 为首选）；运行时首选不可用时按序回退 */
@@ -320,6 +318,12 @@ export interface AppSettings {
      *  mcp = 仅 bob-ocr-mcp（不可用则报错不降级）；local = 仅本地 Swift Vision。 */
     engine?: 'auto' | 'mcp' | 'local';
   };
+  /** AI 浏览器通道：全局互斥单选（设置 → Hippo Browser → AI Browser 开关）。
+   *  aiBrowser='hippo'  → 任务执行只走 Hippo Browser（内置 browser_* / HippoDriver），
+   *                        Bob Browser（扩展/真 Chrome，mcp__bob-browser-mcp__*）对模型不可见；
+   *  aiBrowser='chrome' → 任务执行只走 Bob Browser 通道，内置 browser_* 不注入；
+   *  undefined = 'hippo'（默认通道）—— Hippo 为默认，仅显式写入 'chrome' 才回退 Bob Browser。 */
+  aiBrowser?: 'hippo' | 'chrome';
   /** ⌘F 自定义快捷入口（用户自建插件/工作流一键入口） */
   quickLaunchers?: QuickLauncher[];
   /** 已启用的技能名集合（Agent 级，key='default' 的全局默认池）；undefined = 从未配置，走系统默认技能 */
@@ -505,13 +509,20 @@ const DEFAULT_PRESETS: TextPreset[] = [
   { name: '口语化', prompt: '将文字改写为自然、口语化的表达。' },
 ];
 
-/** ChatNode 快捷指令默认库（首次使用自动填充；用户可增删改） */
-const DEFAULT_QUICK_PROMPTS: QuickPrompt[] = [
+/** ChatNode 快捷指令默认库（首次使用自动填充；用户可增删改）。
+ *  末尾 5 条为「页面向」出厂指令（category '网页'）：服务于 Hippo Browser 右侧对话栏的边看边问场景，
+ *  也适用于画布节点 —— 靠全局库预置，不在 ChatNodeKernel 里硬编码任何面板专属指令。 */
+export const DEFAULT_QUICK_PROMPTS: QuickPrompt[] = [
   { id: 'qp-summarize', name: '总结摘要', content: '请对以上内容做简洁总结，提取核心要点。', category: '通用' },
   { id: 'qp-translate-en', name: '翻译为英文', content: '请将以上内容翻译为英文，保持专业语气。', category: '翻译' },
   { id: 'qp-translate-zh', name: '翻译为中文', content: '请将以上内容翻译为中文，保持专业语气。', category: '翻译' },
   { id: 'qp-polish', name: '润色', content: '请润色以上内容，使表达更流畅优雅，不改变原意。', category: '写作' },
   { id: 'qp-legal-cite', name: '引用法条', content: '请对以上法律问题给出结论，并引用现行有效法条原文（第X条），注明制定/修订时间。', category: '法律' },
+  { id: 'qp-page-summary', name: '总结此页', content: '请总结当前页面：这页在讲什么、3-5 条关键要点、哪些部分值得通读。使用本轮对话中已附带的页面上下文；若上下文缺失，请直接说明，不要凭猜测作答。', category: '网页' },
+  { id: 'qp-page-extract', name: '提取关键字段', content: '请只从当前页面提取我可以直接使用的字段（名称 / 数字 / 日期 / 链接），以表格返回：条目、取值、出现位置。不要复述叙事性正文。', category: '网页' },
+  { id: 'qp-page-translate', name: '翻译此页', content: '请逐段翻译当前页面正文，专有名词、数字与链接保持原样，不要跳过或压缩任何段落。', category: '网页' },
+  { id: 'qp-page-questions', name: '这页漏了什么', content: '根据当前页面，列出 5 个它引出但没有回答的问题；每条再用一句话说明该页面是回答了它、还是悬着。', category: '网页' },
+  { id: 'qp-page-verify', name: '核实这一结论', content: '请核实当前页面的主要结论：至少找到两个相互独立的来源，标明它们冲突之处，每条结论都附完整 URL。', category: '网页' },
 ];
 
 /** 默认需手动确认的工具：写配置类工具（用户显式确认后才真正执行）。

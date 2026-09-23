@@ -172,7 +172,7 @@ export async function POST(request: NextRequest) {
                         'X-Api-Sequence': '-1',
                       },
                       handshakeTimeout: 4000,
-                    } as any);
+                    });
                     ws.on('open', () => {
                       clearTimeout(timer);
                       try { ws!.close(); } catch { /* ignore */ }
@@ -180,7 +180,7 @@ export async function POST(request: NextRequest) {
                     });
                     ws.on('unexpected-response', (_req, res) => {
                       clearTimeout(timer);
-                      const s = (res as any).statusCode;
+                      const s = res.statusCode;
                       // 读取服务端响应体：openspeech 网关在拒绝时会返回详细排障指引
                       //（套餐未包含 / 超额后付费 / Resource-Id 对照 / Base URL 对照），原样透传便于用户定位
                       let bodyText = '';
@@ -199,11 +199,11 @@ export async function POST(request: NextRequest) {
                         }
                       };
                       try {
-                        (res as any).on('data', (chunk: Buffer) => {
+                        res.on('data', (chunk: Buffer) => {
                           if (bodyText.length < 2000) bodyText += chunk.toString('utf-8');
                         });
-                        (res as any).on('end', respondWithBody);
-                        (res as any).on('error', respondWithBody);
+                        res.on('end', respondWithBody);
+                        res.on('error', respondWithBody);
                         // 兜底：body 迟迟不 end 时 3s 后按已收集内容响应
                         setTimeout(respondWithBody, 3000);
                       } catch {

@@ -121,10 +121,22 @@ export interface HippoBrowserApi {
   onFindOpen: (callback: () => void) => () => void;
   /** ⌘L 时主进程通知工具栏聚焦并全选地址栏 */
   onFocusAddr: (callback: () => void) => () => void;
-  /** DOM → Markdown 骨架（主进程已做 SPA 智能等待） */
-  extract: () => Promise<
-    { ok: boolean; ready?: boolean; markdown?: string; text?: string; title?: string; url?: string; error?: string }
-  >;
+  /** DOM → Markdown 骨架（主进程已做 SPA 智能等待）；
+   *  note = 正文可读性提示（PDF / 登录墙 / 空壳未渲染），拿不到正文时由主进程给出成因与下一步；
+   *  kind = note 的机器可读分类（面板据此走 PDF 分流） */
+  extract: () => Promise<{
+    ok: boolean;
+    ready?: boolean;
+    markdown?: string;
+    text?: string;
+    title?: string;
+    url?: string;
+    note?: string;
+    kind?: 'pdf' | 'login' | 'empty';
+    error?: string;
+  }>;
+  /** 网页内划词浮层的动作投递：action='ask' 带选区文本，action='page' 只要整页正文（主进程已展开侧边栏） */
+  onSelectionAction: (callback: (payload: { action: 'ask' | 'page'; text: string }) => void) => () => void;
   /** 截图：fullPage=true 走整页长截图 */
   capture: (opts?: { fullPage?: boolean }) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
   /** 打印当前页：弹系统打印面板 */
@@ -218,6 +230,14 @@ export interface HippoBrowserApi {
   downloadClear: () => Promise<{ ok: boolean; downloads: HippoDownloadRecord[] }>;
   /** 下载：订阅列表与进度变化 */
   onDownloads: (callback: (data: { downloads: HippoDownloadRecord[] }) => void) => () => void;
+  /** AI 驱动指示：AI 正在操作本窗口时点亮工具栏徽标（单向推送 { active, tool }） */
+  onAiDriving: (callback: (data: { active: boolean; tool: string }) => void) => () => void;
+  /** ChatSidebar（右侧对话栏）：切换显示，返回最新展开态 */
+  chatToggle: () => Promise<{ ok: boolean; visible: boolean }>;
+  /** ChatSidebar：设置面板宽度（px；主进程按窗口宽度钳制后持久化） */
+  chatSetWidth: (width: number) => Promise<{ ok: boolean; width: number }>;
+  /** ChatSidebar：把当前会话投送到画布（主进程转发给主窗口，由画布挂载新节点并置焦点） */
+  chatSendToCanvas: (payload: { nodeId: string; title: string; conversations: unknown[] }) => Promise<{ ok: boolean; error?: string }>;
 }
 
 /** Hippo Browser 下载项（主进程 will-download 广播） */
@@ -254,6 +274,8 @@ export interface Api {
   screenOcr: ScreenOcrApi;
   /** Hippo Browser 侧边栏（Cmd+Shift+B） */
   hippoBrowser: HippoBrowserApi;
+  /** 画布：外部（Hippo 对话栏「投送画布」）投送会话后，把新节点挂进画布并置焦点 */
+  onCanvasFocusNode: (callback: (payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void) => () => void;
 }
 
 const api: Api = {
@@ -311,6 +333,11 @@ const api: Api = {
     delete: (id: string) => ipcRenderer.invoke('avatar:delete', id),
   },
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  onCanvasFocusNode: (callback: (payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void) => {
+    const wrapper = (_e: Electron.IpcRendererEvent, payload: { nodeId: string; title?: string; conversations?: unknown[] }) => callback(payload);
+    ipcRenderer.on('bob:focus-canvas-node', wrapper);
+    return () => ipcRenderer.removeListener('bob:focus-canvas-node', wrapper);
+  },
   openDevTools: () => ipcRenderer.invoke('devtools:open'),
   openFile: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
   openHtml: (content: string, filename?: string) => ipcRenderer.invoke('shell:openHtml', content, filename),
@@ -381,6 +408,11 @@ const api: Api = {
       return () => ipcRenderer.removeListener('hippo-browser:open-focus-addr', wrapper);
     },
     extract: () => ipcRenderer.invoke('hippo-browser:extract'),
+    onSelectionAction: (callback: (payload: { action: 'ask' | 'page'; text: string }) => void) => {
+      const wrapper = (_e: Electron.IpcRendererEvent, payload: { action: 'ask' | 'page'; text: string }) => callback(payload);
+      ipcRenderer.on('hippo-browser:selection-action', wrapper);
+      return () => ipcRenderer.removeListener('hippo-browser:selection-action', wrapper);
+    },
     capture: (opts?: { fullPage?: boolean }) => ipcRenderer.invoke('hippo-browser:capture', opts),
     print: () => ipcRenderer.invoke('hippo-browser:print'),
     getState: () => ipcRenderer.invoke('hippo-browser:get-state'),
@@ -458,6 +490,15 @@ const api: Api = {
       ipcRenderer.on('hippo-browser:downloads', wrapper);
       return () => ipcRenderer.removeListener('hippo-browser:downloads', wrapper);
     },
+    onAiDriving: (callback: (data: { active: boolean; tool: string }) => void) => {
+      const wrapper = (_e: Electron.IpcRendererEvent, data: { active: boolean; tool: string }) => callback(data);
+      ipcRenderer.on('hippo-browser:ai-driving', wrapper);
+      return () => ipcRenderer.removeListener('hippo-browser:ai-driving', wrapper);
+    },
+    chatToggle: () => ipcRenderer.invoke('hippo-browser:chat-toggle'),
+    chatSetWidth: (width: number) => ipcRenderer.invoke('hippo-browser:chat-set-width', width),
+    chatSendToCanvas: (payload: { nodeId: string; title: string; conversations: unknown[] }) =>
+      ipcRenderer.invoke('hippo-browser:chat-send-to-canvas', payload),
   },
 };
 

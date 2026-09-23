@@ -7,6 +7,7 @@
  */
 
 import { join, sep, dirname, basename } from 'path';
+import { readFileSync } from 'fs';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { resolveAppRoot, SANDBOX_DIRNAME } from '@/lib/app-root';
 import { mcpManager } from '@/lib/mcp/manager';
@@ -122,8 +123,7 @@ async function toolSandboxExport(args: Record<string, unknown>): Promise<string>
 /** 同步读文件（导出内联用）；失败返回 null */
 function readFileSyncSafe(p: string): string | null {
   try {
-    const fs = require('fs');
-    return fs.readFileSync(p, 'utf-8');
+    return readFileSync(p, 'utf-8');
   } catch {
     return null;
   }

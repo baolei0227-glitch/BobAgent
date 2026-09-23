@@ -6,8 +6,9 @@
  *  - `events`  新增事件（引擎落盘 <teamId>.events.jsonl 的呈现层映射）
  *  - `results` 新 done 任务的产出全文（按 taskId 增量给）
  *
- * 去重口径：面板事件窗口只保留最近 50 条，故用「已见 id 集合」判新——事件是追加写的，
+ * 去重口径：面板事件窗口只保留最近 200 条，故用「已见 id 集合」判新——事件是追加写的，
  * 滑出窗口的 id 不会再回来，每个轮询周期把集合裁剪回当前窗口即可，无需额外游标持久化。
+ * 增量 panel 帧**不带** events（只在首帧带全量），故窗口放大不会让每帧体积跟着涨。
  */
 import type { NextRequest } from 'next/server';
 import type { TeamChatEvent, TeamDetail } from '@/lib/types';
@@ -83,7 +84,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
       /** 已回传过全文的 done 任务 id */
       const seenResults = new Set<string>();
 
-      // 首帧：带产出全文与最近 50 条事件，让重连/刷新后马上成形（不必等下个轮询周期）
+      // 首帧：带产出全文与最近 200 条事件，让重连/刷新后马上成形（不必等下个轮询周期）
       let first: TeamDetail;
       try {
         first = await buildTeamDetail(id, { withResults: true });
@@ -113,7 +114,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
           const events = detail.events ?? [];
           if (events.length > 0) {
             const fresh = events.filter((e) => !seenEvents.has(e.id));
-            // 事件窗口只保留最近 50 条：把集合裁剪回当前窗口，避免无界增长
+            // 事件窗口只保留最近 200 条：把集合裁剪回当前窗口，避免无界增长
             if (seenEvents.size > events.length) {
               const inWindow = new Set(events.map((e) => e.id));
               for (const seen of seenEvents) if (!inWindow.has(seen)) seenEvents.delete(seen);
@@ -140,7 +141,9 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
           const key = panelKey(detail);
           if (key !== lastPanelKey) {
             lastPanelKey = key;
-            send({ type: 'panel', detail });
+            // 增量帧不带事件流：引擎窗口已放大到 200 条（队长条目 / 成员留言会很快把「启动」挤出窗口），
+            // 而前端只在**首帧**消费 detail.events（此后靠 ① 的 events 增量帧），故这里省掉可让帧体积恒定。
+            send({ type: 'panel', detail: { ...detail, events: undefined } });
           }
         } catch (e) {
           failures += 1;

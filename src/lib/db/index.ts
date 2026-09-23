@@ -1,5 +1,6 @@
 import { join, dirname, basename } from 'path';
 import { promises as fs } from 'fs';
+import type BetterSqlite3 from 'better-sqlite3';
 import {
   resolveAppRoot,
   PROJECT_DB_FILENAME,
@@ -7,6 +8,9 @@ import {
   PROJECT_DB_NOSYNC_DIRNAME,
   CALENDAR_DB_FILENAME,
 } from '@/lib/app-root';
+
+/** better-sqlite3 数据库实例类型（避免在大量 CRUD 函数签名中重复写 any） */
+type SqliteDb = BetterSqlite3.Database;
 
 export interface SessionRow {
   id: string;
@@ -376,7 +380,7 @@ export async function initDb(dbPath: string) {
     END;
   `);
   // 存量回填：仅当 FTS 表为空时执行（initDb 每次请求都会调用，避免重复重建）
-  const ftsCount = (db.prepare(`SELECT count(*) AS c FROM events_fts`).get() as any)?.c ?? 0;
+  const ftsCount = ((db.prepare(`SELECT count(*) AS c FROM events_fts`).get()) as { c?: number } | undefined)?.c ?? 0;
   if (ftsCount === 0) {
     db.exec(`
       INSERT INTO events_fts(rowid, title, description, location, tags_json)
@@ -414,7 +418,7 @@ export async function initDb(dbPath: string) {
   return db;
 }
 
-export async function createSession(db: any, data: { title?: string; thinking?: string; model?: string; provider?: string; file_path: string }): Promise<string> {
+export async function createSession(db: SqliteDb, data: { title?: string; thinking?: string; model?: string; provider?: string; file_path: string }): Promise<string> {
   const id = _newId();
   const now = _now();
   db.prepare(`
@@ -424,23 +428,23 @@ export async function createSession(db: any, data: { title?: string; thinking?: 
   return id;
 }
 
-export async function updateSessionTitle(db: any, id: string, title: string): Promise<void> {
+export async function updateSessionTitle(db: SqliteDb, id: string, title: string): Promise<void> {
   db.prepare(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`).run(title, _now(), id);
 }
 
-export async function pinSession(db: any, id: string, pinned: boolean = true): Promise<void> {
+export async function pinSession(db: SqliteDb, id: string, pinned: boolean = true): Promise<void> {
   db.prepare(`UPDATE sessions SET pinned_at = ?, updated_at = ? WHERE id = ?`).run(pinned ? _now() : null, _now(), id);
 }
 
-export async function archiveSession(db: any, id: string): Promise<void> {
+export async function archiveSession(db: SqliteDb, id: string): Promise<void> {
   db.prepare(`UPDATE sessions SET status = 'archived', updated_at = ? WHERE id = ?`).run(_now(), id);
 }
 
-export async function deleteSession(db: any, id: string): Promise<void> {
+export async function deleteSession(db: SqliteDb, id: string): Promise<void> {
   db.prepare(`UPDATE sessions SET status = 'deleted', updated_at = ? WHERE id = ?`).run(_now(), id);
 }
 
-export async function listSessions(db: any, status: string = 'active', limit: number = 50, offset: number = 0): Promise<SessionRow[]> {
+export async function listSessions(db: SqliteDb, status: string = 'active', limit: number = 50, offset: number = 0): Promise<SessionRow[]> {
   const rows = db.prepare(`
     SELECT id, title, status, thinking, model, provider, message_count, token_usage_json, pinned_at, created_at, updated_at
     FROM sessions
@@ -451,12 +455,12 @@ export async function listSessions(db: any, status: string = 'active', limit: nu
   return rows as SessionRow[];
 }
 
-export async function getSession(db: any, id: string): Promise<SessionRow | null> {
+export async function getSession(db: SqliteDb, id: string): Promise<SessionRow | null> {
   const row = db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id);
   return row as SessionRow | null;
 }
 
-export async function appendMessage(db: any, sessionId: string, message: { role: string; content: string }): Promise<void> {
+export async function appendMessage(db: SqliteDb, sessionId: string, message: { role: string; content: string }): Promise<void> {
   const session = await getSession(db, sessionId);
   if (!session) throw new Error(`Session not found: ${sessionId}`);
   
@@ -473,7 +477,7 @@ export async function appendMessage(db: any, sessionId: string, message: { role:
   await fs.appendFile(session.file_path, JSON.stringify(record, null, 0) + '\n', 'utf-8');
 }
 
-export async function readMessages(db: any, sessionId: string, limit: number = 100, offset: number = 0): Promise<{ role: string; content: string; timestamp: string }[]> {
+export async function readMessages(db: SqliteDb, sessionId: string, limit: number = 100, offset: number = 0): Promise<{ role: string; content: string; timestamp: string }[]> {
   const session = await getSession(db, sessionId);
   if (!session) return [];
   
@@ -489,7 +493,7 @@ export async function readMessages(db: any, sessionId: string, limit: number = 1
   }
 }
 
-export async function createEdge(db: any, data: { project_id: string; from_node_id: string; to_node_id: string; edge_type?: string }): Promise<string> {
+export async function createEdge(db: SqliteDb, data: { project_id: string; from_node_id: string; to_node_id: string; edge_type?: string }): Promise<string> {
   const edge_id = _newId();
   const now = _now();
   db.prepare(`
@@ -499,49 +503,49 @@ export async function createEdge(db: any, data: { project_id: string; from_node_
   return edge_id;
 }
 
-export async function deleteEdge(db: any, edgeId: string): Promise<void> {
+export async function deleteEdge(db: SqliteDb, edgeId: string): Promise<void> {
   db.prepare(`DELETE FROM edges WHERE edge_id = ?`).run(edgeId);
 }
 
-export async function disconnectEdge(db: any, edgeId: string): Promise<void> {
+export async function disconnectEdge(db: SqliteDb, edgeId: string): Promise<void> {
   db.prepare(`UPDATE edges SET disconnected_at = ? WHERE edge_id = ?`).run(_now(), edgeId);
 }
 
-export async function reconnectEdge(db: any, edgeId: string): Promise<void> {
+export async function reconnectEdge(db: SqliteDb, edgeId: string): Promise<void> {
   db.prepare(`UPDATE edges SET disconnected_at = NULL WHERE edge_id = ?`).run(edgeId);
 }
 
-export async function listEdges(db: any, projectId: string): Promise<EdgeRow[]> {
+export async function listEdges(db: SqliteDb, projectId: string): Promise<EdgeRow[]> {
   const rows = db.prepare(`SELECT * FROM edges WHERE project_id = ?`).all(projectId);
   return rows as EdgeRow[];
 }
 
-export async function listActiveEdges(db: any, projectId: string): Promise<EdgeRow[]> {
+export async function listActiveEdges(db: SqliteDb, projectId: string): Promise<EdgeRow[]> {
   const rows = db.prepare(`SELECT * FROM edges WHERE project_id = ? AND disconnected_at IS NULL`).all(projectId);
   return rows as EdgeRow[];
 }
 
-export async function listParallelEdges(db: any, projectId: string): Promise<EdgeRow[]> {
+export async function listParallelEdges(db: SqliteDb, projectId: string): Promise<EdgeRow[]> {
   const rows = db.prepare(`SELECT * FROM edges WHERE project_id = ? AND edge_type = 'parallel' AND disconnected_at IS NULL`).all(projectId);
   return rows as EdgeRow[];
 }
 
-export async function listVerticalEdges(db: any, projectId: string): Promise<EdgeRow[]> {
+export async function listVerticalEdges(db: SqliteDb, projectId: string): Promise<EdgeRow[]> {
   const rows = db.prepare(`SELECT * FROM edges WHERE project_id = ? AND edge_type = 'vertical' AND disconnected_at IS NULL`).all(projectId);
   return rows as EdgeRow[];
 }
 
-export async function getUpstreamNodeIds(db: any, projectId: string, nodeId: string): Promise<string[]> {
+export async function getUpstreamNodeIds(db: SqliteDb, projectId: string, nodeId: string): Promise<string[]> {
   const rows = db.prepare(`SELECT from_node_id FROM edges WHERE project_id = ? AND to_node_id = ? AND disconnected_at IS NULL`).all(projectId, nodeId);
-  return rows.map((r: { from_node_id: string }) => r.from_node_id);
+  return rows.map((r) => (r as { from_node_id: string }).from_node_id);
 }
 
-export async function getDownstreamNodeIds(db: any, projectId: string, nodeId: string): Promise<string[]> {
+export async function getDownstreamNodeIds(db: SqliteDb, projectId: string, nodeId: string): Promise<string[]> {
   const rows = db.prepare(`SELECT to_node_id FROM edges WHERE project_id = ? AND from_node_id = ? AND disconnected_at IS NULL`).all(projectId, nodeId);
-  return rows.map((r: { to_node_id: string }) => r.to_node_id);
+  return rows.map((r) => (r as { to_node_id: string }).to_node_id);
 }
 
-export async function deleteEdgesByNode(db: any, projectId: string, nodeId: string): Promise<void> {
+export async function deleteEdgesByNode(db: SqliteDb, projectId: string, nodeId: string): Promise<void> {
   db.prepare(`UPDATE edges SET disconnected_at = ? WHERE project_id = ? AND (from_node_id = ? OR to_node_id = ?)`).run(_now(), projectId, nodeId, nodeId);
 }
 
@@ -598,11 +602,11 @@ export interface UpdateEventData {
   sync_etag?: string | null;
 }
 
-function _rowToEvent(row: any): EventRow {
+function _rowToEvent(row: unknown): EventRow {
   return row as EventRow;
 }
 
-export async function createEvent(db: any, data: CreateEventData, event_id?: string): Promise<string> {
+export async function createEvent(db: SqliteDb, data: CreateEventData, event_id?: string): Promise<string> {
   const id = event_id ?? _newId();
   const now = _now();
   db.prepare(`
@@ -648,9 +652,9 @@ export async function createEvent(db: any, data: CreateEventData, event_id?: str
   return id;
 }
 
-export async function updateEvent(db: any, eventId: string, data: UpdateEventData): Promise<void> {
+export async function updateEvent(db: SqliteDb, eventId: string, data: UpdateEventData): Promise<void> {
   const setters: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
 
   if (data.title !== undefined) { setters.push('title = ?'); params.push(data.title); }
   if (data.description !== undefined) { setters.push('description = ?'); params.push(data.description); }
@@ -686,11 +690,11 @@ export async function updateEvent(db: any, eventId: string, data: UpdateEventDat
   db.prepare(`UPDATE events SET ${setters.join(', ')} WHERE event_id = ?`).run(...params);
 }
 
-export async function deleteEvent(db: any, eventId: string): Promise<void> {
+export async function deleteEvent(db: SqliteDb, eventId: string): Promise<void> {
   db.prepare(`DELETE FROM events WHERE event_id = ?`).run(eventId);
 }
 
-export async function getEvent(db: any, eventId: string): Promise<EventRow | null> {
+export async function getEvent(db: SqliteDb, eventId: string): Promise<EventRow | null> {
   const row = db.prepare(`SELECT * FROM events WHERE event_id = ?`).get(eventId);
   return row ? _rowToEvent(row) : null;
 }
@@ -699,13 +703,13 @@ export async function getEvent(db: any, eventId: string): Promise<EventRow | nul
  *  默认排除已删除（status='cancelled'）事件，避免被删除日程仍显示在日历中；
  *  需要查询已删除事件请用 listEventsByStatus(db, null, 'cancelled')。 */
 export async function listEventsInRange(
-  db: any,
+  db: SqliteDb,
   projectId: string | null,
   rangeStart: string,
   rangeEnd: string,
 ): Promise<EventRow[]> {
   const conds: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
   if (projectId) { conds.push('project_id = ?'); params.push(projectId); }
   // datetime() 把带时区偏移的 ISO（+08:00）与 UTC ISO（.000Z）统一归一化到 UTC 再比较，
   // 避免字符串比较跨时区偏移时出错（如本地 17:00 事件被误判晚于当天 16:00Z 范围终点）
@@ -722,13 +726,13 @@ export async function listEventsInRange(
 
 /** 查询指定状态的事件。projectId 传 null = 查询全部（全局日历库） */
 export async function listEventsByStatus(
-  db: any,
+  db: SqliteDb,
   projectId: string | null,
   status: 'scheduled' | 'done' | 'cancelled',
   limit: number = 100,
 ): Promise<EventRow[]> {
   const conds: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
   if (projectId) { conds.push('project_id = ?'); params.push(projectId); }
   conds.push('status = ?'); params.push(status);
   conds.push('1=1'); // 保持 LIMIT 参数位置稳定
@@ -743,9 +747,9 @@ export async function listEventsByStatus(
 
 /** 查询所有待提醒的定时事件（status=scheduled 且 start_time 非空），供多通知时间扫描使用。
  *  projectId 传 null = 全局日历库全量扫描（日历独立于项目后提醒走全局库） */
-export async function listScheduledEventsWithTime(db: any, projectId: string | null): Promise<EventRow[]> {
+export async function listScheduledEventsWithTime(db: SqliteDb, projectId: string | null): Promise<EventRow[]> {
   const conds: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
   if (projectId) { conds.push("(project_id = ? OR scope = 'global')"); params.push(projectId); }
   conds.push("status = 'scheduled'");
   conds.push("start_time IS NOT NULL AND start_time != ''");
@@ -758,16 +762,16 @@ export async function listScheduledEventsWithTime(db: any, projectId: string | n
 }
 
 /** 更新事件的已触发提醒分钟数（reminder_sent_json，防同一通知时间重复推送） */
-export async function markReminderSent(db: any, eventId: string, sentMinutes: number[]): Promise<void> {
+export async function markReminderSent(db: SqliteDb, eventId: string, sentMinutes: number[]): Promise<void> {
   db.prepare(`UPDATE events SET reminder_sent_json = ?, updated_at = ? WHERE event_id = ?`)
     .run(JSON.stringify(sentMinutes), _now(), eventId);
 }
 
 /** 查询所有事件（默认排除已删除 cancelled，按时间倒序）。projectId 传 null = 全局日历库全量。
  *  需要查询已删除事件请用 listEventsByStatus(db, null, 'cancelled')。 */
-export async function listAllEvents(db: any, projectId: string | null, limit: number = 500): Promise<EventRow[]> {
+export async function listAllEvents(db: SqliteDb, projectId: string | null, limit: number = 500): Promise<EventRow[]> {
   const conds: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
   if (projectId) { conds.push('project_id = ?'); params.push(projectId); }
   conds.push("status != 'cancelled'");
   const rows = db.prepare(`
@@ -798,7 +802,7 @@ export interface SearchEventsOptions {
  * LIKE 通配符（% _）自动转义，避免用户输入被当作模式。
  */
 export async function searchEvents(
-  db: any,
+  db: SqliteDb,
   projectId: string | null,
   keyword: string,
   opts: SearchEventsOptions = {},
@@ -810,7 +814,7 @@ export async function searchEvents(
     try {
       const match = `"${keyword.replace(/"/g, '""')}"`;
       const conds: string[] = [];
-      const params: any[] = [];
+      const params: unknown[] = [];
       if (projectId) { conds.push('e.project_id = ?'); params.push(projectId); }
       params.push(match);
       if (opts.rangeStart && opts.rangeEnd) {
@@ -837,7 +841,7 @@ export async function searchEvents(
   const esc = keyword.replace(/[\\%_]/g, (c) => '\\' + c);
   const like = `%${esc}%`;
   const conds: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
   if (projectId) { conds.push('project_id = ?'); params.push(projectId); }
   conds.push(`(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR location LIKE ? ESCAPE '\\' OR tags_json LIKE ? ESCAPE '\\')`);
   params.push(like, like, like, like);
@@ -858,7 +862,7 @@ export async function searchEvents(
 }
 
 /** 批量创建事件（用于小模型归纳后一次性写入） */
-export async function createEventsBulk(db: any, items: CreateEventData[]): Promise<string[]> {
+export async function createEventsBulk(db: SqliteDb, items: CreateEventData[]): Promise<string[]> {
   const ids: string[] = [];
   const now = _now();
   const stmt = db.prepare(`
@@ -943,16 +947,16 @@ export interface CalendarAccountData {
   enabled?: boolean;
 }
 
-export async function listCalendarAccounts(db: any, projectId: string | null): Promise<CalendarAccountRow[]> {
+export async function listCalendarAccounts(db: SqliteDb, projectId: string | null): Promise<CalendarAccountRow[]> {
   return db.prepare(`SELECT * FROM calendar_accounts ${projectId ? 'WHERE project_id = ?' : ''} ORDER BY created_at ASC`)
     .all(...(projectId ? [projectId] : [])) as CalendarAccountRow[];
 }
 
-export async function getCalendarAccount(db: any, accountId: string): Promise<CalendarAccountRow | null> {
+export async function getCalendarAccount(db: SqliteDb, accountId: string): Promise<CalendarAccountRow | null> {
   return (db.prepare(`SELECT * FROM calendar_accounts WHERE account_id = ?`).get(accountId) as CalendarAccountRow | undefined) ?? null;
 }
 
-export async function createCalendarAccount(db: any, data: CalendarAccountData): Promise<string> {
+export async function createCalendarAccount(db: SqliteDb, data: CalendarAccountData): Promise<string> {
   const account_id = _newId();
   const now = _now();
   db.prepare(`
@@ -971,10 +975,10 @@ export async function createCalendarAccount(db: any, data: CalendarAccountData):
   return account_id;
 }
 
-export async function updateCalendarAccount(db: any, accountId: string, data: Partial<Omit<CalendarAccountData, 'project_id'>>): Promise<void> {
+export async function updateCalendarAccount(db: SqliteDb, accountId: string, data: Partial<Omit<CalendarAccountData, 'project_id'>>): Promise<void> {
   const setters: string[] = [];
-  const params: any[] = [];
-  const map: Record<string, any> = {
+  const params: unknown[] = [];
+  const map: Record<string, unknown> = {
     name: data.name, username: data.username, password_enc: data.password_enc,
     server_url: data.server_url, calendar_url: data.calendar_url,
     calendar_name: data.calendar_name, sync_token: data.sync_token,
@@ -992,12 +996,12 @@ export async function updateCalendarAccount(db: any, accountId: string, data: Pa
   db.prepare(`UPDATE calendar_accounts SET ${setters.join(', ')} WHERE account_id = ?`).run(...params);
 }
 
-export async function deleteCalendarAccount(db: any, accountId: string): Promise<void> {
+export async function deleteCalendarAccount(db: SqliteDb, accountId: string): Promise<void> {
   db.prepare(`DELETE FROM calendar_accounts WHERE account_id = ?`).run(accountId);
 }
 
 /** 按外部日历 ICALUID 查找本地事件（用于 .ics / CalDAV / WebCal 去重）。projectId 传 null = 全局库查找 */
-export async function findEventByExternalId(db: any, projectId: string | null, externalId: string): Promise<EventRow | null> {
+export async function findEventByExternalId(db: SqliteDb, projectId: string | null, externalId: string): Promise<EventRow | null> {
   const row = projectId
     ? db.prepare(`SELECT * FROM events WHERE project_id = ? AND external_id = ? LIMIT 1`).get(projectId, externalId) as EventRow | undefined
     : db.prepare(`SELECT * FROM events WHERE external_id = ? LIMIT 1`).get(externalId) as EventRow | undefined;
@@ -1005,7 +1009,7 @@ export async function findEventByExternalId(db: any, projectId: string | null, e
 }
 
 /** 按外部 URL 查找本地事件（CalDAV href 定位推送目标）。projectId 传 null = 全局库查找 */
-export async function findEventByExternalUrl(db: any, projectId: string | null, externalUrl: string): Promise<EventRow | null> {
+export async function findEventByExternalUrl(db: SqliteDb, projectId: string | null, externalUrl: string): Promise<EventRow | null> {
   const row = projectId
     ? db.prepare(`SELECT * FROM events WHERE project_id = ? AND external_url = ? LIMIT 1`).get(projectId, externalUrl) as EventRow | undefined
     : db.prepare(`SELECT * FROM events WHERE external_url = ? LIMIT 1`).get(externalUrl) as EventRow | undefined;
@@ -1013,15 +1017,15 @@ export async function findEventByExternalUrl(db: any, projectId: string | null, 
 }
 
 /** 写入同步日志 */
-export async function addSyncLog(db: any, accountId: string, projectId: string, level: 'info' | 'warn' | 'error', message: string): Promise<void> {
+export async function addSyncLog(db: SqliteDb, accountId: string, projectId: string, level: 'info' | 'warn' | 'error', message: string): Promise<void> {
   db.prepare(`INSERT INTO calendar_sync_log (account_id, project_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)`)
     .run(accountId, projectId, level, message, _now());
 }
 
 /** 最近 N 条同步日志（N 默认 20）。projectId 传 null = 全局库查询 */
-export async function listSyncLogs(db: any, projectId: string | null, accountId?: string, limit = 20): Promise<{ level: string; message: string; created_at: string }[]> {
+export async function listSyncLogs(db: SqliteDb, projectId: string | null, accountId?: string, limit = 20): Promise<{ level: string; message: string; created_at: string }[]> {
   const conds: string[] = [];
-  const params: any[] = [];
+  const params: unknown[] = [];
   if (projectId) { conds.push('project_id = ?'); params.push(projectId); }
   if (accountId) { conds.push('account_id = ?'); params.push(accountId); }
   const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
@@ -1030,7 +1034,7 @@ export async function listSyncLogs(db: any, projectId: string | null, accountId?
 }
 
 /** 获取或生成项目的日历订阅 token（Apple 日历订阅 BobWork 发布流用） */
-export async function getOrCreateFeedToken(db: any, projectId: string): Promise<string> {
+export async function getOrCreateFeedToken(db: SqliteDb, projectId: string): Promise<string> {
   const row = db.prepare(`SELECT token FROM calendar_feed_token WHERE project_id = ?`).get(projectId) as { token: string } | undefined;
   if (row?.token) return row.token;
   const token = Array.from({ length: 24 }, () =>
@@ -1042,13 +1046,13 @@ export async function getOrCreateFeedToken(db: any, projectId: string): Promise<
 }
 
 /** 校验订阅 token 是否合法，返回对应项目 id（null = 无效） */
-export async function projectIdByFeedToken(db: any, token: string): Promise<string | null> {
+export async function projectIdByFeedToken(db: SqliteDb, token: string): Promise<string | null> {
   const row = db.prepare(`SELECT project_id FROM calendar_feed_token WHERE token = ?`).get(token) as { project_id: string } | undefined;
   return row?.project_id ?? null;
 }
 
 /** 重置项目的订阅 token（吊销旧订阅链接） */
-export async function rotateFeedToken(db: any, projectId: string): Promise<string> {
+export async function rotateFeedToken(db: SqliteDb, projectId: string): Promise<string> {
   const token = Array.from({ length: 24 }, () =>
     'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 62)],
   ).join('');
@@ -1162,7 +1166,7 @@ const CALENDAR_SCHEMA_SQL = `
 
 /** 为已有全局日历库补齐 source_ref 列（增量迁移，幂等）：旧库 events 表无此列时 ALTER 添加，
  *  并补建反向引用索引。新库建表 SQL 已含该列，此函数仅兜底存量库。 */
-function ensureCalendarSourceRefColumn(db: any): void {
+function ensureCalendarSourceRefColumn(db: SqliteDb): void {
   try {
     const cols = db.prepare(`PRAGMA table_info(events)`).all() as { name: string }[];
     if (!cols.some((c) => c.name === 'source_ref')) {
@@ -1176,8 +1180,8 @@ function ensureCalendarSourceRefColumn(db: any): void {
 
 /** 获取全局日历数据库（单例，惰性初始化 + 幂等迁移历史数据）。
  *  日历完全独立于项目：项目删除/切换/重建不影响任何日历数据。 */
-export async function getCalendarDb(): Promise<any> {
-  const g = globalThis as unknown as { [CALENDAR_DB_KEY]?: any };
+export async function getCalendarDb(): Promise<SqliteDb> {
+  const g = globalThis as unknown as { [CALENDAR_DB_KEY]?: SqliteDb };
   if (g[CALENDAR_DB_KEY]) return g[CALENDAR_DB_KEY];
   const Database = (await import('better-sqlite3')).default;
   await fs.mkdir(resolveAppRoot(), { recursive: true });
@@ -1198,7 +1202,7 @@ export async function getCalendarDb(): Promise<any> {
 }
 
 /** 一次性迁移：把各项目 .project.db 中的历史 events / calendar_accounts 迁入全局库（幂等）。 */
-async function migrateLegacyCalendarData(db: any): Promise<void> {
+async function migrateLegacyCalendarData(db: SqliteDb): Promise<void> {
   try {
     const { listProjects } = await import('@/lib/project/project-manager');
     const { projects } = await listProjects();

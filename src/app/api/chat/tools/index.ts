@@ -45,6 +45,7 @@ import { designToolDefs } from './design';
 import { registry, SCENED_TOOLS } from './registry';
 import { webToolDefs } from './web';
 import { attachmentToolDefs } from './attachment';
+import { browserToolDefs, BROWSER_BUILTIN_TOOL_NAMES } from './browser';
 export type { CardItem } from './cards';
 export { buildCardListHtml } from './cards';
 export { getLocalAuthorizedRoots } from './shared';
@@ -196,8 +197,7 @@ async function getLocalWritableRoots(): Promise<string[]> {
   try {
     const project = await getCurrentProject();
     const rootsFile = join(project.path, '.local-roots.json');
-    const fs = require('fs/promises');
-    const content = await fs.readFile(rootsFile, 'utf-8');
+    const content = await readFile(rootsFile, 'utf-8');
     const config = JSON.parse(content);
     // 授权即读写：roots 即为可写范围；旧 writableRoots 字段兼容并入
     return Array.from(new Set<string>([...(config.roots || []), ...(config.writableRoots || [])]));
@@ -337,6 +337,9 @@ export interface ToolExecContext {
   teamWorkerModel?: string;
   /** team 模式的成员名单段（route 已算好的 multiAgentRosterSection 文本）：交给队长规划时参考 */
   teamRosterSection?: string;
+  /** 触发本次协作的用户原始提问（route 从本轮对话里取的 last user 消息原文）：随 team_plan 落进
+   *  draft → team_start 事件 meta，工作台群聊流据此渲染用户那条发言（不加工、不改写） */
+  teamQuestionText?: string;
   /** 当前项目 id（透传给队长会话的 /api/chat，用于项目上下文） */
   projectId?: string;
 }
@@ -1006,7 +1009,7 @@ async function toolWriteFile(args: Record<string, unknown>): Promise<string> {
 
   try {
     const { writeFile, mkdir } = await import('fs/promises');
-    let filePath = await resolvePath(path);
+    const filePath = await resolvePath(path);
     if (!(await isWritablePath(filePath))) {
       return `Error: 路径 "${path}" 不在可写范围内。允许写入：${await describeWritableRoots()}`;
     }
@@ -1548,6 +1551,8 @@ const toolDefs: Tool[] = [
         // 队长规划时参考的成员名单段 + 项目上下文
         rosterSection: ctx?.teamRosterSection,
         projectId: ctx?.projectId,
+        // 用户原始提问（随 run 走）：群聊流据此渲染右侧「我的发言」气泡
+        questionText: ctx?.teamQuestionText,
         onProgress: ctx?.onTeamProgress,
         // 审批策略档位（drive 门禁形态：allow_scope 不打断 / ask 弹卡审批 / never 入口拒绝）
         approvalStrategy: ctx?.approvalStrategy,
@@ -1575,6 +1580,9 @@ registry.registerAll(toolDefs);
 
 /** 记录内置工具名称，用于区分自定义工具 */
 const builtInToolNames = new Set(toolDefs.map((t) => t.name));
+// 内置浏览器工具（browser_*）不在静态 toolDefs 里：按 AI Browser 开关条件注册（见 setBuiltinBrowserToolsEnabled），
+// 但来源判定/分层标注仍需认作内置 —— 否则会被误判为 mcp 段、并被默认归 core 段破坏前缀缓存。
+for (const n of BROWSER_BUILTIN_TOOL_NAMES) builtInToolNames.add(n);
 
 /** 已注册的自定义工具名称集合 */
 let registeredCustomNames = new Set<string>();
@@ -1628,7 +1636,23 @@ export function getToolLayer(name: string): ToolLayer {
   const explicit = BUILTIN_LAYER[name];
   if (explicit) return explicit;
   if (name in SCENED_TOOLS) return 'ondemand';
+  // 内置浏览器工具：随 AI Browser 开关整体增减（ondemand，避免作废 core 段前缀缓存）
+  if (BROWSER_BUILTIN_TOOL_NAMES.has(name)) return 'ondemand';
   return 'core';
+}
+
+/**
+ * 内置浏览器工具（browser_*）注册门控 —— AI Browser 开关的会话级裁剪点。
+ *  - enabled=true（通道解析为 hippo；缺省即 hippo）→ 注册内置组（HippoDriver 执行）
+ *  - enabled=false（仅显式 settings.aiBrowser='chrome'）→ 注销内置组，浏览器能力只走 mcp__bob-browser-mcp__*
+ * 二者互斥注入（另一边由 registerMcpTools 的 excludeServerIds 排除），从根上避免同名工具双份进上下文。
+ * 每请求调用（ToolRuntime.register），开关切换后下一轮对话即按新通道重建工具面。
+ */
+export function setBuiltinBrowserToolsEnabled(enabled: boolean): void {
+  for (const t of browserToolDefs) {
+    if (enabled) registry.register(t);
+    else registry.unregister(t.name);
+  }
 }
 
 /** 判定工具来源：route.ts 排序按来源分段（内置最前、MCP 最后），

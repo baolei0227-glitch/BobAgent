@@ -1,11 +1,12 @@
 /**
  * GET /api/team/list — 团队清单（工作台左侧列表）
  *
- * 只回概览计数，不回成员/任务明细：列表视图不渲染明细，逐个团队拉全量会让响应随团队数线性膨胀。
- * 单团队读取失败（如引擎正在装载）不应让整个清单失败，故用 allSettled 逐个兜底。
+ * 走引擎的 team_overview：单次调用回全部团队的标量（名称/目标/状态/计数/草案有无），
+ * 不逐个拉 team_status 全量面板 —— 清单不渲染成员/邮箱/事件流，全量拉会让响应随
+ * 「团队数 × 明细体积」线性膨胀。工作台凭 status + planDraft 判断哪些草案还能恢复。
  */
-import type { TeamDetail, TeamSummary } from '@/lib/types';
-import { buildTeamDetail, ensureTeamReady, listTeamIds, summarizeTeam } from '@/lib/chat/team-client';
+import type { TeamSummary } from '@/lib/types';
+import { ensureTeamReady, listTeamOverviews } from '@/lib/chat/team-client';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,14 +17,7 @@ export async function GET() {
       return Response.json({ teams: [], error: ready.error }, { status: 503 });
     }
 
-    const ids = await listTeamIds();
-    const settled = await Promise.allSettled(ids.map((id) => buildTeamDetail(id)));
-    const teams: TeamSummary[] = settled
-      .filter((r): r is PromiseFulfilledResult<TeamDetail> => r.status === 'fulfilled')
-      .map((r) => summarizeTeam(r.value))
-      // 最近有动静的排前面
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-
+    const teams: TeamSummary[] = await listTeamOverviews();
     return Response.json({ teams });
   } catch (e) {
     return Response.json({ teams: [], error: e instanceof Error ? e.message : String(e) }, { status: 500 });

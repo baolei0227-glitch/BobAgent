@@ -16,6 +16,7 @@
  */
 
 import { join } from 'path';
+import * as fs from 'fs';
 import { resolveAppRoot } from './app-root';
 
 /** 调度事件（写入 .logs/dispatch.jsonl） */
@@ -70,7 +71,6 @@ export function inferDocType(filePath: string): string {
 /** 追加一条调度事件（同步 IO，永不抛错；超限时裁剪保留最近行） */
 export function logDispatchEvent(ev: DispatchEvent): void {
   try {
-    const fs = require('fs');
     fs.mkdirSync(LOG_DIR, { recursive: true });
     const line =
       JSON.stringify({
@@ -95,7 +95,6 @@ export function logDispatchEvent(ev: DispatchEvent): void {
 export function loadDispatchStats(): Map<string, DispatchModelStats> {
   const stats = new Map<string, DispatchModelStats>();
   try {
-    const fs = require('fs');
     const raw = fs.readFileSync(LOG_PATH, 'utf-8');
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
@@ -137,7 +136,6 @@ export interface DispatchChainHealth {
 export function loadDispatchHealth(): DispatchChainHealth[] {
   const map = new Map<string, DispatchChainHealth>();
   try {
-    const fs = require('fs');
     const raw = fs.readFileSync(LOG_PATH, 'utf-8');
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;

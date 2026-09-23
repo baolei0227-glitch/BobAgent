@@ -12,7 +12,9 @@ import { parseTodoTime } from '@/lib/todo-time-parse';
  * 与 /api/wanted/schedule-parse 的区别：那个解析「查询区间」（整天边界，供检索），
  * 这里解析「单个事件的开始时刻」，语义不同故独立成端点。
  *
- * 返回：{ success: true, date: 'YYYY-MM-DD', time?: 'HH:MM', source: 'regex'|'llm', model_used? }
+ * 返回：{ success: true, date: 'YYYY-MM-DD', time?: 'HH:MM', topic?: string, source: 'regex'|'llm', model_used? }
+ *      topic = 原文剔除时间表达后的事项本身（「明天下午3点跟张三开会」→「跟张三开会」），
+ *      调用方用它预填弹窗 Todo 一栏，让主题与时间各归其位（时间落在 Date/Time 字段）。
  *      识别不到 / 无可用模型 → { success: false, error }（调用方保持弹窗默认时段，不打扰用户）
  */
 
@@ -22,6 +24,8 @@ interface ParsedTimeResponse {
   date?: string;
   /** 本地时刻 HH:MM；缺省表示文本里只有日期 */
   time?: string;
+  /** 原文剔除时间表达后的事项主题；缺省表示无可剔除内容（调用方保留原文） */
+  topic?: string;
   source?: 'regex' | 'llm';
   model_used?: string;
   error?: string;
@@ -71,8 +75,8 @@ async function callModelForTime(
   cfg: { model: string; apiKey: string; baseUrl: string },
   userText: string,
   attempt: number = 1,
-): Promise<{ found: boolean; date?: string; time?: string }> {
-  const SYSTEM_PROMPT = `你是日程时间解析助手。用户给出了一条待办/日程文本，请提取其中表示的「事件开始时间」。
+): Promise<{ found: boolean; date?: string; time?: string; topic?: string }> {
+  const SYSTEM_PROMPT = `你是日程时间解析助手。用户给出了一条待办/日程文本，请提取其中表示的「事件开始时间」，并把事项本身整理成主题。
 
 当前系统本地时间（解析相对时间的锚点）：${nowAnchor()}
 
@@ -80,16 +84,18 @@ async function callModelForTime(
 {
   "found": true,
   "date": "YYYY-MM-DD（本地日期）",
-  "time": "HH:MM（24 小时制本地时刻；文本只说了日期、没给具体时刻时留空字符串 \\"\\"）"
+  "time": "HH:MM（24 小时制本地时刻；文本只说了日期、没给具体时刻时留空字符串 \\"\\"）",
+  "topic": "事项主题：把原文里的日期/时刻表达剔除后剩下的内容，保持原措辞，不要改写、不要补充"
 }
 
 规则：
 1. 相对时间一律以锚点为基准换算成绝对日期：今天/明天/后天/大后天/下周X/本周X/N天后 等；「周五」「周三」若在本周已过，指下周同一周几。
 2. 只有日期没有时刻 → time 留空字符串。
 3. 只有时刻没有日期 → date 取锚点当天；若该时刻已过则取次日。
-4. 文本完全没有时间信息（如「写完报告」「跟张三对接」）→ found=false，date/time 留空。
+4. 文本完全没有时间信息（如「写完报告」「跟张三对接」）→ found=false，date/time/topic 留空。
 5. 严禁臆造：文本没提时间就不要编。
 6. 时间表达可能混在事项描述中间（如「明天下午3点跟张三开会」「先看材料，周一上午10点汇报」）。
+7. topic 必须剔除全部日期/时刻词（含「明天」「下午3点」「上午」这类），但不丢事项本身与其它信息（人名、地点等）；剔除后为空则留空字符串；多个事项时保留全部非时间内容。
 只返回 JSON。`;
 
   const userPrompt = `待办文本：
@@ -143,10 +149,12 @@ ${userText}
     throw new Error('Model response is not valid JSON');
   }
 
+  const topic = typeof parsed.topic === 'string' ? parsed.topic.trim().slice(0, 200) : '';
   return {
     found: parsed.found === true,
     date: typeof parsed.date === 'string' ? parsed.date : undefined,
     time: typeof parsed.time === 'string' ? parsed.time : undefined,
+    topic: topic || undefined,
   };
 }
 
@@ -169,7 +177,13 @@ export async function POST(req: NextRequest) {
     // 1) 正则快路径：常见表达零延迟、零成本（覆盖绝大多数待办）
     const fast = parseTodoTime(text);
     if (fast) {
-      const result: ParsedTimeResponse = { success: true, source: 'regex', date: fast.date, time: fast.time };
+      const result: ParsedTimeResponse = {
+        success: true,
+        source: 'regex',
+        date: fast.date,
+        time: fast.time,
+        topic: fast.topic,
+      };
       return NextResponse.json(result);
     }
 
@@ -192,6 +206,7 @@ export async function POST(req: NextRequest) {
       model_used: cfg.model,
       date: norm.date,
       time: norm.time,
+      topic: r.topic,
     };
     return NextResponse.json(result);
   } catch (e: unknown) {

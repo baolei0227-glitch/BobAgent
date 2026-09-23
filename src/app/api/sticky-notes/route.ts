@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { join } from 'path';
+import { promises as fs } from 'fs';
 import { getCurrentProject, getProjectById } from '@/lib/project/project-manager';
 import { writeTodoIndexFile, readTodoIndexFile, buildTodoIndex, MAX_TODO_NOTES, pickTodoNoteColor, normalizeStickyNote } from '@/lib/sticky-todo';
 import { migrateStickyNotePages } from '@/lib/sticky-notes-migrate';
-import { reconcileStickyNoteEvents, cancelNoteEvents, addStickyLineToCalendar } from '@/lib/sticky-calendar-sync';
+import {
+  reconcileStickyNoteEvents,
+  cancelNoteEvents,
+  addStickyLineToCalendar,
+  autoAddStickyLinesToCalendar,
+} from '@/lib/sticky-calendar-sync';
 
 /**
  * 画布便签（Sticky Notes）— 项目级纯私有便利贴
@@ -120,7 +126,6 @@ function mergeNotePatch(base: StickyNote, note: Partial<StickyNote>): StickyNote
 }
 
 async function readNotes(projectDir: string): Promise<StickyNote[]> {
-  const fs = require('fs/promises');
   try {
     const raw = await fs.readFile(join(projectDir, STICKY_DIR, STICKY_FILE), 'utf-8');
     const data = JSON.parse(raw);
@@ -135,7 +140,6 @@ async function readNotes(projectDir: string): Promise<StickyNote[]> {
 /** 原子写入：先写临时文件再 rename，避免半写状态；写完主文档后同步未完成待办索引（todo-index.json，供 /inspect 零全量扫描聚合）。
  *  落盘前统一经 normalizeStickyNote 剔除空行（空行不是待办，见 lib/sticky-todo）。 */
 async function writeNotes(projectDir: string, notes: StickyNote[]): Promise<void> {
-  const fs = require('fs/promises');
   const dir = join(projectDir, STICKY_DIR);
   await fs.mkdir(dir, { recursive: true });
   const target = join(dir, STICKY_FILE);
@@ -206,7 +210,6 @@ export function upgradeNotePages(note: StickyNote): StickyNote {
  * 迁移后节点便签退场，便签统一由画布层管理（AI 不再可读，见 isReadablePath 排除）。
  */
 async function migrateFromNodeMd(projectDir: string): Promise<{ migrated: number }> {
-  const fs = require('fs/promises');
   const nodesDir = join(projectDir, 'notes-memory');
   let files: string[];
   try {
@@ -366,8 +369,8 @@ export async function POST(req: NextRequest) {
         z: topZ + 1,
       };
       notes.push(created);
-      // StickyTodo 不自动入日历（2026-09-08 起）：新建便签的行保持纯便签、无事件锚点；
-      // 入日历只在用户手动「Add to calendar」或 Butler 排程时发生
+      // 新建时只落便签文本：行的自动入日历发生在之后的「结算」保存
+      // （update 且 settle_auto_calendar !== false，见 autoAddStickyLinesToCalendar）。
       await writeNotes(dir, notes);
       return NextResponse.json({ success: true, note: created });
     }
@@ -384,16 +387,36 @@ export async function POST(req: NextRequest) {
       const base = notes[idx];
       const prevNote = notes[idx];
       const nextNote = upgradeNotePages(mergeNotePatch(base, note as Partial<StickyNote>));
-      // 同步已入日历的行（改文本→改事件标题、勾选→完成、删行→取消）；未入日历的行不建事件（不自动入日历）
+      // 同步已入日历的行（改文本→改事件标题、勾选→完成、删行→取消）；
+      // 未入日历的未完成行自动补建事件只在「结算」时做：客户端打字过程中的防抖落盘带
+      // settle_auto_calendar=false（只存内容），避免半截文本被建成事件；失焦/停手 8 秒/结构性操作才结算。
+      const settleAuto = body.settle_auto_calendar !== false;
       let persisted: StickyNote = nextNote;
+      let autoTouched = 0;
       try {
         const effProjectId = projectId || (await getCurrentProject()).id;
         persisted = await reconcileStickyNoteEvents(effProjectId, nextNote, prevNote);
+        if (settleAuto) {
+          const auto = await autoAddStickyLinesToCalendar(effProjectId, persisted);
+          persisted = auto.note;
+          autoTouched = auto.created + auto.rescheduled;
+        }
       } catch (e) {
         console.error('[sticky-notes] update 同步日历失败:', e);
       }
       notes[idx] = persisted;
       await writeNotes(dir, notes);
+      // 自动入日历确实新建或重排了事件时才即改即推远端日历（与手动 add_to_calendar 一致，免等轮询）
+      if (autoTouched > 0) {
+        try {
+          const { syncAllAccounts } = await import('@/lib/calendar/sync-runner');
+          void syncAllAccounts().catch((e) =>
+            console.error('[sticky-notes] update 远端同步失败:', e),
+          );
+        } catch {
+          /* 远端同步失败不阻断便签保存 */
+        }
+      }
       return NextResponse.json({ success: true, note: persisted });
     }
 
@@ -425,13 +448,22 @@ export async function POST(req: NextRequest) {
         Array.isArray(reminderRaw) && reminderRaw.every((x) => typeof x === 'number')
           ? (reminderRaw as number[])
           : undefined;
+      // 开庭等紧要事项：调用方（C 表单）传 priority='high' → 事件带红色标旗
+      const priorityRaw = body.priority;
+      const priority =
+        priorityRaw === 'high' || priorityRaw === 'normal' || priorityRaw === 'low'
+          ? priorityRaw
+          : undefined;
+      // 地点：显式传入优先（缺省时由 sync 层从行文本尾部「地址：XXX」自动提取）
+      const locationRaw = body.location;
+      const location = typeof locationRaw === 'string' && locationRaw.trim() ? locationRaw.trim() : null;
       const { note: persisted } = await addStickyLineToCalendar(
         effProjectId,
         merged,
         pageId,
         lineIndex,
         text,
-        { start_time: startTime, end_time: endTime, reminder_minutes: reminderMinutes },
+        { start_time: startTime, end_time: endTime, reminder_minutes: reminderMinutes, location, priority },
       );
       notes[idx] = persisted;
       await writeNotes(dir, notes);

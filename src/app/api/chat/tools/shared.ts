@@ -6,7 +6,8 @@
  */
 
 import { homedir } from 'os';
-import { mkdirSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { join, resolve, isAbsolute, sep } from 'path';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { resolveAppRoot, SANDBOX_DIRNAME, BOB_SANDBOX_DIRNAME, LOGS_DIRNAME } from '@/lib/app-root';
@@ -112,8 +113,7 @@ export async function getLocalAuthorizedRoots(): Promise<string[]> {
   try {
     const project = await getCurrentProject();
     const rootsFile = join(project.path, '.local-roots.json');
-    const fs = require('fs/promises');
-    const content = await fs.readFile(rootsFile, 'utf-8');
+    const content = await readFile(rootsFile, 'utf-8');
     const config = JSON.parse(content);
     return (config.roots || []) as string[];
   } catch {
@@ -126,17 +126,16 @@ const AUDIT_LOG_DIR = join(homedir(), 'BobWork', LOGS_DIRNAME);
 const AUDIT_LOG_PATH = join(AUDIT_LOG_DIR, 'tool-audit.log');
 const AUDIT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
 let auditLastPruneTs = 0; // 上次执行清理的时间（每天最多清一次，避免频繁 IO）
-try { require('fs').mkdirSync(AUDIT_LOG_DIR, { recursive: true }); } catch {}
+try { mkdirSync(AUDIT_LOG_DIR, { recursive: true }); } catch {}
 
 export function auditLog(entry: unknown): void {
   try {
-    const fs = require('fs');
     const now = Date.now();
     // 每天最多清理一次过期行
     if (now - auditLastPruneTs > 86_400_000) {
       auditLastPruneTs = now;
       try {
-        const raw = fs.readFileSync(AUDIT_LOG_PATH, 'utf-8');
+        const raw = readFileSync(AUDIT_LOG_PATH, 'utf-8');
         const cutoff = now - AUDIT_MAX_AGE_MS;
         const kept = raw.split('\n').filter((line: string) => {
           if (!line.trim()) return false;
@@ -148,14 +147,14 @@ export function auditLog(entry: unknown): void {
           }
         });
         if (kept.length > 0) {
-          fs.writeFileSync(AUDIT_LOG_PATH, kept.join('\n') + '\n', 'utf-8');
+          writeFileSync(AUDIT_LOG_PATH, kept.join('\n') + '\n', 'utf-8');
         } else {
-          fs.writeFileSync(AUDIT_LOG_PATH, '', 'utf-8');
+          writeFileSync(AUDIT_LOG_PATH, '', 'utf-8');
         }
       } catch {}
     }
     const line = JSON.stringify({ t: new Date().toISOString(), ...(entry as Record<string, unknown>) }) + '\n';
-    fs.appendFileSync(AUDIT_LOG_PATH, line, 'utf-8');
+    appendFileSync(AUDIT_LOG_PATH, line, 'utf-8');
   } catch {}
 }
 

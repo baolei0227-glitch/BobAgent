@@ -49,6 +49,13 @@ export interface BridgeResponse {
   error?: string;
 }
 
+/** 设置中 provider.selectedModels 的条目形态（兼容历史 string 与对象两种存储） */
+interface SelectedModelEntry {
+  modelId?: string;
+  label?: string;
+  supportsVision?: boolean;
+}
+
 // ==================== Whitelist ====================
 
 export const BRIDGE_ACTIONS: BridgeActionDef[] = [
@@ -1268,13 +1275,13 @@ export async function handleBridgeRequest(
         for (const cfg of providers) {
           const preset = PROVIDER_PRESETS.find((p) => p.type === cfg.type);
           const providerLabel = preset?.label || String(cfg.type);
-          const modelsList = Array.isArray(cfg.selectedModels) ? cfg.selectedModels : [];
+          const modelsList: Array<string | SelectedModelEntry> = Array.isArray(cfg.selectedModels) ? cfg.selectedModels : [];
           if (modelsList.length === 0) continue;
           for (let i = 0; i < modelsList.length; i++) {
             const entry = modelsList[i];
-            const modelId = typeof entry === 'string' ? entry : (entry as any).modelId;
-            const label = typeof entry === 'string' ? entry : (entry as any).label || modelId;
-            const supportsVision = Boolean(typeof entry !== 'string' && entry && (entry as any).supportsVision);
+            const modelId = typeof entry === 'string' ? entry : entry.modelId ?? '';
+            const label = typeof entry === 'string' ? entry : entry.label || modelId;
+            const supportsVision = typeof entry === 'string' ? false : Boolean(entry.supportsVision);
             const isDefault = !defaultFound && cfg.apiKey?.trim() ? (defaultFound = true, true) : false;
             const desc = preset?.models.find((pm) => pm.modelId === modelId)?.description || '';
             models.push({
@@ -1295,13 +1302,16 @@ export async function handleBridgeRequest(
       case 'listProjects': {
         const { listProjects } = await import('@/lib/project/project-manager');
         const all = await listProjects();
-        result = (all.active_projects || []).map((p) => ({
-          id: (p as any).id,
-          name: (p as any).name,
-          path: (p as any).path,
-          createdAt: (p as any).createdAt,
-          updatedAt: (p as any).updatedAt,
-        }));
+        result = (all.active_projects || []).map((p) => {
+          const e: ProjectConfig & { createdAt?: string; updatedAt?: string } = p;
+          return {
+            id: e.id,
+            name: e.name,
+            path: e.path,
+            createdAt: e.createdAt,
+            updatedAt: e.updatedAt,
+          };
+        });
         break;
       }
 
@@ -1337,7 +1347,7 @@ export async function handleBridgeRequest(
           platform: process.platform,
           isFirstRun: !(await settingsFileExists().catch(() => false)),
           sandboxDataDir: join(resolveAppRoot(), BOB_SANDBOX_DIRNAME, 'apps'),
-        } as any;
+        };
         break;
       }
 

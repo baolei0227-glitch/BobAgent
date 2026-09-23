@@ -245,9 +245,10 @@ class WechatBridge {
       // 异步轮询扫码，不阻塞 API 返回
       void this.scanLoop(qr.qrcodeId);
       return this.bindingState;
-    } catch (e: any) {
-      console.error('[wechat-bridge] startBinding error:', e?.message || e);
-      this.bindingState = { phase: 'error', error: e?.message || 'Failed to fetch QR code' };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : '';
+      console.error('[wechat-bridge] startBinding error:', message || e);
+      this.bindingState = { phase: 'error', error: message || 'Failed to fetch QR code' };
       return this.bindingState;
     }
   }
@@ -335,8 +336,8 @@ class WechatBridge {
             this.lastError = this.lastError || 'WeChat polling exited unexpectedly';
           }
         }
-      } catch (e: any) {
-        this.lastError = e?.message || 'Polling exited unexpectedly';
+      } catch (e) {
+        this.lastError = (e instanceof Error ? e.message : '') || 'Polling exited unexpectedly';
         this.running = false;
       }
     })();
@@ -399,9 +400,10 @@ class WechatBridge {
                 msg.contextToken);
               return;
             }
-          } catch (dlErr: any) {
+          } catch (dlErr) {
+            const detail = dlErr instanceof Error ? dlErr.message : String(dlErr);
             await sendMessage(creds, msg.from,
-              `⚠️ ${typeName}下载/识别失败：${dlErr?.message || String(dlErr)}。请重新发送或改发文字版本。`,
+              `⚠️ ${typeName}下载/识别失败：${detail}。请重新发送或改发文字版本。`,
               msg.contextToken);
             return;
           }
@@ -452,8 +454,8 @@ class WechatBridge {
         // 主动回推失败时记录，用于用户手动查看 wanted 面板结果
         this.lastError = `Failed to push reply: ${se instanceof Error ? se.message : String(se)}`;
       }
-    } catch (e: any) {
-      this.lastError = e?.message || 'Message processing failed';
+    } catch (e) {
+      this.lastError = (e instanceof Error ? e.message : '') || 'Message processing failed';
       try {
         await sendMessage(creds, msg.from, '❌ Processing failed, please try again later.', msg.contextToken);
       } catch {
@@ -552,7 +554,6 @@ class WechatBridge {
 /** 全局单例（instrumentation 与 API 路由共用） */
 // Turbopack 将 instrumentation 与 route handler 编译为不同 chunk，模块级单例会各自实例化；
 // 用 globalThis 挂载，确保无论哪个 chunk 引用，拿到的都是同一个桥实例。
-const GLOBAL_KEY = '__wechatBridgeSingleton__';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -560,4 +561,4 @@ declare global {
 }
 
 export const wechatBridge: WechatBridge =
-  (globalThis as any)[GLOBAL_KEY] ??= new WechatBridge();
+  globalThis.__wechatBridgeSingleton__ ??= new WechatBridge();

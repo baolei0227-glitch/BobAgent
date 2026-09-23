@@ -13,6 +13,7 @@ import {
   searchEvents,
   type EventRow,
   type CreateEventData,
+  type UpdateEventData,
 } from '@/lib/db';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { scanDueEventReminders } from '@/lib/wanted/event-reminder';
@@ -62,6 +63,9 @@ function rowToFrontend(row: EventRow) {
   } catch {
     reminder_minutes = [];
   }
+  // 'null' = 明确关闭提醒，与 '[]'（未配置 → 扫描时按默认 30 分钟）区分：
+  // 前端据此回显「无提醒」，否则打开事件自动保存会把它悄悄改回 30 分钟
+  const reminder_disabled = row.reminder_minutes_json === 'null';
   return {
     event_id: row.event_id,
     project_id: row.project_id,
@@ -77,9 +81,12 @@ function rowToFrontend(row: EventRow) {
     tags,
     category_path,
     reminder_minutes,
+    reminder_disabled,
     scope: row.scope,
     source_node_id: row.source_node_id,
     source_raw: row.source_raw,
+    // 来源锚点：非空且 kind='sticky' = 由 StickyTodo 便签行入日历；null = 日历直接添加/外部同步
+    source_ref: row.source_ref,
     external_id: row.external_id,
     sync_provider: row.sync_provider,
     created_at: row.created_at,
@@ -131,9 +138,9 @@ export async function GET(req: NextRequest) {
       success: true,
       events: rows.map(rowToFrontend),
     });
-  } catch (e: any) {
+  } catch (e) {
     console.error('calendar GET error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'Query failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: e instanceof Error && e.message ? e.message : 'Query failed' }, { status: 500 });
   }
 }
 
@@ -152,7 +159,7 @@ export async function POST(req: NextRequest) {
     const raw = await req.json();
 
     /** 把请求体的 scope/category_path 映射为 CreateEventData 对应字段，并计算 project_id */
-    function resolveItem(it: any): CreateEventData {
+    function resolveItem(it: Partial<CreateEventData>): CreateEventData {
       const scope = it.scope === 'global' ? 'global' : 'project';
       const effectiveProjectId = scope === 'global' ? GLOBAL_PROJECT_ID : projectId;
       return {
@@ -267,9 +274,9 @@ export async function POST(req: NextRequest) {
       success: true,
       event: created ? rowToFrontend(created) : null,
     });
-  } catch (e: any) {
+  } catch (e) {
     console.error('calendar POST error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'Create failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: e instanceof Error && e.message ? e.message : 'Create failed' }, { status: 500 });
   }
 }
 
@@ -289,12 +296,13 @@ export async function PATCH(req: NextRequest) {
     if (!existing) {
       return NextResponse.json({ success: false, error: '事件不存在' }, { status: 404 });
     }
-    const raw = await req.json();
-    const updateData: any = {};
+    const raw: Record<string, unknown> = await req.json();
+    const updateData: UpdateEventData = {};
+    const writable = updateData as Record<string, unknown>;
     for (const k of ['title', 'description', 'location', 'start_time', 'end_time',
       'all_day', 'status', 'priority', 'color', 'tags', 'category_path', 'scope',
       'source_node_id', 'source_raw', 'reminder_minutes']) {
-      if (raw[k] !== undefined) updateData[k] = raw[k];
+      if (raw[k] !== undefined) writable[k] = raw[k];
     }
     if (updateData.title !== undefined) updateData.title = String(updateData.title).trim();
     if (updateData.tags && !Array.isArray(updateData.tags)) {
@@ -337,12 +345,13 @@ export async function PATCH(req: NextRequest) {
       success: true,
       event: updated ? rowToFrontend(updated) : null,
     });
-  } catch (e: any) {
-    if (e?.message === 'NO_PROJECT') {
+  } catch (e) {
+    const msg = e instanceof Error && e.message ? e.message : 'Update failed';
+    if (msg === 'NO_PROJECT') {
       return NextResponse.json({ success: false, error: '请先创建项目' }, { status: 400 });
     }
     console.error('calendar PATCH error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'Update failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
 
@@ -393,7 +402,7 @@ export async function DELETE(req: NextRequest) {
     // 批量按日期范围删除（全局日历库，不按项目过滤）
     if (rangeStart && rangeEnd) {
       const conds: string[] = [];
-      const params: any[] = [];
+      const params: string[] = [];
 
       // 匹配与日期范围有交集的事件：
       // start_time 在范围内，或 end_time 在范围内，或事件跨越该范围
@@ -472,8 +481,8 @@ export async function DELETE(req: NextRequest) {
     );
 
     return NextResponse.json({ success: true, deleted: true, soft: true });
-  } catch (e: any) {
+  } catch (e) {
     console.error('calendar DELETE error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'Delete failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: e instanceof Error && e.message ? e.message : 'Delete failed' }, { status: 500 });
   }
 }

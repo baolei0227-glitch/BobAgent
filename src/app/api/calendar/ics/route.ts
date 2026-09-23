@@ -95,8 +95,8 @@ export async function POST(req: NextRequest) {
       });
     }
     return NextResponse.json({ ok: true, created, updated, skipped, total: parsed.length });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Import failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Import failed' }, { status: 500 });
   }
 }
 
@@ -134,7 +134,7 @@ export async function GET(req: NextRequest) {
         'Content-Disposition': `attachment; filename="bobwork-${projectId}-events.ics"`,
       },
     });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Export failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Export failed' }, { status: 500 });
   }
 }

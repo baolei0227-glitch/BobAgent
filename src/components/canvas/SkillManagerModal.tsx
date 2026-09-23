@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, createElement } from 'react';
 import { Lightbulb, RefreshCw, Check, Loader2, Package, FolderOpen, Download, Trash, Link, FolderSearch, Globe, AlertCircle, X, Upload, FolderUp, Search, Plug, Blocks, Bot } from 'lucide-react';
 import { skillEntryIcon } from './ext-icons';
 import { Button } from '@/components/ui/button';
@@ -87,7 +87,8 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
 
   const enabled = skill.enabled;
   const isUserSkill = skill.source !== 'builtin';
-  const SkillIcon = skillEntryIcon(skill.name, skill.scenes || [], !!official);
+  // skillEntryIcon 返回稳定的 lucide 组件引用（非 render 内新建组件），用 createElement 直接渲染
+  const skillIcon = skillEntryIcon(skill.name, skill.scenes || [], !!official);
 
   return (
     <div
@@ -103,7 +104,7 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
           style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)', color: 'var(--primary)' }}
         >
-          <SkillIcon className="h-3.5 w-3.5" />
+          {createElement(skillIcon, { className: 'h-3.5 w-3.5' })}
         </span>
         <span className="flex-1 truncate text-xs font-medium" style={{ color: 'var(--ink-strong)' }}>
           {skill.name}
@@ -283,7 +284,7 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
       const file = e.dataTransfer.files?.[0];
       if (file) {
         // Electron/Tauri 桌面端有 .path 属性；浏览器端用 webkitRelativePath
-        const path = (file as any).path || file.webkitRelativePath || file.name;
+        const path = (file as File & { path?: string }).path || file.webkitRelativePath || file.name;
         setInstallUrl(path);
         setInstallError('');
       }
@@ -396,8 +397,8 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
       }
       setInstallSuccess(`Installed: ${data.skill!.name} — toggle & edit it in Installed`);
       loadSkills();
-    } catch (e: any) {
-      setInstallError(e?.message || 'Network error');
+    } catch (e: unknown) {
+      setInstallError(e instanceof Error ? e.message : 'Network error');
     } finally {
       setDownloadingName(null);
     }
@@ -420,8 +421,8 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
       }
       setInstallSuccess(`Reinstalled official version: ${data.skill?.name ?? skillName}`);
       loadSkills();
-    } catch (e: any) {
-      setInstallError(e?.message || 'Network error');
+    } catch (e: unknown) {
+      setInstallError(e instanceof Error ? e.message : 'Network error');
     }
   };
 
@@ -453,8 +454,8 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
       setInstallSuccess(`Installed: ${data.skill!.name}`);
       setInstallUrl('');
       loadSkills();
-    } catch (e: any) {
-      setInstallError(e?.message || 'Network error');
+    } catch (e: unknown) {
+      setInstallError(e instanceof Error ? e.message : 'Network error');
     } finally {
       setInstalling(false);
     }

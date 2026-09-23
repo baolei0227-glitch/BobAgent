@@ -280,6 +280,8 @@ export function SettingsModal({
   const [browserClearBusy, setBrowserClearBusy] = useState(false);
   const [browserClearMsg, setBrowserClearMsg] = useState('');
   const [browserClearErr, setBrowserClearErr] = useState(false);
+  // AI Browser 开关：开 = 任务执行只走应用内 Hippo（内置 browser_*），关 = 只走 Bob Browser 扩展通道
+  const [aiBrowserHippo, setAiBrowserHippo] = useState(false);
   // 文件自动整理投递箱：本地编辑态，改动后随自动保存落盘
   const [fileOrgEnabled, setFileOrgEnabled] = useState(false);
   const [fileOrgDir, setFileOrgDir] = useState('');
@@ -572,6 +574,8 @@ export function SettingsModal({
         setFileOrgNaming(normalizeNaming(fo.naming));
         setFileOrgCategoryInput('');
         setFileOrgPickErr('');
+        // AI 浏览器通道（undefined = hippo，默认通道；仅显式 'chrome' 才显示为关）
+        setAiBrowserHippo(settings.aiBrowser !== 'chrome');
         try {
           const api = (window as unknown as { api: { avatar: { list: () => Promise<Array<{ id: string; name: string; dataUrl: string; builtin: boolean }>> } } }).api;
           if (api?.avatar) {
@@ -621,6 +625,8 @@ export function SettingsModal({
     thinkingPolicy,
     // 文件自动整理投递箱
     fileOrgEnabled, fileOrgDir, fileOrgCategories, fileOrgAutoCreate, fileOrgNaming,
+    // AI 浏览器通道（开关切换 → 下一轮对话工具面自动按新通道裁剪）
+    aiBrowserHippo,
     // 字体缩放（原先点击即独立落盘，现并入自动保存，避免与自动保存并发写同一 settings.json）
     fontScale,
   ]);
@@ -1048,6 +1054,8 @@ export function SettingsModal({
           // 默认规则不落盘：留空即默认，日后调整默认形态也能生效
           naming: isDefaultNaming(fileOrgNaming) ? undefined : fileOrgNaming,
         },
+        // AI 浏览器通道：显式写单值（互斥，不做 auto 判据）
+        aiBrowser: aiBrowserHippo ? 'hippo' : 'chrome',
       });
 
       // 立即应用主题（data-theme 写入 document.documentElement），无需重启
@@ -2333,7 +2341,7 @@ export function SettingsModal({
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Prefer vision model when images are attached</div>
                             <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>
-                              When Auto model routing is on and the message context contains image attachments, pick a vision-capable model so images reach it directly as pixels instead of the OCR-description fallback.
+                              When the model is Auto and the message context contains image attachments, pick a vision-capable model from the pool so images reach it directly as pixels instead of the OCR-description fallback.
                             </div>
                           </div>
                           <button
@@ -2750,6 +2758,29 @@ export function SettingsModal({
             className="mt-4 overflow-hidden rounded-lg border"
             style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}
           >
+            {/* AI Browser：全局互斥开关（开 = 只走 Hippo，关 = 只走 Bob Browser 扩展通道） */}
+            <div className="flex items-start gap-4 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-13 font-medium" style={{ color: 'var(--ink)' }}>
+                  AI Browser
+                </div>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  {aiBrowserHippo
+                    ? 'Browser tasks run inside Hippo Browser (built-in browser_* tools, no extension needed). The Bob Browser channel is hidden from the model.'
+                    : 'Browser tasks use the Bob Browser channel with your real Chrome (sign-ins, bookmarks, extensions). Turn on to run them inside Hippo Browser instead — no extension needed.'}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-3 pt-0.5">
+                <ToggleSwitch
+                  checked={aiBrowserHippo}
+                  onChange={() => setAiBrowserHippo((v) => !v)}
+                  title={aiBrowserHippo ? 'Hippo Browser' : 'Bob Browser'}
+                />
+              </div>
+            </div>
+
+            <div className="border-t" style={{ borderColor: 'var(--line-soft)' }} />
+
             <div className="flex items-center gap-4 px-4 py-3">
               <div className="min-w-0 flex-1 text-13 font-medium" style={{ color: 'var(--ink)' }}>
                 Cookies &amp; Site Data

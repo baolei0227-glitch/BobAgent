@@ -1,7 +1,7 @@
 'use client';
 
 // 独立批注气泡：批注模式下选中文字时弹出，输入批注意见并添加（不经过 AI Edit 面板）
-// 顶部为作用于选中文字的排版工具栏（段落样式 / 字符格式 / 列表 / 复制 · 划词引用），
+// 顶部为作用于选中文字的排版工具栏（段落样式 / 字符格式 / 对齐 / 列表 / 复制 · 划词引用），
 // 中部为意见输入框，底部为 AI 修订与添加批注。
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
@@ -249,8 +249,11 @@ export function AnnotationBubble({ editor, onAdd, onAsk, onDirectRevise, canAskC
         onShow: showTempHighlight,
         onHide: hideTempHighlight,
       }}
+      // 层级：气泡元素由 Tiptap 挂到 view.dom.parentElement，与块级拖拽把手（z-index:30）同层，
+      // 自身不设 z-index 时是 auto，会被把手压住，故显式抬到 40。
+      style={{ zIndex: 40 }}
     >
-      {/* 宽度按工具栏单行排布取定（4 组 + 3 条竖线 ≈ 291px，w-80=320px 留少量余量，不换行）；
+      {/* 宽度按工具栏单行排布取定（11 个按钮 + 3 条竖线 ≈ 317px，w-80=320px 留少量余量，不换行）；
           不加 overflow-hidden：下拉浮层需越出气泡边界 */}
       <div
         className="w-80 rounded-xl border"
@@ -260,7 +263,7 @@ export function AnnotationBubble({ editor, onAdd, onAsk, onDirectRevise, canAskC
           boxShadow: '0 12px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08)',
         }}
       >
-        {/* 顶部排版工具栏：四组（段落样式下拉 | 字符格式 | 列表下拉 | 复制 · 划词引用），组间竖线分隔 */}
+        {/* 顶部排版工具栏：四组（段落样式下拉 | 字符格式 | 对齐 + 列表下拉 | 复制 · 划词引用），组间竖线分隔 */}
         <div
           ref={toolbarRef}
           className="flex items-center gap-0.5 border-b px-1.5 py-1"
@@ -348,7 +351,7 @@ export function AnnotationBubble({ editor, onAdd, onAsk, onDirectRevise, canAskC
 
           <GroupDivider />
 
-          {/* 4. 复制选中文字 + 发送到当前会话 */}
+          {/* 5. 复制选中文字 + 发送到当前会话 */}
           <button
             type="button"
             onMouseDown={(e) => e.preventDefault()}

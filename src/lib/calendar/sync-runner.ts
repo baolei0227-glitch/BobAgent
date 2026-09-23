@@ -59,8 +59,8 @@ async function pullCalDav(accountId: string, projectId: string): Promise<{ added
   let remote: { href: string; etag: string; ical: string }[];
   try {
     remote = await fetchCalendarEvents(account.calendar_url, account.username, password, rangeStart, rangeEnd);
-  } catch (e: any) {
-    await addSyncLog(db, accountId, projectId, 'error', `CalDAV pull failed: ${e?.message || e}`);
+  } catch (e) {
+    await addSyncLog(db, accountId, projectId, 'error', `CalDAV pull failed: ${e instanceof Error ? e.message : String(e)}`);
     return { added: 0, updated: 0, deleted: 0 };
   }
 
@@ -145,8 +145,8 @@ async function pullWebCal(accountId: string, projectId: string): Promise<{ added
   let text: string;
   try {
     text = await fetchWebcal(account.server_url);
-  } catch (e: any) {
-    await addSyncLog(db, accountId, projectId, 'error', `WebCal fetch failed: ${e?.message || e}`);
+  } catch (e) {
+    await addSyncLog(db, accountId, projectId, 'error', `WebCal fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     return { added: 0, updated: 0, deleted: 0 };
   }
 
@@ -261,8 +261,8 @@ async function pushLocalToCalDav(accountId: string, projectId: string, syncBaseA
         sync_provider: 'caldav',
       });
       pushed++;
-    } catch (e: any) {
-      await addSyncLog(db, accountId, projectId, 'error', `Push failed for "${row.title}": ${e?.message || e}`);
+    } catch (e) {
+      await addSyncLog(db, accountId, projectId, 'error', `Push failed for "${row.title}": ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   if (pushed) await addSyncLog(db, accountId, projectId, 'info', `Push done: ${pushed} event(s)`);

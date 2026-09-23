@@ -22,6 +22,7 @@ import {
   registerCustomTools,
   registerMcpTools,
   mergeForcedMcpToolDefs,
+  setBuiltinBrowserToolsEnabled,
 } from '@/app/api/chat/tools';
 import type { ToolDefinition, ToolScene } from '@/app/api/chat/tools';
 import type { AgentProfile } from '@/lib/agents/profiles';
@@ -325,12 +326,22 @@ export class ToolRuntime {
   async register(): Promise<void> {
     registerCustomTools(this.settings.customTools || []);
 
+    // AI 浏览器通道（全局互斥开关，settings.aiBrowser）：
+    //   'chrome' → 注销内置组，浏览器能力只走 mcp__bob-browser-mcp__browser_*；
+    //   否则     → 注册内置 browser_*（HippoDriver），并在下方把 bob-browser-mcp 整个排除。
+    // 缺省（undefined）= 'hippo'（默认通道）：Hippo 为默认，仅显式关开关才回退 Bob Browser。
+    // 二者互斥：任一时刻只有一组浏览器工具进模型上下文。
+    const hippoChannel = this.settings.aiBrowser !== 'chrome';
+    setBuiltinBrowserToolsEnabled(hippoChannel);
+
     // 专属服务不注入普通 chat 节点：exposeToChatNodes === false 的 MCP 仅限专属节点经专用路由调用
     const excludedMcpIds = new Set(
       (this.settings.mcpServers || [])
         .filter((s) => s.exposeToChatNodes === false)
         .map((s) => s.id),
     );
+    // AI Browser 开关打开时，Bob Browser 通道对模型不可见（含快照缓存里的 browser.* 一并跳过）
+    if (hippoChannel) excludedMcpIds.add('bob-browser-mcp');
     // 工具级排除：excludeToolsFromModel 中的工具不注入模型上下文（如授权管理类，防自我授权）
     const excludedMcpToolNames = new Set(
       (this.settings.mcpServers || []).flatMap((s) => s.excludeToolsFromModel ?? []),

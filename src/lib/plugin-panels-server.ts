@@ -23,6 +23,8 @@ import { MCP_PRESETS } from '@/lib/mcp/types';
 import type { PluginPanelEntry, PluginPanelIcon } from '@/lib/plugin-panels';
 import { readSettingsFromFile, bundledPluginPath } from '@/lib/settings-server';
 import { bundledDataHome } from '@/lib/extensions/bundled-data-home';
+import { mcpManager } from '@/lib/mcp/manager';
+import { getPanelPort } from '@/lib/mcp/panel-ports';
 
 const BUNDLED_PREFIX = '{BUNDLED}:';
 
@@ -72,6 +74,16 @@ export async function collectPluginPanelEntries(): Promise<PluginPanelEntry[]> {
   const configs = settings.mcpServers ?? [];
   const entries: PluginPanelEntry[] = [];
 
+  // 出条目前确保 serve 插件已连接：端口由宿主在连接时按实例分配并登记（见 manager.createConnection）。
+  // 不先连接就只能回退预置固定端口（9480/9482），iframe 会指向另一个宿主的实例（数据根共享，静默串台）。
+  if (configs.some((c) => c.enabled && effectivePanel(c)?.mode === 'serve')) {
+    try {
+      await mcpManager.syncServers(configs);
+    } catch (e) {
+      console.warn('[plugin-panels] sync MCP servers before panel registry failed:', e);
+    }
+  }
+
   for (const cfg of configs) {
     if (!cfg.enabled) continue;
     const panel = effectivePanel(cfg);
@@ -82,7 +94,9 @@ export async function collectPluginPanelEntries(): Promise<PluginPanelEntry[]> {
     const icon = presetIcon(cfg.id);
 
     if (panel.mode === 'serve') {
-      const url = (panel.url ?? preset?.panel?.url ?? '').replace(/\/+$/, '');
+      // 运行时端口优先：宿主为本实例分配的端口 > 实例配置面板地址 > 预置地址
+      const port = getPanelPort(cfg.id);
+      const url = (port ? `http://127.0.0.1:${port}` : panel.url ?? preset?.panel?.url ?? '').replace(/\/+$/, '');
       if (!url) continue;
       const statusPath = panel.statusPath ?? '/api/status';
       entries.push({
@@ -250,6 +264,21 @@ async function waitPanelReady(probeUrl: string, timeoutMs: number): Promise<bool
 }
 
 /**
+ * 取「本宿主可信的」端口冲突标记。
+ *
+ * 标记文件落在插件共享数据根，不区分宿主：另一个宿主的插件写下的标记指向的是**对方实例**的端口，
+ * 本宿主若照此回收，就会去杀一个健在的、属于另一个宿主的实例。因此本宿主已为该插件分配运行时
+ * 端口时，只认指向该端口的标记；未分配（尚未连接 / 旧插件不带端口参数）时维持原有行为。
+ */
+async function trustedConflict(pluginId: string): Promise<PanelConflictMarker | null> {
+  const raw = await readPanelConflict(pluginId);
+  if (!raw) return null;
+  const assigned = getPanelPort(pluginId);
+  if (assigned && raw.port !== assigned) return null;
+  return raw;
+}
+
+/**
  * 探测 serve 面板是否真的由「本 App 的插件实例」服务。
  *
  * 为什么不能只看插件 /api/status：宿主 iframe 是直连插件端口的，若端口被残留旧进程占着，
@@ -261,7 +290,7 @@ async function waitPanelReady(probeUrl: string, timeoutMs: number): Promise<bool
 export async function probePluginPanel(entry: PluginPanelEntry): Promise<PluginPanelProbe> {
   if (entry.mode !== 'serve' || !entry.probeUrl) return { ok: true };
 
-  const conflict = await readPanelConflict(entry.pluginId);
+  const conflict = await trustedConflict(entry.pluginId);
   const port = conflict?.port;
   const holderPid = conflict ? (conflict.holderPid ?? (port ? await portHolderPid(port) : null)) : null;
 

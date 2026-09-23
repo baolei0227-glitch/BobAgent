@@ -18,8 +18,8 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ success: true, ...wechatBridge.getStatus() });
     }
     return NextResponse.json({ success: false, error: '未知 action' }, { status: 400 });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || '查询失败' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : '查询失败' }, { status: 500 });
   }
 }
 
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true });
     }
     return NextResponse.json({ success: false, error: '未知 action' }, { status: 400 });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e?.message || '操作失败' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : '操作失败' }, { status: 500 });
   }
 }

@@ -73,7 +73,7 @@ function pickAutoModel(
     }
     // 没有勾选模型时，退回 provider preset 的首个模型（亲儿子兜底：不被 selectedModels 卡死）
     const preset = PROVIDER_PRESETS.find((p) => p.type === cfg.type);
-    const fallback = (cfg as any).defaultModel || preset?.models?.[0]?.modelId;
+    const fallback = cfg.defaultModel || preset?.models?.[0]?.modelId;
     if (fallback) {
       return { provider: cfg.type, modelId: String(fallback) };
     }

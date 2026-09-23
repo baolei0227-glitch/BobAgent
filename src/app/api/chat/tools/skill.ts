@@ -9,6 +9,7 @@
 
 import { join, isAbsolute, relative } from 'path';
 import { readFile } from 'fs/promises';
+import { existsSync, statSync, readdirSync, mkdirSync, readFileSync } from 'fs';
 import { resolveAppRoot } from '@/lib/app-root';
 import type { Tool } from './index';
 
@@ -16,7 +17,7 @@ import type { Tool } from './index';
 export const SKILLS_DIR = join(resolveAppRoot(), 'skills');
 
 /** 确保可写目录存在 */
-try { require('fs').mkdirSync(SKILLS_DIR, { recursive: true }); } catch {}
+try { mkdirSync(SKILLS_DIR, { recursive: true }); } catch {}
 
 /** 内建技能根目录（应用打包自带）—— 优先使用，找不到再回退用户目录 SKILLS_DIR */
 let _builtinSkillsRoot: string | undefined;
@@ -31,8 +32,7 @@ function getBuiltinSkillsRoot(): string {
     // 基于当前文件路径推断（编译后 dist 中位置不同，以 cwd 为准更稳）
     for (const c of candidates) {
       try {
-        const fs = require('fs');
-        if (fs.existsSync(c) && fs.statSync(c).isDirectory()) {
+        if (existsSync(c) && statSync(c).isDirectory()) {
           _builtinSkillsRoot = c;
           return _builtinSkillsRoot;
         }
@@ -52,25 +52,23 @@ const RESOURCE_DIR_NAMES = ['resources', 'references'];
 
 /** 技能目录候选（已存在者）：builtin 内置优先，其次用户目录 SKILLS_DIR */
 function skillDirCandidates(skillName: string): string[] {
-  const fs = require('fs');
   const dirs: string[] = [];
   const builtinRoot = getBuiltinSkillsRoot();
   if (builtinRoot) dirs.push(join(builtinRoot, skillName));
   dirs.push(join(SKILLS_DIR, skillName));
   return dirs.filter((d) => {
-    try { return fs.statSync(d).isDirectory(); } catch { return false; }
+    try { return statSync(d).isDirectory(); } catch { return false; }
   });
 }
 
 /** 技能内实际存在的资源根目录（绝对路径）：约定目录优先，技能根目录兜底 */
 function listSkillResourceRoots(skillName: string): string[] {
-  const fs = require('fs');
   const out: string[] = [];
   for (const dir of skillDirCandidates(skillName)) {
     for (const name of RESOURCE_DIR_NAMES) {
       const sub = join(dir, name);
       try {
-        if (fs.statSync(sub).isDirectory() && !out.includes(sub)) out.push(sub);
+        if (statSync(sub).isDirectory() && !out.includes(sub)) out.push(sub);
       } catch { /* 该约定目录不存在 */ }
     }
     if (!out.includes(dir)) out.push(dir);
@@ -84,7 +82,6 @@ function listSkillResourceRoots(skillName: string): string[] {
  * 不会出现在索引里，模型只能靠猜（历史故障：猜成 /Users/xxx/.trae-cn/skills/... 被 read_file 拒绝）。
  */
 function listSkillResourceFiles(skillName: string): Array<{ rel: string; abs: string }> {
-  const fs = require('fs');
   const base = skillDirCandidates(skillName)[0];
   if (!base) return [];
   const out: Array<{ rel: string; abs: string }> = [];
@@ -92,7 +89,7 @@ function listSkillResourceFiles(skillName: string): Array<{ rel: string; abs: st
   const walk = (dir: string, depth: number) => {
     let entries: Array<{ name: string; isFile: () => boolean; isDirectory: () => boolean }>;
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = readdirSync(dir, { withFileTypes: true });
     } catch { return; }
     for (const e of entries) {
       if (e.name.startsWith('.')) continue;
@@ -139,11 +136,10 @@ function resolveSkillResource(skillName: string, resourceFile: string | undefine
     rel = parts.join('/');
   }
 
-  const fs = require('fs');
   for (const root of listSkillResourceRoots(safeName)) {
     const target = rel ? join(root, rel) : root;
     try {
-      const st = fs.statSync(target);
+      const st = statSync(target);
       if (st.isDirectory()) return { path: target, isDir: true };
       if (st.isFile()) return { path: target, isDir: false };
     } catch { /* 换下一个根目录 */ }
@@ -213,14 +209,13 @@ async function toolReadSkillResource(args: Record<string, unknown>): Promise<str
 
     // 1) 无 resource → 返回索引（resources/ + references/ + 技能根目录内的文件一次列全）
     if (resourceRaw === undefined || resourceRaw.trim() === '') {
-      const fs = require('fs');
       if (skillDirCandidates(skillName).length === 0) {
         return JSON.stringify({ ok: false, error: `技能 ${skillName} 不存在（内建/用户技能库均未找到该目录）` });
       }
       const index: Array<{ file: string; size_chars: number; preview: string }> = [];
       for (const f of listSkillResourceFiles(skillName)) {
         try {
-          const content = fs.readFileSync(f.abs, 'utf-8') as string;
+          const content = readFileSync(f.abs, 'utf-8');
           // 预览：首段 280 字符（优先取第一条 # / ## 标题 + 首段非空行）
           const lines = content.split(/\r?\n/).filter((l: string) => l.trim().length > 0);
           const headings = lines.filter((l: string) => /^#{1,3}\s+/.test(l)).slice(0, 2);
@@ -257,8 +252,7 @@ async function toolReadSkillResource(args: Record<string, unknown>): Promise<str
     }
     if (resolved.isDir) {
       // 指向目录（resource 以 / 结尾或 资源名是子目录）：返回该子目录下的 index（与空 resource 类似但限定子目录）
-      const fs = require('fs');
-      const entries = fs.readdirSync(resolved.path, { withFileTypes: true }) as Array<{ name: string; isFile: () => boolean }>;
+      const entries = readdirSync(resolved.path, { withFileTypes: true });
       const files = entries.filter((e) => e.isFile() && !e.name.startsWith('.')).map((e) => e.name).sort();
       return JSON.stringify({
         ok: true,

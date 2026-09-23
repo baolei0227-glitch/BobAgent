@@ -7,6 +7,7 @@
  * 生成 BobMail 邮件正文。
  */
 import { join } from 'path';
+import { promises as fs } from 'fs';
 import { listProjects, ProjectConfig } from '@/lib/project/project-manager';
 import {
   readTodoIndexFile,
@@ -114,7 +115,6 @@ function filterByKeyword(
 
 /** 读取项目 sticky 主文档（sticky-notes.json）并仅提取未完成待办 —— 索引缺失时的回退路径（重建索引，幂等自愈） */
 async function readStickyMainAsIndex(projectDir: string): Promise<StickyTodoIndex> {
-  const fs = require('fs/promises') as typeof import('fs/promises');
   try {
     const raw = await fs.readFile(join(projectDir, 'sticky-notes', 'sticky-notes.json'), 'utf-8');
     const data = JSON.parse(raw) as { notes?: Array<Record<string, unknown>> };

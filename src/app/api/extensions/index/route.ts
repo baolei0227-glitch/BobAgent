@@ -21,10 +21,10 @@ export async function GET() {
     await writeExtensionsIndex();
     const raw = fs.readFileSync(extensionsIndexFile(), 'utf-8');
     return NextResponse.json(JSON.parse(raw));
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('GET /api/extensions/index error:', e);
     return NextResponse.json(
-      { error: e?.message || 'Failed to build extensions index' },
+      { error: e instanceof Error ? e.message : 'Failed to build extensions index' },
       { status: 500 },
     );
   }

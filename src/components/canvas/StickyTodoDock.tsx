@@ -47,6 +47,8 @@ function isAllDone(content: string): boolean {
 /** 父级暴露给便签卡的编辑操作集（state 全部上提，卡内不保存正文草稿，保证光标安全） */
 export type StickyTodoOps = {
   onTodoText: (noteId: string, index: number, newText: string) => void;
+  /** 行输入框失焦：立即落盘并结算自动入日历（避免打字中的半截文本就入日历） */
+  onTodoLineBlur: (noteId: string) => void;
   /** 返回新增行的下标（用于 Enter 后聚焦） */
   addLine: (noteId: string, afterIndex: number) => number;
   removeLine: (noteId: string, index: number) => boolean;
@@ -66,7 +68,12 @@ export type StickyTodoOps = {
   submitCourt: (
     noteId: string,
     text: string,
-    schedule?: { start_time?: string; end_time?: string; reminder_minutes?: number[] },
+    schedule?: {
+      start_time?: string;
+      end_time?: string;
+      reminder_minutes?: number[];
+      location?: string;
+    },
   ) => Promise<boolean>;
   saveTemplate: (noteId: string, name: string) => Promise<void>;
   applyTemplate: (noteId: string, tpl: StickyTodoTemplate) => void;
@@ -126,10 +133,12 @@ function NoteCardEditor({
   const [calTime, setCalTime] = useState('');
   const [calReminder, setCalReminder] = useState('0'); // 分钟；'0' = 不提醒（与静默清单项语义一致）
   const [calSaving, setCalSaving] = useState(false);
-  /** 自动识别（/api/sticky-notes/parse-time）：从待办文本解析日期/时刻预填；用户手改过则不覆盖 */
+  /** 自动识别（/api/sticky-notes/parse-time）：从待办文本解析日期/时刻预填，并把时间词从 Todo 一栏剔除；
+   *  用户手改过对应字段则不覆盖（日期/时间与 Todo 各自独立判定） */
   const [calDetecting, setCalDetecting] = useState(false);
   const [calDetected, setCalDetected] = useState(false);
   const calTouchedRef = useRef(false);
+  const calTextTouchedRef = useRef(false);
   const calReqRef = useRef(0);
 
   const linesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -174,7 +183,8 @@ function NoteCardEditor({
   };
 
   /** 从待办文本自动识别时间并预填弹窗：正则快路径命不中时服务端回退 LLM。
-   *  用户已手改日期/时间则丢弃结果；识别不到/失败静默沿用默认时段，不打扰用户。 */
+   *  时间进 Date/Time、主题（剔除时间词后的事项）进 Todo 一栏——主题与时间各归其位；
+   *  用户已手改过的字段丢弃识别结果；识别不到/失败静默沿用原文与默认时段，不打扰用户。 */
   const detectCalTime = async (text: string) => {
     const reqId = ++calReqRef.current;
     try {
@@ -184,14 +194,21 @@ function NoteCardEditor({
         body: JSON.stringify({ text }),
       });
       const d = (await res.json().catch(() => null)) as
-        | { success?: boolean; date?: string; time?: string }
+        | { success?: boolean; date?: string; time?: string; topic?: string }
         | null;
       // 过期响应（弹窗已关 / 用户又点了别的行）直接丢弃
-      if (reqId !== calReqRef.current) return;
-      if (!d?.success || typeof d.date !== 'string' || calTouchedRef.current) return;
-      setCalDate(d.date);
-      if (typeof d.time === 'string' && d.time) setCalTime(d.time);
-      setCalDetected(true);
+      if (reqId !== calReqRef.current || !d?.success) return;
+      if (typeof d.date === 'string' && !calTouchedRef.current) {
+        setCalDate(d.date);
+        if (typeof d.time === 'string' && d.time) setCalTime(d.time);
+        setCalDetected(true);
+      }
+      // 主题：剔除时间词后的事项（如「明天下午3点跟张三开会」→「跟张三开会」）；
+      // 剔除后为空（整句都是时间）时服务端不给 topic，保留原文
+      if (typeof d.topic === 'string' && d.topic.trim() && !calTextTouchedRef.current) {
+        setCalText(d.topic.trim());
+        setCalDetected(true);
+      }
     } catch {
       /* 识别失败：沿用默认时段 */
     } finally {
@@ -233,6 +250,7 @@ function NoteCardEditor({
     setCalReminder('0');
     setCalDetected(false);
     calTouchedRef.current = false;
+    calTextTouchedRef.current = false;
     setCalOpen(true);
     setCalDetecting(true);
     void detectCalTime(text);
@@ -314,10 +332,13 @@ function NoteCardEditor({
     const name = courtName.trim();
     if (!dateStr || !name) return;
     const matter = courtMatter.trim();
-    const room = courtRoom.trim();
+    // 法庭号去掉用户可能自带的「第/法庭/庭」，避免拼出「第二十法庭法庭」
+    const room = courtRoom.trim().replace(/^第/, '').replace(/(?:法庭|庭)$/, '').trim();
     const addr = courtAddr.trim();
     const timeStr = courtTime.trim();
-    const text = `${matter ? `${matter} ` : ''}在${name}${room ? `的第${room}法庭` : ''}开庭${addr ? `。地址：${addr}` : ''}`;
+    const text = `${matter ? `${matter} ` : ''}在${name}${room ? `第${room}法庭` : ''}开庭${addr ? `。地址：${addr}` : ''}`;
+    // 地点 = 法院+法庭（+地址）；主题只留事项（由 stickyLineEventTitle 从行文本派生）
+    const location = `${name}${room ? `第${room}法庭` : ''}${addr ? `（${addr}）` : ''}`;
     const startTime = localDateTimeToIso(dateStr, timeStr);
     if (!startTime) {
       showImageAiEditToast('Invalid hearing date/time.', 'error');
@@ -328,6 +349,7 @@ function NoteCardEditor({
       const ok = await ops.submitCourt(note.id, text, {
         start_time: startTime,
         reminder_minutes: [30],
+        location,
       });
       if (ok) {
         resetCourt();
@@ -571,6 +593,7 @@ function NoteCardEditor({
                   onInputText={(text) => ops.onTodoText(note.id, i, text)}
                   onEnter={() => handleEnter(i)}
                   onBackspaceEmpty={() => handleBackspace(i)}
+                  onBlur={() => ops.onTodoLineBlur(note.id)}
                   onToggle={() => ops.toggle(note.id, i)}
                   calendared={isLineCalendared(page, i)}
                   addState={addStates[`${page.id}:${i}`] ?? null}
@@ -605,7 +628,10 @@ function NoteCardEditor({
               <span className="w-16 shrink-0">Todo</span>
               <input
                 value={calText}
-                onChange={(e) => setCalText(e.target.value)}
+                onChange={(e) => {
+                  calTextTouchedRef.current = true;
+                  setCalText(e.target.value);
+                }}
                 autoFocus
                 className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1.5 text-xs outline-none"
                 style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
@@ -639,7 +665,7 @@ function NoteCardEditor({
             </label>
             {(calDetecting || calDetected) && (
               <div className="text-[10px]" style={{ color: 'var(--ink-muted)' }}>
-                {calDetecting ? 'Reading time from text…' : 'Time detected from text — edit to override'}
+                {calDetecting ? 'Reading time from text…' : 'Time & topic taken from text — edit to override'}
               </div>
             )}
             <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--ink-muted)' }}>
@@ -802,6 +828,11 @@ export default function StickyTodoDock() {
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 待结算便签：下一次落盘时允许自动入日历（失焦 / 停手兜底时标记） */
+  const settlePendingRef = useRef<Set<string>>(new Set());
+  /** 有未落盘文字改动的便签（关闭便签卡时兜底保存 + 结算） */
+  const dirtyNotesRef = useRef<Set<string>>(new Set());
   const savedFlashRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const chipsRef = useRef<HTMLDivElement | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -814,6 +845,13 @@ export default function StickyTodoDock() {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
+    }
+  };
+
+  const clearSettleTimer = () => {
+    if (settleTimerRef.current) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
     }
   };
 
@@ -837,6 +875,9 @@ export default function StickyTodoDock() {
     savedFlashRef.current.forEach((t) => clearTimeout(t));
     savedFlashRef.current.clear();
     clearSaveTimer();
+    clearSettleTimer();
+    settlePendingRef.current.clear();
+    dirtyNotesRef.current.clear();
     if (!projectId) return;
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -893,6 +934,17 @@ export default function StickyTodoDock() {
   useEffect(() => {
     return () => {
       clearSaveTimer();
+      clearSettleTimer();
+      // 关闭便签卡：把未落盘的文字改动连同「结算」一起发出，否则打字中途关闭会丢改动、且该行永远不会入日历
+      const pid = projectIdRef.current;
+      if (pid) {
+        for (const id of dirtyNotesRef.current) {
+          const n = notesRef.current.find((x) => x.id === id);
+          if (n) saveNote(id, { pages: n.pages }, true);
+        }
+      }
+      dirtyNotesRef.current.clear();
+      settlePendingRef.current.clear();
       savedFlashRef.current.forEach((t) => clearTimeout(t));
       savedFlashRef.current.clear();
     };
@@ -922,22 +974,39 @@ export default function StickyTodoDock() {
   }, []);
 
   /** 落盘（update）：服务端会同步已入日历行并回写带 lineEventIds 的 note → 仅按 pageId 回填锚点，不整体覆盖 */
-  const saveNote = useCallback((id: string, patch: Partial<StickyNote>) => {
+  const saveNote = useCallback((id: string, patch: Partial<StickyNote>, settleCalendar = true) => {
     const pid = projectIdRef.current;
     if (!pid) return;
     // 空行不是待办：落盘前统一剔除空待办行并重排行级锚点（与服务端 writeNotes 归一化一致）
     const notePatch: Partial<StickyNote> = { ...patch };
     if (Array.isArray(notePatch.pages)) notePatch.pages = cleanTodoPages(notePatch.pages);
     setSaveStates((prev) => ({ ...prev, [id]: 'syncing' }));
+    // 服务端保存时会自动为未入日历的行建事件 → 记下保存前的锚点，回包锚点有变化时通知日历面板刷新
+    const beforeEvs = JSON.stringify(
+      (notesRef.current.find((n) => n.id === id)?.pages ?? []).map((p) => p.lineEventIds ?? null),
+    );
     fetch('/api/sticky-notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'update', project_id: pid, note: { id, ...notePatch } }),
+      body: JSON.stringify({
+        action: 'update',
+        project_id: pid,
+        note: { id, ...notePatch },
+        settle_auto_calendar: settleCalendar,
+      }),
     })
       .then((r) => r.json().catch(() => ({ success: false })))
       .then((d) => {
         if (d?.success) {
-          if (d.note) adoptServerNote(d.note);
+          if (d.note) {
+            adoptServerNote(d.note);
+            const afterEvs = JSON.stringify(
+              ((d.note as StickyNote).pages ?? []).map((p) => p.lineEventIds ?? null),
+            );
+            if (afterEvs !== beforeEvs) {
+              window.dispatchEvent(new CustomEvent('calendar-events-changed'));
+            }
+          }
           setSaveStates((prev) => ({ ...prev, [id]: 'saved' }));
           const prevT = savedFlashRef.current.get(id);
           if (prevT) clearTimeout(prevT);
@@ -976,24 +1045,53 @@ export default function StickyTodoDock() {
       const patch = applyNote(noteId, builder);
       if (!patch || Object.keys(patch).length === 0) return;
       clearSaveTimer();
+      settlePendingRef.current.delete(noteId);
+      dirtyNotesRef.current.delete(noteId);
       setContentRev((r) => r + 1);
       saveNote(noteId, patch);
     },
     [applyNote, saveNote],
   );
 
-  /** 行文本编辑：本地即时更新 + 700ms 防抖落盘（不加 rev，保光标） */
+  /** 结算：允许服务端把该便签里未入日历的行自动入日历（失焦 / 停手 8 秒 / 关闭便签卡时调用）。
+   *  若此刻还有未落盘的文字改动，则不另发请求，改由那次落盘带结算标记，避免文字丢失。 */
+  const requestSettle = useCallback(
+    (noteId: string) => {
+      if (saveTimerRef.current) {
+        settlePendingRef.current.add(noteId);
+        return;
+      }
+      settlePendingRef.current.delete(noteId);
+      dirtyNotesRef.current.delete(noteId);
+      saveNote(noteId, {}, true);
+    },
+    [saveNote],
+  );
+
+  /** 行文本编辑：本地即时更新 + 700ms 防抖落盘（不加 rev，保光标）。
+   *  打字中的落盘只存内容、不结算自动入日历（否则半截文本会被建成事件）；
+   *  失焦（flush 走 requestSettle）或停手 8 秒后才结算一次。 */
   const debounceNote = useCallback(
     (noteId: string, builder: (note: StickyNote) => Partial<StickyNote>) => {
       applyNote(noteId, builder);
+      dirtyNotesRef.current.add(noteId);
       clearSaveTimer();
       saveTimerRef.current = setTimeout(() => {
         saveTimerRef.current = null;
         const latest = notesRef.current.find((n) => n.id === noteId);
-        if (latest) saveNote(noteId, builder(latest));
+        if (!latest) return;
+        const settled = settlePendingRef.current.delete(noteId);
+        if (settled) dirtyNotesRef.current.delete(noteId);
+        saveNote(noteId, builder(latest), settled);
       }, 700);
+      // 停手兜底：连续 8 秒没有新的编辑 → 结算一次
+      clearSettleTimer();
+      settleTimerRef.current = setTimeout(() => {
+        settleTimerRef.current = null;
+        requestSettle(noteId);
+      }, 8000);
     },
-    [applyNote, saveNote],
+    [applyNote, saveNote, requestSettle],
   );
 
   /* ---- 行/标题等编辑操作（语义与旧画布便签一致） ---- */
@@ -1012,6 +1110,16 @@ export default function StickyTodoDock() {
       });
     },
     [debounceNote],
+  );
+
+  /** 行输入框失焦 → 立即结算（有未落盘改动时由那次落盘带结算标记） */
+  const onTodoLineBlur = useCallback(
+    (noteId: string) => {
+      if (!dirtyNotesRef.current.has(noteId) && !settlePendingRef.current.has(noteId)) return;
+      clearSettleTimer();
+      requestSettle(noteId);
+    },
+    [requestSettle],
   );
 
   /** Enter 新建一行：仅在本地插入空行（不落盘），待用户输入文字后由防抖/后续保存统一落盘。
@@ -1243,7 +1351,12 @@ export default function StickyTodoDock() {
     async (
       noteId: string,
       text: string,
-      schedule?: { start_time?: string; end_time?: string; reminder_minutes?: number[] },
+      schedule?: {
+        start_time?: string;
+        end_time?: string;
+        reminder_minutes?: number[];
+        location?: string;
+      },
     ): Promise<boolean> => {
       const pid = projectIdRef.current;
       const note = notesRef.current.find((n) => n.id === noteId);
@@ -1282,6 +1395,9 @@ export default function StickyTodoDock() {
             start_time: schedule?.start_time ?? null,
             end_time: schedule?.end_time ?? null,
             reminder_minutes: schedule?.reminder_minutes,
+            location: schedule?.location ?? null,
+            // 开庭为紧要事项：事件自动打红色标旗（priority=high）
+            priority: 'high',
           }),
         });
         const d = (await resp.json().catch(() => ({ success: false }))) as {
@@ -1371,6 +1487,7 @@ export default function StickyTodoDock() {
   const ops: StickyTodoOps = useMemo(
     () => ({
       onTodoText,
+      onTodoLineBlur,
       addLine,
       removeLine,
       toggle,
@@ -1385,6 +1502,7 @@ export default function StickyTodoDock() {
     }),
     [
       onTodoText,
+      onTodoLineBlur,
       addLine,
       removeLine,
       toggle,

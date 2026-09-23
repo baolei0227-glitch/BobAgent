@@ -2,7 +2,7 @@
  * team-run —— chat 内置「多智能体协作」编排器（宿主侧闭环）。
  *
  * 背景：Agent Teams（bob-team-mcp）已提供团队/成员/任务/质量门禁的完整编排原语，但入口是
- * 21 个 mcp__team__* 工具——主 agent 要自己串「建团队 → 规划 → 等用户确认 → 派任务 → 轮询 →
+ * 22 个 mcp__team__* 工具——主 agent 要自己串「建团队 → 规划 → 等用户确认 → 派任务 → 轮询 →
  * 回收」。这些裸工具现已**不再注入模型**，team_run 是模型侧的唯一入口（画布团队面板/观察节点已退役）。
  *
  * 本模块把这条链收敛为**一次工具调用**：主 agent 负责编排（给出 goal + 成员清单 + 任务 DAG），
@@ -37,7 +37,7 @@
 /** 成员分支/面板结构与前端共用（前端收敛分支卡片 + .md RMETA 持久化都读同一份定义） */
 import type { SubagentBranch, SubagentPanel, TeamChatEvent } from '@/lib/types';
 /** 团队 MCP 信道（就绪性检查 / 调用 / 解析）：与团队工作台 /api/team/* 共用同一份实现 */
-import { callTeamTool, ensureTeamReady } from '@/lib/chat/team-client';
+import { callTeamTool, ensureTeamReady, relayMemberNote, sendCaptainNote } from '@/lib/chat/team-client';
 /** 门禁裁决类型（与工具确认挂起容器同源：approved / denied / timeout 三分） */
 import type { ConfirmVerdict } from '@/lib/chat/confirm-pending';
 /** 多智能体门禁的过程级裁决 + 策略档位（与 tool_confirm 咨询点同源，见 approval.ts） */
@@ -97,6 +97,10 @@ export interface TeamRunDraft {
 
 export interface TeamRunOptions {
   goal: string;
+  /** 触发本次协作的**用户原始提问**（宿主从本轮对话里取，原样不加工）：随 team_plan 落进 draft →
+   *  approve 时写进 team_start 事件 meta，工作台的群聊流据此渲染右侧「我的发言」气泡。
+   *  刻意用原文而不是 goal：goal 是主 agent 转述过的目标，且已显示在 Run started 行里 */
+  questionText?: string;
   /** 兼容路径：显式给出的成员清单（单测/脚本直调）。与 tasks 同时非空时**跳过队长规划**，
    *  行为与既有逐位一致；正常 route 路径留空，成员由队长（captain）规划产出 */
   members?: TeamRunMemberSpec[];
@@ -150,6 +154,10 @@ const PER_RESULT_CAP = 4000;
 const TOTAL_CAP = 24000;
 /** 「群聊流」事件里的正文上限（成员产出摘要 / 成员间留言）：只作过程叙述，完整产出仍在汇总文本里 */
 const EVENT_TEXT_CAP = 600;
+/** 队长条目（点评 / 整合稿）的正文上限：比成员摘要长一些（要放得下整合稿），引擎侧另有 2000 硬上限 */
+const CAPTAIN_NOTE_TEXT_CAP = 1500;
+/** 队长条目「群里那句话」上限：一行口语，长了就不像人话（引擎侧另有 200 硬上限） */
+const CAPTAIN_LINE_CAP = 200;
 /** 队长追问复核的最大轮次（防无限对质烧上下文）：每轮 = 投递追问 → 等成员作答 → 再复核 */
 const MAX_FOLLOWUP_ROUNDS = 2;
 /** 单轮追问等待成员作答的上限（毫秒）：成员被消息唤醒后通常数十秒内回应 */
@@ -237,9 +245,10 @@ function memberMaps(panel: Record<string, unknown>): {
 
 /** 宿主中转：把成员产出里声明的留言投递到目标成员邮箱（fresh = 本轮新完成的任务 id）。
  *  成员是独立 /api/chat 会话、拿不到 mcp__team__* 工具，故「声明 → 解析 → 投递」两端都由宿主代理；
- *  投递走 msg_send——其 from 被 bob-team-mcp 硬编码为 captain，故正文加前缀标明真实来源。
+ *  投递走 msg_send + from_member——引擎按它写邮箱来源前缀（成员侧语义不变），并在事件流里把真实来源
+ *  记进 meta.actor（from 仍为 captain），故工作台群聊流显示的是成员 → 成员。
  *  返回 delivered 为**成功投递**的明细（真实来源成员名 → 目标成员名 + 留言原文），
- *  供「群聊流」事件外推（from 用真实来源而非 captain）。 */
+ *  供会话内「群聊流」事件外推（from 用真实来源而非 captain）。 */
 async function relayMemberMessages(
   teamId: string,
   collected: Array<{ task: string; assignee?: string; result?: unknown }>,
@@ -268,11 +277,9 @@ async function relayMemberMessages(
       }
       for (const to of targets) {
         try {
-          await callTeamTool('msg_send', {
-            team_id: teamId,
-            to,
-            text: `〔成员「${selfName}」留言〕${msg.text}`,
-          });
+          // 引擎侧按 from_member 自行写来源前缀（邮箱正文不变），事件流则记真实来源（meta.actor）——
+          // 故宿主这里不再手写「〔成员「X」留言〕」，工作台群聊流才能显示「X → Y」而非「captain → Y」。
+          await relayMemberNote(teamId, selfName, to, msg.text);
           relayed++;
           delivered.push({ from: selfName, to: idToName.get(to) ?? to, text: msg.text });
         } catch (e) {
@@ -332,7 +339,7 @@ function toProgress(
   const failed = tasks.filter((t) => t.status === 'failed').length;
   const all = ctx.withCaptain ? [captainBranch(ctx), ...rows] : rows;
   return {
-    teamId: String(panel.teamId ?? ''),
+    teamId: String(panel.teamId ?? '') || ctx.teamId,
     goal: ctx.goal,
     done,
     total: tasks.length,
@@ -408,6 +415,13 @@ interface TeamRunCtx {
   maps: ReturnType<typeof memberMaps>;
   /** 最近一次引擎面板（重发快照 / 追问基线时无需再查一次 team_status） */
   lastPanel: Record<string, unknown>;
+  /**
+   * 本次 run 的团队 id：建队成功即赋值（早于 approve）。
+   * 面板要等 approve 后才有 teamId（建队时的面板快照里没有这个字段），若只认面板，那么
+   * 「待批准 → 未批准收口」的 run **永远不会**把团队绑到节点上 —— 前端一直停在发起界面，
+   * 用户看到的就是「协作明明发了，团队面板却还是空的」。故在 openTeam 建队成功后立刻写入本字段并补发一帧。
+   */
+  teamId: string;
   last: TeamRunProgress | null;
   captainState: SubagentBranch['state'];
   captainSubject: string;
@@ -438,6 +452,7 @@ function createTeamRunCtx(
     relayWarnings: [],
     maps: { nameToId: new Map(), idToName: new Map() },
     lastPanel: {},
+    teamId: '',
     last: null,
     captainState: 'running',
     captainSubject: 'Planning',
@@ -581,6 +596,75 @@ function buildMemberDigest(
   return blocks.length > 0 ? blocks.join('\n\n') : '（未回收到任何已完成任务的产出。）';
 }
 
+/** 队长的「派发」条目正文：谁做什么、依赖什么（成员名与任务标题保持原样，固定文案用英文） */
+function buildDispatchText(members: TeamRunMemberSpec[], tasks: TeamRunTaskSpec[]): string {
+  const lines = [
+    `Dispatched ${tasks.length} task${tasks.length === 1 ? '' : 's'} to ${members.length} member${
+      members.length === 1 ? '' : 's'
+    }:`,
+  ];
+  for (const t of tasks) {
+    const who = t.assignee ? `${t.assignee} — ` : '';
+    const deps = t.dependencies && t.dependencies.length > 0 ? ` (after: ${t.dependencies.join(', ')})` : '';
+    lines.push(`- ${who}${t.subject}${deps}`);
+  }
+  return lines.join('\n');
+}
+
+/** 取「一句话」（压平空白、截到第一个句末标点）：队长口语行与前端回退共用同一口径 */
+function oneLiner(text: string): string {
+  const flat = (text || '').replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+  const m = flat.match(/^[^。！？.!?]*[。！？.!?]/);
+  const sentence = (m ? m[0] : flat).trim();
+  return sentence.length > CAPTAIN_LINE_CAP ? `${sentence.slice(0, CAPTAIN_LINE_CAP - 1)}…` : sentence;
+}
+
+/** 队长条目落地：写引擎事件流（落盘，刷新/重启后仍在）+ 同步外推进本轮会话流（chat 侧分支卡片）。
+ *  观测写入失败一律静默 —— 少一条队长条目，协作照常。
+ *  line = 群里那句「人话」（队长说了什么），text 仍是完整正文（展开可见）。 */
+async function emitCaptainNote(
+  ctx: TeamRunCtx,
+  teamId: string,
+  note: { stage: string; text: string; line?: string; memberId?: string; taskId?: string; targets?: string[] },
+): Promise<void> {
+  const text = note.text.slice(0, CAPTAIN_NOTE_TEXT_CAP);
+  const line = (note.line ?? '').trim().slice(0, CAPTAIN_LINE_CAP);
+  try {
+    await sendCaptainNote(teamId, { ...note, text, ...(line ? { line } : {}) });
+  } catch {
+    /* 观测写入失败不阻断编排 */
+  }
+  ctx.pendingEvents.push({
+    kind: 'captain',
+    at: Date.now(),
+    stage: note.stage,
+    text,
+    ...(line ? { line } : {}),
+    ...(note.memberId ? { memberId: note.memberId } : {}),
+    ...(note.taskId ? { taskId: note.taskId } : {}),
+    ...(note.targets && note.targets.length > 0 ? { targets: note.targets } : {}),
+  });
+}
+
+/** 队长逐成员点评（复核轮的 notes 字段）→ 每条一个 captain 条目，挂到对应成员 */
+async function emitCaptainReviewNotes(
+  ctx: TeamRunCtx,
+  teamId: string,
+  raw: Record<string, unknown> | null,
+): Promise<void> {
+  for (const n of parseCaptainNotes(raw)) {
+    const memberId = ctx.maps.nameToId.get(n.member) ?? '';
+    await emitCaptainNote(ctx, teamId, {
+      stage: 'review',
+      text: n.note,
+      line: `Reviewed ${n.member} — ${oneLiner(n.note)}`,
+      ...(memberId ? { memberId } : {}),
+      targets: [n.member],
+    });
+  }
+}
+
 interface CaptainPlanOutcome {
   ok: boolean;
   error?: string;
@@ -673,13 +757,37 @@ async function openTeam(
     : [];
 
   const name = goal.length > 24 ? `${goal.slice(0, 24)}…` : goal;
+  // 兜底作废凭据：建队之后、approve 成功之前，任何异常退出都必须把草案作废（见 catch）。
+  // 少了这层，任何一处意外抛出都会在引擎里留下永不推进的 planning 团队：成员/任务不物化，
+  // 工作台只剩一个空壳（「只有队长第一步、后续全空」即由此而来），且它会一直被面板订阅空转。
+  let createdTeamId: string | null = null;
+  let approved = false;
   try {
     // ① 建团队
-    const created = await callTeamTool('team_create', { name, goal });
+    // project_id（本节点所属项目）：随团队落盘 → 成员会话带项目上下文执行，产物落进项目
+    // homework/（群聊流的文件卡片即可用 project 方式打开，也能在项目侧栏看到）
+    const created = await callTeamTool('team_create', {
+      name,
+      goal,
+      ...(opts.projectId ? { project_id: opts.projectId } : {}),
+    });
     const teamId = String(created.team_id ?? '');
     if (!teamId) throw new Error('team_create 未返回 team_id');
+    createdTeamId = teamId;
+    // 建队即绑定：立刻把 teamId 写进上下文并补发一帧，前端据此把团队登记到本节点。
+    // 不能等 approve 后由面板带回 —— 「待批准 → 拒绝/超时」的 run 到不了那一步，团队会永远绑不上节点，
+    // 团队面板就停在发起界面（协作已经发出，面板却看不到任何东西）。
+    ctx.teamId = teamId;
+    emitCurrent(ctx);
     // ② 规划（成员清单 + 任务 DAG 由队长阶段① 给出，宿主不做二次规划）
-    await callTeamTool('team_plan', { team_id: teamId, goal, members, tasks });
+    await callTeamTool('team_plan', {
+      team_id: teamId,
+      goal,
+      members,
+      tasks,
+      // 用户原始提问随 draft 走（approve 时进 team_start meta）：回看历史 run 也不会错位
+      ...(opts.questionText ? { question: opts.questionText } : {}),
+    });
     // ③ 下发「成员间留言」协议（用广播 to:'all'，且必须在 approve 之前入箱）
     //    - approve 拿到锁后立即 `void pump()` 异步调度，协议晚于 approve 就可能赶不上成员首个任务
     //      （而多数团队成员只有一个任务）→ 故先入箱；
@@ -716,8 +824,10 @@ async function openTeam(
       if (verdict !== 'approved') {
         try {
           await callTeamTool('team_discard', { team_id: teamId });
-        } catch {
-          /* 作废失败不致命：未 approve 的草案不会启动调度器 */
+        } catch (e) {
+          // 作废失败不阻断收口，但必须留痕：否则引擎里留一个 planning 僵尸团队，
+          // 现象是「工作台只有一个空壳团队、面板一直空转」，排查时无从下手。
+          console.warn('[team-run] team_discard 失败，草案可能残留在 planning:', e);
         }
         return {
           ok: false,
@@ -729,7 +839,20 @@ async function openTeam(
       }
     }
     // ⑤ 批准并启动——approve 会物化成员/任务并启动调度器（异步推进）
+    // 队长「派发」条目**必须在 approve 之前**落盘：approve 内部会 void pump() 唤醒成员，
+    // 而 pump 与随后的 await 之间存在竞态——实测成员开工事件会抢在派发之前几毫秒（群聊流读成
+    // 「成员已开工 → 队长才派活」）。此处门禁已放行（denied/timeout 在上文已 return），
+    // 故「已批准 → 队长派发 → 协作启动 → 成员开工」顺序成立。观测写入失败静默，不阻断协作。
+    await emitCaptainNote(ctx, teamId, {
+      stage: 'dispatch',
+      text: buildDispatchText(members, tasks),
+      line: `Split the work into ${tasks.length} task${tasks.length === 1 ? '' : 's'} across ${members.length} member${
+        members.length === 1 ? '' : 's'
+      }.`,
+      targets: members.map((m) => m.name),
+    });
     await callTeamTool('team_approve', { team_id: teamId });
+    approved = true; // 已 approve：此后不再走兜底作废（作废会打断正在推进的调度器）
     ctx.deadline = Date.now() + ctx.budgetMs;
     // ⑥ 取面板拿到 成员名↔id 映射（approve 只回计数；成员 id 是中转投递与追问的落点键）
     ctx.lastPanel = await callTeamTool('team_status', { team_id: teamId });
@@ -744,6 +867,16 @@ async function openTeam(
     });
     return { ok: true, teamId };
   } catch (e) {
+    // 兜底作废：建了队但还没 approve 就异常退出（门禁通道异常、上游抛错、超时等），
+    // 一律作废草案 —— 未 approve 的草案不会启动调度器，作废它零副作用，却能保证引擎里
+    // 不留 planning 僵尸团队（否则工作台会一直列出/订阅一个永远不会产出内容的空壳）。
+    if (createdTeamId && !approved) {
+      try {
+        await callTeamTool('team_discard', { team_id: createdTeamId });
+      } catch (e2) {
+        console.warn('[team-run] 异常收口时 team_discard 失败，草案可能残留在 planning:', e2);
+      }
+    }
     return { ok: false, summary: `多智能体协作启动失败：${e instanceof Error ? e.message : String(e)}` };
   }
 }
@@ -807,6 +940,21 @@ function parseCaptainFollowups(
   return out.slice(0, 3);
 }
 
+/** 从队长复核输出里取出逐成员点评（notes: member + note）；模型偶尔不给则返回空数组（不阻断复核） */
+function parseCaptainNotes(
+  raw: Record<string, unknown> | null,
+): Array<{ member: string; note: string }> {
+  if (!raw || !Array.isArray(raw.notes)) return [];
+  const out: Array<{ member: string; note: string }> = [];
+  for (const item of raw.notes) {
+    const o = (item ?? {}) as Record<string, unknown>;
+    const member = typeof o.member === 'string' ? o.member.trim() : '';
+    const note = typeof o.note === 'string' ? o.note.trim() : '';
+    if (member && note) out.push({ member, note });
+  }
+  return out;
+}
+
 /** 把队长的追问投递到目标成员邮箱（成员名 → 成员 id），并外推 relay 事件。
  *  baseline = 投递前已有的事件 id 集合：追问作答只认之后新出现的事件。 */
 async function askFollowups(
@@ -828,7 +976,8 @@ async function askFollowups(
       continue;
     }
     try {
-      await callTeamTool('msg_send', { team_id: teamId, to: id, text: `〔队长追问〕${f.question}` });
+      // 发送方已是 captain：不再手写「〔队长追问〕」前缀（事件流按 from=Captain 显示，前缀只是噪音）
+      await callTeamTool('msg_send', { team_id: teamId, to: id, text: f.question });
       targetIds.add(id);
       lines.push(`- 已追问 ${f.member}：${f.question}`);
       ctx.pendingEvents.push({
@@ -1037,6 +1186,8 @@ export async function runTeam(opts: TeamRunOptions): Promise<TeamRunOutcome> {
         break;
       }
       const raw = parseCaptainJson(res.text);
+      // 队长逐成员点评：无论本轮走追问还是收尾，先把点评落进事件流（工作台群聊流里「队长评价了谁」）
+      await emitCaptainReviewNotes(ctx, teamId, raw);
       const final = raw && typeof raw.final === 'string' ? raw.final.trim() : '';
       if (final) {
         finalText = final;
@@ -1073,6 +1224,16 @@ export async function runTeam(opts: TeamRunOptions): Promise<TeamRunOutcome> {
       );
       emitCurrent(ctx);
     }
+  }
+
+  // 队长整合稿：与 team_done 同为收口条目，但必须排在它**之前**——否则主列里「Run finished」
+  // 会出现在队长总结上方，读起来像协作先结束、队长后补话。
+  if (finalText) {
+    await emitCaptainNote(ctx, teamId, {
+      stage: 'synthesis',
+      text: finalText,
+      line: `Wrapped up — merged ${collected.length} member output${collected.length === 1 ? '' : 's'} into the final answer.`,
+    });
   }
 
   // 「群聊流」收口事件：任务终态统计（前端据此在流末尾渲染协作结束）

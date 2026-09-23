@@ -104,6 +104,19 @@ export interface SubagentPanel {
 }
 
 /**
+ * 成员产出的一份文件（引擎随 member_done 事件 meta.artifacts 落盘，来自 /api/chat 的 output_files 帧）。
+ * 与 OutputFileItem 同形但只保留呈现所需字段：用户在群聊流里点开文件卡片时，按 path 形态决定打开方式
+ * （项目内相对路径走 project，`~/` 与绝对路径走 local —— 成员会话无项目上下文时产物落在沙箱，即后者）。
+ */
+export interface TeamArtifactItem {
+  path: string;
+  name: string;
+  size: number;
+  kind?: string;
+  source?: string;
+}
+
+/**
  * 多智能体协作「群聊流」事件：team_run 编排期间由宿主（lib/chat/team-run.ts）外推的过程叙述，
  * 经 SSE subagent_events 帧送达前端，渲染成「多角色消息流」（形态 A 呈现层）。
  *
@@ -115,15 +128,24 @@ export interface SubagentPanel {
  */
 export type TeamChatEvent =
   /** 团队启动：主 agent 已给出编排（成员 + 任务 DAG）并获批，调度器开始推进 */
-  | { kind: 'team_start'; at: number; goal: string; memberNames: string[]; taskCount: number }
+  | { kind: 'team_start'; at: number; goal: string; memberNames: string[]; taskCount: number; /** 触发本轮协作的用户原文（宿主经 team_plan 带进引擎 → team_start 事件 meta）：群聊流据此渲染右侧「我的发言」气泡；旧数据 / 非交互路径可能没有 */ question?: string }
   /** 成员被任务唤醒，开始执行（taskId：被唤醒时认领的任务；消息唤醒等无任务场景为空） */
   | { kind: 'member_start'; at: number; memberId: string; name: string; subject?: string; taskId?: string }
-  /** 成员任务完成（summary 为剥离留言块后的产出正文，已截断；全文在 TeamDetail.results[taskId]） */
-  | { kind: 'member_done'; at: number; memberId: string; name: string; subject?: string; summary?: string; taskId?: string }
+  /** 成员任务完成（summary 为剥离留言块/发言行后的产出正文，已截断；全文在 TeamDetail.results[taskId]；
+   *  say 为成员自己写的「群聊发言」（口语一句话，缺失时前端回退动作句）·steps 为工具调用次数；
+   *  artifacts 为本轮落盘的文件，群聊流据此把「成员产出的文档」像发文件一样贴在群里） */
+  | { kind: 'member_done'; at: number; memberId: string; name: string; subject?: string; summary?: string; say?: string; steps?: number; taskId?: string; artifacts?: TeamArtifactItem[] }
   /** 成员任务失败 */
   | { kind: 'member_failed'; at: number; memberId: string; name: string; subject?: string; error?: string; taskId?: string }
   /** 成员间留言投递（宿主中转成功后的实际投递；from 为真实来源成员名，to 为目标成员名） */
   | { kind: 'relay'; at: number; from: string; to: string; text: string }
+  /**
+   * 队长（宿主编排会话）的过程发言：派发任务 / 逐成员点评 / 点名追问 / 最终整合稿。
+   * 由宿主经引擎 captain_note 工具落盘进 <teamId>.events.jsonl，故刷新后仍在；stage 为展示分组
+   * （dispatch / review / followup / synthesis），targets 是被点名的成员名（渲染「→ 名」chip）。
+   * line 是群里那句「人话」（一行口语摘要），text 是完整正文（展开可见；line 缺失时前端回退 text 首句）。
+   */
+  | { kind: 'captain'; at: number; stage: string; text: string; line?: string; memberId?: string; name?: string; targets?: string[]; taskId?: string }
   /** 其他状态迁移（成员增减、搁浅接管/冷恢复、人工重试、计划/质量链）：团队工作台读引擎事件流时才有 */
   | { kind: 'system'; at: number; text: string }
   /** 协作收口（全部任务终态或超出时间预算） */
@@ -152,6 +174,8 @@ export interface TeamSummary {
   taskCount: number;
   doneCount: number;
   failedCount: number;
+  /** 草案仍在（planning 且 draft 未清空）：工作台据此列出可恢复的「未完成草案」 */
+  planDraft: boolean;
 }
 
 /** 团队成员（status: idle/busy/parked/offline） */
@@ -179,6 +203,16 @@ export interface TeamTaskView {
   progressText?: string;
   attempts?: number;
   lastActivityAt?: number;
+  /** 开始执行时刻（认领时写入）：用于分配矩阵/时间线的耗时与区间 */
+  claimedAt?: number;
+  /** 终态时刻（done/failed 写入） */
+  finishedAt?: number;
+  /**
+   * 终态传播标记：非空表示该 failed 是「上游失败导致」而非自身执行失败，值为致败依赖 id。
+   * 引擎侧权威判定（见 bob-team-mcp propagateFailedDeps）——UI 的 blocked 标识与停摆横幅以此为准，
+   * 不要用「deps 含 failed」在前端自行推断，否则与引擎口径分叉。
+   */
+  blockedBy?: string[];
   error?: string;
   qualityStage?: string;
 }
@@ -208,6 +242,18 @@ export interface TeamEventItem {
   meta?: Record<string, unknown>;
 }
 
+/**
+ * 计划草案的呈现层投影（审批之前 / 草案被丢弃后才有内容）。
+ * 此刻成员与任务尚未物化（approve 才创建），若面板只看 members/tasks 就只剩空壳——
+ * 工作台据草案渲染「计划中的成员与任务」与用户原始提问（question）。
+ */
+export interface TeamPlanDraftView {
+  /** 触发本次协作的用户原始提问（宿主经 team_plan 带进引擎） */
+  question?: string;
+  members: Array<{ name: string; role?: string; identity?: string }>;
+  tasks: Array<{ subject: string; assignee?: string; dependencies: string[] }>;
+}
+
 /** 团队详情（工作台主视图一次拉全；results 为成员产出全文，只在拉全量时给） */
 export interface TeamDetail {
   teamId: string;
@@ -217,9 +263,13 @@ export interface TeamDetail {
   createdAt: number;
   updatedAt: number;
   approvedAt?: number | null;
+  /** 计划草案（未批准 / 已丢弃时唯一可读的分工）；成员已物化时通常无此项 */
+  planDraft?: TeamPlanDraftView;
   terminal: boolean;
   /** 当前可认领（依赖已满足）的任务 id */
   ready: string[];
+  /** 心跳接管阈值（引擎 STALE_MS 下发）：工作台接管倒计时据此计算，避免 UI 侧硬编码漂移 */
+  staleMs?: number;
   members: TeamMemberView[];
   tasks: TeamTaskView[];
   messages: TeamMessageView[];
@@ -260,7 +310,7 @@ export interface ChatMessage {
   timestamp?: string;
   /** 该条回复实际使用的模型 id（auto 模式每轮可能不同；custom 模型为完整配置串如 custom:openai:gpt-4o） */
   modelId?: string;
-  /** 该条回复实际使用的思考等级（auto 模式按任务难度推断，每轮可能不同） */
+  /** 该条回复实际使用的思考等级（跟随节点设置，与模型无关） */
   thinkingLevel?: ThinkingLevel;
   /** P2 轨迹：本轮任务的轨迹事件日志 id（对应 .trajectory/<nodeId>/<taskId>.jsonl） */
   taskId?: string;

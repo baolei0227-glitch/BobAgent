@@ -12,7 +12,6 @@
 import { PROVIDER_PRESETS, type ProviderConfig } from '@/lib/types';
 import { readSettingsFromFile } from '@/lib/settings-server';
 import type { TaskModelSettings } from '@/lib/settings';
-import { analyzeTask } from '@/lib/model-matcher';
 
 export interface ResolvedModel {
   model: string;
@@ -177,63 +176,4 @@ export async function resolveOutcomeModel(): Promise<ResolvedModel | null> {
 
   // 4) 兜底：第一个可用厂商
   return resolveProviderFallback(providers);
-}
-
-/* ==================== P3-3b2：服务端轻量 Auto 选路（供 lite / 外部 HTTP 客户端） ==================== */
-
-/** 名字级"潜在思考模型"启发（与前端 AvailableModel.spec 相比仅作粗筛） */
-const THINKING_MODEL_NAME_HINT = /reason|r1|think|thinking|k2|z1|v4|o[134]|deepseek|claude/i;
-
-export interface PoolItem {
-  provider?: string;
-  modelId: string;
-}
-
-/**
- * 按任务类型对候选池排序（纯函数，可单测）：
- *  - reasoning/analysis/long-context 等需深度思考的任务 → 名字含思考标志的模型前置；
- *  - 其余（conversation/coding 常规）→ 保持池序（用户偏好顺序，等价静态首选）。
- * 分类失败或文本为空 → 保持原序（保守：不因分类错乱打乱用户池顺序）。
- */
-export function rankPoolForTaskType(pool: PoolItem[], userText: string): PoolItem[] {
-  if (!Array.isArray(pool) || pool.length <= 1) return pool;
-  const text = (userText || '').trim();
-  let needThinking = false;
-  try {
-    const type = analyzeTask(text).type;
-    needThinking = type === 'reasoning' || type === 'analysis' || type === 'long-context';
-  } catch {
-    /* 分类异常 → 保序 */
-  }
-  if (!needThinking) return pool;
-  const score = (it: PoolItem) => (THINKING_MODEL_NAME_HINT.test(it.modelId) ? 1 : 0);
-  return [...pool]
-    .map((it, idx) => ({ it, idx, s: score(it) }))
-    .sort((a, b) => (b.s - a.s) || (a.idx - b.idx))
-    .map((x) => x.it);
-}
-
-/**
- * 服务端 Auto 任务类型选路（P3-3b2）：
- *  - 仅当 settings.chatModel.auto 未显式关闭时启用（与前端开关语义一致）；
- *  - 取最后一条 user 文本做任务分类 → rankPoolForTaskType 排序 → 依次 resolveProviderModel 解析；
- *  - 全部不可解析或候选池为空 → null（调用方回退 resolveTaskModel 静态链路）。
- */
-export async function resolveAutoTaskModel(
-  messages: Array<{ role?: string; content?: unknown }>,
-): Promise<ResolvedModel | null> {
-  if (!Array.isArray(messages) || messages.length === 0) return null;
-  const settings = await readSettingsFromFile();
-  if (settings.chatModel?.auto === false) return null; // 开关关闭 → 交给静态链路
-  const pool = Array.isArray(settings.chatModel?.pool) ? (settings.chatModel.pool as PoolItem[]) : [];
-  if (pool.length === 0) return null;
-
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-  const text = (typeof lastUser?.content === 'string' ? lastUser.content : '').slice(0, 2000);
-  for (const item of rankPoolForTaskType(pool, text)) {
-    if (!item.modelId || !item.provider) continue;
-    const resolved = await resolveProviderModel(`${item.provider}:${item.modelId}`);
-    if (resolved) return resolved;
-  }
-  return null;
 }

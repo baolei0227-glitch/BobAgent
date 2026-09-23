@@ -14,7 +14,7 @@
 import { promises as fs, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
-import { defaultSettings, normalizeCustomThemes, type AppSettings } from './settings';
+import { defaultSettings, normalizeCustomThemes, DEFAULT_QUICK_PROMPTS, type AppSettings } from './settings';
 import { resolveAppRoot } from './app-root';
 import { encryptSettings, decryptSettings, hasPlainSecrets } from './secrets';
 import { sanitizeBaseUrl } from './types';
@@ -204,6 +204,16 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
       const missing = DEFAULT_MCP_SERVERS.filter((p) => !existing.has(p.id));
       if (missing.length > 0) {
         merged.mcpServers = [...merged.mcpServers, ...missing];
+      }
+    }
+
+    // 出厂快捷指令补全（同 MCP 口径）：已保存过 quickPrompts 的老配置里没有新增的出厂条目，
+    // 缺失即补到末尾，不覆盖、不重排用户自己的条目（用户新增/改名的条目一律保持原样）。
+    if (Array.isArray(merged.quickPrompts)) {
+      const existingQuick = new Set(merged.quickPrompts.map((q) => q.id));
+      const missingQuick = DEFAULT_QUICK_PROMPTS.filter((q) => !existingQuick.has(q.id));
+      if (missingQuick.length > 0) {
+        merged.quickPrompts = [...merged.quickPrompts, ...missingQuick];
       }
     }
 

@@ -8,12 +8,22 @@ import {
   deleteCalendarAccount,
   listSyncLogs,
   addSyncLog,
+  type CalendarAccountData,
 } from '@/lib/db';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { encryptSecret } from '@/lib/secrets';
 
 /** 无当前项目时的占位 project_id（日历与项目独立） */
 const GLOBAL_PROJECT_ID = '__global__';
+
+/** 账户更新载荷：server_url / calendar_url 允许 null（用于清空字段，落库为 NULL） */
+type AccountUpdateInput = Partial<Omit<CalendarAccountData, 'project_id' | 'server_url' | 'calendar_url'>> & {
+  server_url?: string | null;
+  calendar_url?: string | null;
+};
+
+/** updateCalendarAccount 的入参类型（其声明不允许 null 清空，故调用处做一次精确转换） */
+type AccountUpdateParam = Partial<Omit<CalendarAccountData, 'project_id'>>;
 
 /** 获取全局日历数据库（账户与项目完全独立） */
 async function getDb() {
@@ -51,8 +61,8 @@ export async function GET(req: NextRequest) {
     }));
     const logs = await listSyncLogs(db, null, undefined, 30);
     return NextResponse.json({ ok: true, accounts: safe, logs });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'List failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'List failed' }, { status: 500 });
   }
 }
 
@@ -96,8 +106,8 @@ export async function POST(req: NextRequest) {
     });
     await addSyncLog(db, accountId, projectId, 'info', `Account "${name}" created`);
     return NextResponse.json({ ok: true, account_id: accountId });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Create failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Create failed' }, { status: 500 });
   }
 }
 
@@ -112,7 +122,7 @@ export async function PUT(req: NextRequest) {
     const account = await getCalendarAccount(db, accountId);
     if (!account) return NextResponse.json({ ok: false, error: 'account not found' }, { status: 404 });
 
-    const updates: Record<string, any> = {};
+    const updates: AccountUpdateInput = {};
     if (body.name !== undefined) updates.name = String(body.name).trim();
     if (body.username !== undefined) updates.username = String(body.username).trim();
     if (body.password !== undefined && body.password !== '') {
@@ -123,11 +133,11 @@ export async function PUT(req: NextRequest) {
     if (body.read_only !== undefined) updates.read_only = !!body.read_only;
     if (body.enabled !== undefined) updates.enabled = !!body.enabled;
 
-    await updateCalendarAccount(db, accountId, updates);
+    await updateCalendarAccount(db, accountId, updates as AccountUpdateParam);
     await addSyncLog(db, accountId, account.project_id, 'info', 'Account updated');
     return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Update failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Update failed' }, { status: 500 });
   }
 }
 
@@ -143,8 +153,8 @@ export async function DELETE(req: NextRequest) {
       await addSyncLog(db, accountId, account.project_id, 'info', 'Account removed');
     }
     return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'Delete failed' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error && e.message ? e.message : 'Delete failed' }, { status: 500 });
   }
 }
 

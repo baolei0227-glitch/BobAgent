@@ -221,11 +221,18 @@ async function computeFileHash(filePath: string): Promise<string> {
 // 云端 STT：OpenAI 兼容 multipart 转写
 // ============================================================
 
+/** OpenAI 兼容转写响应（未经校验，字段可能缺失） */
+interface TranscriptResponse {
+  text?: string;
+  result?: string;
+  transcription?: Array<{ text?: string }>;
+}
+
 /** 解析 OpenAI 兼容转写响应：优先 text，其次 transcription 数组 */
-function extractTranscript(json: any): string {
+function extractTranscript(json: TranscriptResponse): string {
   if (typeof json?.text === 'string') return json.text;
   if (Array.isArray(json?.transcription)) {
-    return json.transcription.map((t: any) => t?.text || '').join('\n');
+    return json.transcription.map((t) => t?.text || '').join('\n');
   }
   if (typeof json?.result === 'string') return json.result;
   throw new Error('转写响应格式无法解析');
@@ -285,7 +292,7 @@ async function wsTranscribeChunk(stt: SettingsStt, wavChunk: string): Promise<st
       'X-Api-Connect-Id': randomUUID(),
       ...(isPlan ? { 'X-Api-Request-Id': randomUUID(), 'X-Api-Sequence': '-1' } : {}),
     };
-    let ws: any;
+    let ws: InstanceType<typeof Ws>;
     try {
       ws = new Ws(wsUrl, { headers: wsHeaders });
     } catch (e) {
@@ -413,9 +420,9 @@ async function cloudTranscribe(
     if (!resp.ok) {
       throw new Error(`${preset.label} HTTP ${resp.status}: ${raw.slice(0, 500)}`);
     }
-    let json: any;
+    let json: TranscriptResponse;
     try {
-      json = JSON.parse(raw);
+      json = JSON.parse(raw) as TranscriptResponse;
     } catch {
       throw new Error(`${preset.label} 返回非 JSON: ${raw.slice(0, 200)}`);
     }

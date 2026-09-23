@@ -45,7 +45,7 @@ async function toolReadTodo(args: Record<string, unknown>): Promise<string> {
 
     // 基础条件：scope='all'，即 (project_id = current OR scope = 'global')
     const conds: string[] = [`(project_id = ? OR scope = 'global')`];
-    const params: any[] = [project.id];
+    const params: (string | number)[] = [project.id];
 
     // 时间过滤：只对有 start_time 的事件生效；无时间项始终返回（通过 OR start_time IS NULL 引入）
     if (rangeStart && rangeEnd) {
@@ -565,12 +565,11 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
     const projectRoot = await getProjectRootPath();
     const stickyDir = join(projectRoot, 'sticky-notes');
     const stickyFile = join(stickyDir, 'sticky-notes.json');
-    const fs = require('fs/promises') as typeof import('fs/promises');
 
     // 读取现有便签（文件不存在时视为空数组）
     let notes: Array<Record<string, unknown>> = [];
     try {
-      const raw = await fs.readFile(stickyFile, 'utf-8');
+      const raw = await readFile(stickyFile, 'utf-8');
       const data = JSON.parse(raw);
       if (Array.isArray(data?.notes)) notes = data.notes as Array<Record<string, unknown>>;
     } catch { /* 文件不存在或损坏 → 从空数组开始 */ }
@@ -635,10 +634,10 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
 
     // 原子写入：先写临时文件再 rename，避免半写状态。
     // 临时名唯一：与 /api/sticky-notes、迁移脚本并发写时不共用固定 tmp 名，避免互相踩踏（rename ENOENT）
-    await fs.mkdir(stickyDir, { recursive: true });
+    await mkdir(stickyDir, { recursive: true });
     const tmp = join(stickyDir, `.sticky-notes.json.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
-    await fs.writeFile(tmp, JSON.stringify({ notes: arrToWrite }, null, 2), 'utf-8');
-    await fs.rename(tmp, stickyFile);
+    await writeFile(tmp, JSON.stringify({ notes: arrToWrite }, null, 2), 'utf-8');
+    await rename(tmp, stickyFile);
 
     // 同步未完成待办索引（todo-index.json，与 /api/sticky-notes 写盘路径一致；
     // 失败仅影响 /inspect 的索引命中，回退全量扫描可自愈）

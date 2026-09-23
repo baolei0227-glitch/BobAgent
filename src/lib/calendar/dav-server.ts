@@ -696,8 +696,8 @@ async function handlePut(
         DAV: CALDAV_VERSION,
       },
     };
-  } catch (e: any) {
-    return badRequest(e?.message || 'Failed to create/update event');
+  } catch (e) {
+    return badRequest(e instanceof Error && e.message ? e.message : 'Failed to create/update event');
   }
 }
 

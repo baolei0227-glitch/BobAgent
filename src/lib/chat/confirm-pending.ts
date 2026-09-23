@@ -38,29 +38,35 @@ export const CONFIRM_TIMEOUT_MS = 600_000;
 /**
  * 登记一个待确认的工具调用。
  * 返回 confirmId 与 Promise：确认回传后 resolve 结果（approved/denied/timeout + edited）。
+ *
+ * signal：本轮请求的断开信号。必须传——客户端断线（用户点了停止、关页面、SSE 中断）时
+ * 前端再也回传不了确认，若此处只靠 CONFIRM_TIMEOUT_MS（10 分钟）兜底，调用方会白白挂住
+ * 十分钟（团队审批门禁会因此把草案永久留在 planning：成员/任务不物化、工作台一片空白）。
+ * 断开即按 timeout 收口，且立刻从挂起表摘除（避免留下再也无人认领的条目）。
  */
 export function createPendingConfirm(
   toolName: string,
   args: string,
   nodeId?: string,
+  signal?: AbortSignal,
 ): { confirmId: string; promise: Promise<ConfirmResult> } {
   const confirmId = `confirm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   const promise = new Promise<ConfirmResult>((resolve) => {
-    const timer = setTimeout(() => {
+    let timer: NodeJS.Timeout;
+    // 收口唯一出口：清定时器、摘挂起表、摘信号监听，再 resolve（幂等）
+    const settle = (result: ConfirmResult): void => {
+      clearTimeout(timer);
       pendingMap.delete(confirmId);
-      resolve({ verdict: 'timeout' }); // 超时未操作：记为 timeout（区别于用户明确拒绝）
-    }, CONFIRM_TIMEOUT_MS);
-    pendingMap.set(confirmId, {
-      toolName,
-      args,
-      nodeId,
-      resolve: (result: ConfirmResult) => {
-        clearTimeout(timer);
-        pendingMap.delete(confirmId);
-        resolve(result);
-      },
-      timer,
-    });
+      signal?.removeEventListener('abort', onAbort);
+      resolve(result);
+    };
+    const onAbort = (): void => settle({ verdict: 'timeout' });
+    timer = setTimeout(() => settle({ verdict: 'timeout' }), CONFIRM_TIMEOUT_MS); // 超时未操作：记为 timeout（区别于用户明确拒绝）
+    pendingMap.set(confirmId, { toolName, args, nodeId, resolve: settle, timer });
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
   return { confirmId, promise };
 }

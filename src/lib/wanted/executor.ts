@@ -34,6 +34,8 @@ export interface SummarizedTask {
   priority: 'high' | 'normal' | 'low';
   category_path?: string[];
   location?: string;
+  /** 提前提醒分钟数（如 [1440] = 提前 1 天）；未提及提醒时缺省，由 DB 走系统默认 30 分钟 */
+  reminder_minutes?: number[];
   description?: string;
   source_raw?: string;
 }
@@ -246,8 +248,8 @@ async function performDel(
     }
 
     return { ok: true, reply: `✅ 已删除 ${label} 的 ${count} 条日程。`, command: 'todo' };
-  } catch (e: any) {
-    return { ok: false, reply: `删除失败：${e?.message || '网络错误'}`, command: 'todo' };
+  } catch (e) {
+    return { ok: false, reply: `删除失败：${e instanceof Error && e.message ? e.message : '网络错误'}`, command: 'todo' };
   }
 }
 
@@ -273,8 +275,8 @@ async function runTodoDel(content: string, baseUrl?: string): Promise<ExecResult
         if (!data.success) {
           return { ok: false, reply: data.error || '查询失败', command: 'todo' };
         }
-        const events = (data.events || []) as any[];
-        const scheduledEvents = events.filter((e: any) => e.status === 'scheduled');
+        const events: Array<{ event_id?: string; status?: string }> = Array.isArray(data.events) ? data.events : [];
+        const scheduledEvents = events.filter((e) => e.status === 'scheduled');
         if (scheduledEvents.length === 0) {
           return { ok: true, reply: '没有可删除的日程。', command: 'todo' };
         }
@@ -287,8 +289,8 @@ async function runTodoDel(content: string, baseUrl?: string): Promise<ExecResult
           if (delResp.ok) deleted++;
         }
         return { ok: true, reply: `✅ 已删除全部 ${deleted} 条日程。`, command: 'todo' };
-      } catch (e: any) {
-        return { ok: false, reply: `删除失败：${e?.message || '网络错误'}`, command: 'todo' };
+      } catch (e) {
+        return { ok: false, reply: `删除失败：${e instanceof Error && e.message ? e.message : '网络错误'}`, command: 'todo' };
       }
     }
 
@@ -931,6 +933,8 @@ async function writeTodoToCalendarAndFile(
         description,
         source_raw: t.source_raw,
         category_path: t.category_path,
+        // 提前提醒（模型从「提前 N 天提醒」解析）：未提及 → undefined，由 DB 走系统默认 30 分钟
+        reminder_minutes: t.reminder_minutes,
         // 有时间 = 项目级事件；无时间 = 全局无时间清单项
         scope: (start ? 'project' : 'global') as 'project' | 'global',
         tags: [],
@@ -946,7 +950,7 @@ async function writeTodoToCalendarAndFile(
       return { ok: false, error: calData.error || 'Calendar import failed' };
     }
     return { ok: true, eventIds: Array.isArray(calData.event_ids) ? calData.event_ids : [] };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || 'Network error' };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error && e.message ? e.message : 'Network error' };
   }
 }

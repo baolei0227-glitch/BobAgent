@@ -203,7 +203,7 @@ async function migrateLegacyProjectUsage(db: DB): Promise<void> {
                       duration_ms, ttft_ms, est_cost, created_at
                FROM usage_log`,
             )
-            .all() as Array<Record<string, any>>;
+            .all() as Array<Record<string, unknown>>;
           for (const r of rows) {
             insert.run({
               projectId: p.id,
@@ -466,7 +466,20 @@ const BUCKET_SELECT = `
   SUM(est_cost) AS est_cost
 `;
 
-function rowToBucket(row: any, key: string): UsageBucket {
+/** 聚合查询行：SQL 别名字段（来自 BUCKET_SELECT；未经校验，字段可能缺失） */
+interface UsageBucketRow {
+  key: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cache_hit_tokens?: number;
+  cache_miss_tokens?: number;
+  total_tokens?: number;
+  calls?: number;
+  tasks?: number;
+  est_cost?: number | null;
+}
+
+function rowToBucket(row: UsageBucketRow, key: string): UsageBucket {
   return {
     key,
     promptTokens: row.prompt_tokens ?? 0,
@@ -503,7 +516,7 @@ export function queryUsageSummary(db: DB, opts: UsageWindow = {}): UsageSummary 
   const { clause, params } = buildWindowClause(opts);
 
   const totalsRow = db.prepare(`SELECT ${BUCKET_SELECT} FROM usage_log ${clause}`).get(params);
-  const totals = rowToBucket(totalsRow, 'total');
+  const totals = rowToBucket(totalsRow as UsageBucketRow, 'total');
 
   const byModel = db
     .prepare(`
@@ -513,7 +526,7 @@ export function queryUsageSummary(db: DB, opts: UsageWindow = {}): UsageSummary 
       ORDER BY total_tokens DESC
     `)
     .all(params)
-    .map((r: any) => rowToBucket(r, r.key));
+    .map((r) => rowToBucket(r as UsageBucketRow, (r as UsageBucketRow).key));
 
   const byDay = db
     .prepare(`
@@ -523,7 +536,7 @@ export function queryUsageSummary(db: DB, opts: UsageWindow = {}): UsageSummary 
       ORDER BY key ASC
     `)
     .all(params)
-    .map((r: any) => rowToBucket(r, r.key));
+    .map((r) => rowToBucket(r as UsageBucketRow, (r as UsageBucketRow).key));
 
   const byMonth = db
     .prepare(`
@@ -533,7 +546,7 @@ export function queryUsageSummary(db: DB, opts: UsageWindow = {}): UsageSummary 
       ORDER BY key ASC
     `)
     .all(params)
-    .map((r: any) => rowToBucket(r, r.key));
+    .map((r) => rowToBucket(r as UsageBucketRow, (r as UsageBucketRow).key));
 
   return { totals, byModel, byDay, byMonth };
 }

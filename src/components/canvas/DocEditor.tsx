@@ -22,7 +22,6 @@ import TableHeader from '@tiptap/extension-table-header';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import Highlight from '@tiptap/extension-highlight';
-import TextAlign from '@tiptap/extension-text-align';
 import { Markdown } from 'tiptap-markdown';
 import { createLowlight } from 'lowlight';
 import typescript from 'highlight.js/lib/languages/typescript';
@@ -86,7 +85,9 @@ import { extractQuestionnaires, QuestionnairePanel, type QuestionnaireBlock } fr
 import { ExportDocxDialog } from './ExportDocxDialog';
 import { ExportMenu } from './ExportMenu';
 import { convertMarkdownToDocx, type DocxExportConfig } from '@/lib/md-to-docx';
-import { MdAnnotationPanel, ANNOTATION_INTENTS, type MdAnnotation, type AnnotationIntent, type Revision, type RevisionRound, type RevisionOp } from './MdAnnotationPanel';
+import { MdAnnotationPanel, ANNOTATION_INTENTS, type MdAnnotation, type AnnotationIntent, type Revision, type RevisionRound, type RevisionOp, type ReviseReport } from './MdAnnotationPanel';
+import { MdSemanticNav } from './MdSemanticNav';
+import type { ConsistencyItem } from '@/lib/md-consistency/check';
 // track-changes：AI 修订注入为原生 ProseMirror mark（替代文本标记模拟），接受/拒绝/读取原生支持
 import { TrackChangesExtension } from 'tiptap-track-changes';
 // 块级拖拽把手为自研组件（BlockDragHandle），见文件底部定义；替换原 TipTap 第三方扩展
@@ -154,13 +155,55 @@ interface MarkdownStorage {
  *  用 ProseMirror Decoration（inline decoration）标记，避免直接改 DOM class 触发 mutation 重建。 */
 const mdAnnotationSelKey = new PluginKey<DecorationSet>('mdAnnotationHighlight');
 
+/** 建立「纯文本偏移 → doc 位置」映射（全文检索 / 批注锚定共用，避免各写一份而口径漂移）。
+ *  纯文本 = 各文本节点内容依次拼接，块边界与行内叶节点（硬换行/行内图片）各占 1 个 '\n'；
+ *  posOf[i] = 第 i 个字符的 doc 位置，-1 = 占位符（该位置不对应文档里的真实字符）。 */
+function buildTextPosMap(doc: PMNode): { text: string; posOf: number[] } {
+  let text = '';
+  const posOf: number[] = [];
+  let firstBlock = true;
+  doc.descendants((node, pos) => {
+    if (node.isText) {
+      const t = node.text ?? '';
+      for (let i = 0; i < t.length; i++) posOf.push(pos + i);
+      text += t;
+      return false;
+    }
+    if (node.isInline && node.isLeaf) {
+      // 行内叶节点（硬换行 / 行内图片）：不贡献文本，占 1 位防止匹配跨越它
+      text += '\n';
+      posOf.push(-1);
+      return false;
+    }
+    if (node.isTextblock) {
+      if (firstBlock) firstBlock = false;
+      else { text += '\n'; posOf.push(-1); }
+    }
+    return true;
+  });
+  return { text, posOf };
+}
+
 /** 统一批注定位（W3C TextQuoteSelector 思路，Hypothesis 同款）：
  *  ① from/to 精确位置（有效且该处文本与 quote 匹配）→ 直接用；
  *  ② 失效/无位置 → quote + prefix/suffix 上下文锚定（只匹配一处，杜绝重复文本跳错）；
  *  ③ 返回 null 表示无法定位（文档已被大幅改写）。
- *  高亮 / 卡片跳转 / AI 重写三处共用，消除此前"高亮全匹配、跳转第一处"的行为分裂。 */
-function findQuoteWithContext(fullText: string, quote: string, prefix?: string, suffix?: string): { from: number; to: number } | null {
+ *  高亮 / 卡片跳转 / AI 重写三处共用，消除此前"高亮全匹配、跳转第一处"的行为分裂。
+ *  位置换算走 buildTextPosMap：早前用「textBetween(…, '\n') 索引 + 1」近似，
+ *  块边界在文本里占 1 个字符、在文档位置里不存在，长文档下会累计偏移（跳错段）。 */
+function findQuoteWithContext(doc: PMNode, quote: string, prefix?: string, suffix?: string): { from: number; to: number } | null {
   if (!quote) return null;
+  const { text: fullText, posOf } = buildTextPosMap(doc);
+  /** 命中偏移 → doc 位置：取区间内首个/末个真实字符位置；整段都落在占位符上则丢弃 */
+  const toDocRange = (idx: number): { from: number; to: number } | null => {
+    const end = idx + quote.length;
+    let from = -1;
+    let to = -1;
+    for (let i = idx; i < end; i++) if (posOf[i] >= 0) { from = posOf[i]; break; }
+    for (let i = end - 1; i >= idx; i--) if (posOf[i] >= 0) { to = posOf[i] + 1; break; }
+    if (from < 0 || to < 0 || to <= from) return null;
+    return { from, to };
+  };
   const ctxLen = 32;
   let idx = fullText.indexOf(quote);
   while (idx >= 0) {
@@ -169,13 +212,19 @@ function findQuoteWithContext(fullText: string, quote: string, prefix?: string, 
     const ctxOk =
       (!prefix || before.includes(prefix) || prefix.includes(before)) &&
       (!suffix || after.includes(suffix) || suffix.includes(after));
-    if (ctxOk) return { from: idx + 1, to: idx + 1 + quote.length };
+    if (ctxOk) {
+      const r = toDocRange(idx);
+      if (r) return r;
+    }
     idx = fullText.indexOf(quote, idx + 1);
   }
   // 无上下文约束（旧批注无 prefix/suffix）→ 返回首个匹配作为兜底（保持原有行为）
   if (!prefix && !suffix) {
     const idx2 = fullText.indexOf(quote);
-    if (idx2 >= 0) return { from: idx2 + 1, to: idx2 + 1 + quote.length };
+    if (idx2 >= 0) {
+      const r = toDocRange(idx2);
+      if (r) return r;
+    }
   }
   return null;
 }
@@ -206,8 +255,7 @@ function resolveAnnotationPos(editor: Editor, a: MdAnnotation): { from: number; 
       return { from: a.from, to: a.to };
     }
   }
-  const fullText = doc.textBetween(0, docSize, '\n');
-  return findQuoteWithContext(fullText, a.quote, a.prefix, a.suffix);
+  return findQuoteWithContext(doc, a.quote, a.prefix, a.suffix);
 }
 
 const mdAnnotationSelPlugin = new Plugin<DecorationSet>({
@@ -723,6 +771,21 @@ function intentUnmet(intent: string | undefined, text: string, quote: string): b
   return false;
 }
 
+/** 「改了什么」的一句话回报：由改动前后的片段文本确定性生成（不额外调模型，零延迟、可审计）。
+ *  输入为差异段（delete 段 / insert 段），不是全文 —— 全文长度对用户没有信息量。 */
+function describePatch(oldText: string, newText: string, intent?: string): string {
+  const o = oldText.trim().length;
+  const n = newText.trim().length;
+  if (!o && n) return `Inserted ${n} chars`;
+  if (o && !n) return `Deleted ${o} chars`;
+  if (intent === 'shorten') return `Shortened ${o} → ${n} chars`;
+  if (intent === 'expand') return `Expanded ${o} → ${n} chars`;
+  if (intent === 'translate') return `Translated ${o} → ${n} chars`;
+  if (n > o) return `Rewrote ${o} → ${n} chars (+${n - o})`;
+  if (n < o) return `Rewrote ${o} → ${n} chars (−${o - n})`;
+  return `Rewrote ${o} chars (same length)`;
+}
+
 /** 渲染局部替换轮次：accepted/pending 应用 newText，rejected 保留 oldText（用 preContext 锚定位避免误替换他处） */
 function renderPatchRound(round: RevisionRound): string {
   const p = round.patch;
@@ -863,6 +926,8 @@ export function DocEditor({
   const [findMatches, setFindMatches] = useState<{ from: number; to: number }[]>([]);
   /** 当前定位的匹配索引（-1 = 无匹配/未定位） */
   const [findIndex, setFindIndex] = useState(-1);
+  /** 查找栏模式：text=关键词子串查找；semantic=按主题语义检索（AI 分块定位） */
+  const [findMode, setFindMode] = useState<'text' | 'semantic'>('text');
   const findInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
 
@@ -948,9 +1013,14 @@ export function DocEditor({
   /** widget 点击回调（经 ref 调用：高亮 effect 每次重建 widget 时总能拿到最新闭包） */
   const onAnnotationWidgetRef = useRef<(id: string, x: number, y: number) => void>(() => {});
   const [annotationPanelOpen, setAnnotationPanelOpen] = useState(false);
-  /** 右侧栏视图：annotations=批注列表；revisions=修订视图 */
-  const [annotationView, setAnnotationView] = useState<'annotations' | 'revisions'>('annotations');
+  /** 右侧栏视图：annotations=批注列表；revisions=修订视图；checks=一致性检查 */
+  const [annotationView, setAnnotationView] = useState<'annotations' | 'revisions' | 'checks'>('annotations');
   const [revising, setRevising] = useState(false);
+  /** 最近一轮「按批注修订」的结果回报（改了几条 / 失败的批注与原因）；null = 尚未跑过 */
+  const [reviseReport, setReviseReport] = useState<ReviseReport | null>(null);
+  /** 一致性检查结果（仅当前文档）；null = 尚未跑过。文档变更后自动清空（避免展示过期结论） */
+  const [consistencyItems, setConsistencyItems] = useState<ConsistencyItem[] | null>(null);
+  const [checking, setChecking] = useState(false);
   // 修订历史：每次「按批注修订」生成一轮，按轮次保留；activeRoundId 指向当前文档内容对应的轮
   const [revisionRounds, setRevisionRounds] = useState<RevisionRound[]>([]);
   const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
@@ -1109,6 +1179,8 @@ export function DocEditor({
 
   // 手动保存处理（通过 ref 供 editorProps.handleKeyDown 调用，赋值在 editor 创建之后）
   const handleSaveRef = useRef<() => void>(() => {});
+  // 打开查找替换栏（同上：handleKeyDown 闭包创建于首轮渲染，直接引用会锁死 editor=null 的旧值）
+  const openFindRef = useRef<() => void>(() => {});
 
   // 最新 nodeMdId（供 editorProps 的 handlePaste 读取，避免闭包拿到过期值）
   const nodeMdIdRef = useRef(nodeMdId);
@@ -1246,7 +1318,6 @@ export function DocEditor({
       TaskList,
       TaskItem.configure({ nested: true }),
       Highlight,
-      TextAlign.configure({ types: ['heading', 'paragraph'] }),
       MermaidCodeBlock.configure({ lowlight }),
       // 文档嵌入：`![[路径]]` → 嵌入卡片（markdown 双向序列化见扩展内）
       MdEmbed,
@@ -1295,21 +1366,11 @@ export function DocEditor({
         class: `doc-editor-content html-renderer${editable ? '' : ' doc-editor-readonly'}`,
         'data-placeholder': editable ? 'Start writing, or paste Markdown…' : '',
       },
-      handleKeyDown: (view, event) => {
+      handleKeyDown: (_view, event) => {
         // ⌘⇧F / Ctrl+Shift+F：打开编辑器内查找替换（⌘F 已专属全局搜索，见 CanvasFlow）
         if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') {
           event.preventDefault();
-          // 有选区时用选区文字预填
-          const sel = view.state.selection;
-          if (!sel.empty) {
-            const text = view.state.doc.textBetween(sel.from, sel.to, '\n').trim();
-            if (text) setFindQuery(text);
-          }
-          setFindOpen(true);
-          requestAnimationFrame(() => {
-            findInputRef.current?.focus();
-            findInputRef.current?.select();
-          });
+          openFindRef.current();
           return true;
         }
         // Cmd/Ctrl+S 手动保存
@@ -1420,11 +1481,12 @@ export function DocEditor({
     },
   });
 
-  /** 记录一次局部替换为修订轮次（逐条 AI 修改也进修订面板，可审阅/回退） */
-  const addPatchRound = useCallback((before: string, after: string, annotationId?: string) => {
-    if (!before || before === after) return;
+  /** 记录一次局部替换为修订轮次（逐条 AI 修改也进修订面板，可审阅/回退）。
+   *  intent 用于生成「改了什么」的回报文案（note）；返回新轮次 id（未产生轮次时 null），供调用方回报。 */
+  const addPatchRound = useCallback((before: string, after: string, annotationId?: string, intent?: string): string | null => {
+    if (!before || before === after) return null;
     const { oldText, newText, preLen } = diffPatch(before, after);
-    if (!oldText && !newText) return;
+    if (!oldText && !newText) return null;
     const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
     const revs: Revision[] = [];
     if (oldText) revs.push({ id: `rev-${stamp}-d`, type: 'delete', text: oldText, status: 'pending' });
@@ -1437,11 +1499,13 @@ export function DocEditor({
       revisions: revs,
       patch: { baseMd: before, oldText, newText, preContext },
       ...(annotationId ? { annotationId } : {}),
+      note: describePatch(oldText, newText, intent),
     };
     setRevisionRounds((prev) => [...prev, round]);
     // 标记"刚就地应用的改动"：该轮设为活动轮会触发整篇重建，重建后据此把视口停回改动处
     justAppliedAnchorRef.current = newText || oldText;
     setActiveRoundId(round.id);
+    return round.id;
   }, []);
 
   // ===== 批注 + 修订 sidecar 读写 =====
@@ -1662,8 +1726,8 @@ export function DocEditor({
   const [rewritingId, setRewritingId] = useState<string | null>(null);
 
   /** 单条重写核心：调 AI 改写 quote 并替换（进度由调用方管理）；替换记录为修订轮次。
-   *  返回 { ok } 成功 / { ok:false, reason } 失败原因（可展示给用户）。 */
-  const rewriteSingle = useCallback(async (a: MdAnnotation): Promise<{ ok: boolean; reason?: string }> => {
+   *  返回 { ok, roundId } 成功 / { ok:false, reason } 失败原因（可展示给用户）。 */
+  const rewriteSingle = useCallback(async (a: MdAnnotation): Promise<{ ok: boolean; reason?: string; roundId?: string }> => {
     if (!editor || !a.quote.trim() || !a.content.trim()) return { ok: false, reason: '选中范围或意见为空' };
     const before = getMarkdown(editor);
     // 结构化意图：给 AI 带明确操作前缀；auto（自动判断）不指定方向，提示 AI 自行理解意见意图
@@ -1710,7 +1774,7 @@ export function DocEditor({
       return { ok: false, reason: 'AI 改写结果偏离原文 / 未达成意图，已还原（请调整指令后重试）' };
     }
     // 逐条重写也记录为修订轮次（进修订面板可审阅/回退），并关联来源批注（接受修订时自动标记批注已解决）
-    addPatchRound(before, after, a.id);
+    const roundId = addPatchRound(before, after, a.id, a.intent);
     // 重写成功：把批注锚更新到新文本处（quote=替换后文本、from/to=新区间、prefix/suffix 重算）——
     // 否则锚停留在被替换的旧文本，后续定位/高亮失效（"修改卡片无法定位"的残留根因）
     const newLen = afterSize - beforeSize + (to - from);
@@ -1732,7 +1796,7 @@ export function DocEditor({
           : x,
       ));
     }
-    return { ok: true };
+    return { ok: true, roundId: roundId ?? undefined };
   }, [editor, addPatchRound, annotations, persistAnnotations]);
 
   /** 单条批注 AI 重写（卡片按钮）：进行中在卡片上显示进度 */
@@ -1785,20 +1849,30 @@ export function DocEditor({
   }, [annotations, rewriteSingle, rewritingAll]);
 
   /** 按批注修订（简化版）：串行逐条 AI 修改每条未解决批注（复用可靠单条链路），
-   *  每条改动进修订面板可审阅/回退；全部成功后批注标记已解决。 */
+   *  每条改动进修订面板可审阅/回退；全部成功后批注标记已解决。
+   *  结束后产出 ReviseReport（改了几条 / 哪几条失败及原因），失败不再静默丢弃。 */
   const reviseFromAnnotations = useCallback(async () => {
     if (!editor || revising) return;
     const unresolved = annotations.filter((a) => !a.resolved && a.quote.trim() && a.content.trim());
     if (unresolved.length === 0) return;
     setRevising(true);
+    setReviseReport(null);
     try {
       const doneIds: string[] = [];
+      const revised: ReviseReport['revised'] = [];
+      const failed: ReviseReport['failed'] = [];
       for (const a of unresolved) {
         setRewritingId(a.id);
         const r = await rewriteSingle(a);
-        if (r.ok) doneIds.push(a.id);
+        if (r.ok) {
+          doneIds.push(a.id);
+          if (r.roundId) revised.push({ annotationId: a.id, roundId: r.roundId });
+        } else {
+          failed.push({ annotationId: a.id, quote: a.quote, reason: r.reason ?? 'AI 修订失败' });
+        }
       }
       setRewritingId(null);
+      setReviseReport({ total: unresolved.length, revised, failed, at: new Date().toISOString() });
       // 修改成功的批注标记为已解决
       if (doneIds.length > 0) {
         const done = new Set(doneIds);
@@ -2403,6 +2477,24 @@ export function DocEditor({
   /** 导出草稿身份：优先文件路径，其次节点 id（同一文档复用草稿；都没有时由 ExportMenu 退化为内容哈希） */
   const exportDocKey = filePath || nodeMdId || undefined;
 
+  /** 打开查找替换栏：有选区时用选区文字预填（⌘⇧F / 右上角按钮 / 右键菜单共用同一入口） */
+  const openFind = useCallback(() => {
+    const view = editor?.view;
+    if (view) {
+      const sel = view.state.selection;
+      if (!sel.empty) {
+        const text = view.state.doc.textBetween(sel.from, sel.to, '\n').trim();
+        if (text) setFindQuery(text);
+      }
+    }
+    setFindOpen(true);
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, [editor]);
+  openFindRef.current = openFind;
+
   /** 命令集：右键菜单统一入口（格式/段落/插入/历史/工具） */
   const paletteCommands = useMemo<PaletteCommand[]>(() => {
     if (!editor) return [];
@@ -2422,6 +2514,7 @@ export function DocEditor({
     // 分隔线从划词气泡工具栏移回此处（会替换选中文字 / 在光标处插入一条 ---）
     push('Insert', 'hr', 'Divider', '', () => editor.chain().focus().setHorizontalRule().run());
     // 工具
+    push('Tools', 'find', 'Find', '⌘⇧F', openFind);
     push('Tools', 'format', 'Format', '', handleFormatMarkdown);
     push('Tools', 'annotations', 'Annotations', '', () => setAnnotationPanelOpen((v) => !v));
     push('Tools', 'export', 'Export', 'Card/Poster/Article/HTML', () => setShowExportMenu(true));
@@ -2430,7 +2523,7 @@ export function DocEditor({
     push('Tools', 'print', 'Print', '', handlePrint);
     push('Tools', 'share', 'Share', '', handleShareDocument);
     return cmds;
-  }, [editor, handleFormatMarkdown, handlePrint, handleShareDocument]);
+  }, [editor, handleFormatMarkdown, handlePrint, handleShareDocument, openFind]);
 
 
   /** 从当前选区向上查找所在表格节点，返回其文档位置（不在表格内则 null） */
@@ -2474,16 +2567,47 @@ export function DocEditor({
     };
   }, [editor, editable, findTablePos]);
 
-  /** 全文检索匹配区间（textBetween 字符串索引 +1 即 doc position，与 locateTextInDoc 一致） */
+  /** 全文检索匹配区间。
+   *  不能用「textBetween(…, '\n') 的索引 + 1」换算 doc 位置：块分隔符在文本里占 1 个字符、
+   *  在文档位置里却不存在，于是第 k 个文本块内的匹配会被低估 k 个位置（k = 其前置文本块数），
+   *  越靠后偏移越大——这正是「搜索高亮文字不准确」的根因（同类坑见上方 posAtTextIndex 注释）。
+   *  这里按节点一次性建立「字符偏移 → doc 位置」映射：文本节点内部位置连续（跨 mark 也能命中），
+   *  块边界与行内叶节点写 -1 占位，跨越占位符的匹配直接丢弃，避免拼出假匹配或横跨换行/图片的高亮。 */
   const computeFindMatches = useCallback(
     (view: EditorView | null, query: string): { from: number; to: number }[] => {
       if (!view || !query) return [];
-      const fullText = view.state.doc.textBetween(0, view.state.doc.content.size, '\n');
+      let text = '';
+      const posOf: number[] = []; // posOf[i] = 第 i 个字符的 doc 位置；-1 = 占位符（不可匹配）
+      let firstBlock = true;
+      view.state.doc.descendants((node, pos) => {
+        if (node.isText) {
+          const t = node.text ?? '';
+          for (let i = 0; i < t.length; i++) posOf.push(pos + i);
+          text += t;
+          return false;
+        }
+        if (node.isInline && node.isLeaf) {
+          // 行内叶节点（硬换行 / 行内图片）：不贡献文本，占 1 位防止匹配跨越它
+          text += '\n';
+          posOf.push(-1);
+          return false;
+        }
+        if (node.isTextblock) {
+          if (firstBlock) firstBlock = false;
+          else { text += '\n'; posOf.push(-1); }
+        }
+        return true;
+      });
       const matches: { from: number; to: number }[] = [];
       let idx = 0;
-      while ((idx = fullText.indexOf(query, idx)) >= 0) {
-        matches.push({ from: idx + 1, to: idx + 1 + query.length });
-        idx += query.length;
+      while ((idx = text.indexOf(query, idx)) >= 0) {
+        const end = idx + query.length;
+        let valid = true;
+        for (let i = idx; i < end; i++) {
+          if (posOf[i] < 0) { valid = false; break; }
+        }
+        if (valid) matches.push({ from: posOf[idx], to: posOf[end - 1] + 1 });
+        idx = end;
       }
       return matches;
     },
@@ -2580,9 +2704,89 @@ export function DocEditor({
     setReplaceQuery('');
     setFindMatches([]);
     setFindIndex(-1);
+    setFindMode('text');
     const view = editor?.view;
     if (view) view.dispatch(view.state.tr.setMeta(findDecoKey, DecorationSet.empty));
     editor?.commands.focus();
+  }, [editor]);
+
+  /** 语义检索结果跳转：按 quote 在正文中精确定位（findQuoteWithContext，非子串近似）
+   *  → 选中 + 临时高亮（复用查找高亮装饰）+ 滚动到视口。返回是否成功定位，
+   *  false 时由调用方提示「文档已改动、找不到该片段」。 */
+  const jumpToQuote = useCallback(
+    (quote: string): boolean => {
+      const view = editor?.view;
+      if (!view || !quote) return false;
+      const range = findQuoteWithContext(view.state.doc, quote);
+      if (!range) return false;
+      let tr = view.state.tr;
+      tr = tr.setMeta(
+        findDecoKey,
+        DecorationSet.create(view.state.doc, [Decoration.inline(range.from, range.to, { class: 'md-find-active' })]),
+      );
+      tr = tr.setSelection(TextSelection.create(view.state.doc, range.from, range.to));
+      view.dispatch(tr);
+      const coords = view.coordsAtPos(range.from);
+      const scroller = view.dom.parentElement;
+      if (scroller) {
+        scroller.scrollTo({
+          top: scroller.scrollTop + coords.top - scroller.getBoundingClientRect().top - 90,
+          behavior: 'smooth',
+        });
+      }
+      return true;
+    },
+    [editor],
+  );
+
+  /** 一致性检查（仅当前文档）：编号 / 交叉引用确定性查 + 术语交模型分组（见 /api/md-consistency） */
+  const runConsistencyCheck = useCallback(async () => {
+    if (!editor || checking) return;
+    setChecking(true);
+    try {
+      const resp = await fetch('/api/md-consistency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ md: getMarkdown(editor) }),
+      });
+      const data = (await resp.json()) as { success?: boolean; items?: ConsistencyItem[]; error?: string };
+      if (!data.success) {
+        setConsistencyItems([
+          { key: 'check-error', level: 'fail', msg: data.error || 'Consistency check failed', kind: 'numbering', locate: '' },
+        ]);
+        return;
+      }
+      setConsistencyItems(data.items ?? []);
+    } catch (e) {
+      setConsistencyItems([
+        {
+          key: 'check-error',
+          level: 'fail',
+          msg: e instanceof Error ? e.message : String(e),
+          kind: 'numbering',
+          locate: '',
+        },
+      ]);
+    } finally {
+      setChecking(false);
+    }
+  }, [editor, checking]);
+
+  /** 点击检查项 → 跳转到正文对应位置（复用语义导航同款精确定位 + 临时高亮） */
+  const jumpToCheck = useCallback(
+    (item: ConsistencyItem) => {
+      if (!item.locate) return;
+      if (!jumpToQuote(item.locate)) showImageAiEditToast('Could not locate this text in the document', 'error');
+    },
+    [jumpToQuote],
+  );
+
+  // 文档变更 → 清空过期的一致性检查结果（避免把旧结论当现行事实）
+  useEffect(() => {
+    if (!editor) return;
+    const clear = () => setConsistencyItems(null);
+    editor.on('update', clear);
+    return () => { editor.off('update', clear); };
   }, [editor]);
 
   // 查找词变化 → 实时刷新匹配（打开时预填选区文字也会走到这里）
@@ -2721,12 +2925,46 @@ export function DocEditor({
         </div>
       )}
 
-      {/* 查找替换栏（⌘F）：固定在工具栏与内容区之间，不随文档滚动 */}
+      {/* 查找栏（⌘F）：固定在工具栏与内容区之间，不随文档滚动。
+          两种模式：Text=关键词子串查找/替换；Semantic=按主题检索条款（AI 分块定位，见 MdSemanticNav）。 */}
       {findOpen && (
         <div
-          className="flex flex-wrap items-center gap-2 border-b px-3 py-2"
+          className="flex flex-col border-b"
           style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper-soft)' }}
         >
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+          {/* 模式切换：Text | Semantic（与右侧栏 tab 同款分段控件） */}
+          <div className="flex shrink-0 items-center gap-0.5 rounded-md p-0.5" style={{ backgroundColor: 'var(--paper-hover)', boxShadow: 'inset 0 1px 2px rgba(23,23,23,0.06)' }}>
+            <button
+              type="button"
+              onClick={() => setFindMode('text')}
+              className="rounded px-1.5 py-0.5 text-10 font-medium transition-colors"
+              style={{
+                backgroundColor: findMode === 'text' ? 'var(--paper)' : 'transparent',
+                boxShadow: findMode === 'text' ? '0 1px 2px rgba(23,23,23,0.1)' : 'none',
+                color: findMode === 'text' ? 'var(--primary)' : 'var(--ink-muted)',
+              }}
+              title="Keyword find & replace"
+            >
+              Text
+            </button>
+            <button
+              type="button"
+              onClick={() => setFindMode('semantic')}
+              className="rounded px-1.5 py-0.5 text-10 font-medium transition-colors"
+              style={{
+                backgroundColor: findMode === 'semantic' ? 'var(--paper)' : 'transparent',
+                boxShadow: findMode === 'semantic' ? '0 1px 2px rgba(23,23,23,0.1)' : 'none',
+                color: findMode === 'semantic' ? 'var(--primary)' : 'var(--ink-muted)',
+              }}
+              title="Find clauses by topic (AI)"
+            >
+              Semantic
+            </button>
+          </div>
+
+          {findMode === 'text' && (
+            <>
           <div className="flex items-center gap-1.5">
             <Search className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
             <input
@@ -2820,6 +3058,30 @@ export function DocEditor({
               </div>
             </>
           )}
+            </>
+          )}
+
+          {/* Semantic 模式：关闭按钮（Text 模式的关闭按钮在查找控件组内） */}
+          {findMode === 'semantic' && (
+            <Button
+              type="button"
+              onClick={closeFind}
+              variant="ghost"
+              tone="neutral"
+              size="icon-sm"
+              className="ml-auto"
+              title="Close (Esc)"
+              aria-label="Close find"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+
+        {/* Semantic 模式：按主题检索条款（AI 单次分块定位），结果点击跳转并高亮 */}
+        {findMode === 'semantic' && (
+          <MdSemanticNav md={editor ? getMarkdown(editor) : ''} onJump={jumpToQuote} />
+        )}
         </div>
       )}
 
@@ -2856,14 +3118,30 @@ export function DocEditor({
 
         {!hideToc && (
           <div ref={tocRef} className="absolute right-2 top-2 z-30 flex flex-col items-end">
-            <button
-              onClick={() => setShowToc((v) => !v)}
-              title={showToc ? 'Hide outline' : 'Show outline'}
-              className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
-              style={{ color: 'var(--ink-muted)', backgroundColor: showToc ? 'color-mix(in oklab, var(--ink) 6%, transparent)' : 'transparent' }}
-            >
-              <ListTree className="h-3.5 w-3.5" />
-            </button>
+            {/* 文档工具图标（同排）：查找替换 + 目录 */}
+            <div className="flex items-center gap-1">
+              {editable && (
+                <button
+                  type="button"
+                  onClick={() => { setShowToc(false); openFind(); }}
+                  title="Find and replace (⌘⇧F)"
+                  aria-label="Find and replace"
+                  className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
+                  style={{ color: 'var(--ink-muted)' }}
+                >
+                  <Search className="h-3.5 w-3.5" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowToc((v) => !v)}
+                title={showToc ? 'Hide outline' : 'Show outline'}
+                className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
+                style={{ color: 'var(--ink-muted)', backgroundColor: showToc ? 'color-mix(in oklab, var(--ink) 6%, transparent)' : 'transparent' }}
+              >
+                <ListTree className="h-3.5 w-3.5" />
+              </button>
+            </div>
             {/* 目录弹窗：灰色底；点击目录项硬切到对应章节且保持展开，仅在点击弹窗/按钮以外区域时收起 */}
             {showToc && headings.length > 0 && (
               <div
@@ -2937,6 +3215,11 @@ export function DocEditor({
             rewritingAll={rewritingAll}
             rewritingId={rewritingId}
             onFocusRevision={focusRevision}
+            reviseReport={reviseReport}
+            consistencyItems={consistencyItems ?? undefined}
+            checking={checking}
+            onRunChecks={runConsistencyCheck}
+            onJumpToCheck={jumpToCheck}
             view={annotationView}
             onViewChange={setAnnotationView}
           />
@@ -4000,6 +4283,9 @@ export function DocEditor({
                     {commandGlyph(cmd.id)}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-12">{cmd.label}</span>
+                  {cmd.hint && SHORTCUT_HINT_RE.test(cmd.hint) && (
+                    <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>{cmd.hint}</span>
+                  )}
                 </button>
               ))}
             </>
@@ -4137,6 +4423,7 @@ function commandGlyph(id: string): React.ReactNode {
     case 'columns3': return <Columns3 className="h-4 w-4" />;
     case 'undo': return <RotateCcw className="h-4 w-4" />;
     case 'redo': return <RotateCw className="h-4 w-4" />;
+    case 'find': return <Search className="h-4 w-4" />;
     case 'format': return <Wand2 className="h-4 w-4" />;
     case 'annotations': return <MessageSquare className="h-4 w-4" />;
     case 'toc': return <ListTree className="h-4 w-4" />;
@@ -4152,6 +4439,9 @@ function commandGlyph(id: string): React.ReactNode {
 const CTX_LABELS: Record<string, string> = {
   undo: 'Undo', redo: 'Redo', print: 'Print', share: 'Share',
 };
+/** 竖向条目右侧的快捷键提示：仅显示含修饰键的 hint。
+ *  Export / Word 那类描述性 hint 过长，会撑破 9rem 菜单宽度，故不显示。 */
+const SHORTCUT_HINT_RE = /[⌘⇧]/;
 function ctxLabel(id: string): string {
   const key = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
   return CTX_LABELS[key] ?? id;
@@ -4227,7 +4517,10 @@ function BlockDragHandle({ editor }: { editor: Editor | null }) {
   const ghostRef = useRef<HTMLElement | null>(null);
   const indicatorRef = useRef<HTMLElement | null>(null);
 
-  viewRef.current = editor?.view ?? null;
+  // editor view 同步到 ref（不在 render 内写 ref，改在提交后同步）
+  useEffect(() => {
+    viewRef.current = editor?.view ?? null;
+  }, [editor]);
 
   /** 取光标所在顶级块（doc depth=1）：返回 {start,end,el}
    *  优先 posAtCoords（精确到文本行）；但编辑器在段落之间的垂直间隙（<p> 的 margin 空白区）上
@@ -4450,7 +4743,7 @@ function BlockDragHandle({ editor }: { editor: Editor | null }) {
 
       let insertAt = dt.before ? dt.start : dt.end;
       if (srcStart < insertAt) insertAt -= span; // 源块在目标之前时，删除会使其后的位置前移
-      let tr = view2.state.tr;
+      const tr = view2.state.tr;
       const node = view2.state.doc.nodeAt(srcStart);
       if (!node) { hideHandle(); return; }
       tr.delete(srcStart, srcEnd);

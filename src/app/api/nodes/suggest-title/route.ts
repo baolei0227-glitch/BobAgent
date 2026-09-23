@@ -87,10 +87,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: '模型未返回有效标题' });
     }
     return NextResponse.json({ success: true, title, model_used: cfg.model });
-  } catch (e: any) {
+  } catch (e) {
     console.error('nodes/suggest-title error:', e);
     return NextResponse.json(
-      { success: false, error: e?.message || '标题生成失败' },
+      { success: false, error: e instanceof Error && e.message ? e.message : '标题生成失败' },
       { status: 500 },
     );
   }

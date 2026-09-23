@@ -992,6 +992,9 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   const loadProjectFilesRef = useRef<((pid: string) => Promise<void>) | null>(null);
   // 项目列表是否已首次加载（首次自动展开当前项目；后续 focus/切换刷新不重置用户展开状态）
   const projectsLoadedRef = useRef(false);
+  // 项目列表加载序号：并发触发（focus / SSE / 切换项目）时只允许最后一次发起的结果落盘，
+  // 避免切换项目后被更早发出的慢响应回写旧 current_id（表现为"切换了但侧栏仍高亮旧项目"）
+  const loadProjectsSeqRef = useRef(0);
 
   // materials 目录授权状态（复用 .local-roots.json 授权机制：授权后 AI 可读写 + @ 引用联动）
   const [localRoots, setLocalRoots] = useState<string[]>([]);
@@ -1213,9 +1216,12 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   }, []);
 
   const loadProjects = useCallback(async () => {
+    const seq = ++loadProjectsSeqRef.current;
     try {
       const resp = await fetch('/api/projects');
       const data = await resp.json();
+      // 过期响应丢弃：期间已有更新的加载发起（如刚切换了项目），旧快照不得回写
+      if (seq !== loadProjectsSeqRef.current) return;
       if (data.success) {
         setProjects((data.active_projects || data.projects || []).filter((p: ProjectInfo) => !p.hidden));
         setCurrentId(data.current_id);
@@ -2230,7 +2236,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                         if (!h.isDir) bus.publish(BusEvents.fileOpen, { source: 'project', path: h.rel, name: h.name });
                                       }}
                                       className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                                      title={h.rel}
+                                      title={h.isDir ? h.rel : undefined}
                                     >
                                       {h.isDir ? (
                                         <Folder className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
@@ -2504,7 +2510,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                       bus.publish(BusEvents.fileOpen, { source: 'project', path: row.rel, name: row.name });
                                     }}
                                     className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                                    title={row.rel}
                                   >
                                     {selectable ? selectCheckbox(selected) : (
                                       <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fileIcon(row.extension).color }} />
@@ -2765,7 +2770,6 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                       bus.publish(BusEvents.fileOpen, { source: 'project', path: row.rel, name: row.name });
                                     }}
                                     className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                                    title={row.rel}
                                   >
                                     {selectable ? selectCheckbox(selected) : (
                                       <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: fileIcon(row.extension).color }} />
@@ -2888,7 +2892,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
                                         if (hasChildren) toggleWsDir(rel);
                                       }}
                                       className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded-md px-1 py-1 text-left text-sm transition-colors hover:bg-[var(--paper-hover)]"
-                                      title={isDir ? (node.title || node.name) : node.name}
+                                      title={isDir ? (node.title || node.name) : undefined}
                                     >
                                       {isDir ? (
                                         expanded ? (

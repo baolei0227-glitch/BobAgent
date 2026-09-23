@@ -417,7 +417,7 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
             : 'info';
           let threadId: string | undefined;
           let messages: ChatMessage[] | undefined;
-          let noticeTitle =
+          const noticeTitle =
             result.command === 'todo'
               ? `Tasks saved (${result.tasks?.length ?? 0})`
               : result.command === 'notebook'

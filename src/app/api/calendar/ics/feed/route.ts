@@ -53,7 +53,7 @@ export async function GET(req: NextRequest) {
         'Cache-Control': 'no-store, no-cache',
       },
     });
-  } catch (e: any) {
-    return new Response(`Feed error: ${e?.message || 'unknown'}`, { status: 500, headers: { 'Content-Type': 'text/plain' } });
+  } catch (e) {
+    return new Response(`Feed error: ${e instanceof Error && e.message ? e.message : 'unknown'}`, { status: 500, headers: { 'Content-Type': 'text/plain' } });
   }
 }

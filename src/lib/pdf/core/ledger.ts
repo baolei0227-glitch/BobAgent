@@ -197,7 +197,7 @@ function checkLedgerBalanceLegacy(transcript: string): LedgerBalanceCheck {
   if (headerIdx < 0) return empty;
   const header = lines[headerIdx].split('|').map((c) => c.trim());
   const colOf = (kw: string) => header.findIndex((h) => h.includes(kw));
-  let iDate = colOf('日期');
+  const iDate = colOf('日期');
   let iIncome = colOf('收入');
   let iExpense = colOf('支出');
   const iBalance = colOf('余额');

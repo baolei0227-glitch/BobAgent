@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -25,7 +25,8 @@ import {
   MoreHorizontal,
   Check,
   Eye,
-  EyeOff,
+  EyeClosed,
+  Flag,
 } from 'lucide-react';
 import { Callout } from '@/components/ui/callout';
 import { Button } from '@/components/ui/button';
@@ -45,9 +46,13 @@ interface CalendarEvent {
   priority: 'high' | 'normal' | 'low';
   color: string | null;
   tags: string[];
-  /** 提前提醒分钟数（如 [30] = 开始前 30 分钟；空 = 默认 [30]） */
+  /** 提前提醒分钟数（如 [30] = 开始前 30 分钟，可多个；空数组 = 无提醒） */
   reminder_minutes?: number[];
+  /** true = 明确关闭提醒（后端存 'null'），与「未配置 → 默认 30 分钟」区分 */
+  reminder_disabled?: boolean;
   source_raw: string | null;
+  /** 来源锚点 JSON：`{"kind":"sticky","noteId","pageId"}` = 由 StickyTodo 便签行入日历；null = 日历直接添加 */
+  source_ref: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -59,15 +64,46 @@ interface CalendarPanelProps {
   onClose: () => void;
 }
 
+/** 日历同步账户（GET /api/calendar/accounts 返回的安全字段） */
+interface CalendarSyncAccount {
+  account_id: string;
+  provider: 'caldav' | 'webcal';
+  name: string;
+  username: string | null;
+  server_url: string | null;
+  calendar_name: string | null;
+  read_only: boolean;
+  enabled: boolean;
+  last_sync_at: string | null;
+}
+
+/** 单账户同步结果（POST /api/calendar/sync 返回的 results 项） */
+interface CalendarSyncResultItem {
+  name: string;
+  result: { added: number; updated: number; deleted: number };
+}
+
+/** 新增账户请求体（POST /api/calendar/accounts） */
+interface AddCalendarAccountBody {
+  provider: string;
+  name: string;
+  read_only: boolean;
+  username?: string;
+  password?: string;
+  calendar_url?: string;
+  server_url?: string;
+}
+
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const STATUS_ICONS: Record<string, React.FC<{ className?: string }>> = {
   scheduled: Circle,
   done: CheckCircle2,
   cancelled: XCircle,
 };
-const PRIORITY_LABELS: Record<string, string> = { high: 'High', normal: 'Normal', low: 'Low' };
+/** 旗子标记 = 数据层的 priority='high'（点亮即高优先级，关闭回落 'normal'） */
+const FLAG_PRIORITY = 'high';
 
-/** 提前提醒预设（分钟）：可多选，默认选中 30 min */
+/** 提前提醒预设（分钟）：下拉单选，预设之外的值走 Custom… */
 const REMINDER_PRESETS: { label: string; value: number }[] = [
   { label: '10 min', value: 10 },
   { label: '30 min', value: 30 },
@@ -75,7 +111,18 @@ const REMINDER_PRESETS: { label: string; value: number }[] = [
   { label: '2 h', value: 120 },
   { label: '1 day', value: 1440 },
   { label: '2 days', value: 2880 },
+  // 模型可解析「提前 N 天/一周提醒」：把常用档位补进预设，避免落到 Custom 里显示成 4320/10080 分钟
+  { label: '3 days', value: 4320 },
+  { label: '1 week', value: 10080 },
 ];
+/** 分钟数 → 标签：预设直接用其文案，其余按天/小时/分钟就近取整（如 4320 → 3 days、45 → 45 min） */
+function fmtReminderLabel(minutes: number): string {
+  const preset = REMINDER_PRESETS.find((r) => r.value === minutes);
+  if (preset) return preset.label;
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440} days`;
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} h`;
+  return `${minutes} min`;
+}
 
 function toLocalDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -95,13 +142,6 @@ const PRESET_COLORS = ['#F59E0B', '#EF4444', '#3B82F6', '#10B981', '#8B5CF6', '#
 const HOUR_HEIGHT = 44;
 const HOURS = Array.from({ length: 24 }, (_, h) => h);
 
-/** 事件底色：用 color-mix 生成半透明底色。
- *  兼容 hex / CSS 变量 / 任意颜色，避免 `颜色 + '18'` 这种拼接在非 hex 值上产生非法 CSS 而底色失效。 */
-function eventTint(color: string | null | undefined, pct: number): string {
-  const base = color && color.trim() ? color : 'var(--primary)';
-  return `color-mix(in oklab, ${base} ${pct}%, transparent)`;
-}
-
 /** 事件文字样式：分类色交由左侧色条表达，文字统一中性色；完成/取消沉为灰 + 删除线 */
 function eventTextStyle(status: CalendarEvent['status']): React.CSSProperties {
   const finished = status === 'done' || status === 'cancelled';
@@ -111,9 +151,21 @@ function eventTextStyle(status: CalendarEvent['status']): React.CSSProperties {
   };
 }
 
-/** 分类色条取色：scheduled 用事件自身颜色，完成/取消统一灰 */
+/** 事件是否来自 StickyTodo 便签行（source_ref 锚点 kind='sticky'） */
+function isStickySourced(ev: CalendarEvent): boolean {
+  if (!ev.source_ref) return false;
+  try {
+    return (JSON.parse(ev.source_ref) as { kind?: string } | null)?.kind === 'sticky';
+  } catch {
+    return false;
+  }
+}
+
+/** 标识色条取色：完成/取消统一灰；scheduled 时便签来源用暖黄（--warn）与分类色区分，其余用事件自身分类色 */
 function eventBarColor(ev: CalendarEvent): string {
-  return ev.status === 'scheduled' ? (ev.color || 'var(--primary)') : 'var(--ink-faint)';
+  if (ev.status !== 'scheduled') return 'var(--ink-faint)';
+  if (isStickySourced(ev)) return 'var(--warn)';
+  return ev.color || 'var(--primary)';
 }
 
 /** 取 HH:mm */
@@ -135,10 +187,53 @@ function durationMinutesOf(ev: CalendarEvent, startMin: number): number {
   return Math.min(raw, 24 * 60 - startMin);
 }
 
+/** 月视图事件行（格子内与「+N more」浮层共用）：小竖棒 + 时刻/标题 + 红旗 */
+function MonthEventRow({ ev, onOpen }: { ev: CalendarEvent; onOpen: (ev: CalendarEvent) => void }) {
+  return (
+    <div
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(ev);
+      }}
+      className="flex min-w-0 cursor-pointer items-center gap-1 rounded px-1 text-[11px] leading-tight transition-colors hover:bg-[var(--paper-hover)]"
+      style={eventTextStyle(ev.status)}
+      title={ev.title}
+    >
+      {/* 分类标识：标题前的小竖棒（macOS 日历风格），取代原先的通高左边框色条 */}
+      <span
+        aria-hidden
+        className="h-2 w-[3px] shrink-0 rounded-full"
+        style={{ backgroundColor: eventBarColor(ev) }}
+      />
+      <span className="truncate">
+        {!ev.all_day && ev.start_time && (
+          <span style={{ opacity: 0.7 }}>{new Date(ev.start_time).toTimeString().slice(0, 5)}{' '}</span>
+        )}
+        {ev.title}
+      </span>
+      {/* 旗子标记：事件右侧的小旗（数据层 priority='high'） */}
+      {ev.priority === FLAG_PRIORITY && (
+        <Flag
+          aria-hidden
+          className="ml-auto h-2 w-2 shrink-0"
+          style={{ color: 'var(--danger)' }}
+          fill="currentColor"
+        />
+      )}
+    </div>
+  );
+}
+
 export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const [date, setDate] = useState(() => new Date());
   const panelRef = useRef<HTMLDivElement>(null);
   const [selectedDate, setSelectedDate] = useState<string>(() => toLocalDateStr(new Date()));
+  /** 月视图「+N more」浮层：该日全部事件（可滚动、隐藏滚动条），坐标取自被点的格子 */
+  const [morePop, setMorePop] = useState<{ date: string; left: number; top: number; width: number } | null>(
+    null,
+  );
+  // 切换月份时关掉「+N more」浮层，避免停留在已不可见的日期上
+  useEffect(() => setMorePop(null), [date]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [editMode, setEditMode] = useState<EditMode>(null);
@@ -154,11 +249,16 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const [searchResults, setSearchResults] = useState<CalendarEvent[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
-  // 隐藏已完成事项（仅影响日历展示，不改变数据）
-  const [hideCompleted, setHideCompleted] = useState(false);
-  // 面板宽度（左边缘可拖拽调整；默认 946px，受视口宽度约束）
-  const [panelWidth, setPanelWidth] = useState(946);
+  // 隐藏已完成事项（仅影响日历展示，不改变数据）；默认隐藏，保持日历清爽
+  const [hideCompleted, setHideCompleted] = useState(true);
+  // 面板宽度：null = 占满屏幕宽度（默认）；左边缘拖拽后变为固定像素宽度
+  // 左侧待办栏固定 260px，其余宽度全部给日历区
+  const [panelWidth, setPanelWidth] = useState<number | null>(null);
   const resizingRef = useRef(false);
+  // 自动保存：防抖定时器 + 上次落盘快照（同内容不重复提交）+ 首次打开时跳过自动保存
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedRef = useRef<string | null>(null);
+  const autoSaveReadyRef = useRef(false);
   // 同步操作菜单：Import / Export / Subscribe / Accounts / Logs 收进 ⋯，避免抢日历主视觉
   const [showSyncMenu, setShowSyncMenu] = useState(false);
   const syncMenuRef = useRef<HTMLDivElement>(null);
@@ -172,16 +272,30 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const [formStartTime, setFormStartTime] = useState('');
   const [formEndTime, setFormEndTime] = useState('');
   const [formAllDay, setFormAllDay] = useState(false);
-  const [formPriority, setFormPriority] = useState<'high' | 'normal' | 'low'>('normal');
+  const [formFlag, setFormFlag] = useState(false);
   const [formDescription, setFormDescription] = useState('');
   const [formLocation, setFormLocation] = useState('');
   const [formColor, setFormColor] = useState('#F59E0B');
+  // 标签：弹窗已不再提供编辑入口，仅用于编辑时原样带回已有 tags，避免保存时被清空
   const [formTags, setFormTags] = useState('');
-  // 提前提醒分钟数（可多选）；默认 [30] = 开始前 30 分钟
-  const [formReminderMinutes, setFormReminderMinutes] = useState<number[]>([30]);
+  // 提前提醒（权威状态）：可多个，如 [10080, 1440] = 提前一周 + 提前一天各提醒一次
+  const [formReminders, setFormReminders] = useState<number[]>([30]);
+  // 「添加提醒」下拉的选中值：预设分钟数字符串，或 'custom' 表示走自定义输入框
+  const [reminderAdd, setReminderAdd] = useState('');
+  // 下拉选中「Custom…」时的分钟数输入文本（保持可编辑，如清空后重新输入）
+  const [customReminderText, setCustomReminderText] = useState('');
 
   const year = date.getFullYear();
   const month = date.getMonth();
+
+  // 加入一条提醒（去重、按提前量从大到小；'custom' 取输入框分钟数）
+  const addReminder = (raw: string) => {
+    const n = Math.round(Number(raw === 'custom' ? customReminderText : raw));
+    if (!Number.isFinite(n) || n <= 0) return;
+    setFormReminders((prev) => [...new Set([...prev, n])].sort((a, b) => b - a));
+    setReminderAdd('');
+    setCustomReminderText('');
+  };
 
   // 月份范围
   const monthStart = new Date(year, month, 1);
@@ -191,6 +305,30 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   const startDayOfWeek = monthStart.getDay();
   const daysInMonth = monthEnd.getDate();
   const totalCells = Math.ceil((startDayOfWeek + daysInMonth) / 7) * 7;
+
+  // 月视图格子内事件条数：按格子实际高度自适应（能放几条放几条，溢出行留给 +N more），随面板尺寸变化重算
+  const monthGridRef = useRef<HTMLDivElement>(null);
+  const [rowsPerCell, setRowsPerCell] = useState(3);
+  useLayoutEffect(() => {
+    const el = monthGridRef.current;
+    if (!el) return;
+    const measure = () => {
+      const gridH = el.clientHeight;
+      if (!gridH) return;
+      const rows = Math.max(1, Math.round(totalCells / 7));
+      // 网格：无外圈内边距，行间 1px 发丝间隙；每格高 = (总高 − 行间距) / 行数
+      const cellH = (gridH - (rows - 1)) / rows;
+      // 格子内部扣除：边框 2 + 内边距 8 + 日期行 16 + 事件区上间距 2
+      const areaH = cellH - 28;
+      // 单条约 14px（11px 字号 + leading-tight）+ 行间距 1px，n 条占 15n−1
+      const capacity = Math.max(1, Math.min(8, Math.floor((areaH + 1) / 15)));
+      setRowsPerCell(capacity);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [view, totalCells]);
 
   const fetchEvents = useCallback(async () => {
     setLoading(true);
@@ -236,7 +374,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   }, [fetchEvents]);
 
   // ===== 日历同步（.ics 导入导出 / CalDAV / WebCal）=====
-  const [syncAccounts, setSyncAccounts] = useState<Array<Record<string, any>>>([]);
+  const [syncAccounts, setSyncAccounts] = useState<CalendarSyncAccount[]>([]);
   const [syncLogs, setSyncLogs] = useState<Array<{ level: string; message: string; created_at: string }>>([]);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
@@ -283,7 +421,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         const results = data.results || [];
         setSyncMsg(
           results.length
-            ? results.map((r: any) => `${r.name}: +${r.result.added}/~${r.result.updated}/-${r.result.deleted}`).join('  ')
+            ? results.map((r: CalendarSyncResultItem) => `${r.name}: +${r.result.added}/~${r.result.updated}/-${r.result.deleted}`).join('  ')
             : 'No sync accounts configured',
         );
         fetchEvents();
@@ -391,7 +529,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     setAddBusy(true);
     setAddErr(null);
     try {
-      const body: Record<string, any> = {
+      const body: AddCalendarAccountBody = {
         provider: accForm.provider,
         name: accForm.name || (accForm.provider === 'webcal' ? 'WebCal Subscription' : 'iCloud Calendar'),
         read_only: accForm.read_only,
@@ -544,7 +682,8 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
       if (e.key === 'ArrowLeft') goPrev();
       else if (e.key === 'ArrowRight') goNext();
       else if (e.key === 'Escape') {
-        setEditMode(null);
+        // 先冲刷未落盘的自动保存改动，再关闭弹窗
+        void closeEditor();
         setConfirmDelete(null);
         setShowMonthPicker(false);
       }
@@ -572,7 +711,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     const onMove = (e: PointerEvent) => {
       if (!resizingRef.current) return;
       const next = window.innerWidth - e.clientX;
-      setPanelWidth(Math.min(Math.max(next, 560), Math.min(window.innerWidth - 40, 1400)));
+      setPanelWidth(Math.min(Math.max(next, 560), window.innerWidth));
     };
     const onUp = () => {
       if (!resizingRef.current) return;
@@ -642,12 +781,15 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     setFormStartTime(defaultStart);
     setFormEndTime(defaultEnd);
     setFormAllDay(false);
-    setFormPriority('normal');
+    setFormFlag(false);
     setFormDescription('');
     setFormLocation('');
     setFormColor('#3B82F6'); // 默认蓝色
     setFormTags('');
-    setFormReminderMinutes([30]); // 默认开始前 30 分钟提醒
+    setFormReminders([30]); // 默认开始前 30 分钟提醒
+    setReminderAdd('');
+    setCustomReminderText('');
+    autoSaveReadyRef.current = false; // 本次打开只记录基线，用户改动后才开始自动保存
     setFormError(null);
     setEditMode({ date: dateStr });
   };
@@ -662,102 +804,132 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     setFormStartTime(ev.all_day ? '' : d.toTimeString().slice(0, 5));
     setFormEndTime(ev.end_time && !ev.all_day ? new Date(ev.end_time).toTimeString().slice(0, 5) : '');
     setFormAllDay(ev.all_day);
-    setFormPriority(ev.priority);
+    setFormFlag(ev.priority === FLAG_PRIORITY);
     setFormDescription(ev.description || '');
     setFormLocation(ev.location || '');
     setFormColor(ev.color || '#3B82F6');
     setFormTags(ev.tags?.length ? ev.tags.join(', ') : '');
-    setFormReminderMinutes(
-      Array.isArray(ev.reminder_minutes) && ev.reminder_minutes.length > 0
-        ? ev.reminder_minutes
-        : [30],
+    // 提醒：可多个；'null'（明确关闭）→ 空列表，未配置 → 默认 30 分钟
+    const reminderList = (Array.isArray(ev.reminder_minutes) ? ev.reminder_minutes : [])
+      .filter((n) => Number.isFinite(n) && n > 0);
+    setFormReminders(
+      ev.reminder_disabled ? [] : (reminderList.length ? [...reminderList].sort((a, b) => b - a) : [30]),
     );
+    setReminderAdd('');
+    setCustomReminderText('');
+    autoSaveReadyRef.current = false; // 本次打开只记录基线，用户改动后才开始自动保存
     setFormError(null);
     setEditMode({ event_id: ev.event_id });
   };
 
-  // 提交表单
-  const handleSubmit = async () => {
-    // 校验
-    if (!formTitle.trim()) {
-      setFormError('Title is required');
-      return;
-    }
-    if (!formDate) {
-      setFormError('Date is required');
-      return;
-    }
-    setSaving(true);
-    setFormError(null);
-    try {
-      const startIso = formAllDay
-        ? new Date(formDate + 'T00:00:00').toISOString()
-        : new Date(formDate + 'T' + (formStartTime || '09:00') + ':00').toISOString();
+  // 自动保存：把表单构建为提交体；标题/时间为空或时间区间非法时返回 null（不提交）
+  const buildPayload = (): { body: Record<string, unknown> } | null => {
+    if (!formTitle.trim() || !formDate) return null;
 
-      // 结束时间（支持跨天：结束日期 + 结束时刻）
-      let endIso: string | null | undefined = formAllDay ? null : undefined;
-      if (!formAllDay && formEndTime) {
-        const startMs = new Date(formDate + 'T' + (formStartTime || '09:00') + ':00').getTime();
-        const endMs = new Date((formEndDate || formDate) + 'T' + formEndTime + ':00').getTime();
-        if (!Number.isFinite(endMs) || endMs < startMs) {
-          setFormError('End time must be after start time');
-          return;
-        }
-        endIso = new Date((formEndDate || formDate) + 'T' + formEndTime + ':00').toISOString();
+    const startIso = formAllDay
+      ? new Date(formDate + 'T00:00:00').toISOString()
+      : new Date(formDate + 'T' + (formStartTime || '09:00') + ':00').toISOString();
+
+    // 结束时间（支持跨天：结束日期 + 结束时刻）
+    let endIso: string | null = null;
+    if (!formAllDay && formEndTime) {
+      const startMs = new Date(formDate + 'T' + (formStartTime || '09:00') + ':00').getTime();
+      const endMs = new Date((formEndDate || formDate) + 'T' + formEndTime + ':00').getTime();
+      if (!Number.isFinite(endMs) || endMs < startMs) {
+        setFormError('End time must be after start time');
+        return null;
       }
+      endIso = new Date((formEndDate || formDate) + 'T' + formEndTime + ':00').toISOString();
+    }
 
-      const body: any = {
+    setFormError(null);
+    return {
+      body: {
         title: formTitle.trim(),
         start_time: startIso,
-        end_time: endIso ?? null,
+        end_time: endIso,
         all_day: formAllDay,
-        priority: formPriority,
+        priority: formFlag ? FLAG_PRIORITY : 'normal',
         description: formDescription.trim() || null,
         location: formLocation.trim() || null,
         color: formColor,
         tags: formTags.split(/[,，]/).map((t) => t.trim()).filter(Boolean),
-        reminder_minutes: formReminderMinutes,
-      };
+        reminder_minutes: formReminders,
+      },
+    };
+  };
 
-      if (editMode && 'event_id' in editMode) {
-        // 更新
-        const resp = await fetch(`/api/calendar/events?event_id=${editMode.event_id}`, {
-          method: 'PATCH',
+  // 落盘：新建走 POST，已存在走 PATCH；成功后记录快照，避免同内容重复提交
+  const persist = async (): Promise<boolean> => {
+    if (!editMode) return false; // 弹窗已关闭 → 不落盘，避免误建事件
+    const built = buildPayload();
+    if (!built) return false;
+    const snapshot = JSON.stringify(built.body);
+    if (snapshot === lastSavedRef.current) return false;
+    const isEdit = !!editMode && 'event_id' in editMode;
+    setSaving(true);
+    try {
+      const resp = await fetch(
+        isEdit ? `/api/calendar/events?event_id=${(editMode as { event_id: string }).event_id}` : '/api/calendar/events',
+        {
+          method: isEdit ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const data = await resp.json();
-        if (!data.success) {
-          console.error('Update failed:', data.error);
-          setPanelError(data.error || 'Update failed');
-          return;
-        }
-      } else {
-        // 新建
-        const resp = await fetch('/api/calendar/events', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const data = await resp.json();
-        if (!data.success) {
-          console.error('Create failed:', data.error);
-          setPanelError(data.error || 'Create failed');
-          return;
-        }
+          body: JSON.stringify(built.body),
+        },
+      );
+      const data = await resp.json();
+      if (!data.success) {
+        console.error(isEdit ? 'Update failed:' : 'Create failed:', data.error);
+        setPanelError(data.error || (isEdit ? 'Update failed' : 'Create failed'));
+        return false;
       }
-      setEditMode(null);
+      lastSavedRef.current = snapshot;
+      // 新建成功后转为编辑态：后续自动保存走 PATCH，避免重复创建
+      if (!isEdit && data.event?.event_id) {
+        setEditMode({ event_id: data.event.event_id });
+      }
       setPanelError(null);
       fetchEvents();
       // 通知全局：日历已变更（新增/编辑事件可能反向联动便签行，便签层据此重载）
       window.dispatchEvent(new Event('calendar-events-changed'));
+      return true;
     } catch (err) {
       console.error('Save error:', err);
       setPanelError(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
     } finally {
       setSaving(false);
     }
   };
+
+  // 关闭弹窗：先冲刷未落盘的改动（防抖窗口内直接关闭会丢失编辑），再关闭
+  const closeEditor = async () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    await persist();
+    setEditMode(null);
+  };
+
+  // 自动保存：表单任一字段变化后防抖 600ms 落盘；刚打开弹窗时只记录基线不提交
+  useEffect(() => {
+    if (!editMode) return;
+    if (!autoSaveReadyRef.current) {
+      autoSaveReadyRef.current = true;
+      lastSavedRef.current = JSON.stringify(buildPayload()?.body ?? null);
+      return;
+    }
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => { void persist(); }, 600);
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, formTitle, formDate, formStartTime, formEndTime, formEndDate, formAllDay, formFlag, formDescription, formLocation, formColor, formTags, formReminders.join(',')]);
 
   // 请求删除：弹出确认（不再用原生 confirm，避免误删）
   const requestDelete = (eventId: string) => {
@@ -854,10 +1026,12 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
   return (
     <div
       ref={panelRef}
+      data-calendar-panel
       className="fixed right-0 top-0 z-[51] flex h-full flex-col overflow-hidden"
       style={{
-        width: `${panelWidth}px`,
-        maxWidth: 'calc(100vw - 40px)',
+        // 默认占满屏幕宽度（面板贴右、左侧待办栏 260px，其余宽度全给日历区）
+        width: panelWidth === null ? '100vw' : `${panelWidth}px`,
+        maxWidth: panelWidth === null ? 'none' : '100vw',
         backgroundColor: 'var(--paper)',
         borderLeft: '1px solid var(--line)',
         boxShadow: 'var(--shadow-lg)',
@@ -975,17 +1149,18 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
               ))}
             </div>
 
-            {/* 隐藏已完成事项：仅切换展示，不修改数据 */}
+            {/* 隐藏已完成事项：仅切换展示，不修改数据；灰色眼睛图标，不使用品牌色高亮 */}
             <Button
               onClick={() => setHideCompleted((v) => !v)}
-              variant={hideCompleted ? 'soft' : 'ghost'}
-              tone={hideCompleted ? 'brand' : 'neutral'}
+              variant="ghost"
+              tone="neutral"
               size="icon-sm"
               aria-pressed={hideCompleted}
               title={hideCompleted ? 'Show completed events' : 'Hide completed events'}
               aria-label={hideCompleted ? 'Show completed events' : 'Hide completed events'}
+              style={{ color: 'var(--ink-muted)' }}
             >
-              {hideCompleted ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              {hideCompleted ? <EyeClosed className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
           </div>
 
@@ -1071,7 +1246,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
 
             {/* 同步：状态 + 立即同步 + 选项菜单（并入标题栏；窄面板下状态文案收起，见 Sync now 的 title 与 ⋯ 菜单） */}
             <span className="mx-0.5 h-4 w-px shrink-0" style={{ backgroundColor: 'var(--line-soft)' }} />
-            {panelWidth >= 760 && (
+            {(panelWidth === null || panelWidth >= 760) && (
               <span
                 className="max-w-[150px] shrink-0 truncate text-11"
                 style={{ color: syncMsg ? 'var(--ink-muted)' : 'var(--ink-faint)' }}
@@ -1158,6 +1333,100 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
           </div>
         </div>
       </div>
+
+      {/* 主体：左侧待办列表 + 右侧日历主体（对齐 macOS 日历的「左栏列表 + 主区日历」布局） */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* 左侧待办栏：占满面板剩余高度，内部独立滚动 */}
+        <aside
+          className="flex w-[260px] shrink-0 flex-col overflow-hidden border-r"
+          style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}
+        >
+          <div
+            className="flex shrink-0 items-center gap-1.5 border-b px-3 py-2"
+            style={{ backgroundColor: 'var(--paper-muted)', borderColor: 'var(--line-soft)' }}
+          >
+            <Clock className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
+            <span className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>
+              {selectedDate === todayStr ? 'Today' : 'Selected'} — {selectedDateLabel}
+            </span>
+            <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+              ({selectedDateEvents.length} task{selectedDateEvents.length !== 1 ? 's' : ''})
+            </span>
+          </div>
+
+          {selectedDateEvents.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center px-2">
+              <EmptyState
+                size="sm"
+                preset="inbox"
+                title={selectedDate === todayStr ? 'Nothing scheduled today' : 'Nothing scheduled'}
+                description="Double-click a day or use + to add an event."
+              />
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 divide-y divide-[var(--line-soft)] overflow-y-auto">
+              {selectedDateEvents.map((ev) => (
+                <div
+                  key={ev.event_id}
+                  className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-[var(--paper-hover)]"
+                >
+                  {/* 状态图标 */}
+                  <button
+                    onClick={() => {
+                      const next = ev.status === 'done' ? 'scheduled' : ev.status === 'cancelled' ? 'scheduled' : 'done';
+                      toggleStatus(ev, next);
+                    }}
+                    className="shrink-0 transition-colors hover:opacity-70"
+                    style={{ color: ev.status === 'done' ? 'var(--success)' : ev.status === 'cancelled' ? 'var(--ink-faint)' : 'var(--ink-faint)' }}
+                    title={ev.status === 'done' ? 'Mark as scheduled' : ev.status === 'cancelled' ? 'Mark as scheduled' : 'Mark as done'}
+                  >
+                    {ev.status === 'done' ? <CheckCircle2 className="h-4 w-4" /> :
+                     ev.status === 'cancelled' ? <XCircle className="h-4 w-4" /> :
+                     <Circle className="h-4 w-4" />}
+                  </button>
+
+                  {/* 内容：时间与标题同行（时间在左、旗子在右），地点另起一行 */}
+                  <div
+                    className="flex-1 min-w-0 cursor-pointer"
+                    onClick={() => openEdit(ev)}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="shrink-0 text-11 tabular-nums" style={{ color: 'var(--ink-muted)' }}>
+                        {ev.all_day ? 'All day' : new Date(ev.start_time).toTimeString().slice(0, 5)}
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 truncate text-xs font-medium"
+                        style={{
+                          color: ev.status === 'done' ? 'var(--ink-faint)' : 'var(--ink)',
+                          textDecoration: ev.status === 'done' ? 'line-through' : 'none',
+                        }}
+                      >
+                        {ev.title}
+                      </span>
+                      {ev.priority === FLAG_PRIORITY && (
+                        <Flag
+                          aria-hidden
+                          className="h-3 w-3 shrink-0"
+                          style={{ color: 'var(--danger)' }}
+                          fill="currentColor"
+                        />
+                      )}
+                    </div>
+                    {ev.location && (
+                      <div className="flex items-center gap-1 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>
+                        <MapPin size={9} style={{ flexShrink: 0 }} />
+                        <span className="truncate">{ev.location}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </aside>
+
+        {/* 右侧：日历主体（星期行 + 网格 / 时间轴），行高按可用高度等分 */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
 
       {/* 星期标题（月视图显示星期；周视图显示星期 + 今天胶囊） */}
       <div className="flex shrink-0 items-stretch border-b" style={{ borderColor: 'var(--line-soft)' }}>
@@ -1317,17 +1586,27 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                               <div
                                 key={ev.event_id}
                                 onClick={() => openEdit(ev)}
-                                className="absolute left-0.5 right-0.5 cursor-pointer overflow-hidden rounded-md border-l-2 px-1 py-0.5 text-11 leading-tight transition-shadow hover:shadow-md"
+                                className="absolute left-0.5 right-0.5 cursor-pointer overflow-hidden rounded-md border-l-2 px-1 py-0.5 text-11 leading-tight transition-colors hover:bg-[var(--paper-hover)]"
                                 style={{
                                   top: (startMin / 60) * HOUR_HEIGHT + 1,
                                   height: Math.max((dur / 60) * HOUR_HEIGHT - 2, 15),
-                                  backgroundColor: eventTint(ev.color, 14),
                                   borderLeftColor: eventBarColor(ev),
                                   ...eventTextStyle(ev.status),
                                 }}
                                 title={`${ev.all_day ? 'All day' : hhmm(ev.start_time)} ${ev.title}`}
                               >
-                                <div className="truncate font-medium">{ev.title}</div>
+                                <div className="flex items-center gap-1">
+                                  <span className="min-w-0 flex-1 truncate font-medium">{ev.title}</span>
+                                  {/* 旗子标记：事件右侧的小旗（数据层 priority='high'） */}
+                                  {ev.priority === FLAG_PRIORITY && (
+                                    <Flag
+                                      aria-hidden
+                                      className="h-2.5 w-2.5 shrink-0"
+                                      style={{ color: 'var(--danger)' }}
+                                      fill="currentColor"
+                                    />
+                                  )}
+                                </div>
                                 {!ev.all_day && dur >= 45 && (
                                   <div className="truncate text-10" style={{ color: 'var(--ink-muted)' }}>
                                     {hhmm(ev.start_time)}
@@ -1343,8 +1622,13 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                 </div>
               </div>
             ) : (
-              /* 月视图格子：flex-1 占满网格区域（容器已禁滚动，行高随面板自适应） */
-              <div className="grid min-h-0 flex-1 grid-cols-7 gap-1 p-1">
+              /* 月视图格子：行高按可用高度均分（minmax(0,1fr)），内容超出时由格子裁剪，
+                 避免 6 行月份（如 8 月）在矮面板下撑破网格、溢出外框 */
+              <div
+                ref={monthGridRef}
+                className="grid min-h-0 flex-1 grid-cols-7 gap-px overflow-hidden"
+                style={{ gridTemplateRows: `repeat(${totalCells / 7}, minmax(0, 1fr))` }}
+              >
               {Array.from({ length: totalCells }).map((_, i) => {
                 const cellDate = new Date(year, month, 1 - startDayOfWeek + i);
                 const cellDateStr = toLocalDateStr(cellDate);
@@ -1352,13 +1636,16 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                 const isToday = cellDateStr === todayStr;
                 const isSelected = cellDateStr === selectedDate;
                 const dayEvents = eventsByDate.get(cellDateStr) || [];
+                // 自适应条数：溢出时留一行给「+N more」（rowsPerCell 由格子高度实测得出）
+                const visibleCount =
+                  dayEvents.length > rowsPerCell ? Math.max(1, rowsPerCell - 1) : dayEvents.length;
 
                 return (
                   <div
                     key={i}
-                    className="group relative cursor-pointer rounded-lg border p-1 transition-colors hover:bg-[var(--paper-hover)]"
+                    data-day-cell={cellDateStr}
+                    className="group relative flex min-h-0 cursor-pointer flex-col overflow-hidden rounded-lg border p-1 transition-colors hover:bg-[var(--paper-hover)]"
                     style={{
-                      minHeight: '72px',
                       borderColor: isSelected ? 'var(--primary)' : 'var(--line-soft)',
                       opacity: isCurrentMonth ? 1 : 0.45,
                       backgroundColor: isSelected ? 'var(--primary-soft)' : 'transparent',
@@ -1367,19 +1654,18 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                     onDoubleClick={() => openCreate(cellDateStr)}
                     title={isCurrentMonth ? 'Double-click to add' : undefined}
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex shrink-0 items-center justify-between">
                       <span
-                        className="text-xs font-medium"
+                        className="text-[11px] font-medium"
                         style={{
                           color: isToday ? 'var(--paper)' : 'var(--ink)',
                           backgroundColor: isToday ? 'var(--primary)' : 'transparent',
                           borderRadius: isToday ? '9999px' : undefined,
-                          width: isToday ? '20px' : undefined,
-                          height: isToday ? '20px' : undefined,
+                          width: isToday ? '16px' : undefined,
+                          height: isToday ? '16px' : undefined,
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
-                          border: (!isToday && isSelected) ? '1.5px solid var(--primary)' : 'none',
                         }}
                       >
                         {cellDate.getDate()}
@@ -1396,35 +1682,29 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                       </button>
                     </div>
 
-                    {/* 事件标签 */}
-                    <div className="mt-0.5 space-y-px">
-                      {dayEvents.slice(0, 3).map((ev) => (
-                        <div
-                          key={ev.event_id}
+                    {/* 事件标签：占满格子剩余高度并裁剪，超出部分不溢出格子 */}
+                    <div className="mt-0.5 min-h-0 flex-1 space-y-px overflow-hidden">
+                      {dayEvents.slice(0, visibleCount).map((ev) => (
+                        <MonthEventRow key={ev.event_id} ev={ev} onOpen={openEdit} />
+                      ))}
+                      {dayEvents.length > visibleCount && (
+                        <button
+                          type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            openEdit(ev);
+                            const cell = e.currentTarget.closest('[data-day-cell]') as HTMLElement | null;
+                            const r = cell?.getBoundingClientRect();
+                            const width = 260;
+                            const left = Math.max(8, Math.min(r?.left ?? e.clientX, window.innerWidth - width - 8));
+                            const top = r ? r.top + 2 : e.clientY;
+                            setSelectedDate(cellDateStr);
+                            setMorePop({ date: cellDateStr, left, top, width });
                           }}
-                          className="truncate rounded border-l-2 px-1 py-px text-xs leading-tight transition-colors hover:brightness-95"
-                          style={{
-                            backgroundColor: eventTint(ev.color, 14),
-                            borderLeftColor: eventBarColor(ev),
-                            ...eventTextStyle(ev.status),
-                          }}
-                          title={ev.title}
+                          className="block w-full rounded px-1 text-left text-[11px] transition-colors hover:bg-[var(--paper-hover)]"
+                          style={{ color: 'var(--ink-muted)' }}
                         >
-                          {!ev.all_day && ev.start_time && (
-                            <span style={{ opacity: 0.7 }}>
-                              {new Date(ev.start_time).toTimeString().slice(0, 5)}{' '}
-                            </span>
-                          )}
-                          {ev.title}
-                        </div>
-                      ))}
-                      {dayEvents.length > 3 && (
-                        <span className="block px-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                          +{dayEvents.length - 3} more
-                        </span>
+                          +{dayEvents.length - visibleCount} more
+                        </button>
                       )}
                     </div>
                   </div>
@@ -1433,100 +1713,46 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             </div>
             )}
 
-            {/* 选中日期待办：固定高度卡片（高度不随待办数量变化，内容过多时内部滚动，避免挤压日历网格） */}
-            <div className="shrink-0 h-[34%] min-h-[132px] max-h-[300px] px-3 pb-3 pt-2">
-              <div
-                className="flex h-full flex-col overflow-hidden rounded-xl border"
-                style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', boxShadow: 'var(--shadow-sm)' }}
-              >
-              <div
-                className="flex shrink-0 items-center gap-1.5 border-b px-3 py-2"
-                style={{ backgroundColor: 'var(--paper-muted)', borderColor: 'var(--line-soft)' }}
-              >
-                <Clock className="h-3.5 w-3.5" style={{ color: 'var(--primary)' }} />
-                <span className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>
-                  {selectedDate === todayStr ? 'Today' : 'Selected'} — {selectedDateLabel}
-                </span>
-                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-                  ({selectedDateEvents.length} task{selectedDateEvents.length !== 1 ? 's' : ''})
-                </span>
-              </div>
-
-              {selectedDateEvents.length === 0 ? (
-                <div className="flex min-h-0 flex-1 items-center justify-center">
-                  <EmptyState
-                    size="sm"
-                    preset="inbox"
-                    title={selectedDate === todayStr ? 'Nothing scheduled today' : 'Nothing scheduled'}
-                    description="Double-click a day or use + to add an event."
-                  />
-                </div>
-              ) : (
-                <div className="min-h-0 flex-1 divide-y divide-[var(--line-soft)] overflow-y-auto">
-                  {selectedDateEvents.map((ev) => (
-                    <div
-                      key={ev.event_id}
-                      className="flex items-center gap-2 px-4 py-2 transition-colors hover:bg-[var(--paper-hover)]"
-                    >
-                      {/* 状态图标 */}
-                      <button
-                        onClick={() => {
-                          const next = ev.status === 'done' ? 'scheduled' : ev.status === 'cancelled' ? 'scheduled' : 'done';
-                          toggleStatus(ev, next);
+            {/* 「+N more」浮层：列出该日全部事件，可滚动、隐藏滚动条；点条目进编辑 */}
+            {morePop && (
+              <>
+                <div className="fixed inset-0 z-[59]" onPointerDown={() => setMorePop(null)} />
+                <div
+                  className="fixed z-[60] flex flex-col overflow-hidden rounded-lg border shadow-xl"
+                  style={{
+                    left: morePop.left,
+                    top: morePop.top,
+                    width: morePop.width,
+                    maxHeight: Math.max(120, window.innerHeight - morePop.top - 12),
+                    backgroundColor: 'var(--paper)',
+                    borderColor: 'var(--line-soft)',
+                  }}
+                >
+                  <div
+                    className="shrink-0 border-b px-2 py-1 text-xs font-semibold"
+                    style={{ color: 'var(--ink-muted)', borderColor: 'var(--line-soft)' }}
+                  >
+                    {morePop.date}
+                  </div>
+                  <div className="hide-scrollbar min-h-0 flex-1 space-y-px overflow-y-auto p-1">
+                    {(eventsByDate.get(morePop.date) || []).map((ev) => (
+                      <MonthEventRow
+                        key={ev.event_id}
+                        ev={ev}
+                        onOpen={(x) => {
+                          setMorePop(null);
+                          openEdit(x);
                         }}
-                        className="shrink-0 transition-colors hover:opacity-70"
-                        style={{ color: ev.status === 'done' ? 'var(--success)' : ev.status === 'cancelled' ? 'var(--ink-faint)' : 'var(--ink-faint)' }}
-                        title={ev.status === 'done' ? 'Mark as scheduled' : ev.status === 'cancelled' ? 'Mark as scheduled' : 'Mark as done'}
-                      >
-                        {ev.status === 'done' ? <CheckCircle2 className="h-4 w-4" /> :
-                         ev.status === 'cancelled' ? <XCircle className="h-4 w-4" /> :
-                         <Circle className="h-4 w-4" />}
-                      </button>
-
-                      {/* 内容 */}
-                      <div
-                        className="flex-1 min-w-0 cursor-pointer"
-                        onClick={() => openEdit(ev)}
-                      >
-                        <div
-                          className="truncate text-xs font-medium"
-                          style={{
-                            color: ev.status === 'done' ? 'var(--ink-faint)' : 'var(--ink)',
-                            textDecoration: ev.status === 'done' ? 'line-through' : 'none',
-                          }}
-                        >
-                          {ev.title}
-                        </div>
-                        <div className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                          {ev.all_day ? (
-                            <span>All day</span>
-                          ) : (
-                            <span>
-                              {new Date(ev.start_time).toTimeString().slice(0, 5)}
-                              {ev.end_time && ` - ${new Date(ev.end_time).toTimeString().slice(0, 5)}`}
-                            </span>
-                          )}
-                          {ev.priority === 'high' && (
-                            <span className="rounded px-1 py-px text-xs" style={{ backgroundColor: 'var(--danger-soft)', color: 'var(--danger)' }}>
-                              High
-                            </span>
-                          )}
-                        </div>
-                        {ev.location && (
-                          <div className="flex items-center gap-1 truncate text-xs" style={{ color: 'var(--ink-muted)' }}>
-                            <MapPin size={9} style={{ flexShrink: 0 }} />
-                            <span className="truncate">{ev.location}</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                      />
+                    ))}
+                  </div>
                 </div>
-              )}
-              </div>
-            </div>
+              </>
+            )}
           </>
         )}
+      </div>
+        </div>
       </div>
 
       {/* 新建/编辑弹窗 */}
@@ -1534,7 +1760,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
         <div
           className="fixed inset-0 z-[100]"
           style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
-          onPointerDown={(e) => { e.stopPropagation(); setEditMode(null); }}
+          onPointerDown={(e) => { e.stopPropagation(); void closeEditor(); }}
         >
           <div
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-xl border p-5 shadow-2xl nowheel"
@@ -1545,179 +1771,203 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
             }}
             onPointerDown={(e) => e.stopPropagation()}
           >
-            <h3 className="mb-4 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
-              {'event_id' in editMode ? 'Edit Event' : 'New Event'}
-            </h3>
-
-            {/* 标题 */}
-            <input
-              type="text"
-              placeholder="Event title"
-              value={formTitle}
-              onChange={(e) => setFormTitle(e.target.value)}
-              className="mb-3 w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--primary)]"
-              style={{
-                backgroundColor: 'var(--input-bg)',
-                borderColor: 'var(--input-border)',
-                color: 'var(--ink)',
-              }}
-              autoFocus
-            />
-
-            {/* 日期 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Date</label>
-              <input
-                type="date"
-                value={formDate}
-                onChange={(e) => setFormDate(e.target.value)}
-                className="w-full rounded-md border px-3 py-1.5 text-sm"
-                style={{
-                  backgroundColor: 'var(--input-bg)',
-                  borderColor: 'var(--input-border)',
-                  color: 'var(--ink)',
-                }}
-              />
+            {/* 头部：小标题 + 右侧操作（自动保存提示 / 删除 / 关闭） */}
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-11 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-muted)' }}>
+                {'event_id' in editMode ? 'Edit Event' : 'New Event'}
+              </span>
+              <div className="flex items-center gap-1">
+                {saving && (
+                  <span className="flex items-center gap-1 text-11" style={{ color: 'var(--ink-muted)' }}>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Saving…
+                  </span>
+                )}
+                {'event_id' in editMode && (
+                  <Button
+                    onClick={() => {
+                      const id = editMode.event_id;
+                      setEditMode(null);
+                      requestDelete(id);
+                    }}
+                    variant="ghost"
+                    tone="danger"
+                    size="icon-sm"
+                    aria-label="delete event"
+                    title="Delete event"
+                  >
+                    <Trash className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void closeEditor()}
+                  className="rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink-muted)' }}
+                  aria-label="Close"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
 
-            {/* 全天切 */}
-            <label className="mb-2 flex items-center gap-2 cursor-pointer">
+            {/* 标题行：标题输入 + 右侧旗子开关（点亮后在日历上事件右侧显示小旗） */}
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="New Event"
+                value={formTitle}
+                onChange={(e) => setFormTitle(e.target.value)}
+                className="min-w-0 flex-1 border-b bg-transparent px-0 py-1.5 text-base font-medium outline-none transition-colors focus:border-[var(--primary)]"
+                style={{ borderColor: 'var(--line-soft)', color: 'var(--ink)' }}
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={() => setFormFlag((v) => !v)}
+                aria-pressed={formFlag}
+                aria-label="Flag"
+                title={formFlag ? 'Remove flag' : 'Flag this event'}
+                className="shrink-0 rounded p-1 transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: formFlag ? 'var(--danger)' : 'var(--ink-faint)' }}
+              >
+                <Flag className="h-4 w-4" fill={formFlag ? 'currentColor' : 'none'} />
+              </button>
+            </div>
+            <input
+              type="text"
+              placeholder="Location"
+              value={formLocation}
+              onChange={(e) => setFormLocation(e.target.value)}
+              className="mb-3 w-full border-b bg-transparent px-0 py-1.5 text-sm outline-none transition-colors focus:border-[var(--primary)]"
+              style={{ borderColor: 'var(--line-soft)', color: 'var(--ink)' }}
+            />
+
+            {/* 全天 */}
+            <label className="mb-2 flex cursor-pointer items-center justify-between">
+              <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>All day</span>
               <input
                 type="checkbox"
                 checked={formAllDay}
                 onChange={(e) => setFormAllDay(e.target.checked)}
               />
-              <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>All day</span>
             </label>
 
-            {/* 时间（非全天时） */}
+            {/* Starts / Ends：标签 + 日期（+ 时刻）同行，对齐 macOS 的紧凑时间行 */}
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="w-10 shrink-0 text-xs" style={{ color: 'var(--ink-muted)' }}>Starts</span>
+              <input
+                type="date"
+                value={formDate}
+                onChange={(e) => setFormDate(e.target.value)}
+                className="min-w-0 flex-1 rounded-md border px-2 py-1 text-xs"
+                style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+              />
+              {!formAllDay && (
+                <input
+                  type="time"
+                  value={formStartTime}
+                  onChange={(e) => setFormStartTime(e.target.value)}
+                  className="w-[88px] shrink-0 rounded-md border px-2 py-1 text-xs"
+                  style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+                />
+              )}
+            </div>
             {!formAllDay && (
-              <>
-                <div className="mb-2 flex gap-2">
-                  <div className="flex-1">
-                    <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Start</label>
-                    <input
-                      type="time"
-                      value={formStartTime}
-                      onChange={(e) => setFormStartTime(e.target.value)}
-                      className="w-full rounded-md border px-3 py-1.5 text-sm"
-                      style={{
-                        backgroundColor: 'var(--input-bg)',
-                        borderColor: 'var(--input-border)',
-                        color: 'var(--ink)',
-                      }}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>End</label>
-                    <input
-                      type="time"
-                      value={formEndTime}
-                      onChange={(e) => setFormEndTime(e.target.value)}
-                      className="w-full rounded-md border px-3 py-1.5 text-sm"
-                      style={{
-                        backgroundColor: 'var(--input-bg)',
-                        borderColor: 'var(--input-border)',
-                        color: 'var(--ink)',
-                      }}
-                    />
-                  </div>
-                </div>
-                {/* 结束日期：填了结束时间才显示，支持跨天事件（结束在次日） */}
-                {formEndTime && (
-                  <div className="mb-2">
-                    <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>End date</label>
-                    <input
-                      type="date"
-                      value={formEndDate}
-                      onChange={(e) => setFormEndDate(e.target.value)}
-                      className="w-full rounded-md border px-3 py-1.5 text-sm"
-                      style={{
-                        backgroundColor: 'var(--input-bg)',
-                        borderColor: 'var(--input-border)',
-                        color: 'var(--ink)',
-                      }}
-                    />
-                  </div>
-                )}
-              </>
+              <div className="mb-3 flex items-center gap-2">
+                <span className="w-10 shrink-0 text-xs" style={{ color: 'var(--ink-muted)' }}>Ends</span>
+                <input
+                  type="date"
+                  value={formEndDate}
+                  onChange={(e) => setFormEndDate(e.target.value)}
+                  className="min-w-0 flex-1 rounded-md border px-2 py-1 text-xs"
+                  style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+                />
+                <input
+                  type="time"
+                  value={formEndTime}
+                  onChange={(e) => setFormEndTime(e.target.value)}
+                  className="w-[88px] shrink-0 rounded-md border px-2 py-1 text-xs"
+                  style={{ backgroundColor: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+                />
+              </div>
             )}
 
-            {/* 优先级 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Priority</label>
-              <select
-                value={formPriority}
-                onChange={(e) => setFormPriority(e.target.value as any)}
-                className="w-full rounded-md border px-3 py-1.5 text-sm"
-                style={{
-                  backgroundColor: 'var(--input-bg)',
-                  borderColor: 'var(--input-border)',
-                  color: 'var(--ink)',
-                }}
-              >
-                {(['high', 'normal', 'low'] as const).map((p) => (
-                  <option key={p} value={p}>{PRIORITY_LABELS[p]}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* 提前提醒（可多选，默认开始前 30 分钟） */}
+            {/* 提前提醒：可多个（模型可解析出「提前一周 + 提前 1 天」），已选用 chips 展示、下拉用于添加 */}
             <div className="mb-2">
               <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Remind before</label>
-              <div className="flex flex-wrap gap-1">
-                {REMINDER_PRESETS.map((r) => {
-                  const active = formReminderMinutes.includes(r.value);
-                  return (
-                    <button
-                      key={r.value}
-                      type="button"
-                      onClick={() =>
-                        setFormReminderMinutes((prev) =>
-                          active
-                            ? prev.filter((v) => v !== r.value)
-                            : [...prev, r.value].sort((a, b) => a - b),
-                        )
-                      }
-                      className="rounded-full border px-2 py-0.5 text-xs transition-colors"
-                      style={{
-                        borderColor: active ? 'var(--primary)' : 'var(--input-border)',
-                        backgroundColor: active ? 'var(--primary-soft)' : 'transparent',
-                        color: active ? 'var(--primary-strong)' : 'var(--ink-muted)',
-                      }}
+              {formReminders.length > 0 && (
+                <div className="mb-1 flex flex-wrap gap-1">
+                  {formReminders.map((m) => (
+                    <span
+                      key={m}
+                      className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-11"
+                      style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
                     >
-                      {r.label}
-                    </button>
-                  );
-                })}
-              </div>
-              {/* 自定义分钟 */}
-              <div className="mt-1.5 flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min={1}
-                  placeholder="Custom (min)"
-                  className="w-28 rounded-md border px-2 py-1 text-xs outline-none"
+                      {fmtReminderLabel(m)}
+                      <button
+                        type="button"
+                        onClick={() => setFormReminders((prev) => prev.filter((x) => x !== m))}
+                        className="leading-none transition-opacity hover:opacity-60"
+                        style={{ color: 'var(--ink-muted)' }}
+                        aria-label={`Remove ${fmtReminderLabel(m)}`}
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <select
+                  value={reminderAdd}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') setReminderAdd('custom');
+                    else if (v) addReminder(v);
+                  }}
+                  className="min-w-0 flex-1 rounded-md border px-2 py-1 text-xs"
                   style={{
                     backgroundColor: 'var(--input-bg)',
                     borderColor: 'var(--input-border)',
                     color: 'var(--ink)',
                   }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      const v = Number((e.target as HTMLInputElement).value);
-                      if (Number.isFinite(v) && v > 0 && !formReminderMinutes.includes(v)) {
-                        setFormReminderMinutes((prev) => [...prev, v].sort((a, b) => a - b));
-                      }
-                      (e.target as HTMLInputElement).value = '';
-                    }
-                  }}
-                />
-                <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>Enter to add</span>
+                >
+                  <option value="">Add reminder…</option>
+                  {REMINDER_PRESETS.map((r) => (
+                    <option key={r.value} value={String(r.value)}>{r.label}</option>
+                  ))}
+                  <option value="custom">Custom…</option>
+                </select>
+                {reminderAdd === 'custom' && (
+                  <>
+                    <input
+                      type="number"
+                      min={1}
+                      placeholder="min"
+                      value={customReminderText}
+                      onChange={(e) => setCustomReminderText(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') addReminder('custom'); }}
+                      className="w-[88px] shrink-0 rounded-md border px-2 py-1 text-xs outline-none"
+                      style={{
+                        backgroundColor: 'var(--input-bg)',
+                        borderColor: 'var(--input-border)',
+                        color: 'var(--ink)',
+                      }}
+                    />
+                    <span className="text-11" style={{ color: 'var(--ink-muted)' }}>min</span>
+                    <button
+                      type="button"
+                      onClick={() => addReminder('custom')}
+                      className="shrink-0 rounded-md border px-2 py-1 text-11 transition-colors hover:bg-[var(--paper-hover)]"
+                      style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+                    >
+                      Add
+                    </button>
+                  </>
+                )}
               </div>
-              <p className="mt-1 text-11" style={{ color: 'var(--ink-muted)' }}>
-                Each selected time triggers a notification. Default: 30 min before.
-              </p>
             </div>
 
             {/* 颜色 */}
@@ -1736,118 +1986,42 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                     title={c}
                   />
                 ))}
+                {/* 自定义颜色：方形取色框，与圆形预设色区分（点击打开系统取色器） */}
                 <input
                   type="color"
                   value={formColor}
                   onChange={(e) => setFormColor(e.target.value)}
-                  className="h-5 w-8 cursor-pointer rounded border"
-                  style={{ borderColor: 'var(--input-border)' }}
+                  className="h-5 w-5 cursor-pointer rounded-[5px] border p-0"
+                  style={{ borderColor: 'var(--input-border)', backgroundColor: 'transparent' }}
                   title="Custom color"
+                  aria-label="Custom color"
                 />
               </div>
             </div>
 
-            {/* 描述 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Description</label>
-              <textarea
-                placeholder="Optional"
-                value={formDescription}
-                onChange={(e) => setFormDescription(e.target.value)}
-                rows={2}
-                className="w-full rounded-md border px-3 py-1.5 text-sm resize-none"
-                style={{
-                  backgroundColor: 'var(--input-bg)',
-                  borderColor: 'var(--input-border)',
-                  color: 'var(--ink)',
-                }}
-              />
-            </div>
-
-            {/* 标签 */}
-            <div className="mb-2">
-              <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Tags</label>
-              <input
-                type="text"
-                placeholder="Comma separated, e.g. 合同, 华为"
-                value={formTags}
-                onChange={(e) => setFormTags(e.target.value)}
-                className="w-full rounded-md border px-3 py-2 text-sm"
-                style={{
-                  backgroundColor: 'var(--input-bg)',
-                  borderColor: 'var(--input-border)',
-                  color: 'var(--ink)',
-                }}
-              />
-            </div>
-
-            {/* 地点 */}
-            <div className="mb-4">
-              <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Location</label>
-              <input
-                type="text"
-                placeholder="Optional"
-                value={formLocation}
-                onChange={(e) => setFormLocation(e.target.value)}
-                className="w-full rounded-md border px-3 py-2 text-sm"
-                style={{
-                  backgroundColor: 'var(--input-bg)',
-                  borderColor: 'var(--input-border)',
-                  color: 'var(--ink)',
-                }}
-              />
-            </div>
+            {/* 备注：带边框的浅色小字输入（地点已移到标题下方） */}
+            <textarea
+              placeholder="Notes"
+              value={formDescription}
+              onChange={(e) => setFormDescription(e.target.value)}
+              rows={2}
+              className="mb-3 w-full resize-none rounded-md border px-2.5 py-1.5 text-xs outline-none transition-colors focus:border-[var(--primary)]"
+              style={{
+                backgroundColor: 'var(--input-bg)',
+                borderColor: 'var(--input-border)',
+                color: 'var(--ink-muted)',
+              }}
+            />
 
             {/* 表单错误提示 */}
             {formError && (
               <div
-                className="mb-3 rounded-md px-3 py-2 text-xs"
+                className="rounded-md px-3 py-2 text-xs"
                 style={{ backgroundColor: 'var(--danger-soft)', color: 'var(--danger)' }}
               >
                 {formError}
               </div>
             )}
-
-            {/* 操作按钮 */}
-            <div className="flex items-center justify-between">
-              <div>
-                {'event_id' in editMode && (
-                  <Button
-                    onClick={() => {
-                      setEditMode(null);
-                      requestDelete(editMode.event_id);
-                    }}
-                    variant="ghost"
-                    tone="danger"
-                    size="sm"
-                  >
-                    <Trash className="h-3.5 w-3.5" />
-                    Delete
-                  </Button>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  onClick={() => setEditMode(null)}
-                  variant="ghost"
-                  tone="neutral"
-                  size="md"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleSubmit}
-                  disabled={saving || !formTitle.trim()}
-                  loading={saving}
-                  variant="solid"
-                  tone="brand"
-                  size="md"
-                >
-                  {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                  {'event_id' in editMode ? 'Save' : 'Create'}
-                </Button>
-              </div>
-            </div>
           </div>
         </div>
       )}

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, Search, LayoutGrid, List, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText } from 'lucide-react';
+import { FolderOpen, Search, LayoutGrid, List, Grid3x3, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText } from 'lucide-react';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { localDateTimeToIso } from '@/lib/utils';
@@ -104,8 +104,8 @@ type SortKey = 'recent' | 'created' | 'nodes' | 'name';
 /** 分组方式 */
 type GroupMode = 'none' | 'category' | 'tag';
 
-/** 视图模式：网格卡片（默认）/ 列表 */
-type BoardViewMode = 'grid' | 'list';
+/** 视图模式：网格卡片（默认）/ 列表 / 图标墙 */
+type BoardViewMode = 'grid' | 'list' | 'icons';
 
 interface ProjectBoardViewProps {
   open: boolean;
@@ -158,13 +158,35 @@ const BREATH_DUR = [1.2, 1.8, 2.4, 3.0];
 
 /** 距开庭剩余天数（0=当天）；无效/已过/超过3天返回 -1（不开呼吸灯） */
 function hearingDaysLeft(iso: string): number {
+  const days = daysUntil(iso);
+  return days >= 0 && days <= 3 ? days : -1;
+}
+
+/** 距指定日期剩余天数；无效日期返回 -1 */
+function daysUntil(iso: string): number {
   const m = iso.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (!m) return -1;
-  const hearing = Date.parse(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
-  if (Number.isNaN(hearing)) return -1;
+  const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
+  if (Number.isNaN(t)) return -1;
   const today = Date.parse(`${new Date().toLocaleDateString('en-CA')}T00:00:00Z`);
-  const days = Math.round((hearing - today) / 86400000);
-  return days >= 0 && days <= 3 ? days : -1;
+  return Math.round((t - today) / 86400000);
+}
+
+/** 图标墙底色：由项目 id 哈希出稳定色相（0–359），同一项目每次渲染配色一致 */
+function projectHue(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return h;
+}
+
+/** 图标墙字形：中文取首字；空格分隔的英文取首字母缩写；其余取前两个字符，空名回退 "?" */
+function projectGlyph(name: string): string {
+  const s = (name || '').trim();
+  if (!s) return '?';
+  if (/[\u4e00-\u9fa5]/.test(s[0])) return s[0];
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return s.slice(0, 2).toUpperCase();
 }
 
 /* ────────────────────────────────────────────────────────────
@@ -324,10 +346,13 @@ function TodoPopup({
     const name = courtName.trim();
     if (!dateStr || !name) return;
     const matter = courtMatter.trim();
-    const room = courtRoom.trim();
+    // 法庭号去掉用户可能自带的「第/法庭/庭」，避免拼出「第二十法庭法庭」
+    const room = courtRoom.trim().replace(/^第/, '').replace(/(?:法庭|庭)$/, '').trim();
     const addr = courtAddr.trim();
     const timeStr = courtTime.trim();
-    const text = `${matter ? `${matter} ` : ''}在${name}${room ? `的第${room}法庭` : ''}开庭${addr ? `。地址：${addr}` : ''}`;
+    const text = `${matter ? `${matter} ` : ''}在${name}${room ? `第${room}法庭` : ''}开庭${addr ? `。地址：${addr}` : ''}`;
+    // 地点 = 法院+法庭（+地址）；主题只留事项（由 stickyLineEventTitle 从行文本派生）
+    const location = `${name}${room ? `第${room}法庭` : ''}${addr ? `（${addr}）` : ''}`;
     const startTime = localDateTimeToIso(dateStr, timeStr);
     if (!startTime) {
       showImageAiEditToast('Invalid hearing date/time.', 'error');
@@ -357,6 +382,9 @@ function TodoPopup({
           text,
           start_time: startTime,
           reminder_minutes: [30],
+          location,
+          // 开庭为紧要事项：事件自动打红色标旗（priority=high）
+          priority: 'high',
         }),
       });
       const d = await resp.json().catch(() => ({ success: false }));
@@ -741,9 +769,12 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
   const [catFilter, setCatFilter] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('created');
   const [groupBy, setGroupBy] = useState<GroupMode>('none');
-  // 视图模式：网格卡片 / 列表（读写 localStorage；打开面板时重置筛选与排序，但保留视图偏好）
+  // 视图模式：网格卡片 / 列表 / 图标墙（读写 localStorage；打开面板时重置筛选与排序，但保留视图偏好）
   const [viewMode, setViewMode] = useState<BoardViewMode>(() => {
-    try { return localStorage.getItem(BOARD_VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; }
+    try {
+      const saved = localStorage.getItem(BOARD_VIEW_KEY);
+      return saved === 'list' || saved === 'icons' ? saved : 'grid';
+    } catch { return 'grid'; }
   });
   const setViewModePersist = (v: BoardViewMode) => {
     setViewMode(v);
@@ -1047,6 +1078,22 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     });
   }, [projects, filter]);
 
+  // 图标 KPI 条：当前状态视图（Active/Archived/Trash）下的规模与到期压力，全部由已有字段推导
+  const kpis = useMemo(() => {
+    let hearings = 0;
+    let todos = 0;
+    let nodes = 0;
+    for (const p of viewProjects) {
+      // 待开庭：未归档/未回收，且开庭日未过期（含当天）——不设时间窗口，全部计入
+      if (!p.archived && !p.trashed && p.hearing_date) {
+        if (daysUntil(p.hearing_date) >= 0) hearings++;
+      }
+      todos += p.todo_count ?? 0;
+      nodes += p.node_count ?? 0;
+    }
+    return { total: viewProjects.length, hearings, todos, nodes };
+  }, [viewProjects]);
+
   // 默认标签（分类）：从项目分类动态聚合，仅显示有项目在用的分类；点击按分类筛选
   const catTags = useMemo(() => {
     const map = new Map<string, number>();
@@ -1347,8 +1394,9 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'update', project_id: projectId, note: { id: noteId, pages } }),
         });
-        // 广播事件 → 画布便签重新加载
+        // 广播事件 → 画布便签重新加载；保存时服务端会自动把未入日历的行入日历 → 同播日历刷新
         window.dispatchEvent(new CustomEvent('sticky-notes-changed'));
+        window.dispatchEvent(new CustomEvent('calendar-events-changed'));
         // 本地更新弹窗数据
         setTodoData((prev) =>
           prev
@@ -1756,7 +1804,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
           ))}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {/* 视图切换：网格卡片 / 列表（偏好持久化） */}
+          {/* 视图切换：网格卡片 / 列表 / 图标墙（偏好持久化） */}
           <div
             className="flex shrink-0 items-center gap-0.5 rounded-lg p-0.5"
             style={{ border: '1px solid var(--border)' }}
@@ -1764,6 +1812,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
             {([
               { key: 'grid' as const, label: 'Grid view', Icon: LayoutGrid },
               { key: 'list' as const, label: 'List view', Icon: List },
+              { key: 'icons' as const, label: 'Icon view', Icon: Grid3x3 },
             ]).map(({ key, label, Icon }) => (
               <button
                 key={key}
@@ -1876,6 +1925,35 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
           )}
         </div>
       )}
+
+      {/* 图标 KPI 条：一眼看清当前视图的规模与到期压力（随 Active/Archived/Trash 联动，
+          全部由已有字段推导，不引入额外请求） */}
+      <div
+        className="flex flex-wrap items-center gap-2 border-b px-5 py-2"
+        style={{ borderColor: 'var(--border)', backgroundColor: 'var(--paper, #ffffff)' }}
+      >
+        {[
+          { key: 'total', Icon: FolderOpen, label: 'Projects', value: kpis.total, alert: false },
+          { key: 'hearings', Icon: CalendarDays, label: 'Hearings', value: kpis.hearings, alert: kpis.hearings > 0 },
+          { key: 'todos', Icon: ListTodo, label: 'Open todos', value: kpis.todos, alert: kpis.todos > 0 },
+          { key: 'nodes', Icon: MessageSquareText, label: 'Nodes', value: kpis.nodes, alert: false },
+        ].map(({ key, Icon, label, value, alert }) => (
+          <div
+            key={key}
+            title={label}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1"
+            style={{ border: '1px solid var(--border)', background: 'var(--paper-hover, #f6f6f8)' }}
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0" style={{ color: alert ? 'var(--danger, #e8463a)' : 'var(--ink-faint)' }} />
+            <span className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+              {value}
+            </span>
+            <span className="text-11" style={{ color: 'var(--ink-faint)' }}>
+              {label}
+            </span>
+          </div>
+        ))}
+      </div>
 
       {/* 主体：分组卡片网格 + 详情侧栏（单击卡片即打开详情；打开/进入项目用卡片右下角 Open 按钮，
           无双击判定，交互直接无延迟） */}
@@ -2093,7 +2171,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                         </div>
                     ))}
                   </div>
-                  ) : (
+                  ) : viewMode === 'list' ? (
                   /* 列表视图：一行一项目，列信息与卡片对齐（筛选/排序/分组与网格共用同一份数据） */
                   <div className="flex flex-col gap-1.5">
                     {items.map(({ p, isCurrent, isArchived, isTrashed, isSelected, breath }) => (
@@ -2261,6 +2339,107 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                         >
                           Open
                         </button>
+                      </div>
+                    ))}
+                  </div>
+                  ) : (
+                  /* 图标墙视图：每个项目一个方形图标磁贴，图标由项目名自动生成
+                     （中文取首字 / 英文取缩写，底色由 id 哈希出稳定色相，无需素材与迁移）。
+                     交互与网格/列表一致：单击打开右侧详情，悬停显示进入项目入口。 */
+                  <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))' }}>
+                    {items.map(({ p, isCurrent, isArchived, isTrashed, isSelected, breath }) => (
+                      <div
+                        key={p.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          // 与卡片/列表一致：拖选文字时不打开详情
+                          if (hasTextSelection()) return;
+                          openDetail(p);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            openDetail(p);
+                          }
+                        }}
+                        title={[p.name, p.category, ...(p.tags || [])].filter(Boolean).join(' · ')}
+                        className="board-icon group flex cursor-pointer flex-col items-center gap-1.5 rounded-xl p-2 text-center transition-all"
+                        data-current={isCurrent}
+                        data-selected={isSelected}
+                        style={{
+                          // 与网格卡片同一套状态语义：当前绿环、选中紫环、回收站降透明度
+                          border: isCurrent
+                            ? '2px solid #2fa97a'
+                            : isSelected
+                              ? '2px solid var(--primary-strong, #5b48d8)'
+                              : '1px solid var(--border)',
+                          ...(isCurrent
+                            ? { background: 'color-mix(in oklab, #2fa97a 8%, var(--paper, #ffffff))' }
+                            : isSelected
+                              ? { background: 'color-mix(in oklab, var(--primary, #7c5cff) 6%, var(--paper, #ffffff))' }
+                              : {}),
+                          opacity: isTrashed ? 0.6 : 1,
+                        }}
+                      >
+                        <span className="relative block h-14 w-14 shrink-0">
+                          <span
+                            className="flex h-full w-full items-center justify-center rounded-2xl text-lg font-bold"
+                            style={{ background: `hsl(${projectHue(p.id)} 62% 52%)`, color: '#fff' }}
+                          >
+                            {projectGlyph(p.name)}
+                          </span>
+                          {/* 悬停遮罩：显式进入项目（当前项目点击返回画布），归档/回收站不可进入 */}
+                          <button
+                            type="button"
+                            disabled={isArchived || isTrashed}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isArchived || isTrashed) return;
+                              if (isCurrent) onClose();
+                              else void switchTo(p.id);
+                            }}
+                            title={isArchived || isTrashed ? 'Restore to open' : 'Open project'}
+                            className="absolute inset-0 flex items-center justify-center rounded-2xl opacity-0 transition-opacity group-hover:opacity-100 disabled:hidden"
+                            style={{ background: 'rgb(23 23 23 / 45%)', color: '#fff' }}
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </button>
+                          {/* 未完成待办角标：> 0 时红点提醒 */}
+                          {(p.todo_count ?? 0) > 0 && (
+                            <span
+                              title="Open todos"
+                              className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-10 font-bold"
+                              style={{ color: '#fff', background: 'var(--danger, #e8463a)' }}
+                            >
+                              {p.todo_count}
+                            </span>
+                          )}
+                        </span>
+                        <span className="w-full truncate text-xs font-medium" style={{ color: 'var(--ink)' }}>
+                          {p.name}
+                        </span>
+                        <span className="flex items-center gap-1.5 text-10" style={{ color: 'var(--ink-faint)' }}>
+                          {!isArchived && !isTrashed && p.hearing_date && (
+                            <span
+                              title={`开庭：${p.hearing_date}`}
+                              className="flex items-center gap-0.5 font-semibold"
+                              style={{
+                                color: 'var(--danger, #e8463a)',
+                                // 开庭前3天起与卡片同款呼吸灯
+                                ...(breath >= 0
+                                  ? { animation: `court-breathe-${breath} var(--court-dur, ${BREATH_DUR[breath]}s) ease-in-out infinite` }
+                                  : {}),
+                              }}
+                            >
+                              <CalendarDays className="h-2.5 w-2.5 shrink-0" />
+                              {hearingLabel(p.hearing_date)}
+                            </span>
+                          )}
+                          <span className="flex items-center gap-0.5">
+                            <MessageSquareText className="h-2.5 w-2.5 shrink-0" />×{p.node_count ?? 0}
+                          </span>
+                        </span>
                       </div>
                     ))}
                   </div>

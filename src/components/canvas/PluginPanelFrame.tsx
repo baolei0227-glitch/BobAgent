@@ -57,6 +57,8 @@ export function PluginPanelFrame({ pluginId, name, src, probeUrl }: PluginPanelF
   const autoRetryRef = useRef(0);
   /** 面板 iframe：中继消息时校验 event.source，确保只放行本面板发出的消息 */
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  /** 最新 probe 的引用：供 probe 内部延时自调用，避免自引用（声明前使用） */
+  const probeRef = useRef<() => Promise<void>>(async () => {});
 
   const probe = useCallback(async () => {
     if (!probeUrl) return;
@@ -78,7 +80,7 @@ export function PluginPanelFrame({ pluginId, name, src, probeUrl }: PluginPanelF
       // 宿主已清掉残留占用者：插件侧下一次重试（3s 一次）即接管端口，自动重探几次免手动 Retry
       if (data?.reaped && autoRetryRef.current < 4) {
         autoRetryRef.current += 1;
-        setTimeout(() => void probe(), 1800);
+        setTimeout(() => void probeRef.current(), 1800);
       }
     } catch {
       setResult({ ok: false, reason: 'unreachable' });
@@ -86,8 +88,10 @@ export function PluginPanelFrame({ pluginId, name, src, probeUrl }: PluginPanelF
     }
   }, [pluginId, probeUrl]);
 
-  // 每次挂载探测一次（预览面板切到该 tab 重新挂载 = 重新探测 + 重新加载 iframe）
+  // 每次挂载探测一次（预览面板切到该 tab 重新挂载 = 重新探测 + 重新加载 iframe），
+  // 同时把最新 probe 同步到 ref（不在 render 内写 ref），供延时重探调用
   useEffect(() => {
+    probeRef.current = probe;
     void probe();
   }, [probe]);
 

@@ -371,6 +371,17 @@ body {
   box-shadow: 0 2px 8px rgb(23 23 23 / 10%);
 }
 
+/* 项目面板：图标墙磁贴。默认底色与阴影写在样式表（而非内联），
+   避免内联样式压掉 :hover；当前/选中态的描边与底色调由内联接管。 */
+[data-project-board] .board-icon {
+  background: var(--paper, #fff);
+  box-shadow: 0 1px 2px rgb(23 23 23 / 8%);
+}
+[data-project-board] .board-icon:hover {
+  box-shadow: 0 4px 12px rgb(23 23 23 / 14%);
+  transform: translateY(-1px);
+}
+
 /* 项目面板待办按钮呼吸灯：未完成待办 > 0 时红色脉冲呼吸（透明度 + 红色外发光），提醒待处理；
    待办 >= 3 时前端以更短的 animation-duration 加速节奏 */
 @keyframes todo-breathe {
@@ -476,6 +487,16 @@ body {
   color: inherit !important;
 }
 [data-template-panel] ::-moz-selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+
+/* 日历面板：同样位于 data-canvas-ui="overlay" 内，恢复文字选中高亮（沿用全局金色） */
+[data-calendar-panel] ::selection {
+  background-color: rgba(218, 165, 32, 0.35) !important;
+  color: inherit !important;
+}
+[data-calendar-panel] ::-moz-selection {
   background-color: rgba(218, 165, 32, 0.35) !important;
   color: inherit !important;
 }

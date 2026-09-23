@@ -17,9 +17,12 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { homedir } from 'os';
 import { isAbsolute, join, resolve, sep } from 'path';
+import { existsSync, readdirSync } from 'fs';
 import { bundledDataHome } from '../extensions/bundled-data-home';
-import type { McpServerConfig, McpToolInfo } from './types';
+import { MCP_PRESETS, type McpServerConfig, type McpToolInfo } from './types';
+import { allocateFreePort, ensurePanelPort } from './panel-ports';
 import { PluginKernel, type PluginRuntime, type PluginSpec } from './plugin-kernel';
+import { getCurrentProjectRef } from '../project/project-config';
 
 /** 构建子进程 PATH（与 electron/main.ts 的 buildChildPath 一致） */
 function buildChildPath(): string {
@@ -35,10 +38,9 @@ function buildChildPath(): string {
   ];
   // nvm
   try {
-    const fs = require('fs');
     const nvmDir = join(home, '.nvm/versions/node');
-    if (fs.existsSync(nvmDir)) {
-      for (const ver of fs.readdirSync(nvmDir)) {
+    if (existsSync(nvmDir)) {
+      for (const ver of readdirSync(nvmDir)) {
         paths.push(join(nvmDir, ver, 'bin'));
       }
     }
@@ -95,17 +97,52 @@ function connServiceName(serverId: string): string {
   return `mcp:${serverId}`;
 }
 
-/** 建立 MCP 连接（stdio / streamable-http），失败抛错 */
-async function createConnection(config: McpServerConfig): Promise<{ client: Client; close: () => Promise<void> }> {
+/** 该服务声明的自带面板（实例配置优先，缺省回退预置）；无声明返回 undefined */
+function servePanelDecl(config: McpServerConfig) {
+  const panel = config.panel ?? MCP_PRESETS.find((p) => p.id === config.id)?.panel;
+  return panel?.mode === 'serve' ? panel : undefined;
+}
+
+/**
+ * 把裸 `--serve` 改写为 `--serve <port>`（插件 CLI 已支持显式端口）。
+ * 配置里已写死数字端口（用户自定义）时原样保留，不覆盖。
+ */
+function withServePort(args: string[], port: number): string[] {
+  const i = args.indexOf('--serve');
+  if (i < 0) return args;
+  const next = args[i + 1];
+  if (next !== undefined && Number.isFinite(Number(next))) return args;
+  return [...args.slice(0, i + 1), String(port), ...args.slice(i + 1)];
+}
+
+/**
+ * 建立 MCP 连接（stdio / streamable-http），失败抛错。
+ *
+ * `registerPanelPort`：真实连接 true —— 为 serve 面板插件分配并登记本宿主的运行时端口；
+ * 测试连接（testConnection）不传 —— 另分配一个临时空闲端口且不登记，否则会覆盖真实实例端口。
+ */
+async function createConnection(
+  config: McpServerConfig,
+  opts?: { registerPanelPort?: boolean },
+): Promise<{ client: Client; close: () => Promise<void> }> {
   let transport: StdioClientTransport | StreamableHTTPClientTransport;
   if (config.transport === 'stdio') {
     const childPath = buildChildPath();
     // 随包插件数据根统一：注入 BOB_*_MCP_HOME → ~/BobWork/extensions/<plugin>。
     // 仅登记过的随包插件注入；自定义/未登记 server 不注入；config.env 显式值优先。
     const dataHome = bundledDataHome(config.id);
+    // 自带 serve 面板的插件：端口由宿主按实例分配（面板地址随之走运行时表），
+    // 避免整机固定端口（9480/9482）被别的宿主实例占用后本实例面板永久打不开。
+    let args = [...(config.args || [])];
+    if (servePanelDecl(config)) {
+      const port = opts?.registerPanelPort
+        ? await ensurePanelPort(config.id)
+        : await allocateFreePort();
+      args = withServePort(args, port);
+    }
     transport = new StdioClientTransport({
       command: config.command || 'npx',
-      args: [...(config.args || [])],
+      args,
       env: {
         ...process.env,
         PATH: childPath,
@@ -154,7 +191,7 @@ async function ensureConnected(state: McpConnectionState, config: McpServerConfi
     try { await state.client.close(); } catch { /* 忽略 */ }
     state.client = undefined;
   }
-  const { client } = await createConnection(config);
+  const { client } = await createConnection(config, { registerPanelPort: true });
   state.client = client;
   state.toolsCache = null; // 连接变化 → 工具发现缓存失效
   state.failCount = 0;
@@ -366,8 +403,8 @@ class McpClientManager {
       } catch { /* 列工具失败不阻断测试结果 */ }
       await close();
       return { success: true, toolsCount };
-    } catch (e: any) {
-      return { success: false, toolsCount: 0, error: e?.message || 'Connection failed' };
+    } catch (e) {
+      return { success: false, toolsCount: 0, error: e instanceof Error ? e.message : 'Connection failed' };
     }
   }
 
@@ -410,6 +447,36 @@ class McpClientManager {
     }
 
     return allTools;
+  }
+
+  /**
+   * 发现各已连接 server 自带的说明书（MCP 协议 InitializeResult.instructions）。
+   *
+   * 与 discoverTools 同源同序：只看 active 连接，空说明书 / 读失败的 server 不出现在结果里。
+   * 宿主只透传不改写 —— 「这个服务怎么用」由服务自己声明，不再永远靠宿主手写。
+   * toolPrefix 与 discoverTools 的 fullName 拼接同源，供调用侧按「工具是否真的在册」对齐。
+   */
+  async discoverServerInstructions(): Promise<Array<{ serverId: string; serverName: string; toolPrefix: string; instructions: string }>> {
+    const out: Array<{ serverId: string; serverName: string; toolPrefix: string; instructions: string }> = [];
+    for (const rt of this.kernel.getAllRuntimes()) {
+      if (rt.state !== 'active') continue;
+      const state = this.kernel.getService<McpConnectionState>(connServiceName(rt.id));
+      if (!state?.client) continue;
+      let text = '';
+      try {
+        text = (state.client.getInstructions() || '').trim();
+      } catch {
+        continue; // 握手未完成等异常：视为该 server 无说明书
+      }
+      if (!text) continue;
+      out.push({
+        serverId: rt.id,
+        serverName: rt.name,
+        toolPrefix: `mcp__${sanitizeToolName(rt.id)}__`,
+        instructions: text,
+      });
+    }
+    return out;
   }
 
   /** 调用 MCP 工具；连接层异常时自动自愈重连（超时不重试调用，防副作用重复）。
@@ -462,8 +529,7 @@ class McpClientManager {
       const raw = args.path.trim();
       if (!isAbsolute(raw) && !raw.startsWith('~')) {
         try {
-          const { getCurrentProject } = await import('@/lib/project/project-manager');
-          const project = await getCurrentProject();
+          const project = await getCurrentProjectRef();
           if (project?.path) {
             const root = resolve(project.path);
             const resolved = resolve(join(root, raw));
@@ -506,7 +572,7 @@ class McpClientManager {
         : await callPromise;
       // 检查 isError 标志
       if (result.isError) {
-        const errText = Array.isArray(result.content) ? result.content.map((c: any) => c.text || '').join(' ') : 'Unknown error';
+        const errText = Array.isArray(result.content) ? result.content.map((c) => ('text' in c && typeof c.text === 'string' ? c.text : '')).join(' ') : 'Unknown error';
         console.error(`[MCP:callTool] ${serverId}/${toolName} 服务端报错:`, errText.slice(0, 300));
         return { text: `Error from server: ${errText}` };
       }

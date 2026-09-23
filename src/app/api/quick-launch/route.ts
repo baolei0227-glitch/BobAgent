@@ -18,8 +18,8 @@ export async function GET() {
   try {
     const settings = await readSettingsFromFile();
     return NextResponse.json({ quickLaunchers: (settings as { quickLaunchers?: QuickLauncher[] }).quickLaunchers ?? [] });
-  } catch (e: any) {
-    return NextResponse.json({ quickLaunchers: [], error: e?.message || 'Failed to load quick launchers' }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ quickLaunchers: [], error: e instanceof Error ? e.message : 'Failed to load quick launchers' }, { status: 500 });
   }
 }
 
@@ -60,8 +60,8 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ success: false, error: `Unknown action "${String(body.action)}"` }, { status: 400 });
-  } catch (e: any) {
+  } catch (e) {
     console.error('POST /api/quick-launch error:', e);
-    return NextResponse.json({ success: false, error: e?.message || 'Quick-launch operation failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : 'Quick-launch operation failed' }, { status: 500 });
   }
 }

@@ -162,6 +162,8 @@ type TodoLineItemProps = {
   accent: string;
   rev: number;
   onInputText: (text: string) => void;
+  /** 输入框失焦：宿主据此立即落盘并结算自动入日历 */
+  onBlur?: () => void;
   onEnter: () => void;
   onBackspaceEmpty: () => boolean;
   onToggle: () => void;
@@ -180,6 +182,7 @@ export const TodoLineItem = memo(
     color,
     accent,
     onInputText,
+    onBlur,
     onEnter,
     onBackspaceEmpty,
     onToggle,
@@ -214,6 +217,7 @@ export const TodoLineItem = memo(
             const txt = (e.currentTarget.textContent ?? '').replace(/\n$/, '');
             onInputText(txt);
           }}
+          onBlur={onBlur}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === 'Enter' && !e.shiftKey) {

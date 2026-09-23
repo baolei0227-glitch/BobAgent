@@ -41,6 +41,7 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     '.next/**',
+    '**/.next/**',
     'out/**',
     'build/**',
     'next-env.d.ts',
@@ -49,6 +50,15 @@ const eslintConfig = defineConfig([
     'dist/**',
     // Script files (CommonJS):
     'scripts/**/*.js',
+    '**/*.cjs',
+    // Vendored / bundled third-party assets (regenerated from deps, not app source):
+    'public/pdf.worker.min.mjs',
+    'assets/skills/**/scripts/**',
+    // Release bundles (packaged app + staging) and compiled electron output:
+    // 这些是构建产物（压缩 chunk / 编译后 JS），只随打包流程再生，不参与源码 lint。
+    'release/**',
+    'release-dist/**',
+    'electron/dist/**',
   ]),
 ]);
 

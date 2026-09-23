@@ -29,11 +29,14 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowLeft,
+  BarChart3,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleDashed,
   Copy,
   History,
+  Info,
   Layers,
   Loader2,
   Paperclip,
@@ -44,6 +47,7 @@ import {
   X,
 } from 'lucide-react';
 import TeamChatStream, { fmtDuration, MarkdownBody, useStallHints, type StallTrackItem } from './TeamChatStream';
+import TeamTimeline from './TeamTimeline';
 import { useComposer, type ComposerContext } from './composer/useComposer';
 import ComposerChips from './composer/ComposerChips';
 import MentionMenu from './composer/MentionMenu';
@@ -76,6 +80,32 @@ const MEMBER_COLOR: Record<string, string> = {
   parked: 'var(--warn)',
   offline: 'var(--ink-muted)',
 };
+
+/**
+ * 心跳接管阈值兜底值：正常由引擎下发的 `staleMs` 覆盖（面板载荷带 STALE_MS），
+ * 仅在引擎版本较旧、未下发该字段时使用。必须与 bob-team-mcp scheduler.ts 的 STALE_MS 一致。
+ */
+const FALLBACK_STALE_MS = 6 * 60 * 1000;
+
+/**
+ * 「未完成草案」可认领时效（30 分钟）：草案只有被 approve 才物化成员/任务，未被批准的草案
+ * 指向一个永不推进的团队 —— 点开即把 teamId 绑进节点并长期订阅，面板永远空白。
+ * 门禁超时/断开现在会主动 team_discard 收口（status 转 discarded，不再出现在清单里）；
+ * 本阈值只兜住「进程/宿主中途消失、没来得及 discard」的残留草案，过了时效不再列为可恢复。
+ */
+const DRAFT_ADOPT_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * 任务耗时：claimedAt → finishedAt（终态），运行中的任务延展到「现在」。
+ * 起止时间戳均来自引擎（认领 / 落终态时写入），未开跑的任务返回 undefined。
+ */
+function taskDuration(t: TeamTaskView, now: number): number | undefined {
+  if (typeof t.claimedAt !== 'number') return undefined;
+  const running = t.status === 'running' || t.status === 'claimed';
+  const end = typeof t.finishedAt === 'number' ? t.finishedAt : running ? now : undefined;
+  if (typeof end !== 'number') return undefined;
+  return Math.max(0, end - t.claimedAt);
+}
 
 /**
  * Merged result shown in this view: every member's output, in the engine's dependency order.
@@ -166,9 +196,20 @@ export default function TeamWorkbench({
   const [retrying, setRetrying] = useState<string | null>(null);
   /** "New run" view: the initial launch interface (shown instead of the run detail; past runs stay listed under it) */
   const [launchOpen, setLaunchOpen] = useState(false);
-  /** Expanded state of the merged-result block (open by default: it is the run's deliverable) */
-  const [deliverableOpen, setDeliverableOpen] = useState(true);
+  /** Expanded state of the merged-result block (collapsed by default: the collaboration stream owns the main
+   *  column, and the merged text duplicates the per-task output that the stream reveals on click) */
+  const [deliverableOpen, setDeliverableOpen] = useState(false);
   const [copiedDeliverable, setCopiedDeliverable] = useState(false);
+  /** 侧栏（成员/任务）展开状态：折叠优先于拖动——节点内嵌面板宽度受限，拖动易破版 */
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  /** 时间线抽屉开关（P1-3，甘特/泳道） */
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  /** 被点击的成员：高亮其名下任务（再点一次取消） */
+  const [highlightMember, setHighlightMember] = useState<string | null>(null);
+  /** 被停摆横幅 #tN 定位到的任务：高亮并滚动到可视区 */
+  const [highlightTask, setHighlightTask] = useState<string | null>(null);
+  /** 侧栏滚动容器：停摆横幅点 #tN 时滚动定位任务行 */
+  const asideRef = useRef<HTMLDivElement | null>(null);
 
   // Selection follows the node's run list: a freshly launched run takes the view (otherwise "New run" would
   // land back on the run the user was just looking at), a dropped selection falls back to the first run.
@@ -213,10 +254,16 @@ export default function TeamWorkbench({
     };
   }, [launchView]);
 
-  const openPlans = useMemo(
-    () => (teamIds.length === 0 ? teamList.filter((t) => t.status === 'planning') : []),
-    [teamList, teamIds.length],
-  );
+  const openPlans = useMemo(() => {
+    if (teamIds.length > 0) return [];
+    const now = Date.now();
+    return teamList.filter(
+      (t) =>
+        t.status === 'planning' &&
+        t.planDraft &&
+        now - t.updatedAt < DRAFT_ADOPT_TTL_MS,
+    );
+  }, [teamList, teamIds.length]);
 
   /** Past-run label: engine name / goal when the snapshot has it, otherwise the position in this node's list */
   const runLabel = useCallback(
@@ -287,6 +334,22 @@ export default function TeamWorkbench({
   const members = useMemo(() => detail?.members ?? [], [detail]);
   const tasks = useMemo(() => detail?.tasks ?? [], [detail]);
 
+  /**
+   * Pre-approval readability: the engine materializes members and tasks only on approve, so a team that is
+   * still planning (or whose plan was discarded) has none of either — the panel used to collapse into an empty
+   * shell ("No members", nothing in the stream) with no trace of what was planned. The plan draft rides the
+   * panel and is what keeps the run readable: it lists the planned roster / tasks and the user's own ask.
+   */
+  const planned = detail?.planDraft;
+  const plannedMembers = members.length === 0 ? (planned?.members ?? []) : [];
+  const plannedTasks = tasks.length === 0 ? (planned?.tasks ?? []) : [];
+  /** planning / discarded: drives the one-line explanation above the stream */
+  const preRunStatus =
+    detail && (detail.status === 'planning' || detail.status === 'discarded') ? detail.status : null;
+  /** Roster size for the sidebar: the live members once materialized, the planned ones before that */
+  const rosterCount = members.length > 0 ? members.length : plannedMembers.length;
+  const rosterTaskCount = tasks.length > 0 ? tasks.length : plannedTasks.length;
+
   // Stall hints: this stream only pushes a frame when the panel actually changes, so a running task whose
   // progress text stopped changing is the only evidence that its member is stuck (the spinner keeps turning)
   const stallTrack = useMemo<StallTrackItem[]>(
@@ -311,6 +374,58 @@ export default function TeamWorkbench({
   );
   const doneCount = useMemo(() => tasks.filter((t) => t.status === 'done').length, [tasks]);
   const failedCount = useMemo(() => tasks.filter((t) => t.status === 'failed').length, [tasks]);
+
+  // 心跳接管阈值：优先用引擎下发值（单一事实来源），旧引擎下未下发时回落到本地常量
+  const staleMs = detail?.staleMs ?? FALLBACK_STALE_MS;
+
+  // 运行中任务存在时按 5s 走时钟：驱动「成员累计耗时」与「接管倒计时」增长（面板帧只在真变化时下发）
+  const hasActiveTasks = useMemo(
+    () => tasks.some((t) => t.status === 'running' || t.status === 'claimed'),
+    [tasks],
+  );
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasActiveTasks) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveTasks]);
+
+  const memberIds = useMemo(() => new Set(members.map((m) => m.id)), [members]);
+  const isUnassigned = useCallback(
+    (t: TeamTaskView) => !t.assignee || !memberIds.has(t.assignee),
+    [memberIds],
+  );
+
+  /** 分配矩阵：每个成员的已分配数 / 已完成数 / 累计耗时（含运行中任务的实时增长） */
+  const memberLoad = useMemo(() => {
+    const map = new Map<string, { assigned: number; done: number; durationMs: number }>();
+    for (const m of members) map.set(m.id, { assigned: 0, done: 0, durationMs: 0 });
+    for (const t of tasks) {
+      if (!t.assignee) continue;
+      const rec = map.get(t.assignee);
+      if (!rec) continue;
+      rec.assigned += 1;
+      if (t.status === 'done') rec.done += 1;
+      rec.durationMs += taskDuration(t, now) ?? 0;
+    }
+    return map;
+  }, [members, tasks, now]);
+
+  // 停摆：引擎终态传播产出的 blockedBy（权威判定），前端不再自行按「deps 含 failed」推断
+  const blockedTasks = useMemo(() => tasks.filter((t) => (t.blockedBy?.length ?? 0) > 0), [tasks]);
+  const blockedUpstreams = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of blockedTasks) for (const d of t.blockedBy ?? []) s.add(d);
+    return [...s];
+  }, [blockedTasks]);
+
+  /** 停摆横幅点 #tN：高亮该任务并滚动到侧栏可视区 */
+  const locateTask = useCallback((taskId: string) => {
+    setHighlightTask(taskId);
+    const el = asideRef.current?.querySelector<HTMLElement>(`[data-task-id="${taskId}"]`);
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, []);
 
   const copyDeliverable = useCallback(async () => {
     try {
@@ -445,6 +560,10 @@ export default function TeamWorkbench({
             }}
           />
         </div>
+        {/* Silent stretch between Launch and the first engine frame (captain planning) — see PlanningStatus.
+            Only this node's first run leaves the launch view on screen (teamIds empty), so that is exactly
+            where the stage needs to be named; once a run exists the run view takes over on the spot. */}
+        {launching && teamIds.length === 0 && <PlanningStatus />}
         {teamIds.length > 0 ? (
           <div className="w-full max-w-[560px]">
             <div className="mb-1 flex items-center gap-1 text-10" style={{ color: 'color-mix(in oklab, var(--ink-muted) 78%, transparent)' }}>
@@ -523,7 +642,7 @@ export default function TeamWorkbench({
   const readingTask = reading ? tasks.find((t) => t.id === reading) : undefined;
 
   return (
-    <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col gap-1.5">
+    <div className="relative flex min-h-0 w-full min-w-0 flex-1 flex-col gap-1.5">
       {/* New run: switches to the initial launch view (past runs stay listed there, see the launch view above) */}
       <div className="flex w-full min-w-0 shrink-0 items-center gap-1.5">
         <button
@@ -539,15 +658,47 @@ export default function TeamWorkbench({
           <Plus className="h-2.5 w-2.5" />
           New run
         </button>
-        {presetAgentIds.length > 0 && (
+        {presetAgentIds.length > 0 && !timelineOpen && (
           <span className="min-w-0 flex-1 truncate text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 65%, transparent)' }}>
             {presetAgentIds.length} preset members
           </span>
         )}
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          {/* Timeline: gantt/swimlane drawer (parallelism + queueing at a glance) */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setTimelineOpen(true);
+            }}
+            className="flex h-5 shrink-0 cursor-pointer items-center gap-0.5 rounded-md px-1.5 text-10 transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)]"
+            style={{ color: 'color-mix(in oklab, var(--ink-muted) 78%, transparent)' }}
+            title="Show the run timeline (start/end of each task, parallelism)"
+          >
+            <BarChart3 className="h-2.5 w-2.5" />
+            Timeline
+          </button>
+          {/* Sidebar collapse: the panel is node-embedded, so width is precious (collapse, not drag) */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setSidebarOpen((v) => !v);
+            }}
+            className="flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)]"
+            style={{ color: 'color-mix(in oklab, var(--ink-muted) 78%, transparent)' }}
+            title={sidebarOpen ? 'Collapse the members/tasks sidebar' : 'Expand the members/tasks sidebar'}
+          >
+            <ChevronRight className="h-3 w-3" style={sidebarOpen ? undefined : { transform: 'rotate(180deg)' }} />
+          </button>
+        </div>
       </div>
 
-      {/* Team selector row: the runs this node has been linked to (horizontally scrollable when many);
-          × drops one from this node's list */}
+      {/* Team selector row: only the switcher between several runs, so it stays hidden for a single run
+          (the ask bubble, the Run started/finished lines and the sidebar already carry that run's name and
+          progress — an extra row repeating them is noise). Labels are short on purpose: the run's goal is
+          long, and it is already on screen; hover reveals it in full. */}
+      {teamIds.length > 1 && (
       <div className="flex w-full min-w-0 shrink-0 items-center gap-1 overflow-x-auto pb-0.5 hide-scrollbar">
         {teamIds.map((id, i) => {
           const active = id === selectedId;
@@ -567,7 +718,7 @@ export default function TeamWorkbench({
                 className="shrink-0 cursor-pointer py-0.5 text-10 font-medium"
                 style={active ? { color: 'var(--primary-strong)' } : { color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}
               >
-                {active && detail ? detail.name || runLabel(id, i) : runLabel(id, i)}
+                {`Run ${i + 1}`}
               </button>
               <button
                 type="button"
@@ -590,6 +741,7 @@ export default function TeamWorkbench({
             : ''}
         </span>
       </div>
+      )}
 
       {error && (
         <div
@@ -603,9 +755,57 @@ export default function TeamWorkbench({
         </div>
       )}
 
+      {/* Stall banner: tasks whose failure came from an upstream failure (engine-authoritative blockedBy).
+          These have no executable path until a human retries the upstream — surface that loudly and make the
+          culprit upstream tasks reachable in one click. */}
+      {blockedTasks.length > 0 && (
+        <div
+          className="flex w-full min-w-0 shrink-0 flex-wrap items-center gap-1 rounded-md px-2 py-1"
+          style={{ backgroundColor: 'var(--danger-soft)' }}
+        >
+          <AlertTriangle className="h-3 w-3 shrink-0" style={{ color: 'var(--danger)' }} />
+          <span className="text-10" style={{ color: 'var(--danger)' }}>
+            {blockedTasks.length} {blockedTasks.length === 1 ? 'task' : 'tasks'} stalled by failed upstream
+          </span>
+          {blockedUpstreams.map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                locateTask(id);
+              }}
+              className="shrink-0 cursor-pointer rounded px-1 text-10 font-medium underline decoration-dotted underline-offset-2"
+              style={{ color: 'var(--danger)' }}
+              title="Locate this failed upstream task — retry it to revive its dependents"
+            >
+              #{id}
+            </button>
+          ))}
+          <span className="text-9" style={{ color: 'color-mix(in oklab, var(--danger) 80%, transparent)' }}>
+            · retry the upstream to revive dependents automatically
+          </span>
+        </div>
+      )}
+
       <div className="flex min-h-0 w-full min-w-0 flex-1 gap-2">
         {/* Main column: chat stream / full task output text */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* Unapproved run: one muted line so the panel says what it is waiting for (the stream below is
+              legitimately silent until approve materializes members and starts the schedule) */}
+          {preRunStatus && (
+            <div
+              className="flex w-full min-w-0 shrink-0 items-center gap-1 px-1 pb-1 text-10"
+              style={{ color: 'color-mix(in oklab, var(--ink-muted) 75%, transparent)' }}
+            >
+              <Info className="h-3 w-3 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">
+                {preRunStatus === 'discarded'
+                  ? 'Plan discarded — no members or tasks were created'
+                  : 'Plan awaiting approval — members and tasks are created once you approve'}
+              </span>
+            </div>
+          )}
           {readingTask ? (
             <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
               <div className="flex w-full min-w-0 shrink-0 items-center gap-1.5 pb-1">
@@ -641,20 +841,18 @@ export default function TeamWorkbench({
             </div>
           ) : (
             <>
-              {/* Merged result: the run's deliverable, assembled from the members' outputs in dependency order.
-                  Shown as soon as the first task lands (with a "still running" hint) so it can be read/copied
-                  without switching to the engine-side chat stream. */}
+              {/* Merged result: every member's output in dependency order, i.e. the one place to read or copy the
+                  full text at once (the stream's per-task panels hold the same text, one click each).
+                  Deliberately demoted to a single collapsed line: the collaboration stream below owns the main
+                  column, and an open merged block would push it off the first screen. */}
               {deliverable && (
-                <div
-                  className="mb-1.5 flex w-full min-w-0 shrink-0 flex-col overflow-hidden rounded-md border"
-                  style={{
-                    borderColor: 'color-mix(in oklab, var(--line) 35%, transparent)',
-                    backgroundColor: 'color-mix(in oklab, var(--paper-soft) 55%, transparent)',
-                  }}
-                >
-                  <div className="flex w-full min-w-0 items-center gap-1.5 px-1.5 py-1">
+                <div className="mb-1 flex w-full min-w-0 shrink-0 flex-col overflow-hidden">
+                  <div
+                    onClick={() => setDeliverableOpen((v) => !v)}
+                    className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_5%,transparent)]"
+                  >
                     <Layers className="h-3 w-3 shrink-0" style={{ color: 'var(--primary-strong)' }} />
-                    <span className="shrink-0 text-10 font-semibold" style={{ color: 'var(--ink)' }}>
+                    <span className="shrink-0 text-10 font-medium" style={{ color: 'var(--ink)' }}>
                       Merged result
                     </span>
                     <span
@@ -671,32 +869,25 @@ export default function TeamWorkbench({
                         e.stopPropagation();
                         void copyDeliverable();
                       }}
-                      className="flex h-5 shrink-0 cursor-pointer items-center gap-0.5 rounded px-1 text-9 transition-colors"
+                      className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded px-1 text-9 transition-colors"
                       style={{ backgroundColor: 'color-mix(in oklab, var(--ink) 5%, transparent)', color: 'var(--ink-muted)' }}
                       title="Copy the merged result"
                     >
                       {copiedDeliverable ? <Check className="h-2.5 w-2.5" /> : <Copy className="h-2.5 w-2.5" />}
                       {copiedDeliverable ? 'Copied' : 'Copy'}
                     </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeliverableOpen((v) => !v);
-                      }}
-                      className="flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded transition-colors"
+                    <ChevronDown
+                      className={`h-3 w-3 shrink-0 transition-transform ${deliverableOpen ? '' : '-rotate-90'}`}
                       style={{ color: 'var(--ink-muted)' }}
-                      title={deliverableOpen ? 'Collapse the merged result' : 'Expand the merged result'}
-                    >
-                      <ChevronDown className={`h-3 w-3 transition-transform ${deliverableOpen ? '' : '-rotate-90'}`} />
-                    </button>
+                    />
                   </div>
                   {deliverableOpen && (
                     <div
-                      className="ai-canvas-scroll min-h-0 w-full min-w-0 overflow-y-auto border-t px-2 py-1.5 text-10 leading-relaxed"
+                      className="ai-canvas-scroll mb-0.5 min-h-0 w-full min-w-0 overflow-y-auto rounded-md border px-2 py-1.5 text-10 leading-relaxed"
                       style={{
                         maxHeight: '34vh',
-                        borderColor: 'color-mix(in oklab, var(--line) 25%, transparent)',
+                        borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
+                        backgroundColor: 'color-mix(in oklab, var(--paper-soft) 60%, transparent)',
                         color: 'color-mix(in oklab, var(--ink) 82%, transparent)',
                       }}
                     >
@@ -710,41 +901,140 @@ export default function TeamWorkbench({
                 events={events}
                 members={streamMembers}
                 isStreaming={detail ? !detail.terminal : false}
-                results={results}
                 goal={detail?.goal}
                 taskCount={tasks.length}
+                /* Ask fallback: pre-approval there is no team_start event to carry the ask. The draft holds the
+                   user's exact wording; older runs (draft already cleared) fall back to the team goal, which is
+                   also derived from that ask — either way the stream opens with what the run is about. */
+                question={planned?.question ?? detail?.goal}
               />
             </>
           )}
         </div>
 
-        {/* Side column: members + task DAG */}
+        {/* Side column: members + task DAG. Collapsible (not draggable): the panel is node-embedded,
+            so a free drag risks broken layouts at narrow node widths. */}
         <aside
-          className="ai-canvas-scroll flex w-[184px] shrink-0 flex-col gap-2 overflow-y-auto rounded-md border px-1.5 py-1.5"
+          ref={asideRef}
+          className={`ai-canvas-scroll flex shrink-0 flex-col gap-2 overflow-y-auto rounded-md border py-1.5 ${
+            sidebarOpen ? 'w-[184px] px-1.5' : 'w-[28px] items-center px-0.5'
+          }`}
           style={{
             borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
             backgroundColor: 'color-mix(in oklab, var(--paper) 55%, transparent)',
           }}
         >
+          {!sidebarOpen ? (
+            // Collapsed strip: counts only, click anywhere to expand
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSidebarOpen(true);
+              }}
+              className="flex w-full cursor-pointer flex-col items-center gap-1.5 rounded px-0.5 py-0.5 transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_60%,transparent)]"
+              title="Expand the members/tasks sidebar"
+            >
+              <ChevronRight className="h-3 w-3 rotate-180" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }} />
+              <span className="flex flex-col items-center gap-0.5" title={`${rosterCount} members`}>
+                <Users className="h-2.5 w-2.5" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }} />
+                <span className="text-8" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}>{rosterCount}</span>
+              </span>
+              <span className="flex flex-col items-center gap-0.5" title={`${doneCount}/${rosterTaskCount} tasks done`}>
+                <Layers className="h-2.5 w-2.5" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }} />
+                <span className="text-8" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}>
+                  {doneCount}/{rosterTaskCount}
+                </span>
+              </span>
+              {blockedTasks.length > 0 && (
+                <span className="flex flex-col items-center gap-0.5" title={`${blockedTasks.length} tasks stalled by failed upstream`}>
+                  <AlertTriangle className="h-2.5 w-2.5" style={{ color: 'var(--danger)' }} />
+                  <span className="text-8" style={{ color: 'var(--danger)' }}>{blockedTasks.length}</span>
+                </span>
+              )}
+            </button>
+          ) : (
+            <>
           <div className="flex flex-col gap-0.5">
             <span className="text-9 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}>
-              Members {members.length > 0 ? `(${members.length})` : ''}
+              Members {rosterCount > 0 ? `(${rosterCount})` : ''}
+              {/* Planned roster: not created yet (approve materializes them) — say so instead of passing the
+                  pre-approval rows off as running members */}
+              {members.length === 0 && plannedMembers.length > 0 ? ' · planned' : ''}
             </span>
-            {members.map((m) => (
-              <div key={m.id} className="flex min-w-0 items-center gap-1" title={`${m.name} · ${m.role || 'Member'} · ${m.status}`}>
-                <span
-                  className="h-1.5 w-1.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: MEMBER_COLOR[m.status] ?? 'var(--ink-muted)' }}
-                />
-                <span className="min-w-0 truncate text-10" style={{ color: 'var(--ink)' }}>
-                  {m.name}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 65%, transparent)' }}>
-                  {m.currentTaskId ? (tasks.find((t) => t.id === m.currentTaskId)?.subject ?? m.role) : m.role}
-                </span>
-              </div>
-            ))}
-            {members.length === 0 && (
+            {/* Member row = allocation unit: status dot + name + load badge (done/assigned) + cumulative time + progress bar.
+                Click highlights that member's tasks below. */}
+            {members.map((m) => {
+              const load = memberLoad.get(m.id);
+              const active = highlightMember === m.id;
+              const runningTask = m.currentTaskId ? tasks.find((t) => t.id === m.currentTaskId) : undefined;
+              const pct = load && load.assigned > 0 ? Math.round((load.done / load.assigned) * 100) : 0;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHighlightMember(active ? null : m.id);
+                  }}
+                  className="flex w-full min-w-0 cursor-pointer flex-col gap-0.5 rounded px-0.5 py-0.5 text-left transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_60%,transparent)]"
+                  style={active ? { backgroundColor: 'color-mix(in oklab, var(--primary) 10%, transparent)' } : undefined}
+                  title={`${m.name} · ${m.role || 'Member'} · ${m.status}${load ? ` · ${load.done}/${load.assigned} tasks done` : ''}`}
+                >
+                  <span className="flex w-full min-w-0 items-center gap-1">
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: MEMBER_COLOR[m.status] ?? 'var(--ink-muted)' }} />
+                    <span className="min-w-0 truncate text-10" style={{ color: 'var(--ink)' }}>
+                      {m.name}
+                    </span>
+                    {load && load.assigned > 0 && (
+                      <span
+                        className="ml-auto shrink-0 rounded px-1 text-9"
+                        style={{ backgroundColor: 'color-mix(in oklab, var(--ink) 8%, transparent)', color: 'color-mix(in oklab, var(--ink-muted) 82%, transparent)' }}
+                      >
+                        {load.done}/{load.assigned}
+                      </span>
+                    )}
+                  </span>
+                  <span className="flex w-full min-w-0 items-center gap-1 pl-2.5">
+                    <span className="min-w-0 flex-1 truncate text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 65%, transparent)' }}>
+                      {runningTask?.subject ?? m.role}
+                    </span>
+                    {load && load.durationMs > 0 && (
+                      <span className="shrink-0 text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 62%, transparent)' }} title="Cumulative execution time of this member's tasks">
+                        {fmtDuration(load.durationMs)}
+                      </span>
+                    )}
+                  </span>
+                  {load && load.assigned > 0 && (
+                    <span className="ml-2.5 block h-[2px] w-[calc(100%-0.625rem)] overflow-hidden rounded-full" style={{ backgroundColor: 'color-mix(in oklab, var(--ink) 10%, transparent)' }}>
+                      <span className="block h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: 'var(--success)' }} />
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+            {members.length === 0 && plannedMembers.length > 0 &&
+              plannedMembers.map((m, i) => (
+                <div
+                  key={`${m.name}-${i}`}
+                  className="flex w-full min-w-0 items-center gap-1 rounded px-0.5 py-0.5"
+                  title={`${m.name}${m.role ? ` · ${m.role}` : ''}${m.identity ? ` · agent: ${m.identity}` : ''}`}
+                >
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: 'color-mix(in oklab, var(--ink-muted) 45%, transparent)' }}
+                  />
+                  <span className="min-w-0 truncate text-10" style={{ color: 'color-mix(in oklab, var(--ink) 78%, transparent)' }}>
+                    {m.name}
+                  </span>
+                  {m.role && (
+                    <span className="ml-auto min-w-0 shrink-0 truncate text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 65%, transparent)' }}>
+                      {m.role}
+                    </span>
+                  )}
+                </div>
+              ))}
+            {members.length === 0 && plannedMembers.length === 0 && (
               <span className="text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
                 {detail ? 'No members' : 'Loading…'}
               </span>
@@ -753,83 +1043,165 @@ export default function TeamWorkbench({
 
           <div className="flex flex-col gap-1">
             <span className="text-9 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}>
-              Tasks {tasks.length > 0 ? `(${tasks.filter((t) => t.status === 'done').length}/${tasks.length})` : ''}
+              Tasks {tasks.length > 0 ? `(${doneCount}/${tasks.length})` : plannedTasks.length > 0 ? `(${plannedTasks.length}) · planned` : ''}
             </span>
-            {tasks.map((t) => (
-              <div key={t.id} className="flex min-w-0 flex-col gap-0.5">
-                <div className="flex min-w-0 items-start gap-1">
-                  <span className="mt-0.5 shrink-0">
-                    <TaskIcon status={t.status} />
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (t.status === 'done') setReading(t.id);
-                    }}
-                    className={`min-w-0 flex-1 break-words text-left text-10 leading-snug ${t.status === 'done' ? 'cursor-pointer hover:underline' : 'cursor-default'}`}
-                    style={{ color: t.status === 'failed' ? 'var(--danger)' : 'color-mix(in oklab, var(--ink) 85%, transparent)' }}
-                    title={`${t.subject}\n${TASK_LABEL[t.status] ?? t.status}${t.assignee ? ` · ${memberName(t.assignee)}` : ''}`}
-                  >
-                    {t.subject}
-                  </button>
-                  {t.status === 'failed' && (
+            {tasks.map((t) => {
+              const dur = taskDuration(t, now);
+              const unassigned = isUnassigned(t);
+              const isBlocked = (t.blockedBy?.length ?? 0) > 0;
+              const running = t.status === 'running' || t.status === 'claimed';
+              const stallMs = stallHints[t.id];
+              const takeoverIn = stallMs !== undefined ? Math.max(0, staleMs - stallMs) : undefined;
+              const highlighted = highlightTask === t.id || (highlightMember !== null && t.assignee === highlightMember);
+              return (
+                <div
+                  key={t.id}
+                  data-task-id={t.id}
+                  className="flex min-w-0 flex-col gap-0.5 rounded px-0.5"
+                  style={highlighted ? { backgroundColor: 'color-mix(in oklab, var(--primary) 9%, transparent)' } : undefined}
+                >
+                  <div className="flex min-w-0 items-start gap-1">
+                    <span className="mt-0.5 shrink-0">
+                      <TaskIcon status={t.status} />
+                    </span>
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void retryTask(t.id);
+                        if (t.status === 'done') setReading(t.id);
                       }}
-                      disabled={retrying !== null}
-                      className="shrink-0 cursor-pointer rounded p-0.5 transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)] disabled:opacity-40"
-                      style={{ color: 'var(--ink-muted)' }}
-                      title="Retry this task"
+                      className={`min-w-0 flex-1 break-words text-left text-10 leading-snug ${t.status === 'done' ? 'cursor-pointer hover:underline' : 'cursor-default'}`}
+                      style={{ color: t.status === 'failed' ? 'var(--danger)' : 'color-mix(in oklab, var(--ink) 85%, transparent)' }}
+                      title={`${t.subject}\n${TASK_LABEL[t.status] ?? t.status}${t.assignee ? ` · ${memberName(t.assignee)}` : ''}${isBlocked ? `\nBlocked by failed upstream ${t.blockedBy!.map((d) => `#${d}`).join(', ')}` : ''}`}
                     >
-                      {retrying === t.id ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <RotateCcw className="h-2.5 w-2.5" />}
+                      {t.subject}
                     </button>
+                    {/* Retry only for self-inflicted failures: a task failed *through* an upstream must not offer
+                        retry (the engine rejects it — dependencies are still failed). Retry the upstream instead. */}
+                    {t.status === 'failed' && !isBlocked && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void retryTask(t.id);
+                        }}
+                        disabled={retrying !== null}
+                        className="shrink-0 cursor-pointer rounded p-0.5 transition-colors hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)] disabled:opacity-40"
+                        style={{ color: 'var(--ink-muted)' }}
+                        title="Retry this task"
+                      >
+                        {retrying === t.id ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <RotateCcw className="h-2.5 w-2.5" />}
+                      </button>
+                    )}
+                  </div>
+                  <span className="flex flex-wrap items-center gap-1 pl-3.5 text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 62%, transparent)' }}>
+                    <span>{TASK_LABEL[t.status] ?? t.status}</span>
+                    {t.assignee && !unassigned ? <span>· {memberName(t.assignee)}</span> : null}
+                    {unassigned && (
+                      <span className="rounded px-1" style={{ backgroundColor: 'color-mix(in oklab, var(--ink) 8%, transparent)' }}>
+                        unassigned
+                      </span>
+                    )}
+                    {dur !== undefined && (
+                      <span title="Execution time">{fmtDuration(dur)}</span>
+                    )}
+                    {isBlocked && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          locateTask(t.blockedBy![0]);
+                        }}
+                        className="shrink-0 cursor-pointer rounded px-1 font-medium"
+                        style={{ backgroundColor: 'var(--danger-soft)', color: 'var(--danger)' }}
+                        title={`Blocked by failed upstream ${t.blockedBy!.map((d) => `#${d}`).join(', ')} — retry that upstream to revive this task`}
+                      >
+                        blocked by {t.blockedBy!.map((d) => `#${d}`).join(', ')}
+                      </button>
+                    )}
+                  </span>
+                  {t.dependencies.length > 0 && (
+                    <span
+                      className="truncate pl-3.5 text-9"
+                      style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}
+                      title={`Depends on: ${t.dependencies.map((d) => tasks.find((x) => x.id === d)?.subject ?? d).join(', ')}`}
+                    >
+                      ↳ after {t.dependencies.map((d) => tasks.find((x) => x.id === d)?.subject ?? d).join(', ')}
+                    </span>
+                  )}
+                  {t.progressText && t.status !== 'done' && (
+                    <span className="break-words pl-3.5 text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 62%, transparent)' }}>
+                      {t.progressText}
+                    </span>
+                  )}
+                  {stallMs !== undefined && (
+                    <span className="flex flex-wrap items-center gap-1 break-words pl-3.5 text-9" style={{ color: 'var(--warn)' }}>
+                      <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+                      <span title="This member has reported no progress for a while — the engine takes the attempt over automatically at the threshold">
+                        {takeoverIn !== undefined && takeoverIn > 0
+                          ? `No progress for ${fmtDuration(stallMs)} · takeover in ${fmtDuration(takeoverIn)}`
+                          : `No progress for ${fmtDuration(stallMs)} · takeover due`}
+                      </span>
+                      {running && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void retryTask(t.id);
+                          }}
+                          disabled={retrying !== null}
+                          className="shrink-0 cursor-pointer rounded px-1 font-medium underline decoration-dotted underline-offset-2 disabled:opacity-40"
+                          style={{ color: 'var(--primary-strong)' }}
+                          title="Take over now: revoke this in-flight attempt and requeue the task"
+                        >
+                          {retrying === t.id ? 'taking over…' : 'Take over'}
+                        </button>
+                      )}
+                    </span>
+                  )}
+                  {t.error && (
+                    <span className="break-words pl-3.5 text-9" style={{ color: 'var(--danger)' }}>
+                      {t.error}
+                    </span>
                   )}
                 </div>
-                <span className="pl-3.5 text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 62%, transparent)' }}>
-                  {TASK_LABEL[t.status] ?? t.status}
-                  {t.assignee ? ` · ${memberName(t.assignee)}` : ''}
-                </span>
-                {t.dependencies.length > 0 && (
-                  <span
-                    className="truncate pl-3.5 text-9"
-                    style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}
-                    title={`Depends on: ${t.dependencies.map((d) => tasks.find((x) => x.id === d)?.subject ?? d).join(', ')}`}
-                  >
-                    ↳ after {t.dependencies.map((d) => tasks.find((x) => x.id === d)?.subject ?? d).join(', ')}
-                  </span>
-                )}
-                {t.progressText && t.status !== 'done' && (
-                  <span className="break-words pl-3.5 text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 62%, transparent)' }}>
-                    {t.progressText}
-                  </span>
-                )}
-                {stallHints[t.id] !== undefined && (
-                  <span
-                    className="flex items-center gap-0.5 break-words pl-3.5 text-9"
-                    style={{ color: 'var(--warn)' }}
-                    title="This member has reported no progress for a while — the run may be stuck"
-                  >
-                    <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
-                    Possibly stalled · no progress for {fmtDuration(stallHints[t.id])}
-                  </span>
-                )}
-                {t.error && (
-                  <span className="break-words pl-3.5 text-9" style={{ color: 'var(--danger)' }}>
-                    {t.error}
-                  </span>
-                )}
-              </div>
-            ))}
-            {tasks.length === 0 && (
+              );
+            })}
+            {tasks.length === 0 && plannedTasks.length > 0 &&
+              plannedTasks.map((t, i) => (
+                <div
+                  key={`${t.subject}-${i}`}
+                  className="flex min-w-0 flex-col gap-0.5 rounded px-0.5"
+                >
+                  <div className="flex min-w-0 items-start gap-1">
+                    <span className="mt-0.5 shrink-0">
+                      <CircleDashed className="h-2.5 w-2.5" style={{ color: 'color-mix(in oklab, var(--ink-muted) 50%, transparent)' }} />
+                    </span>
+                    <span
+                      className="min-w-0 flex-1 break-words text-10 leading-snug"
+                      style={{ color: 'color-mix(in oklab, var(--ink) 78%, transparent)' }}
+                      title={`${t.subject}\nPlanned — created once the plan is approved`}
+                    >
+                      {t.subject}
+                    </span>
+                  </div>
+                  {(t.assignee || t.dependencies.length > 0) && (
+                    <span className="flex flex-wrap items-center gap-1 pl-3.5 text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 62%, transparent)' }}>
+                      <span>Planned</span>
+                      {t.assignee ? <span>· {t.assignee}</span> : null}
+                      {t.dependencies.length > 0 ? <span>· after {t.dependencies.join(', ')}</span> : null}
+                    </span>
+                  )}
+                </div>
+              ))}
+            {tasks.length === 0 && plannedTasks.length === 0 && (
               <span className="text-9" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
                 {detail ? 'No tasks' : 'Loading…'}
               </span>
             )}
           </div>
+            </>
+          )}
         </aside>
       </div>
 
@@ -948,6 +1320,56 @@ export default function TeamWorkbench({
           </button>
         </div>
       </div>
+
+      {/* Timeline drawer (overlays the whole workbench; closed by default) */}
+      {timelineOpen && (
+        <TeamTimeline
+          tasks={tasks}
+          members={members}
+          onClose={() => setTimelineOpen(false)}
+          onSelectTask={(taskId) => {
+            setTimelineOpen(false);
+            if (tasks.find((t) => t.id === taskId)?.status === 'done') setReading(taskId);
+            else locateTask(taskId);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Planning status: this node's launched turn is in flight and no team exists yet (teamIds empty).
+ *
+ * Why it is needed: the captain session plans the member roster + task DAG in a single LLM call *before*
+ * team_create, so in that window there is no team id — this panel has no engine data to render and would
+ * otherwise look frozen (only the Launch button spins). The row names the stage and counts the elapsed
+ * time; it goes away by itself the moment the team id arrives and the run view takes over.
+ */
+function PlanningStatus() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <div
+      className="flex w-full max-w-[560px] items-center gap-1.5 rounded-md border px-2 py-1.5"
+      style={{
+        borderColor: 'color-mix(in oklab, var(--primary) 25%, transparent)',
+        backgroundColor: 'color-mix(in oklab, var(--primary) 5%, transparent)',
+      }}
+    >
+      <Loader2 className="h-3 w-3 shrink-0 animate-spin" style={{ color: 'var(--primary)' }} />
+      <span className="shrink-0 text-10 font-medium" style={{ color: 'color-mix(in oklab, var(--ink) 85%, transparent)' }}>
+        Captain is planning
+      </span>
+      <span className="min-w-0 truncate text-10" style={{ color: 'color-mix(in oklab, var(--ink-muted) 85%, transparent)' }}>
+        · members and task DAG
+      </span>
+      <span className="ml-auto shrink-0 text-9 tabular-nums" style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}>
+        {seconds}s
+      </span>
     </div>
   );
 }

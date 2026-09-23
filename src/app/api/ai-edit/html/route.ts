@@ -19,6 +19,7 @@ import { getProviderPreset, parseCustomModel, isCustomModel, type ProviderConfig
 import { modelOutputTokenMaxForModel } from '@/lib/context-limits';
 import { resolveAppRoot } from '@/lib/app-root';
 import { join } from 'path';
+import * as fs from 'fs';
 
 /** AI HTML 编辑请求日志：落盘 <BOBWORK_HOME>/.logs/ai-edit.jsonl（同步 IO，永不抛错）。
  *  用途：回溯每次编辑的 mode / 目标元素 / 校验结果 / 输出规模，排查"改一部分变整体"类问题。 */
@@ -26,7 +27,6 @@ const AI_EDIT_LOG_DIR = join(resolveAppRoot(), '.logs');
 const AI_EDIT_LOG_PATH = join(AI_EDIT_LOG_DIR, 'ai-edit.jsonl');
 function logAiEdit(entry: Record<string, unknown>): void {
   try {
-    const fs = require('fs');
     fs.mkdirSync(AI_EDIT_LOG_DIR, { recursive: true });
     fs.appendFileSync(AI_EDIT_LOG_PATH, JSON.stringify({ t: new Date().toISOString(), ...entry }) + '\n', 'utf-8');
   } catch { /* 日志失败不影响主链路 */ }

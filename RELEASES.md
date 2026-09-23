@@ -14,6 +14,339 @@
 
 ***
 
+
+## v0.7.622 (2026-09-23)
+
+### 新增
+- **网页内划词浮层（Copy / Ask Bob / Page text）**（改 `electron/hippo-browser.ts` / `electron/preload.ts` /
+  `src/components/hippo-browser/BrowserChatPanel.tsx`）：Hippo 打开的第三方文档与面板页面不同源，React 渲染不进去，
+  故改为向网页注入 DOM 浮层。两处刻意写法：
+  - 样式全走 CSSOM 赋值（`el.style.cssText`），不用 `<style>`、不用 style 属性，以躲开站点 CSP 的 inline style 限制；
+  - 回传走 `window.open` 哨兵地址 `https://bob-hippo-sel.invalid/`（`.invalid` 是保留域名，永不解析），
+    由主进程 `setWindowOpenHandler` 前置拦截消费并 `{ action: 'deny' }` —— 不产生新窗口、不留历史记录，
+    也不用往第三方页面挂 preload、不暴露页面可触碰的接口。原读选区 IPC `hippo-browser:selection` 随之下线。
+  - 三个动作：`Copy`（主进程写剪贴板，页面回执把按钮切成 `Copied` 900ms）、`Ask Bob`（把选区文本挂成本轮上下文）、
+    `Page text`（挂整页正文）；后两个动作投递前先幂等展开对话栏，否则收起态下投进去用户看不到。
+  - 注入幂等（`window.__bobSelBubbleBound`），每次 `dom-ready` 重注，不随文档切换失效；浮层贴选区下沿并做视口钳制
+    （下方放不下翻到上方）；`Escape` / `scroll` / `resize` / 页面 `mousedown` 均收起；富文本编辑器（Google Docs
+    一类虚拟光标）不弹；`mousedown` 上 `preventDefault + stopPropagation` 保住页面选区。
+  - **抽取正文与截图前先移掉浮层**（`clearSelectionBubble`，幂等）：否则刚划完词就抽取/截图，浮层会被当成页面内容
+    写进 markdown、或被一起拍进截图。
+- **对话栏上下文挂载收敛为「每轮自动 + 划词手动」两条线**（改 `src/components/canvas/ChatNodeKernel.tsx` /
+  `BrowserChatPanel.tsx`）：
+  - 新增 `ambientContext`：Hippo 侧边栏把「用户此刻在看哪一页」的 URL / 标题每轮自动前置进模型侧内容。只进
+    `effectiveContent`，不进气泡正文、不落盘、发送后不清除，与 `referenceTag` 的单槽位引用语义互不干扰；
+    拼接位置放在引用标签 / 资料引用之后，避免被后续赋值覆盖。
+  - 删除「首轮自动挂上下文」（`autoAttachedRef` / `attachPageContext` / `attachSelection`）与工具栏的选区挂载按钮；
+    整页正文按钮收敛为**只在 Ask 档出现**（该档模型没有 `browser_*` 工具，是它读到正文的唯一通道），
+    与之配套的 `attaching` 在途标记只服务这个按钮；页头区块由 `<button>` 改为 `<div>`（只展示）。
+- **对话会话删除**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`）：会话菜单新增删除，两步内联确认
+  （垃圾桶 → 红色 `Delete`）。先摘本地索引立即生效，再删落盘节点（软删进 `.trash/nodes`，404 视为删除成功）；
+  删的是当前会话则切到下一条，一条不剩则新建；落盘失败时留一句
+  `Chat removed from the list, but its archived node could not be deleted`。
+
+
+***
+
+
+## v0.7.621 (2026-09-23)
+
+### 修复与优化
+- **修复 Hippo 对话栏冷启动白屏**（`electron/hippo-browser.ts`）：对话栏视图首帧 `loadURL` 的失败此前被静默吞掉，
+  而创建函数对已存在的视图直接 `return`（复用、不再重载），于是冷启动时 app 内 Next 服务尚未就绪的那一次失败，
+  会让对话栏那块区域**永久白**。现改为按 `did-fail-load` 退避重试：`CHAT_LOAD_MAX_RETRY = 3`，
+  退避间隔 400ms × 已试次数，次数用尽才 `warn` 留痕；`-3`（ERR_ABORTED，被新导航打断/主动取消）不计入重试，
+  `did-finish-load` 后计数归零。
+
+
+***
+
+## v0.7.620 (2026-09-23)
+
+### 新增
+- **PDF 正文读取打通（模型侧工具与对话栏共用一条提取管线）**（新增 `src/lib/pdf/page-source.ts`、
+  `src/app/api/pdf-text/route.ts`；改 `src/app/api/chat/tools/browser.ts`）：
+  - 抽出 `pdfPathFromUrl` / `downloadToTemp` 到 `lib/pdf/page-source.ts`，把三种地址形态归一：
+    本地查看页（`/pdf-viewer?path=`）/ `file:` / `http(s)`（Hippo 打开 PDF 时地址栏保持原始 URL，不指向查看器）；
+    模型侧 `browser_read_pdf` 与对话栏「内容」按钮**共用同一份**，不再各存一份。
+  - 新增 `POST /api/pdf-text`：对话栏面板在渲染进程里调不到模型侧工具，改由宿主路由复用 Python →
+    `pdf-parse` 两级提取管线（Python 结果 ≤20 字回退 `pdf-parse`），上限 40000 字符 / 500 页。
+  - 对话栏「内容」按钮在 PDF 页上分流：DOM 里没有正文时改由该路由取真实文本，取不到才退回成因提示。
+- **`browser_extract_text` 增加正文可读性诊断（`note` + `kind`）**（改 `electron/hippo-browser.ts` /
+  `electron/preload.ts` / `electron/hippo-cdp.ts` / `src/lib/browser-tools/specs.ts` /
+  `src/app/api/chat/tools/browser.ts` / `src/app/api/chat/route.ts`）：
+  - 主进程先判 PDF 页：命中 Chromium 内置查看器扩展 id（`mhjfbmdgcfjbbpaeojofohoefgiehjai`）或地址以 `.pdf`
+    收尾即返回 `kind: 'pdf'`（抽取脚本要等正文渲染最长 6 秒，PDF 查看器页永远等不到，故先判掉）；
+    再按「登录墙关键词 + 正文长度」分类：<1200 字且命中 `sign in / log in / subscribe / paywall / 登录 /
+    订阅` 等 = `login`，<300 字 = `empty`（可能未渲染完或内容在 iframe / shadow DOM）。
+  - `note` 给出成因与下一步，`kind` 供机器分流；Envelope 与工具返回一并透传，正文回注时加
+    `[PDF]` / `[LOGIN]` / `[EMPTY]` 前缀。
+  - 规则层同步：新增「**PDF 页换工具，不要判空**」（改用 `browser_read_pdf`，不因提取为空断言页面无内容）
+    与「`browser_extract_text` 带 `note` 时按它执行」；Research 规则「读全文而非片段」改为按页面类型分流。
+- **Team 计划草案（未批准 / 已丢弃）可读**（改 `src/lib/types.ts`、`src/lib/chat/team-client.ts`、
+  `src/components/canvas/TeamWorkbench.tsx` / `TeamChatStream.tsx`）：
+  - 新增 `TeamPlanDraftView`：宿主从 panel 的 `draft` 投影出「计划中的成员与任务」与用户原始提问
+    （`question`）。approve 之前成员 / 任务尚未物化，此前工作台只能渲染空壳。
+  - 工作台据草案渲染计划分工（灰点 + `role`、`CircleDashed` + `Planned · assignee · after deps`），
+    Members / Tasks 计数改用「已物化优先、否则计划」的口径并标注 `· planned`；`planning` / `discarded`
+    时在主列顶部给出单行说明（等待批准 / 计划已丢弃）。
+  - `TeamChatStream` 新增 `question` 回退：审批前没有 `team_start` 事件，时间线不再开天窗（`team_start`
+    存在时仍以它为准，重载后一致）；无任何事件时显示 `No collaboration events yet`，而不是复用
+    「该成员无事件」那行。
+
+### 修复与优化
+- **建队即绑定 teamId**（`src/lib/chat/team-run.ts`）：`team_create` 成功后立刻把 `teamId` 写进上下文并
+  补发一帧 —— 只认面板带回的话，「待批准 → 拒绝 / 超时」的 run 永远到不了 approve 那一步，团队会永远
+  绑不上节点，用户看到的就是「协作明明发了，团队面板却还停在发起界面」。
+- **DOM → Markdown 抽取质量**（`electron/hippo-browser.ts`）：跳过已被已输出祖先覆盖的嵌套节点（去重复行）；
+  `tr` 输出补表格分隔线并转义单元格内的 `|`。
+- **工具栏对话按钮图标**（`electron/hippo-browser.ts`）：改用 bot 图标，并把 `#chatBtn svg` 由默认 13px
+  放大到 15px，与相邻 AI 编辑图标对齐（bot 图标笔画密、视觉偏小）。
+
+
+***
+
+## v0.7.619 (2026-09-23)
+
+### 新增
+- **Hippo Browser 全量迁移落地（默认通道翻转为 hippo）**（新增 `electron/hippo-cdp.ts`、`lib/browser-tools/*`、
+  `components/hippo-browser/BrowserChatPanel.tsx`、`app/browser-chat/`、`app/api/chat/tools/browser.ts`，
+  改 `electron/hippo-browser.ts` / `electron/main.ts` / `electron/preload.ts` / `lib/runtime/tools.ts` /
+  `lib/agents/profiles.ts` / `lib/settings.ts` / `app/api/chat/route.ts`）：
+  - 抽出一套**工具规格 + 两个 driver** 的浏览器工具层（`lib/browser-tools/`：`specs` 规格、`types` 接口、
+    `policy` 策略与页内脚本 lint、`index` 通道解析、`hippo-driver` Hippo 侧实现），
+    `chrome` 通道继续走 Bob Browser，`hippo` 通道走应用内浏览器；开关为**全局互斥**的 `settings.aiBrowser`，
+    不做单次调用路由。
+  - **默认通道翻转**：`aiBrowser` 缺省（undefined）即 `hippo`——仅显式写入 `'chrome'` 才回退 Bob Browser；
+    `runtime/tools.ts`、`app/api/chat/route.ts`、`settings.ts`、`SettingsModal` 的判据同步由 `=== 'hippo'` 改为 `!== 'chrome'`。
+  - 新增 `electron/hippo-cdp.ts`（主进程自动化后端）：把规格层 `browser_*` 调用映射到当前活动标签的
+    `WebContents`（`webContents.debugger` + CDP + 页内脚本），统一返回 Envelope（`ok` / `value` / `error.phase`）；
+    ref 作用域前缀（`e3` / `s1-e2` / `f1-e4`），CDP 会话按标签常驻，遥测走 WeakMap 环形缓存。
+  - 新增右侧**浏览器对话栏** `BrowserChatPanel`（直挂 `ChatNodeKernel`，`node_type='browser'`），新增
+    `browser` / `browserAsk` / `browserResearch` 三个身份：`browser` 为 `hidden` 固定场景身份
+    （scenes `browser` + `ledger`，剔除 read_file / write_file / run_command 等文件与命令类内核），
+    `browserResearch` 追加**调研作业纪律**规则（先取证据再下结论、结论需回链页面）。
+  - `bob-browser-mcp` 由「出厂默认开启」改为「非出厂默认项，仅市场手动添加」；Bob Browser 降级为**互补通道**。
+  - 迁移结论见 `docs/hippo-browser-full-migration_20260923.1.md`（抽规格层 + 双 driver，开关互斥切换）。
+- **Team 视图主列改造为「工作汇报群」时间线**（改 `bob-team-mcp/`：`engine/team`、`engine/scheduler`、`store`、
+  `tools`、`mcp-server`、`prompt/guidance`；宿主 `lib/chat/team-events.ts` / `team-client.ts` /
+  `components/canvas/TeamChatStream.tsx` / `TeamWorkbench.tsx` / `lib/types.ts`）：
+  - 引擎新增 `kind: 'captain'` 事件（`meta.stage`：`dispatch` / `review` / `followup` / `synthesis`）与
+    `captain_note` 工具 + `captainNote()` 方法（`CAPTAIN_NOTE_CAP = 2000`）：队长开群派活、逐人点评、
+    点名追问、收口合并均以「群内发言」形式落进同一条时间线。
+  - `msg_send` 增可选 `from_member`：邮箱层不变、事件层 `meta.actor` 记真实成员名，宿主 `relay` 的 `from`
+    改读 `meta.actor`，成员互留言显示真实来源→目标。
+  - 成员 `member_done` 增 `say`（群聊发言行）与 `steps`（工具调用步数），并透传**产出文件卡片**
+    （`TeamArtifactItem`：path / name / size / kind / source，只放行有 path 的条目）；成员会话带 `projectId`，
+    产出直接落进对应项目的 `homework/`。
+  - 新增 `team_overview` 引擎工具（team_id 列表）+ `store.listTeamSummaries()`（只读抽标量、跳过坏文件），
+    团队列表由「逐个 `team_status` + `summarizeTeam`」改为单次调用；宿主新增 `listTeamOverviews()`。
+  - 引擎工具数 21 → **22**；事件窗口 `readTeamEvents(50)` → `200`；`TeamChatStream` 新增 `CaptainRow`，
+    增量 `panel` 帧省略 `events` 字段以降带宽；`team_plan` 增 `question`，随 `team_start` meta 落盘。
+  - 右栏 Members / Tasks 矩阵保持不变。
+- **md 编辑器 AI-native 三块能力**（新增 `app/api/md-navigate/`、`app/api/md-consistency/`、
+  `lib/md-consistency/check.ts`、`components/canvas/MdSemanticNav.tsx` / `CheckReport.tsx` / `MdAnnotationPanel.tsx`、
+  `lib/ai/resolve-model-config.ts`，改 `app/api/ai-edit/markdown/route.ts`）：
+  - **批注驱动编辑**：修订轮次带 `note`、产出 `ReviseReport` 与汇总块，按批注逐条落地。
+  - **语义导航**：LLM 单次分块定位 + 服务端 `indexOf` 回校，跳转不落空。
+  - **一致性检查**：术语 / 编号 / 引用一致性核查，报告复用批注样式。
+  - `resolveModelConfig` 抽到 `lib/ai/resolve-model-config.ts`，`ai-edit` 与 `markdown` 共用。
+  - 硬约束不变：markdown 是唯一真相源；新增界面文案一律英文。
+- **出厂网页快捷指令**：`settings.ts` 预置 5 条 `category: '网页'` 快捷指令（总结此页 / 提取要点 / 翻译此页 /
+  追问问答 / 事实核查），`settings-server.ts` 对缺失项**出厂补全到末尾**、不覆盖用户已有项。
+- **Hippo「Send to canvas」接线**（`CanvasFlow.tsx`）：接收主进程 `onCanvasFocusNode` 回调，将页面内容挂成
+  画布节点并置焦点。
+- **legal-drafter skill 微调**（`assets/skills/legal-drafter/`）：资源读取仅保留 `references/xxx.md`；
+  「独立使用模式」产出由 `.docx` 改为 `.md`。
+
+### 修复
+- **团队审批门禁偶发挂死到超时**（`lib/chat/confirm-pending.ts`、`app/api/chat/confirm/route.ts`、
+  `components/canvas/ChatNodeKernel.tsx`）：
+  - 挂起确认项新增 `signal?: AbortSignal`，`settle()` 成为唯一收口出口（清定时器 / 摘挂起表 / 摘监听 / resolve 幂等），
+    **连接断开即按超时收口**，不再让审批项悬空到 10 分钟。
+  - `/api/chat/confirm` 缺 `confirmId` 回 **400**；挂起项不存在回 **409**（并 `console.warn('[chat/confirm] 挂起项不存在…')`），
+    此前一律回 200 导致内核误认为审批已生效、静默挂死。
+  - `ChatNodeKernel` 对非 ok 响应置 `setTeamPlanDiscarded(true)` 并告警，界面明确显示「审批未生效」。
+- **项目配置与侧栏列表并发丢更新**（`lib/project/project-manager.ts`、`components/canvas/Sidebar.tsx`、
+  `CanvasFlow.tsx`）：
+  - `project-manager` 新增配置读写**串行队列** `withConfigLock()`，`createProject` / `switchProject` /
+    `archiveProject` / `unarchiveProject` 全部改走 `*Locked` 临界区，消除并发读改写互相覆盖导致的配置丢失。
+  - `Sidebar` 增 `loadProjectsSeqRef`、`CanvasFlow` 增 `loadProjectDataSeqRef`：过期响应（序号不匹配）直接丢弃，
+    避免旧请求晚到覆盖新列表 / 新画布数据。
+- **团队列表接口放大调用**（`app/api/team/list/route.ts`）：改走引擎 `team_overview` 单次调用，
+  不再逐个 `team_status` + `summarizeTeam`，列表显著变快。
+- **成员产出与发言丢失**：`bob-team-mcp` 成员会话落 `cleanText`、`extractSay` 抽发言行；
+  `chat-adapter` SSE 帧读取 `ev.output_files` 并在返回值透传，产出文件不再丢。
+
+
+## v0.7.618 (2026-09-23)
+
+### 修复
+- **插件面板端口冲突导致「打不开」**（新增 `lib/mcp/panel-ports.ts`，改 `lib/mcp/manager.ts` / `lib/plugin-panels-server.ts` / `app/api/chat/route.ts`）：
+  - serve 形态插件面板（Bob Notes 9480 / Bob-Mind 9482）原为**整机唯一**的固定端口，同一台机器上并存两个宿主
+    （安装版 App + 源码 dev，或两个安装版）时，后启动者的插件实例必然 `EADDRINUSE`；面板永久打不开且不会自愈
+    —— 宿主侧回收器刻意不碰「另一个活着宿主」的实例。
+  - 新增 `lib/mcp/panel-ports.ts`：宿主侧运行时端口表，`node:net` `listen(0)` 取空闲端口；状态挂 `globalThis`
+    （Next 每个 route 独立 chunk、dev HMR 会重建模块实例，模块级变量会出多份），仅依赖 `node:net`，无反向依赖。
+  - `manager.ts`：`createConnection` 新增 `registerPanelPort` 选项，仅对 `mode === 'serve'` 的插件分配端口（已登记则复用），
+    用**解析后 args 副本**把裸 `--serve` 改写为 `--serve <port>`（配置里已写死数字端口则原样保留），并注入 env `BOB_PANEL_PORT`；
+    **不就地改写 `config.args`**（`configChanged` 逐字比较会导致反复重连、iframe src 抖动）；`testConnection` 路径
+    只分配临时空闲端口、**不登记**，避免测试端口覆盖真实实例端口。
+  - `plugin-panels-server.ts`：serve 条目端口优先级改为 **运行时表 > 实例配置 > 预置地址**；出条目前幂等触发
+    `syncServers` 确保 serve 插件已连接（否则只能回退固定端口，iframe 指向另一个宿主的实例、静默串台）；
+    新增 `trustedConflict()` 归属校验——冲突标记落在插件共享数据根、不分宿主，本宿主已分配运行端口时只认指向该端口的标记，
+    避免误杀另一个宿主的健在实例。
+  - `app/api/chat/route.ts`：`MIND_PANEL_URL` 由模块级常量改为 `mindPanelUrl()` 函数内动态解析（运行时表优先，
+    回退预置地址），使面板改动回看注入指向本实例。
+  - 插件侧 `EADDRINUSE` 重试与冲突标记、宿主 `reapStaleHolder` 回收**保留不动**，作为安全网。
+- **Hippo Browser 下载面板 Clear / Close 点击无效**（`electron/hippo-browser.ts`）：
+  - 下载面板原排在 `.bar` / `.tabbar` / `.bmtabs` 等拖拽区（`-webkit-app-region: drag`）之前，Chromium 按文档顺序
+    累加拖拽区，后出现的 drag 元素会重新盖住先前声明的 no-drag 区域；面板头部（Clear / Close，y≈52~76）
+    正落在标签条 / 书签栏的拖拽带内，点击被当作拖动窗口吞掉，而面板下半部分仍可点。
+  - 将面板 DOM 移至全部拖拽区之后（`position: fixed`，移动位置不影响布局），并为 `.dlHead` / `.fbtn` 补 `-webkit-app-region: no-drag`。
+
+### 优化
+- **文件列表 tooltip 收敛**（`components/canvas/Sidebar.tsx`）：非目录项不再挂 `title`（文件名已在行内完整可见，
+  悬停气泡遮挡相邻项），目录项保留路径 tooltip。
+
+
+## v0.7.617 (2026-09-23)
+
+### 修复
+- **全文搜索高亮定位不准**（`components/canvas/DocEditor.tsx`）：
+  - 原 `computeFindMatches` 用 `textBetween(0, size, '\n')` 的字符串索引 `+1` 换算 doc 位置，
+    但块分隔符在文本里占 1 个字符、在文档位置中并不存在，导致第 k 个文本块内的匹配被低估 k 个位置，
+    越靠后的段落偏移越大——这正是「搜索高亮文字不准确」的根因。
+  - 改为遍历文档节点一次性建立「字符偏移 → doc 位置」映射：文本节点内部位置连续（跨 mark 也能命中）；
+    块边界与行内叶节点（硬换行 / 行内图片）写入 `-1` 占位，跨越占位符的匹配直接丢弃，
+    避免拼出假匹配或横跨换行 / 图片的高亮。
+- **标题段落对齐「点了没反应」**（`components/canvas/extensions/CollapsibleHeading.ts`）：
+  - 折叠标题的 NodeView 接管渲染后不会自动带上 `HTMLAttributes`，`TextAlign` 写入的 `textAlign`
+    属性未能落到 DOM，表现为对齐命令确实生效却看不到任何变化。
+  - 新增 `applyAlign()`，手动将 `attrs.textAlign` 落到 `content`（h1–h6）的 `style.textAlign`，
+    并在 `update()` 中同步应用；落在 `content` 而非 `wrapper`，因 wrapper 是 flex 容器、
+    `text-align` 对 flex 子项不生效。
+  - 同步在 `components/canvas/extensions/AnnotationBubble.tsx` 补充说明该限制：Markdown 无段落对齐语法，
+    `tiptap-markdown` 的 paragraph / heading 序列化器会丢弃 `textAlign`，故段落对齐仅在本次编辑会话内生效，
+    保存重开后还原为左对齐（与表格单元格 L/C/R 的既有行为一致）。
+
+
+## v0.7.616 (2026-09-23)
+
+### 新增
+- **团队工作台：任务时序与接管能力**（`components/canvas/TeamWorkbench.tsx` / `lib/team/*`）：
+  - `TeamTaskView` 新增 `claimedAt`（认领时写入）与 `finishedAt`（进入终态时写入），引擎随任务下发 `staleMs`（`STALE_MS`）。
+  - 工作台据此显示「No progress for Xs · takeover in Ys / takeover due」倒计时；旧引擎缺少 `staleMs` 时回落 `FALLBACK_STALE_MS`（6 分钟）。
+  - 新增 **Take over** 按钮（复用 `retryTask`），可立即接管疑似停滞的任务；原「Possibly stalled …」静态提示文案移除。
+- **团队工作台：依赖失败传播与停摆提示**（`TeamWorkbench.tsx` / `lib/team/*`）：
+  - `TeamTaskView.blockedBy: string[]` 由引擎在任务进入终态时传播产出（权威判定），UI 不再自行按「deps 含 failed」推断。
+  - 新增停摆横幅「N tasks stalled by failed upstream」，可点击 `#tN` 定位并高亮上游任务。
+  - 失败任务仅在「自身失败」时显示 Retry，被上游阻塞导致的失败不再出现误导性重试入口。
+- **团队工作台：分配矩阵与时间线**（`TeamWorkbench.tsx` / **新增** `components/canvas/TeamTimeline.tsx`）：
+  - 成员行升级为「分配单元」：状态点 + 名称 + `done/assigned` 徽标 + 累计耗时 + 完成率进度条。
+  - 侧栏支持折叠（`sidebarOpen`），折叠后收为 28px 计数条。
+  - 新增甘特/泳道式时间线视图：任务条按 `claimedAt..finishedAt` 定位，未开跑任务归入 **Queued** 清单；由顶部 **Timeline** 按钮打开。
+
+### 变更
+- **Auto 模式选模逻辑大幅简化**（`lib/model-matcher.ts` / `lib/wanted/task-model.ts` / `lib/bridge/settings.ts` / `components/canvas/ChatNodeKernel.tsx` / `components/canvas/SettingsModal.tsx`）：
+  - 删除整套任务类型分析选路逻辑：`TaskType` / `TaskAnalysis`、关键词表、`analyzeTask()`、`selectBestModel()`、`inferThinkingLevel()`、`generateModelSpec()`。
+  - 新 Auto 语义：① 取候选池有序首项（`settings.chatModel.pool[0]`）；② 带图且 `autoVisionOnImage !== false` 时改为选取池中首个视觉模型。
+  - 移除设置项 `chatModel.auto`（开关随之下线）；`autoVisionOnImage` 文案更新为「When the model is Auto… pick a vision-capable model from the pool」。
+  - 服务端解析链简化为 `resolveAgentRoleModel` → `resolveTaskModel`；删除 `resolveAutoTaskModel()` / `rankPoolForTaskType()`。
+  - `thinkingLevel` 语义注释变更：「auto 按任务难度推断」→「跟随节点设置，与模型无关」。
+  - 资产文档 `assets/skills/user-guide/SKILL.md` 同步更正 Auto 模式说明。
+- **文档编辑器：查找替换新入口与段落对齐**（`components/canvas/DocEditor.tsx` / `components/canvas/extensions/AnnotationBubble.tsx`）：
+  - ⌘⇧F 查找替换抽为统一 `openFind`；右键菜单与命令面板 Tools 组新增 **Find（⌘⇧F）**，右上角 TOC 图标旁新增 Search 图标按钮。
+  - 划词气泡工具栏新增 **段落对齐下拉（左 / 中 / 右）**，调用 `setTextAlign`；工具栏由 3 组扩为 4 组。
+
+### 重构
+- **全量 TypeScript 类型加固（无行为变化）**：
+  - 全库 `catch (e: any)` → `catch (e)` + `e instanceof Error`；内联 `require('fs' | 'fs/promises' | 'path')` 提升为顶层 `import`；`any` → 具名类型。
+  - `lib/db/index.ts`（432 行 diff）：`db: any` → `db: SqliteDb`、`params: any[]` → `unknown[]`，**未新增表 / 列 / 迁移**。
+  - `electron/main.ts`：`info: any` → `UpdateInfo`，Proxy 相关类型收紧。
+  - `e2e/settings-simulate.spec.ts`：`(window as any)` → `MockAvatar` / `MockAvatarApi` 接口。
+- **项目路径读取收敛**（**新增** `lib/project/project-config.ts`）：
+  - 新增 `readProjectRefs()` / `getCurrentProjectRef()`，只读 `<APP_ROOT>/.projects.json`。
+  - `md-annotations-cleanup.ts` 改用 `readProjectRefs()`；`mcp/manager.ts` 改用 `getCurrentProjectRef()`。
+  - `sticky-notes-migrate.ts` 改用 `readProjectRefs()`，消除与 `project-manager` 的循环依赖。
+- **工程化**：`eslint.config.mjs` 新增忽略 `**/.next/**`、`**/*.cjs`、`public/pdf.worker.min.mjs`、`assets/skills/**/scripts/**`、`release/**`、`release-dist/**`、`electron/dist/**`；新增 `types/global.d.ts` 与 3 个单元测试（`docx-numbering`、`node-markdown`、`pdf/text-search`）。
+
+### 修复
+- **微信桥接**（`lib/bridge/wechat-adapter.ts`）：扫码状态未知值回落为 `waiting`。
+- **媒体解析**：媒体 item 需 `type` 为数字才解析，避免异常项被误判。
+
+
+## v0.7.615 (2026-09-21)
+
+### 新增
+- **提前提醒可被模型解析（「提前 N 天 / 一周提醒」）**（`lib/wanted/task-summarize.ts` / `lib/wanted/executor.ts`）：
+  - 双通道 prompt（批量 / `single`）新增 `reminder_minutes` 字段与规则 8：把「提前 3 天提醒」「提前一周」「提前半小时」换算成分钟填数组（1 天 = 1440 / 1 小时 = 60 / 1 周 = 10080），多个提前量填多个；
+  - 明确强调这是**提醒时间点、不是事件开始时间** —— 不要因为「提前 3 天提醒」就把 `start_time` 往前挪 3 天；
+  - 未提及提醒时**不输出该字段**（与「输出空数组 = 明确关闭」区分）；落到事件前做规范化：只接受正整数分钟、去重降序、上限 30 天（30×1440），空数组 → `undefined` 走系统默认；
+  - prompt 另补一段说明：解析结果会直接写进日历事件，字段（标题 / 开始 / 结束 / 全天 / 优先级 / 提前提醒 / 地点 / 分类 / 描述）各有归属，用户提到的信息要落到对应字段、不要一股脑塞进标题。
+- **「明确关闭提醒」与「未配置」的语义区分**（`app/api/calendar/events/route.ts` / `components/canvas/CalendarPanel.tsx`）：事件接口新增返回 `reminder_disabled`（`reminder_minutes_json === 'null'` 即为 true）—— `'null'` = 明确关闭提醒，`'[]'` = 未配置、扫描时按默认 30 分钟。前端据此回显「无提醒」；否则打开事件即触发自动保存，会把「已关闭」悄悄改回 30 分钟。
+- **便签行入日历同步补全其余日历字段**（`lib/sticky-calendar-sync.ts`）：除标题 / 时间 / 地点外，把模型解析出的 `description` / `category_path`（重排与新建路径）与 `priority`（仅新建）一并落库；提醒口径为「模型解析出的优先（支持提前 N 天 / 一周），否则解析到时间就给系统默认 `[30]`，完全没解析出时间则 `[]` 表示不提醒」；正则回退路径不带这些字段，保持 `undefined` 不动原值。
+
+### 优化
+- **提前提醒改为多档 chips**（`components/canvas/CalendarPanel.tsx`）：
+  - 由「单选下拉（预设 + Custom…）」改为**可添加多个提醒**：已选用 chips 展示（可逐个 × 删除），下拉变为 `Add reminder…` 只用于追加；
+  - 预设新增 `3 days`(4320) / `1 week`(10080)，避免模型解析出的常用档位落进 Custom 显示成裸分钟数；
+  - 新增 `fmtReminderLabel()`：预设用其文案，其余按天 / 小时 / 分钟就近取整（`4320 → 3 days`、`45 → 45 min`）；
+  - 自定义分钟支持 Enter 提交与 `Add` 按钮；提醒状态改为数组，写入前去重降序；打开事件时 `reminder_disabled → []`、未配置 → `[30]`。
+- **月视图更紧凑**（`components/canvas/CalendarPanel.tsx`）：事件条与日期数字字号统一到 `11px`（小竖棒 / 红旗 2.5 → 2）；月视图网格由 `gap-1 + p-1` 收紧为 `gap-px`（去外圈内边距、行间 1px 发丝线），容量算法随之从 18n−1 调为 15n−1、内部扣除 32 → 28；今日圆底 20 → 16px，并移除选中日的额外边框环（改由格子边框表达）。
+
+### 说明
+- 本版 **5 个文件改动**（`src/app/api/calendar/events/route.ts` 20 行 / `src/components/canvas/CalendarPanel.tsx` 303 行 / `src/lib/sticky-calendar-sync.ts` 60 行 / `src/lib/wanted/executor.ts` 20 行 / `src/lib/wanted/task-summarize.ts` 96 行）；Electron / screenshot-plugin / MCP server 无改动。
+- 取证：`.next/standalone/src/**` 源码快照基线有效（`BUILD_ID` 17:34 = v0.7.614 构建，`standalone/package.json` 版本 0.7.614），与 mtime 全仓扫描两法完全吻合（均只 5 个文件）。
+
+## v0.7.614 (2026-09-21)
+
+### 优化
+- **便签行入日历「重排判据」修正**（`lib/sticky-calendar-sync.ts` / `app/api/sticky-notes/route.ts`）：
+  - `source_ref` 新增 `autoText`（**上次解析所用的行文本原文**）；重排判据由「与上一份便签 `prevNote` 做 diff」改为「与 `source_ref.autoText` 比对」。原判据失效的原因：打字防抖落盘已先把新文本写进文件，等到结算时再与上一份便签比对**恒为空**，会漏掉「事后补写日期」这类修改；改用 `autoText` 后判据只认「相对上次解析是否变过」。
+  - 新增**漏读日期兜底**：`DATE_HINT_RE`（年 / 月日 / 斜杠日期 / 相对日）+ `isNoTimeFallback()`（时间落在「当前 + 1 小时」默认值 ±5 分钟内，即模型判定「无时间线索」的默认值）。上次解析把带日期的文本判成无时间线索时，重试一次重新解析。
+  - 新增**重排保护** `keepTime`：新解析结果落在「无时间线索」默认值上、而事件原本是一个明确时间时，保留原时间，只更新标题 / 地点，避免一次无效重排把已排好的时间打回默认。
+  - `autoAddStickyLinesToCalendar` 去掉 `prevNote` 入参（不再依赖与上一份便签的比对）。
+- **月视图 `+N more` 浮层化 + 事件条数自适应**（`components/canvas/CalendarPanel.tsx`）：
+  - 格子内事件条数由硬编码 3 条改为**按格子实际高度实测自适应**（`useLayoutEffect` + `ResizeObserver`，容量 1–8 条），随面板尺寸变化重算；溢出时固定留一行给 `+N more`。
+  - `+N more` 由静态文本升级为**可点浮层**：列出该日全部事件、可滚动（隐藏滚动条）、点条目直接进编辑；浮层坐标取自被点格子并做视口边界钳制，切换月份自动关闭。
+  - 抽出 `MonthEventRow` 组件（小竖棒 + 时刻 / 标题 + 红旗），格子内与浮层共用同一套渲染。
+
+### 说明
+- 本版 **3 个文件改动**（`src/app/api/sticky-notes/route.ts` 2 行 / `src/lib/sticky-calendar-sync.ts` 54 行 / `src/components/canvas/CalendarPanel.tsx` 161 行）；Electron / screenshot-plugin / MCP server 无改动。
+- 取证：`.next/standalone/src/**` 源码快照基线有效（`BUILD_ID` 15:16 = v0.7.613 构建，`standalone/package.json` 版本 0.7.613），`diff -rq` 仅 3 个 `Files … differ`。
+
+## v0.7.613 (2026-09-21)
+
+### 新增
+- **便签待办行自动入日历（与 `/todo` 统一口径）**（`lib/sticky-calendar-sync.ts` / `app/api/sticky-notes/route.ts` / `components/canvas/StickyTodoDock.tsx` / `components/canvas/CanvasStickyNotes.tsx`）：
+  - 便签「结算」保存时，把**未入日历且未完成**的待办行自动排期为项目作用域事件（新增 `autoAddStickyLinesToCalendar`）；解析逐行调 `/api/tasks/summarize` 内核（`single=true`，一行 = 一任务，故「一行 ↔ 一个事件」天然一一对应），模型不可用 / 失败 / 无任务则退回正则 `parseTodoTime`（只有日期按 09:00），再退默认时段；
+  - 结算时机重新设计：打字过程中的防抖落盘带 `settle_auto_calendar=false`（只存内容，避免半截文本被建成事件）；仅在**行输入框失焦**、**停手 8 秒兜底**、**关闭便签卡**（把未落盘脏数据连同结算一起冲盘）时才真正结算；
+  - 事件标题统一口径 `主题_项目名`（项目名去掉创建时追加的 `_YYYYMMDD`）；`source_ref` 新增 `autoTime` / `aiTitle` 标记 —— 系统推断时间的事件在行文本改写时跟随重排，用户在日历手动指定时间、或由模型排期的事件不被正则口径覆盖；
+  - 反向同步（日历 → 便签行）先剥掉标题的 `_项目名` 后缀再落回行文本，且行内时间表达不计入差异，避免日历侧改状态/颜色把行内「明天 10 点」洗掉。
+- **待办文本「时间 / 主题」双通道解析**（`lib/todo-time-parse.ts` / `app/api/sticky-notes/parse-time/route.ts` / `components/canvas/StickyTodoDock.tsx`）：`parseTodoTime` 与模型 prompt 新增产出 `topic`（原文剔除日期/时刻表达后的事项本身，「明天下午3点跟张三开会」→「跟张三开会」），识别命中时时间写进 Date/Time 字段、主题写进 Todo 栏（各自独立判定用户是否已手改）；提示文案改为 `Time & topic taken from text — edit to override`。
+- **项目面板新增「图标墙」视图**（`components/canvas/ProjectBoardView.tsx` / `app/globals.css`）：
+  - 视图模式由 `grid | list` 扩为三种，新增 `Icon view`；磁贴底色按项目 id 哈希出稳定色相、字形取中文首字 / 英文首字母缩写，**无需素材与数据迁移**；
+  - 磁贴内含 hover 入口（`Open project` / 归档态 `Restore to open`）、未完成待办红点角标、开庭标签（开庭前 3 天起与卡片同款呼吸灯）；
+  - 头部新增图标 KPI 条 `Projects` / `Hearings` / `Open todos` / `Nodes`，全部由既有字段推导，不引入额外请求。
+- **开庭排期事件化补全**（`components/canvas/ProjectBoardView.tsx` / `components/canvas/StickyTodoDock.tsx`）：法庭号做规范化（去掉用户自带的「第 / 法庭 / 庭」，避免拼出「第二十法庭法庭」）；建事件时新增 `location`（地点 = 法院 + 法庭（+ 地址），主题只留事项）与 `priority='high'`（自动红色标旗）。
+
+### 优化
+- **日历面板改版为 macOS 日历范式**（`components/canvas/CalendarPanel.tsx`）：
+  - 事件弹窗由「表单 + Save/Create 按钮」改为**自动保存**（600ms 防抖；非法输入静默保留最后落盘版本，不再弹校验提示；ESC / 点遮罩关闭前先冲刷未落盘改动），新建成功后自动转为编辑态走 PATCH，避免重复创建；
+  - 新增左侧 260px 待办栏（`Today` / `Selected` 表头 + 状态切换 + 红旗 + 地点行），删除原底部固定高度待办卡片；
+  - 面板默认占满屏宽（仅左边缘拖拽后变固定像素宽度），月视图网格改为固定行高，避免 6 行月份（如 8 月）在矮面板下撑破外框；
+  - 优先级下拉改为**红旗开关**（`FLAG_PRIORITY = 'high'`），月视图标签 / 时间轴块 / 左栏列表统一显示小红旗；
+  - 提醒设置由多选胶囊改为**单选下拉**（预设之外走 `Custom…`，非预设的既有值可正确回填）；
+  - 事件标签视觉由「通高左边框色条 + 半透明底色」改为 macOS 风格「标题前小竖棒」，默认隐藏已完成事件（改中性灰眼睛图标）；
+  - 便签来源事件（`source_ref.kind === 'sticky'`）以暖黄与普通分类色区分。
+- **任务解析内核抽离**（新增 `lib/wanted/task-summarize.ts` / `app/api/tasks/summarize/route.ts`）：`/api/tasks/summarize` 的模型解析内核抽为共享模块，路由退化为薄封装；便签自动入日历复用同一套 prompt 与 `single` 口径，避免两处漂移。
+- **样式与联动**（`app/globals.css` / `app/api/calendar/events/route.ts` / `components/canvas/*`）：项目面板磁贴底色与阴影移入样式表（避免内联样式压掉 `:hover`）；日历面板恢复文字选中高亮；日历事件接口返回 `source_ref`；便签保存与项目面板保存后广播 `calendar-events-changed`，自动入日历确实建/改事件时即推远端日历，免等轮询。
+
+### 说明
+- 本版 **12 个文件改动 + 1 个新增**（`src/lib/wanted/task-summarize.ts`）；另有 `next-env.d.ts` 生成物噪声（dev server 改写指向 `.next/dev/types/`，构建时会被覆盖）。Electron / screenshot-plugin / MCP server 无改动。
+- 取证：`.next/standalone/src/**` 源码快照基线有效（`BUILD_ID` 23:24 = v0.7.612 构建），与 `git status` 交叉吻合（11 个源文件 `Files … differ` + 1 个新增）。
+
 ## v0.7.612 (2026-09-20)
 
 ### 优化
