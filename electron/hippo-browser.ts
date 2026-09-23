@@ -21,6 +21,7 @@ import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync } from '
 import { join, basename, extname } from 'path';
 import { homedir } from 'os';
 import { HIPPO_TOOLBAR_HEIGHT } from '../src/lib/hippo-browser/layout';
+import { execBrowserTool, type ExecHost } from './hippo-cdp';
 
 /** 独立浏览器窗口默认尺寸 */
 const WIN_MIN_WIDTH = 560;
@@ -50,6 +51,57 @@ let chromeTop = HIPPO_TOOLBAR_HEIGHT;
 const closedTabs: Array<{ url: string; title: string }> = [];
 /** 各标签的 favicon（page-favicon-updated 事件写入，供标签条渲染） */
 const faviconMap = new Map<number, string>();
+
+// ============ ChatSidebar（右侧对话栏，P2） ============
+// 独立 WebContentsView 加载本地 Next 路由 /browser-chat，与网页 view 并排；宽度与展开态持久化在 userData。
+/** 对话栏宽度上下限与默认值（下限保证输入框可用，上限避免吃掉整个网页） */
+const CHAT_MIN_WIDTH = 320;
+const CHAT_MAX_WIDTH = 720;
+const CHAT_DEFAULT_WIDTH = 400;
+/** 网页区最小保留宽度：窗口变窄时对话栏优先让位，保证网页仍可读 */
+const CHAT_PAGE_MIN_WIDTH = 360;
+/** 直接挂在浏览器窗口下的对话栏视图（未展开时 setVisible(false)） */
+let chatView: WebContentsView | null = null;
+/** 展开态 + 宽度（userData/hippo-chat-prefs.json 持久化，重启后恢复） */
+let chatPrefs: { visible: boolean; width: number } = { visible: false, width: CHAT_DEFAULT_WIDTH };
+/** 对话栏首帧加载失败的最大重试次数（冷启动时 app 内 Next 服务可能尚未就绪） */
+const CHAT_LOAD_MAX_RETRY = 3;
+/** 会话隔离维度：单窗口场景用固定标识，关闭后重开浏览器仍恢复同一条会话 */
+const CHAT_WIN_ID = 'hippo';
+/** 「投送画布」通知宿主（由 main.ts 注入，避免 hippo-browser 反向依赖 main.ts 形成循环） */
+let chatCanvasNotifier: ((payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void) | null = null;
+
+/** 宿主注入投送画布通知器（main.ts 调用：把消息转发给主窗口 webContents） */
+export function setHippoChatCanvasNotifier(
+  fn: (payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void,
+): void {
+  chatCanvasNotifier = fn;
+}
+
+function chatPrefsFile(): string {
+  return join(app.getPath('userData'), 'hippo-chat-prefs.json');
+}
+function chatClampWidth(w: number): number {
+  if (!Number.isFinite(w)) return CHAT_DEFAULT_WIDTH;
+  return Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, Math.round(w)));
+}
+function chatPrefsLoad(): void {
+  try {
+    if (!existsSync(chatPrefsFile())) return;
+    const raw = JSON.parse(readFileSync(chatPrefsFile(), 'utf8')) as { visible?: boolean; width?: number };
+    chatPrefs = { visible: !!raw.visible, width: chatClampWidth(Number(raw.width)) };
+  } catch { /* 读取失败回退默认值 */ }
+}
+function chatPrefsSave(): void {
+  try {
+    writeFileSync(chatPrefsFile(), JSON.stringify(chatPrefs), 'utf8');
+  } catch { /* 忽略持久化失败 */ }
+}
+/** 通知工具栏同步对话栏按钮的激活态（复用工具菜单的菜单动作通道） */
+function pushChatState(): void {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  win.webContents.send('hippo-browser:menu-cmd', chatPrefs.visible ? 'chatOn' : 'chatOff');
+}
 
 /** 一个下载项（工具栏下载面板据此渲染） */
 interface HippoDownload {
@@ -99,6 +151,12 @@ export interface HippoExtractResult {
   text: string;
   title: string;
   url: string;
+  /** 正文可读性提示（英文，作为上下文元信息注入）：
+   *  区分「拿不到正文」的典型成因（PDF 插件页 / 登录墙 / 空壳未渲染），
+   *  避免把导航噪声当正文，也避免在 PDF 页白跑一次 DOM 抽取。 */
+  note?: string;
+  /** note 的机器可读分类：面板据此走 PDF 分流，不去解析 note 文案 */
+  kind?: 'pdf' | 'login' | 'empty';
 }
 
 // ============ 状态 ============
@@ -128,7 +186,7 @@ function currentState(): HippoBrowserState {
 let lastStateJson = '';
 let lastTabsJson = '';
 
-/** 广播状态给工具栏 webContents（窗口 webContents） */
+/** 广播状态给工具栏 webContents（窗口 webContents）+ 对话栏（右侧面板据此显示当前页） */
 function broadcastState(): void {
   if (!win || win.isDestroyed()) return;
   const s = currentState();
@@ -136,6 +194,7 @@ function broadcastState(): void {
   if (json === lastStateJson) return;
   lastStateJson = json;
   win.webContents.send('hippo-browser:state', s);
+  if (chatView && !chatView.webContents.isDestroyed()) chatView.webContents.send('hippo-browser:state', s);
 }
 
 /** 广播标签列表给工具栏（标签条据此渲染） */
@@ -155,6 +214,46 @@ function broadcastTabs(): void {
   if (json === lastTabsJson) return;
   lastTabsJson = json;
   win.webContents.send('hippo-browser:tabs', payload);
+  if (chatView && !chatView.webContents.isDestroyed()) chatView.webContents.send('hippo-browser:tabs', payload);
+}
+
+// ============ AI 驱动指示（AI 正在操作本窗口） ============
+// 任务执行期间工具栏点亮 AI 徽标：进入工具调用时点亮，最后一次调用结束后静默 AI_IDLE_MS 自动熄灭。
+// 计数制（aiBusy）而非「调用即置真」：长耗时工具（wait_for / 整页截图）在途期间徽标不能中途熄灭。
+const AI_IDLE_MS = 1500;
+let aiBusy = 0;
+let aiDrivingOn = false;
+let aiDrivingTool = '';
+let aiIdleTimer: NodeJS.Timeout | null = null;
+
+/** 推送驱动态给工具栏（内容未变化时不发 IPC，与 state/tabs 同款去抖） */
+function broadcastAiDriving(): void {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  win.webContents.send('hippo-browser:ai-driving', { active: aiDrivingOn, tool: aiDrivingOn ? aiDrivingTool : '' });
+}
+
+function setAiDriving(on: boolean, tool: string): void {
+  const changed = aiDrivingOn !== on || aiDrivingTool !== tool;
+  aiDrivingOn = on;
+  aiDrivingTool = on ? tool : '';
+  if (changed) broadcastAiDriving();
+}
+
+/** 工具调用开始：点亮并根据工具名更新徽标 */
+function aiToolBegin(tool: string): void {
+  aiBusy++;
+  if (aiIdleTimer) { clearTimeout(aiIdleTimer); aiIdleTimer = null; }
+  setAiDriving(true, tool);
+}
+
+/** 工具调用结束：全部在途调用结束后再延时熄灭，避免连续调用之间徽标闪烁 */
+function aiToolEnd(): void {
+  aiBusy = Math.max(0, aiBusy - 1);
+  if (aiIdleTimer) { clearTimeout(aiIdleTimer); aiIdleTimer = null; }
+  aiIdleTimer = setTimeout(() => {
+    aiIdleTimer = null;
+    if (aiBusy === 0) setAiDriving(false, '');
+  }, AI_IDLE_MS);
 }
 
 function requireView(): Electron.WebContents {
@@ -507,9 +606,22 @@ const EXTRACT_SCRIPT = `
   const toMarkdown = (root) => {
     const lines = [];
     const nodes = root.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,pre,blockquote,tr,hr');
+    // 已输出的元素：子孙若也命中选择器（典型如 td>p、li>p）直接跳过，避免同一段文字出现两次
+    const emitted = new Set();
+    const isNested = (n) => {
+      let p = n.parentElement;
+      while (p && p !== root) {
+        if (emitted.has(p)) return true;
+        p = p.parentElement;
+      }
+      return false;
+    };
+    // 每张表已输出的行数：首行后补一行分隔线，否则多数 Markdown 渲染器不认这是表格
+    const tableRows = new Map();
     for (const n of nodes) {
       const text = (n.innerText || '').trim();
       if (!text) continue;
+      if (isNested(n)) continue;
       const tag = n.tagName.toLowerCase();
       if (/^h[1-6]$/.test(tag)) {
         const level = parseInt(tag[1], 10);
@@ -521,12 +633,18 @@ const EXTRACT_SCRIPT = `
       } else if (tag === 'blockquote') {
         lines.push('> ' + text);
       } else if (tag === 'tr') {
-        lines.push('| ' + Array.from(n.children).map((c) => (c.innerText || '').trim().replace(/\\|/g, '\\\\|')).join(' | ') + ' |');
+        const cells = Array.from(n.children).map((c) => (c.innerText || '').trim().replace(/\\|/g, '\\\\|'));
+        const tbl = n.closest('table');
+        const rowIdx = tbl ? (tableRows.get(tbl) || 0) : -1;
+        lines.push('| ' + cells.join(' | ') + ' |');
+        if (rowIdx === 0) lines.push('|' + cells.map(() => ' --- ').join('|') + '|');
+        if (tbl) tableRows.set(tbl, rowIdx + 1);
       } else if (tag === 'hr') {
         lines.push('---');
       } else {
         lines.push(text);
       }
+      emitted.add(n);
     }
     return lines.join('\\n').replace(/\\n{3,}/g, '\\n\\n');
   };
@@ -551,21 +669,306 @@ const EXTRACT_SCRIPT = `
 })()
 `;
 
+/** Chromium 内置 PDF 查看器的扩展 id（URL 形如 chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html?file=…） */
+const PDF_VIEWER_EXT_ID = 'mhjfbmdgcfjbbpaeojofohoefgiehjai';
+/** 登录墙 / 付费墙关键词（正文极短且命中任一即判定） */
+const LOGIN_HINT_RE = /(sign\s?in|log\s?in|sign\s?up|register|subscribe|paywall|continue reading|登录|登陆|注册|订阅|会员)/i;
+/** 正文短于此长度视为「没拿到正文」（导航噪声量级） */
+const BODY_MIN_CHARS = 300;
+/** 登录墙判定上界：正文短于它且命中关键词，才判为登录墙 */
+const LOGIN_MAX_CHARS = 1200;
+
+/** 判断当前页是否为 PDF（.pdf 结尾，或停在 Chromium 内置 PDF 查看器页） */
+function isPdfPage(url: string): boolean {
+  if (!url) return false;
+  if (url.includes(PDF_VIEWER_EXT_ID)) return true;
+  return /\.pdf($|[?#])/i.test(url);
+}
+
+/** PDF 分流提示：内置 PDF 查看器页没有正文 DOM，硬抽只会白等渲染超时，
+ *  直接如实告知并指向模型侧的 browser_read_pdf */
+const PDF_NOTE = 'This page is a PDF document — the DOM has no article text. Read it with the browser_read_pdf tool (Browse / Research mode; no arguments needed: it reads the PDF currently open in Hippo Browser; pass maxChars for long files). Do not treat the DOM text as the document body.';
+
+/** 正文可读性诊断：note 给模型看，kind 给面板分流用（面板不解析 note 文案）。
+ *  只在「没拿到正文」时产出，按登录墙 → 空壳顺序命中一类即返回。 */
+function diagnoseExtract(r: HippoExtractResult): { kind: 'login' | 'empty'; note: string } | undefined {
+  const chars = r.text.length;
+  if (chars < LOGIN_MAX_CHARS && LOGIN_HINT_RE.test(r.text)) {
+    return {
+      kind: 'login',
+      note: `The extracted text (${chars} chars) looks like a login or paywall prompt, not the article body. Ask the user to sign in inside Hippo Browser, then re-read the page — do not treat this text as the page content.`,
+    };
+  }
+  if (chars < BODY_MIN_CHARS) {
+    return {
+      kind: 'empty',
+      note: `The page yielded almost no body text (${chars} chars): it may still be rendering, or the content lives in an iframe / shadow DOM. Re-fetch with browser_wait_for / browser_wait_network_idle, or reach the content with browser_snapshot / browser_page_script (Browse / Research mode) — do not conclude the page is empty.`,
+    };
+  }
+  return undefined;
+}
+
 async function extractContent(): Promise<HippoExtractResult> {
   const wc = requireView();
+  const url = wc.getURL();
+  // PDF 分流：抽取脚本要等正文渲染（最长 6 秒），PDF 查看器页永远等不到，先判掉
+  if (isPdfPage(url)) {
+    return { ready: true, markdown: '', text: '', title: wc.getTitle(), url, note: PDF_NOTE, kind: 'pdf' };
+  }
+  // 抽正文前先移掉划词浮层：否则它会被当成页面内容写进 markdown
+  await clearSelectionBubble(wc);
   const result = (await wc.executeJavaScript(EXTRACT_SCRIPT, true)) as HippoExtractResult;
-  return {
+  const out: HippoExtractResult = {
     ready: !!result.ready,
     markdown: result.markdown ?? '',
     text: result.text ?? '',
     title: result.title ?? wc.getTitle(),
-    url: result.url ?? wc.getURL(),
+    url: result.url ?? url,
   };
+  const diag = diagnoseExtract(out);
+  if (diag) {
+    out.note = diag.note;
+    out.kind = diag.kind;
+  }
+  return out;
+}
+
+/** 选区文本上限（字符）：只做「带一段话去提问」，不做长文搬运 */
+const SELECTION_LIMIT = 4000;
+
+/** 划词浮层动作回传的哨兵 URL：window.open 这个 .invalid 地址，由 setWindowOpenHandler 拦截并 deny
+ *  （不产生新窗口、不留历史记录、不受站点 CSP 与跨域限制）。.invalid 是保留域名，永远不会真的解析。 */
+const SEL_SENTINEL = 'https://bob-hippo-sel.invalid/';
+
+/** 网页内划词浮层（Copy / Ask Bob / Page text）：与主 chat 的划词操作窗同一套交互，
+ *  但网页是第三方文档、与本面板不同源，React 渲染不进去，只能用注入 DOM 实现。
+ *  两个刻意的写法：① 样式全部走 CSSOM 赋值（不用 <style>、不用 style 属性），躲开站点 CSP 的 inline style 限制；
+ *  ② 回传走 window.open 哨兵地址，不往第三方页面挂 preload / 不暴露任何页面可触碰的接口。 */
+const SELECTION_BUBBLE_SCRIPT = `(() => {
+  try {
+    if (window.__bobSelBubbleBound) return true;
+    window.__bobSelBubbleBound = true;
+
+    var SENT = ${JSON.stringify(SEL_SENTINEL)};
+    var LIMIT = ${SELECTION_LIMIT};
+    var bubble = null;
+
+    function css(el, text) { try { el.style.cssText = text; } catch (e) {} }
+
+    function remove() {
+      try { if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble); } catch (e) {}
+      bubble = null;
+    }
+    // 主进程在抽取正文 / 截图前调用，避免浮层混进页面内容
+    window.__bobHippoSelClear = remove;
+    // 主进程写剪贴板成功后的回执：http 站点页面自己拿不到 clipboard 权限，复制统一由主进程做
+    window.__bobHippoSelCopied = function () {
+      var b = bubble && bubble.querySelector('[data-a="copy"]');
+      if (!b) return;
+      b.textContent = 'Copied';
+      setTimeout(function () { if (b && b.parentNode) b.textContent = 'Copy'; }, 900);
+    };
+
+    function send(action, text) {
+      try { window.open(SENT + action + '#' + encodeURIComponent(text || ''), '_blank'); } catch (e) {}
+    }
+
+    /** 读选区：优先文档选区；输入框内的选区不进 window.getSelection，故再查一次聚焦元素 */
+    function readSelection() {
+      var text = '';
+      try {
+        var s = window.getSelection();
+        if (s && !s.isCollapsed) text = String(s.toString() || '');
+      } catch (e) {}
+      if (!text) {
+        try {
+          var el = document.activeElement;
+          if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')
+            && typeof el.selectionStart === 'number' && el.selectionStart !== el.selectionEnd) {
+            text = String(el.value || '').slice(el.selectionStart, el.selectionEnd);
+          }
+        } catch (e) {}
+      }
+      return text.split('\\u00a0').join(' ').trim().slice(0, LIMIT);
+    }
+
+    /** 富文本编辑器内不弹：虚拟光标的编辑器（Google Docs 之类）上弹浮层既挡视线又打断输入。
+     *  普通 input/textarea 的选区照常支持（其选区不进 window.getSelection，浮层退到鼠标落点）。
+     *  注意 anchorNode 多数是文本节点，必须先归一到元素再往上找 isContentEditable。 */
+    function inRichEditor(node) {
+      try {
+        var n = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+        while (n && n.nodeType === 1) {
+          if (n.isContentEditable) return true;
+          n = n.parentElement;
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    function inBubble(node) {
+      try { return !!(node && node.nodeType === 1 && node.closest && node.closest('[data-bob-selection-bubble]')); } catch (e) { return false; }
+    }
+
+    function makeBtn(label, action, text, title) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('data-a', action);
+      b.title = title;
+      b.textContent = label;
+      css(b, 'all:unset !important;box-sizing:border-box !important;display:inline-flex !important;'
+        + 'align-items:center !important;height:26px !important;padding:0 9px !important;'
+        + 'border-radius:7px !important;font:500 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif !important;'
+        + 'color:#1f2430 !important;background:transparent !important;cursor:pointer !important;white-space:nowrap !important;');
+      b.addEventListener('mouseenter', function () { try { b.style.setProperty('background', 'rgba(15,20,30,0.07)', 'important'); } catch (e) {} });
+      b.addEventListener('mouseleave', function () { try { b.style.setProperty('background', 'transparent', 'important'); } catch (e) {} });
+      b.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        // 复制后浮层留着（等主进程回执切「Copied」）；另外两个动作用完即收，不挡后续阅读
+        if (action === 'copy') send('copy', text);
+        else { remove(); send(action, text); }
+      });
+      return b;
+    }
+
+    function show(x, y, text) {
+      remove();
+      var box = document.createElement('div');
+      box.setAttribute('data-bob-selection-bubble', '1');
+      css(box, 'all:initial !important;position:fixed !important;left:0 !important;top:0 !important;z-index:2147483647 !important;'
+        + 'display:flex !important;align-items:center !important;gap:2px !important;padding:4px !important;'
+        + 'border-radius:10px !important;background:#ffffff !important;border:1px solid rgba(15,20,30,0.12) !important;'
+        + 'box-shadow:0 6px 24px rgba(15,20,30,0.18) !important;');
+      box.appendChild(makeBtn('Copy', 'copy', text, 'Copy selected text'));
+      box.appendChild(makeBtn('Ask Bob', 'ask', text, 'Send selected text to the chat sidebar'));
+      box.appendChild(makeBtn('Page text', 'page', text, 'Attach the whole page content to the chat'));
+      // 按住浮层时保住页面选区：mousedown 默认行为会把选区收起，正文还没回传就先丢了
+      box.addEventListener('mousedown', function (e) { e.preventDefault(); e.stopPropagation(); }, true);
+      (document.documentElement || document.body).appendChild(box);
+      bubble = box;
+      // 贴到选区下沿后再按浮层实际尺寸做视口钳制（下方放不下就翻到上方）
+      var r = box.getBoundingClientRect();
+      var vw = window.innerWidth || 0;
+      var vh = window.innerHeight || 0;
+      var left = Math.min(Math.max(8, x), Math.max(8, vw - r.width - 8));
+      var top = y + 10;
+      if (top + r.height > vh - 8) top = Math.max(8, y - r.height - 10);
+      try {
+        box.style.setProperty('left', left + 'px', 'important');
+        box.style.setProperty('top', top + 'px', 'important');
+      } catch (e) {}
+    }
+
+    function selectionRect() {
+      try {
+        var s = window.getSelection();
+        if (!s || s.rangeCount === 0) return null;
+        var r = s.getRangeAt(0).getBoundingClientRect();
+        if (r && (r.width || r.height)) return r;
+      } catch (e) {}
+      return null;
+    }
+
+    document.addEventListener('mousedown', function (e) {
+      if (inBubble(e.target)) return;
+      remove();
+    }, true);
+
+    document.addEventListener('mouseup', function (e) {
+      if (inBubble(e.target)) return;
+      var sx = e.clientX;
+      var sy = e.clientY;
+      // 等 selection 稳定再读取
+      setTimeout(function () {
+        var text = readSelection();
+        if (!text) { remove(); return; }
+        var sel = null;
+        try { sel = window.getSelection(); } catch (err) {}
+        if (sel && inRichEditor(sel.anchorNode)) { remove(); return; }
+        var r = selectionRect();
+        // 选区矩形拿不到（跨块选的边角情况）就退回到鼠标落点
+        show(r ? r.left : sx, r ? r.bottom : sy, text);
+      }, 0);
+    }, true);
+
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') remove(); }, true);
+    document.addEventListener('scroll', remove, true);
+    window.addEventListener('resize', remove, true);
+    return true;
+  } catch (e) { return false; }
+})()`;
+
+/** 把划词浮层注入指定网页：与「打开方式」注入同一条链路，每次文档加载后都要重注 */
+function applySelectionBubbleTo(wc: Electron.WebContents): void {
+  if (!wc || wc.isDestroyed()) return;
+  wc.executeJavaScript(SELECTION_BUBBLE_SCRIPT, true)
+    .then((ok: unknown) => { if (ok !== true) console.warn('[hippo] selection bubble not installed on this page'); })
+    .catch((err: unknown) => console.warn(`[hippo] selection bubble injection failed: ${err instanceof Error ? err.message : String(err)}`));
+}
+
+/** 抽取正文 / 截图前移掉划词浮层（幂等；页面没注入过就什么都不做） */
+async function clearSelectionBubble(wc: Electron.WebContents | undefined): Promise<void> {
+  if (!wc || wc.isDestroyed()) return;
+  try {
+    await wc.executeJavaScript('(() => { try { if (window.__bobHippoSelClear) window.__bobHippoSelClear(); } catch (e) {} return true; })()', true);
+  } catch { /* 忽略：清理失败不影响抽取本身 */ }
+}
+
+/** 展开对话栏（幂等）：收起态下触发的划词动作要先把侧边栏亮出来，否则投进去用户看不到 */
+function showChatSidebar(): void {
+  if (!chatPrefs.visible) {
+    chatPrefs.visible = true;
+    chatPrefsSave();
+  }
+  ensureChatView();
+  relayoutView();
+  pushChatState();
+}
+
+/** 把划词动作投给对话栏页面（BrowserChatPanel 监听后挂成本轮上下文）。
+ *  视图刚建 / 仍在加载时事件会早于 React 挂载，故等 did-finish-load 再留一拍补投。 */
+function pushSelectionActionToChat(payload: { action: 'ask' | 'page'; text: string }): void {
+  const wc = chatView?.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  const deliver = (): void => { if (!wc.isDestroyed()) wc.send('hippo-browser:selection-action', payload); };
+  if (wc.isLoading()) wc.once('did-finish-load', () => setTimeout(deliver, 300));
+  else deliver();
+}
+
+/** 处理划词浮层的哨兵动作（setWindowOpenHandler 前置拦截）：返回 true 表示本 URL 已被消费，不应再开窗口 */
+function handleSelectionBubbleAction(rawUrl: string): boolean {
+  if (!rawUrl || rawUrl.indexOf(SEL_SENTINEL) !== 0) return false;
+  let action = '';
+  let text = '';
+  try {
+    const u = new URL(rawUrl);
+    action = u.pathname.split('/').filter(Boolean).join('/');
+    text = decodeURIComponent(u.hash.slice(1)).slice(0, SELECTION_LIMIT);
+  } catch {
+    return true;
+  }
+  if (action === 'copy') {
+    clipboard.writeText(text);
+    const wc = view?.webContents;
+    if (wc && !wc.isDestroyed()) {
+      wc.executeJavaScript('(() => { try { if (window.__bobHippoSelCopied) window.__bobHippoSelCopied(); } catch (e) {} return true; })()', true)
+        .catch(() => { /* 回执失败只是没显示 Copied，剪贴板已写入 */ });
+    }
+    return true;
+  }
+  if (action === 'ask' || action === 'page') {
+    showChatSidebar();
+    pushSelectionActionToChat({ action, text });
+  }
+  return true;
 }
 
 /** 截图：视口走 capturePage()（免 CDP）；fullPage 走 debugger 整页长截图（用完即 detach） */
 async function capture(opts: { fullPage?: boolean } = {}): Promise<string> {
   const wc = requireView();
+  // 截图前先移掉划词浮层：否则刚划完词就截图会把浮层一起拍进去
+  await clearSelectionBubble(wc);
   if (opts.fullPage) {
     const wasAttached = wc.debugger.isAttached();
     if (!wasAttached) wc.debugger.attach('1.3');
@@ -685,6 +1088,52 @@ async function bridgeSend(res: ServerResponse, status: number, body: unknown): P
   res.end(json);
 }
 
+/** 浏览器自动化宿主能力（供 hippo-cdp 的元素交互/截图/提取复用本文件的既有实现） */
+const execHost: ExecHost = {
+  activeWebContents: () => {
+    const wc = view?.webContents;
+    return wc && !wc.isDestroyed() ? wc : null;
+  },
+  webContentsOfTab: (id) => {
+    const t = tabs.find((x) => x.id === id);
+    const wc = t?.view.webContents;
+    return wc && !wc.isDestroyed() ? wc : null;
+  },
+  navigate: async (url, newTab) => {
+    const target = localFileToViewerUrl(normalizeFileUrl(url)) || url;
+    if (!isAllowedUrl(target)) throw new Error('Only http/https/file links are supported');
+    // 本地查看页（PDF/图片）与 file: 一律新标签；普通网页默认当前标签
+    if (newTab || isLocalViewer(target) || /^file:\/\//i.test(target)) openInNewTab(target);
+    else { requireView().loadURL(target).catch(() => {}); reveal(); }
+  },
+  capture: (opts) => capture(opts),
+  extract: () => extractContent(),
+  listTabs: () =>
+    tabs
+      .filter((t) => !t.view.webContents.isDestroyed())
+      .map((t) => {
+        const wc = t.view.webContents;
+        const u = wc.getURL();
+        let title = wc.getTitle();
+        if (!title || u.startsWith('data:text/html')) title = 'New Tab';
+        return { id: t.id, title, url: u, active: t.id === activeTabId };
+      }),
+  activateTab: (id) => !!activateTabById(id),
+  closeTab: (id) => {
+    closeTabById(id);
+    return { ok: true, activeId: activeTabId };
+  },
+  openTab: (url, activate = true) => {
+    const target = localFileToViewerUrl(normalizeFileUrl(url)) || url;
+    if (!isAllowedUrl(target)) return { ok: false, error: 'Only http/https/file links are supported' };
+    const t = spawnTab();
+    t.view.webContents.loadURL(target).catch(() => {});
+    if (activate !== false) activateTabById(t.id);
+    reveal();
+    return { ok: true, id: t.id };
+  },
+};
+
 function bridgeStart(): void {
   if (bridgeServer) return;
   bridgeToken = randomBytes(16).toString('hex');
@@ -726,6 +1175,25 @@ function bridgeStart(): void {
         if (isLocalViewer(target) || /^file:\/\//i.test(target)) openInNewTab(target);
         else { requireView().loadURL(target).catch(() => {}); reveal(); }
         await bridgeSend(res, 200, { ok: true, url: target });
+        return;
+      }
+      if (p === '/exec') {
+        // 通用浏览器自动化入口（规格层 browser_* → CDP）：返回 Envelope，与 Next 侧 HippoDriver 契约一致。
+        // 旧的 /navigate /extract /capture /search 保留兼容存量 hippo_browser_* 工具调用。
+        const name = typeof body.name === 'string' ? body.name : '';
+        const args = body.args && typeof body.args === 'object' ? (body.args as Record<string, unknown>) : {};
+        if (!name) {
+          await bridgeSend(res, 200, { ok: false, error: { phase: 'syntax', message: 'missing tool name' } });
+          return;
+        }
+        // 工具栏 AI 徽标：从进入工具调用到返回全程点亮（finally 保证异常时也熄灭）
+        aiToolBegin(name);
+        try {
+          const env = await execBrowserTool(name, args, execHost);
+          await bridgeSend(res, 200, env);
+        } finally {
+          aiToolEnd();
+        }
         return;
       }
       if (p === '/back') { back(); await bridgeSend(res, 200, { ok: true }); return; }
@@ -904,6 +1372,8 @@ function toolbarHtml(): string {
   .btn.active { background: rgba(75,63,227,.14); color:#4b3fe3; }
   .btn svg { width: 13px; height: 13px; }
   .btn#reload svg { width: 12px; height: 12px; }
+  /* 对话栏按钮：bot 图标笔画密、视觉偏小，比默认 13px 放大 2px，与相邻 AI 编辑图标（15px）对齐 */
+  .btn#chatBtn svg { width: 15px; height: 15px; }
   /* ===== macOS 原生红绿灯（Yosemite/Big Sur 质感） ===== */
   .tl { display: grid; grid-auto-flow: column; gap: 8px; padding: 0 8px 0 6px; align-items: center; }
   .tl button { width: 12px; height: 12px; border-radius: 50%; border: none; padding: 0; cursor: pointer;
@@ -988,14 +1458,21 @@ function toolbarHtml(): string {
   .dlBadge { position: absolute; top: 1px; right: 0; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px;
     background: #6b5cf0; color: #fff; font-size: 9.5px; line-height: 14px; text-align: center; display: none; }
   .dlBadge.show { display: block; }
+  /* ===== AI 驱动徽标（AI 正在操作本窗口时点亮；纯展示，不可点击） ===== */
+  .aiDriving { display: none; align-items: center; gap: 5px; height: 22px; padding: 0 9px 0 8px; border-radius: 11px; flex: none;
+    background: #eef0ff; color: #5a48e6; font-size: 11.5px; font-weight: 600; letter-spacing: .2px; -webkit-app-region: no-drag; }
+  .aiDriving.show { display: inline-flex; }
+  .aiDriving i { width: 6px; height: 6px; border-radius: 50%; background: #6b5cf0; animation: aiPulse 1.1s ease-in-out infinite; }
+  @keyframes aiPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.7); } }
   .dlPanel { position: fixed; top: 44px; right: 10px; width: 340px; max-height: 62vh; background: #fff; border: 1px solid #e0e0ea;
     border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.12); z-index: 998; display: none; flex-direction: column;
     overflow: hidden; -webkit-app-region: no-drag; }
   .dlPanel.show { display: flex; }
-  .dlHead { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #eeeef6; flex: none; }
+  .dlHead { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #eeeef6; flex: none;
+    -webkit-app-region: no-drag; }
   .dlHead .dlTitle { flex: 1; font-size: 13px; font-weight: 600; color: #333; }
   .dlHead .fbtn { flex: none; height: 24px; min-width: 24px; padding: 0 6px; border: none; border-radius: 6px;
-    background: transparent; color: #888; font-size: 14px; cursor: pointer; }
+    background: transparent; color: #888; font-size: 14px; cursor: pointer; -webkit-app-region: no-drag; }
   .dlHead .fbtn:hover { background: #f2f2f8; }
   .dlList { overflow-y: auto; padding: 6px; }
   .dlItem { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 8px; }
@@ -1066,8 +1543,12 @@ function toolbarHtml(): string {
     <input class="addr" id="addr" placeholder="Search or enter address" spellcheck="false" />
     <button class="addrStar" id="bm" title="Bookmark this page"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2.9 6.3 6.9.6-5.2 4.6 1.5 6.8L12 16.9 5.9 20.3l1.5-6.8L2.2 8.9l6.9-.6z"></path></svg></button>
   </span>
+  <span class="aiDriving" id="aiDriving" title="AI is operating this browser"><i></i>AI</span>
   <button class="btn" id="pinBtn" title="Always on top">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"></path></svg>
+  </button>
+  <button class="btn" id="chatBtn" title="Chat sidebar">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
   </button>
   <button class="btn" id="aiEd" title="In-place AI edit (click a page element directly)">
     <img src="data:image/png;base64,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" alt="AI Edit" style="width:15px;height:15px;pointer-events:none;-webkit-user-select:none" draggable="false" />
@@ -1081,14 +1562,6 @@ function toolbarHtml(): string {
   <span class="menuWrap">
     <button class="btn" id="menuBtn" title="Tools" style="width:30px;padding:0;">⋯</button>
   </span>
-</div>
-<div class="dlPanel" id="dlPanel">
-  <div class="dlHead">
-    <span class="dlTitle">Downloads</span>
-    <button class="fbtn" id="dlClear" title="Clear finished downloads">Clear</button>
-    <button class="fbtn" id="dlClose" title="Close">×</button>
-  </div>
-  <div class="dlList" id="dlList"></div>
 </div>
 <div class="tabbar" id="tabbar"></div>
 <div class="findbar" id="findbar">
@@ -1112,6 +1585,19 @@ function toolbarHtml(): string {
   </div>
   <textarea id="edSrc" spellcheck="false" wrap="off"></textarea>
   <div id="edPreviewPane"><iframe id="edFrame" sandbox="allow-scripts allow-same-origin"></iframe></div>
+</div>
+<!-- 下载面板必须排在全部拖拽区（.bar / .tabbar / .bmtabs 都是 -webkit-app-region: drag）
+     之后：Chromium 按文档顺序累加拖拽区，后出现的 drag 元素会重新盖住先前声明的 no-drag 区域，
+     面板排在前头时其头部（Clear / Close，y≈52~76）正落在标签条 / 书签栏的拖拽带内，
+     点击被当作拖动窗口吞掉，而面板下半部分仍可点 —— 故只有 Clear / Close 失效。
+     面板为 position: fixed，移动其 DOM 位置不影响布局。 -->
+<div class="dlPanel" id="dlPanel">
+  <div class="dlHead">
+    <span class="dlTitle">Downloads</span>
+    <button class="fbtn" id="dlClear" title="Clear finished downloads">Clear</button>
+    <button class="fbtn" id="dlClose" title="Close">×</button>
+  </div>
+  <div class="dlList" id="dlList"></div>
 </div>
 <script>
   const $ = (id) => document.getElementById(id);
@@ -1137,6 +1623,9 @@ function toolbarHtml(): string {
     adblockOff: () => alert('Ad / tracker blocking disabled'),
     linkNewTab: () => alert('Links will open in new tabs'),
     linkCurrentTab: () => alert('Links will open in the current tab'),
+    // 对话栏展开态由主进程广播（chat-toggle 后统一回推），工具栏只同步按钮激活态
+    chatOn: () => $('chatBtn').classList.toggle('active', true),
+    chatOff: () => $('chatBtn').classList.toggle('active', false),
   };
   // 主进程回传的菜单动作：工具有 act 表；书签右键菜单用 bm: 前缀单独分发
   if (BAPI && BAPI.onMenuCmd) BAPI.onMenuCmd((a) => {
@@ -1147,6 +1636,8 @@ function toolbarHtml(): string {
   $('winMin').onclick = () => BAPI && BAPI.minimize();
   $('winMax').onclick = () => BAPI && BAPI.toggleMaximize();
   $('pinBtn').onclick = () => BAPI && BAPI.toggleTop();
+  // 对话栏开关：主进程翻转展开态后经 menu-cmd 广播回来，这里只负责发起
+  $('chatBtn').onclick = () => BAPI && BAPI.chatToggle();
   $('back').onclick = () => BAPI && BAPI.back();
   $('fwd').onclick = () => BAPI && BAPI.forward();
   $('reload').onclick = () => { const st = current; if (st && st.loading) BAPI.stop(); else BAPI.reload(); };
@@ -1428,6 +1919,16 @@ function toolbarHtml(): string {
     syncChromeTop();
   }
   if (BAPI && BAPI.onTabs) BAPI.onTabs(renderTabs);
+
+  /* ===== AI 驱动指示：主进程推送 { active, tool }，控制工具栏 AI 徽标 =====
+     仅管视觉；主进程已做「全部在途调用结束 + 静默 1.5s」才熄灭，这里不做计时。 */
+  const aiEl = $('aiDriving');
+  if (BAPI && BAPI.onAiDriving) BAPI.onAiDriving((d) => {
+    if (!aiEl) return;
+    const on = !!(d && d.active);
+    aiEl.classList.toggle('show', on);
+    aiEl.title = on ? 'AI is operating this browser — ' + (d.tool || 'browser task') : 'AI is operating this browser';
+  });
 
   /* ===== 下载面板（面板展开时同步抬高 chrome，网页 view 自动下移让位） ===== */
   let downloads = [];
@@ -2100,12 +2601,73 @@ export function openUrlInHippo(url: string): boolean {
   return true;
 }
 
-/** 网页区跟随窗口尺寸：始终占工具栏(chromeTop)下方全部区域 */
+/** 网页区跟随窗口尺寸：始终占工具栏(chromeTop)下方全部区域；对话栏展开时右侧让出宽度 */
 function relayoutView(): void {
   if (!win || win.isDestroyed() || !view) return;
   const { width, height } = win.getContentBounds();
   const top = Math.max(HIPPO_TOOLBAR_HEIGHT, chromeTop);
-  view.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) });
+  const bodyH = Math.max(0, height - top);
+  // 对话栏宽度：受"窗口宽 - 网页最小保留宽"二次钳制，窄窗口下自动收缩甚至归零（只显示网页）
+  const maxForChat = Math.max(0, width - CHAT_PAGE_MIN_WIDTH);
+  const chatW = chatPrefs.visible ? Math.min(chatPrefs.width, maxForChat) : 0;
+  view.setBounds({ x: 0, y: top, width: Math.max(0, width - chatW), height: bodyH });
+  if (chatView && !chatView.webContents.isDestroyed()) {
+    const show = chatW > 0;
+    chatView.setVisible(show);
+    if (show) chatView.setBounds({ x: width - chatW, y: top, width: chatW, height: bodyH });
+  }
+}
+
+/** 创建对话栏视图（幂等）：独立分区 persist:bob-browser-chat + 复用主进程 preload（window.api 可用）。
+ *  会话 nodeId 记忆与解锁偏好由页面侧 localStorage 按 CHAT_WIN_ID 维度维护。 */
+function ensureChatView(): void {
+  if (!win || win.isDestroyed()) return;
+  if (chatView && !chatView.webContents.isDestroyed()) return;
+  const v = new WebContentsView({
+    webPreferences: {
+      partition: 'persist:bob-browser-chat',
+      contextIsolation: true,
+      nodeIntegration: false,
+      // 与工具栏一致必须 sandbox:false：preload 复用主进程 preload.js（用到 os 等 Node 内置模块）
+      sandbox: false,
+      preload: join(__dirname, 'preload.js'),
+    },
+  });
+  v.setBackgroundColor('#ffffff');
+  // 首帧加载：冷启动时 app 内 Next 服务可能尚未就绪，loadURL 失败会被静默吞掉，
+  // 而本函数对已存在视图直接 return（视图复用、不再重载）→ 那块区域会永久白。
+  // 故失败统一按 did-fail-load 退避重试，重试次数用尽才 warn 留痕。
+  const chatUrl = `${aiServerUrl}/browser-chat?win=${encodeURIComponent(CHAT_WIN_ID)}`;
+  let attempt = 0;
+  const loadChat = (): void => {
+    if (v.webContents.isDestroyed()) return;
+    v.webContents.loadURL(chatUrl).catch(() => { /* 失败统一由 did-fail-load 兜底重试 */ });
+  };
+  v.webContents.on('did-fail-load', (_e, errorCode, errorDesc, _url, isMainFrame) => {
+    // -3 = ERR_ABORTED（被新导航打断/主动取消），不是故障，不计入重试
+    if (!isMainFrame || errorCode === -3) return;
+    if (attempt >= CHAT_LOAD_MAX_RETRY) {
+      console.warn(`[hippo] chat sidebar load failed after ${attempt} retries: ${errorCode} ${errorDesc}`);
+      return;
+    }
+    attempt += 1;
+    console.warn(`[hippo] chat sidebar load failed (${errorCode} ${errorDesc}); retry ${attempt}/${CHAT_LOAD_MAX_RETRY}`);
+    setTimeout(loadChat, 400 * attempt);
+  });
+  loadChat();
+  // 页面加载完成后补推一次当前状态与标签列表（页面挂载早于广播时会漏掉首帧）；
+  // broadcastState/broadcastTabs 带变更指纹去重，新视图复用旧指纹会整帧被吞，故先清指纹再推
+  v.webContents.on('did-finish-load', () => {
+    attempt = 0;
+    lastStateJson = '';
+    lastTabsJson = '';
+    broadcastState();
+    broadcastTabs();
+  });
+  chatView = v;
+  win.contentView.addChildView(v);
+  v.setVisible(false);
+  relayoutView();
 }
 /** 合并连续的窗口尺寸变化：一帧内最多做一次布局，避免拖拽缩放时重复 setBounds */
 let relayoutScheduled = false;
@@ -2385,6 +2947,28 @@ async function applyInlineEdit(newHtml: string, mode: string, selector: string |
 export function setupHippoBrowser(): void {
   teardownHippoBrowser();
   registerBookmarkHandlers();
+  // 对话栏偏好（展开态 / 宽度）在窗口创建前读入，relayoutView 首次调用即可用
+  chatPrefsLoad();
+  // 对话栏开关：主进程单一真相源，翻转后重排 + 回推按钮态
+  ipcMain.handle('hippo-browser:chat-toggle', () => {
+    chatPrefs.visible = !chatPrefs.visible;
+    chatPrefsSave();
+    relayoutView();
+    pushChatState();
+    return { ok: true, visible: chatPrefs.visible };
+  });
+  ipcMain.handle('hippo-browser:chat-set-width', (_e, w: number) => {
+    chatPrefs.width = chatClampWidth(Number(w));
+    chatPrefsSave();
+    relayoutView();
+    return { ok: true, width: chatPrefs.width };
+  });
+  ipcMain.handle('hippo-browser:chat-send-to-canvas', (_e, payload: { nodeId: string; title?: string; conversations?: unknown[] }) => {
+    if (!payload?.nodeId) return { ok: false, error: 'missing nodeId' };
+    if (!chatCanvasNotifier) return { ok: false, error: 'canvas unavailable' };
+    chatCanvasNotifier(payload);
+    return { ok: true };
+  });
   ipcMain.handle('hippo-browser:set-chrome-height', (_e, h: number) => {
     const v = Math.max(HIPPO_TOOLBAR_HEIGHT, Math.round(Number(h) || HIPPO_TOOLBAR_HEIGHT));
     if (Math.abs(chromeTop - v) > 1) { chromeTop = v; relayoutView(); }
@@ -2458,7 +3042,7 @@ export function setupHippoBrowser(): void {
 
   // 顶部工具栏：窗口 webContents 加载内联页面
   bw.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(toolbarHtml())).catch(() => {});
-  bw.webContents.on('did-finish-load', () => { broadcastState(); broadcastTabs(); });
+  bw.webContents.on('did-finish-load', () => { broadcastState(); broadcastTabs(); pushChatState(); });
   bw.webContents.on('before-input-event', (event, input) => {
     // 焦点在工具栏（含地址栏）时同样响应浏览器快捷键
     if (handleBrowserShortcut(event, input)) return;
@@ -2475,6 +3059,8 @@ export function setupHippoBrowser(): void {
   // 网页区：每个标签一个 WebContentsView 叠在工具栏下方；默认创建一个新建标签页（避免白屏）。
   const tab = spawnTab();
   activateTabById(tab.id);
+  // 对话栏：独立 WebContentsView 常驻创建（展开态由 chatPrefs 决定），在网页区右侧并排
+  ensureChatView();
 
   win.on('resize', scheduleRelayout);
   win.on('resized', scheduleRelayout);
@@ -2485,6 +3071,8 @@ export function setupHippoBrowser(): void {
   win.on('closed', () => {
     win = null;
     view = null;
+    // 对话栏视图随窗口销毁一起释放（WebContentsView 由 Electron 回收，这里只清引用防悬垂）
+    chatView = null;
     tabs = [];
     activeTabId = 0;
     faviconMap.clear();
@@ -2511,6 +3099,8 @@ function spawnTab(): BrowserTab {
   // 新窗口（target=_blank / window.open，含页面内链接拦截后的转发）：
   // 打开方式 = 新标签 → 新开标签；= 当前标签 → 收编为本标签导航；本地文档（PDF/图片）重定向到内置查看页
   v.webContents.setWindowOpenHandler(({ url }) => {
+    // 划词浮层的哨兵回传（Copy / Ask Bob / Page text）：先于打开方式判定消费掉，不开新窗口
+    if (handleSelectionBubbleAction(url)) return { action: 'deny' };
     const target = localFileToViewerUrl(url) || (isAllowedUrl(url) ? url : '');
     if (!target) return { action: 'deny' };
     if (openLinkInNewTab) openInNewTab(target);
@@ -2522,8 +3112,11 @@ function spawnTab(): BrowserTab {
     if (viewerUrl) { e.preventDefault(); v.webContents.loadURL(viewerUrl).catch(() => {}); return; }
     if (!isAllowedUrl(url)) e.preventDefault();
   });
-  // 每次文档加载完成后注入页面内链接点击拦截（打开方式为「新标签」时生效）
-  v.webContents.on('dom-ready', () => applyLinkModeTo(v.webContents));
+  // 每次文档加载完成后注入页面内链接点击拦截（打开方式为「新标签」时生效）与划词浮层
+  v.webContents.on('dom-ready', () => {
+    applyLinkModeTo(v.webContents);
+    applySelectionBubbleTo(v.webContents);
+  });
   // 状态事件转发（工具栏据此刷新）
   const wc = v.webContents;
   // 先拿到 id，供 favicon / 右键菜单等事件回调引用
@@ -2882,6 +3475,10 @@ export function teardownHippoBrowser(): void {
   if (win && !win.isDestroyed()) win.destroy();
   win = null;
   view = null;
+  // 对话栏视图与网页视图同生命周期：随窗口一并清引用
+  chatView = null;
+  lastStateJson = '';
+  lastTabsJson = '';
   capsuleMode = false;
   bridgeStop();
 }
