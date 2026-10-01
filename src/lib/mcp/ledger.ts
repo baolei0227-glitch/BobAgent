@@ -67,6 +67,21 @@ const LEDGER_PARTIES_SECTION = `## 当事人与材料分区（每行一条：\`-
 /** SCHEMA.md「条目类型」段标题（解析与迁移的锚点；允许标题后带括号补充说明） */
 const LEDGER_TYPES_SECTION_TITLE = '## 条目类型';
 
+/** SCHEMA.md「补充条款」段标题：规则的自由文本区（档案员按用户要求追加，宿主不解析）。 */
+const LEDGER_CLAUSE_SECTION_TITLE = '## 补充条款';
+
+/** 研究取向的补充类型（考证/论证类课题按需使用，普通项目不用即可）。
+ *  宿主引入的**声明式**类型：新库写进种子段；存量库由 ensureLedger 按行补齐——
+ *  因为 ledger_record 只认盘上「条目类型」段里声明过的 key（未声明会忽略并回 warning），
+ *  所以这些类型必须真的出现在 SCHEMA.md 里才可用，而不是靠代码兜底。 */
+const LEDGER_RESEARCH_TYPES: LedgerTypeDef[] = [
+  { key: 'concept', label: '概念与口径（统一术语，避免同名异义）' },
+  { key: 'claim', label: '论断与假设（待验证命题，不是事实，不得被引用为事实依据）' },
+  { key: 'evidence', label: '证据卡（指向某条 claim，必须标立场与出处）' },
+  { key: 'timeline', label: '时间线（事件按时间串，每条带 materials/ 出处）' },
+  { key: 'method', label: '方法与口径（检索式/筛选标准/编码规则，保证可复现）' },
+];
+
 /** SCHEMA.md「条目类型」段（行式，与「当事人与材料分区」段同风格）：
  *   - key | 说明 | 正文骨架（可选，用字面 \n 表示换行）
  *  条目类型是"知识分层"的抓手：材料事实 vs 分析推断 vs 双方对照 vs 争议焦点，权威性完全不同。
@@ -78,6 +93,8 @@ const LEDGER_TYPES_SECTION = `## 条目类型（每行一条：\`- key | 说明 
 - comparison | 双方对照（同一焦点的双方主张与依据并列）
 - analysis | 分析推断（不是事实，不得被引用为事实）
 - note | 约定与备忘
+# 研究取向的补充类型（考证/论证类课题按需使用；普通项目不用即可）
+${LEDGER_RESEARCH_TYPES.map((t) => `- ${t.key} | ${t.label}`).join('\n')}
 `;
 
 /** 账本 SCHEMA.md 种子（首次创建时写入；此后由人编辑，已存在不覆盖）。
@@ -138,6 +155,23 @@ function asOrigin(v: unknown): FactOrigin | undefined {
   return FACT_ORIGINS.includes(v as FactOrigin) ? (v as FactOrigin) : undefined;
 }
 
+/* 研究取向的两个正交维度（都与当事人立场 side 无关，不要混用）：
+ *   - claim.status    论断的验证状态：open 待验证 / supported 已有支撑 / refuted 已被反驳 / unclear 尚不明确
+ *   - evidence.points 证据方向：supports 支撑 / refutes 反驳（配合 evidence.claim 指向的论断 id）
+ *  普通案件项目不用这两个字段即可，行为与存量完全一致。 */
+export type ClaimStatus = 'open' | 'supported' | 'refuted' | 'unclear';
+export type EvidencePoints = 'supports' | 'refutes';
+const CLAIM_STATUSES: ClaimStatus[] = ['open', 'supported', 'refuted', 'unclear'];
+const EVIDENCE_POINTS: EvidencePoints[] = ['supports', 'refutes'];
+
+function asClaimStatus(v: unknown): ClaimStatus | undefined {
+  return CLAIM_STATUSES.includes(v as ClaimStatus) ? (v as ClaimStatus) : undefined;
+}
+
+function asPoints(v: unknown): EvidencePoints | undefined {
+  return EVIDENCE_POINTS.includes(v as EvidencePoints) ? (v as EvidencePoints) : undefined;
+}
+
 export interface LedgerItem {
   id: string;
   title: string;
@@ -159,6 +193,12 @@ export interface LedgerItem {
   statedAt?: string;
   /** 条目类型 key（来自 SCHEMA.md「条目类型」段：fact/entity/issue/comparison/analysis/note，可自定义） */
   type?: string;
+  /** 论断的验证状态（仅 type==='claim' 有值；front-matter 键为 status，读不出时视为 open） */
+  claimStatus?: ClaimStatus;
+  /** 证据卡指向的论断 id（仅 type==='evidence'；front-matter 键为 claim） */
+  claim?: string;
+  /** 证据方向（仅 type==='evidence'；front-matter 键为 points） */
+  points?: EvidencePoints;
   /** 依据材料内容已变更、待复核（材料变更时宿主自动标记；更新该条目即视为复核完成） */
   stale?: boolean;
   /** 待复核原因（仅 stale===true 时有值） */
@@ -185,6 +225,31 @@ export async function currentProjectRoot(): Promise<string | null> {
   }
 }
 
+/** 在既有「条目类型」段末尾补齐研究取向的补充类型行（缺哪行补哪行；段本身不存在则不动，
+ *  由 ensureLedger 的整段迁移处理）。段是用户可编辑的，因此只做追加，不改动已有行。 */
+function migrateResearchTypeLines(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((ln) => ln.trim().startsWith(LEDGER_TYPES_SECTION_TITLE));
+  if (start < 0) return text;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i].trim())) {
+      end = i; // 下一个二级标题 → 本段结束
+      break;
+    }
+  }
+  while (end > start + 1 && lines[end - 1].trim() === '') end--; // 段尾空行之前插入，保持排版
+  const declared = new Set<string>();
+  for (let i = start + 1; i < end; i++) {
+    const m = lines[i].match(/^\s*-\s+([^|]+)/);
+    if (m) declared.add(m[1].trim());
+  }
+  const missing = LEDGER_RESEARCH_TYPES.filter((t) => !declared.has(t.key));
+  if (missing.length === 0) return text;
+  lines.splice(end, 0, ...missing.map((t) => `- ${t.key} | ${t.label}`));
+  return lines.join('\n');
+}
+
 /** 确保账本骨架存在（幂等）：目录 + SCHEMA.md + log.md。返回账本根；无项目根返回 null。 */
 export function ensureLedger(projectRoot: string): string | null {
   const root = (projectRoot || '').trim();
@@ -205,6 +270,9 @@ export function ensureLedger(projectRoot: string): string | null {
       ] as const) {
         if (!next.includes(title)) next = `${next.trimEnd()}\n\n${section}`;
       }
+      // 二次迁移：段已在、但缺研究取向的补充类型行 → 按行补进该段末尾（只补宿主引入的这几个 key，
+      // 用户自己增删的行不动）。
+      next = migrateResearchTypeLines(next);
       if (next !== cur) {
         // 原子写（唯一临时名 + rename）：SCHEMA.md 是用户可编辑的规则文件，直写遇崩溃会留半截内容。
         const tmp = `${l.schemaPath}.tmp-${process.pid}-${Date.now()}`;
@@ -355,6 +423,7 @@ function listDir(dir: string, kind: 'wiki' | 'raw' | 'project'): LedgerItem[] {
     const parsed = readEntryFile(join(dir, `${id}.md`));
     if (!parsed) continue;
     const d = parsed.data;
+    const type = typeof d.type === 'string' && d.type ? d.type : undefined;
     out.push({
       id,
       kind,
@@ -367,7 +436,11 @@ function listDir(dir: string, kind: 'wiki' | 'raw' | 'project'): LedgerItem[] {
       origin: asOrigin(d.origin),
       statedBy: typeof d.statedBy === 'string' && d.statedBy ? d.statedBy : undefined,
       statedAt: typeof d.statedAt === 'string' && d.statedAt ? d.statedAt : undefined,
-      type: typeof d.type === 'string' && d.type ? d.type : undefined,
+      type,
+      // 论断缺省 open（未写 status 视为待验证）；证据卡的 claim/points 只在证据卡上有意义
+      claimStatus: asClaimStatus(d.status) ?? (type === 'claim' ? 'open' : undefined),
+      claim: typeof d.claim === 'string' && d.claim ? d.claim : undefined,
+      points: asPoints(d.points),
       stale: d.stale === true ? true : undefined,
       staleReason: d.stale === true && typeof d.staleReason === 'string' && d.staleReason ? d.staleReason : undefined,
       ...(kind === 'project' ? { stage: asStage(d.stage) } : {}),
@@ -475,6 +548,7 @@ export const BUILTIN_LEDGER_TYPES: LedgerTypeDef[] = [
   { key: 'comparison', label: '双方对照（同一焦点的双方主张与依据并列）' },
   { key: 'analysis', label: '分析推断（不是事实，不得被引用为事实）' },
   { key: 'note', label: '约定与备忘' },
+  ...LEDGER_RESEARCH_TYPES,
 ];
 
 /** 类型 key 的合法形状（存进 front-matter，禁止怪字符） */
@@ -532,6 +606,169 @@ export function shortTypeLabel(types: LedgerTypeDef[], key: string | undefined):
   return def.label.split(/[（(]/)[0].trim() || key;
 }
 
+/* ------------------- SCHEMA.md 写入（仅档案员 ledger_schema） ------------------- */
+
+/** 段写入结果：warnings 为「已写入但需要代言人转述给用户」的软提示（被忽略的行等） */
+export type SchemaWriteResult = { ok: true; path: string; warnings: string[] } | { ok: false; error: string };
+
+/** 原子写回 SCHEMA.md（唯一临时名 + rename，与 ensureLedger 同款）：
+ *  规则文件用户也会手改，直写遇崩溃会留半截内容。 */
+function writeSchemaAtomic(path: string, next: string): void {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeFileSync(tmp, next, 'utf-8');
+  renameSync(tmp, path);
+  // 解析缓存按 mtime/size 失效，同秒等长写入可能命中旧缓存 → 主动清空（本文件内模块级变量）
+  partiesCache = null;
+  typesCache = null;
+}
+
+/** 定位 SCHEMA.md 里一个二级段的行区间：start = 标题行下标，end = 下一个 `## ` 标题或文件末尾 */
+function schemaSectionRange(lines: string[], title: string): { start: number; end: number } | null {
+  const start = lines.findIndex((ln) => ln.trim().startsWith(title));
+  if (start < 0) return null;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i].trim())) return { start, end: i };
+  }
+  return { start, end: lines.length };
+}
+
+/** 清洗一条分区目录：转成项目相对路径前缀（去 ./ 与末尾斜杠）；非法者记进 bad */
+function cleanPartyDir(dir: string, bad: string[]): string {
+  const d = dir.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!d) return '';
+  if (d.startsWith('/') || d.includes('..')) {
+    bad.push(dir.trim());
+    return '';
+  }
+  return d;
+}
+
+/** 重写「当事人与材料分区」段：分区是**声明表**（同一 key 只能有一条），所以整表替换，
+ *  允许改口径与撤回；段内说明行（既非 `-` 声明行也非 `#` 示例行）原样保留。
+ *  parties 传 [] = 清空声明（该库不做分侧检查）。 */
+export function writeLedgerParties(
+  projectRoot: string,
+  parties: Array<{ key: LedgerSide; label: string; dirs: string[] }>,
+): SchemaWriteResult {
+  const root = (projectRoot || '').trim();
+  if (!root) return { ok: false, error: '无激活项目' };
+  try {
+    ensureLedger(root); // SCHEMA.md 缺失时先落种子（幂等）
+    const path = layout(root).schemaPath;
+    const lines = readFileSync(path, 'utf-8').split(/\r?\n/);
+    const range = schemaSectionRange(lines, LEDGER_PARTIES_SECTION_TITLE);
+    if (!range) return { ok: false, error: 'SCHEMA.md 缺「当事人与材料分区」段，无法写入' };
+
+    const bad: string[] = [];
+    const warnings: string[] = [];
+    const rows: string[] = [];
+    const seen = new Set<LedgerSide>();
+    for (const party of parties) {
+      if (!LEDGER_SIDES.includes(party.key) || seen.has(party.key)) continue;
+      seen.add(party.key);
+      const dirs = party.dirs.map((d) => cleanPartyDir(d, bad)).filter(Boolean);
+      if (dirs.length === 0) warnings.push(`${party.key} 未声明任何目录：该侧材料不会被自动归侧`);
+      rows.push(`- ${party.key} | ${party.label.trim() || party.key} | ${dirs.join(', ')}`);
+    }
+    if (bad.length > 0) warnings.push(`已忽略非法目录：${bad.join('、')}（须为项目相对路径前缀，不能是绝对路径或含 ..）`);
+
+    // 段内保留说明文字（说明行不是声明表的一部分，重写时不该把它抹掉）
+    const keep = lines.slice(range.start + 1, range.end).filter((ln) => {
+      const t = ln.trim();
+      return !t.startsWith('-') && !t.startsWith('#');
+    });
+    while (keep.length > 0 && keep[keep.length - 1].trim() === '') keep.pop();
+
+    const body = [...keep, ...(rows.length > 0 ? ['', ...rows] : []), ''];
+    const next = [...lines.slice(0, range.start + 1), ...body, ...lines.slice(range.end)].join('\n');
+    writeSchemaAtomic(path, next);
+    return { ok: true, path, warnings };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** 追加「条目类型」段缺的声明行（**只加不删**：删类型请在文件里手改，避免误删内置类型）。
+ *  key 形状不合规或已声明的跳过；skeleton 里的真换行按段格式转义成字面 \n。 */
+export function addLedgerTypes(projectRoot: string, defs: LedgerTypeDef[]): SchemaWriteResult {
+  const root = (projectRoot || '').trim();
+  if (!root) return { ok: false, error: '无激活项目' };
+  try {
+    ensureLedger(root);
+    const path = layout(root).schemaPath;
+    const lines = readFileSync(path, 'utf-8').split(/\r?\n/);
+    const range = schemaSectionRange(lines, LEDGER_TYPES_SECTION_TITLE);
+    if (!range) return { ok: false, error: 'SCHEMA.md 缺「条目类型」段，无法写入' };
+
+    const declared = new Set<string>();
+    for (let i = range.start + 1; i < range.end; i++) {
+      const m = lines[i].match(/^\s*-\s+([^|]+)/);
+      if (m) declared.add(m[1].trim());
+    }
+    const warnings: string[] = [];
+    const added: string[] = [];
+    for (const def of defs) {
+      const key = (def.key || '').trim();
+      if (!LEDGER_TYPE_KEY_RE.test(key)) {
+        warnings.push(`已忽略非法类型 key：${key || '(空)'}（须以字母开头，仅含字母/数字/_/-）`);
+        continue;
+      }
+      if (declared.has(key)) {
+        warnings.push(`类型 ${key} 已声明，未重复写入`);
+        continue;
+      }
+      declared.add(key);
+      const skeleton = (def.skeleton || '').trim().replace(/\n/g, '\\n');
+      added.push(`- ${key} | ${(def.label || '').trim() || key}${skeleton ? ` | ${skeleton}` : ''}`);
+    }
+    if (added.length === 0) return { ok: true, path, warnings };
+
+    const end = (() => {
+      let e = range.end;
+      while (e > range.start + 1 && lines[e - 1].trim() === '') e--; // 段尾空行之前插入，保持排版
+      return e;
+    })();
+    const next = [...lines.slice(0, end), ...added, ...lines.slice(end)].join('\n');
+    writeSchemaAtomic(path, next);
+    return { ok: true, path, warnings };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** 追加一条补充条款到「## 补充条款」段（段不存在则创建；append-only，不改既有内容）。
+ *  段若不在文件末尾，插在该段内末尾而非文件末尾——避免落进别的段。 */
+export function appendLedgerClause(projectRoot: string, clause: string): SchemaWriteResult {
+  const root = (projectRoot || '').trim();
+  if (!root) return { ok: false, error: '无激活项目' };
+  const text = (clause || '').trim();
+  if (!text) return { ok: false, error: 'clause 为空' };
+  try {
+    ensureLedger(root);
+    const path = layout(root).schemaPath;
+    const cur = readFileSync(path, 'utf-8');
+    const lines = cur.split(/\r?\n/);
+    const range = schemaSectionRange(lines, LEDGER_CLAUSE_SECTION_TITLE);
+    let end: number;
+    let head: string[];
+    if (range) {
+      end = range.end;
+      while (end > range.start + 1 && lines[end - 1].trim() === '') end--;
+      head = lines.slice(0, end);
+    } else {
+      head = [...lines];
+      while (head.length > 0 && head[head.length - 1].trim() === '') head.pop();
+      head.push('', LEDGER_CLAUSE_SECTION_TITLE);
+      end = head.length;
+    }
+    const next = [...head, ...text.split(/\r?\n/), ...lines.slice(end)].join('\n');
+    writeSchemaAtomic(path, next);
+    return { ok: true, path, warnings: [] };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /* --------------------------------- 索引 --------------------------------- */
 
 /** 刷新 index.md（宿主维护：扫 raw/ wiki/ 的 front-matter 重写，确定性、0 token）。
@@ -579,8 +816,10 @@ export function refreshLedgerIndex(projectRoot: string): string[] {
       const originTag = w.origin === 'user' ? ' · 用户陈述' : '';
       const typeLabel = shortTypeLabel(types, w.type);
       const typeTag = typeLabel ? ` · ${typeLabel}` : '';
+      // 论断的验证状态直接标在索引行（open 是待办信号：还没证据就得接着查）
+      const claimTag = w.type === 'claim' && w.claimStatus ? ` · ${w.claimStatus}` : '';
       const staleTag = w.stale === true ? ' · 需复核' : '';
-      lines.push(`- **${w.title}** \`${w.id}\`${originTag}${typeTag}${staleTag}${w.source ? ` — 出处：${w.source}` : ''}`);
+      lines.push(`- **${w.title}** \`${w.id}\`${originTag}${typeTag}${claimTag}${staleTag}${w.source ? ` — 出处：${w.source}` : ''}`);
       if (w.summary) lines.push(`  ${w.summary}`);
     }
   }
@@ -648,12 +887,19 @@ const LEDGER_RULES_APPENDIX = `## 补充条款（宿主注入 · 对存量账本
     两侧都为零时写「账本与材料中均未检索到相关事实，该观点目前无项目事实支撑」。
     账本检索是关键词 + 索引（无向量），因此**禁止宣称"已核对全部材料"**，只报检索范围与命中数。
 13. **条目类型**：写条目时声明 \`type\`（fact 材料事实 / entity 实体 / issue 争议焦点 / comparison 双方对照 /
-    analysis 分析推断 / note 约定备忘；类型清单见 SCHEMA.md「条目类型」段，可自行增删）。
+    analysis 分析推断 / note 约定备忘 / concept 概念口径 / claim 论断假设 / evidence 证据卡 /
+    timeline 时间线 / method 方法口径；类型清单见 SCHEMA.md「条目类型」段，可自行增删）。
     \`comparison\` 必须**两侧各至少一条出处**（缺一侧即为缺对照）；\`fact\` 必须有 \`materials/\` 出处；
-    \`analysis\` 是推断不是事实，**不得被其他条目引用为事实依据**。
-    判断类三型（issue / comparison / analysis）默认只在用户明确要求时写；**唯一例外是宿主下发的后台账本编译任务**——
+    \`analysis\` 与 \`claim\` 是推断/待验证命题，**不得被其他条目引用为事实依据**；
+    \`evidence\` 必须标立场与出处，并指向某条 \`claim\`；\`method\` 记检索式/筛选标准，以便结论可复现。
+    **研究取向字段**（与当事人立场 \`side\` 正交，不要混用）：\`claim\` 条目用 \`status\` 记验证状态
+    （open 待验证 / supported 已有支撑 / refuted 已被反驳 / unclear 尚不明确，缺省 open）；
+    \`evidence\` 条目除用 \`claim: w-…\` 指向论断外，还用 \`points: supports | refutes\` 标方向。
+    证据卡脱离论断（未指向 / 指向的 id 不存在 / 指向的不是 claim）会被 \`ledger_lint\` 当**孤儿证据**报出；
+    论断**只有单侧证据**、或**长期停在 open**（约 30 天）也会被报出——按检出结果补证据或推进状态即可。
+    判断类（issue / comparison / analysis / claim）默认只在用户明确要求时写；**唯一例外是宿主下发的后台账本编译任务**——
     它可写 \`comparison\`（条件：同一焦点两侧材料都已读到或已登记、两侧各至少一条 \`materials/\` 出处、
-    正文只并列不裁决），\`issue\` / \`analysis\` 仍需用户明确要求。
+    正文只并列不裁决），\`issue\` / \`analysis\` / \`claim\` 仍需用户明确要求。
 14. **结论可复核**：材料内容变更时，引用它的条目会被标记「依据材料已变更，需复核」，更新该条目即视为复核完成
     （标记自动清除）；**标记未清除前，该条目的结论不得作为现行事实引用**（\`read_ledger\` 与 \`ledger_challenge\`
     会显式标注）；条目被覆盖写入前会自动留版本快照（\`.ledger/wiki/.history/{id}/{时间戳}.md\`，每条约 20 份），
@@ -733,6 +979,7 @@ export function readLedgerEntry(projectRoot: string, id: string): LedgerEntry | 
   const parsed = readEntryFile(join(dir, `${cleanId}.md`));
   if (!parsed) return null;
   const d = parsed.data;
+  const type = typeof d.type === 'string' && d.type ? d.type : undefined;
   return {
     id: cleanId,
     kind: cleanId.startsWith('r-') ? 'raw' : cleanId.startsWith('p-') ? 'project' : 'wiki',
@@ -745,7 +992,10 @@ export function readLedgerEntry(projectRoot: string, id: string): LedgerEntry | 
     origin: asOrigin(d.origin),
     statedBy: typeof d.statedBy === 'string' && d.statedBy ? d.statedBy : undefined,
     statedAt: typeof d.statedAt === 'string' && d.statedAt ? d.statedAt : undefined,
-    type: typeof d.type === 'string' && d.type ? d.type : undefined,
+    type,
+    claimStatus: asClaimStatus(d.status) ?? (type === 'claim' ? 'open' : undefined),
+    claim: typeof d.claim === 'string' && d.claim ? d.claim : undefined,
+    points: asPoints(d.points),
     stale: d.stale === true ? true : undefined,
     staleReason: d.stale === true && typeof d.staleReason === 'string' && d.staleReason ? d.staleReason : undefined,
     body: parsed.body,
@@ -901,7 +1151,7 @@ export function latestLockOf(projectRoot: string, nodeId: string): LockRecord | 
  *  - 更新已有条目即视为**复核完成**：不写 stale/staleReason，旧标记自动消失（front-matter 整体重写）。 */
 export function recordLedgerEntry(
   projectRoot: string,
-  input: { title: string; content: string; id?: string; source?: string; tags?: string[]; rawIds?: string[]; origin?: FactOrigin; statedBy?: string; statedAt?: string; type?: string },
+  input: { title: string; content: string; id?: string; source?: string; tags?: string[]; rawIds?: string[]; origin?: FactOrigin; statedBy?: string; statedAt?: string; type?: string; status?: string; claim?: string; points?: string },
 ): { id: string; created: boolean; warning?: string } {
   ensureLedger(projectRoot);
   const l = layout(projectRoot);
@@ -913,7 +1163,20 @@ export function recordLedgerEntry(
   // 按未分类写入并回一个 warning，让调用方自己决定是否纠正。
   const wantedType = (input.type || '').trim();
   const type = wantedType && readLedgerTypes(projectRoot).some((t) => t.key === wantedType) ? wantedType : undefined;
-  const warning = wantedType && !type ? `未知条目类型 ${wantedType}，已按未分类写入（可先在 .ledger/SCHEMA.md 的「条目类型」段声明）` : undefined;
+  const warnings: string[] = [];
+  if (wantedType && !type) warnings.push(`未知条目类型 ${wantedType}，已按未分类写入（可先在 .ledger/SCHEMA.md 的「条目类型」段声明）`);
+
+  // 研究取向字段：只对相应类型生效（status 仅 claim；claim/points 仅 evidence）；
+  // 类型不符或取值非法时按未采用处理并回 warning（与未知 type 同策略，不打断档案员工作流）。
+  const wantedStatus = (input.status || '').trim();
+  const status = type === 'claim' ? asClaimStatus(wantedStatus) : undefined;
+  if (wantedStatus && !status) warnings.push(type === 'claim' ? `status 只能是 ${CLAIM_STATUSES.join(' | ')}（已忽略）` : 'status 仅用于 claim（论断）条目（已忽略）');
+  const wantedClaim = (input.claim || '').trim();
+  const claim = type === 'evidence' && /^w-/.test(wantedClaim) ? wantedClaim : undefined;
+  if (wantedClaim && !claim) warnings.push(type === 'evidence' ? 'claim 必须是论断条目 id（w-…）（已忽略）' : 'claim 仅用于 evidence（证据卡）条目（已忽略）');
+  const wantedPoints = (input.points || '').trim();
+  const points = type === 'evidence' ? asPoints(wantedPoints) : undefined;
+  if (wantedPoints && !points) warnings.push(type === 'evidence' ? `points 只能是 ${EVIDENCE_POINTS.join(' | ')}（已忽略）` : 'points 仅用于 evidence（证据卡）条目（已忽略）');
 
   const wanted = (input.id || '').trim().replace(/\.md$/, '');
   const existing = wanted && /^w-/.test(wanted) ? readEntryFile(join(l.wikiDir, `${wanted}.md`)) : null;
@@ -933,6 +1196,10 @@ export function recordLedgerEntry(
       statedBy: input.origin === 'user' ? input.statedBy?.trim() : undefined,
       statedAt: input.origin === 'user' ? input.statedAt?.trim() : undefined,
       type,
+      // 研究取向字段（缺省不写；front-matter 键与 schema 一致：status / claim / points）
+      status,
+      claim,
+      points,
       created: (existing?.data.created as string) || now,
       updated: now,
     },
@@ -940,7 +1207,7 @@ export function recordLedgerEntry(
   );
   refreshLedgerIndex(projectRoot);
   appendLog(projectRoot, existing ? 'update' : 'record', `${id} ${input.title.trim()}${type ? ` [${type}]` : ''}`);
-  return { id, created: !existing, ...(warning ? { warning } : {}) };
+  return { id, created: !existing, ...(warnings.length > 0 ? { warning: warnings.join('；') } : {}) };
 }
 
 /** 把引用了某条 raw 的条目（wiki 概览 + 项目页）标记为「依据材料已变更，需复核」；返回被标记的条目数。
@@ -1465,6 +1732,53 @@ function collectLintIssues(projectRoot: string): string[] {
   for (const item of [...wiki, ...listDir(l.wikiDir, 'project')]) {
     if (item.stale !== true) continue;
     issues.push(`${item.id}「${item.title}」所依据材料已变更，需复核${item.staleReason ? `：${item.staleReason}` : ''}（复核后更新该条目即自动清除标记）`);
+  }
+
+  // 14-16) 研究取向条目（claim 论断 / evidence 证据卡）：普通案件项目不写这两类即完全不触发。
+  const typeById = new Map(wiki.map((w) => [w.id, w.type]));
+
+  // 14) 孤儿证据（补充条款 13）：证据卡脱离论断就没有意义 —— 未指向 claim、指向的 id 不存在、
+  //     或指向的不是 claim 类型，都算孤儿；方向（supports/refutes）必填，缺了无从判断它在证明什么。
+  for (const w of wiki) {
+    if (w.type !== 'evidence') continue;
+    if (!w.claim) {
+      issues.push(`${w.id}「${w.title}」证据卡未指向论断：请用 ledger_record 的 claim 参数填它所支撑/反驳的 claim 条目 id`);
+    } else if (!typeById.has(w.claim)) {
+      issues.push(`${w.id}「${w.title}」证据卡指向的论断 ${w.claim} 不存在（孤儿证据）`);
+    } else if (typeById.get(w.claim) !== 'claim') {
+      issues.push(`${w.id}「${w.title}」证据卡指向的 ${w.claim} 不是论断类型（应为 claim，孤儿证据）`);
+    }
+    if (!w.points) {
+      issues.push(`${w.id}「${w.title}」证据卡未标方向：points 填 supports（支撑）或 refutes（反驳）`);
+    }
+  }
+
+  // 15) 论断只有单侧证据（研究取向，与检查 8 的分侧纪律同源）：有支撑无反驳（或反之）时须补另一侧。
+  const evidenceTally = new Map<string, { supports: number; refutes: number }>();
+  for (const w of wiki) {
+    if (w.type !== 'evidence' || !w.claim || typeById.get(w.claim) !== 'claim') continue;
+    const rec = evidenceTally.get(w.claim) ?? { supports: 0, refutes: 0 };
+    if (w.points === 'supports') rec.supports++;
+    else if (w.points === 'refutes') rec.refutes++;
+    evidenceTally.set(w.claim, rec);
+  }
+  for (const w of wiki) {
+    if (w.type !== 'claim') continue;
+    const rec = evidenceTally.get(w.id);
+    if (!rec || rec.supports === rec.refutes) continue; // 无证据、或两侧均衡 → 不在这里报
+    const only = rec.supports > 0 ? `仅有支撑证据 ${rec.supports} 条、无反证` : `仅有反驳证据 ${rec.refutes} 条、无支撑`;
+    issues.push(`${w.id}「${w.title}」论断${only}：请补另一侧证据或显式说明缺口`);
+  }
+
+  // 16) 论断长期停在 open（研究取向）：超过阈值仍未见结论的论断要把状态显式往前推，
+  //     否则"待验证"会长期挂着而无从区分"还在查"与"忘了查"。
+  const CLAIM_OPEN_STALE_DAYS = 30;
+  const claimCutoff = Date.now() - CLAIM_OPEN_STALE_DAYS * 86400000;
+  for (const w of wiki) {
+    if (w.type !== 'claim' || (w.claimStatus ?? 'open') !== 'open') continue;
+    const ts = w.updated ? Date.parse(w.updated) : Number.NaN;
+    if (!Number.isFinite(ts) || ts > claimCutoff) continue;
+    issues.push(`${w.id}「${w.title}」论断停在 open 已超过 ${CLAIM_OPEN_STALE_DAYS} 天：请补证据并把 status 更新为 supported/refuted/unclear`);
   }
 
   // 顺带：账本目录本身必须可读（statSync 失败视为异常）

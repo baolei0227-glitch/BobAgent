@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { Pluggable, PluggableList } from 'unified';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { AlertTriangle, BookOpen, Loader2, RotateCw } from 'lucide-react';
+import { openFileByProjectRelPath } from './HtmlRenderer';
 
 /** 账本条目（与宿主 /api/ledger/document 返回的 LedgerEntry 对应） */
 interface LedgerDocEntry {
@@ -56,7 +58,101 @@ interface LedgerDocPanelProps {
   projectId: string;
 }
 
-const REMARK_PLUGINS = [remarkGfm];
+/* ------------------- 正文项目路径 → 可点开原件的链接 ------------------- */
+
+/** 项目相对路径（与对话正文 .file-mention 同一口径；排除 [] # 以免吃掉引用标记的尾巴） */
+const PROJECT_PATH_RE = /(?:materials|homework|attachments)\/(?!\.{1,2}(?:\/|$))[^\s<>"'`，。；：、！？（）【】《》〔〕「」『』\[\]#]+/g;
+/** 判据用（不带 g：避免 lastIndex 状态在多次调用间串味） */
+const PROJECT_PATH_HEAD_RE = /^(?:materials|homework|attachments)\//;
+
+/** 该 href / 文本是否是项目相对路径（可点开原件，而非外链跳转） */
+function isProjectRelPath(value: string): boolean {
+  return PROJECT_PATH_HEAD_RE.test(value);
+}
+
+/** mdast 节点最小结构（只用到 type/value/url/children；不为此引入 mdast 类型包） */
+interface MdNode {
+  type: string;
+  value?: string;
+  url?: string;
+  children?: MdNode[];
+}
+
+/** 不下钻的节点：代码块 / 行内代码 / 既有链接（避免造出嵌套链接）/ 原始 HTML */
+const NO_DESCEND = new Set(['code', 'inlineCode', 'link', 'linkReference', 'image', 'html']);
+
+/** 纯文本 → 文本 + 链接节点；无命中返回 null（原节点不动） */
+function splitProjectPaths(value: string): MdNode[] | null {
+  PROJECT_PATH_RE.lastIndex = 0;
+  const out: MdNode[] = [];
+  let last = 0;
+  let hit = false;
+  for (let m = PROJECT_PATH_RE.exec(value); m; m = PROJECT_PATH_RE.exec(value)) {
+    hit = true;
+    if (m.index > last) out.push({ type: 'text', value: value.slice(last, m.index) });
+    out.push({ type: 'link', url: m[0], children: [{ type: 'text', value: m[0] }] });
+    last = m.index + m[0].length;
+  }
+  if (!hit) return null;
+  if (last < value.length) out.push({ type: 'text', value: value.slice(last) });
+  return out;
+}
+
+function linkifyProjectPaths(node: MdNode): void {
+  const children = node.children;
+  if (!children || NO_DESCEND.has(node.type)) return;
+  const next: MdNode[] = [];
+  for (const child of children) {
+    if (child.type === 'text' && typeof child.value === 'string') {
+      const parts = splitProjectPaths(child.value);
+      if (parts) {
+        next.push(...parts);
+        continue;
+      }
+    } else {
+      linkifyProjectPaths(child);
+    }
+    next.push(child);
+  }
+  node.children = next;
+}
+
+/** remark 插件：把正文里的项目相对路径包成链接（href 即路径本身，由 DOC_COMPONENTS.a 拦截为「系统默认程序打开」）。
+ *  只动纯文本节点：代码块 / 行内代码 / 既有链接天然不受影响。 */
+const remarkLinkifyProjectPaths: Pluggable = () => (tree: unknown) => {
+  linkifyProjectPaths(tree as MdNode);
+};
+
+const REMARK_PLUGINS: PluggableList = [remarkGfm, remarkLinkifyProjectPaths];
+
+/** 项目内文件路径胶囊（与对话正文 .file-mention 同款外观）：点击用系统默认程序打开原件 */
+function ProjectFileLink({ path, children }: { path: string; children?: ReactNode }) {
+  return (
+    <button
+      type="button"
+      title={`Open ${path}`}
+      onClick={() => void openFileByProjectRelPath(path)}
+      className="inline-block cursor-pointer align-bottom"
+      style={{
+        maxWidth: '100%',
+        padding: '0 5px',
+        margin: '0 1px',
+        borderRadius: 6,
+        border: '1px solid color-mix(in oklab, var(--info) 25%, transparent)',
+        backgroundColor: 'color-mix(in oklab, var(--info) 10%, transparent)',
+        color: 'var(--info)',
+        fontFamily: 'var(--font-mono, monospace)',
+        fontSize: 12,
+        lineHeight: 1.6,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}
+    >
+      {children ?? path}
+    </button>
+  );
+}
 
 function fmtTime(iso: string): string {
   const d = new Date(iso);
@@ -293,7 +389,9 @@ export function LedgerDocPanel({ open, onOpenChange, projectId }: LedgerDocPanel
                         <h3 className="text-13 font-semibold" style={{ color: 'var(--ink-strong)' }}>{e.title}</h3>
                         <div className="mt-0.5 mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-10" style={{ color: 'var(--ink-muted)' }}>
                           <span className="font-mono">{e.id}</span>
-                          {e.source && <span>{e.source}</span>}
+                          {e.source && (isProjectRelPath(e.source)
+                            ? <ProjectFileLink path={e.source} />
+                            : <span>{e.source}</span>)}
                           {e.updated && <span>{fmtTime(e.updated)}</span>}
                           {(e.tags ?? []).map((t) => <span key={t}>#{t}</span>)}
                         </div>
@@ -356,11 +454,16 @@ const DOC_COMPONENTS: Components = {
     </blockquote>
   ),
   hr: () => <hr className="my-2 border-0 border-t" style={{ borderColor: 'var(--line-soft)' }} />,
-  a: ({ href, children }) => (
-    <a href={href} target="_blank" rel="noreferrer noopener" className="underline underline-offset-2" style={{ color: 'var(--info)' }}>
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => {
+    const rel = typeof href === 'string' ? href : '';
+    // 项目相对路径（materials/… homework/…）→ 用系统默认程序打开原件；target=_blank 对本地相对路径只会开出一个坏页面
+    if (isProjectRelPath(rel)) return <ProjectFileLink path={rel}>{children}</ProjectFileLink>;
+    return (
+      <a href={href} target="_blank" rel="noreferrer noopener" className="underline underline-offset-2" style={{ color: 'var(--info)' }}>
+        {children}
+      </a>
+    );
+  },
   code: ({ className, children }) =>
     /language-/.test(className ?? '') ? (
       <code className="font-mono text-10 leading-5">{children}</code>

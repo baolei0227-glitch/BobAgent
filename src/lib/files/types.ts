@@ -7,8 +7,9 @@
  * - 能力分层：可写来源实现 IWritableSource，不把 optional 方法塞进 IFileSource。
  */
 
-/** 来源类型（对应"空间站"的对接端口标识） */
-export type FileSourceKind = 'local' | 'project' | 'attachment' | 'material';
+/** 来源类型（对应"空间站"的对接端口标识）
+ *  - transient：临时（未保存）来源——内容驻留内存，只读展示，由用户决定是否落盘到项目 */
+export type FileSourceKind = 'local' | 'project' | 'attachment' | 'material' | 'transient';
 
 /** 来源能力声明（调用方据此决定可用操作，而非判断来源类型） */
 export interface FileSourceCapabilities {

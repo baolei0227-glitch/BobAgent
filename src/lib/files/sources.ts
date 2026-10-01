@@ -173,10 +173,55 @@ class MaterialSource implements IFileSource {
   }
 }
 
+/**
+ * 临时（未保存）文档存储：path → FileInfo，进程内内存有效、刷新即失。
+ * 用于承载"先生成、后决定存哪"的结果（如会议纪要草稿），内容只读展示。
+ */
+const transientFiles = new Map<string, FileInfo>();
+
+/**
+ * 登记一份临时文档并返回其 transient 路径（调用方随后自行发布 file.open）。
+ * @param name          展示用文件名（决定扩展名 → 匹配渲染器，如 "会议纪要.md"）
+ * @param content       文本内容
+ * @param suggestedPath 建议落盘路径（存于 FileInfo.full_path，供"Save to current project"使用）
+ */
+export function putTransientFile(name: string, content: string, suggestedPath?: string): string {
+  const path = `transient://${Date.now().toString(36)}/${encodeURIComponent(name)}`;
+  const dot = name.lastIndexOf('.');
+  transientFiles.set(path, {
+    name,
+    type: 'text',
+    content,
+    size: content.length,
+    extension: dot >= 0 ? name.slice(dot) : '',
+    full_path: suggestedPath,
+  });
+  return path;
+}
+
+/** 临时来源（内存）：只读展示未保存结果；搜索/监听不支持，内容无后端代理 */
+class TransientSource implements IFileSource {
+  readonly kind = 'transient' as const;
+  readonly label = '未保存';
+  readonly capabilities = { writable: false, searchable: false, watchable: false };
+
+  async read(path: string): Promise<FileInfo> {
+    const f = transientFiles.get(path);
+    if (!f) throw new Error('未保存内容已失效');
+    return f;
+  }
+
+  async proxy(): Promise<string> {
+    // 内存内容无代理 URL；文本渲染器直接消费 read() 返回的 content
+    return '';
+  }
+}
+
 /** 注册全部来源（应用启动时调用一次） */
 export function registerFileSources(): void {
   registerSource(new LocalSource());
   registerSource(new ProjectSource());
   registerSource(new AttachmentSource());
   registerSource(new MaterialSource());
+  registerSource(new TransientSource());
 }

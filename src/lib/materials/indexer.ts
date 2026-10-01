@@ -20,6 +20,7 @@
  *                              #   整份识别（无分页结构）时 textPageCount < pageCount，读取方按它决定读几个 pages/NNNN.txt。
  *                              #   pageMeta = L0 免费页级标注（qualityScore/rotated/enhanced/upgraded/
  *                              #   skewAngle/route），抽取时顺手落盘，正文保持纯净、标注随附。
+ *                              #   网页原件（.html）额外带 sourceUrl / retrievedAt（取自文件头注释）
  *
  * 识别口径（用户确认）：**质量第一位**——文本层用本地提取器（确定性、快速）；
  * 扫描件/图片走 bob-ocr-mcp 的 upgrade='auto'，由插件 ocr.source 决定引擎
@@ -31,6 +32,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { PageRoute } from '@/lib/pdf/shared/types';
+import { extractHtmlText } from './html-text';
 
 const INDEX_DIR_NAME = '.materials-index';
 const MATERIALS_DIR_NAME = 'materials';
@@ -271,6 +273,10 @@ interface ExtractOutcome {
   pageBlocks?: (MaterialBlock[] | undefined)[];
   /** 任有一页为扫描/OCR 页 */
   hasScannedPages?: boolean;
+  /** 网页原件（.html）的出处：写在文件头注释里，随 meta.json 留痕 */
+  sourceUrl?: string;
+  /** 网页原件的抓取日期（YYYY-MM-DD） */
+  retrievedAt?: string;
 }
 
 /** extractWithPython / extractWithPdfParse 回传中 L0 关心的页级字段 */
@@ -318,6 +324,29 @@ async function extractTextFile(fullPath: string): Promise<ExtractOutcome> {
     }
   }
   return { quality: 'text', pages: [content.replace(/^\uFEFF/, '')] };
+}
+
+/** 网页原件抽取出的正文上限：与旧 .md 材料同口径（当时在落盘时即截到这里） */
+const MAX_HTML_TEXT_CHARS = 60000;
+
+/**
+ * 网页原件（.html）→ 正文
+ *
+ * 落盘的是渲染后的整页 HTML（脚本已剥、链接已绝对化），直接当纯文本读会把标签灌进索引，
+ * 所以这里走「剥噪声 → 主内容容器 → turndown」。正文头部保留文件头注释里的原文链接，
+ * 索引与检索结果里仍能看见来源；正文为空 → null（与「无文本」同待遇，不留空页）。
+ */
+async function extractHtmlFile(fullPath: string): Promise<ExtractOutcome | null> {
+  const raw = await fs.readFile(fullPath, 'utf-8').catch(() => '');
+  const { markdown, sourceUrl, retrievedAt } = extractHtmlText(raw);
+  if (!markdown) return null;
+  const head = sourceUrl ? `> Source: ${sourceUrl}\n> Retrieved: ${retrievedAt ?? ''}\n\n` : '';
+  return {
+    quality: 'text',
+    pages: [`${head}${markdown}`.slice(0, MAX_HTML_TEXT_CHARS)],
+    sourceUrl,
+    retrievedAt,
+  };
 }
 
 /** 每页平均字符数达标 → 视为可用文字层（与 read_attachment 判定一致） */
@@ -727,6 +756,9 @@ async function extractByExt(
   fullPath: string,
   ctx: ScanQueueContext,
 ): Promise<ExtractOutcome | 'queued' | null> {
+  // .html 也在 TEXT_EXTS 里（保证 isIndexableExt 放行），但必须走「剥标记」的抽取：
+  // 网页原件是整页 HTML，当纯文本直读会把标签灌进索引
+  if (ext === '.html') return extractHtmlFile(fullPath);
   if (TEXT_EXTS.has(ext)) return extractTextFile(fullPath);
   if (ext === '.pdf') return extractPdf(fullPath, ctx);
   if (IMAGE_EXTS.has(ext)) return extractScannedViaOcr(fullPath, ctx);
@@ -773,6 +805,8 @@ async function writeIndexFiles(
   pageBlocks?: (MaterialBlock[] | undefined)[],
   /** 文档真实页数；缺省视为 pages.length（文本层抽取/逐页 OCR 时两者本就一致） */
   pageCount?: number,
+  /** 网页原件（.html）的出处：随 meta.json 留痕，正文里另有同源的一行 */
+  provenance?: Pick<ExtractOutcome, 'sourceUrl' | 'retrievedAt'>,
 ): Promise<void> {
   const dir = path.join(getIndexDir(projectPath), hash);
   const pagesDir = path.join(dir, 'pages');
@@ -804,6 +838,8 @@ async function writeIndexFiles(
     indexedAt: new Date().toISOString(),
   };
   if (hasScannedPages) meta.hasScannedPages = true;
+  if (provenance?.sourceUrl) meta.sourceUrl = provenance.sourceUrl;
+  if (provenance?.retrievedAt) meta.retrievedAt = provenance.retrievedAt;
   if (pageMeta && pageMeta.length > 0) meta.pageMeta = pageMeta;
   await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8');
 }
@@ -1178,6 +1214,7 @@ async function doIndexMaterialFile(
       outcome.hasScannedPages,
       outcome.pageBlocks,
       outcome.pageCount,
+      outcome,
     );
   }
 

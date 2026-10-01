@@ -4,9 +4,17 @@ import { join, extname, basename } from 'path';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 import { indexMaterialFile, removeMaterialsIndex, renameMaterialsIndex, isIndexableExt, listMaterialIndexStatus, retryMaterialIndex, kickMaterialsBackfill } from '@/lib/materials/indexer';
+import { importUrlAsMaterial, importReadTextAsMaterial, importResearchReportAsMaterial, importSharedDocAsMaterial, extractShareToken, saveCurrentHippoPage, readCurrentHippoPage, REUSABLE_TEXT_MIN_CHARS, type LinkImportResult } from '@/lib/materials/link-import';
+import { getShareLink } from '@/lib/share-links';
+import { getHippoDriver } from '@/lib/browser-tools/hippo-driver';
+import { callNotes } from '@/lib/mcp/notes-bridge';
 import { readFileTags, setFileTags, setFileTagsBulk, renameFileTags, removeFileTags, isTagScope, type TagScope } from '@/lib/files/tags';
 
 const MAX_SIZE = 500 * 1024 * 1024;
+
+/** bobnotes raw/ 单条素材上限（插件 notes_add_raw 硬约束，超出直接报错）：
+ *  超长网页正文在此截断并留痕，避免整条收藏失败 */
+const RAW_NOTES_MAX_CHARS = 20000;
 
 /** PDF 同级 sidecar 后缀（批注 / OCR 识别状态）：与源文件同级存放，
  *  单个文件移动时需一并搬迁，否则新位置读不到既有批注与识别结果 */
@@ -22,6 +30,22 @@ function sanitizeRelSegments(relPath: string): string[] {
     .split('/')
     .map((s) => s.replace(/\.\./g, '').replace(/[\\/:*?"<>|]/g, '_').trim())
     .filter((s) => s.length > 0);
+}
+
+/** 链接导入 / Hippo 一键保存共用的返回体：前端按 file 渲染「解析中」并 Toast 文件名 */
+function pageImportPayload(result: Extract<LinkImportResult, { ok: true }>) {
+  return {
+    success: true,
+    via: result.via,
+    title: result.title,
+    file: {
+      name: result.name,
+      path: result.path,
+      size: result.bytes,
+      extension: result.extension,
+      indexable: true,
+    },
+  };
 }
 
 /** 把 materials 下的一个条目（文件 / 子目录）搬到目标分组目录（toSegs 为空 = materials 根）。
@@ -85,6 +109,34 @@ async function relocateMaterialEntry(
     console.error('Materials tags rename failed:', fromRel, '->', newRel, err);
   }
   return { ok: true, path: newRel, name: destName };
+}
+
+/** 提升为资料后建索引（目录则递归）。
+ *  不能只靠 kickMaterialsBackfill：它有「每项目本会话只扫一次」守卫，覆盖不到刚落位的新条目。 */
+async function indexPromotedMaterials(
+  projectPath: string,
+  materialsPath: string,
+  relSegs: string[],
+  isDir: boolean,
+): Promise<void> {
+  if (!isDir) {
+    await indexMaterialFile(projectPath, relSegs.join('/')).catch(() => {});
+    return;
+  }
+  const walk = async (dirAbs: string, rel: string): Promise<void> => {
+    const entries = await fs.readdir(dirAbs, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue; // 点开头条目（sidecar / 清册等）不进资料树
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await walk(join(dirAbs, entry.name), childRel);
+        continue;
+      }
+      if (!isIndexableExt(extname(entry.name))) continue;
+      void indexMaterialFile(projectPath, childRel).catch(() => {});
+    }
+  };
+  await walk(join(materialsPath, ...relSegs), relSegs.join('/'));
 }
 
 /** 归档箱条目：path 为「去掉 .archive 前缀」的作用域根相对路径，归档 / 恢复两侧同义 */
@@ -421,6 +473,148 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: true, ...result });
       }
 
+      if (action === 'add_link' || action === 'save_page') {
+        // add_link：带「研究中已读到的正文」时直接落盘，否则抓取正文
+        // （服务端直抓优先，失败 / 登录墙回落 Hippo）
+        // save_page：Hippo 侧边栏一键保存当前标签（直接读已渲染的页面，不重新抓取）
+        const folder = typeof body.folder === 'string' ? body.folder : '';
+        // save_page 两个去向：project = 当前项目 materials/（默认）；notes = bobnotes raw/ 收件箱（只投放，不编译）
+        if (action === 'save_page' && body.target === 'notes') {
+          const page = await readCurrentHippoPage();
+          if (!page.ok) {
+            return NextResponse.json({ error: page.error }, { status: 502 });
+          }
+          const clip = await callNotes('add_raw', {
+            text:
+              page.markdown.length > RAW_NOTES_MAX_CHARS
+                ? `${page.markdown.slice(0, RAW_NOTES_MAX_CHARS)}\n\n> …(truncated: the raw inbox accepts at most ${RAW_NOTES_MAX_CHARS} chars)`
+                : page.markdown,
+            title: page.title,
+            source: page.url,
+          });
+          if (!clip.ok) {
+            return NextResponse.json({ error: clip.error }, { status: 502 });
+          }
+          const rawEntry = (clip.data?.raw ?? {}) as { id?: string; title?: string };
+          const rawId = rawEntry.id ?? '';
+          // compile=true：收藏即编译（一键 —— 收件箱留档 + 交给插件大脑 ingest）
+          // 编译耗时不可控（走大脑模型），故不阻塞返回、失败只 console.warn 留痕：
+          // 条目已落在收件箱，用户随时可用 /note ingest 补编译，不出现「假失败」误导。
+          if (body.compile === true && rawId) {
+            void callNotes('ingest', { ids: [rawId] })
+              .then((r) => {
+                if (!r.ok) console.warn('[materials] save_page compile failed:', r.error);
+              })
+              .catch((e) => console.warn('[materials] save_page compile error:', e));
+          }
+          return NextResponse.json({
+            success: true,
+            target: 'notes',
+            compiled: body.compile === true && Boolean(rawId),
+            title: rawEntry.title || page.title,
+            entry: { id: rawId },
+          });
+        }
+        let result;
+        if (action === 'save_page') {
+          result = await saveCurrentHippoPage({ projectRoot: projectPath, folder });
+        } else {
+          const url = typeof body.url === 'string' ? body.url : '';
+          if (!url.trim()) {
+            return NextResponse.json({ error: 'url is required' }, { status: 400 });
+          }
+          // Research 档来源导入会带上「本轮已读到的正文」：有就直接落盘（与回答里的引用同版），
+          // 缺失 / 太短才回落抓取链路（服务端直抓 → Hippo Browser）
+          const captured = typeof body.body === 'string' ? body.body.trim() : '';
+          result =
+            captured.length >= REUSABLE_TEXT_MIN_CHARS
+              ? await importReadTextAsMaterial({
+                  projectRoot: projectPath,
+                  url,
+                  title: typeof body.title === 'string' ? body.title : '',
+                  markdown: captured,
+                  folder,
+                })
+              : await importUrlAsMaterial({ projectRoot: projectPath, url, folder });
+        }
+        if (!result.ok) {
+          return NextResponse.json({ error: result.error }, { status: 502 });
+        }
+        // 与上传同口径：异步建立内容索引，不阻塞返回
+        void indexMaterialFile(projectPath, result.path).catch(() => {});
+        return NextResponse.json(pageImportPayload(result));
+      }
+
+      if (action === 'paste_link') {
+        // 粘贴链接（工作区 Ctrl+V / ⋮ → Paste link）：智能识别两类链接
+        //   - 本机分享链接（路径 /share/<token> 且 token 能在本机 store 命中）→ 复制**原始 md**
+        //     （原文保真、离线可用，不依赖局域网是否可达）
+        //   - 其它 http(s) 链接（普通网页、别人机器发来的分享链接）→ 走既有抓取管线
+        // 判定只靠 token 命中、不做 host 校验：别人机器的 token 在本地查不到，自然回落抓取。
+        const url = typeof body.url === 'string' ? body.url.trim() : '';
+        if (!url) {
+          return NextResponse.json({ error: 'url is required' }, { status: 400 });
+        }
+        const folder = typeof body.folder === 'string' ? body.folder : '';
+        const token = extractShareToken(url);
+        const share = token ? await getShareLink(token) : null;
+        const result = share
+          ? await importSharedDocAsMaterial({
+              projectRoot: projectPath,
+              url,
+              title: share.title,
+              folder,
+              sourcePath: share.path,
+            })
+          : await importUrlAsMaterial({ projectRoot: projectPath, url, folder });
+        if (!result.ok) {
+          return NextResponse.json({ error: result.error }, { status: 502 });
+        }
+        // 与上传同口径：异步建立内容索引，不阻塞返回
+        void indexMaterialFile(projectPath, result.path).catch(() => {});
+        return NextResponse.json(pageImportPayload(result));
+      }
+
+      if (action === 'add_report') {
+        // 研究结论固化：正文即 Hippo 对话栏 Research 档本轮的回答（派生材料），
+        // 出处头带会话节点与依据来源清单。与 add_link 一样由用户显式勾选触发，不自动入库。
+        const markdown = typeof body.body === 'string' ? body.body : '';
+        if (!markdown.trim()) {
+          return NextResponse.json({ error: 'body is required' }, { status: 400 });
+        }
+        const result = await importResearchReportAsMaterial({
+          projectRoot: projectPath,
+          nodeId: typeof body.nodeId === 'string' ? body.nodeId : '',
+          title: typeof body.title === 'string' ? body.title : '',
+          markdown,
+          sources: Array.isArray(body.sources) ? body.sources.filter((u: unknown): u is string => typeof u === 'string') : [],
+          folder: typeof body.folder === 'string' ? body.folder : '',
+        });
+        if (!result.ok) {
+          return NextResponse.json({ error: result.error }, { status: 502 });
+        }
+        void indexMaterialFile(projectPath, result.path).catch(() => {});
+        return NextResponse.json(pageImportPayload(result));
+      }
+
+      if (action === 'open_in_hippo') {
+        // 收件箱（或任意）链接 → 在 Hippo 新标签打开并聚焦。
+        // 正文不在这里抓：登录墙 / JS 渲染 / 正文抽取全交给 Hippo，
+        // 用户随后用对话栏书签按钮「Current project」把渲染好的正文存进本项目 materials/。
+        const url = typeof body.url === 'string' ? body.url.trim() : '';
+        if (!/^https?:\/\//i.test(url)) {
+          return NextResponse.json({ error: 'A http(s) URL is required' }, { status: 400 });
+        }
+        const opened = await getHippoDriver().exec('browser_open_tab', { url, activate: true }, {});
+        if (!opened.ok) {
+          return NextResponse.json(
+            { error: opened.error?.message || 'Hippo Browser is not available', hint: opened.error?.hint },
+            { status: 502 },
+          );
+        }
+        return NextResponse.json({ success: true, url });
+      }
+
       if (action === 'set_tags') {
         // 覆盖式设置某个文件（资料 / 作业产物）的标签（空数组 = 取消全部标签）
         const scope = resolveTagScope(body.scope);
@@ -526,6 +720,75 @@ export async function POST(request: NextRequest) {
         }
         await fs.rm(groupAbs, { recursive: true, force: true });
         return NextResponse.json({ success: true, moved });
+      }
+
+      if (action === 'promote') {
+        // 提升为资料：把 homework 里的成果搬 / 复制进 materials，转成可检索、可被账本引用的正式材料。
+        // 索引边界不变——不是让索引去读 homework，而是让文件**真的成为** materials 内的材料；
+        // 落位后必须显式建索引（见 indexPromotedMaterials 注释）。
+        const fromSegs = sanitizeRelSegments(typeof body.from === 'string' ? body.from : '');
+        const toSegs = sanitizeRelSegments(typeof body.to === 'string' ? body.to : '');
+        const isCopy = body.copy === true;
+        if (fromSegs.length === 0) {
+          return NextResponse.json({ error: 'from is required' }, { status: 400 });
+        }
+
+        const homeworkPath = join(projectPath, 'homework');
+        const srcAbs = join(homeworkPath, ...fromSegs);
+        if (!srcAbs.startsWith(homeworkPath)) {
+          return NextResponse.json({ error: 'Invalid path' }, { status: 403 });
+        }
+        const stat = await fs.stat(srcAbs).catch(() => null);
+        if (!stat) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+        const destDirAbs = toSegs.length > 0 ? join(materialsPath, ...toSegs) : materialsPath;
+        if (!destDirAbs.startsWith(materialsPath)) {
+          return NextResponse.json({ error: 'Invalid path' }, { status: 403 });
+        }
+        await fs.mkdir(destDirAbs, { recursive: true });
+
+        // 目标同名冲突：追加 " (1)" / " (2)"（与上传 / 搬运 / 复制行为一致）
+        const srcName = fromSegs[fromSegs.length - 1];
+        const srcExt = stat.isDirectory() ? '' : extname(srcName);
+        const stem = srcExt ? srcName.slice(0, -srcExt.length) : srcName;
+        let destName = srcName;
+        let destAbs = join(destDirAbs, destName);
+        for (let i = 1; i < 100; i++) {
+          if (!(await fs.stat(destAbs).catch(() => null))) break;
+          destName = `${stem} (${i})${srcExt}`;
+          destAbs = join(destDirAbs, destName);
+        }
+
+        try {
+          if (isCopy) await fs.cp(srcAbs, destAbs, { recursive: true });
+          else await fs.rename(srcAbs, destAbs);
+        } catch (e) {
+          return NextResponse.json(
+            { error: e instanceof Error ? e.message : 'Promote failed' },
+            { status: 500 },
+          );
+        }
+
+        const fromRel = fromSegs.join('/');
+        const destRelSegs = [...toSegs, destName];
+        if (isCopy) {
+          // 复制：原件仍在工作区，归属清册与标签保持原样（资料侧副本按新路径重新起标签）
+        } else {
+          // 移动：成果已离开工作区 —— 清掉归属清册键（留着会成指向不存在路径的僵尸键），
+          // 并回收 homework 侧标签键（标签表按「作用域 + 相对路径」寻址，键留着会指向空路径）
+          await removeHomeworkOwnershipPaths(projectPath, fromRel);
+          await removeFileTags(projectPath, 'homework', fromRel).catch(() => {});
+        }
+
+        // 建内容索引：文本层本地抽取，扫描件走统一 OCR 链路；异步不阻塞返回（与上传分支同款）
+        void indexPromotedMaterials(projectPath, materialsPath, destRelSegs, stat.isDirectory());
+
+        return NextResponse.json({
+          success: true,
+          path: destRelSegs.join('/'),
+          name: destName,
+          copied: isCopy,
+        });
       }
 
       return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
