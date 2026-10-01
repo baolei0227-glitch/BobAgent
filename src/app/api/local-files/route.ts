@@ -278,7 +278,7 @@ export async function GET(request: NextRequest) {
         headers: {
           'Content-Type': mimeMap[ext] || 'application/octet-stream',
           'Content-Length': String(stat.size),
-          // 打开时刻的 mtime 哨兵：DocxViewer 记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
+          // 打开时刻的 mtime 哨兵：docx 编辑器（DocxTiptapEditor）记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
           'X-File-Mtime': String(stat.mtimeMs),
           'Cache-Control': 'public, max-age=3600',
         },

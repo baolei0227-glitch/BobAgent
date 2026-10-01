@@ -37,7 +37,7 @@ import {
 } from '@/lib/nodes/compact';
 import { inferContextWindow, modelOutputTokenMaxForModel } from '@/lib/context-limits';
 import { readSettingsFromFile } from '@/lib/settings-server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel } from '@/lib/core/task-model';
 import { promises as fs } from 'fs';
 import { join, resolve, sep, basename } from 'path';
 import { userInfo } from 'os';

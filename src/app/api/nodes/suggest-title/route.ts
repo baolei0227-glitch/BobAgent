@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel } from '@/lib/core/task-model';
 
 /** 标题长度上限（与前端规则层 deriveInstantTitle 保持一致） */
 const MAX_TITLE_LENGTH = 20;

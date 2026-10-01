@@ -32,6 +32,15 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * 修复 sanitize 造成的脚注锚点 id 双重前缀（与编辑器 HtmlRenderer 同款处理）：
+ * remark-gfm 输出 href="#user-content-fn-1"，rehype-sanitize 的 clobberPrefix 再给 id
+ * 加一层前缀 → id="user-content-user-content-fn-1"，角标点了跳不到文末引用条目。
+ */
+function fixFootnoteAnchors(html: string): string {
+  return html.replace(/id="user-content-user-content-([^"]+)"/g, 'id="user-content-$1"');
+}
+
 function buildPage(title: string, html: string): string {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -76,6 +85,18 @@ function buildPage(title: string, html: string): string {
   .paper .bw-widget { margin: 14px 0; }
   .paper .bw-widget svg { max-width: 100%; height: auto; }
   .paper .bw-widget-source { margin: 0; }
+  /* 脚注（GFM remark-gfm 渲染）：正文角标 + 文末引用表 —— 报告式引用在分享页需自备样式
+     （应用内的同款样式见 globals.css 的 sup[data-footnote-ref] / .footnotes） */
+  .paper sup[data-footnote-ref] a { font-size: 11px; line-height: 0; padding: 0 1px; color: #3b6df5; text-decoration: none; vertical-align: super; }
+  .paper sup[data-footnote-ref] a:hover { text-decoration: underline; }
+  .paper .footnotes { margin-top: 32px; padding-top: 16px; border-top: 1px solid #eceef0; font-size: 13px; color: #57606a; }
+  .paper .footnotes h2 { font-size: 14px; margin: 0 0 8px; padding: 0; border: none; color: #57606a; }
+  .paper .footnotes ol { margin: 0; padding-left: 20px; }
+  .paper .footnotes li { margin: 4px 0; }
+  .paper .footnotes a { word-break: break-all; }
+  /* remark-gfm 给引用表标题挂 sr-only（应用侧由 Tailwind 提供该类 → 标题不可见），
+     分享页没有 Tailwind，这里补一份，保证两个面的脚注区外观一致 */
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border-width: 0; }
 ${SHARE_WIDGET_CSS}
   @media (prefers-color-scheme: dark) {
     :root { color-scheme: dark; }
@@ -88,6 +109,8 @@ ${SHARE_WIDGET_CSS}
     .paper th { background: #262a32; }
     .paper th, .paper td { border-color: #33373f; }
     .paper a { color: #7c9cf5; }
+    .paper .footnotes { border-color: #2d3139; color: #9aa4b2; }
+    .paper .footnotes h2 { color: #9aa4b2; }
     /* 图表颜色在服务端已固化为浅色配色，深色下垫一层浅色底板保证可读 */
     .paper .bw-widget { background: #f7f7f8; border-radius: 10px; }
   }
@@ -118,7 +141,7 @@ export async function GET(
     // 服务端预渲染 ```mermaid / ```widget:* 围栏为静态 HTML/SVG（分享页无客户端脚本，无法像编辑器那样运行时出图）
     const { markdown, blocks } = await preprocessShareMarkdown(expanded);
     const { html } = renderer.markdownSync(markdown);
-    const page = buildPage(entry.title, injectShareWidgets(html, blocks));
+    const page = buildPage(entry.title, injectShareWidgets(fixFootnoteAnchors(html), blocks));
     return new Response(page, {
       status: 200,
       headers: {

@@ -22,38 +22,79 @@ const TAGLEN = 16;
 /** 内置 pepper（仅用于提升暴力破解成本，不是安全边界） */
 const PEPPER = 'BobWork.Secrets.Pepper::v1::2026-07';
 
-/** 机器唯一特征，尽量稳定（用户改 hostname 不影响 hw.uuid） */
-function getMachineFingerprint(): string {
+/** 同步执行外部命令取机器特征；失败返回空串（该候选指纹直接跳过，不影响其它候选） */
+function tryExec(cmd: string): string {
   try {
-    // macOS: 硬件 UUID，跨重启稳定
-    if (process.platform === 'darwin') {
-      const uuid = execSync('sysctl -n hw.uuid', { stdio: ['ignore', 'pipe', 'ignore'] })
-        .toString()
-        .trim();
-      if (uuid) return `hw.uuid:${uuid}`;
-    }
-    // Linux: machine-id
-    if (process.platform === 'linux') {
-      const id = readFileSync('/etc/machine-id', 'utf-8').trim();
-      if (id) return `machine-id:${id}`;
-    }
-  } catch {}
-  // Fallback：hostname + username，至少能保证跨机器不同
-  return `host:${hostname()}:user:${userInfo().username}`;
+    return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  } catch {
+    return '';
+  }
 }
 
-let cachedKey: Buffer | null = null;
-function getKey(): Buffer {
-  if (cachedKey) return cachedKey;
-  const material = `${PEPPER}::${getMachineFingerprint()}`;
-  cachedKey = scryptSync(material, 'BobWork.Secrets.Salt', KEYLEN, { N: 16384, r: 8, p: 1 });
-  return cachedKey;
+/**
+ * 硬件指纹候选（首选，跨重启/跨网络稳定）：
+ *   - macOS：IOPlatformUUID（ioreg 读取）。注意 Apple Silicon 上 `sysctl -n hw.uuid`
+ *     已返回 `unknown oid`，若此时退回主机名派生，主机名一变（DHCP 把 HostName 改成 IP、
+ *     或用户改名）密钥就全部解不开。
+ *   - Linux：/etc/machine-id
+ */
+function hardwareFingerprints(): string[] {
+  const out: string[] = [];
+  if (process.platform === 'darwin') {
+    const ioreg = tryExec('/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice');
+    const uuid = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(ioreg)?.[1];
+    if (uuid) out.push(`hw.uuid:${uuid}`);
+    // Intel 机器仍可用（与 IOPlatformUUID 同值，去重后不重复派生）
+    const sysctl = tryExec('/usr/sbin/sysctl -n hw.uuid');
+    if (sysctl) out.push(`hw.uuid:${sysctl}`);
+  } else if (process.platform === 'linux') {
+    try {
+      const id = readFileSync('/etc/machine-id', 'utf-8').trim();
+      if (id) out.push(`machine-id:${id}`);
+    } catch { /* 读不到就退到主机名候选 */ }
+  }
+  return out;
+}
+
+/**
+ * 历史指纹候选（只用于解密回退，不用于加密）：
+ * 旧版本一律用主机名派生，主机名一变旧密文即解不开。保留这些候选，
+ * 老密文仍能被解开并按主指纹透明迁移（见 settings-server 的迁移分支）。
+ */
+function legacyFingerprints(): string[] {
+  const user = userInfo().username;
+  const out: string[] = [];
+  const host = hostname().trim();
+  if (host) out.push(`host:${host}:user:${user}`);
+  if (process.platform === 'darwin') {
+    // macOS 未设 HostName 时 gethostname() 返回 "<LocalHostName>.local"
+    const local = tryExec('/usr/sbin/scutil --get LocalHostName');
+    if (local) {
+      out.push(`host:${local}.local:user:${user}`);
+      out.push(`host:${local}:user:${user}`);
+    }
+  }
+  return out;
+}
+
+let cachedKeys: Buffer[] | null = null;
+
+/** 全部候选派生密钥：首个为主密钥（用于加密），其余仅用于解密回退 */
+function getKeys(): Buffer[] {
+  if (cachedKeys) return cachedKeys;
+  const unique = Array.from(new Set([...hardwareFingerprints(), ...legacyFingerprints()]));
+  // 兜底：任何特征都取不到时仍要有一条确定性候选，避免无密钥可用
+  if (unique.length === 0) unique.push(`host:${hostname()}:user:${userInfo().username}`);
+  cachedKeys = unique.map((fp) =>
+    scryptSync(`${PEPPER}::${fp}`, 'BobWork.Secrets.Salt', KEYLEN, { N: 16384, r: 8, p: 1 }),
+  );
+  return cachedKeys;
 }
 
 export function encryptSecret(plain: string | undefined | null): string | undefined {
   if (plain === undefined || plain === null || plain === '') return plain === '' ? '' : undefined;
   if (plain.startsWith(PREFIX)) return plain; // 已加密
-  const key = getKey();
+  const key = getKeys()[0];
   const iv = randomBytes(IVLEN);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(plain, 'utf-8'), cipher.final()]);
@@ -63,24 +104,47 @@ export function encryptSecret(plain: string | undefined | null): string | undefi
   return PREFIX + combined;
 }
 
-export function decryptSecret(blob: string | undefined | null): string | undefined {
-  if (blob === undefined || blob === null || blob === '') return blob === '' ? '' : undefined;
-  if (!blob.startsWith(PREFIX)) return blob; // 明文，直接返回（兼容老数据）
+/** 用指定密钥解一条密文；格式非法或密钥不匹配时返回 undefined（不抛异常） */
+function decryptWithKey(blob: string, key: Buffer): string | undefined {
   const parts = blob.slice(PREFIX.length).split(':');
   if (parts.length !== 3) return undefined;
+  const iv = Buffer.from(parts[0], 'base64');
+  const tag = Buffer.from(parts[1], 'base64');
+  const ct = Buffer.from(parts[2], 'base64');
+  if (iv.length !== IVLEN || tag.length !== TAGLEN) return undefined;
   try {
-    const iv = Buffer.from(parts[0], 'base64');
-    const tag = Buffer.from(parts[1], 'base64');
-    const ct = Buffer.from(parts[2], 'base64');
-    if (iv.length !== IVLEN || tag.length !== TAGLEN) return undefined;
-    const decipher = createDecipheriv('aes-256-gcm', getKey(), iv);
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(tag);
     const plain = Buffer.concat([decipher.update(ct), decipher.final()]);
     return plain.toString('utf-8');
   } catch {
-    // 解密失败（换机器、文件损坏）→ 返回 undefined，由上层决定是否提示
     return undefined;
   }
+}
+
+/**
+ * 解密一条密文：依次尝试主指纹与历史指纹。
+ *
+ * 全部失败返回 undefined —— 调用方必须按「凭据不可用」处理，
+ * 绝不能把 `enc::v1::…` 密文本体当 Key 发出去（服务端会回
+ * "Your api key: ****Vcg= is invalid"，即密文尾部被当成密钥回显）。
+ */
+export function decryptSecret(blob: string | undefined | null): string | undefined {
+  if (blob === undefined || blob === null || blob === '') return blob === '' ? '' : undefined;
+  if (!blob.startsWith(PREFIX)) return blob; // 明文，直接返回（兼容老数据）
+  for (const key of getKeys()) {
+    const plain = decryptWithKey(blob, key);
+    if (plain !== undefined) return plain;
+  }
+  return undefined;
+}
+
+/** 是否为「主指纹解不开、历史指纹能解开」的密文 → 需要用主指纹重新加密迁移一次 */
+export function isLegacyCiphertext(blob: string): boolean {
+  if (!blob.startsWith(PREFIX)) return false;
+  const keys = getKeys();
+  if (decryptWithKey(blob, keys[0]) !== undefined) return false;
+  return keys.slice(1).some((key) => decryptWithKey(blob, key) !== undefined);
 }
 
 export function isEncrypted(blob: unknown): boolean {
@@ -154,14 +218,33 @@ export function encryptSettings<T>(settings: T): T {
   });
 }
 
+/** 解密失败只提示一次，避免每次读设置都刷屏 */
+let warnedDecryptFailure = false;
+
+/** 解密叶子：密文解不开时返回空串（视作「未配置」并留痕），
+ *  绝不把密文本体当凭据向上传递 */
+function decryptLeaf(leaf: string): string {
+  const plain = decryptSecret(leaf);
+  if (plain === undefined) {
+    if (!warnedDecryptFailure) {
+      warnedDecryptFailure = true;
+      console.warn(
+        '[secrets] 密文解密失败：与当前机器指纹不匹配（换机器或文件损坏），相关凭据视为未配置，需重新录入',
+      );
+    }
+    return '';
+  }
+  return plain;
+}
+
 export function decryptSettings<T>(settings: T): T {
   return applyToSensitive(settings, (leaf) => {
     if (leaf === undefined || leaf === null) return leaf;
-    if (typeof leaf === 'string') return decryptSecret(leaf) ?? leaf;
+    if (typeof leaf === 'string') return decryptLeaf(leaf);
     if (typeof leaf === 'object' && leaf !== null) {
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(leaf)) {
-        out[k] = typeof v === 'string' ? decryptSecret(v) ?? v : v;
+        out[k] = typeof v === 'string' ? decryptLeaf(v) : v;
       }
       return out;
     }
@@ -179,6 +262,23 @@ export function hasPlainSecrets<T>(settings: T): boolean {
     if (leaf !== null && typeof leaf === 'object') {
       for (const v of Object.values(leaf)) {
         if (typeof v === 'string' && v !== '' && !isEncrypted(v)) found = true;
+      }
+    }
+    return leaf;
+  });
+  return found;
+}
+
+/** 是否存在「历史指纹加密」的敏感字段（能解开但需按主指纹重写迁移） */
+export function hasLegacySecrets<T>(settings: T): boolean {
+  let found = false;
+  applyToSensitive(settings, (leaf) => {
+    if (typeof leaf === 'string' && isLegacyCiphertext(leaf)) {
+      found = true;
+    }
+    if (leaf !== null && typeof leaf === 'object') {
+      for (const v of Object.values(leaf)) {
+        if (typeof v === 'string' && isLegacyCiphertext(v)) found = true;
       }
     }
     return leaf;

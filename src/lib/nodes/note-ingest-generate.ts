@@ -16,7 +16,7 @@
 import { promises as fs } from 'fs';
 import OpenAI from 'openai';
 import { parseNodeMarkdown, serializeNode, updateNodeFile, type ConversationTurn } from '@/lib/node-markdown';
-import { resolveOutcomeModel } from '@/lib/wanted/task-model';
+import { resolveOutcomeModel } from '@/lib/core/task-model';
 import { collectMaterialSourceWhitelist } from '@/lib/nodes/outcome-generate';
 import type { NoteTypeDef } from '@/lib/mcp/notes-types';
 

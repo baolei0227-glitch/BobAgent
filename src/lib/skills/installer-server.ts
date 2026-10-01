@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { resolveAppRoot } from '../app-root';
 import { parseFrontmatter, SKILL_SCENES, BUILTIN_SKILLS_DIR } from './loader-server';
+import { recordBaseline, removeBaseline } from './baseline-server';
 import type { SkillMeta, SkillScene } from './types';
 
 export const USER_SKILLS_DIR = path.join(resolveAppRoot(), 'skills');
@@ -255,7 +256,10 @@ export async function installBuiltinSkill(
       detail: 'No builtin source found in the app bundle',
     };
   }
-  return installSkill({ source: 'local', localPath: srcDir, force: opts.force });
+  const result = await installSkill({ source: 'local', localPath: srcDir, force: opts.force });
+  // 物化成功即记录安装基线（此刻副本 == 随包源），供后续区分「官方更新 / 本地修改」
+  if (result.success) recordBaseline(name);
+  return result;
 }
 
 /**
@@ -379,6 +383,7 @@ export function uninstallSkill(skillName: string): { success: boolean; error?: s
       return { success: false, error: 'Security: cannot delete outside user skills directory' };
     }
     fs.rmSync(userTargetDir, { recursive: true, force: true });
+    removeBaseline(skillName); // 副本已删，基线一并清掉（重装时会重新记录）
     return { success: true };
   }
 
@@ -387,6 +392,7 @@ export function uninstallSkill(skillName: string): { success: boolean; error?: s
     const extTargetDir = path.join(extDir, skillName);
     if (fs.existsSync(extTargetDir)) {
       fs.rmSync(extTargetDir, { recursive: true, force: true });
+      removeBaseline(skillName);
       return { success: true };
     }
   }

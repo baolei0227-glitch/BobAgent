@@ -8,7 +8,7 @@
  * 同时产出「主题」：把被识别为时间表达的片段从原文里剔除（「明天下午3点跟张三开会」→「跟张三开会」），
  * 让弹窗 Todo 一栏只留事项本身、时间交给 Date/Time 字段（主题与时间各归其位）。
  *
- * 与 lib/wanted/schedule.ts 的区别：那边解析「查询区间」（整天边界，用于检索），
+ * 与 lib/core/schedule.ts 的区别：那边解析「查询区间」（整天边界，用于检索），
  * 这里解析「单个事件的开始时刻」（用于建日历事件），语义不同故独立实现。
  */
 
@@ -185,6 +185,56 @@ function parseTime(s: string, spans: TimeSpan[]): { h: number; m: number } | nul
   return null;
 }
 
+/** 单个中文数字 → 数值（含「两」=2）；非数字或非法字符返回 null */
+const CN_DIGIT: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+
+function cnNum(s: string | undefined): number | null {
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+  return CN_DIGIT[s] ?? null;
+}
+
+/**
+ * 相对时刻表达（「10分钟后」「2小时后」「半小时后」→ 精确到分钟的时刻）。
+ *
+ * 与 parseDate 的「N天后」（整天、00:00）语义不同：这里是**时刻级偏移**，
+ * 供「提醒我 10 分钟后喝水」这类即时提醒使用（能正确跨过午夜，日期由目标时刻反推）。
+ *
+ * 数字支持阿拉伯数字与单个中文数字（一~十），因为「半小时后 / 一个半小时后 / 两小时后」
+ * 这类小数额在口语里几乎都用中文写（十以上仍走阿拉伯数字，与 parseDate/parseTime 口径一致）。
+ */
+function parseRelativeOffset(s: string, now: Date, spans: TimeSpan[]): Date | null {
+  let m: RegExpMatchArray | null;
+  const N = '((?:\\d{1,3}|[一二两三四五六七八九十]))';
+
+  // 一个半小时后 = 90 分钟 / 两个半小时后 = 150 分钟
+  m = s.match(new RegExp(`${N}\\s*个?\\s*半\\s*小时\\s*(?:以)?后`));
+  if (m) {
+    hit(m, spans);
+    return new Date(now.getTime() + (cnNum(m[1])! * 60 + 30) * 60_000);
+  }
+  // 半小时后
+  m = s.match(/半\s*个?\s*小时\s*(?:以)?后/);
+  if (m) {
+    hit(m, spans);
+    return new Date(now.getTime() + 30 * 60_000);
+  }
+  // N小时后
+  m = s.match(new RegExp(`${N}\\s*个?\\s*小时\\s*(?:以)?后`));
+  if (m) {
+    hit(m, spans);
+    return new Date(now.getTime() + cnNum(m[1])! * 3_600_000);
+  }
+  // N分钟后
+  m = s.match(new RegExp(`${N}\\s*分钟\\s*(?:以)?后`));
+  if (m) {
+    hit(m, spans);
+    return new Date(now.getTime() + cnNum(m[1])! * 60_000);
+  }
+
+  return null;
+}
+
 /**
  * 从原文里剔除时间片段得到「主题」。
  *  - 紧贴被剔时间之后、且位于主题开头的悬空标记一并剔除（「9月30日前提交答辩状」→「提交答辩状」、
@@ -227,6 +277,18 @@ export function parseTodoTime(text: string, now: Date = new Date()): ParsedTodoT
   if (!s) return null;
 
   const spans: TimeSpan[] = [];
+  // 相对时刻优先：它同时给出日期与时刻，且正则（含「小时/分钟 + 后」）与下面的日期/时刻表达不冲突
+  const rel = parseRelativeOffset(s, now, spans);
+  if (rel) {
+    const out: ParsedTodoTime = {
+      date: `${rel.getFullYear()}-${pad(rel.getMonth() + 1)}-${pad(rel.getDate())}`,
+      time: `${pad(rel.getHours())}:${pad(rel.getMinutes())}`,
+    };
+    const topic = buildTopic(s, spans);
+    if (topic) out.topic = topic;
+    return out;
+  }
+
   const rawTime = parseTime(s, spans);
   const time = rawTime && rawTime.h >= 0 && rawTime.h <= 23 && rawTime.m >= 0 && rawTime.m <= 59 ? rawTime : null;
   if (!time) spans.length = 0; // 非法时刻（如 25:00）不算时间表达，不参与主题剔除

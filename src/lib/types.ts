@@ -44,15 +44,6 @@ export interface MessageAttachment {
 }
 
 /**
- * 附件落盘根目录（相对项目根）：
- *   - `materials`（默认）：项目资料层，登记进材料 manifest、参与 search_materials 正文检索；
- *   - `attachments`：对话级临时附件（如粘贴的截图），不进 manifest、不参与正文检索，
- *     随节点删除一并回收（见 nodes/route.ts 的附件目录清理）。
- * 两处子目录命名规则相同（`{nodeId前4位}_{标题}`），删除时按前缀匹配。
- */
-export type AttachmentStore = 'materials' | 'attachments';
-
-/**
  * 消息级 @引用 快照（资料库文件 / 本地文件 / 链接 / 操作目录）。
  * 与 MessageAttachment 区分：@引用 不产生上传文件，仅作为本轮上下文，
  * 需要在气泡内以 chip 展示并随回答落盘（<!-- REFERENCES: -->）。
@@ -347,7 +338,7 @@ export const DEFAULT_MODEL_ID = '';
 /* ==================== 项目分类与标签 ==================== */
 
 /** 项目分类（创建项目时选择，显示在项目标题右侧；面板 Tags 栏作为默认标签置顶显示） */
-export const PROJECT_CATEGORIES = ['诉讼', '常法', '非诉', '破产', '其他'] as const;
+export const PROJECT_CATEGORIES = ['诉讼', '常法', '非诉', '破产', '研究', '其他'] as const;
 export type ProjectCategory = (typeof PROJECT_CATEGORIES)[number];
 /** 项目自定义标签上限 */
 export const PROJECT_TAG_LIMIT = 2;
@@ -414,8 +405,8 @@ export interface SelectedModel {
   modelId: string;
   thinking: boolean;
   /** 用途标签（模型池统一仓库）：缺省按 category 推断，显式指定用于角色区过滤。
-   *  chat=对话 / vision=视觉 / stt=语音转写 / image=图像生成与编辑 / ocr=在线识别 */
-  purpose?: 'chat' | 'vision' | 'stt' | 'image' | 'ocr';
+   *  chat=对话 / vision=视觉 / stt=语音转写 / tts=语音合成 / image=图像生成与编辑 / ocr=在线识别 */
+  purpose?: 'chat' | 'vision' | 'stt' | 'tts' | 'image' | 'ocr';
 }
 
 export interface ProviderConfig {
@@ -444,7 +435,7 @@ export interface AvailableModel {
   vendor?: string;
 }
 
-export { getAvailableModels, isCustomModel, parseCustomModel, getProviderPreset, isDeclaredV4Model } from './providers/resolve';
+export { getAvailableModels, isCustomModel, parseCustomModel, getProviderPreset, isDeclaredV4Model, isPresetVisionModel } from './providers/resolve';
 
 /* ==================== 思考深度控制系统 ==================== */
 

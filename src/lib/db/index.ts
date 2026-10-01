@@ -8,6 +8,7 @@ import {
   PROJECT_DB_NOSYNC_DIRNAME,
   CALENDAR_DB_FILENAME,
 } from '@/lib/app-root';
+import { serializeRecurrence, type RecurrenceRule } from '@/lib/calendar/recurrence';
 
 /** better-sqlite3 数据库实例类型（避免在大量 CRUD 函数签名中重复写 any） */
 type SqliteDb = BetterSqlite3.Database;
@@ -53,6 +54,17 @@ export interface EventRow {
   tags_json: string;          // JSON string array
   category_path_json: string; // JSON string array，层级分类如 ["工作","开发"]
   scope: string;              // 'project' | 'global'（global = 全局待办）
+  /** 实体三分：'event' 外部日程 | 'task' 计划集（可被排程器安排时段） | 'log' 记录集（不对外投影） */
+  kind: string;
+  due_at: string | null;            // 截止时间（可空；排程硬约束）
+  estimated_minutes: number | null; // 预估用时（分钟）
+  actual_minutes: number | null;    // 实际用时（分钟，完成时写入）
+  started_at: string | null;        // 实际开始执行时间
+  completed_at: string | null;      // 完成时间
+  /** 排程状态：'ok' 最新 | 'stale' 依赖已变需重排 | 'unscheduled' 尚无时段 | 'n/a' 不参与排程 */
+  schedule_status: string;
+  block_locked: number;             // 1 = 用户锁定执行时段，排程器不得移动
+  scheduled_by: string | null;      // 'user' | 'scheduler'（谁写的 start/end）
   source_node_id: string | null;  // 关联的画布节点 ID
   source_raw: string | null;      // 原始粘贴文本（备注）
   /** 反向引用来源（JSON 字符串，如 {"kind":"sticky","noteId":"sn-xxx","pageId":"pg-xxx"}）：
@@ -61,8 +73,10 @@ export interface EventRow {
   notified_at: string | null;     // 到期提醒「已通知」时间（null = 未提醒；已由多通知时间取代，保留兼容）
   /** 提前提醒分钟数配置（JSON 数组，如 [30, 1440] = 开始前 30 分钟 + 1 天；空数组/空 = 默认 [30]） */
   reminder_minutes_json: string;
-  /** 已触发的提前分钟数（JSON 数组，防同一通知时间重复推送） */
+  /** 已触发的提前分钟数（JSON 数组；周期事件为 "实例开始ms:提前分钟" 字符串键，见 event-reminder） */
   reminder_sent_json: string;
+  /** 周期重复规则（JSON，如 {"freq":"daily"} / {"freq":"weekly","until":"..."}；NULL = 不重复） */
+  recurrence_json: string | null;
   external_id: string | null;     // 外部日历 ICALUID（.ics 导入 / CalDAV / WebCal 去重键）
   external_url: string | null;    // 外部日历资源 href（CalDAV 推送定位；WebCal 订阅来源）
   sync_provider: string | null;   // 'caldav' | 'webcal' | 'ics' | null
@@ -193,11 +207,21 @@ export async function initDb(dbPath: string) {
       tags_json TEXT NOT NULL DEFAULT '[]',
       category_path_json TEXT NOT NULL DEFAULT '[]',
       scope TEXT NOT NULL DEFAULT 'project',
+      kind TEXT NOT NULL DEFAULT 'event',
+      due_at TEXT,
+      estimated_minutes INTEGER,
+      actual_minutes INTEGER,
+      started_at TEXT,
+      completed_at TEXT,
+      schedule_status TEXT NOT NULL DEFAULT 'n/a',
+      block_locked INTEGER NOT NULL DEFAULT 0,
+      scheduled_by TEXT,
       source_node_id TEXT,
       source_raw TEXT,
       notified_at TEXT,
       reminder_minutes_json TEXT NOT NULL DEFAULT '[]',
       reminder_sent_json TEXT NOT NULL DEFAULT '[]',
+      recurrence_json TEXT,
       external_id TEXT,
       external_url TEXT,
       sync_provider TEXT,
@@ -214,10 +238,20 @@ export async function initDb(dbPath: string) {
   const hasNotifiedAt = eventCols.some((c) => c.name === 'notified_at');
   const hasReminderMinutes = eventCols.some((c) => c.name === 'reminder_minutes_json');
   const hasReminderSent = eventCols.some((c) => c.name === 'reminder_sent_json');
+  const hasRecurrence = eventCols.some((c) => c.name === 'recurrence_json');
   const hasExternalId = eventCols.some((c) => c.name === 'external_id');
   const hasExternalUrl = eventCols.some((c) => c.name === 'external_url');
   const hasSyncProvider = eventCols.some((c) => c.name === 'sync_provider');
   const hasSyncEtag = eventCols.some((c) => c.name === 'sync_etag');
+  const hasKind = eventCols.some((c) => c.name === 'kind');
+  const hasDueAt = eventCols.some((c) => c.name === 'due_at');
+  const hasEstimatedMinutes = eventCols.some((c) => c.name === 'estimated_minutes');
+  const hasActualMinutes = eventCols.some((c) => c.name === 'actual_minutes');
+  const hasStartedAt = eventCols.some((c) => c.name === 'started_at');
+  const hasCompletedAt = eventCols.some((c) => c.name === 'completed_at');
+  const hasScheduleStatus = eventCols.some((c) => c.name === 'schedule_status');
+  const hasBlockLocked = eventCols.some((c) => c.name === 'block_locked');
+  const hasScheduledBy = eventCols.some((c) => c.name === 'scheduled_by');
   const startTimeCol = eventCols.find((c) => c.name === 'start_time');
   const needsRebuild = !!startTimeCol && startTimeCol.notnull === 1;
 
@@ -242,11 +276,21 @@ export async function initDb(dbPath: string) {
         tags_json TEXT NOT NULL DEFAULT '[]',
         category_path_json TEXT NOT NULL DEFAULT '[]',
         scope TEXT NOT NULL DEFAULT 'project',
+        kind TEXT NOT NULL DEFAULT 'event',
+        due_at TEXT,
+        estimated_minutes INTEGER,
+        actual_minutes INTEGER,
+        started_at TEXT,
+        completed_at TEXT,
+        schedule_status TEXT NOT NULL DEFAULT 'n/a',
+        block_locked INTEGER NOT NULL DEFAULT 0,
+        scheduled_by TEXT,
         source_node_id TEXT,
         source_raw TEXT,
         notified_at TEXT,
         reminder_minutes_json TEXT NOT NULL DEFAULT '[]',
         reminder_sent_json TEXT NOT NULL DEFAULT '[]',
+        recurrence_json TEXT,
         external_id TEXT,
         external_url TEXT,
         sync_provider TEXT,
@@ -264,10 +308,20 @@ export async function initDb(dbPath: string) {
       // 新列：旧表没有 → 用默认值
       `'[]' AS category_path_json`,
       `'project' AS scope`,
+      hasKind ? 'kind' : `'event' AS kind`,
+      hasDueAt ? 'due_at' : 'NULL AS due_at',
+      hasEstimatedMinutes ? 'estimated_minutes' : 'NULL AS estimated_minutes',
+      hasActualMinutes ? 'actual_minutes' : 'NULL AS actual_minutes',
+      hasStartedAt ? 'started_at' : 'NULL AS started_at',
+      hasCompletedAt ? 'completed_at' : 'NULL AS completed_at',
+      hasScheduleStatus ? 'schedule_status' : `'n/a' AS schedule_status`,
+      hasBlockLocked ? 'block_locked' : '0 AS block_locked',
+      hasScheduledBy ? 'scheduled_by' : 'NULL AS scheduled_by',
       'source_node_id', 'source_raw',
       hasNotifiedAt ? 'notified_at' : 'NULL AS notified_at',
       `'[]' AS reminder_minutes_json`,
       `'[]' AS reminder_sent_json`,
+      hasRecurrence ? 'recurrence_json' : 'NULL AS recurrence_json',
       hasExternalId ? 'external_id' : 'NULL AS external_id',
       hasExternalUrl ? 'external_url' : 'NULL AS external_url',
       hasSyncProvider ? 'sync_provider' : 'NULL AS sync_provider',
@@ -283,6 +337,7 @@ export async function initDb(dbPath: string) {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_status ON events(project_id, status);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_node ON events(source_node_id);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_external ON events(project_id, external_id);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_events_kind_due ON events(kind, due_at);`);
     // 6. FTS 表和触发器也需要重建（content='events' 指向的表被重建了）
     db.exec(`DROP TABLE IF EXISTS events_fts;`);
   } else {
@@ -292,15 +347,26 @@ export async function initDb(dbPath: string) {
     if (!hasNotifiedAt) db.exec(`ALTER TABLE events ADD COLUMN notified_at TEXT`);
     if (!hasReminderMinutes) db.exec(`ALTER TABLE events ADD COLUMN reminder_minutes_json TEXT NOT NULL DEFAULT '[]'`);
     if (!hasReminderSent) db.exec(`ALTER TABLE events ADD COLUMN reminder_sent_json TEXT NOT NULL DEFAULT '[]'`);
+    if (!hasRecurrence) db.exec(`ALTER TABLE events ADD COLUMN recurrence_json TEXT`);
     if (!hasExternalId) db.exec(`ALTER TABLE events ADD COLUMN external_id TEXT`);
     if (!hasExternalUrl) db.exec(`ALTER TABLE events ADD COLUMN external_url TEXT`);
     if (!hasSyncProvider) db.exec(`ALTER TABLE events ADD COLUMN sync_provider TEXT`);
     if (!hasSyncEtag) db.exec(`ALTER TABLE events ADD COLUMN sync_etag TEXT`);
+    if (!hasKind) db.exec(`ALTER TABLE events ADD COLUMN kind TEXT NOT NULL DEFAULT 'event'`);
+    if (!hasDueAt) db.exec(`ALTER TABLE events ADD COLUMN due_at TEXT`);
+    if (!hasEstimatedMinutes) db.exec(`ALTER TABLE events ADD COLUMN estimated_minutes INTEGER`);
+    if (!hasActualMinutes) db.exec(`ALTER TABLE events ADD COLUMN actual_minutes INTEGER`);
+    if (!hasStartedAt) db.exec(`ALTER TABLE events ADD COLUMN started_at TEXT`);
+    if (!hasCompletedAt) db.exec(`ALTER TABLE events ADD COLUMN completed_at TEXT`);
+    if (!hasScheduleStatus) db.exec(`ALTER TABLE events ADD COLUMN schedule_status TEXT NOT NULL DEFAULT 'n/a'`);
+    if (!hasBlockLocked) db.exec(`ALTER TABLE events ADD COLUMN block_locked INTEGER NOT NULL DEFAULT 0`);
+    if (!hasScheduledBy) db.exec(`ALTER TABLE events ADD COLUMN scheduled_by TEXT`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_project_id ON events(project_id);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(project_id, start_time);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_status ON events(project_id, status);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_node ON events(source_node_id);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_events_external ON events(project_id, external_id);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_events_kind_due ON events(kind, due_at);`);
   }
 
   // 日历同步账户表（CalDAV 双向 / WebCal 单向订阅统一建模）
@@ -567,12 +633,24 @@ export interface CreateEventData {
   tags?: string[];
   category_path?: string[];      // 层级分类如 ["工作","开发"]
   scope?: 'project' | 'global';  // 默认 'project'；'global' = 全局待办（project_id 设为 '__global__'）
+  /** 实体三分：'event'（默认）| 'task' 计划集 | 'log' 记录集（不对外投影） */
+  kind?: 'event' | 'task' | 'log';
+  due_at?: string | null;            // 截止时间
+  estimated_minutes?: number | null; // 预估用时（分钟）
+  actual_minutes?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  schedule_status?: 'ok' | 'stale' | 'unscheduled' | 'n/a';
+  block_locked?: boolean;
+  scheduled_by?: 'user' | 'scheduler' | null;
   source_node_id?: string;
   source_raw?: string;
   /** 反向引用来源（JSON 字符串；便签行手动入日历 / Butler 排程时写入的锚点，供日历侧反向联动） */
   source_ref?: string;
   /** 提前提醒分钟数（如 [30] = 开始前 30 分钟；多个则每个时间点各提醒一次；缺省默认 [30]） */
   reminder_minutes?: number[];
+  /** 周期重复规则（daily/weekly；缺省 = 不重复） */
+  recurrence?: RecurrenceRule | null;
   external_id?: string;
   external_url?: string;
   sync_provider?: string;
@@ -592,10 +670,21 @@ export interface UpdateEventData {
   tags?: string[];
   category_path?: string[];
   scope?: 'project' | 'global';
+  kind?: 'event' | 'task' | 'log';
+  due_at?: string | null;
+  estimated_minutes?: number | null;
+  actual_minutes?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  schedule_status?: 'ok' | 'stale' | 'unscheduled' | 'n/a';
+  block_locked?: boolean;
+  scheduled_by?: 'user' | 'scheduler' | null;
   source_node_id?: string | null;
   source_raw?: string | null;
   source_ref?: string | null;
   reminder_minutes?: number[];
+  /** 周期重复规则；null = 明确取消重复（与「不传 = 不改」区分） */
+  recurrence?: RecurrenceRule | null;
   external_id?: string | null;
   external_url?: string | null;
   sync_provider?: string | null;
@@ -606,7 +695,12 @@ function _rowToEvent(row: unknown): EventRow {
   return row as EventRow;
 }
 
-export async function createEvent(db: SqliteDb, data: CreateEventData, event_id?: string): Promise<string> {
+export async function createEvent(
+  db: SqliteDb,
+  data: CreateEventData,
+  event_id?: string,
+  opts?: { markStale?: boolean },
+): Promise<string> {
   const id = event_id ?? _newId();
   const now = _now();
   db.prepare(`
@@ -614,11 +708,13 @@ export async function createEvent(db: SqliteDb, data: CreateEventData, event_id?
       event_id, project_id, title, description, location,
       start_time, end_time, all_day, status, priority,
       color, tags_json, category_path_json, scope,
+      kind, due_at, estimated_minutes, actual_minutes, started_at, completed_at,
+      schedule_status, block_locked, scheduled_by,
       source_node_id, source_raw, source_ref,
-      reminder_minutes_json, reminder_sent_json,
+      reminder_minutes_json, reminder_sent_json, recurrence_json,
       external_id, external_url, sync_provider, sync_etag,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.project_id,
@@ -634,6 +730,15 @@ export async function createEvent(db: SqliteDb, data: CreateEventData, event_id?
     JSON.stringify(data.tags ?? []),
     JSON.stringify(data.category_path ?? []),
     data.scope ?? 'project',
+    data.kind ?? 'event',
+    data.due_at ?? null,
+    data.estimated_minutes ?? null,
+    data.actual_minutes ?? null,
+    data.started_at ?? null,
+    data.completed_at ?? null,
+    data.schedule_status ?? 'n/a',
+    data.block_locked ? 1 : 0,
+    data.scheduled_by ?? null,
     data.source_node_id ?? null,
     data.source_raw ?? null,
     data.source_ref ?? null,
@@ -642,6 +747,7 @@ export async function createEvent(db: SqliteDb, data: CreateEventData, event_id?
       ? '[]'
       : (data.reminder_minutes.length === 0 ? 'null' : JSON.stringify(data.reminder_minutes)),
     '[]',
+    serializeRecurrence(data.recurrence),
     data.external_id ?? null,
     data.external_url ?? null,
     data.sync_provider ?? null,
@@ -649,10 +755,16 @@ export async function createEvent(db: SqliteDb, data: CreateEventData, event_id?
     now,
     now,
   );
+  if (opts?.markStale !== false) markScheduleStale(db);
   return id;
 }
 
-export async function updateEvent(db: SqliteDb, eventId: string, data: UpdateEventData): Promise<void> {
+export async function updateEvent(
+  db: SqliteDb,
+  eventId: string,
+  data: UpdateEventData,
+  opts?: { markStale?: boolean },
+): Promise<void> {
   const setters: string[] = [];
   const params: unknown[] = [];
 
@@ -668,6 +780,15 @@ export async function updateEvent(db: SqliteDb, eventId: string, data: UpdateEve
   if (data.tags !== undefined) { setters.push('tags_json = ?'); params.push(JSON.stringify(data.tags)); }
   if (data.category_path !== undefined) { setters.push('category_path_json = ?'); params.push(JSON.stringify(data.category_path)); }
   if (data.scope !== undefined) { setters.push('scope = ?'); params.push(data.scope); }
+  if (data.kind !== undefined) { setters.push('kind = ?'); params.push(data.kind); }
+  if (data.due_at !== undefined) { setters.push('due_at = ?'); params.push(data.due_at); }
+  if (data.estimated_minutes !== undefined) { setters.push('estimated_minutes = ?'); params.push(data.estimated_minutes); }
+  if (data.actual_minutes !== undefined) { setters.push('actual_minutes = ?'); params.push(data.actual_minutes); }
+  if (data.started_at !== undefined) { setters.push('started_at = ?'); params.push(data.started_at); }
+  if (data.completed_at !== undefined) { setters.push('completed_at = ?'); params.push(data.completed_at); }
+  if (data.schedule_status !== undefined) { setters.push('schedule_status = ?'); params.push(data.schedule_status); }
+  if (data.block_locked !== undefined) { setters.push('block_locked = ?'); params.push(data.block_locked ? 1 : 0); }
+  if (data.scheduled_by !== undefined) { setters.push('scheduled_by = ?'); params.push(data.scheduled_by); }
   if (data.source_node_id !== undefined) { setters.push('source_node_id = ?'); params.push(data.source_node_id); }
   if (data.source_raw !== undefined) { setters.push('source_raw = ?'); params.push(data.source_raw); }
   if (data.source_ref !== undefined) { setters.push('source_ref = ?'); params.push(data.source_ref); }
@@ -676,22 +797,138 @@ export async function updateEvent(db: SqliteDb, eventId: string, data: UpdateEve
     setters.push('reminder_minutes_json = ?');
     params.push(data.reminder_minutes.length === 0 ? 'null' : JSON.stringify(data.reminder_minutes));
   }
+  if (data.recurrence !== undefined) {
+    // null（或非法规则）→ 落 NULL = 取消重复
+    setters.push('recurrence_json = ?');
+    params.push(serializeRecurrence(data.recurrence));
+  }
   if (data.external_id !== undefined) { setters.push('external_id = ?'); params.push(data.external_id); }
   if (data.external_url !== undefined) { setters.push('external_url = ?'); params.push(data.external_url); }
   if (data.sync_provider !== undefined) { setters.push('sync_provider = ?'); params.push(data.sync_provider); }
   if (data.sync_etag !== undefined) { setters.push('sync_etag = ?'); params.push(data.sync_etag); }
 
+  // 「完成时必记」（Phase ④）：status → 'done' 时自动补 completed_at / actual_minutes，
+  // 让估时偏差分析有 actual 可用。放在 db 层是因为这里是三条完成路径（日历 UI / Butler 工具 /
+  // 便签勾选）的唯一写入漏斗。调用方显式传值时不覆盖。
+  //   实际用时优先按 started_at → now；无 started_at 时退回执行块时长（end_time - start_time）。
+  let autoCompletedAt: string | null = null;
+  let autoActualMinutes: number | null = null;
+  if (data.status === 'done') {
+    const cur = db
+      .prepare(`SELECT status, start_time, end_time, started_at, completed_at FROM events WHERE event_id = ?`)
+      .get(eventId) as
+      | { status: string; start_time: string | null; end_time: string | null; started_at: string | null; completed_at: string | null }
+      | undefined;
+    if (cur) {
+      // 首次进入 done（或历史 done 行缺完成时间）才打点；重复 done→done 不重写
+      const firstCompletion = cur.status !== 'done' || !cur.completed_at;
+      if (data.completed_at === undefined && firstCompletion) autoCompletedAt = _now();
+      if (data.actual_minutes === undefined && firstCompletion) {
+        const startedMs = cur.started_at ? Date.parse(cur.started_at) : NaN;
+        const endMs = Date.parse(autoCompletedAt ?? _now());
+        const blockMs =
+          cur.start_time && cur.end_time ? Date.parse(cur.end_time) - Date.parse(cur.start_time) : NaN;
+        if (Number.isFinite(startedMs) && Number.isFinite(endMs) && endMs > startedMs) {
+          autoActualMinutes = Math.max(1, Math.round((endMs - startedMs) / 60_000));
+        } else if (Number.isFinite(blockMs) && blockMs > 0) {
+          autoActualMinutes = Math.round(blockMs / 60_000);
+        }
+      }
+    }
+  }
+
   if (setters.length === 0) return;
+
+  if (autoCompletedAt) { setters.push('completed_at = ?'); params.push(autoCompletedAt); }
+  if (autoActualMinutes !== null) { setters.push('actual_minutes = ?'); params.push(autoActualMinutes); }
 
   setters.push('updated_at = ?');
   params.push(_now());
   params.push(eventId);
 
   db.prepare(`UPDATE events SET ${setters.join(', ')} WHERE event_id = ?`).run(...params);
+  if (opts?.markStale !== false) markScheduleStale(db);
 }
 
-export async function deleteEvent(db: SqliteDb, eventId: string): Promise<void> {
+export async function deleteEvent(
+  db: SqliteDb,
+  eventId: string,
+  opts?: { markStale?: boolean },
+): Promise<void> {
   db.prepare(`DELETE FROM events WHERE event_id = ?`).run(eventId);
+  if (opts?.markStale !== false) markScheduleStale(db);
+}
+
+// ============================================================
+// 排程状态记账（schedule_meta 单行 + 行级 schedule_status）
+// ============================================================
+// 「变更即重排」的集中记账点：任何日历写入（create/update/delete）默认把计划置 stale，
+// 再由排程器 3s 去抖后重算并把 status 复位为 ok（version++）。排程器自身写入、以及
+// 外部同步的 push（把本地状态推给远端，不改本地计划）显式传 markStale:false 以免自激。
+
+export interface ScheduleMeta {
+  /** 'ok' 计划最新 | 'stale' 依赖已变、待重排 */
+  status: string;
+  dirty_at: string | null;
+  last_planned_at: string | null;
+  version: number;
+}
+
+/** 读取排程元状态（项目库无该表 / 异常 → 视为 ok，不影响调用方） */
+export function getScheduleMeta(db: SqliteDb): ScheduleMeta {
+  try {
+    const row = db
+      .prepare(`SELECT status, dirty_at, last_planned_at, version FROM schedule_meta WHERE id = 1`)
+      .get() as ScheduleMeta | undefined;
+    if (row) return row;
+  } catch { /* 项目库无 schedule_meta，按无状态处理 */ }
+  return { status: 'ok', dirty_at: null, last_planned_at: null, version: 0 };
+}
+
+/** 排程完成：status='ok'、last_planned_at=at、version++（单行 upsert） */
+export function setSchedulePlanOk(db: SqliteDb, at: string = _now()): void {
+  try {
+    db.prepare(`
+      INSERT INTO schedule_meta (id, status, dirty_at, last_planned_at, version)
+      VALUES (1, 'ok', NULL, ?, 1)
+      ON CONFLICT(id) DO UPDATE SET
+        status = 'ok',
+        last_planned_at = excluded.last_planned_at,
+        version = schedule_meta.version + 1
+    `).run(at);
+  } catch { /* 项目库无该表：静默 */ }
+}
+
+/**
+ * 记账：日历发生变更 → 计划置 stale，并触发去抖重排。
+ *  1) schedule_meta 单行 upsert（status='stale'、dirty_at=now）；
+ *  2) 行级：会被排程器重排的任务（kind='task'、未锁定、由 scheduler 排过、仍在计划中）标 'stale'——
+ *     用户手工排的块与未排程任务（已是 'unscheduled'）不动，避免产生「永久 stale」的假信号；
+ *  3) 动态 import 排程器触发 3s 去抖重排（避免 db ⇄ scheduler 循环依赖；失败不影响写入主链路）。
+ */
+export function markScheduleStale(db: SqliteDb): void {
+  try {
+    db.prepare(`
+      INSERT INTO schedule_meta (id, status, dirty_at, last_planned_at, version)
+      VALUES (1, 'stale', ?, NULL, 0)
+      ON CONFLICT(id) DO UPDATE SET status = 'stale', dirty_at = excluded.dirty_at
+    `).run(_now());
+    db.prepare(`
+      UPDATE events SET schedule_status = 'stale'
+      WHERE kind = 'task'
+        AND COALESCE(block_locked, 0) = 0
+        AND scheduled_by = 'scheduler'
+        AND status = 'scheduled'
+    `).run();
+  } catch {
+    return; // 项目库 / 未迁移库：无排程概念，静默跳过（也不触发重排）
+  }
+  // 排程器静态依赖本模块（读任务/落库），故此处用动态 import 打断静态环：
+  // 只在真正发生写入时按需加载，调用时刻两模块均已初始化完毕，无初始化顺序风险。
+  // eslint-disable-next-line import/no-cycle -- 见上：动态 import 是有意的环打断，运行时安全
+  import('@/lib/calendar/scheduler')
+    .then((m) => m.scheduleReplan())
+    .catch(() => { /* 排程链路异常不影响日历写入 */ });
 }
 
 export async function getEvent(db: SqliteDb, eventId: string): Promise<EventRow | null> {
@@ -700,6 +937,8 @@ export async function getEvent(db: SqliteDb, eventId: string): Promise<EventRow 
 }
 
 /** 按时间范围查询事件 [start, end)，ISO 字符串。projectId 传 null = 查询全部（全局日历库）。
+ *  交集判定：与 [start, end) 有重合的事件（含跨越范围的长事件）；无 end_time 的事件按
+ *  start+30min 的点事件参与判定，不视为「永不结束」。
  *  默认排除已删除（status='cancelled'）事件，避免被删除日程仍显示在日历中；
  *  需要查询已删除事件请用 listEventsByStatus(db, null, 'cancelled')。 */
 export async function listEventsInRange(
@@ -714,7 +953,10 @@ export async function listEventsInRange(
   // datetime() 把带时区偏移的 ISO（+08:00）与 UTC ISO（.000Z）统一归一化到 UTC 再比较，
   // 避免字符串比较跨时区偏移时出错（如本地 17:00 事件被误判晚于当天 16:00Z 范围终点）
   conds.push('datetime(start_time) < datetime(?)'); params.push(rangeEnd);
-  conds.push('(end_time IS NULL OR datetime(end_time) >= datetime(?))'); params.push(rangeStart);
+  // 无 end_time 的事件（Butler/便签自然语言待办多数如此）按「点事件」处理：等价于 start+30min，
+  // 而不是「永不结束」。否则任何历史遗留的无结束时间待办都会命中所有晚于它的窗口
+  // （2026-09-25 修复：Butler 排 18:00 会议时误报 19 条 8 月的无结束时间待办为冲突）
+  conds.push("datetime(COALESCE(NULLIF(TRIM(end_time), ''), datetime(start_time, '+30 minutes'))) >= datetime(?)"); params.push(rangeStart);
   conds.push("status != 'cancelled'");
   const rows = db.prepare(`
     SELECT * FROM events
@@ -761,10 +1003,11 @@ export async function listScheduledEventsWithTime(db: SqliteDb, projectId: strin
   return rows.map(_rowToEvent);
 }
 
-/** 更新事件的已触发提醒分钟数（reminder_sent_json，防同一通知时间重复推送） */
-export async function markReminderSent(db: SqliteDb, eventId: string, sentMinutes: number[]): Promise<void> {
+/** 更新事件的已触发提醒键（reminder_sent_json，防同一通知时间重复推送）。
+ *  键为 `<实例开始ms>:<提前分钟>`（周期事件按实例区分；历史纯数字偏移由 event-reminder 读取时归一化）。 */
+export async function markReminderSent(db: SqliteDb, eventId: string, sentKeys: string[]): Promise<void> {
   db.prepare(`UPDATE events SET reminder_sent_json = ?, updated_at = ? WHERE event_id = ?`)
-    .run(JSON.stringify(sentMinutes), _now(), eventId);
+    .run(JSON.stringify(sentKeys), _now(), eventId);
 }
 
 /** 查询所有事件（默认排除已删除 cancelled，按时间倒序）。projectId 传 null = 全局日历库全量。
@@ -819,7 +1062,7 @@ export async function searchEvents(
       params.push(match);
       if (opts.rangeStart && opts.rangeEnd) {
         conds.push('datetime(e.start_time) < datetime(?)');
-        conds.push('(e.end_time IS NULL OR datetime(e.end_time) >= datetime(?))');
+        conds.push("datetime(COALESCE(NULLIF(TRIM(e.end_time), ''), datetime(e.start_time, '+30 minutes'))) >= datetime(?)");
         params.push(opts.rangeEnd, opts.rangeStart);
       }
       conds.push("e.status != 'cancelled'");
@@ -847,7 +1090,7 @@ export async function searchEvents(
   params.push(like, like, like, like);
   if (opts.rangeStart && opts.rangeEnd) {
     conds.push('datetime(start_time) < datetime(?)');
-    conds.push('(end_time IS NULL OR datetime(end_time) >= datetime(?))');
+    conds.push("datetime(COALESCE(NULLIF(TRIM(end_time), ''), datetime(start_time, '+30 minutes'))) >= datetime(?)");
     params.push(opts.rangeEnd, opts.rangeStart);
   }
   conds.push("status != 'cancelled'");
@@ -871,9 +1114,9 @@ export async function createEventsBulk(db: SqliteDb, items: CreateEventData[]): 
       start_time, end_time, all_day, status, priority,
       color, tags_json, category_path_json, scope,
       source_node_id, source_raw,
-      reminder_minutes_json, reminder_sent_json,
+      reminder_minutes_json, reminder_sent_json, recurrence_json,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const tx = db.transaction((list: CreateEventData[]) => {
     for (const data of list) {
@@ -900,6 +1143,7 @@ export async function createEventsBulk(db: SqliteDb, items: CreateEventData[]): 
           ? '[]'
           : (data.reminder_minutes.length === 0 ? 'null' : JSON.stringify(data.reminder_minutes)),
         '[]',
+        serializeRecurrence(data.recurrence),
         now,
         now,
       );
@@ -1089,12 +1333,22 @@ const CALENDAR_SCHEMA_SQL = `
     tags_json TEXT NOT NULL DEFAULT '[]',
     category_path_json TEXT NOT NULL DEFAULT '[]',
     scope TEXT NOT NULL DEFAULT 'project',
+    kind TEXT NOT NULL DEFAULT 'event',
+    due_at TEXT,
+    estimated_minutes INTEGER,
+    actual_minutes INTEGER,
+    started_at TEXT,
+    completed_at TEXT,
+    schedule_status TEXT NOT NULL DEFAULT 'n/a',
+    block_locked INTEGER NOT NULL DEFAULT 0,
+    scheduled_by TEXT,
     source_node_id TEXT,
     source_raw TEXT,
     source_ref TEXT,
     notified_at TEXT,
     reminder_minutes_json TEXT NOT NULL DEFAULT '[]',
     reminder_sent_json TEXT NOT NULL DEFAULT '[]',
+    recurrence_json TEXT,
     external_id TEXT,
     external_url TEXT,
     sync_provider TEXT,
@@ -1107,6 +1361,10 @@ const CALENDAR_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_events_status ON events(project_id, status);
   CREATE INDEX IF NOT EXISTS idx_events_node ON events(source_node_id);
   CREATE INDEX IF NOT EXISTS idx_events_external ON events(project_id, external_id);
+  -- 注意：idx_events_kind_due(kind, due_at) 不在此处创建。存量库的 events 表可能还没有 kind/due_at
+  -- 列（本 SQL 的 CREATE TABLE IF NOT EXISTS 对已存在的表是 no-op），在此建索引会报
+  -- 「no such column: kind」并让整个 db.exec 中止 → getCalendarDb 抛错 → 日历全线不可用（历史数据仍在）。
+  -- 该索引改由 ensureCalendarTaskColumns() 在 ALTER TABLE 补列**之后**创建（见 getCalendarDb）。
   CREATE TABLE IF NOT EXISTS calendar_accounts (
     account_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -1143,6 +1401,13 @@ const CALENDAR_SCHEMA_SQL = `
     project_id TEXT PRIMARY KEY,
     migrated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS schedule_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    status TEXT NOT NULL DEFAULT 'ok',
+    dirty_at TEXT,
+    last_planned_at TEXT,
+    version INTEGER NOT NULL DEFAULT 0
+  );
   CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
     title, description, location, tags_json,
     content='events',
@@ -1178,6 +1443,32 @@ function ensureCalendarSourceRefColumn(db: SqliteDb): void {
   }
 }
 
+/** 为已有全局日历库补齐「任务/排程」相关列（增量迁移，幂等）：
+ *  旧库 events 表缺列时 ALTER 添加，并补建 (kind, due_at) 索引。新库建表 SQL 已含这些列。 */
+function ensureCalendarTaskColumns(db: SqliteDb): void {
+  try {
+    const cols = (db.prepare(`PRAGMA table_info(events)`).all() as { name: string }[]).map((c) => c.name);
+    const adds: Array<[string, string]> = [
+      ['kind', `kind TEXT NOT NULL DEFAULT 'event'`],
+      ['due_at', 'due_at TEXT'],
+      ['estimated_minutes', 'estimated_minutes INTEGER'],
+      ['actual_minutes', 'actual_minutes INTEGER'],
+      ['started_at', 'started_at TEXT'],
+      ['completed_at', 'completed_at TEXT'],
+      ['schedule_status', `schedule_status TEXT NOT NULL DEFAULT 'n/a'`],
+      ['block_locked', 'block_locked INTEGER NOT NULL DEFAULT 0'],
+      ['scheduled_by', 'scheduled_by TEXT'],
+      ['recurrence_json', 'recurrence_json TEXT'],
+    ];
+    for (const [name, ddl] of adds) {
+      if (!cols.includes(name)) db.exec(`ALTER TABLE events ADD COLUMN ${ddl}`);
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_events_kind_due ON events(kind, due_at)`);
+  } catch (e) {
+    console.error('[calendar-db] events 任务/排程列迁移失败（不影响后续使用）:', e);
+  }
+}
+
 /** 获取全局日历数据库（单例，惰性初始化 + 幂等迁移历史数据）。
  *  日历完全独立于项目：项目删除/切换/重建不影响任何日历数据。 */
 export async function getCalendarDb(): Promise<SqliteDb> {
@@ -1190,6 +1481,7 @@ export async function getCalendarDb(): Promise<SqliteDb> {
   db.pragma('foreign_keys = ON');
   db.exec(CALENDAR_SCHEMA_SQL);
   ensureCalendarSourceRefColumn(db);
+  ensureCalendarTaskColumns(db);
   // 首次建库后回填 FTS（与项目库 initDb 一致）
   const ftsCount = (db.prepare(`SELECT count(*) AS c FROM events_fts`).get() as { c?: number } | undefined)?.c ?? 0;
   if (ftsCount === 0) {
@@ -1217,8 +1509,8 @@ async function migrateLegacyCalendarData(db: SqliteDb): Promise<void> {
             event_id, project_id, title, description, location, start_time, end_time,
             all_day, status, priority, color, tags_json, category_path_json, scope,
             source_node_id, source_raw, notified_at, reminder_minutes_json, reminder_sent_json,
-            external_id, external_url, sync_provider, sync_etag, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            recurrence_json, external_id, external_url, sync_provider, sync_etag, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         // global 事件在多个项目库中各有一份副本（不同 event_id）→ 只迁入首份（按 title+start_time 去重）
         const hasGlobalDup = db.prepare(
@@ -1231,6 +1523,7 @@ async function migrateLegacyCalendarData(db: SqliteDb): Promise<void> {
               r.event_id, r.project_id, r.title, r.description, r.location, r.start_time, r.end_time,
               r.all_day, r.status, r.priority, r.color, r.tags_json, r.category_path_json, r.scope,
               r.source_node_id, r.source_raw, r.notified_at, r.reminder_minutes_json, r.reminder_sent_json,
+              r.recurrence_json ?? null,
               r.external_id, r.external_url, r.sync_provider, r.sync_etag, r.created_at, r.updated_at,
             );
           }

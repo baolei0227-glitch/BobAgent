@@ -29,7 +29,7 @@ export const PROJECT_DB_FILENAME = '.project.db';
 /** 全局工作流模板数据库文件名（隐藏） */
 export const TEMPLATES_DB_FILENAME = '.templates.db';
 
-/** 全局 WANTED 收件箱数据库文件名（隐藏，跨项目统一收件箱） */
+/** 全局 Butler 收件箱数据库文件名（隐藏，跨项目统一收件箱） */
 export const INBOX_DB_FILENAME = '.inbox.db';
 
 /** 全局日历数据库文件名（隐藏）——日历与项目完全独立，事件/账户存于 app root 级全局库，

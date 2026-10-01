@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel } from '@/lib/core/task-model';
 
 /**
  * /api/skills/templates/ai-extract — 用 LLM 从粘贴文本中抽取模板字段值（顺丰式智能粘贴识别）。

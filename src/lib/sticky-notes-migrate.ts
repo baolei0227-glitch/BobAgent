@@ -2,7 +2,7 @@
  * 便签 note 页 → 全局笔记库迁移（2026-08 便签 note 模式停用）
  *
  * 设计约束：便签 todo 清单按项目隔离（<项目>/sticky-notes/sticky-notes.json），
- * 而 kind='note' 的笔记页真实数据迁入全局笔记库 ~/BobWork/wanted/notebook.json，
+ * 而 kind='note' 的笔记页真实数据迁入全局笔记库 ~/BobWork/butler/notebook.json，
  * 实现「笔记独立于项目」——删除/切换项目不影响笔记。
  *
  * 迁移入口（三者互相兜底，均幂等）：

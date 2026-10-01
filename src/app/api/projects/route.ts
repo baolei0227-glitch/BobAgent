@@ -22,7 +22,7 @@ import {
   type ProjectConfig,
 } from '@/lib/project/project-manager';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT } from '@/lib/types';
-import { inspectStickyTodos } from '@/lib/wanted/inspect';
+import { inspectStickyTodos } from '@/lib/core/inspect';
 import { promises as fs } from 'fs';
 import { join, extname, dirname } from 'path';
 import { resolveAppRoot, BOB_SANDBOX_DIRNAME } from '@/lib/app-root';
@@ -96,8 +96,8 @@ async function scanDirectory(dirPath: string, maxDepth = 5, relDir = ''): Promis
 
   for (const entry of entries) {
     if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-    // 跳过 BobWork 内部数据目录（sticky-notes、notes-memory、wanted 等）
-    if (entry.isDirectory() && (entry.name === 'sticky-notes' || entry.name === 'notes-memory' || entry.name === 'wanted')) continue;
+    // 跳过 BobWork 内部数据目录（sticky-notes、notes-memory、butler 等）
+    if (entry.isDirectory() && (entry.name === 'sticky-notes' || entry.name === 'notes-memory' || entry.name === 'butler')) continue;
     // 跳过 SQLite 数据库及其 WAL/SHM 辅助文件（.project.db / .project.db-shm / .project.db-wal）
     if (!entry.isDirectory() && /\.db(-shm|-wal)?$/i.test(entry.name)) continue;
 
@@ -380,7 +380,7 @@ export async function GET(request: NextRequest) {
           headers: {
             'Content-Type': mimeMap[ext] || 'application/octet-stream',
             'Content-Length': String(stat.size),
-            // 打开时刻的 mtime 哨兵：DocxViewer 记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
+            // 打开时刻的 mtime 哨兵：docx 编辑器（DocxTiptapEditor）记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
             'X-File-Mtime': String(stat.mtimeMs),
             'Cache-Control': 'public, max-age=3600',
           },

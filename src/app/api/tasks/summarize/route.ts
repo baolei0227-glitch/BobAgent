@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
-import { parseTasksWithModel, type SummarizedTask } from '@/lib/wanted/task-summarize';
+import { resolveTaskModel } from '@/lib/core/task-model';
+import { parseTasksWithModel, type SummarizedTask } from '@/lib/core/task-summarize';
 
 /**
- * 文本 → 结构化任务（/todo 指令、WANTED 面板）。
- * 解析内核已抽到 lib/wanted/task-summarize.ts，与便签行自动入日历共用同一口径（single=true 一行一任务）。
+ * 文本 → 结构化任务（/todo 指令、Butler 面板）。
+ * 解析内核已抽到 lib/core/task-summarize.ts，与便签行自动入日历共用同一口径（single=true 一行一任务）。
  */
 interface SummarizeResponse {
   success: boolean;

@@ -226,6 +226,9 @@ export const desktop = {
     navigate(url: string): Promise<{ ok: boolean; error?: string }> {
       return raw()?.hippoBrowser?.navigate?.(url) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
     },
+    openUrlInNewTab(url: string): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.openUrlInNewTab?.(url) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
     back(): Promise<{ ok: boolean; error?: string }> {
       return raw()?.hippoBrowser?.back?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
     },

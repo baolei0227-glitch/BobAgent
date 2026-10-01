@@ -6,7 +6,7 @@
  *    有变更则通过 project-events 广播 projects-changed（/api/projects/events SSE 推送给侧边栏）。
  *  - 项目内文件增删改（用户在 Finder 里直接操作 homework/materials 等可见目录）→ 广播 files-changed，
  *    驱动已展开项目的文件树实时刷新。
- *  文件树不可见的内容（隐藏文件/目录、notes-memory、wanted、sticky-notes 等内部数据路径）不触发
+ *  文件树不可见的内容（隐藏文件/目录、notes-memory、butler、sticky-notes 等内部数据路径）不触发
  *  files-changed，避免应用自身写库/写节点造成无谓的文件树刷新。
  * 由 instrumentation.ts 在服务启动时调用，不依赖任何第三方依赖（recursive 监听需 macOS/Windows）。
  */
@@ -92,7 +92,7 @@ function scheduleSync(notifyFiles: boolean): void {
 
 /** 判断递归事件对应的相对路径是否属于文件树不可见内容（命中则无需推送 files-changed）：
  *  - 隐藏文件/目录（.project.db / .ai-workspace / .DS_Store 等）
- *  - 应用内部数据目录（notes-memory / wanted / sticky-notes，文件树扫描时跳过）
+ *  - 应用内部数据目录（notes-memory / butler / sticky-notes，文件树扫描时跳过）
  *  filename 以被监听的工作区目录为根，形如 "<项目名>/<子路径>"；无路径信息时保守按可见变更处理。 */
 function shouldIgnoreFsPath(filename: string | null): boolean {
   if (!filename) return false;
@@ -102,7 +102,7 @@ function shouldIgnoreFsPath(filename: string | null): boolean {
   // 文件树扫描跳过这些项目内部数据目录（第二段起，第一段是项目文件夹名）
   if (segs.length > 1) {
     const inner = segs.slice(1);
-    if (inner.includes('notes-memory') || inner.includes('wanted') || inner.includes('sticky-notes')) {
+    if (inner.includes('notes-memory') || inner.includes('butler') || inner.includes('sticky-notes')) {
       return true;
     }
   }

@@ -250,3 +250,69 @@ export async function listUncalendaredOpenRows(projectDir: string): Promise<stri
   }
   return out;
 }
+
+/** 便签里一条未完成待办行的定位（供 Butler Sticky 报告生成可点击项） */
+export type StickyOpenRow = {
+  noteId: string;
+  noteTitle: string;
+  pageId: string;
+  /** 该行在 page.content 里的行号（0 基，与 split('\n') 对齐）——点击完成后据此回写勾选 */
+  lineIndex: number;
+  text: string;
+  /** 该行已挂的日历事件 id（未入日历为空数组） */
+  eventIds: string[];
+};
+
+/**
+ * 列出项目便签里所有**未完成的待办行**（含已入日历的行），带行定位信息。
+ *
+ * 与 extractPendingItems 同一套判定（空行 / `- [x]` 跳过、普通非空行也算待办），
+ * 但 Sticky 报告需要行号与事件锚点才能把点击完成落到具体行，故直接读主文档
+ * （todo-index.json 只有纯文本，不含行级信息）。
+ */
+export async function listOpenTodoRows(projectDir: string): Promise<StickyOpenRow[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(join(projectDir, 'sticky-notes', 'sticky-notes.json'), 'utf-8');
+  } catch {
+    return [];
+  }
+  let data: { notes?: unknown };
+  try {
+    data = JSON.parse(raw) as { notes?: unknown };
+  } catch {
+    return [];
+  }
+  const notes = Array.isArray(data?.notes) ? (data.notes as Array<Record<string, unknown>>) : [];
+  const out: StickyOpenRow[] = [];
+  for (const n of notes) {
+    const noteId = typeof n.id === 'string' ? n.id : '';
+    if (!noteId) continue;
+    const noteTitle = typeof n.title === 'string' && n.title.trim() ? n.title.trim() : '';
+    const pages = Array.isArray(n.pages) ? (n.pages as Array<Record<string, unknown>>) : [];
+    for (const p of pages) {
+      if (p.kind === 'note') continue;
+      const pageId = typeof p.id === 'string' ? p.id : '';
+      if (!pageId) continue;
+      const content = typeof p.content === 'string' ? p.content : '';
+      const rows = content.split('\n');
+      const evs = Array.isArray(p.lineEventIds) ? (p.lineEventIds as unknown[][]) : [];
+      for (let i = 0; i < rows.length; i++) {
+        if (isBlankTodoRow(rows[i])) continue;
+        const m = rows[i].match(/^-\s*\[( |x)\]\s*(.*)$/);
+        if (m && m[1] === 'x') continue;
+        const text = (m ? m[2] : rows[i]).trim();
+        if (!text) continue;
+        out.push({
+          noteId,
+          noteTitle,
+          pageId,
+          lineIndex: i,
+          text,
+          eventIds: Array.isArray(evs[i]) ? (evs[i] as string[]).filter(Boolean) : [],
+        });
+      }
+    }
+  }
+  return out;
+}

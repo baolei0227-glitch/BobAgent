@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAllSkills, getDownloadableSkills, hasUserSkill, invalidateSkillsCache } from '@/lib/skills/loader-server';
 import { installSkill, installBuiltinSkill, uninstallSkill, type InstallOptions } from '@/lib/skills/installer-server';
+import { computeSkillStatuses } from '@/lib/skills/baseline-server';
 import {
   enableSkillForAgent,
   disableSkillForAgent,
@@ -31,6 +32,9 @@ export async function GET(request: NextRequest) {
     const hasConfig = hasAgentConfig(agentId);
     const enabled = getEnabledSkillsForAgent(agentId);
 
+    // 更新状态（官方更新 / 本地修改 / 冲突）：一次读基线，只覆盖「已装的随包源技能」
+    const updateStates = computeSkillStatuses(skills.map((s) => s.meta.name));
+
     const list = skills.map((s) => ({
       name: s.meta.name,
       description: s.meta.description,
@@ -39,6 +43,8 @@ export async function GET(request: NextRequest) {
       scenes: s.meta.scenes,
       // 无显式配置时：所有已发现技能默认启用
       enabled: hasConfig ? enabled.has(s.meta.name) : true,
+      // 无值即 synced / 无法判定（JSON 序列化时该键直接消失）
+      updateState: updateStates[s.meta.name],
     }));
 
     // 下载制技能（随包源，未下载不可用）：附 installed 状态供客户端列表展示
@@ -49,6 +55,7 @@ export async function GET(request: NextRequest) {
       version: s.meta.version,
       scenes: s.meta.scenes,
       installed: hasUserSkill(s.meta.name),
+      updateState: updateStates[s.meta.name],
     }));
 
     return NextResponse.json({ agentId, skills: list, downloadable });

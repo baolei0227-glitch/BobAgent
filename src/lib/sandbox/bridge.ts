@@ -11,7 +11,7 @@
  * Storage layers (exposed via injected window.BobStorage):
  *   1. BobStorage.set/get  →  browser localStorage, auto-prefixed with APP_ID
  *   2. BobStorage.save/load → ~/BobWork/bob-sandbox/apps/<APP_ID>/data/<key>.json  (disk, survives restart)
- *   3. BobStorage.writeWanted → ~/BobWork/wanted/  (global delivery, requires explicit user request)
+ *   3. BobStorage.writeWanted → ~/BobWork/butler/  (global delivery, requires explicit user request)
  */
 
 import { join } from 'path';
@@ -77,7 +77,7 @@ export const BRIDGE_ACTIONS: BridgeActionDef[] = [
   },
   {
     action: 'writeWanted',
-    description: 'Write a file to the global wanted/ directory',
+    description: 'Write a file to the global butler/ directory',
     params: ['filename:string', 'content:string'],
     returns: '{ path }',
   },
@@ -184,10 +184,10 @@ export const BRIDGE_ACTIONS: BridgeActionDef[] = [
     params: ['model?:string', 'messages:Array<{role,content}>', 'onDelta:(text)=>void', 'maxTokens?:number', 'temperature?:number'],
     returns: 'Promise<{ model, provider, usage? }> (via onDelta for incremental text)',
   },
-  // ===== WANTED（亲儿子：宿主 WANTED 直接读，小程序作全局信息面板）=====
+  // ===== Butler（亲儿子：宿主 Butler 直接读，小程序作全局信息面板）=====
   {
     action: 'readWantedTodo',
-    description: 'Read the WANTED to-do list (merged into the events DB). Pass optional filter: "today" / date (YYYY-MM-DD) / category. Returns markdown or null.',
+    description: 'Read the Butler to-do list (merged into the events DB). Pass optional filter: "today" / date (YYYY-MM-DD) / category. Returns markdown or null.',
     params: ['filter?:string'],
     returns: '{ content: string } or { content: null }',
   },
@@ -199,7 +199,7 @@ export const BRIDGE_ACTIONS: BridgeActionDef[] = [
   },
   {
     action: 'readWantedPreferences',
-    description: 'Read the full user preferences record at wanted/preferences.md. Pass optional type (e.g. "output-format", "reference-spec") to filter a category.',
+    description: 'Read the full user preferences record at butler/preferences.md. Pass optional type (e.g. "output-format", "reference-spec") to filter a category.',
     params: ['type?:string'],
     returns: '{ content: string, categories: string[] }',
   },
@@ -299,6 +299,70 @@ export function buildBridgeClientScript(appId: string): string {
   }
   var HOST_TARGET_ORIGIN = resolveTargetOrigin();
 
+  // 自托管模式：顶层页（Hippo guest / 独立窗口）无父窗口，桥请求直连服务端中继
+  var IS_STANDALONE = (window.parent === window);
+
+  // 服务端中继（独立页场景）：POST /api/sandbox/bridge { action, data }
+  function relayRequest(action, data) {
+    var ctrl = new AbortController();
+    var isManual = MANUAL_CONFIRM_ACTIONS.indexOf(action) >= 0;
+    var to = setTimeout(function() { try { ctrl.abort(); } catch (_) {} }, isManual ? MANUAL_CONFIRM_TIMEOUT : 30000);
+    return fetch('/api/sandbox/bridge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action, data: data }),
+      signal: ctrl.signal
+    }).then(function(r) { return r.json(); }).then(function(j) {
+      if (j && j.success) return j.data;
+      throw new Error((j && j.error) || ('bridge error: ' + action));
+    }).finally(function() { clearTimeout(to); });
+  }
+
+  // 服务端流式中继（独立页场景）：POST /api/sandbox/chat-stream，解析 SSE
+  function relayChatStream(data, onDelta) {
+    var ctrl = new AbortController();
+    var LF = String.fromCharCode(10);
+    var promise = fetch('/api/sandbox/chat-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal: ctrl.signal
+    }).then(function(resp) {
+      if (!resp.ok) return resp.json().then(function(j) { throw new Error(j.error || ('chat-stream HTTP ' + resp.status)); });
+      if (!resp.body || !resp.body.getReader) throw new Error('chat-stream not readable');
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buf = '';
+      var meta = {};
+      return new Promise(function(resolve, reject) {
+        function pump() {
+          reader.read().then(function(step) {
+            if (step.done) { resolve(meta); return; }
+            buf += decoder.decode(step.value, { stream: true });
+            var sep;
+            while ((sep = buf.indexOf(LF + LF)) >= 0) {
+              var chunk = buf.slice(0, sep);
+              buf = buf.slice(sep + 2);
+              var ev = null, dt = null;
+              chunk.split(LF).forEach(function(line) {
+                if (line.indexOf('event:') === 0) ev = line.slice(6).trim();
+                else if (line.indexOf('data:') === 0) dt = line.slice(5).trim();
+              });
+              if (!dt) return;
+              var parsed; try { parsed = JSON.parse(dt); } catch (_) { return; }
+              if (ev === 'delta') { if (typeof parsed.text === 'string') onDelta(parsed.text); }
+              else if (ev === 'done') { meta = parsed; }
+              else if (ev === 'error') { reject(new Error(parsed.error || 'chat-stream error')); }
+            }
+            pump();
+          }).catch(function(e) { reject(e); });
+        }
+        pump();
+      });
+    });
+    return { promise: promise, abort: function() { try { ctrl.abort(); } catch (_) {} } };
+  }
+
   function postToHost(msg) {
     if (HOST_TARGET_ORIGIN) {
       try { window.parent.postMessage(msg, HOST_TARGET_ORIGIN); return; } catch (_) {}
@@ -313,6 +377,19 @@ export function buildBridgeClientScript(appId: string): string {
       data = data || {};
       // 自动注入本小程序 appId，宿主据此做权限校验（graph* 动作必需）
       data._appId = APP_ID;
+      // 自托管模式（Hippo 顶层页）：无父窗口，直连服务端中继
+      if (IS_STANDALONE) {
+        // 画布对接类动作在独立页无意义（无画布宿主），直接友好拒绝
+        if (action.indexOf('graph') === 0) {
+          return Promise.reject(new Error('当前为独立页面（Hippo），不支持画布对接操作'));
+        }
+        // 人工确认型动作：先 in-page 确认，复刻宿主弹窗语义（服务端权限闸仍生效）
+        var manual = MANUAL_CONFIRM_ACTIONS.indexOf(action) >= 0;
+        if (manual && !window.confirm('小程序请求执行「' + action + '」，是否允许？')) {
+          return Promise.reject(new Error('user denied: ' + action));
+        }
+        return relayRequest(action, data);
+      }
       var id = 'req_' + (++requestId);
       return new Promise(function(resolve, reject) {
         pendingRequests[id] = { resolve: resolve, reject: reject };
@@ -350,8 +427,16 @@ export function buildBridgeClientScript(appId: string): string {
         maxTokens: opts.maxTokens,
         _appId: APP_ID
       };
-      var id = 'stream_' + (++requestId);
       var onDelta = typeof opts.onDelta === 'function' ? opts.onDelta : function() {};
+      // 自托管模式（Hippo 顶层页）：直连服务端流式中继
+      if (IS_STANDALONE) {
+        var relay = relayChatStream(data, onDelta);
+        return {
+          promise: relay.promise,
+          abort: function() { relay.abort(); }
+        };
+      }
+      var id = 'stream_' + (++requestId);
       var settled = false;
       var promise = new Promise(function(resolve, reject) {
         chatStreams[id] = {
@@ -545,7 +630,7 @@ export function buildBridgeClientScript(appId: string): string {
       return window.BobWork.request('deleteAppData', { appId: APP_ID, key: key });
     },
 
-    // ---- Layer 3: write to global wanted/ (final deliverables) ----
+    // ---- Layer 3: write to global butler/ (final deliverables) ----
     writeWanted: function(filename, content) {
       return window.BobWork.request('writeWanted', { filename: filename, content: content });
     }
@@ -734,7 +819,7 @@ const ActionSchemas: Record<string, z.ZodTypeAny | undefined> = {
   getProjectInfo: z.object({}).strict().optional(),
   getTheme: z.object({}).strict().optional(),
   listActions: z.object({}).strict().optional(),
-  // ===== WANTED 亲儿子只读接口 =====
+  // ===== Butler 亲儿子只读接口 =====
   readWantedTodo: z.object({
     filter: z.string().max(64).optional(),
   }).strict().optional(),
@@ -899,9 +984,9 @@ export async function handleBridgeRequest(
         const content = String(data.content ?? '');
         if (!filename) throw new Error('filename is required');
         const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const wantedDir = join(resolveAppRoot(), 'wanted');
-        await fs.mkdir(wantedDir, { recursive: true });
-        const filePath = join(wantedDir, safeName);
+        const butlerDir = join(resolveAppRoot(), 'butler');
+        await fs.mkdir(butlerDir, { recursive: true });
+        const filePath = join(butlerDir, safeName);
         await fs.writeFile(filePath, content, 'utf-8');
         result = { path: safeName };
         break;
@@ -1059,7 +1144,7 @@ export async function handleBridgeRequest(
         break;
       }
 
-      // ===== WANTED（亲儿子：宿主 WANTED 全系列只读）=====
+      // ===== Butler（亲儿子：宿主 Butler 全系列只读）=====
 
       case 'readWantedTodo': {
         const f = String(data.filter ?? '');
@@ -1125,7 +1210,7 @@ export async function handleBridgeRequest(
         const typeFilter = typeof data.type === 'string' ? data.type.trim() : '';
         let content = '';
         try {
-          content = await fs.readFile(join(resolveAppRoot(), 'wanted', 'preferences.md'), 'utf-8');
+          content = await fs.readFile(join(resolveAppRoot(), 'butler', 'preferences.md'), 'utf-8');
         } catch {
           content = '';
         }

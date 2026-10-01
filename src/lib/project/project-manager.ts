@@ -66,7 +66,7 @@ export interface ProjectConfig {
   analysis_model?: string;
   archived?: boolean;
   archived_at?: string;
-  /** 隐藏项目（不显示在侧边栏项目列表，如 wanted 临时问答项目） */
+  /** 隐藏项目（不显示在侧边栏项目列表，如 Butler 临时问答项目） */
   hidden?: boolean;
   /** 已移入垃圾桶（软删除）：数据仍在磁盘，可恢复；trashed 与 archived 互斥 */
   trashed?: boolean;
@@ -342,17 +342,18 @@ export async function validateProjectParentDir(dir: string): Promise<string> {
   return '';
 }
 
-/** 创建新项目（opts.hidden = true 时不显示在侧边栏，也不抢占当前项目；默认保存位置取自 config.default_project_dir） */
+/** 创建新项目（opts.hidden = true 时不显示在侧边栏，也不抢占当前项目；
+ *  opts.makeCurrent = true 时建完即切换为当前项目；默认保存位置取自 config.default_project_dir） */
 export function createProject(
   name: string,
-  opts?: { hidden?: boolean; category?: string; note?: string; tags?: string[] },
+  opts?: { hidden?: boolean; category?: string; note?: string; tags?: string[]; makeCurrent?: boolean },
 ): Promise<ProjectConfig> {
   return withConfigLock(() => createProjectLocked(name, opts));
 }
 
 async function createProjectLocked(
   name: string,
-  opts?: { hidden?: boolean; category?: string; note?: string; tags?: string[] },
+  opts?: { hidden?: boolean; category?: string; note?: string; tags?: string[]; makeCurrent?: boolean },
 ): Promise<ProjectConfig> {
   const config = await readConfig();
 
@@ -386,12 +387,12 @@ async function createProjectLocked(
   await fs.mkdir(join(projectPath, 'materials'), { recursive: true });
   await fs.mkdir(join(projectPath, 'homework'), { recursive: true });
 
-  // 确保全局 wanted 目录存在（与 projects 同级）
-  const wantedDir = join(APP_ROOT, 'wanted');
+  // 确保全局 butler 目录存在（与 projects 同级）
+  const butlerDir = join(APP_ROOT, 'butler');
   try {
-    await fs.access(wantedDir);
+    await fs.access(butlerDir);
   } catch {
-    await fs.mkdir(wantedDir, { recursive: true });
+    await fs.mkdir(butlerDir, { recursive: true });
   }
 
   const now = new Date().toISOString();
@@ -410,8 +411,13 @@ async function createProjectLocked(
   };
 
   config.projects.push(newProject);
-  // 如果是第一个项目，自动设为当前项目（隐藏项目除外，避免临时项目抢占用户当前项目）
-  if (!newProject.hidden && (config.projects.length === 1 || !config.current_project_id)) {
+  // 默认：仅第一个项目（或无当前项目时）自动设为当前，隐藏项目不抢占当前项目。
+  // 显式 opts.makeCurrent=true 时按调用方意愿切换为当前项目
+  // （Butler 建完项目后要紧接着把待办/便签写进去的场景）。
+  if (
+    !newProject.hidden &&
+    (opts?.makeCurrent || config.projects.length === 1 || !config.current_project_id)
+  ) {
     config.current_project_id = projectId;
   }
   await writeConfig(config);

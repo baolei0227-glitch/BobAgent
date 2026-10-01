@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel } from '@/lib/core/task-model';
 import { parseTodoTime } from '@/lib/todo-time-parse';
 
 /**
@@ -9,7 +9,7 @@ import { parseTodoTime } from '@/lib/todo-time-parse';
  * 用识别出的日期/时刻预填（用户手改过则不覆盖）。
  * 分层：正则快路径（lib/todo-time-parse，零延迟）→ LLM 回退（覆盖「下周三下午开会」等任意表达）。
  *
- * 与 /api/wanted/schedule-parse 的区别：那个解析「查询区间」（整天边界，供检索），
+ * 与 /api/core/schedule-parse 的区别：那个解析「查询区间」（整天边界，供检索），
  * 这里解析「单个事件的开始时刻」，语义不同故独立成端点。
  *
  * 返回：{ success: true, date: 'YYYY-MM-DD', time?: 'HH:MM', topic?: string, source: 'regex'|'llm', model_used? }

@@ -19,7 +19,7 @@ import {
  *  - 不写入任何节点 .md，不接入 intern_search（AI 完全不可见）
  *  - 按项目隔离：project_id 指定项目，否则用当前激活项目
  *  - 2026-08：便签 note 模式（kind='note' 带编号笔记页）已停用，
- *    存量 note 页内容迁移到统一笔记库 wanted/notebook.json（见 lib/sticky-notes-migrate.ts），
+ *    存量 note 页内容迁移到统一笔记库 notes/（见 lib/sticky-notes-migrate.ts），
  *    便签只保留 todo 勾选清单。笔记与项目完全独立：删除项目前也会兜底迁移。
  */
 
@@ -393,6 +393,9 @@ export async function POST(req: NextRequest) {
       const settleAuto = body.settle_auto_calendar !== false;
       let persisted: StickyNote = nextNote;
       let autoTouched = 0;
+      // 本次结算时自动入日历检测到的重叠（2026-09-25）：详情已写进事件备注，
+      // 这里一并回传，供前端提示与排查「为什么这条排到了拥挤的时段」。
+      let calendarConflicts: { count: number; titles: string[] } = { count: 0, titles: [] };
       try {
         const effProjectId = projectId || (await getCurrentProject()).id;
         persisted = await reconcileStickyNoteEvents(effProjectId, nextNote, prevNote);
@@ -400,6 +403,7 @@ export async function POST(req: NextRequest) {
           const auto = await autoAddStickyLinesToCalendar(effProjectId, persisted);
           persisted = auto.note;
           autoTouched = auto.created + auto.rescheduled;
+          calendarConflicts = { count: auto.conflicts, titles: auto.conflictTitles };
         }
       } catch (e) {
         console.error('[sticky-notes] update 同步日历失败:', e);
@@ -417,7 +421,11 @@ export async function POST(req: NextRequest) {
           /* 远端同步失败不阻断便签保存 */
         }
       }
-      return NextResponse.json({ success: true, note: persisted });
+      return NextResponse.json({
+        success: true,
+        note: persisted,
+        ...(calendarConflicts.count > 0 ? { calendar_conflicts: calendarConflicts } : {}),
+      });
     }
 
     if (action === 'add_to_calendar') {
@@ -481,6 +489,76 @@ export async function POST(req: NextRequest) {
         note: persisted,
         event_ids: persisted.pages?.find((p) => p.id === pageId)?.lineEventIds?.[lineIndex] ?? [],
       });
+    }
+
+    /**
+     * 勾选 / 取消勾选某一行便签待办（日报 Sticky 页的「点击完成」走这里）。
+     * 只改这一行的 `- [x]` / `- [ ]`，随后跑一次前向 reconcile：该行已入日历 → 事件状态随之
+     * done / scheduled（双向链路的便签侧）；日历侧的改动仍由 /api/calendar/events 的 PATCH
+     * 反向落回便签行（pushCalendarEventToSticky）。
+     * line_index 是报告生成时的行号，用户事后编辑过便签会漂移 → 文本对不上时按文本回退定位。
+     */
+    if (action === 'toggle_line') {
+      const noteId = typeof body.note_id === 'string' ? body.note_id : '';
+      const pageId = typeof body.page_id === 'string' ? body.page_id : '';
+      const lineIndex = Number(body.line_index);
+      const done = body.done === true;
+      if (!noteId || !pageId || !Number.isInteger(lineIndex) || lineIndex < 0) {
+        return NextResponse.json({ success: false, error: 'note_id / page_id / line_index required' }, { status: 400 });
+      }
+      const idx = notes.findIndex((n) => n.id === noteId);
+      if (idx < 0) {
+        return NextResponse.json({ success: false, error: 'note not found' }, { status: 404 });
+      }
+      const prevNote = notes[idx];
+      const page = (prevNote.pages ?? []).find((p) => p.id === pageId);
+      if (!page || page.kind === 'note') {
+        return NextResponse.json({ success: false, error: 'page not found or not a todo page' }, { status: 404 });
+      }
+      const rawLines = String(page.content ?? '').split('\n');
+      /** 取某行的待办文本（去掉 `- [ ]` 前缀），供行号漂移时按文本比对 */
+      const lineText = (i: number): string => {
+        const m = (rawLines[i] ?? '').match(/^-\s*\[( |x)\]\s*(.*)$/);
+        return (m ? m[2] : (rawLines[i] ?? '')).trim();
+      };
+      const wantText = typeof body.text === 'string' ? body.text.trim() : '';
+      let at = lineIndex < rawLines.length ? lineIndex : -1;
+      if (wantText && (at < 0 || lineText(at) !== wantText)) {
+        at = rawLines.findIndex((_, i) => lineText(i) === wantText);
+      }
+      if (at < 0) {
+        return NextResponse.json({ success: false, error: 'todo line not found' }, { status: 404 });
+      }
+      rawLines[at] = `- [${done ? 'x' : ' '}] ${lineText(at)}`;
+      const nextNote: StickyNote = {
+        ...prevNote,
+        pages: (prevNote.pages ?? []).map((p) =>
+          p.id === pageId ? { ...p, content: rawLines.join('\n') } : p,
+        ),
+        updatedAt: new Date().toISOString(),
+      };
+      const effProjectId = projectId || (await getCurrentProject()).id;
+      let persisted: StickyNote = nextNote;
+      try {
+        persisted = await reconcileStickyNoteEvents(effProjectId, nextNote, prevNote);
+      } catch (e) {
+        console.error('[sticky-notes] toggle_line 同步日历失败:', e);
+      }
+      notes[idx] = persisted;
+      await writeNotes(dir, notes);
+      const eventIds = persisted.pages?.find((p) => p.id === pageId)?.lineEventIds?.[at] ?? [];
+      // 勾选影响到了日历事件时才即改即推远端（与 add_to_calendar 一致，免等轮询）
+      if (eventIds.length > 0) {
+        try {
+          const { syncAllAccounts } = await import('@/lib/calendar/sync-runner');
+          void syncAllAccounts().catch((e) =>
+            console.error('[sticky-notes] toggle_line 远端同步失败:', e),
+          );
+        } catch {
+          /* 远端同步失败不阻断勾选本身 */
+        }
+      }
+      return NextResponse.json({ success: true, note: persisted, line_index: at, event_ids: eventIds });
     }
 
     if (action === 'delete') {

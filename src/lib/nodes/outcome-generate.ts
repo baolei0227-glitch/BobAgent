@@ -15,7 +15,7 @@
 import { promises as fs } from 'fs';
 import { parseNodeMarkdown, serializeNode, updateNodeFile, outcomeContentHash, type ConversationTurn } from '@/lib/node-markdown';
 import { parseOutcome, renderOutcome, OUTCOME_FIELD_DEFS, type Outcome } from '@/lib/nodes/outcome';
-import { resolveOutcomeModel } from '@/lib/wanted/task-model';
+import { resolveOutcomeModel } from '@/lib/core/task-model';
 import OpenAI from 'openai';
 
 /** 材料来源的规范写法：`[来源: 材料:materials/相对路径#p页码]`（页码可省） */
