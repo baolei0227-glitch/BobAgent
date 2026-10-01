@@ -11,7 +11,8 @@ import {
   Sparkles, Terminal, Wrench, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { MessageAttachment, MessageReference, ToolCallPhase, ToolCallRecord } from '@/lib/types';
+import type { MessageAttachment, MessageReference, ThinkingLevel, ToolCallPhase, ToolCallRecord } from '@/lib/types';
+import { MODEL_BRAND_COLOR, MODEL_BRAND_PATHS, resolveModelBrand } from '@/lib/providers/brand-icons';
 import { formatFileSize } from './composer/useComposer';
 import { estimateProcessRows, finalizeToolCallPhase, formatDuration, openChipPath } from './chatNodeKernelUtils';
 
@@ -59,7 +60,193 @@ export class MessagesErrorBoundary extends React.Component<{ children: React.Rea
     return this.props.children;
   }
 }
-/** 消息附件 chips（用户/助手消息通用）：图片缩略图或类型图标 + 文件名 + 大小 */
+/** 月相思考档位图标（推理强度选择器用）：真实月球观感，对齐标准月相 emoji 🌒🌓🌔🌕。
+ *  相位几何：off=娥眉月 0.25 / low=上弦 0.5 / high=凸月 0.75 / max=满月 1（medium legacy 随 high），
+ *  明暗界线（terminator）为半椭圆而非圆弧，故各档形状与真实月相一致。
+ *  月球质感三层：① 暗面 —— 恒在的整轮，深灰蓝球面渐变（真实月亮的夜面是深暗的，不是透明）；
+ *  ② 亮面 —— 暖灰白月壤，径向渐变以日下点（受照最强处；满月居中、上弦贴近亮缘）为中心向月缘衰减，
+ *  等价于亮度随入射角余弦下降（月缘变暗 = limb darkening）；③ 月海与高地 —— 大小深浅不一的暗斑与亮斑，
+ *  经亮面路径裁剪，故只出现在受照区（真实照片即如此，月牙档只剩一牙光，斑纹自然隐去）。
+ *  档位只靠相位区分，不再用档位配色染色（O/L/H/X 角标亦已废弃）。
+ *  明暗界线保持锐利——月球没有大气，真实照片里投射线就是硬边，不做柔化。
+ *  注：渐变与裁剪需要 url(#id)，用 useId 派生唯一 id，避免同页多实例（输入框按钮 + 档位菜单）互相串色。 */
+export function MoonPhaseIcon({ level, size = 16, className, style }: { level: ThinkingLevel; size?: number; className?: string; style?: React.CSSProperties }) {
+  const uid = `moon-${React.useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const R = 6.5;                                    // 月盘半径（viewBox 16×16，圆心 8,8）
+  const top = 8 - R;
+  const bottom = 8 + R;
+  // 照亮比例 f → 界线半轴 a = R·|2f-1|（f=0.5 时 a=0，弧退化为直线，即上弦）
+  const f = level === 'max' ? 1 : level === 'high' || level === 'medium' ? 0.75 : level === 'low' ? 0.5 : 0.25;
+  const a = Math.abs(2 * f - 1) * R;
+  // 右半圆（上→下）+ 回程半椭圆：f≥0.5 界线向左鼓（凸月→满月），f<0.5 向右鼓（月牙）
+  const litPath = `M8 ${top} A${R} ${R} 0 0 1 8 ${bottom} A${a} ${R} 0 0 ${2 * f - 1 >= 0 ? 1 : 0} 8 ${top} Z`;
+  // 日下点投影偏移 = R·sin e（cos e = 1-2f）：满月居中、上弦 0.5 贴右缘、月牙更靠右，与真实月面高光位置一致
+  const sunX = 8 + R * Math.sqrt(Math.max(0, 1 - (1 - 2 * f) ** 2));
+
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" className={className} style={style} aria-hidden="true" focusable="false">
+      <defs>
+        {/* 夜面：深灰蓝球面（真实月亮未被照亮的一面是深暗的，不是透明） */}
+        <radialGradient id={`${uid}-dark`} cx="8" cy="8" r={R}>
+          <stop offset="0" stopColor="#3d4453" />
+          <stop offset="0.75" stopColor="#252a35" />
+          <stop offset="1" stopColor="#14171e" />
+        </radialGradient>
+        {/* 受照月壤：日下点最亮，向月缘衰减（月缘变暗 = limb darkening） */}
+        <radialGradient id={`${uid}-surface`} gradientUnits="userSpaceOnUse" cx={sunX} cy="8" r={R * 1.25}>
+          <stop offset="0" stopColor="#fdf4d9" />
+          <stop offset="0.45" stopColor="#f1e2b4" />
+          <stop offset="0.8" stopColor="#d8c48d" />
+          <stop offset="1" stopColor="#b29c6a" />
+        </radialGradient>
+        {/* 裁剪到亮面：月海与高地只出现在受照区，不越过明暗界线 */}
+        <clipPath id={`${uid}-lit`}>
+          <path d={litPath} />
+        </clipPath>
+      </defs>
+      {/* 夜面整轮：恒在，构成月盘轮廓 */}
+      <circle cx="8" cy="8" r={R} fill={`url(#${uid}-dark)`} stroke="#6f6552" strokeOpacity="0.35" strokeWidth="0.7" />
+      {/* 受照面 */}
+      <path d={litPath} fill={`url(#${uid}-surface)`} />
+      {/* 月海（暗斑）与高地（亮斑）：真实月球的表面斑驳 */}
+      <g clipPath={`url(#${uid}-lit)`}>
+        <g fill="#9a8c69">
+          <circle cx="9.7" cy="5.3" r="1.5" opacity="0.5" />
+          <circle cx="11.5" cy="9.7" r="1.15" opacity="0.45" />
+          <circle cx="6.7" cy="8.3" r="1.05" opacity="0.4" />
+          <circle cx="10.2" cy="7.3" r="0.75" opacity="0.42" />
+          <circle cx="7.7" cy="5.5" r="0.6" opacity="0.32" />
+          <circle cx="12.1" cy="6.3" r="0.5" opacity="0.36" />
+        </g>
+        <g fill="#fffbee">
+          <circle cx="8.7" cy="10.7" r="0.85" opacity="0.38" />
+          <circle cx="11.1" cy="4.2" r="0.6" opacity="0.3" />
+        </g>
+      </g>
+    </svg>
+  );
+}
+
+/** 模型品牌 logo（模型选择器用）：按模型 id 解析厂商品牌，渲染真实厂商 logo，取代此前的状态圆点。
+ *  品牌判定与图形素材见 lib/providers/brand-icons（一个 provider 可含多品牌，故按模型名判定）；
+ *  未识别的模型回落为中性星标。单色可染色，openai/ollama 随主题用 currentColor。 */
+export function ModelBrandLogo({ modelId, size = 13, className, style }: { modelId: string; size?: number; className?: string; style?: React.CSSProperties }) {
+  const brand = resolveModelBrand(modelId);
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill={MODEL_BRAND_COLOR[brand]}
+      className={cn('shrink-0', className)}
+      style={style}
+      aria-hidden="true"
+      focusable="false"
+    >
+      {MODEL_BRAND_PATHS[brand].map((d, i) => (
+        <path key={i} d={d} fillRule="evenodd" clipRule="evenodd" />
+      ))}
+    </svg>
+  );
+}
+
+/** 微信式语音条（B4 尾批 v2）：声波弧线图标 + N'' 时长 + 未读红点，点击整条播放/暂停；播放中弧线依次闪烁。
+ *  仅项目相对路径（materials/ | attachments/）可经 /api/attachments GET 服务；
+ *  绝对路径（如 TTS 产物 butler/tts）维持 chip 外部打开，不走这里。
+ *  配色镜像微信：user=主色实底白图标（弧线朝右）；assistant=paper 底 ink 图标（镜像朝左）。 */
+export function AudioVoiceBar({ att, role }: { att: MessageAttachment; role: 'user' | 'assistant' }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  // 微信未读语义：播放过的语音条红点消失（组件内 state，刷新后重置）
+  const [played, setPlayed] = useState(false);
+  const [duration, setDuration] = useState<number | null>(null);
+
+  const src = `/api/attachments?path=${encodeURIComponent(att.path)}`;
+  // 微信时长格式：<60s → N''；≥60s → M'SS''（metadata 未加载前回退文件大小）
+  const timeLabel =
+    duration != null
+      ? duration < 60
+        ? `${Math.max(1, Math.round(duration))}''`
+        : `${Math.floor(duration / 60)}'${String(Math.round(duration % 60)).padStart(2, '0')}''`
+      : formatFileSize(att.size);
+
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) {
+      setPlayed(true);
+      void el.play().catch(() => setPlaying(false));
+    } else el.pause();
+  };
+
+  const isUser = role === 'user';
+  const wave = (
+    <svg
+      viewBox="0 0 20 16"
+      className="h-4 w-5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      style={{ color: isUser ? '#fff' : 'var(--ink)', transform: isUser ? undefined : 'scaleX(-1)' }}
+    >
+      <path d="M5.5 5.4 C7 6.9 7 9.1 5.5 10.6" className={playing ? 'animate-pulse' : ''} style={{ animationDelay: '0ms' }} />
+      <path d="M9 3.6 C11.5 6.2 11.5 9.8 9 12.4" className={playing ? 'animate-pulse' : ''} style={{ animationDelay: '200ms' }} />
+      <path d="M12.5 1.8 C16 5.5 16 10.5 12.5 14.2" className={playing ? 'animate-pulse' : ''} style={{ animationDelay: '400ms' }} />
+    </svg>
+  );
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        toggle();
+      }}
+      className="relative my-0.5 flex h-9 min-w-[96px] shrink-0 items-center gap-2 rounded-lg px-3 transition-opacity hover:opacity-85"
+      style={
+        isUser
+          ? { backgroundColor: 'var(--primary)' }
+          : { backgroundColor: 'var(--paper)', border: '1px solid var(--line)' }
+      }
+      title={att.name}
+      aria-label={playing ? 'Pause voice message' : 'Play voice message'}
+    >
+      {!played && (
+        <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full" style={{ backgroundColor: 'var(--danger)' }} />
+      )}
+      {isUser ? (
+        <>
+          {wave}
+          <span className="text-xs tabular-nums" style={{ color: '#fff' }}>
+            {timeLabel}
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="text-xs tabular-nums" style={{ color: 'var(--ink)' }}>
+            {timeLabel}
+          </span>
+          {wave}
+        </>
+      )}
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="metadata"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          setDuration(isFinite(d) && d > 0 ? d : null);
+        }}
+      />
+    </button>
+  );
+}
+
+/** 消息附件 chips（用户/助手消息通用）：图片缩略图或类型图标 + 文件名 + 大小；audio 且项目内路径 → 微信式语音条（独占行） */
 export function AttachmentChips({ attachments, role }: { attachments: MessageAttachment[]; role: 'user' | 'assistant' }) {
   if (!attachments || attachments.length === 0) return null;
   return (
@@ -67,6 +254,14 @@ export function AttachmentChips({ attachments, role }: { attachments: MessageAtt
       {attachments.map((att) => {
         // folder 是授权目录、无预览语义；无 path 的历史附件同样不可点
         const canOpen = att.type !== 'folder' && !!att.path;
+        // 语音条：audio + 项目相对路径（materials/ | attachments/）→ 内联播放（整行）；绝对路径仍走外部打开
+        if (att.type === 'audio' && att.path && !att.path.startsWith('/') && !att.path.startsWith('~')) {
+          return (
+            <div key={att.id} className="flex w-full">
+              <AudioVoiceBar att={att} role={role} />
+            </div>
+          );
+        }
         return (
         <span
           key={att.id}
@@ -188,6 +383,73 @@ export function StepTypeIcon({ name, size = 14 }: { name: string; size?: number 
   return <Wrench style={cls} />;
 }
 /**
+ * WaitingHint — 侧边栏「等待安抚」条（对齐 Grok 式：让用户知道在推进、没卡死）。
+ * 窄栏里模型可能几十秒不出字（首 token 等待 / 长页面加载 / 长思考），用户会怀疑挂住了。
+ * 这里只给两类纯宿主信号：①秒表每秒在动——"数字在动"本身就是活着的最强证据；
+ * ②按等待时长分档换安抚话，每 8 秒轮换一句（换字同样是"在动"的信号）。
+ * 零模型 token、不猜进度、不可能说谎；自带 1s tick，避免 ChatNodeKernel 整个消息列表每秒重渲染。
+ */
+export function WaitingHint({
+  label,
+  since,
+}: {
+  /** 当前动作文案（如 "Doing: navigate — 打开商品页"）；流式刚开始尚无阶段时为 null，回退为 Thinking… */
+  label: string | null;
+  /** 当前阶段开始时刻（epoch ms）；<=0 表示未知 —— 仍显示动作行，只是不带秒表 */
+  since: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const sec = since > 0 ? Math.max(0, Math.floor((now - since) / 1000)) : 0;
+  // 安抚话分三档（短等 / 中等 / 长等），档内每 8 秒轮换一句
+  const pool = sec < 8
+    ? null
+    : sec < 20
+      ? ['Still working — not stuck.', 'Reading through it…', 'On it.']
+      : sec < 45
+        ? ['Still on it — slow pages take a while.', 'Hang tight, still running.', 'Nearly there…']
+        : ['Still running — thanks for waiting.', 'Big page, still going…', 'Working through it, please hold on.'];
+  const reassurance = pool ? pool[Math.floor(sec / 8) % pool.length] : null;
+  return (
+    <div className="mb-1 flex w-full min-w-0 flex-col items-start gap-0.5">
+      <div
+        className="flex w-fit max-w-full items-center gap-1.5 rounded-md border px-2 py-0.5"
+        style={{ backgroundColor: 'transparent', borderColor: 'var(--ink-strong)' }}
+      >
+        <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" style={{ color: 'var(--primary-strong)' }} />
+        <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--primary-strong)' }}>
+          {label ?? 'Thinking…'}
+        </span>
+        {since > 0 && (
+          <span
+            className="shrink-0 text-10 tabular-nums"
+            style={{ color: 'color-mix(in oklab, var(--ink-muted) 70%, transparent)' }}
+          >
+            {sec}s
+          </span>
+        )}
+      </div>
+      {reassurance && (
+        <div
+          className="flex min-w-0 items-center gap-1.5 px-1 text-10"
+          style={{ color: 'color-mix(in oklab, var(--ink-muted) 75%, transparent)' }}
+        >
+          <span className="flex shrink-0 items-center gap-0.5">
+            <span className="think-dot" />
+            <span className="think-dot" />
+            <span className="think-dot" />
+          </span>
+          <span className="min-w-0 truncate">{reassurance}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * TraceProcessSummary — 对话视图「执行过程」紧凑摘要（对齐 dsh 对话页签）。
  * 只给过程感：思考收成小条、每个工具一行摘要、技能小药丸；
  * 点击 Think / 工具行就地展开明细（思考原文 / 参数 / 结果），不切换到 Trace 视图。
@@ -199,6 +461,7 @@ export function TraceProcessSummary({
   isStreaming,
   thinkingActive,
   hideStructuralTools,
+  compact,
 }: {
   thinkText?: string;
   toolCalls: ToolCallRecord[];
@@ -208,6 +471,9 @@ export function TraceProcessSummary({
   thinkingActive?: boolean;
   /** 流式中隐藏结构性工具行（todo_write / finish_task / 存量 plan_task）——它们由右侧 DOS 步骤面板结构化呈现 */
   hideStructuralTools?: boolean;
+  /** 窄栏紧凑态（浏览器右侧对话栏）：只留一行概览，不给展开、不列思考原文与工具行。
+   *  侧边栏是"边看网页边问"的陪伴位，逐条执行明细会把答复挤出视野 —— 明细留给画布 Trace 视图。 */
+  compact?: boolean;
 }) {
   const [thinkOpen, setThinkOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState<number | null>(null);
@@ -234,8 +500,8 @@ export function TraceProcessSummary({
   const skills = skillNames ?? [];
   if (!hasThink && calls.length === 0 && skills.length === 0) return null;
   const totalRows = estimateProcessRows(thinkText, toolCalls, skillNames);
-  const showFoldHeader = !isStreaming && totalRows > 1;
-  const showDetail = isStreaming || !showFoldHeader || !groupFolded;
+  const showFoldHeader = compact || (!isStreaming && totalRows > 1);
+  const showDetail = !compact && (isStreaming || !showFoldHeader || !groupFolded);
   const failCount = visibleCalls.filter((tc) => tc.phase === 'error' || tc.success === false).length;
   const processSummary = [
     hasThink ? '1 thought' : null,
@@ -263,34 +529,51 @@ export function TraceProcessSummary({
   };
   return (
     <div className="mb-1 flex w-full min-w-0 flex-col items-start gap-0.5">
-      {/* 结束态整体折叠标题行：已完成且过程区超一行时显示；点击展开/收起整块过程明细 */}
-      {showFoldHeader && (
-        <button
-          type="button"
-          onClick={toggleGroupFold}
-          title={groupFolded ? 'Show process details' : 'Hide process details'}
-          className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 px-1 py-0.5 text-left transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_5%,transparent)]"
-        >
-          <Wrench className="h-3 w-3 shrink-0" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }} />
-          <span className="text-10 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
-            Process
-          </span>
-          {processSummary && (
-            <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--ink)' }}>
-              {processSummary}
+      {/* 结束态整体折叠标题行：已完成且过程区超一行时显示；点击展开/收起整块过程明细。
+          compact（浏览器侧边栏）恒显示此行但不可展开 —— 窄栏只报"跑了多少步"，明细留给画布 Trace */}
+      {showFoldHeader && (() => {
+        const head = (
+          <>
+            <Wrench className="h-3 w-3 shrink-0" style={{ color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }} />
+            <span className="text-10 font-semibold uppercase tracking-wide" style={{ color: 'color-mix(in oklab, var(--ink-muted) 55%, transparent)' }}>
+              Process
             </span>
-          )}
-          {failCount > 0 && (
-            <span className="shrink-0 text-10 font-bold leading-none" style={{ color: 'var(--danger)' }}>
-              ✕ {failCount}
-            </span>
-          )}
-          <ChevronDown
-            className={cn('h-3 w-3 shrink-0 transition-transform duration-150', !groupFolded && 'rotate-180')}
-            style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)' }}
-          />
-        </button>
-      )}
+            {processSummary && (
+              <span className="min-w-0 truncate text-11 font-medium" style={{ color: 'var(--ink)' }}>
+                {processSummary}
+              </span>
+            )}
+            {failCount > 0 && (
+              <span className="shrink-0 text-10 font-bold leading-none" style={{ color: 'var(--danger)' }}>
+                ✕ {failCount}
+              </span>
+            )}
+            {!compact && (
+              <ChevronDown
+                className={cn('h-3 w-3 shrink-0 transition-transform duration-150', !groupFolded && 'rotate-180')}
+                style={{ color: 'color-mix(in oklab, var(--ink-muted) 40%, transparent)' }}
+              />
+            )}
+          </>
+        );
+        return compact ? (
+          <div
+            className="flex w-full min-w-0 items-center gap-1.5 px-1 py-0.5"
+            title="Process summary — 执行明细请在画布 Trace 视图查看"
+          >
+            {head}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={toggleGroupFold}
+            title={groupFolded ? 'Show process details' : 'Hide process details'}
+            className="flex w-full min-w-0 cursor-pointer items-center gap-1.5 px-1 py-0.5 text-left transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_5%,transparent)]"
+          >
+            {head}
+          </button>
+        );
+      })()}
       {showDetail && (
         <>
       {/* Think 小条：默认收起，点击就地展开思考原文 */}

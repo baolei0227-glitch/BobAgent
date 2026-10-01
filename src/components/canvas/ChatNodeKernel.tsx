@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback, useContext, useMemo, memo, us
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { useNodeHost, type HostNode, type HostEdge } from './node-host';
-import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Brain, Check, Zap, Wrench, CheckCircle2, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, Lightbulb, AlertTriangle, AlertCircle, AtSign, Trash, Plug, Users, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, ChartSpline, Play, SlidersHorizontal, Clock, Loader2, Bot, Search, Globe, Terminal, Pencil, Archive } from 'lucide-react';
+import { X, ArrowUpCircle, Gauge, Sparkles, ChevronDown, ChevronLeft, Check, Zap, Wrench, CheckCircle2, Copy, ClipboardCheck, FileText, Paperclip, Image as ImageIcon, File as FileIcon, AlertTriangle, AlertCircle, AtSign, Trash, Users, Folder, Film, Music, Table, Presentation, Shield, ShieldCheck, FileCheck, ExternalLink, RotateCw, ArrowDown, ClipboardList, Link2, ChartSpline, Play, Clock, Loader2, Bot, Search, Globe, Terminal, Pencil, Archive, Mic } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { AiChatNodeData, ChatMessage, ThinkingLevel, ToolCallRecord, ToolCallPhase, MessageAttachment, MessageReference, OutputFileItem, SkillDetail, SubagentPanel, TeamChatEvent } from '@/lib/types';
 import QuestionPopup, { stripQuestionsBlock, type QuestionItem, type AnswerEntry } from './QuestionPopup';
@@ -12,7 +12,8 @@ import { ButlerConfirmModal, type ButlerConfirmState } from './ButlerConfirmModa
 import TeamMemberPickerDialog from './TeamMemberPickerDialog';
 import TeamWorkbench from './TeamWorkbench';
 import LoginDialog from './LoginDialog';
-import { StreamingMarkdown } from './HtmlRenderer';
+import { StreamingMarkdown, type ReadSourceInfo } from './HtmlRenderer';
+import { normalizeSourceUrl } from '@/lib/materials/source-url';
 import { bus, BusEvents } from '@/lib/bus';
 import {
   DEFAULT_MODEL_ID,
@@ -27,15 +28,13 @@ import {
   PROVIDER_VENDOR,
   type ProviderConfig,
   type ProviderType,
-  type AvailableModel,
 } from '@/lib/types';
 import { loadSettings, getQuickPrompts, updateQuickPrompts, type QuickPrompt } from '@/lib/settings';
-import type { McpServerConfig } from '@/lib/mcp/types';
-import { isVisionModel } from '@/lib/model-tags';
 import { outcomeMaxLengthForModel, inferContextWindow, compactTriggerTokensForContext } from '@/lib/context-limits';
 import { WidgetRenderer, WidgetSkeleton } from './WidgetRenderer';
 import { parseWidgetBlocks, hasWidgetBlocks, hasOpenWidgetFence } from '@/lib/widget-blocks';
 import { desktop } from '@/lib/desktop-adapter';
+import { openSandboxPreviewInHippo } from '@/lib/sandbox/open-preview';
 import type { CodingPhase, AgentId } from '@/lib/agents/profiles';
 import { registerScreenOcrTarget, unregisterScreenOcrTarget, setScreenOcrFocus } from '@/lib/screen-ocr/frontend';
 import { parseCitations, CitationsPanel } from './CitationsPanel';
@@ -59,6 +58,8 @@ import {
 } from './composer/useComposer';
 import ComposerChips from './composer/ComposerChips';
 import MentionMenu from './composer/MentionMenu';
+// 语音输入：录音状态机 + 麦克风左侧内联展开的录音条（与助理抽屉中栏输入框共用，见 components/ui/voice-input.tsx）
+import { VoiceRecordBar, useVoiceInput, appendVoiceText } from '@/components/ui/voice-input';
 // T1-2 抽离：纯函数/常量 → ./chatNodeKernelUtils，无状态子组件 → ./chatNodeKernelParts（零行为变更）
 import {
   CODING_PHASE_UI, SYSTEM_PROMPT, THINKING_LEVEL_COLOR, THINKING_LEVEL_LETTER,
@@ -67,7 +68,7 @@ import {
   formatDuration, formatMsgTime, isErrorReply, openChipPath, parseThink, stripReferenceMarkers,
 } from './chatNodeKernelUtils';
 import {
-  AttachmentChips, MessagesErrorBoundary, ReferenceChips, StepTypeIcon, TaskStepsPanel, TraceProcessSummary,
+  AttachmentChips, MessagesErrorBoundary, ModelBrandLogo, MoonPhaseIcon, ReferenceChips, StepTypeIcon, TaskStepsPanel, TraceProcessSummary, WaitingHint,
 } from './chatNodeKernelParts';
 import type { PanelStep, StepStatus } from './chatNodeKernelParts';
 
@@ -87,9 +88,15 @@ export interface ChatNodeKernelProps {
   data: AiChatNodeData;
   selected?: boolean;
   identity: ChatNodeIdentity;
+  /** 渲染面：canvas = 画布节点卡片（默认）；sidebar = Hippo 浏览器对话栏。
+   *  侧边栏没有画布语境，需隐藏画布专属的卡片头元素。 */
+  surface?: 'canvas' | 'sidebar';
   /** 环境上下文：每轮自动前置进用户消息的模型侧内容（如 Hippo 侧边栏的当前页 URL/标题）。
    *  只进 effectiveContent，不进气泡正文、不落盘、发送后不清除 —— 与 referenceTag 的单槽位语义互不干扰。 */
   ambientContext?: string;
+  /** Research 开关（Hippo 侧边栏）：同一件事的两个消费端读同一个值 ——
+   *  开启时服务端多注入一段调研纪律、这里多渲染来源清单卡片，不各写各的判据。 */
+  researchMode?: boolean;
 }
 
 // Context: 节点点击 .md 附件时通知画布打开阅读器
@@ -99,7 +106,9 @@ export const NodeReaderContext = React.createContext<(nodeMdId: string, options?
 
 
 
-export function ChatNodeKernel({ id, data, selected, identity, ambientContext }: ChatNodeKernelProps) {
+export function ChatNodeKernel({ id, data, selected, identity, ambientContext, researchMode, surface = 'canvas' }: ChatNodeKernelProps) {
+  // 侧边栏面（Hippo 浏览器对话栏）：隐藏画布节点专属的卡片头元素（见下方 surface 判据）
+  const isSidebar = surface === 'sidebar';
   // 宿主注入通道（单焦点宿主 2026-09）：替代 useReactFlow()/useStore(s=>s.edges)
   const nodeHost = useNodeHost();
   /** 等价旧 useReactFlow().setNodes（函数式语义；本文件 15 处 setNodes 全为"只改本节点 data"的 map） */
@@ -143,34 +152,14 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
   // Butler 结构化确认卡片（排程创建/修改/删除的可编辑确认，挂在节点层）
   const [butlerConfirm, setButlerConfirm] = useState<ButlerConfirmState | null>(null);
 
-  // 展开态尺寸常量（壳列分离阅读宽度方案）：
-  // 高度 = calc(100vh - 20px)，与右侧悬浮面板（预览/本地文件）同高（容器 top/bottom 各 10px）；
-  // 展开节点垂直居中后上下边缘各留 10px，与面板视觉对齐，长内容由节点内部滚动承接，不设高度封顶。
-  // 外壳宽度较旧版收窄 10%（880→792px / 72vw→64.8vw）；正文消息列仍限宽 720px（READING_COL_W），
-  // 滚动区内边距相应收紧（px-10→px-7），保证正文宽度不变而左右边距变小。
-  // 居中保证行长舒适（中文约 45 字）；宽代码块经 .wide breakout 越出到正文列宽，兼顾可读性。
-  // 外壳宽度额外受画布可视区（扣除侧边栏/右侧预览面板）约束，避免展开节点被面板遮挡。
-  const EXPANDED_HEIGHT_CSS = 'calc(100vh - 6px)';
-  // 2026-09 布局重构：对话区自由拉伸填满容器（TraeWork 式），不再设 792px 外壳上限。
-  // 外壳宽 = 画布可视宽（wrapper，已扣除左栏/右 dock），窄窗口随容器自动收缩
-  const expandedShellW = (visible: number | null): number => {
-    if (visible !== null && visible > 0) return Math.max(Math.round(visible), 320);
-    return Math.min(Math.round(window.innerWidth * 0.94), 1180);
-  };
+  // 展开态尺寸（壳列分离阅读宽度方案）：外壳宽高均由外壳 style 的 width/height:100% 决定，
+  // 随对话容器（已扣除左栏/右 dock）同轮次布局收缩；正文消息列仍限宽 720px（READING_COL_W），
+  // 居中保证行长舒适（中文约 45 字），宽代码块经 .wide breakout 越出到正文列宽。
+  // 曾用 canvas-visible-width 广播把 wrapper 实测宽写成 px：该广播经 ResizeObserver / 被动 effect
+  // 在 paint 之后才送达，面板展开的那一帧外壳仍是旧宽度（1252px 覆盖 800px 面板）→ 视觉上
+  // 「预览面板覆盖中间对话区」。CSS 100% 与容器在同一布局轮次收缩，无跨帧错位。
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => finalizeMessagesPhase(data.messages ?? []));
-
-  // 画布可视宽度（CanvasFlow 广播 canvas-visible-width：扣除侧边栏 + 右侧面板 overlay）：
-  // 作为展开宽度上限，保证节点不与右侧宽屏预览面板重叠；面板打开/折叠/宽窄切换时实时更新
-  const [visibleCanvasW, setVisibleCanvasW] = useState<number | null>(null);
-  useEffect(() => {
-    const onVisible = (e: Event) => {
-      const d = (e as CustomEvent<{ width?: number }>).detail;
-      if (typeof d?.width === 'number' && d.width > 0) setVisibleCanvasW(d.width);
-    };
-    window.addEventListener('canvas-visible-width', onVisible);
-    return () => window.removeEventListener('canvas-visible-width', onVisible);
-  }, []);
 
   // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）
   const isCoding = identity === 'coding';
@@ -229,14 +218,10 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
   //  - 节点一律处于大面板形态：有内容 = 大阅读面板，无内容 = 空态欢迎区（品牌行 + 输入框）；
   //  - 已移除「空节点小卡片（400px 紧凑输入条）」形态：新建会话固定为同一套欢迎区 UI，
   //    节点不再互斥收起，彻底消除「偶尔变成可展开/缩小节点」的类竞态问题。
-  // 大阅读面板：固定阅读宽度方案 — 高度 calc(100vh - 20px)（与右侧面板同高），宽度 min(64.8vw, 792px)，
-  // 较旧版（72vw / 880px）收窄 10%；正文列保持 720px，边距随之变小，
-  // 且不超过画布可视区宽度（visibleCanvasW，扣除侧边栏/右侧面板），避免与宽屏预览面板重叠。
-  // 宽度必须显式给固定值，不能用 width:auto + aspect-ratio 推导：
-  // width:auto 会被内容 min-content（宽表格/长代码行）撑宽，导致节点宽度随内容抖动、
-  // 300ms transition 持续跟随 → "整个节点在闪"。固定宽度后节点尺寸完全稳定。
-  const nodeWidth = `${expandedShellW(visibleCanvasW)}px`;
-  const nodeHeight = EXPANDED_HEIGHT_CSS;
+  // 大阅读面板：宽度由外壳 style 的 width:100% 决定（高度同理由外壳 style 的 height:100% 决定），
+  // 随对话容器（已扣除左栏/右 dock）同步收缩，不会与右侧宽屏预览面板重叠。
+  // 宽度必须给显式定值（100%），不能用 width:auto：auto 会被内容 min-content（宽表格/长代码行）
+  // 撑宽，导致节点宽度随内容抖动、300ms transition 持续跟随 → "整个节点在闪"。
 
   // 新建节点后自动聚焦输入框（CanvasFlow 创建流程广播）：ChatGPT 式「点新建即打字」
   useEffect(() => {
@@ -337,8 +322,6 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
   }, [isMind]);
 
   const [modelId, setModelId] = useState(data.modelId ?? DEFAULT_MODEL_ID);
-  // 模型为 Auto 时思考强度默认 High，且允许用户手动调整（不再由模型推断覆盖）
-  const thinkingAutoMode = modelId === DEFAULT_MODEL_ID;
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   // 节点内内容分栏（dsh 对话 / 轨迹 / 团队）：默认对话视图；轨迹承载完整执行明细，
   // 团队是本节点关联团队的协作工作台（数据真相源在引擎侧，见 TeamWorkbench）
@@ -431,7 +414,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
     return { goal, steps: steps.map((s) => ({ content: s, activeForm: '', status: 'pending' as const })), completed, running, source: 'plan_task' as const };
   }, [messages, streamingMsgId]);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(
-    data.thinkingLevel ?? (thinkingAutoMode ? 'high' : DEFAULT_THINKING_LEVEL),
+    data.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
   );
   const [persistError, setPersistError] = useState<string | null>(null);
   const pendingAppendRef = useRef<{ nodeId: string; question: string; answer: string; mood?: { vibe?: string[]; sparks?: string[]; reflections?: string[]; will?: string[] }; modelId?: string; thinkingLevel?: ThinkingLevel } | null>(null);
@@ -625,7 +608,15 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
     return null;
   };
   const [currentStage, setCurrentStage] = useState<StageKind>(null);
-  const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
+  // 等待安抚（侧边栏，见 WaitingHint）计时基准：任务开始或阶段切换即重置。
+  // 计时放在窄栏那条 WaitingHint 内部（自带 1s tick），这里只存一个时刻，避免整个消息列表每秒重渲染。
+  const [stageSince, setStageSince] = useState<number>(0);
+  useEffect(() => {
+    if (isStreaming) setStageSince(Date.now());
+  }, [isStreaming]);
+  useEffect(() => {
+    setStageSince(Date.now());
+  }, [currentStage]);
   // 空态欢迎区 BobWork 打字机效果：新建会话时逐字从左到右显示
   const [typedBrand, setTypedBrand] = useState('');
   const brandTypingDone = typedBrand.length >= 'BobWork'.length;
@@ -642,8 +633,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
     }, 90);
     return () => window.clearInterval(timer);
   }, [messages.length]);
-  const [availableMcpServers, setAvailableMcpServers] = useState<McpServerConfig[]>([]);
-  // 节点 MCP 下拉真实来源：/api/mcp/store（kind=mcp 且已安装且全局打开；不依赖本地 settings 快照）
+  // 强制 MCP 胶囊名称来源：/api/mcp/store（kind=mcp 且已安装且全局打开；不依赖本地 settings 快照）
   const [nodeMcpOptions, setNodeMcpOptions] = useState<Array<{ id: string; name: string }>>([]);
   // ==== ChatNode 快捷指令（全局库） ====
   const [quickPrompts, setQuickPrompts] = useState<QuickPrompt[]>([]);
@@ -896,7 +886,6 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
       setProviderConfigs(settings.providers);
       setChatRoleModel(settings.chatModel);
       const servers = settings.mcpServers || [];
-      setAvailableMcpServers(servers);
       // 加载快捷指令全局库
       const qps = await getQuickPrompts();
       setQuickPrompts(qps);
@@ -918,7 +907,6 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
       setProviderConfigs(settings.providers);
       setChatRoleModel(settings.chatModel);
       const servers = settings.mcpServers || [];
-      setAvailableMcpServers(servers);
       // 设置变更时刷新快捷指令库
       const qps = await getQuickPrompts();
       setQuickPrompts(qps);
@@ -1104,7 +1092,9 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
         vendor: preset ? PROVIDER_VENDOR[p.provider as ProviderType] : undefined,
       });
     }
-    return result;
+    // 候选池为空时退化为「全部已勾选模型」：Auto 下线后节点必须能从下拉里选到具体模型，
+    // 不能再出现「菜单里只剩 Auto」的空下拉。
+    return result.length > 0 ? result : availableModels;
   }, [availableModels, chatRoleModel]);
 
   // Team 分栏两档模型的候选项（与节点 chat 下拉同源：chatModel 角色池）
@@ -1229,6 +1219,51 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
     buildBlocks,
   } = composer;
 
+  // ===== 语音输入（微信式）：MediaRecorder 录音 → 服务端 STT 转文字回填输入框。
+  // 状态机与录音条已抽到 components/ui/voice-input.tsx（助理抽屉中栏输入框共用同一套，
+  // 避免「同一个录音流程写两遍」）；这里只保留本输入框特有的两件事：文字追加到哪、失败怎么讲。 =====
+  // 流式「边说边写」的草稿基线：null = 本次录音没有实时预填（走录制链路，或还没出字）
+  const voiceBaseRef = useRef<string | null>(null);
+  const voice = useVoiceInput({
+    canStart: !isStreaming,
+    // 实时预填：第一次出字时快照住当前草稿，之后草稿一直是「基线 + 中间文本」
+    onPartial: (text) => {
+      if (voiceBaseRef.current === null) voiceBaseRef.current = localInputRef.current;
+      setLocalInput(appendVoiceText(voiceBaseRef.current, text));
+    },
+    // 作废（✕ / 没识别出文字 / 流式半途失败）：草稿还原成录音前的样子
+    onDiscard: () => {
+      const base = voiceBaseRef.current;
+      voiceBaseRef.current = null;
+      if (base !== null) setLocalInput(base);
+    },
+    // 定稿：流式链路草稿里已有预填 → 用定稿文本覆盖它；录制链路 → 追加到现有草稿之后（不自动发送）
+    onText: (text) => {
+      const base = voiceBaseRef.current;
+      voiceBaseRef.current = null;
+      setLocalInput((prev) => appendVoiceText(base ?? prev, text));
+      setTimeout(() => textareaRef.current?.focus(), 50);
+    },
+    onError: (reason) => {
+      void confirmAsk({
+        title: 'Voice transcription failed',
+        message: `${reason} The recording was discarded — voice input only fills the text box, nothing is saved.`,
+        confirmLabel: 'OK',
+        cancelLabel: 'Close',
+      });
+    },
+    // 录音根本没起来（无麦克风权限 / 非安全上下文 / 被预览框架拦住）：原来只 console.warn，
+    // 界面上表现为「点了没反应」——这里必须把原因讲出来
+    onStartError: (reason) => {
+      void confirmAsk({
+        title: 'Microphone unavailable',
+        message: reason,
+        confirmLabel: 'OK',
+        cancelLabel: 'Close',
+      });
+    },
+  });
+
   // 监听从文件浏览器发送的附件（挂载时先消费事件缓冲，防止"发送到新建节点"时事件先于监听器注册而丢失）
   useEffect(() => {
     // 挂载时消费缓冲中属于本节点的附件
@@ -1274,7 +1309,6 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
   const autoRootsAppliedRef = useRef(false);
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
   const skillMenuRef = useRef<HTMLDivElement>(null);
-  const mcpMenuRef = useRef<HTMLDivElement>(null);
 
   /** 节点标识：优先 nodeMdId，兜底 React Flow 节点 id */
   const agentNodeId = data.nodeMdId || id;
@@ -1486,7 +1520,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
 
   // 点击节点外部时关闭下拉菜单
   useEffect(() => {
-    if (!modelMenuOpen && !thinkingMenuOpen && !skillMenuOpen && !mcpMenuOpen && !quickPromptMenuOpen) return;
+    if (!modelMenuOpen && !thinkingMenuOpen && !skillMenuOpen && !quickPromptMenuOpen) return;
     const handler = (e: PointerEvent) => {
       const target = e.target;
       if (!(target instanceof globalThis.Node)) return;
@@ -1494,18 +1528,16 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext }:
         modelMenuRef.current?.contains(target) ||
         thinkingMenuRef.current?.contains(target) ||
         skillMenuRef.current?.contains(target) ||
-        mcpMenuRef.current?.contains(target) ||
         quickPromptMenuRef.current?.contains(target)
       ) return;
       setModelMenuOpen(false);
       setThinkingMenuOpen(false);
       setSkillMenuOpen(false);
-      setMcpMenuOpen(false);
       setQuickPromptMenuOpen(false);
     };
     document.addEventListener('pointerdown', handler);
     return () => document.removeEventListener('pointerdown', handler);
-  }, [modelMenuOpen, thinkingMenuOpen, skillMenuOpen, mcpMenuOpen, quickPromptMenuOpen]);
+  }, [modelMenuOpen, thinkingMenuOpen, skillMenuOpen, quickPromptMenuOpen]);
 
   // 模型下拉菜单打开时，捕获阶段拦截 wheel：双指滑动滚动模型列表时，
   // 不冒泡到 React Flow 的 panOnScroll，避免画布被拖拽
@@ -2123,95 +2155,14 @@ ${rows.join('\n')}
       setReferenceTag(null); // 发送后清除引用标签
     }
 
-    let currentModelId = modelId;
+    // 模型选择器已下线 Auto：节点始终持有具体模型（旧节点的空值由节点内迁移 effect 落成），
+    // 这里不再做客户端选路；极端情况（模型列表尚未就绪）留空交由服务端兜底解析。
+    const currentModelId = modelId;
+    // 本轮服务端实际使用的模型（done 帧回传，provider:modelId）：服务端可能因「带图改选视觉模型」
+    // 而与节点所选不同，落盘时以实际为准，避免消息标签误导。
+    let servedModelId = currentModelId;
     // 本轮实际思考等级：直接采用节点当前设置（不再由模型/任务推断）
     const actualThinkingLevel: ThinkingLevel = thinkingLevel;
-
-    if (isContinuation && (!currentModelId || currentModelId === DEFAULT_MODEL_ID)) {
-      // P3-3b：追问（continuation）延续上一轮实际模型 —— 修正历史"跳过 Auto 决策后
-      // 静默回退 availableModels[0]"的模型跳变（docs §11.2）；无可用记录则落入下方 Auto 决策
-      const lastActualModel = [...messages].reverse().find((m) => m.role === 'assistant' && m.modelId)?.modelId;
-      if (lastActualModel) currentModelId = lastActualModel;
-    }
-
-    if (!currentModelId || currentModelId === DEFAULT_MODEL_ID) {
-      // 本轮上下文是否携带图片附件（新挂的附件 + 发送窗口内历史 user 消息仍带图的）。
-      const hasImageInContext =
-        (turnAttachments?.length > 0 && turnAttachments.some((a) => a.type === 'image')) ||
-        messages.some(
-          (m) => m.role === 'user' && !!m.attachments && m.attachments.some((a) => a.type === 'image'),
-        );
-      // Auto 模式选模型只做两件事（不做任务类型/能力打分）：
-      //   ① 候选池有序首选 —— 取主对话候选池（settings.chatModel.pool）首项，池为空则取全部可用模型首项，
-      //      语义等同服务端 resolveMainChat；
-      //   ② 带图视觉优先 —— 上下文含图片且开关打开时，在候选中取第一个视觉模型，
-      //      使后端能把图片以多模态直连喂给模型（而非描述注入兜底）；候选中无视觉模型则仍取首项。
-      let bestModel: AvailableModel | null = null;
-      try {
-        const settings = await loadSettings();
-        const pool = settings.chatModel?.pool ?? [];
-        // Auto 视觉优先开关（settings.chatModel.autoVisionOnImage，默认开）；关 = 带图也不选视觉模型
-        const autoVisionOnImage = settings.chatModel?.autoVisionOnImage !== false;
-        // availableModels 的 modelId 是 `provider:modelId` 格式，配置存的是裸 modelId
-        const findInAvailable = (modelId: string, provider?: string) =>
-          availableModels.find((m) => {
-            const parsed = parseCustomModel(m.modelId);
-            if (!parsed) return m.modelId === modelId;
-            return provider ? parsed.provider === provider && parsed.modelId === modelId : parsed.modelId === modelId;
-          });
-        // 候选池（去重）→ 池为空则整个可用模型列表
-        const poolModels: AvailableModel[] = [];
-        const seen = new Set<string>();
-        for (const item of pool) {
-          const m = findInAvailable(item.modelId, item.provider);
-          if (m && !seen.has(m.modelId)) { poolModels.push(m); seen.add(m.modelId); }
-        }
-        const candidates = poolModels.length > 0 ? poolModels : availableModels;
-        if (hasImageInContext && autoVisionOnImage) {
-          bestModel =
-            candidates.find((m) => {
-              const parsed = parseCustomModel(m.modelId);
-              return isVisionModel(parsed ? parsed.modelId : m.modelId);
-            }) ?? null;
-        }
-        bestModel = bestModel ?? candidates[0] ?? null;
-      } catch { /* 读取失败则回退自动选择 */ }
-
-      if (!bestModel) {
-        alert('Please configure at least one model in settings');
-        return;
-      }
-
-      currentModelId = bestModel.modelId;
-      // === 模型 Auto：思考强度直接采用用户选择（默认 High），不随模型推断变化 ===
-      // auto 模式：本轮选中的具体模型仅用于本次请求与消息标签，不写回节点状态，
-      // 保持 modelId 为 Auto（空值），下一轮仍按需求重新智能选择。
-      if (modelId === DEFAULT_MODEL_ID) {
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? { ...n, data: { ...n.data, thinkingLevel: actualThinkingLevel } }
-              : n,
-          ),
-        );
-      } else {
-        setModelId(currentModelId);
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === id
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    modelId: currentModelId,
-                    thinkingLevel: actualThinkingLevel,
-                  },
-                }
-              : n,
-          ),
-        );
-      }
-    }
 
     // 续写模式：复用已有的（合并了补充信息的）用户消息，不创建新 userMsg
     const now = new Date();
@@ -2462,7 +2413,7 @@ ${rows.join('\n')}
       messages: apiMessages,
       nodeId: currentMdId,
       // 节点身份（chat | coding）：服务端据此按场景过滤工具集（coding 节点剔除
-      // legal/wanted/ocr/audio/skill 专属工具，避免每次全量注入无关注入）
+      // legal/core/ocr/audio/skill 专属工具，避免每次全量注入无关注入）
       identity,
       modelId: custom ? undefined : selectedModel.modelId,
       thinking: selectedModel.thinking ? 'enabled' : 'disabled',
@@ -2478,6 +2429,11 @@ ${rows.join('\n')}
     // 投影窗口（临时节点）显式传 projectId，使其写入 hidden 的 temporary 项目而非当前项目
     if (data.projectId) {
       requestBody.projectId = data.projectId;
+    }
+
+    // Research 开关（Hippo 侧边栏）：开启才发送，服务端据此在浏览器操作纪律之外再叠一层调研纪律
+    if (researchMode) {
+      requestBody.researchMode = true;
     }
 
     if (selectedSkills.size > 0) {
@@ -3089,6 +3045,10 @@ ${rows.join('\n')}
                 if (typeof parsed.taskId === 'string' && parsed.taskId) {
                   taskIdForTurn = parsed.taskId;
                 }
+                // 服务端实际使用模型（可能是「带图改选视觉模型」的结果）：以它作为消息标签
+                if (typeof parsed.model === 'string' && parsed.model) {
+                  servedModelId = parsed.model;
+                }
                 const u = parsed.usage as { promptTokens?: number; completionTokens?: number; cacheHitTokens?: number; cacheMissTokens?: number; calls?: number } | undefined;
                 if (u && (typeof u.promptTokens === 'number' || typeof u.completionTokens === 'number')) {
                   if (mountedRef.current) {
@@ -3241,9 +3201,8 @@ ${rows.join('\n')}
             reasoning: reasoningContent || undefined,
             toolCalls: toolCallRecords.length > 0 ? toolCallRecords : undefined,
             outputFiles: outputFileItems.length > 0 ? outputFileItems : undefined,
-            // 保留本轮实际使用的模型与思考等级：auto 模式下前端已解析出真实选中模型，
-            // 若此处丢失，消息底部标签会回退显示 "Auto"（真实模型名在历史消息中也无法追溯）
-            modelId: currentModelId,
+            // 本轮实际使用的模型与思考等级（以服务端 done 帧回传的模型为准，含带图改选视觉模型）
+            modelId: servedModelId,
             thinkingLevel: actualThinkingLevel,
             taskId: taskIdForTurn ?? undefined,
             // 多智能体协作分支面板：随本轮回答定格（折叠卡片重启后仍可回看）
@@ -3701,6 +3660,29 @@ ${rows.join('\n')}
     }
   }, [id, setNodes, dropdownModels, thinkingLevel]);
 
+  // Auto 下线迁移：存量节点（含 CanvasFlow 新建的节点）modelId 为空，等候选池就绪后
+  // 落成「候选池有序首选（池空则下拉首项）」，使"节点始终有具体模型"这一前提成立。
+  // 思考强度不受影响：Auto 时代默认 High === DEFAULT_THINKING_LEVEL。
+  useEffect(() => {
+    if (modelId !== DEFAULT_MODEL_ID || dropdownModels.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      let target = dropdownModels[0].modelId;
+      try {
+        const settings = await loadSettings();
+        const pool = settings.chatModel?.pool ?? [];
+        for (const item of pool) {
+          // availableModels 的 modelId 是 `provider:modelId` 格式，配置存的是裸 modelId
+          const hit = dropdownModels.find((m) => m.modelId === `${item.provider}:${item.modelId}`);
+          if (hit) { target = hit.modelId; break; }
+        }
+      } catch { /* 读取失败则用下拉首项 */ }
+      if (cancelled) return;
+      handleSelectModel(target);
+    })();
+    return () => { cancelled = true; };
+  }, [modelId, dropdownModels, handleSelectModel]);
+
   const handleThinkingLevelChange = useCallback((level: ThinkingLevel) => {
     setThinkingLevel(level);
     setNodes((nds) =>
@@ -3942,6 +3924,11 @@ ${rows.join('\n')}
           // The think text to display (prefer API reasoning_content, fallback to <think> tags)
           const thinkText = showReasoning ? msg.reasoning : (hasThinkTags ? parsedContent!.think : '');
 
+          // Sidebar 档（surface='sidebar'，Hippo Browser 右侧对话栏）：窄栏是"边看网页边问"的陪伴位，
+          // 不是开发工作台 —— 思考原文 + 逐条工具行会把答复挤出视野，故本档不进食过程明细，
+          // 过程区只留一行概览（TraceProcessSummary 的 compact 态）。画布节点 isSidebar 恒 false，不受影响。
+          const traceThinkText = isSidebar ? '' : thinkText;
+
           // AI 回复：显示完整内容 + .md 附件卡片
           // 完成态判定：仅"当前正在流式的消息"按未完成渲染（纯文本），
           // 其余 assistant 消息（含历史加载的消息）恒为完成态，避免流式期间旧消息回退为纯文本/丢失卡片。
@@ -3982,6 +3969,21 @@ ${rows.join('\n')}
           });
           const citationDisplay = authParsed ? authParsed.cleanContent : (inlineFilesParsed ? inlineFilesParsed.cleanContent : citationClean);
 
+          // Step 14: Research 开关的候选来源清单 —— 报告本身一行 + 本轮真实读过的网页（取自工具调用记录，
+          // 非模型自述）。两者同卡同勾选，由用户决定哪些进 materials/。
+          // 仅 Hippo 侧边栏开关打开时出现，画布节点与开关关闭时恒为空数组
+          const collectedSources = isAssistantDone && researchMode
+            ? collectResearchSources(msg.toolCalls)
+            : [];
+          const reportSource = isAssistantDone && researchMode
+            ? buildReportSource(citationDisplay, id)
+            : null;
+          const researchSources = reportSource ? [reportSource, ...collectedSources] : collectedSources;
+          // 正文里「本轮真读过」的链接标注（hover 弹窗）。必须从 collectedSources 建映射：
+          // 它按 toolCalls 身份缓存、跨渲染身份稳定，而 researchSources 是每帧新建的数组字面量 ——
+          // 用它当缓存键会每次落空，新 Map 让 HtmlRenderer 的 memo 失效、innerHTML 反复重写打散划词选区
+          const readSourceMap = collectedSources.length > 0 ? buildReadSourceMap(collectedSources) : undefined;
+
           // Trae 式简单渲染：正文完整直出，不做任何折叠/剥离
           const bodyContent = citationDisplay;
 
@@ -3997,7 +3999,7 @@ ${rows.join('\n')}
           const hasInlineTrace = msg.role === 'assistant'
             && ((msg.toolCalls?.length ?? 0) > 0
               || msgMatchedSkills.length > 0
-              || !!thinkText);
+              || !!traceThinkText);
           // 是否存在执行步骤数据（工具调用或历史过程叙述）——Final Answer 分隔线判定用
           const hasStepData = (msg.toolCalls && msg.toolCalls.length > 0)
             || (msg.processNarration && msg.processNarration.trim().length > 0);
@@ -4094,7 +4096,8 @@ ${rows.join('\n')}
                             · cached {Math.round((msgUsage.cacheHitTokens / (msgUsage.cacheHitTokens + msgUsage.cacheMissTokens)) * 100)}%
                           </span>
                         )}
-                        {msgPrefixHash && (
+                        {/* 缓存头指纹 / 降档 / ttft / tok/s 是开发诊断向元数据：侧边栏窄栏不展示（保留 token 用量行） */}
+                        {!isSidebar && msgPrefixHash && (
                           <span
                             className="opacity-80"
                             style={msgPrefixChanged ? { color: 'var(--warning)' } : undefined}
@@ -4112,21 +4115,21 @@ ${rows.join('\n')}
                             · head {msgPrefixHash.slice(0, 8)}
                           </span>
                         )}
-                        {msgPrefixSegs && msgPrefixChanged && msgPrefixSegChanged && (
+                        {!isSidebar && msgPrefixSegs && msgPrefixChanged && msgPrefixSegChanged && (
                           <span className="opacity-80" style={{ color: 'var(--warning)' }}>
                             {msgPrefixSegChanged.tools ? ` tools+` : ''}
                             {msgPrefixSegChanged.toolsByte && !msgPrefixSegChanged.tools ? ' order+' : ''}
                             {msgPrefixSegChanged.history ? ' history+' : ''}
                           </span>
                         )}
-                        {msgStats && msgStats.durationMs > 0 && (
+                        {!isSidebar && msgStats && msgStats.durationMs > 0 && (
                           <span className="opacity-70" title={`TTFT ${msgStats.ttftMs === null ? 'n/a' : msgStats.ttftMs + 'ms'} · total ${(msgStats.durationMs / 1000).toFixed(1)}s`}>
                             · ttft {msgStats.ttftMs === null ? '—' : msgStats.ttftMs < 1000 ? `${Math.round(msgStats.ttftMs)}ms` : `${(msgStats.ttftMs / 1000).toFixed(1)}s`}
                             · {msgStats.tokensPerSec} tok/s
                           </span>
                         )}
                         {/* 思考决策可见性（方向 D）：实际执行轮降档 / C1 琐碎关思考命中，仅在发生过时显示 */}
-                        {msgStats?.thinking && msgStats.thinking.downgradedRounds > 0 && (
+                        {!isSidebar && msgStats?.thinking && msgStats.thinking.downgradedRounds > 0 && (
                           <span
                             className="opacity-75"
                             title={`用户档位 ${msgStats.thinking.level || ''}：执行轮按策略降档以省 reasoning tokens（配置 thinking.downgradeOnExecution）`}
@@ -4134,7 +4137,7 @@ ${rows.join('\n')}
                             · 思考 {msgStats.thinking.level || ''}（执行轮降档 ×{msgStats.thinking.downgradedRounds}）
                           </span>
                         )}
-                        {msgStats?.thinking?.trivialOff && (
+                        {!isSidebar && msgStats?.thinking?.trivialOff && (
                           <span className="opacity-75" title="琐碎问答自动关闭思考省 token（配置 thinking.trivialPromptOff）">
                             · C1 琐碎关思考
                           </span>
@@ -4146,12 +4149,13 @@ ${rows.join('\n')}
                 点击 Think / 工具行就地展开明细（思考原文 / 参数 / 结果），无需切换到 Trace */}
             {msg.role === 'assistant' && hasInlineTrace && (
               <TraceProcessSummary
-                thinkText={thinkText}
+                thinkText={traceThinkText}
                 toolCalls={msg.toolCalls ?? []}
                 skillNames={msgMatchedSkills}
                 isStreaming={msg.id === streamingMsgId && isStreaming}
                 thinkingActive={msg.id === streamingMsgId && isStreaming && stageKind === 'thinking'}
                 hideStructuralTools={msg.id === streamingMsgId && isStreaming}
+                compact={isSidebar}
               />
             )}
 
@@ -4172,8 +4176,12 @@ ${rows.join('\n')}
 
             {/* 实时「当前动作」条：流式中指示正在做什么（思考 / 正在调用的工具+目的 / 写答案）。
                 置于过程区末尾、正文（Final Answer）之上：思考/调工具阶段它是回复最底部一条，
-                开始写答案后固定在答案上方；完成后消失 */}
-            {currentActionText && (
+                开始写答案后固定在答案上方；完成后消失。
+                Sidebar 档改走 WaitingHint：额外带秒表 + 按时长轮换的安抚话（窄栏久等易误判卡死），
+                且流式刚发起（首 token 未到、尚无阶段）就出现 —— 那段静默正是最像"卡住"的窗口 */}
+            {isSidebar && msg.role === 'assistant' && msg.id === streamingMsgId && isStreaming ? (
+              <WaitingHint label={currentActionText} since={stageSince} />
+            ) : currentActionText && (
               <div
                 className="mb-1 flex w-fit items-center gap-1.5 rounded-md border px-2 py-0.5"
                 style={{
@@ -4215,6 +4223,9 @@ ${rows.join('\n')}
                       )}
                       {pendingAuthReqs.length > 0 && (
                         <AuthReqCard paths={pendingAuthReqs} />
+                      )}
+                      {researchSources.length > 0 && (
+                        <ResearchSourcesCard sources={researchSources} nodeId={id} />
                       )}
                       <CitationsPanel citations={citations} onOpenNode={(nid) => onOpenReader?.(nid)} />
                     </>
@@ -4273,7 +4284,11 @@ ${rows.join('\n')}
                             <span className="h-px flex-1" style={{ background: 'linear-gradient(90deg, color-mix(in oklab, var(--primary) 35%, transparent), transparent)' }} />
                           </div>
                         )}
-                        <StreamingMarkdown content={bodyContent} streaming={!isAssistantDone} />
+                        <StreamingMarkdown
+                          content={bodyContent}
+                          streaming={!isAssistantDone}
+                          readSources={readSourceMap}
+                        />
                       </>
                     )}
                   </>
@@ -4312,6 +4327,9 @@ ${rows.join('\n')}
                     )}
                     {pendingAuthReqs.length > 0 && (
                       <AuthReqCard paths={pendingAuthReqs} />
+                    )}
+                    {researchSources.length > 0 && (
+                      <ResearchSourcesCard sources={researchSources} nodeId={id} />
                     )}
                     <CitationsPanel citations={citations} onOpenNode={(nid) => onOpenReader?.(nid)} />
                   </>
@@ -4448,6 +4466,10 @@ ${rows.join('\n')}
                       </span>
                     );
                   })()}
+                  {/* 上下文占用环（dsh ContextMeter）：本条回复末尾最右侧，点击看明细 */}
+                  <div className="ml-auto flex items-center">
+                    <ContextMeter meter={composerCtxMeter} />
+                  </div>
                 </div>
               )}
               {/* Share 卡片预览面板（内联展开，无遮罩） */}
@@ -4502,9 +4524,10 @@ ${rows.join('\n')}
             ? 'color-mix(in oklab, var(--primary) 6%, transparent)'
             : 'var(--paper)',
         }}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
+        // 拖入文件即附件：侧边栏不上传附件（paperclip 入口与粘贴图片同样已关），故不挂拖放处理
+        onDragOver={isSidebar ? undefined : handleDragOver}
+        onDragLeave={isSidebar ? undefined : handleDragLeave}
+        onDrop={isSidebar ? undefined : handleDrop}
         // 阻止 click 冒泡：输入栏内点击不得触发节点级 onNodeClick（避免被当作"点击节点"处理）
         onClick={(e) => e.stopPropagation()}
       >
@@ -4650,7 +4673,7 @@ ${rows.join('\n')}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
-            onPaste={handlePaste}
+            onPaste={isSidebar ? undefined : handlePaste}
             className={cn(
               'node-input flex-1 overflow-y-auto px-2 py-1.5 text-sm focus:outline-none',
             )}
@@ -4675,6 +4698,8 @@ ${rows.join('\n')}
         <div className="mt-0.5 flex items-center justify-between gap-2 px-0.5">
           {/* 左侧：附件 + 技能 + 目录标签 */}
           <div className="flex min-w-0 items-center gap-1.5">
+            {/* 附件入口只在画布节点提供：浏览器对话栏是纯浏览器面，不承担上传附件 */}
+            {!isSidebar && (
             <label
               className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors disabled:opacity-50"
               style={{
@@ -4709,41 +4734,23 @@ ${rows.join('\n')}
                 <Paperclip className="h-3.5 w-3.5" />
               )}
             </label>
+            )}
 
-            {/* 技能选择按钮 */}
+            {/* 技能菜单：入口只有输入框内输入 "/"（见 handleKeyDown），不再放独立按钮 */}
             {availableSkills.length > 0 && (
               <div className="relative" ref={skillMenuRef}>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!isStreaming) setSkillMenuOpen((v) => !v);
-                  }}
-                  disabled={isStreaming}
-                  className={cn(
-                    'flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 transition-colors disabled:opacity-50',
-                    selectedSkills.size > 0 && 'ring-1',
-                  )}
-                  style={{
-                    backgroundColor: selectedSkills.size > 0 ? 'var(--primary-soft)' : 'var(--paper-hover)',
-                    color: selectedSkills.size > 0 ? 'var(--primary-strong)' : 'var(--ink-muted)',
-                    borderColor: selectedSkills.size > 0 ? 'color-mix(in oklab, var(--primary) 30%, transparent)' : 'transparent',
-                  }}
-                  title={selectedSkills.size > 0 ? `${selectedSkills.size} skill(s) selected` : 'Select skill'}
-                >
-                  <Lightbulb className="h-3.5 w-3.5" />
-                </button>
                 {skillMenuOpen && (
                   <div
                     className="absolute bottom-full left-0 mb-1 rounded-xl border shadow-lg z-50 flex flex-col nowheel"
                     style={{
                       borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
                       backgroundColor: 'var(--popover)',
-                      width: '300px',
+                      width: '196px',
                       maxHeight: '320px',
                     }}
                   >
-                    {/* 单列技能列表：系统 + 已下载/导入，按可用顺序平铺 */}
-                    <div className="min-h-0 flex-1 overflow-y-auto py-1">
+                    {/* 单列技能列表：系统 + 已下载/导入，按可用顺序平铺；超长仍可滚动但不显示滚动条 */}
+                    <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto py-1">
                       {availableSkills.map((s) => {
                         const checked = selectedSkills.has(s.name);
                         return (
@@ -4799,7 +4806,9 @@ ${rows.join('\n')}
               </div>
             )}
 
-            {/* 快捷指令管理 - 下拉菜单（全局库勾选 + 增删改） */}
+            {/* 快捷指令管理 - 下拉菜单（全局库勾选 + 增删改）：带增删改的提示词库，
+                侧边栏只做浏览器任务、用不上这套重 UI，故不提供（isSidebar） */}
+            {!isSidebar && (
             <div className="relative" ref={quickPromptMenuRef}>
               <button
                 onClick={(e) => {
@@ -4943,103 +4952,10 @@ ${rows.join('\n')}
                 </div>
               )}
             </div>
-
-            {/* MCP 强制使用 - 下拉菜单（勾选 = 该节点无视场景/画像过滤恒定保留；Store 全局 enabled 即自动可用） */}
-            {availableMcpServers.length > 0 && (
-              <div className="relative" ref={mcpMenuRef}>
-                {(() => {
-                  const currentModel = availableModels.find((m) => m.modelId === modelId);
-                  const mcpSupported = currentModel ? isCustomModel(currentModel.modelId) : true;
-                  return (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!isStreaming && mcpSupported) setMcpMenuOpen((v) => !v);
-                  }}
-                  disabled={isStreaming || !mcpSupported}
-                  className={cn(
-                    'flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 transition-colors disabled:opacity-50',
-                    enabledMcpIds.size > 0 && 'ring-1',
-                  )}
-                  style={{
-                    backgroundColor: enabledMcpIds.size > 0 ? 'var(--info-soft)' : 'var(--paper-hover)',
-                    color: enabledMcpIds.size > 0 ? 'var(--info)' : 'var(--ink-muted)',
-                    borderColor: enabledMcpIds.size > 0 ? 'color-mix(in oklab, var(--info) 30%, transparent)' : 'transparent',
-                  }}
-                  title={!mcpSupported ? 'This model does not support MCP tool calls' : (enabledMcpIds.size > 0 ? `${enabledMcpIds.size} MCP forced in this node` : 'Force MCP (Store-enabled MCPs are auto-available)')}
-                >
-                  <Plug className="h-3.5 w-3.5" />
-                </button>
-                );
-                })()}
-                {mcpMenuOpen && (
-                  <div
-                    className="absolute bottom-full left-0 mb-1 rounded-xl border shadow-lg z-50 flex nowheel"
-                    style={{
-                      borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
-                      backgroundColor: 'var(--popover)',
-                      width: '300px',
-                      maxHeight: '280px',
-                    }}
-                  >
-                    {(() => {
-                      // 来源：服务端 Store 中 kind=mcp 且已安装且全局打开的服务（Plugins 不进下拉）
-                      const shownMcp = nodeMcpOptions;
-                      if (shownMcp.length === 0) {
-                        return (
-                          <div
-                            className="flex items-center justify-center px-4 py-6 text-center text-xs"
-                            style={{ color: 'var(--ink-muted)' }}
-                          >
-                            No MCP tools enabled. Turn them on in Extensions Store → MCP &amp; Plugins.
-                          </div>
-                        );
-                      }
-                      return (
-                        <div className="min-w-0 flex-1 overflow-y-auto py-1">
-                          {shownMcp.map((server) => {
-                            const checked = enabledMcpIds.has(server.id);
-                            return (
-                              <button
-                                key={server.id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleMcpServer(server.id);
-                                }}
-                                title={checked ? 'Unforce this MCP (available via Store when enabled)' : 'Force this MCP in this node (keep regardless of context/scene)'}
-                                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--paper-soft)]"
-                              >
-                                <span
-                                  className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border text-xs"
-                                  style={{
-                                    backgroundColor: checked ? 'var(--info)' : 'transparent',
-                                    borderColor: checked ? 'var(--info)' : 'var(--ink-faint)',
-                                    color: '#fff',
-                                  }}
-                                >
-                                  {checked && <Check className="h-2.5 w-2.5" />}
-                                </span>
-                                <div className="min-w-0 flex-1">
-                                  <div
-                                    className="truncate text-xs font-medium"
-                                    style={{ color: 'var(--ink)' }}
-                                  >
-                                    {server.name}
-                                  </div>
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
             )}
 
-            {/* Materials 文件夹图标：无授权/操作目录时显示 */}
-            {authorizedRoots.length === 0 && contextFolders.length === 0 && (
+            {/* Materials 文件夹图标：无授权/操作目录时显示。侧边栏不上传/不引用本地文件，不提供 */}
+            {!isSidebar && authorizedRoots.length === 0 && contextFolders.length === 0 && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -5053,8 +4969,9 @@ ${rows.join('\n')}
               </button>
             )}
 
-            {/* 操作目录 / 授权目录（列表形式标签，直接显示文件夹名） */}
-            {(authorizedRoots.length > 0 || contextFolders.length > 0) && (
+            {/* 操作目录 / 授权目录（列表形式标签，直接显示文件夹名）；
+                侧边栏已剔除文件工具，标签的「AI can read/write」语义不成立，故仅画布显示 */}
+            {!isSidebar && (authorizedRoots.length > 0 || contextFolders.length > 0) && (
               <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1 overflow-hidden">
                 {contextFolders.map((folder) => {
                   // 用户从本地文件面板一键发送的子文件夹：操作目录（锁定范围），用暖色小图标区分
@@ -5114,7 +5031,10 @@ ${rows.join('\n')}
             )}
 
             {/* 多智能体协作（Multi-agent mode）：点击弹出成员选择器（已安装 Agent 包勾选）；
-                开启后本轮主 agent 可调用 team_run 编排多成员协作，与「团队」分栏是并行入口 */}
+                开启后本轮主 agent 可调用 team_run 编排多成员协作，与「团队」分栏是并行入口。
+                侧边栏不提供：browser 画像 fixedScenes 只有 browser + ledger，team 工具根本不会注入，
+                但服务端仍按开关注入 MULTI_AGENT_RULES —— 等于让模型去调一个不存在的工具（isSidebar） */}
+            {!isSidebar && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -5136,6 +5056,7 @@ ${rows.join('\n')}
             >
               <Users className="h-3.5 w-3.5" />
             </button>
+            )}
           </div>
 
           {/* 右侧：推理强度 + 模型 + 发送 */}
@@ -5148,24 +5069,12 @@ ${rows.join('\n')}
                   if (!isStreaming) setThinkingMenuOpen((v) => !v);
                 }}
                 disabled={isStreaming}
-                className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-all disabled:opacity-50"
-                title={`${thinkingAutoMode ? 'Auto · ' : ''}${THINKING_LEVELS.find((l) => l.value === thinkingLevel)?.label ?? thinkingLevel}`}
-                style={{
-                  backgroundColor: 'var(--primary-soft)',
-                  color: 'var(--primary-strong)',
-                }}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-50"
+                title={THINKING_LEVELS.find((l) => l.value === thinkingLevel)?.label ?? thinkingLevel}
+                style={{ backgroundColor: 'var(--paper-hover)' }}
               >
-                <Brain className="h-3.5 w-3.5 shrink-0" />
-                {/* ⑫ 思考档位徽标：右上角 O/L/H/X（Off/Low/High/Max；legacy medium=M；Auto 模式默认 High 且可手动调整） */}
-                <span
-                    className="absolute -right-1 -top-1 inline-flex h-[13px] min-w-[13px] items-center justify-center rounded-full px-[3px] text-10 font-bold leading-none text-white"
-                    style={{
-                      backgroundColor: THINKING_LEVEL_COLOR[thinkingLevel],
-                      boxShadow: '0 0 0 1px var(--paper)',
-                    }}
-                  >
-                    {THINKING_LEVEL_LETTER[thinkingLevel]}
-                  </span>
+                {/* 月相图标即档位本身：off=娥眉月🌒 / low=上弦🌓 / high=凸月🌔 / max=满月🌕（不再挂 O/L/H/X 角标） */}
+                <MoonPhaseIcon level={thinkingLevel} size={17} className="shrink-0" />
               </button>
               {thinkingMenuOpen && (
                 <div
@@ -5184,7 +5093,7 @@ ${rows.join('\n')}
                 >
                   {/* S2b 四档可选（legacy medium 仅存量显示，不进菜单） */}
                   {THINKING_LEVELS.filter((l) => l.value !== 'medium').map((lvl) => {
-                const modelSupportsThinking = thinkingAutoMode || (availableModels.find((m) => m.modelId === modelId)?.thinking ?? true);
+                const modelSupportsThinking = availableModels.find((m) => m.modelId === modelId)?.thinking ?? true;
                 const isDisabled = !modelSupportsThinking;
                 const levelSelected = thinkingLevel === lvl.value;
                 return (
@@ -5224,7 +5133,15 @@ ${rows.join('\n')}
                     }
                   }}
                 >
-                  <span>{lvl.label}</span>
+                  <span className="flex items-center gap-1.5">
+                    <MoonPhaseIcon
+                      level={lvl.value}
+                      size={14}
+                      className="shrink-0"
+                      style={{ opacity: isDisabled ? 0.4 : 1 }}
+                    />
+                    <span>{lvl.label}</span>
+                  </span>
                   {levelSelected && <Check className="h-2.5 w-2.5" />}
                 </button>
                 );
@@ -5246,72 +5163,30 @@ ${rows.join('\n')}
                   backgroundColor: 'var(--paper-hover)',
                   color: 'var(--ink-muted)',
                 }}
-                title={modelId && modelId !== DEFAULT_MODEL_ID
-                  ? dropdownModels.find((m) => m.modelId === modelId)?.label ?? modelId
-                  : 'Auto Mode'}
+                title={dropdownModels.find((m) => m.modelId === modelId)?.label ?? modelId}
               >
-                <span
-                  className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
-                  style={{
-                    backgroundColor: (dropdownModels.find((m) => m.modelId === modelId)?.thinking ?? false)
-                      ? 'var(--primary-strong)'
-                      : 'var(--ink-faint)',
-                  }}
-                />
+                {/* 品牌 logo 取代此前的状态圆点（圆点只表「是否推理模型」，与旁边月相档位重复） */}
+                <ModelBrandLogo modelId={modelId} size={13} />
                 <span className="max-w-[200px] truncate">
-                  {modelId && modelId !== DEFAULT_MODEL_ID
-                    ? dropdownModels.find((m) => m.modelId === modelId)?.label ?? modelId
-                    : 'Auto'}
+                  {dropdownModels.find((m) => m.modelId === modelId)?.label ?? modelId}
                 </span>
                 <ChevronDown className="h-2.5 w-2.5 opacity-50" />
               </button>
 
               {modelMenuOpen && (
                 <div
-                  className="absolute bottom-full right-0 z-30 mb-1 max-h-64 w-52 overflow-y-auto rounded-xl border shadow-lg"
+                  className="absolute bottom-full right-0 z-30 mb-1 max-h-64 w-40 overflow-y-auto rounded-xl border shadow-lg"
                   style={{
                     borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
                     backgroundColor: 'var(--popover)',
                   }}
                 >
-                  {/* Auto 模式选项 */}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleSelectModel(DEFAULT_MODEL_ID);
-                    }}
-                    className="flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors"
-                    style={{
-                      backgroundColor: modelId === DEFAULT_MODEL_ID ? 'var(--paper-soft)' : 'transparent',
-                      borderBottom: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
-                    }}
-                    onMouseEnter={(e) => {
-                      if (modelId !== DEFAULT_MODEL_ID) {
-                        e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (modelId !== DEFAULT_MODEL_ID) {
-                        e.currentTarget.style.backgroundColor = 'transparent';
-                      }
-                    }}
-                  >
-                    <div className="flex flex-1 flex-col">
-                      <span
-                        className="text-xs font-medium"
-                        style={{ color: 'var(--ink)' }}
-                      >
-                        Auto
-                      </span>
-                    </div>
-                    {modelId === DEFAULT_MODEL_ID && (
-                      <Check
-                        className="mt-0.5 h-3.5 w-3.5 shrink-0"
-                        style={{ color: 'var(--primary)' }}
-                      />
-                    )}
-                  </button>
                   {/* 模型平铺列表：不再按供应商分类 */}
+                  {dropdownModels.length === 0 && (
+                    <div className="px-2.5 py-3 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                      No model configured. Add one in Settings → Models.
+                    </div>
+                  )}
                   {dropdownModels.map((m) => {
                     const parsed = parseCustomModel(m.modelId);
                     const providerType = parsed?.provider;
@@ -5339,20 +5214,15 @@ ${rows.join('\n')}
                         handleSelectModel(m.modelId);
                       }}
                       className="flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors"
-                      style={{
-                        backgroundColor: m.modelId === modelId ? 'var(--paper-soft)' : 'transparent',
-                      }}
+                      style={{ backgroundColor: 'transparent' }}
                       onMouseEnter={(e) => {
-                        if (m.modelId !== modelId) {
-                          e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
-                        }
+                        e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
                       }}
                       onMouseLeave={(e) => {
-                        if (m.modelId !== modelId) {
-                          e.currentTarget.style.backgroundColor = 'transparent';
-                        }
+                        e.currentTarget.style.backgroundColor = 'transparent';
                       }}
                     >
+                      <ModelBrandLogo modelId={m.modelId} size={13} className="mt-0.5" />
                       <div className="flex flex-1 flex-col">
                         <span
                           className="truncate text-xs font-medium"
@@ -5390,26 +5260,46 @@ ${rows.join('\n')}
                       setModelMenuOpen(false);
                       window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'roles' } }));
                     }}
-                    className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors"
-                    style={{
-                      borderTop: '1px solid color-mix(in oklab, var(--line) 30%, transparent)',
-                      backgroundColor: 'transparent',
-                    }}
+                    className="mx-1.5 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center rounded-md px-2 py-1.5 transition-colors"
+                    style={{ backgroundColor: 'var(--paper-muted)' }}
                     onMouseEnter={(e) => {
-                      e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
+                      e.currentTarget.style.backgroundColor = 'var(--paper-hover)';
                     }}
                     onMouseLeave={(e) => {
-                      e.currentTarget.style.backgroundColor = 'transparent';
+                      e.currentTarget.style.backgroundColor = 'var(--paper-muted)';
                     }}
                   >
-                    <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--primary)' }} />
                     <span className="text-xs font-medium" style={{ color: 'var(--ink)' }}>
-                      Model settings
+                      model settings
                     </span>
                   </button>
               </div>
           )}
         </div>
+
+            {/* 语音输入（微信式）：点击开始录音 → 麦克风左侧**就地展开**一条录音条（实时音量波形 +
+                计时 + ✕ 取消 / ✓ 完成），不覆盖输入框；录音结束服务端转文字回填输入框。
+                录音本身不落盘（转写失败即丢弃）。条与按钮同排，展开方向自然朝左。
+                侧边栏不提供：浏览器任务靠「看页面 + 打字追问」，键盘输入已足够（isSidebar） */}
+            {!isSidebar && <VoiceRecordBar voice={voice} />}
+            {!isSidebar && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                voice.start();
+              }}
+              disabled={isStreaming || voice.recording || voice.transcribing}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-50"
+              style={{
+                backgroundColor: 'var(--paper-hover)',
+                color: 'var(--ink-muted)',
+              }}
+              title="Voice note (record & transcribe to text)"
+            >
+              <Mic className="h-3.5 w-3.5" />
+            </button>
+            )}
 
             {/* 发送 / 停止按钮 — 最右侧：执行中且有输入 → 发送（走待办确认）；执行中无输入 → 停止 */}
             {isStreaming && !localInput.trim() ? (
@@ -5442,9 +5332,6 @@ ${rows.join('\n')}
                 <ArrowUpCircle className="h-3.5 w-3.5" />
               </button>
             )}
-
-            {/* 上下文占用环（dsh ContextMeter）：composer 尾部，点击看明细 */}
-            <ContextMeter meter={composerCtxMeter} />
           </div>
         </div>
       </div>
@@ -5532,11 +5419,9 @@ ${rows.join('\n')}
         'ai-node-expanded overflow-x-hidden',
       )}
       style={{
-        width: nodeWidth,
+        // 宽度与对话容器同轮次布局：面板展开时随容器收缩，不再出现"外壳仍是旧宽度、被面板覆盖"的一帧
+        width: '100%',
         height: '100%',
-        // 实际外壳宽度透传给 globals.css：--wide-bleed 按真实壳宽计算，
-        // 避免节点被可视区上限压缩后代码块 breakout 仍按壳宽上限外扩导致右缘被裁
-        ['--bob-shell-w' as string]: nodeWidth,
       }}
     >
       {/* 画布连线已物理移除（2026-09）：不再渲染左右 Handle 拖线；
@@ -5546,17 +5431,19 @@ ${rows.join('\n')}
           （flex/grid 子项 flex-basis:auto 时 min-width 默认 auto=内容宽，这里显式归零） */}
       <div
         className={cn(
-          'relative z-[1] flex w-full min-w-0 flex-col overflow-x-hidden rounded-xl border transition-[box-shadow,border-color,background-color,opacity] duration-200',
+          'relative z-[1] flex w-full min-w-0 flex-col overflow-x-hidden transition-[box-shadow,border-color,background-color,opacity] duration-200',
           'h-full',
+          // 画布节点是浮在灰底上的卡片；侧边栏是一块平整面板，不要圆角与四周描边
+          !isSidebar && 'rounded-xl border',
           confirmPending && 'confirm-breathing',
         )}
         style={{
           // 2026-09-12 会话区改纯白：与灰色画布底 --canvas-bg 拉开对比，凸显会话卡片
           background: '#fff',
           // 2026-09 口径：去除身份高亮边框——所有 agent 统一中性边框，不再按 coding/Kar/Butler 染色
-          borderColor: 'color-mix(in oklab, var(--line) 45%, transparent)',
-          // inset 高光减弱（淡灰底上原 18% 白光太突兀）
-          boxShadow: 'inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent)',
+          borderColor: isSidebar ? undefined : 'color-mix(in oklab, var(--line) 45%, transparent)',
+          // inset 高光减弱（淡灰底上原 18% 白光太突兀）；侧边栏无画布底，这道高光没有依据
+          boxShadow: isSidebar ? undefined : 'inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent)',
         }}
       >
       {/* Header — Phase 2: 统一 NodeCardHeader 三段式骨架（左锚点 + 标题 + 右操作组） */}
@@ -5585,7 +5472,8 @@ ${rows.join('\n')}
               style={{ color: 'var(--ink-muted)' }}
             />
             <span className="inline-block max-w-full truncate">
-              {data.title}
+              {/* 侧边栏的会话标题在工具条会话菜单里，此处不重复显示 */}
+              {isSidebar ? '' : data.title}
             </span>
           </span>
         }
@@ -5596,44 +5484,48 @@ ${rows.join('\n')}
                 无外框、无底色（与标题栏其他图标按钮同款样式），仅靠与主分栏的间距区分，
                 避免三个字数不等的文字标签挤在一个分段控件里 */}
             <div className="flex items-center gap-1.5">
-              <div
-                className="flex items-center gap-0.5 rounded-lg border p-0.5"
-                style={{
-                  borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
-                  backgroundColor: 'color-mix(in oklab, var(--paper) 75%, transparent)',
-                }}
-              >
-                {(['chat', 'team'] as const).map((k) => {
-                  const active = pane === k;
-                  return (
-                    <button
-                      key={k}
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); setPane(k); }}
-                      className={cn('flex h-5 cursor-pointer items-center rounded-md px-2 text-11 font-medium transition-colors', active ? '' : 'hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)]')}
-                      style={active
-                        ? { backgroundColor: 'color-mix(in oklab, var(--primary) 14%, transparent)', color: 'var(--primary-strong)' }
-                        : { color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
-                      title={k === 'team' ? 'Team: launch multi-agent runs here, and watch member assignments / task progress / collaboration — you can interject and retry tasks' : 'Chat: this turn\'s conversation and the final answer'}
-                    >
-                      {k === 'chat' ? 'Chat' : 'Team'}
-                    </button>
-                  );
-                })}
-              </div>
+              {/* 视图切换 Chat/Team：Team 工作台是画布分栏形态，侧边栏不提供该入口 */}
+              {!isSidebar && (
+                <div
+                  className="flex items-center gap-0.5 rounded-lg border p-0.5"
+                  style={{
+                    borderColor: 'color-mix(in oklab, var(--line) 30%, transparent)',
+                    backgroundColor: 'color-mix(in oklab, var(--paper) 75%, transparent)',
+                  }}
+                >
+                  {(['chat', 'team'] as const).map((k) => {
+                    const active = pane === k;
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setPane(k); }}
+                        className={cn('flex h-5 cursor-pointer items-center rounded-md px-2 text-11 font-medium transition-colors', active ? '' : 'hover:bg-[color:color-mix(in_oklab,var(--paper-hover)_70%,transparent)]')}
+                        style={active
+                          ? { backgroundColor: 'color-mix(in oklab, var(--primary) 14%, transparent)', color: 'var(--primary-strong)' }
+                          : { color: 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
+                        title={k === 'team' ? 'Team: launch multi-agent runs here, and watch member assignments / task progress / collaboration — you can interject and retry tasks' : 'Chat: this turn\'s conversation and the final answer'}
+                      >
+                        {k === 'chat' ? 'Chat' : 'Team'}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {/* 必须是来回切换：侧边栏已隐藏 Chat/Team 分段控件，这枚图标是从 Trace 回对话的唯一入口 */}
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); setPane('trace'); }}
+                onClick={(e) => { e.stopPropagation(); setPane(pane === 'trace' ? 'chat' : 'trace'); }}
                 className="flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
                 style={{ color: pane === 'trace' ? 'var(--primary-strong)' : 'color-mix(in oklab, var(--ink-muted) 60%, transparent)' }}
-                title="Trace: this conversation's execution trajectory and task replay"
+                title={pane === 'trace' ? 'Back to chat' : "Trace: this conversation's execution trajectory and task replay"}
               >
                 <ChartSpline className="h-3.5 w-3.5" />
               </button>
             </div>
             {/* 连线关系入口：画布已物理移除连线（2026-09），关系经 NodeMap 查看/管理。
                 点击 → NodeMap 展开并高亮本节点及其连线。 */}
-            {linkCount > 0 && (
+            {!isSidebar && linkCount > 0 && (
               <button
                 type="button"
                 onClick={() => window.dispatchEvent(new CustomEvent('nodemap-reveal-node', { detail: { nodeId: id } }))}
@@ -5651,7 +5543,7 @@ ${rows.join('\n')}
               </button>
             )}
             {/* Bob-Mind 未回看改动角标：面板手动改过导图，Buzan 还没看过（说话或点 Ask Buzan 后消失） */}
-            {isMind && mindChanges > 0 && (
+            {!isSidebar && isMind && mindChanges > 0 && (
               <span
                 className="relative flex h-5 min-w-5 shrink-0 items-center justify-center gap-1 rounded-full px-1.5 text-7 font-bold leading-none"
                 style={{
@@ -5665,7 +5557,7 @@ ${rows.join('\n')}
               </span>
             )}
             {/* 断线警告角标 */}
-            {hasDisconnectedUpstream && (
+            {!isSidebar && hasDisconnectedUpstream && (
               <span
                 className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
                 style={{ backgroundColor: 'color-mix(in oklab, var(--danger) 12%, transparent)' }}
@@ -5675,16 +5567,12 @@ ${rows.join('\n')}
               </span>
             )}
             {/* AI Coding 预览按钮：在小程序中打开预览 */}
-            {typeof data.sandboxAppId === 'string' && data.sandboxAppId && (
+            {!isSidebar && typeof data.sandboxAppId === 'string' && data.sandboxAppId && (
               <>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    window.dispatchEvent(
-                      new CustomEvent('open-sandbox-preview', {
-                        detail: { id: data.sandboxAppId as string, name: data.title || 'Sandbox App' },
-                      }),
-                    );
+                    void openSandboxPreviewInHippo({ id: data.sandboxAppId as string, name: data.title || 'Sandbox App' });
                   }}
                   className="flex shrink-0 items-center rounded p-0.5 transition-opacity hover:opacity-70"
                   title="Open preview"
@@ -6140,6 +6028,240 @@ function inferOutputKind(name: string): OutputFileItem['kind'] {
   return 'other';
 }
 
+/* ------------------------- Research 档候选来源清单 ------------------------- */
+
+/** 候选来源：本轮**真实读过**的网页。
+ *  URL 与正文都取自工具调用记录（调用参数 / 返回原文），不是模型自述 → 不会被编造；
+ *  正文即「研究时读到的正文」，导入时直接落盘复用，与回答里的引用同版（NotebookLM 口径）。 */
+interface ResearchSource {
+  url: string;
+  /** 去 www 的域名，用作行内标签前缀 */
+  host: string;
+  /** 列表展示用的短标签：域名 + 路径尾段（完整 URL 走 title 悬浮提示） */
+  label: string;
+  /** 页面标题（read 类工具的返回信封里有） */
+  title?: string;
+  /** 本轮读到的正文（Markdown）；只打开过页面、没读正文的来源没有这一项 */
+  body?: string;
+  /** page（默认）= 本轮读过的网页原件；report = 本轮研究结论（模型综述，派生材料） */
+  kind?: 'page' | 'report';
+  /** 报告行专用：正文摘要（结论首段）；网页行的摘要由 sourceSummary(body) 现算 */
+  summary?: string;
+}
+
+/** 只打开页面、不返回正文的工具：URL 从调用参数取（chrome 通道的 MCP 同名工具一并认） */
+const RESEARCH_NAV_TOOLS = new Set([
+  'browser_navigate',
+  'browser_open_tab',
+  'web_fetch',
+  'mcp__bob-browser-mcp__browser_navigate',
+  'mcp__bob-browser-mcp__browser_open_tab',
+]);
+
+/** 返回正文的工具：URL 与正文都从**返回原文**解析（参数里没有 URL） */
+const RESEARCH_READ_TOOLS = new Set([
+  'browser_extract_text',
+  'browser_read_article',
+  'browser_read_pdf',
+  'mcp__bob-browser-mcp__browser_extract_text',
+  'mcp__bob-browser-mcp__browser_read_article',
+  'mcp__bob-browser-mcp__browser_read_pdf',
+]);
+
+/** 搜索引擎：只用来挑候选来源，本身不是研究来源 → 不进清单 */
+const RESEARCH_SKIP_HOSTS = new Set([
+  'google.com', 'bing.com', 'baidu.com', 'duckduckgo.com', 'sogou.com', 'so.com',
+  'yandex.com', 'yandex.ru', 'search.brave.com', 'startpage.com', 'search.yahoo.com',
+  'ecosia.org', 'weixin.sogou.com',
+]);
+
+/** 正文上限：防御极长页面（返回值本身已被工具 maxOutput 截过，这里只兜底） */
+const MAX_SOURCE_BODY_CHARS = 200_000;
+
+/**
+ * 从工具返回原文里解析 URL / 标题 / 正文。
+ *
+ * 认得两种信封：
+ *   1. 内置工具的文本信封（renderEnvelope）——
+ *      extract_text / read_article: `标题: …\nURL: …\n\n<正文>`
+ *      read_pdf:                    `PDF: <url>\n…\n\n<正文>`
+ *      navigate:                    `已打开: <url>\n标题: …`（无正文）
+ *   2. MCP 通道的 JSON 返回体（url + markdown / text / content）
+ * 两者都不匹配时返回 null —— 宁可不认，也不猜（避免把非正文塞进材料）。
+ */
+function parseReadResult(
+  toolName: string,
+  result: string,
+): { url: string; title?: string; body?: string } | null {
+  const text = (result || '').trim();
+  if (!text) return null;
+
+  if (text.startsWith('{')) {
+    try {
+      const v = JSON.parse(text) as Record<string, unknown>;
+      const url = typeof v.url === 'string' ? v.url : '';
+      if (!url) return null;
+      const body = [v.markdown, v.text, v.content].find(
+        (x): x is string => typeof x === 'string' && x.trim().length > 0,
+      );
+      return { url, title: typeof v.title === 'string' ? v.title : undefined, body };
+    } catch {
+      return null; // 非合法 JSON：不当信封解析，直接放弃
+    }
+  }
+
+  // 首行块（到第一个空行为止）给 标题 / URL，其后整段为正文
+  const sep = text.indexOf('\n\n');
+  const head = sep >= 0 ? text.slice(0, sep) : text;
+  const body = sep >= 0 ? text.slice(sep + 2).trim() : '';
+  const title = /^标题:\s*(.+)$/m.exec(head)?.[1]?.trim();
+  const url =
+    /^URL:\s*(\S+)$/m.exec(head)?.[1] ||
+    /^PDF:\s*(\S+)$/m.exec(head)?.[1] ||
+    /^已打开:\s*(\S+)$/m.exec(head)?.[1] ||
+    '';
+  if (!url) return null;
+  // 正文只认 read 类工具：navigate 的信封同样有 `标题:` 行，但它没有正文
+  return { url, title, body: RESEARCH_READ_TOOLS.has(toolName) ? body : undefined };
+}
+
+/** 摘要行：正文首个像样的段落（去掉标题 / 列表符号），单行截断 */
+function sourceSummary(body: string | undefined): string {
+  if (!body) return '';
+  const para = body
+    .split(/\n{2,}/)
+    // 摘要行是纯文本，脚注角标 `[^n]` 只显噪（报告正文的出处都长这样），先摘掉
+    .map((p) =>
+      p
+        .replace(/\[\^[^\]\s]{1,64}\]/g, '')
+        .replace(/^[#>\-*\d.\s]+/, '')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
+    .find((p) => p.length >= 30);
+  if (!para) return '';
+  return para.length > 160 ? `${para.slice(0, 160)}…` : para;
+}
+
+/**
+ * 本轮研究结论 → 一行候选来源（kind: 'report'）。
+ *
+ * 与网页来源同卡、同勾选、同导入，差别只在性质：正文不是别人写的网页原件，而是模型本轮的
+ * 综述（派生材料）。url 用 `bobwork://` 合成键，只当去重 / 勾选状态 / localStorage 的键用，
+ * 不会被当成可抓取地址；出处（会话节点 + 依据来源清单）由服务端写进文件头。
+ */
+function buildReportSource(content: string, nodeId?: string): ResearchSource | null {
+  const raw = (content || '').trim();
+  // 报告正文从一级标题起算：Research 档的过程叙述（"Let me open…"）与结论同处一条 assistant
+  // 消息、且整段挤在报告之前，整条固化会把叙述一起写进 materials（分享页照渲染）。骨架保证
+  // 报告以 `# <主题>` 开头，故按该行切开；找不到一级标题时保持原样，不做猜测性截断。
+  const h1 = /^\s{0,3}#\s+.+$/m.exec(raw);
+  const body = (h1 ? raw.slice(h1.index) : raw).trim();
+  if (body.length < 200) return null; // 太短不值得固化（与 REUSABLE_TEXT_MIN_CHARS 同口径）
+  // 优先一级标题：综述骨架以 `# <主题>` 开头，若退回「第一个标题」会把 `## 研究问题`
+  // 这类小节名当文件名。无一级标题时才退回二级，再没有则由服务端用日期兜底。
+  const heading =
+    /^\s{0,3}#\s+(.+)$/m.exec(body)?.[1] ??
+    /^\s{0,3}##\s+(.+)$/m.exec(body)?.[1];
+  const title = heading?.replace(/[#*`]/g, '').trim();
+  // 摘要 = 正文首个像样的段落（标题行、`① 研究问题` 这类短小节名由 sourceSummary 自行跳过），
+  // 只去掉加粗/代码标记，便于在卡片行内一行读出一个结论轮廓
+  const summary = sourceSummary(body).replace(/[*`]/g, '');
+  return {
+    url: `bobwork://report/${nodeId || 'session'}`,
+    host: '',
+    label: 'Research report',
+    title: title && title.length <= 80 ? title : undefined,
+    summary: summary || undefined,
+    body,
+    kind: 'report',
+  };
+}
+
+/** 按 toolCalls 数组缓存收集结果：卡片所在层每帧都会重算，而正文是大字符串，
+ *  不缓存的话每次渲染都要重新切片几十 KB × 来源数。数组引用变了自然失效，无额外成本。 */
+const researchSourcesCache = new WeakMap<ToolCallRecord[], ResearchSource[]>();
+
+/** 正文链接标注用的映射缓存。按 sources 数组身份缓存 —— 必须给 HtmlRenderer 一个**身份稳定**的
+ *  Map：它是 React.memo 的 props 之一，每次渲染新建 Map 会让 memo 失效、innerHTML 被整块重写，
+ *  进而把用户正在划词的选区打散（见 HtmlRenderer 底部注释）。 */
+const readSourceMapCache = new WeakMap<ResearchSource[], Map<string, ReadSourceInfo>>();
+
+/**
+ * 本轮读过的页面 → 正文链接标注信息（键为归一化 URL）。
+ *
+ * 只收「真的读到了正文」的来源：只 navigate 打开过、没读正文的页面不给弹窗 ——
+ * 与「搜索页摘要不算读过」同一条纪律，让「有没有真读过」在正文里也看得见。
+ */
+function buildReadSourceMap(sources: ResearchSource[]): Map<string, ReadSourceInfo> {
+  const cached = readSourceMapCache.get(sources);
+  if (cached) return cached;
+  const map = new Map<string, ReadSourceInfo>();
+  for (const s of sources) {
+    if (s.kind === 'report' || !s.body) continue; // 合成键不是真地址；无正文不标注
+    const key = normalizeSourceUrl(s.url);
+    if (!key || map.has(key)) continue;
+    map.set(key, { title: s.title || s.host, host: s.host, excerpt: sourceSummary(s.body) });
+  }
+  readSourceMapCache.set(sources, map);
+  return map;
+}
+
+/** 汇总本轮候选来源：按首次出现顺序去重、剔除搜索页与失败调用、上限 30 条。
+ *  同一页面可能先 navigate 后 read —— 按 URL 合并，后到的标题 / 正文补齐。 */
+function collectResearchSources(toolCalls: ToolCallRecord[] | undefined): ResearchSource[] {
+  if (!toolCalls?.length) return [];
+  const cached = researchSourcesCache.get(toolCalls);
+  if (cached) return cached;
+  const byUrl = new Map<string, ResearchSource>();
+  for (const t of toolCalls) {
+    if (!t || t.success === false) continue;
+    const isRead = RESEARCH_READ_TOOLS.has(t.toolName);
+    if (!isRead && !RESEARCH_NAV_TOOLS.has(t.toolName)) continue;
+
+    let url = '';
+    let title: string | undefined;
+    let body: string | undefined;
+    if (isRead) {
+      const parsed = parseReadResult(t.toolName, t.result);
+      if (parsed) {
+        url = parsed.url;
+        title = parsed.title;
+        body = parsed.body ? parsed.body.slice(0, MAX_SOURCE_BODY_CHARS) : undefined;
+      }
+    }
+    if (!url) {
+      const raw = t.arguments?.url;
+      if (typeof raw === 'string' && raw.trim()) url = raw.trim();
+    }
+    if (!url) continue;
+
+    const norm = normalizeSourceUrl(url);
+    if (!norm) continue;
+    let host = '';
+    let path = '';
+    try {
+      const u = new URL(norm);
+      host = u.hostname.replace(/^www\./, '');
+      path = decodeURIComponent(u.pathname);
+    } catch { continue; }
+    if (RESEARCH_SKIP_HOSTS.has(host)) continue;
+
+    const prev = byUrl.get(norm);
+    if (prev) {
+      if (!prev.title && title) prev.title = title;
+      if (body && body.length > (prev.body?.length ?? 0)) prev.body = body;
+      continue;
+    }
+    if (byUrl.size >= 30) continue;
+    const tail = path.split('/').filter(Boolean).pop() ?? '';
+    byUrl.set(norm, { url: norm, host, label: tail ? `${host}/${tail}` : host, title, body });
+  }
+  const out = Array.from(byUrl.values());
+  researchSourcesCache.set(toolCalls, out);
+  return out;
+}
+
 /**
  * 从回答正文提取 `OutputFile: <path>` 行（模型按系统提示在末尾输出的产物标记）。
  * 当写文件发生在工具结果未回传 SSE 时，正文行是展示产物的唯一线索。
@@ -6557,6 +6679,323 @@ function OutputFilesCard({ files, projectId }: { files: OutputFileItem[]; projec
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Research 档「来源清单」卡片：本轮**研究结论**一行 + 本轮**真实读过**的网页若干行。
+ *  - 网页：URL 与正文都取自工具调用记录（非模型自述，故不会被编造），行内给首段摘要，
+ *    可展开看本轮读到的全文；
+ *  - 结论：本轮回答本身（派生材料），展开可看全文，出处头标注 Derived 并列出依据来源。
+ *  两者同勾选、同导入：用户决定哪些进当前项目 materials/。网页走 add_link（**已读正文优先
+ *  直接落盘**，与回答里的引用同版；没有正文的才回落抓取链路），结论走 add_report。
+ *  落盘后宿主自动登记账本并建内容索引，研究结果由此沉淀成可复用的项目材料。
+ *  仅 Hippo 对话栏 Research 档渲染，画布节点不出现。 */
+function ResearchSourcesCard({ sources, nodeId }: { sources: ResearchSource[]; nodeId?: string }) {
+  // 默认全选：excluded 只记「用户主动取消」的，新增来源自动回到选中态
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  // 展开全文的来源（默认收起：候选行只占一行摘要，避免卡片被正文撑爆）
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // 「已导入」标记按会话节点落 localStorage：卡片每次都由 toolCalls 重建，
+  // 标记不落盘的话重开会话会把同一批来源再导一遍（materials 里出现 "(1)" 副本）
+  const importedKey = nodeId ? `bob-research-imported:${nodeId}` : '';
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState(0);
+  /** 本次导入总数：selected 会随每条例成功而收缩，不能拿它当进度分母 */
+  const [total, setTotal] = useState(0);
+  const [imported, setImported] = useState<Set<string>>(new Set());
+  const [failures, setFailures] = useState<Array<{ label: string; error: string }>>([]);
+
+  // 挂载后再读已导入标记：SSR 期没有 localStorage，且避开首帧水合不一致
+  useEffect(() => {
+    if (!importedKey) return;
+    try {
+      const arr: unknown = JSON.parse(localStorage.getItem(importedKey) || '[]');
+      if (Array.isArray(arr)) setImported(new Set(arr.filter((x): x is string => typeof x === 'string')));
+    } catch { /* 脏数据忽略 */ }
+  }, [importedKey]);
+
+  if (!sources || sources.length === 0) return null;
+
+  const allImported = imported.size === sources.length;
+  // 报告与网页同列表：报告是派生结论，网页是原件 —— 计数分开，别把报告算成「读过的网页」
+  const pages = sources.filter((s) => s.kind !== 'report');
+  const hasReport = sources.some((s) => s.kind === 'report');
+  const headerLabel =
+    `${allImported ? 'Sources Imported' : 'Sources Read'}`
+    + (pages.length > 0 ? ` · ${pages.length}` : '')
+    + (hasReport ? ' · Report' : '');
+
+  const selected = sources.filter((s) => !imported.has(s.url) && !excluded.has(s.url));
+
+  /** 标记一条已导入：同时落 localStorage，重开会话不会重复导入 */
+  const markImported = (url: string) => {
+    setImported((prev) => {
+      const next = new Set(prev).add(url);
+      if (importedKey) {
+        try { localStorage.setItem(importedKey, JSON.stringify(Array.from(next))); } catch { /* 配额满忽略 */ }
+      }
+      return next;
+    });
+  };
+
+  const toggle = (url: string) => {
+    if (importing || imported.has(url)) return;
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  };
+
+  const toggleExpand = (url: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  };
+
+  const handleImport = async () => {
+    const queue = selected;
+    if (queue.length === 0 || importing) return;
+    setImporting(true);
+    setFailures([]);
+    setTotal(queue.length);
+    const failed: Array<{ label: string; error: string }> = [];
+    // 串行逐条：服务端抓取有超时与降级路径，并发跑会同时压两套抓取通道
+    for (let i = 0; i < queue.length; i++) {
+      setProgress(i + 1);
+      const s = queue[i];
+      try {
+        // 报告：派生结论，出处写会话节点 + 依据来源清单；网页：带本轮读到的正文与标题，
+        // 服务端优先直接落盘（与引用同版），缺失才重新抓取
+        const payload = s.kind === 'report'
+          ? {
+              action: 'add_report',
+              nodeId,
+              title: s.title,
+              body: s.body,
+              sources: pages.map((p) => p.url),
+            }
+          : { action: 'add_link', url: s.url, title: s.title, body: s.body };
+        const res = await fetch('/api/materials', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          failed.push({ label: s.label, error: data?.error || `HTTP ${res.status}` });
+        } else {
+          markImported(s.url);
+        }
+      } catch {
+        failed.push({ label: s.label, error: 'Network error' });
+      }
+    }
+    setImporting(false);
+    setProgress(0);
+    if (failed.length > 0) setFailures(failed);
+  };
+
+  return (
+    <div
+      className="mt-2 rounded-lg border px-2 py-2"
+      style={{
+        borderColor: allImported
+          ? 'color-mix(in oklab, var(--success) 55%, transparent)'
+          : 'color-mix(in oklab, var(--primary-strong) 45%, transparent)',
+        backgroundColor: 'color-mix(in oklab, var(--paper) 90%, transparent)',
+      }}
+    >
+      <div className="flex items-center gap-1.5 px-0.5">
+        {allImported ? (
+          <CheckCircle2 className="h-2.5 w-2.5 shrink-0" style={{ color: 'var(--success)' }} />
+        ) : (
+          <Globe className="h-2.5 w-2.5 shrink-0" style={{ color: 'var(--primary-strong)' }} />
+        )}
+        <span
+          className="text-xs font-semibold uppercase tracking-wider"
+          style={{ color: 'color-mix(in oklab, var(--ink-muted) 80%, transparent)' }}
+        >
+          {headerLabel}
+        </span>
+        <div className="h-px flex-1" style={{ backgroundColor: 'color-mix(in oklab, var(--paper-hover) 80%, transparent)' }} />
+      </div>
+
+      <div className="mt-1.5 grid grid-cols-1 gap-1 px-0.5">
+        {sources.map((s) => {
+          const done = imported.has(s.url);
+          const checked = done || !excluded.has(s.url);
+          const isReport = s.kind === 'report';
+          // 报告行不给首段摘要，改说清它的性质与依据：这是本轮的结论，不是又一份原始网页
+          const summary = isReport
+            ? `Model-written synthesis of ${pages.length} source${pages.length === 1 ? '' : 's'} · derived`
+            : sourceSummary(s.body);
+          const isOpen = expanded.has(s.url);
+          return (
+            <div
+              key={s.url}
+              className="rounded-md border transition-colors"
+              style={{
+                borderColor: done
+                  ? 'color-mix(in oklab, var(--success) 40%, transparent)'
+                  : checked
+                    ? 'color-mix(in oklab, var(--primary-strong) 35%, transparent)'
+                    : 'color-mix(in oklab, var(--paper-hover) 90%, transparent)',
+                backgroundColor: done
+                  ? 'color-mix(in oklab, var(--success) 8%, transparent)'
+                  : checked
+                    ? 'color-mix(in oklab, var(--primary-strong) 7%, transparent)'
+                    : 'transparent',
+              }}
+            >
+              <div className="flex items-start gap-1.5 px-2 py-1.5">
+                <button
+                  type="button"
+                  onClick={() => toggle(s.url)}
+                  disabled={importing || done}
+                  title={s.url}
+                  className={cn(
+                    'flex min-w-0 flex-1 items-start gap-1.5 text-left',
+                    !importing && !done ? 'cursor-pointer' : 'cursor-default',
+                  )}
+                >
+                  <span
+                    className="mt-0.5 flex h-3 w-3 shrink-0 items-center justify-center rounded-[3px] border"
+                    style={{
+                      borderColor: done
+                        ? 'color-mix(in oklab, var(--success) 60%, transparent)'
+                        : checked
+                          ? 'var(--primary-strong)'
+                          : 'color-mix(in oklab, var(--ink-muted) 45%, transparent)',
+                      backgroundColor: done
+                        ? 'color-mix(in oklab, var(--success) 20%, transparent)'
+                        : checked
+                          ? 'color-mix(in oklab, var(--primary-strong) 20%, transparent)'
+                          : 'transparent',
+                    }}
+                  >
+                    {checked && (
+                      <Check className="h-2 w-2" style={{ color: done ? 'var(--success)' : 'var(--primary-strong)' }} />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs" style={{ color: 'var(--ink-strong)' }}>
+                      {s.label}
+                    </span>
+                    {summary && (
+                      <span className="mt-0.5 block text-xs leading-snug" style={{ color: 'var(--ink-muted)' }}>
+                        {summary}
+                      </span>
+                    )}
+                    {/* 报告行：性质说明之外再补一句正文摘要，不展开也能看出结论讲了什么 */}
+                    {isReport && s.summary && (
+                      <span className="mt-0.5 block text-xs leading-snug" style={{ color: 'var(--ink-muted)' }}>
+                        {s.summary}
+                      </span>
+                    )}
+                  </span>
+                </button>
+                {s.body && (
+                  <button
+                    type="button"
+                    onClick={() => toggleExpand(s.url)}
+                    className="shrink-0 cursor-pointer rounded px-1 py-0.5 text-xs"
+                    style={{ color: 'var(--primary-strong)' }}
+                  >
+                    {isOpen ? 'Hide' : 'Show full text'}
+                  </button>
+                )}
+              </div>
+              {isOpen && s.body && (
+                <div
+                  className="mx-2 mb-1.5 max-h-56 overflow-auto whitespace-pre-wrap rounded border px-2 py-1.5 text-xs leading-relaxed"
+                  style={{
+                    borderColor: 'color-mix(in oklab, var(--paper-hover) 90%, transparent)',
+                    color: 'var(--ink-muted)',
+                  }}
+                >
+                  {s.body}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 px-0.5">
+        {importing ? (
+          <button
+            disabled
+            className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium opacity-70"
+            style={{
+              borderColor: 'color-mix(in oklab, var(--primary-strong) 45%, transparent)',
+              backgroundColor: 'color-mix(in oklab, var(--primary-strong) 12%, transparent)',
+              color: 'var(--primary-strong)',
+            }}
+          >
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Importing {progress}/{total}...
+          </button>
+        ) : selected.length === 0 && imported.size > 0 ? (
+          <span className="text-xs leading-relaxed" style={{ color: 'var(--success)' }}>
+            {allImported ? `${imported.size} sources saved` : `${imported.size} of ${sources.length} saved`} to materials/ · indexed automatically.
+          </span>
+        ) : (
+          <button
+            onClick={() => void handleImport()}
+            disabled={selected.length === 0}
+            className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
+            style={{
+              borderColor: 'color-mix(in oklab, var(--primary-strong) 45%, transparent)',
+              backgroundColor: 'color-mix(in oklab, var(--primary-strong) 12%, transparent)',
+              color: 'var(--primary-strong)',
+            }}
+          >
+            <Folder className="h-3 w-3" />
+            Import {selected.length === 1 ? '1 source' : `${selected.length} sources`}
+          </button>
+        )}
+        {!importing && selected.length === 0 && imported.size === 0 && (
+          <span className="flex-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+            Nothing selected.
+          </span>
+        )}
+        {!importing && selected.length > 0 && (
+          <span className="flex-1 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
+            Uncheck anything you don&apos;t want in the project.
+          </span>
+        )}
+      </div>
+
+      {failures.length > 0 && (
+        <div className="mt-1 grid grid-cols-1 gap-1 px-0.5">
+          {failures.slice(0, 3).map((f, i) => (
+            <div
+              key={`${f.label}-${i}`}
+              className="flex items-start gap-1.5 rounded-md border px-2 py-1.5"
+              style={{
+                borderColor: 'color-mix(in oklab, var(--danger) 40%, transparent)',
+                backgroundColor: 'color-mix(in oklab, var(--danger) 8%, transparent)',
+              }}
+            >
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" style={{ color: 'var(--danger)' }} />
+              <span className="min-w-0 flex-1 text-xs" style={{ color: 'var(--danger)' }}>
+                {f.label} — {f.error}
+              </span>
+            </div>
+          ))}
+          {failures.length > 3 && (
+            <span className="px-0.5 text-xs" style={{ color: 'var(--danger)' }}>
+              and {failures.length - 3} more failed — click Import again to retry.
+            </span>
+          )}
         </div>
       )}
     </div>

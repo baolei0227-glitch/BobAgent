@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
-import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge, Globe, FolderOpen } from 'lucide-react';
+import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge, Globe, FolderOpen, Bell } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -36,11 +36,14 @@ import {
   type QuickPrompt,
 } from '@/lib/settings';
 import { inferModelSpec } from '@/lib/model-matcher';
-import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normalizeVendorName } from '@/lib/model-tags';
+import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normalizeVendorName, isTtsModel } from '@/lib/model-tags';
 import { TemplateLibraryModal } from './TemplateLibraryModal';
 import { WechatBindModal } from './WechatBindModal';
+import { FeishuBindModal } from './FeishuBindModal';
 import { UsagePanel } from './UsagePanel';
 import { ToggleSwitch } from './ToggleSwitch';
+import { LocalSttPanel } from './LocalSttPanel';
+import { LocalTtsPanel, type LocalTtsEngine } from './LocalTtsPanel';
 import {
   DEFAULT_NAMING,
   PAD_OPTIONS,
@@ -144,6 +147,11 @@ const BINDING_MODE_STYLE: Record<BindingMode, { bg: string; fg: string }> = {
 /** 本地无鉴权厂商（BobMultimodal / Ollama）：无需 API Key，连接验证与模型列表拉取跳过 Key 校验 */
 const NO_AUTH_LOCAL_PROVIDERS = new Set<ProviderType>(['bobmultimodal', 'ollama']);
 
+/** BobMultimodal（Qwen3-TTS CustomVoice）的固定音色枚举，与服务端 GET /api/tts/voices 一致；传枚举外的值会 500 */
+const BOBMULTIMODAL_TTS_VOICES = ['serena', 'vivian', 'uncle_fu', 'ryan', 'aiden', 'ono_anna', 'sohee', 'eric', 'dylan'] as const;
+/** 该厂商的服务端默认音色（voice 留空时引擎侧回落到它，见 lib/tts 的 TTS_PROVIDER_PRESETS） */
+const BOBMULTIMODAL_DEFAULT_VOICE = 'vivian';
+
 /** Provider 侧栏分组（视觉分组，不影响类型真源） */
 const PROVIDER_SIDEBAR_GROUPS: Array<{ label: string; types: ProviderType[] }> = [
   { label: 'Mainland China', types: ['deepseek', 'glm', 'moonshot', 'qwen', 'siliconflow'] },
@@ -165,14 +173,16 @@ function HintLabel({
 }
 
 /** 用途标签（模型池统一仓库）：把 FetchedModel.category 映射为角色用途。
- *  chat=Chat / stt=STT / image=Image / ocr=OCR（vision 角色已随视觉模型配置一并移除，由 bob-ocr-mcp 插件管理） */
-type ModelPurpose = 'chat' | 'stt' | 'image' | 'ocr';
+ *  chat=Chat / stt=STT / tts=TTS / image=Image / ocr=OCR（vision 角色已随视觉模型配置一并移除，由 bob-ocr-mcp 插件管理） */
+type ModelPurpose = 'chat' | 'stt' | 'tts' | 'image' | 'ocr';
 
-function categoryToPurpose(cat: FetchedModel['category']): ModelPurpose | undefined {
-  switch (cat) {
+/** category + 模型名 → 用途。audio 是「识别 + 合成」混合分类，须按模型名再分：
+ *  命中 TTS 关键词归 tts，其余归 stt——否则 TTS 模型会混进 STT 角色候选池（反之亦然）。 */
+function categoryToPurpose(model: Pick<FetchedModel, 'category' | 'modelId'>): ModelPurpose | undefined {
+  switch (model.category) {
     case 'chat': return 'chat';
     case 'ocr': return 'ocr';
-    case 'audio': return 'stt';
+    case 'audio': return isTtsModel(model.modelId) ? 'tts' : 'stt';
     case 'image': return 'image';
     case 'other': return 'image';
     default: return undefined; // vision / embedding / rerank 不参与角色
@@ -182,6 +192,7 @@ function categoryToPurpose(cat: FetchedModel['category']): ModelPurpose | undefi
 const PURPOSE_TAG: Record<ModelPurpose, { label: string; bg: string; fg: string }> = {
   chat: { label: 'Chat', bg: 'var(--primary-soft)', fg: 'var(--primary-strong)' },
   stt: { label: 'STT', bg: 'var(--purple-soft)', fg: 'var(--purple)' },
+  tts: { label: 'TTS', bg: 'var(--info-soft)', fg: 'var(--info)' },
   image: { label: 'Image', bg: 'var(--warn-soft)', fg: 'var(--warn)' },
   ocr: { label: 'OCR', bg: 'var(--success-soft)', fg: 'var(--success)' },
 };
@@ -275,7 +286,7 @@ export function SettingsModal({
   // 单模型添加验证中（勾选 / Add 时的连接测试），驱动 spinner 与防重复点击
   const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
   // 统一导航：左栏目录选中项，右栏显示对应面板
-  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'usage' | 'browser' | 'fileorganizer'>('roles');
+  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'feishu' | 'usage' | 'browser' | 'fileorganizer' | 'butlernotify' | 'remote'>('roles');
   // Hippo Browser：清除 Cookies 按钮状态
   const [browserClearBusy, setBrowserClearBusy] = useState(false);
   const [browserClearMsg, setBrowserClearMsg] = useState('');
@@ -291,6 +302,77 @@ export function SettingsModal({
   const [fileOrgPickErr, setFileOrgPickErr] = useState('');
   // 命名规则（受控选项：字段顺序 / 分隔符 / 版本号补零）
   const [fileOrgNaming, setFileOrgNaming] = useState<NamingRule>(DEFAULT_NAMING);
+  // Butler 推送克制（B5）：免打扰时段 / 单日上限；本地编辑态，改动随自动保存落盘。
+  // 口径见 lib/core/quiet-hours.ts —— 用户自订日历提醒永不被静默，只受单日上限。
+  const [bnEnabled, setBnEnabled] = useState(true);
+  const [bnQuietStart, setBnQuietStart] = useState('22:00');
+  const [bnQuietEnd, setBnQuietEnd] = useState('08:00');
+  const [bnDailyLimit, setBnDailyLimit] = useState('6');
+  const [bnLimitErr, setBnLimitErr] = useState('');
+
+  // 远程访问鉴权：手机经私有隧道远程操作本机 BobWork；桌面 localhost 豁免。
+  const [raEnabled, setRaEnabled] = useState(false);
+  const [raToken, setRaToken] = useState('');
+  const [raMode, setRaMode] = useState<'loopback-exempt' | 'strict'>('loopback-exempt');
+  const [raBusy, setRaBusy] = useState(false);
+  const [raMsg, setRaMsg] = useState('');
+
+  const loadRemoteAccess = useCallback(async () => {
+    try {
+      const r = await fetch('/api/remote-access');
+      if (r.ok) {
+        const d = await r.json();
+        setRaEnabled(!!d.enabled);
+        setRaToken(d.token || '');
+        setRaMode(d.mode === 'strict' ? 'strict' : 'loopback-exempt');
+      }
+    } catch {
+      /* 忽略读取失败 */
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRemoteAccess();
+  }, [loadRemoteAccess]);
+
+  const applyRemoteAccess = useCallback(async (action: 'enable' | 'disable' | 'rotate') => {
+    setRaBusy(true);
+    setRaMsg('');
+    try {
+      const r = await fetch('/api/remote-access', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      if (!r.ok) throw new Error('request failed');
+      const d = await r.json();
+      setRaEnabled(!!d.enabled);
+      setRaToken(d.token || '');
+      setRaMode(d.mode === 'strict' ? 'strict' : 'loopback-exempt');
+      setRaMsg(action === 'disable' ? '远程访问已关闭' : '已更新，请把 Token 填入手机端 App');
+    } catch {
+      setRaMsg('操作失败，请重试');
+    } finally {
+      setRaBusy(false);
+    }
+  }, [raEnabled]);
+
+  const setRemoteMode = useCallback(async (mode: 'loopback-exempt' | 'strict') => {
+    setRaBusy(true);
+    try {
+      const r = await fetch('/api/remote-access', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'setMode', mode }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        setRaMode(d.mode === 'strict' ? 'strict' : 'loopback-exempt');
+      }
+    } finally {
+      setRaBusy(false);
+    }
+  }, [raMode]);
 
   const handleClearBrowserCookies = useCallback(async () => {
     setBrowserClearBusy(true);
@@ -349,7 +431,7 @@ export function SettingsModal({
 
   // 角色派发区块折叠状态（默认全部折叠，点击标题展开/收起）
   const [rolesCollapsed, setRolesCollapsed] = useState<Record<string, boolean>>({
-    chat: true, ocr: true, stt: true, image: true, task: true, outcome: true,
+    chat: true, ocr: true, stt: true, image: true, task: true, outcome: true, tts: true,
   });
   // 模型管理界面单一真源：pickerSide = 当前选中厂商（selectedChatProvider 即它本身）
   const [pickerSide, setPickerSide] = useState<ProviderType>('deepseek');
@@ -415,10 +497,44 @@ export function SettingsModal({
   const [chatAutoVisionOnImage, setChatAutoVisionOnImage] = useState<boolean>(true);
 
   // STT
-  const [sttProvider, setSttProvider] = useState<'doubao-stream' | 'doubao' | 'dashscope' | 'siliconflow' | 'openai' | 'bobmultimodal'>('doubao-stream');
+  const [sttProvider, setSttProvider] = useState<'doubao-stream' | 'doubao' | 'dashscope' | 'siliconflow' | 'openai'>('doubao-stream');
   const [sttModel, setSttModel] = useState<string>('');
   // STT 候选池（与 Chat 统一：首个 model 为活动模型）
   const [sttPool, setSttPool] = useState<Array<{ provider: string; modelId: string }>>([]);
+  // 本地离线 STT（sherpa-onnx）：与云端**互斥单选**——非空即"本地模型为当前引擎"，空 = 未选本地
+  const [localSttModel, setLocalSttModel] = useState<string>('');
+  // 引擎互斥：往云端池加模型 → 清掉本地选择；选中本地模型 → 清空云端池（保存时据此决定 provider）
+  const setSttPoolExclusive = (next: Array<{ provider: string; modelId: string }>) => {
+    setSttPool(next);
+    if (next.length > 0) setLocalSttModel('');
+  };
+  const selectLocalSttModel = (id: string) => {
+    setLocalSttModel(id);
+    if (id) setSttPool([]);
+  };
+
+  // TTS（语音合成，B4）：与 STT 同款——云端池与本地引擎互斥单选；音色/语速为云端补充字段
+  const [ttsPool, setTtsPool] = useState<Array<{ provider: string; modelId: string }>>([]);
+  const [ttsVoice, setTtsVoice] = useState<string>('');
+  const [ttsSpeed, setTtsSpeed] = useState<string>('');
+  // 本地引擎二态：'' = 云端池；'sherpa-local' = 离线神经模型
+  const [ttsLocalEngine, setTtsLocalEngine] = useState<LocalTtsEngine>('');
+  // 本地引擎的独立参数（保存时只写当前引擎那份）
+  const [ttsLocalModel, setTtsLocalModel] = useState<string>('');   // 离线神经模型 id
+  // 零样本克隆（ZipVoice）的参考音：绝对路径 + 与之逐字一致的文本
+  const [ttsLocalRefAudio, setTtsLocalRefAudio] = useState<string>('');
+  const [ttsLocalRefText, setTtsLocalRefText] = useState<string>('');
+  // 多音色预置模型的音色 id；'' = 用模型首条
+  const [ttsLocalVoice, setTtsLocalVoice] = useState<string>('');
+  // 引擎互斥：往云端池加模型 → 取消本地选择；选中本地引擎 → 清空云端池
+  const setTtsPoolExclusive = (next: Array<{ provider: string; modelId: string }>) => {
+    setTtsPool(next);
+    if (next.length > 0) setTtsLocalEngine('');
+  };
+  const selectTtsEngine = (next: LocalTtsEngine) => {
+    setTtsLocalEngine(next);
+    if (next) setTtsPool([]);
+  };
 
   // 图像编辑（Image Edit）：独立配置（图像编辑走 images API，与聊天模型不同形态）
   const [imageEditProvider, setImageEditProvider] = useState<'openai' | 'doubao' | 'qwen' | 'siliconflow' | 'bobmultimodal' | 'ollama'>('doubao');
@@ -446,12 +562,13 @@ export function SettingsModal({
   const [fontScale, setFontScale] = useState<'m' | 'l' | 'xl'>('l');
   // 思考档位策略开关（settings.thinking）：缺省均 true（harnessPure 默认=纯 DSH 固定档），
   // 与后端/默认设置语义一致（draft 加载时合并初始化）
-  const [thinkingPolicy, setThinkingPolicy] = useState<{ harnessPure: boolean; downgradeOnExecution: boolean; trivialPromptOff: boolean; injectThinkGuide: boolean }>({
+  const [thinkingPolicy, setThinkingPolicy] = useState<{ harnessPure: boolean; downgradeOnExecution: boolean; trivialPromptOff: boolean }>({
     harnessPure: true,
     downgradeOnExecution: true,
     trivialPromptOff: true,
-    injectThinkGuide: true,
   });
+  // Chat Model 卡片的高级区折叠（默认折叠；内含思考档位策略，仅在 harnessPure 关掉时才用得上）
+  const [chatAdvancedOpen, setChatAdvancedOpen] = useState(false);
   // 左栏导航搜索词（P3）
   const [navQuery, setNavQuery] = useState<string>('');
   // 快捷指令全局库（Quick Prompts 页签：集中管理，节点按 id 选用）
@@ -537,14 +654,31 @@ export function SettingsModal({
           harnessPure: thinkingCfg.harnessPure !== false,
           downgradeOnExecution: thinkingCfg.downgradeOnExecution !== false,
           trivialPromptOff: thinkingCfg.trivialPromptOff !== false,
-          injectThinkGuide: thinkingCfg.injectThinkGuide !== false,
         });
         // 笔记专属模型已随笔记系统拆分到 bob-notes-mcp 插件域（插件大脑自持模型配置），宿主不再维护
         if (settings.stt) {
-          setSttProvider((settings.stt.provider as typeof sttProvider) || 'doubao-stream');
+          // 已知 STT 引擎白名单（本地 sherpa-local 由下方 localModel 分支单独承接）；
+          // 不在表内的陈旧 provider 归一化为默认厂商，避免无效值沉淀
+          const knownSttProviders = ['doubao-stream', 'doubao', 'dashscope', 'siliconflow', 'openai', 'bobmultimodal'];
+          setSttProvider(knownSttProviders.includes(settings.stt.provider || '')
+            ? (settings.stt.provider as typeof sttProvider)
+            : 'doubao-stream');
           setSttModel(settings.stt.model || '');
           const sttPoolProv = settings.stt.provider === 'dashscope' ? 'qwen' : (settings.stt.provider === 'doubao-stream' || settings.stt.provider === 'doubao') ? 'doubao' : settings.stt.provider;
           setSttPool(settings.stt.pool?.length ? settings.stt.pool : (settings.stt.model ? [{ provider: (sttPoolProv as string) || 'qwen', modelId: settings.stt.model }] : []));
+          setLocalSttModel(settings.stt.localModel || '');
+        }
+        if (settings.tts) {
+          setTtsPool(settings.tts.pool?.length ? settings.tts.pool : (settings.tts.model ? [{ provider: settings.tts.provider || 'openai', modelId: settings.tts.model }] : []));
+          setTtsVoice(settings.tts.voice || '');
+          setTtsSpeed(typeof settings.tts.speed === 'number' ? String(settings.tts.speed) : '');
+          // 本地引擎二态：provider 为本地标识时才算本地引擎
+          const local = settings.tts.provider;
+          setTtsLocalEngine(local === 'sherpa-local' ? local : '');
+          setTtsLocalModel(settings.tts.localModel || '');
+          setTtsLocalRefAudio(settings.tts.localRefAudio || '');
+          setTtsLocalRefText(settings.tts.localRefText || '');
+          setTtsLocalVoice(settings.tts.localVoice || '');
         }
         if (settings.imageEdit) {
           setImageEditProvider((settings.imageEdit.provider as typeof imageEditProvider) || 'doubao');
@@ -574,6 +708,13 @@ export function SettingsModal({
         setFileOrgNaming(normalizeNaming(fo.naming));
         setFileOrgCategoryInput('');
         setFileOrgPickErr('');
+        // Butler 推送克制（B5）：缺省 = 开启（开箱即克制）；显式 enabled:false 才关
+        const bn = settings.butlerNotify ?? {};
+        setBnEnabled(bn.enabled !== false);
+        setBnQuietStart(bn.quietStart ?? '22:00');
+        setBnQuietEnd(bn.quietEnd ?? '08:00');
+        setBnDailyLimit(String(typeof bn.dailyPushLimit === 'number' ? bn.dailyPushLimit : 6));
+        setBnLimitErr('');
         // AI 浏览器通道（undefined = hippo，默认通道；仅显式 'chrome' 才显示为关）
         setAiBrowserHippo(settings.aiBrowser !== 'chrome');
         try {
@@ -616,15 +757,19 @@ export function SettingsModal({
   }, [
     apiKeys, customBaseUrls, selectedModels, searchConfig,
     selectedChatModel, chatModelPool, chatAutoVisionOnImage,
-    sttProvider, sttModel, sttPool,
+    sttProvider, sttModel, sttPool, localSttModel,
     imageEditProvider, imageEditModel, imageEditSelectedModels, imagePool,
     taskModelPool, outcomeModelPool,
+    ttsPool, ttsVoice, ttsSpeed, ttsLocalEngine, ttsLocalModel,
+    ttsLocalRefAudio, ttsLocalRefText, ttsLocalVoice,
     // App Icons（欢迎窗口头像 / 侧边栏品牌 Logo；头像池增删走 Electron API 直接落盘，不需保存设置）
     avatarMode, avatarSelected, brandLogo,
     theme,
     thinkingPolicy,
     // 文件自动整理投递箱
     fileOrgEnabled, fileOrgDir, fileOrgCategories, fileOrgAutoCreate, fileOrgNaming,
+    // Butler 推送克制（B5）
+    bnEnabled, bnQuietStart, bnQuietEnd, bnDailyLimit,
     // AI 浏览器通道（开关切换 → 下一轮对话工具面自动按新通道裁剪）
     aiBrowserHippo,
     // 字体缩放（原先点击即独立落盘，现并入自动保存，避免与自动保存并发写同一 settings.json）
@@ -957,7 +1102,7 @@ export function SettingsModal({
             modelId: id,
             thinking: true,
             // 用途标签：按分类推断（chat/stt/image/ocr），角色区据此过滤
-            purpose: fetched ? categoryToPurpose(fetched.category) : undefined,
+            purpose: fetched ? categoryToPurpose(fetched) : undefined,
           };
         });
         const baseUrl = sanitizeBaseUrl(customBaseUrls[type]) || undefined;
@@ -999,6 +1144,37 @@ export function SettingsModal({
       // selectedChatModel 为旧配置残留（只读），仅在仍有值且存在于候选池时优先使用
       const chatRole = resolveRoleFromChat(selectedChatModel || chatModelPool[0]?.modelId || '');
 
+      /**
+       * Butler 推送克制（B5）入参校验。
+       * 非法输入**不静默丢弃**：回落默认值 + 内联提示，避免用户以为改成功了
+       * （quiet-hours 侧也会二次兜底，两侧都拦才不会把策略写坏）。
+       */
+      const HM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+      const notifyCheck = (() => {
+        const problems: string[] = [];
+        const start = bnQuietStart.trim();
+        const end = bnQuietEnd.trim();
+        const startOk = HM_RE.test(start);
+        const endOk = HM_RE.test(end);
+        if (!startOk) problems.push(`Quiet start "${bnQuietStart}" is not HH:mm`);
+        if (!endOk) problems.push(`Quiet end "${bnQuietEnd}" is not HH:mm`);
+        if (startOk && endOk && start === end) {
+          // 零长度窗口会被 quiet-hours 判为「不静默」，等于开关失效 → 明确提示
+          problems.push('Quiet start and end are identical — the window would be empty');
+        }
+        const rawLimit = bnDailyLimit.trim();
+        let limit: number | undefined;
+        if (rawLimit === '') {
+          limit = undefined; // 留空 = 用默认 6
+        } else {
+          const n = Number(rawLimit);
+          if (Number.isInteger(n) && n >= 0) limit = n;
+          else problems.push(`Daily push limit "${bnDailyLimit}" must be an integer ≥ 0 (0 = unlimited)`);
+        }
+        return { problems, startOk, endOk, start, end, limit };
+      })();
+      setBnLimitErr(notifyCheck.problems.join(' · '));
+
       // 连接验证已前移到"添加模型到模型池"时（勾选 checkbox / Add 即测，TRAE 式），
       // 保存时不再批量测试，避免一个失效模型阻塞整次配置保存。
 
@@ -1017,10 +1193,29 @@ export function SettingsModal({
           pool: chatModelPool,
         },
         // 笔记专属模型已随笔记系统拆分到 bob-notes-mcp 插件域，宿主不再写 notesModel
-        stt: {
-          provider: sttPool[0]?.provider || sttProvider,
-          model: sttPool[0]?.modelId || undefined,
-          pool: sttPool,
+        // 引擎单选：选中本地模型 → provider='sherpa-local'（清空云端池）；否则用云端池首个
+        stt: localSttModel
+          ? { provider: 'sherpa-local', model: undefined, pool: [], localModel: localSttModel }
+          : {
+              provider: sttPool[0]?.provider || sttProvider,
+              model: sttPool[0]?.modelId || undefined,
+              pool: sttPool,
+              localModel: undefined,
+            },
+        // TTS（语音合成）：始终输出对象——本地引擎与云端池互斥单选，选中本地时写对应 provider
+        // （引擎侧据此走本地引擎）；Key/BaseUrl 从厂商角色继承（引擎侧 resolve）
+        tts: {
+          provider: ttsLocalEngine || ttsPool[0]?.provider,
+          model: ttsLocalEngine ? undefined : ttsPool[0]?.modelId,
+          pool: ttsLocalEngine ? [] : ttsPool,
+          voice: ttsVoice.trim() || undefined,
+          speed: ttsSpeed.trim() ? Number(ttsSpeed) : undefined,
+          localModel: ttsLocalEngine === 'sherpa-local' ? (ttsLocalModel || undefined) : undefined,
+          // 零样本克隆（ZipVoice）的参考音与逐字文本：内置/自定义统一为绝对路径
+          localRefAudio: ttsLocalEngine === 'sherpa-local' ? (ttsLocalRefAudio.trim() || undefined) : undefined,
+          localRefText: ttsLocalEngine === 'sherpa-local' ? (ttsLocalRefText.trim() || undefined) : undefined,
+          // 多音色预置的音色 id：'' 时由合成层回落模型首条
+          localVoice: ttsLocalEngine === 'sherpa-local' ? (ttsLocalVoice || undefined) : undefined,
         },
         imageEdit: {
           // 与 STT 一致：默认 provider/model 取候选池首个（池为空时回退旧字段），保证后端默认路径可解析
@@ -1037,12 +1232,11 @@ export function SettingsModal({
         brandLogo: brandLogo || undefined,
         fontScale,
         theme: 'warm',
-        // 思考档位策略：显式写四值（缺省语义已由初始化时归一，确保开关与后端一致；harnessPure=true=纯固定档）
+        // 思考档位策略：显式写三值（缺省语义已由初始化时归一，确保开关与后端一致；harnessPure=true=纯固定档）
         thinking: {
           harnessPure: thinkingPolicy.harnessPure,
           downgradeOnExecution: thinkingPolicy.downgradeOnExecution,
           trivialPromptOff: thinkingPolicy.trivialPromptOff,
-          injectThinkGuide: thinkingPolicy.injectThinkGuide,
         },
         // 文件自动整理投递箱（分类清单为空 = 用内置默认分类）
         fileOrganizer: {
@@ -1056,6 +1250,14 @@ export function SettingsModal({
         },
         // AI 浏览器通道：显式写单值（互斥，不做 auto 判据）
         aiBrowser: aiBrowserHippo ? 'hippo' : 'chrome',
+        // Butler 推送克制（B5）：非法项回落默认（不写该字段 = quiet-hours 用默认值），
+        // 并在面板上给出内联提示（见 notifyCheck）。
+        butlerNotify: {
+          enabled: bnEnabled,
+          ...(notifyCheck.startOk ? { quietStart: notifyCheck.start } : {}),
+          ...(notifyCheck.endOk ? { quietEnd: notifyCheck.end } : {}),
+          ...(typeof notifyCheck.limit === 'number' ? { dailyPushLimit: notifyCheck.limit } : {}),
+        },
       });
 
       // 立即应用主题（data-theme 写入 document.documentElement），无需重启
@@ -1292,6 +1494,12 @@ export function SettingsModal({
                       keywords: ['wechat', 'bind', 'qr', 'weixin', '微信'],
                     },
                     {
+                      id: 'feishu',
+                      label: 'Feishu Bot',
+                      icon: <MessageSquare className="h-3.5 w-3.5" />,
+                      keywords: ['feishu', 'lark', 'bot', '飞书', '机器人'],
+                    },
+                    {
                       id: 'browser',
                       label: 'Hippo Browser',
                       icon: <Globe className="h-3.5 w-3.5" />,
@@ -1302,6 +1510,23 @@ export function SettingsModal({
                       label: 'File Organizer',
                       icon: <FolderOpen className="h-3.5 w-3.5" />,
                       keywords: ['file', 'folder', 'inbox', 'organize', 'rename', 'archive', '文件整理', '投递箱', '归档', '分类', '命名', '自动整理'],
+                    },
+                  ],
+                },
+                {
+                  label: 'Butler',
+                  items: [
+                    {
+                      id: 'butlernotify',
+                      label: 'Butler Notify',
+                      icon: <Bell className="h-3.5 w-3.5" />,
+                      keywords: ['butler', 'notify', 'notification', 'quiet', 'dnd', 'do not disturb', 'push', '免打扰', '推送', '克制', '通知', '提醒'],
+                    },
+                    {
+                      id: 'remote',
+                      label: 'Remote Access',
+                      icon: <Globe className="h-3.5 w-3.5" />,
+                      keywords: ['remote', 'access', 'token', 'bearer', 'tailscale', 'tunnel', '远程访问', '手机', '隧道', '鉴权'],
                     },
                   ],
                 },
@@ -1328,8 +1553,11 @@ export function SettingsModal({
                 quickprompts: 'var(--danger)',
                 templates: 'var(--info)',
                 wechat: 'var(--success)',
+                feishu: 'var(--info)',
                 browser: 'var(--teal)',
                 fileorganizer: 'var(--warn)',
+                butlernotify: 'var(--success)',
+                remote: 'var(--teal)',
                 diagram: 'var(--ink-faint)',
               };
               const filteredGroups = groups
@@ -1833,16 +2061,22 @@ export function SettingsModal({
                 <div className="mt-3 divide-y rounded-xl border" style={{ borderColor: 'var(--line)' }}>
                   {(
                     [
-                      { keys: ['⌘', 'R'], label: 'Auto arrange nodes (Node Map)' },
+                      { keys: ['⌘', 'F'], label: 'Open global search panel' },
                       { keys: ['⌘', 'G'], label: 'Open Project Board' },
+                      { keys: ['⌘', 'R'], label: 'Auto arrange nodes (Node Map)' },
                       { keys: ['⌘', 'S'], label: 'Save document' },
+                      { keys: ['⌘', '⇧', 'F'], label: 'Find / replace in document & PDF' },
+                      { keys: ['⌘', 'Z'], label: 'Undo (document editor)' },
+                      { keys: ['⇧', '⌘', 'Z'], label: 'Redo (document editor)' },
                       { keys: ['⌘', 'Enter'], label: 'Send message (in input fields)' },
                       { keys: ['⌘/Ctrl', 'Scroll'], label: 'Zoom canvas' },
-                      { keys: ['J', 'K'], label: 'Prev / next mail (BobMail)' },
-                      { keys: ['R'], label: 'Focus reply (BobMail)' },
-                      { keys: ['E'], label: 'Archive mail (BobMail)' },
-                      { keys: ['S'], label: 'Star mail (BobMail)' },
-                      { keys: ['⌘', '⇧', 'D'], label: 'Delete mail (BobMail)' },
+                      { keys: ['⌘', '⇧', 'O'], label: 'Screenshot OCR (macOS only)' },
+                      { keys: ['⌘', '⇧', 'B'], label: 'Show / hide Hippo Browser' },
+                      // 2026-09-25：收件箱已从邮件式通知中心（WantedNoticeCenter，已删）迁入 Butler 抽屉，
+                      // 原 J/K · R · E · S · ⌘⇧D 五条邮件快捷键随组件一并消失 → 换成对话框的真实键位
+                      { keys: ['Enter'], label: 'Send question (Butler dialog)' },
+                      { keys: ['⇧', 'Enter'], label: 'New line in input (Butler dialog)' },
+                      { keys: ['Esc'], label: 'Close Butler dialog' },
                     ]
                   ).map((item) => (
                     <div key={item.label} className="flex items-center justify-between gap-3 px-3 py-2">
@@ -1892,18 +2126,20 @@ export function SettingsModal({
               const coreRect = { x: 66, y: 210, w: 788, h: 250 };
 
               // Command Core 乘员：画布上可创建的 Agent 节点舱
+              // 2026-09-25：Butler 已不再是画布节点（能力融合进悬浮球 Butler 抽屉），从乘员表移除
               const crew = [
                 { id: 'crew-chat', title: 'Chat', icon: <MessageSquare className="h-4 w-4" /> },
                 { id: 'crew-coding', title: 'Coding', icon: <Wrench className="h-4 w-4" /> },
                 { id: 'crew-kar', title: 'Kar', icon: <BookOpen className="h-4 w-4" /> },
-                { id: 'crew-butler', title: 'Butler', icon: <ClipboardCheck className="h-4 w-4" /> },
               ];
-              const crewPos = crew.map((_, i) => ({
-                x: coreRect.x + 28 + i * 150,
-                y: coreRect.y + 46,
-                w: 132,
-                h: 150,
-              }));
+              // 乘员按数量在核心舱内水平居中（成员数变化时不必手改坐标）
+              const crewPos = (() => {
+                const spacing = 150;
+                const w = 132;
+                const groupW = (crew.length - 1) * spacing + w;
+                const startX = coreRect.x + (coreRect.w - groupW) / 2;
+                return crew.map((_, i) => ({ x: startX + i * spacing, y: coreRect.y + 46, w, h: 150 }));
+              })();
 
               // 舱段卡：顶部为接入外部能力的模块，底部为动力与产出系统
               const modules: {
@@ -2122,11 +2358,7 @@ export function SettingsModal({
                 ) => {
                   return (
                     <>
-                      {pool.length === 0 ? (
-                        <p className="mb-2 text-sm italic" style={{ color: 'var(--ink-muted)' }}>
-                          No models in {label} pool yet. Add models below.
-                        </p>
-                      ) : (
+                      {pool.length > 0 && (
                         <div className="mb-2 grid grid-cols-2 gap-1.5">
                           {pool.map((item) => {
                             const preset = PROVIDER_PRESETS.find((p) => p.type === item.provider as ProviderType);
@@ -2190,7 +2422,7 @@ export function SettingsModal({
                             return list
                               .filter((m) => !added.has(`${type}|${m.modelId}`))
                               .filter((m) => {
-                                if (purpose) return categoryToPurpose(m.category) === purpose;
+                                if (purpose) return categoryToPurpose(m) === purpose;
                                 return true;
                               })
                               .map((m) => (
@@ -2204,6 +2436,40 @@ export function SettingsModal({
                     </>
                   );
                 };
+
+                /** 行首摘要：当前角色已选模型（池首个 + 其余数量），未配置显示 Not set */
+                const renderRoleSummary = (pool: Array<{ provider: string; modelId: string }>) => (
+                  pool.length === 0 ? (
+                    <span className="text-11 italic" style={{ color: 'var(--ink-faint)' }}>Not set</span>
+                  ) : (
+                    <span className="flex min-w-0 items-center gap-1">
+                      <span className="max-w-[132px] truncate text-11" style={{ color: 'var(--ink-muted)' }}>{pool[0].modelId}</span>
+                      {pool.length > 1 && <Badge variant="primary" size="sm" label={`+${pool.length - 1}`} />}
+                    </span>
+                  )
+                );
+
+                /** STT 行首摘要：本地与云端互斥，本地模型非空即当前引擎（带 Local 标签），否则回落到云端池 */
+                const renderSttSummary = () => (
+                  localSttModel ? (
+                    <span className="flex min-w-0 items-center gap-1">
+                      <span className="max-w-[132px] truncate text-11" style={{ color: 'var(--ink-muted)' }}>{localSttModel}</span>
+                      <Badge variant="primary" size="sm" label="Local" />
+                    </span>
+                  ) : renderRoleSummary(sttPool)
+                );
+
+                /** TTS 行首摘要：本地与云端互斥，选中本地引擎即当前引擎（带 Local 标签），否则回落到云端池 */
+                const renderTtsSummary = () => (
+                  ttsLocalEngine ? (
+                    <span className="flex min-w-0 items-center gap-1">
+                      <span className="max-w-[132px] truncate text-11" style={{ color: 'var(--ink-muted)' }}>
+                        {ttsLocalModel || 'Offline neural'}
+                      </span>
+                      <Badge variant="primary" size="sm" label="Local" />
+                    </span>
+                  ) : renderRoleSummary(ttsPool)
+                );
 
                 return (
                   <div className="px-5 py-4">
@@ -2240,21 +2506,24 @@ export function SettingsModal({
                       />
                     )}
 
+                    {/* 角色模型分配：单卡片行式列表——每行一个角色，行首显示当前模型，展开后增删 */}
+                    <div className="rounded-lg border" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
+
                     {/* 主对话模型（Chat Model）：候选池，首个模型为默认主对话模型 */}
-                    <div className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
-                      <button type="button" onClick={() => toggleRoleSection('chat')} className="mb-3 flex w-full items-center gap-2.5 text-left">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
-                          <MessageSquare className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    <div className="scroll-mt-2">
+                      <button type="button" onClick={() => toggleRoleSection('chat')} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="shrink-0 text-xs font-semibold" style={{ color: 'var(--ink)' }}>
                           <HintLabel icon={false} hint="Add to chat pool. Pool models are auto-checked in their provider and visible in every node's model selector.">Chat Model</HintLabel>
                         </span>
-                        {rolesCollapsed.chat
-                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+                          {renderRoleSummary(chatModelPool)}
+                          {rolesCollapsed.chat
+                            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        </span>
                       </button>
                       {!rolesCollapsed.chat && (
-                      <>
+                      <div className="px-3 pb-3">
                       {/* 候选池列表 */}
                       {chatModelPool.length === 0 ? (
                         <p className="mb-2 text-sm italic" style={{ color: 'var(--ink-muted)' }}>
@@ -2341,7 +2610,7 @@ export function SettingsModal({
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-semibold" style={{ color: 'var(--ink)' }}>Prefer vision model when images are attached</div>
                             <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>
-                              When the model is Auto and the message context contains image attachments, pick a vision-capable model from the pool so images reach it directly as pixels instead of the OCR-description fallback.
+                              When the turn carries image attachments but the selected model cannot read images, switch that turn to a vision-capable model from the pool so images reach it directly as pixels instead of the OCR-description fallback. No vision model in the pool → keep the selected model.
                             </div>
                           </div>
                           <button
@@ -2358,9 +2627,20 @@ export function SettingsModal({
                         </div>
                       </div>
 
-                      {/* ── Thinking Policy（思考档位策略，高级；随主表单 Save 统一落盘）── */}
+                      {/* ── Advanced（默认折叠）：思考档位策略，随主表单 Save 统一落盘 ── */}
                       <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--line-soft)' }}>
-                        <div className="mb-1 text-11 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Thinking Policy</div>
+                        <button
+                          type="button"
+                          onClick={() => setChatAdvancedOpen((v) => !v)}
+                          className="flex w-full items-center justify-between text-left"
+                        >
+                          <span className="text-11 font-semibold uppercase tracking-wide" style={{ color: 'var(--ink-faint)' }}>Advanced</span>
+                          {chatAdvancedOpen
+                            ? <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        </button>
+                        {chatAdvancedOpen && (
+                        <>
                         {/* S2b：harnessPure = 纯 DSH 固定档总开关（默认 On）；Off = 启用下方执行轮降级 + C1 省 token */}
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
@@ -2381,10 +2661,13 @@ export function SettingsModal({
                             {thinkingPolicy.harnessPure ? 'On' : 'Off'}
                           </button>
                         </div>
+                        {/* 以下两条仅在「纯固定档」关掉后才有语义，故条件渲染，避免看起来能用其实无效 */}
+                        {!thinkingPolicy.harnessPure && (
+                        <>
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Downgrade thinking during tool execution</div>
-                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — savings of reasoning tokens (applies only when Pure DSH tiers is Off).</div>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>Lower reasoning tier on tool-loop rounds — saves reasoning tokens (planning and final rounds keep the selected tier).</div>
                           </div>
                           <button
                             type="button"
@@ -2401,7 +2684,7 @@ export function SettingsModal({
                         <div className="flex items-center justify-between gap-3 py-1.5">
                           <div className="min-w-0 flex-1">
                             <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>Skip thinking on trivial prompts</div>
-                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>No reasoning for greetings, acknowledgements and similar trivial turns.</div>
+                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>No reasoning for greetings, acknowledgements and similar trivial turns. Tiers you set to High/Max are never skipped.</div>
                           </div>
                           <button
                             type="button"
@@ -2415,103 +2698,170 @@ export function SettingsModal({
                             {thinkingPolicy.trivialPromptOff ? 'On' : 'Off'}
                           </button>
                         </div>
-                        <div className="flex items-center justify-between gap-3 py-1.5">
-                          <div className="min-w-0 flex-1">
-                            <div className="text-xs font-medium" style={{ color: 'var(--ink)' }}>{'Inject <think> guide for non-V4 reasoning models'}</div>
-                            <div className="text-11 leading-snug" style={{ color: 'var(--ink-muted)' }}>DeepSeek V4 never receives the guide; this switch only affects non-V4 reasoning models.</div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setThinkingPolicy((p) => ({ ...p, injectThinkGuide: !p.injectThinkGuide }))}
-                            className="shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors"
-                            style={{
-                              backgroundColor: thinkingPolicy.injectThinkGuide ? 'var(--primary-soft)' : 'var(--paper-hover)',
-                              color: thinkingPolicy.injectThinkGuide ? 'var(--primary-strong)' : 'var(--ink-muted)',
-                            }}
-                          >
-                            {thinkingPolicy.injectThinkGuide ? 'On' : 'Off'}
-                          </button>
-                        </div>
+                        </>
+                        )}
+                        </>
+                        )}
                       </div>
-                      </>
+                      </div>
                       )}
                     </div>
 
                     {/* 任务模型（Task Model）：通用任务层，任务摘要/会议纪要/日程解析/AI 字段抽取等轻量任务 */}
-                    <div className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
-                      <button type="button" onClick={() => toggleRoleSection('task')} className="mb-3 flex w-full items-center gap-2.5 text-left">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
-                          <Sparkles className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    <div className="border-t scroll-mt-2" style={{ borderColor: 'var(--line-soft)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('task')} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="shrink-0 text-xs font-semibold" style={{ color: 'var(--ink)' }}>
                           <HintLabel icon={false} hint="For light tasks like task summary / meeting notes / schedule parsing / AI field extraction. Defaults to the main chat model when unset; configure to route these to a cheaper or preferred model.">Task Model</HintLabel>
                         </span>
-                        {rolesCollapsed.task
-                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+                          {renderRoleSummary(taskModelPool)}
+                          {rolesCollapsed.task
+                            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        </span>
                       </button>
                       {!rolesCollapsed.task && (
-                      <>
+                      <div className="px-3 pb-3">
                       {renderRolePool('Task Model', 'var(--primary-strong)', taskModelPool, setTaskModelPool, 'chat', true)}
-                      </>
+                      </div>
                       )}
                     </div>
 
                     {/* 成果块模型（Outcome Model）：成果块（法律引用）专属，默认跟随主对话 */}
-                    <div className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
-                      <button type="button" onClick={() => toggleRoleSection('outcome')} className="mb-3 flex w-full items-center gap-2.5 text-left">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}>
-                          <FileText className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    <div className="border-t scroll-mt-2" style={{ borderColor: 'var(--line-soft)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('outcome')} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="shrink-0 text-xs font-semibold" style={{ color: 'var(--ink)' }}>
                           <HintLabel icon={false} hint="For outcome blocks (legal citations — quality-sensitive). Defaults to the main chat model, then the Task Model; configure to pin a dedicated model.">Outcome Model</HintLabel>
                         </span>
-                        {rolesCollapsed.outcome
-                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+                          {renderRoleSummary(outcomeModelPool)}
+                          {rolesCollapsed.outcome
+                            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        </span>
                       </button>
                       {!rolesCollapsed.outcome && (
-                      <>
+                      <div className="px-3 pb-3">
                       {renderRolePool('Outcome Model', 'var(--primary-strong)', outcomeModelPool, setOutcomeModelPool, 'chat', true)}
-                      </>
+                      </div>
                       )}
                     </div>
 
                     {/* 音频转写模型（STT） */}
-                    <div ref={sttSectionRef} className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
-                      <button type="button" onClick={() => toggleRoleSection('stt')} className="mb-3 flex w-full items-center gap-2.5 text-left">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--purple-soft)', color: 'var(--purple)' }}>
-                          <Zap className="h-3.5 w-3.5" />
+                    <div ref={sttSectionRef} className="border-t scroll-mt-2" style={{ borderColor: 'var(--line-soft)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('stt')} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="shrink-0 text-xs font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel>Audio STT Model</HintLabel>
                         </span>
-                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
-                          <HintLabel icon={false} hint="Speech → Text (STT) via cloud engines (Doubao / DashScope / SiliconFlow / OpenAI-compatible) or local BobMultimodal (Qwen3-ASR, no API key). Configure a provider and API Key below.">Audio STT Model</HintLabel>
+                        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+                          {renderSttSummary()}
+                          {rolesCollapsed.stt
+                            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
                         </span>
-                        {rolesCollapsed.stt
-                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
                       </button>
                       {!rolesCollapsed.stt && (
-                      <>
-                      {renderRolePool('STT', 'var(--purple)', sttPool, setSttPool, 'stt', true)}
-                      </>
+                      <div className="px-3 pb-3">
+                      {renderRolePool('STT', 'var(--purple)', sttPool, setSttPoolExclusive, 'stt', true)}
+                      {/* 本地离线（sherpa-onnx）：与云端互斥单选，选中即切换引擎；引擎/模型按需下载 */}
+                      <LocalSttPanel
+                        model={localSttModel}
+                        onModelChange={selectLocalSttModel}
+                      />
+                      </div>
+                      )}
+                    </div>
+
+                    {/* 语音合成模型（TTS，B4）：文字 → 语音，走 OpenAI 兼容 /audio/speech（见 lib/tts） */}
+                    <div className="border-t scroll-mt-2" style={{ borderColor: 'var(--line-soft)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('tts')} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="shrink-0 text-xs font-semibold" style={{ color: 'var(--ink)' }}>
+                          <HintLabel>Audio TTS Model</HintLabel>
+                        </span>
+                        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+                          {renderTtsSummary()}
+                          {rolesCollapsed.tts
+                            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        </span>
+                      </button>
+                      {!rolesCollapsed.tts && (
+                      <div className="px-3 pb-3">
+                      {renderRolePool('TTS', 'var(--purple)', ttsPool, setTtsPoolExclusive, 'tts', true)}
+                      {/* 本地引擎（离线神经模型）：与云端互斥单选，选中即切换引擎 */}
+                      <LocalTtsPanel
+                        engine={ttsLocalEngine}
+                        onEngineChange={selectTtsEngine}
+                        localModel={ttsLocalModel}
+                        onLocalModelChange={setTtsLocalModel}
+                        refAudio={ttsLocalRefAudio}
+                        onRefAudioChange={setTtsLocalRefAudio}
+                        refText={ttsLocalRefText}
+                        onRefTextChange={setTtsLocalRefText}
+                        voice={ttsLocalVoice}
+                        onVoiceChange={setTtsLocalVoice}
+                      />
+                      {/* 音色 / 语速：云端专属补充字段，仅当云端模型为当前引擎时出现 */}
+                      {ttsPool.length > 0 && (
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Voice (optional)</label>
+                          {/* BobMultimodal 音色是固定枚举，传枚举外的值会 500 —— 用下拉限定；其余厂商仍为自由输入 */}
+                          {ttsPool[0]?.provider === 'bobmultimodal' ? (
+                            <select
+                              value={ttsVoice || BOBMULTIMODAL_DEFAULT_VOICE}
+                              onChange={(e) => setTtsVoice(e.target.value)}
+                              className="h-8 w-full rounded-md border px-2 text-sm outline-none"
+                              style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+                            >
+                              {BOBMULTIMODAL_TTS_VOICES.map((v) => (
+                                <option key={v} value={v}>{v}</option>
+                              ))}
+                            </select>
+                          ) : (
+                          <input
+                            value={ttsVoice}
+                            onChange={(e) => setTtsVoice(e.target.value)}
+                            placeholder="e.g. alloy / nova / fishaudio…:alex"
+                            className="h-8 w-full rounded-md border px-3 text-sm"
+                            style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+                          />
+                          )}
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--ink-muted)' }}>Speed (optional)</label>
+                          <input
+                            value={ttsSpeed}
+                            onChange={(e) => setTtsSpeed(e.target.value)}
+                            placeholder="0.25 – 4.0, empty = default"
+                            inputMode="decimal"
+                            className="h-8 w-full rounded-md border px-3 text-sm"
+                            style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+                          />
+                        </div>
+                      </div>
+                      )}
+                      </div>
                       )}
                     </div>
 
                     {/* 图像编辑模型（Image Edit） */}
-                    <div ref={imageEditSectionRef} className="mb-3 rounded-lg border p-4 scroll-mt-2" style={{ borderColor: 'var(--line)', backgroundColor: 'var(--paper)' }}>
-                      <button type="button" onClick={() => toggleRoleSection('image')} className="mb-3 flex w-full items-center gap-2.5 text-left">
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: 'var(--purple-soft)', color: 'var(--purple)' }}>
-                          <Image className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="flex-1 text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+                    <div ref={imageEditSectionRef} className="border-t scroll-mt-2" style={{ borderColor: 'var(--line-soft)' }}>
+                      <button type="button" onClick={() => toggleRoleSection('image')} className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="shrink-0 text-xs font-semibold" style={{ color: 'var(--ink)' }}>
                           <HintLabel icon={false} hint="AI image editing for the preview panel. Image-edit models (e.g. Doubao SeedEdit / OpenAI gpt-image-1 / Qwen qwen-image-edit) use the images API — independent from chat models, so they are configured separately. Local no-auth providers (BobMultimodal SDXL / Ollama) also work here — base URL is auto-filled from the provider preset or inherited from the Model Pool when left empty.">Image Edit Model</HintLabel>
                         </span>
-                        {rolesCollapsed.image
-                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-                          : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        <span className="ml-auto flex min-w-0 items-center gap-1.5">
+                          {renderRoleSummary(imagePool)}
+                          {rolesCollapsed.image
+                            ? <ChevronDown className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+                            : <ChevronUp className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />}
+                        </span>
                       </button>
-                      {/* 已选模型 chips：同 Key 下多选，仅展开时显示（折叠时标题标签已显示默认模型） */}
-                      {!rolesCollapsed.image && imageEditSelectedModels.length > 0 && (
+                      {!rolesCollapsed.image && (
+                      <div className="px-3 pb-3">
+                      {/* 已选模型 chips：同 Key 下多选 */}
+                      {imageEditSelectedModels.length > 0 && (
                         <div className="-mt-1 mb-2 flex flex-wrap items-center gap-1">
                           {imageEditSelectedModels.map((m) => {
                             const isDefault = m === imageEditModel.trim();
@@ -2541,11 +2891,11 @@ export function SettingsModal({
                           })}
                         </div>
                       )}
-                      {!rolesCollapsed.image && (
-                      <>
                       {renderRolePool('Image Edit', 'var(--warn)', imagePool, setImagePool, 'image')}
-                      </>
+                      </div>
                       )}
+                    </div>
+
                     </div>
                   </div>
                 );
@@ -2557,6 +2907,9 @@ export function SettingsModal({
       )}
       {activeSection === 'wechat' && (
         <WechatBindModal embedded open onOpenChange={() => {}} />
+      )}
+      {activeSection === 'feishu' && (
+        <FeishuBindModal embedded open onOpenChange={() => {}} />
       )}
       {activeSection === 'usage' && (
         <UsagePanel embedded onClose={() => setActiveSection('roles')} />
@@ -2744,6 +3097,163 @@ export function SettingsModal({
               </p>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ============ Butler Notify（主动推送克制，B5） ============ */}
+      {activeSection === 'butlernotify' && (
+        <div className="space-y-6 p-6">
+          <div>
+            <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>Butler Notify</h3>
+            <p className="mt-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              How much Butler is allowed to interrupt you. Quiet hours silence proactive pushes
+              (morning / evening reports to WeChat); the report is never lost — it still lands in the drawer inbox.
+            </p>
+          </div>
+
+          {/* 总开关 */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Stay quiet</h4>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  Off = push everything, always (previous behaviour).
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={bnEnabled}
+                onChange={() => setBnEnabled((v) => !v)}
+                title={bnEnabled ? 'Enabled' : 'Disabled'}
+              />
+            </div>
+          </div>
+
+          {/* 免打扰时段 */}
+          <div
+            style={{ borderColor: 'var(--line)', opacity: bnEnabled ? 1 : 0.5 }}
+            className="rounded-xl border p-4"
+          >
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Quiet Hours</h4>
+            <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              Proactive pushes sent inside this window are held back and resume when it ends.
+              A window that runs past midnight is fine (e.g. 22:00 → 08:00).
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <Input
+                value={bnQuietStart}
+                onChange={(e) => setBnQuietStart(e.target.value)}
+                placeholder="22:00"
+                disabled={!bnEnabled}
+                className="w-24"
+              />
+              <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>→</span>
+              <Input
+                value={bnQuietEnd}
+                onChange={(e) => setBnQuietEnd(e.target.value)}
+                placeholder="08:00"
+                disabled={!bnEnabled}
+                className="w-24"
+              />
+            </div>
+          </div>
+
+          {/* 单日上限 */}
+          <div
+            style={{ borderColor: 'var(--line)', opacity: bnEnabled ? 1 : 0.5 }}
+            className="rounded-xl border p-4"
+          >
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Daily Push Limit</h4>
+            <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              Max proactive pushes per day. Leave empty for the default (6) — enter 0 for no limit.
+            </p>
+            <div className="mt-3 w-24">
+              <Input
+                value={bnDailyLimit}
+                onChange={(e) => setBnDailyLimit(e.target.value)}
+                placeholder="6"
+                disabled={!bnEnabled}
+              />
+            </div>
+          </div>
+
+          {/* 永远不静默的项：说明口径，避免用户以为闹钟会被吞掉 */}
+          <div style={{ borderColor: 'var(--line-soft)' }} className="rounded-xl border p-4">
+            <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Never silenced</h4>
+            <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              Calendar reminders you set yourself are always delivered — quiet hours never
+              suppress them. They only count toward the daily push limit above.
+            </p>
+          </div>
+
+          {bnLimitErr && (
+            <p className="text-xs" style={{ color: 'var(--danger)' }}>{bnLimitErr}</p>
+          )}
+        </div>
+      )}
+
+      {/* ============ Remote Access（手机远程操作本机，Bearer 鉴权） ============ */}
+      {activeSection === 'remote' && (
+        <div className="space-y-6 p-6">
+          <div>
+            <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>Remote Access</h3>
+            <p className="mt-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              允许手机经私有隧道（Tailscale / Cloudflare Tunnel）远程操作本机 BobWork。开启后，所有非本机请求必须持 Bearer Token；桌面端（localhost）自动豁免，不受影响。
+            </p>
+          </div>
+
+          {/* 总开关 */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>启用远程访问</h4>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  仅在已配置私有隧道、且 Mac 常开时开启。Token 是唯一密钥，泄露即等于放开本机。
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={raEnabled}
+                onChange={() => applyRemoteAccess(raEnabled ? 'disable' : 'enable')}
+                title={raEnabled ? 'Enabled' : 'Disabled'}
+              />
+            </div>
+          </div>
+
+          {raEnabled && (
+            <>
+              {/* Token */}
+              <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Access Token</h4>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  复制到手机端 BobWork Remote App 的 Token 字段。每次「重旋」都会使旧 Token 失效。
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  <Input value={raToken} readOnly className="flex-1 font-mono text-xs" />
+                  <Button variant="ghost" size="sm" onClick={() => navigator.clipboard?.writeText(raToken)}>复制</Button>
+                  <Button variant="ghost" size="sm" onClick={() => applyRemoteAccess('rotate')} disabled={raBusy}>重旋</Button>
+                </div>
+              </div>
+
+              {/* 鉴权模式 */}
+              <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>鉴权模式</h4>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  Loopback-exempt（默认）：仅非本机请求需 Token，Tailscale / WireGuard 直连下精准命中。Strict：所有请求（含本机）强制 Token，用于 Cloudflare Tunnel（其本地跳为 loopback，会绕过豁免）；Strict 模式下桌面端需同步配置自动补 Token。
+                </p>
+                <div className="mt-3 flex items-center gap-3">
+                  <ToggleSwitch
+                    checked={raMode === 'strict'}
+                    onChange={() => setRemoteMode(raMode === 'strict' ? 'loopback-exempt' : 'strict')}
+                    title={raMode === 'strict' ? 'Strict' : 'Loopback-exempt'}
+                  />
+                  <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                    {raMode === 'strict' ? 'Strict（全请求强制）' : 'Loopback-exempt（默认）'}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {raMsg && <p className="text-xs" style={{ color: 'var(--info)' }}>{raMsg}</p>}
         </div>
       )}
 

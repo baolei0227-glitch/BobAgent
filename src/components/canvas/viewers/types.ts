@@ -44,4 +44,9 @@ export interface ViewerRenderer {
   test: (ext: string, fileInfo: FileInfo) => boolean;
   /** 懒加载渲染器组件（named export） */
   load: () => Promise<ComponentType<ViewerRenderProps>>;
+  /**
+   * 渲染器自带缩放时置 true：调度层不再对内容层套 CSS `zoom`。
+   * 目前仅 docx（分页编辑器必须按面板宽度自己算适配缩放，外层再套一层会变成双重缩放）。
+   */
+  ownsZoom?: boolean;
 }

@@ -828,11 +828,12 @@ export default function StickyTodoDock() {
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** 待结算便签：下一次落盘时允许自动入日历（失焦 / 停手兜底时标记） */
+  /** 待结算便签：下一次落盘时允许自动入日历（离开输入行时标记） */
   const settlePendingRef = useRef<Set<string>>(new Set());
   /** 有未落盘文字改动的便签（关闭便签卡时兜底保存 + 结算） */
   const dirtyNotesRef = useRef<Set<string>>(new Set());
+  /** 本组件自身广播刷新的时间戳：用于抑制「自触发 → 整表重载 → 覆盖正在编辑的本地行」 */
+  const selfRefreshAtRef = useRef(0);
   const savedFlashRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const chipsRef = useRef<HTMLDivElement | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -848,20 +849,46 @@ export default function StickyTodoDock() {
     }
   };
 
-  const clearSettleTimer = () => {
-    if (settleTimerRef.current) {
-      clearTimeout(settleTimerRef.current);
-      settleTimerRef.current = null;
-    }
-  };
+  /** 广播便签/日历刷新（供画布/日历侧复用）；同时记下时间戳，供本组件识别「这是自己发出来的」 */
+  const broadcastRefresh = useCallback(() => {
+    selfRefreshAtRef.current = Date.now();
+    window.dispatchEvent(new CustomEvent('sticky-notes-changed'));
+    window.dispatchEvent(new CustomEvent('calendar-events-changed'));
+  }, []);
 
-  const reload = useCallback(() => {
+  /** 拉取服务端便签表。
+   *  anchorsOnly=true（日历侧变更）：只把服务端行级锚点按 pageId 合入本地，不用服务端内容覆盖本地 pages
+   *  —— 正在编辑的（Enter 新建的）空行与未落盘字符只存在于本地，整表替换会把它们抹掉，
+   *  连带卸载正在输入的行、丢掉焦点，表现为「便签界面退出」。新增便签仍带进来，保证别处新建可见。 */
+  const reload = useCallback((opts?: { anchorsOnly?: boolean }) => {
     const pid = projectIdRef.current;
     if (!pid) return;
     fetch(`/api/sticky-notes?project_id=${encodeURIComponent(pid)}`)
       .then((r) => r.json())
       .then((d) => {
-        if (d?.success) setNotes(Array.isArray(d.notes) ? d.notes : []);
+        if (!d?.success) return;
+        const serverNotes: StickyNote[] = Array.isArray(d.notes) ? d.notes : [];
+        if (!opts?.anchorsOnly) {
+          setNotes(serverNotes);
+          return;
+        }
+        setNotes((prev) => {
+          const haveIds = new Set(prev.map((n) => n.id));
+          const merged = prev.map((n) => {
+            const sp = serverNotes.find((x) => x.id === n.id);
+            if (!sp || !Array.isArray(n.pages)) return n;
+            const serverPages = Array.isArray(sp.pages) ? sp.pages : [];
+            return {
+              ...n,
+              pages: n.pages.map((p) => {
+                const spp = serverPages.find((x) => x.id === p.id);
+                return spp ? { ...p, lineEventIds: spp.lineEventIds, lineCalendared: spp.lineCalendared } : p;
+              }),
+            };
+          });
+          for (const sp of serverNotes) if (!haveIds.has(sp.id)) merged.push(sp);
+          return merged;
+        });
       })
       .catch(() => {});
   }, []);
@@ -875,7 +902,6 @@ export default function StickyTodoDock() {
     savedFlashRef.current.forEach((t) => clearTimeout(t));
     savedFlashRef.current.clear();
     clearSaveTimer();
-    clearSettleTimer();
     settlePendingRef.current.clear();
     dirtyNotesRef.current.clear();
     if (!projectId) return;
@@ -886,11 +912,16 @@ export default function StickyTodoDock() {
   // 外部变更（AI create_sticky_note / create_scheduled_todo、日历反向、看板编辑）后刷新
   useEffect(() => {
     if (!projectId) return;
-    const onChanged = () => reload();
+    const onChanged = () => {
+      // 自己刚广播过（落盘/手动入日历）→ 本地已是权威，跳过整表重载，避免覆盖正在编辑的行
+      if (Date.now() - selfRefreshAtRef.current < 1200) return;
+      reload();
+    };
     let timer: ReturnType<typeof setTimeout> | null = null;
     const onCalendar = () => {
+      // 日历侧变更不改变便签文本，只需同步行级锚点（闹钟标识）；整表替换会抹掉本地未落盘行
       if (timer) clearTimeout(timer);
-      timer = setTimeout(reload, 250);
+      timer = setTimeout(() => reload({ anchorsOnly: true }), 250);
     };
     window.addEventListener('sticky-notes-changed', onChanged);
     window.addEventListener('calendar-events-changed', onCalendar);
@@ -934,7 +965,6 @@ export default function StickyTodoDock() {
   useEffect(() => {
     return () => {
       clearSaveTimer();
-      clearSettleTimer();
       // 关闭便签卡：把未落盘的文字改动连同「结算」一起发出，否则打字中途关闭会丢改动、且该行永远不会入日历
       const pid = projectIdRef.current;
       if (pid) {
@@ -1004,6 +1034,8 @@ export default function StickyTodoDock() {
               ((d.note as StickyNote).pages ?? []).map((p) => p.lineEventIds ?? null),
             );
             if (afterEvs !== beforeEvs) {
+              // 锚点已由上面的 adoptServerNote 合入本地，此处只通知日历面板；记时间戳避免自触发重载
+              selfRefreshAtRef.current = Date.now();
               window.dispatchEvent(new CustomEvent('calendar-events-changed'));
             }
           }
@@ -1053,7 +1085,7 @@ export default function StickyTodoDock() {
     [applyNote, saveNote],
   );
 
-  /** 结算：允许服务端把该便签里未入日历的行自动入日历（失焦 / 停手 8 秒 / 关闭便签卡时调用）。
+  /** 结算：允许服务端把该便签里未入日历的行自动入日历（离开输入行 / 关闭便签卡时调用）。
    *  若此刻还有未落盘的文字改动，则不另发请求，改由那次落盘带结算标记，避免文字丢失。 */
   const requestSettle = useCallback(
     (noteId: string) => {
@@ -1070,7 +1102,7 @@ export default function StickyTodoDock() {
 
   /** 行文本编辑：本地即时更新 + 700ms 防抖落盘（不加 rev，保光标）。
    *  打字中的落盘只存内容、不结算自动入日历（否则半截文本会被建成事件）；
-   *  失焦（flush 走 requestSettle）或停手 8 秒后才结算一次。 */
+   *  只有用户离开这一行（失焦 / 点击其他地方）才结算一次。 */
   const debounceNote = useCallback(
     (noteId: string, builder: (note: StickyNote) => Partial<StickyNote>) => {
       applyNote(noteId, builder);
@@ -1084,14 +1116,8 @@ export default function StickyTodoDock() {
         if (settled) dirtyNotesRef.current.delete(noteId);
         saveNote(noteId, builder(latest), settled);
       }, 700);
-      // 停手兜底：连续 8 秒没有新的编辑 → 结算一次
-      clearSettleTimer();
-      settleTimerRef.current = setTimeout(() => {
-        settleTimerRef.current = null;
-        requestSettle(noteId);
-      }, 8000);
     },
-    [applyNote, saveNote, requestSettle],
+    [applyNote, saveNote],
   );
 
   /* ---- 行/标题等编辑操作（语义与旧画布便签一致） ---- */
@@ -1116,7 +1142,6 @@ export default function StickyTodoDock() {
   const onTodoLineBlur = useCallback(
     (noteId: string) => {
       if (!dirtyNotesRef.current.has(noteId) && !settlePendingRef.current.has(noteId)) return;
-      clearSettleTimer();
       requestSettle(noteId);
     },
     [requestSettle],
@@ -1334,8 +1359,7 @@ export default function StickyTodoDock() {
             adoptServerNote(d.note);
             setContentRev((r) => r + 1);
           }
-          window.dispatchEvent(new CustomEvent('sticky-notes-changed'));
-          window.dispatchEvent(new CustomEvent('calendar-events-changed'));
+          broadcastRefresh();
           return true;
         }
         return false;
@@ -1343,7 +1367,7 @@ export default function StickyTodoDock() {
         return false;
       }
     },
-    [adoptServerNote],
+    [adoptServerNote, broadcastRefresh],
   );
 
   /** 开庭 C 提交：在活动页追加一行待办，并按所选日期/时间建日历事件绑定该行（单事务 action add_to_calendar） */
@@ -1426,8 +1450,7 @@ export default function StickyTodoDock() {
               setContentRev((r) => r + 1);
             }
           }
-          window.dispatchEvent(new CustomEvent('sticky-notes-changed'));
-          window.dispatchEvent(new CustomEvent('calendar-events-changed'));
+          broadcastRefresh();
           return true;
         }
         return false;
@@ -1435,7 +1458,7 @@ export default function StickyTodoDock() {
         return false;
       }
     },
-    [],
+    [broadcastRefresh],
   );
 
   const saveTemplate = useCallback(

@@ -222,7 +222,7 @@ export function AICodingCreateDialog({ open, position, initialKind = 'mini', onC
       'Call the update_agent_package tool — it must already be installed (agent.json exists).',
       '',
       'First use ask_user_questions to confirm with the user which of these they want to change:',
-      '1) Scenes — addScenes / removeScenes (options: General / Legal = pkulaw / Notes = notebook / Node / Butler / wanted);',
+      '1) Scenes — addScenes / removeScenes (options: General / Legal = pkulaw / Notes = notebook / Node / Butler / core);',
       '2) Kernel tools — replace coreExclusions (typical: strip file / command / web tools, or clear to []);',
       '3) Skill pool — replace skillPool (or [] to fall back to global default);',
       '4) Persona — append short instructions to the existing prompt (preferred), or a full prompt rewrite if asked.',

@@ -22,12 +22,10 @@ const TooltipContent = React.forwardRef<
         (className || '')
       }
       style={{
-        backgroundColor: 'color-mix(in oklab, var(--ink-strong) 92%, transparent)',
-        backdropFilter: 'blur(12px) saturate(150%)',
-        WebkitBackdropFilter: 'blur(12px) saturate(150%)',
-        color: 'var(--paper)',
+        backgroundColor: 'var(--panel-bg)',
+        color: 'var(--ink)',
         fontFamily: "var(--font-sans)",
-        border: '1px solid color-mix(in oklab, var(--line) 25%, transparent)',
+        border: '1px solid color-mix(in oklab, var(--line) 60%, transparent)',
       }}
       {...props}
     />

@@ -203,6 +203,15 @@ body {
   animation: fade-in 200ms ease-out;
 }
 
+/* 右侧「AI 精选」弹窗入场（Butler 搜索栏触发）：从右缘滑入 + 淡入 */
+@keyframes side-panel-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.side-panel-in {
+  animation: side-panel-in 220ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
 /* 思考折叠栏活跃呼吸灯：暖橙脉冲外发光，2s 周期，表示模型正在流式执行任务 */
 @keyframes think-breathe {
   0%, 100% {
@@ -402,42 +411,6 @@ body {
     animation: none;
     box-shadow: none;
   }
-}
-
-/* ===== WANTED 悬浮球：全息玻璃球呼吸光晕 ===== */
-@keyframes wanted-orb-glow {
-  0%, 100% {
-    box-shadow:
-      0 0 0 1px rgba(255,255,255,0.10),
-      0 0 12px 2px oklch(0.62 0.15 250 / 0.18),
-      0 4px 14px rgba(0,0,0,0.18),
-      inset 0 1px 0 rgba(255,255,255,0.35),
-      inset 0 -3px 6px rgba(0,0,0,0.12);
-  }
-  50% {
-    box-shadow:
-      0 0 0 1px rgba(255,255,255,0.14),
-      0 0 22px 4px oklch(0.62 0.15 250 / 0.38),
-      0 4px 14px rgba(0,0,0,0.18),
-      inset 0 1px 0 rgba(255,255,255,0.45),
-      inset 0 -3px 6px rgba(0,0,0,0.12);
-  }
-}
-.wanted-orb-breathing {
-  animation: wanted-orb-glow 3s ease-in-out infinite;
-}
-.wanted-orb-hover {
-  box-shadow:
-    0 0 0 1px rgba(255,255,255,0.16),
-    0 0 28px 6px oklch(0.62 0.15 250 / 0.50),
-    0 6px 20px rgba(0,0,0,0.22),
-    inset 0 1px 0 rgba(255,255,255,0.50),
-    inset 0 -3px 6px rgba(0,0,0,0.12) !important;
-  transform: scale(1.06);
-}
-@media (prefers-reduced-motion: reduce) {
-  .wanted-orb-breathing { animation: none; }
-  .wanted-orb-hover { transform: none; }
 }
 
 /* ===== HtmlRenderer 全局样式 ===== */
@@ -900,6 +873,106 @@ body {
   margin: 4px 0;
   line-height: 1.7;
 }
+
+/* Butler 抽屉气泡内的 markdown（复用 .html-renderer 管线，见 ButlerDrawer 的 StreamingMarkdown）。
+   气泡是 text-xs 的窄容器，必须把文档级标题/间距收紧——否则一个 h1（20px、上边距 16px）
+   会把气泡撑成一块「文档」。标题色改 inherit：.html-renderer 的标题是硬编码暖黑 oklch，
+   深色主题下在纸上不可读；p / code / pre 本就吃 --paper/--line/--ink，无需覆盖。 */
+.butler-md .html-renderer h1,
+.butler-md .html-renderer h2,
+.butler-md .html-renderer h3,
+.butler-md .html-renderer h4,
+.butler-md .html-renderer h5,
+.butler-md .html-renderer h6 {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  margin: 8px 0 3px;
+  color: inherit;
+}
+.butler-md .html-renderer h1:first-child,
+.butler-md .html-renderer h2:first-child,
+.butler-md .html-renderer h3:first-child,
+.butler-md .html-renderer h4:first-child,
+.butler-md .html-renderer h5:first-child,
+.butler-md .html-renderer h6:first-child { margin-top: 0; }
+.butler-md .html-renderer p { margin: 3px 0; line-height: 1.6; }
+.butler-md .html-renderer p:first-child { margin-top: 0; }
+.butler-md .html-renderer p:last-child { margin-bottom: 0; }
+.butler-md .html-renderer ul,
+.butler-md .html-renderer ol { margin: 3px 0; padding-left: 16px; }
+.butler-md .html-renderer li { margin: 1px 0; line-height: 1.6; }
+.butler-md .html-renderer hr { margin: 8px 0; }
+.butler-md .html-renderer pre { margin: 5px 0; padding: 8px 10px; }
+.butler-md .html-renderer pre code,
+.butler-md .html-renderer :not(pre) > code { font-size: 11px; }
+.butler-md .html-renderer blockquote { margin: 4px 0; }
+.butler-md .html-renderer table td,
+.butler-md .html-renderer table th { font-size: 11px; }
+
+/* Report 页签（Today 面板的第一个页签）：三页签里唯一直接渲染 markdown 的一块，
+   结构固定为「📝 小结 blockquote → --- → 📁 ### 项目标题 + emoji 要点」。
+   目标是把裸 markdown 的层级**做出来**（对照飞书简报：标题粗大、正文疏朗、留白足）：
+     标题 13 / 700 / ink-strong ── 明显重于 ── 正文 12 / 400 / ink-muted，
+   字号 + 字重 + 颜色三重差异，不再只靠字重一档。按样式面板的 token 给，换主题不用改这里。 */
+.butler-report .html-renderer {
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink-muted);
+}
+
+/* 小结底卡：覆盖 .html-renderer blockquote 硬编码的暖色 + 斜体（深色主题下不可读），
+   换成品牌色系 token——左侧一道竖条做「引言」语义，浅底把小结与明细分开。
+   底色压得很淡（5%）：卡片只负责「分组」，视觉重量必须让给下面的项目标题。 */
+.butler-report .html-renderer blockquote {
+  margin: 0 0 14px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--brand);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--brand) 5%, transparent);
+  font-style: normal;
+}
+/* 卡片内正文回到一级色：它是「结论」，不该跟着明细一起退成次级灰 */
+.butler-report .html-renderer blockquote p { margin: 0; color: var(--ink); }
+
+/* 小结与明细之间的分隔线：压成一道细线，只负责「断开」，不喧宾夺主 */
+.butler-report .html-renderer hr {
+  margin: 14px 0 4px;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* 分区标题（📋 昨日小结）：全篇最高的 14 / 700，与下面的项目标题拉开一档 */
+.butler-report .html-renderer h1,
+.butler-report .html-renderer h2,
+.butler-report .html-renderer h3 {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  margin: 14px 0 6px;
+  color: var(--ink-strong);
+}
+
+/* 项目标题（📁 项目名）：比分区低一档（12.5 / 600 / ink），但相对正文仍明显更重——
+   这样三层是「分区 14/700/最黑 > 项目 12.5/600/黑 > 正文 12/400/灰」，
+   不会出现分区与项目同级、只靠 emoji 猜的情况。 */
+.butler-report .html-renderer h4 {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  margin: 11px 0 4px;
+  color: var(--ink);
+}
+
+/* 紧跟在分隔线后的第一个标题：间隔由 hr 的下边距提供，自身不再叠加 */
+.butler-report .html-renderer hr + h1,
+.butler-report .html-renderer hr + h2,
+.butler-report .html-renderer hr + h3,
+.butler-report .html-renderer hr + h4 { margin-top: 0; }
+
+/* 要点行：行间距放宽（飞书那种疏朗感），emoji 与文字之间留一点气口 */
+.butler-report .html-renderer ul { margin: 2px 0 0; padding-left: 15px; }
+.butler-report .html-renderer li { margin: 3px 0; }
 
 /* 允许节点对话框内文本选择：
    覆盖旧 React Flow base.css 的 .react-flow__node { user-select: none }。
@@ -1479,40 +1552,6 @@ body {
   transform: scale(0.98);
 }
 
-/* ===== Game Boy 灰绿 LCD 显示屏（TaskPanel wanted 界面） =====
-   LCD 屏幕为固定灰绿配色（不随主题），进度条为不确定态循环滑动。 */
-@keyframes lcd-progress-slide {
-  0%   { transform: translateX(-110%); }
-  100% { transform: translateX(340%); }
-}
-.lcd-progress {
-  height: 10px;
-  border: 2px solid #0F380F;
-  border-radius: 3px;
-  overflow: hidden;
-  background: #8BAC0F;
-}
-.lcd-progress-fill {
-  width: 30%;
-  height: 100%;
-  background: #0F380F;
-  animation: lcd-progress-slide 1.1s linear infinite;
-}
-/* 邮件投递箭头：向右脉冲跳动（8-bit 阶梯运动），暗示内容已发送 */
-@keyframes lcd-mail-arrow {
-  0%, 100% { transform: translateX(0); }
-  50%      { transform: translateX(3px); }
-}
-.lcd-mail-arrow {
-  animation: lcd-mail-arrow 0.7s steps(2, end) infinite;
-}
-/* LCD 顶栏 BobMail 入口（信封图标）：悬停时液晶像素反色提示可点击 */
-.lcd-mail-btn {
-  transition: background-color 0.15s steps(2, end);
-}
-.lcd-mail-btn:hover {
-  background-color: rgba(15, 56, 15, 0.18);
-}
 /* 项目面板：开庭提示呼吸灯（开庭前3天开始，随日期临近频率与亮度递增，紫色系） */
 /* 档0=开庭当天（最快最亮）… 档3=前3天（最慢最弱），duration 由徽标内联 --court-dur 控制 */
 @keyframes court-breathe-0 {
@@ -1533,10 +1572,6 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --court-dur: 0s; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .lcd-progress-fill { animation: none; width: 100%; }
-  .lcd-mail-arrow { animation: none; }
 }
 
 /* ===== 隐藏滚动条工具类（容器仍可滚动，仅不显示滚动条） ===== */

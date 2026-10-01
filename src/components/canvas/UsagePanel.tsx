@@ -14,6 +14,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Gauge, DollarSign, Clock, Activity, Layers, Cpu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 
 // ---- 与 src/lib/usage.ts 返回结构对齐的轻量类型 ----
 interface Bucket {
@@ -372,20 +373,35 @@ export function UsagePanel({
             </Section>
           )}
 
-          {/* 日粒度走势：仅 Today / This month（All 用月度趋势，避免日柱过密） */}
+          {/* 日粒度走势：仅 Today / This month（All 用月度趋势，避免日柱过密）；悬停柱显示当日 tokens 与估算金额 */}
           {range !== 'all' && data.summary.byDay.length > 1 && (
             <Section title="By day">
-              <div className="flex h-24 items-end gap-1.5">
-                {data.summary.byDay.map((b) => (
-                  <div key={b.key} className="group flex min-w-0 flex-1 flex-col items-center gap-1" title={`${b.key}: ${b.totalTokens.toLocaleString()} tokens`}>
-                    <div
-                      className="w-full rounded-t-sm transition-opacity group-hover:opacity-80"
-                      style={{ height: `${Math.max(2, (b.totalTokens / maxByDay) * 84)}px`, backgroundColor: 'var(--info)', opacity: 0.75 }}
-                    />
-                    <span className="text-9 tabular-nums" style={{ color: 'var(--ink-muted)' }}>{b.key.slice(5)}</span>
-                  </div>
-                ))}
-              </div>
+              <TooltipProvider delayDuration={120}>
+                <div className="flex h-24 items-end gap-1.5">
+                  {data.summary.byDay.map((b) => (
+                    <Tooltip key={b.key}>
+                      <TooltipTrigger asChild>
+                        <div className="group flex min-w-0 flex-1 flex-col items-center gap-1">
+                          <div
+                            className="w-full rounded-t-sm transition-opacity group-hover:opacity-80"
+                            style={{ height: `${Math.max(2, (b.totalTokens / maxByDay) * 84)}px`, backgroundColor: 'var(--info)', opacity: 0.75 }}
+                          />
+                          <span className="text-9 tabular-nums" style={{ color: 'var(--ink-muted)' }}>{b.key.slice(5)}</span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" align="center">
+                        <div className="text-10 font-medium opacity-70">{b.key}</div>
+                        <div className="tabular-nums">
+                          Total tokens: <span className="font-semibold">{b.totalTokens.toLocaleString()}</span>
+                        </div>
+                        <div className="tabular-nums">
+                          Est. cost: <span className="font-semibold" style={{ color: 'var(--warn)' }}>{fmtCost(b.estCost, cur)}</span>
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                </div>
+              </TooltipProvider>
             </Section>
           )}
 

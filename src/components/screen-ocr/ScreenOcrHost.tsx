@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { desktop, type ScreenOcrGeometry } from '@/lib/desktop-adapter';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { ScreenOcrEditor } from '@/components/screen-ocr/ScreenOcrEditor';
@@ -19,6 +20,7 @@ import { ScreenOcrEditor } from '@/components/screen-ocr/ScreenOcrEditor';
  * 仅保留 start/captured/canceled/error 四类事件。
  */
 export function ScreenOcrHost() {
+  const pathname = usePathname();
   /** 待编辑截图 dataUrl（主进程 screen-ocr:captured 下发） */
   const [editImage, setEditImage] = useState<string | null>(null);
   /** 初始选区模式：region（原生 -i 已选区）→ 整图全选区直接标注；full（整屏待选）→ 用户自行拖选 */
@@ -52,7 +54,9 @@ export function ScreenOcrHost() {
     };
   }, []);
 
-  if (!editImage) return null;
+  // Hippo 对话侧栏（/browser-chat）是主进程 WebContentsView 加载的独立页面，设计上「零 App 外壳」，
+  // 但该路由没有自己的 layout → 继承根 layout；截图编辑面板不该出现在那个窄侧栏里。
+  if (!editImage || pathname === '/browser-chat') return null;
 
   return (
     <ScreenOcrEditor

@@ -6,7 +6,7 @@
  * 从 ChatNodeKernel 的内联实现中抽出，使 Team 输入框与 chat 输入框具备完全一致的能力：
  *   ① 本地文件选择器上传（文件真实复制到 <项目>/materials/<短id_标题>/）
  *   ② 拖拽文件到输入区
- *   ③ 粘贴（图片＝截图 → attachments/；其他文件 → materials/ 附件上传；
+ *   ③ 粘贴（文件 → materials/ 附件上传，粘贴的截图同样落 materials/；
  *      纯 URL → 链接材料；本地绝对路径 → @文件名 引用 chip；普通文本 → 原样插入）
  *   ④ @ 弹窗引用（materials 资料文件夹 + 已授权目录，支持多级浏览）
  *
@@ -20,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AttachmentStore, MessageAttachment } from '@/lib/types';
+import type { MessageAttachment } from '@/lib/types';
 
 /** 单个 URL（http/https/ftp 开头、无空白） */
 export const URL_ONLY_RE = /^(https?:\/\/|ftp:\/\/)[^\s/$.?#][^\s]*$/i;
@@ -81,7 +81,7 @@ export function emptyComposerContext(): ComposerContext {
 }
 
 /** File → base64（不含 data: 前缀） */
-function fileToBase64(file: File): Promise<string> {
+export function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -96,14 +96,12 @@ function fileToBase64(file: File): Promise<string> {
 /**
  * 上传单个文件：用 base64 + JSON（规避 Turbopack FormData bug）。
  * 服务端把文件真实复制到 <项目>/materials/<短id_标题>/，回传附件元数据。
- * `store: 'attachments'` 时改落 <项目>/attachments/<短id_标题>/（对话级临时附件，
- * 如粘贴的截图：不进项目资料 manifest、不参与 search_materials 检索）。
+ * 所有附件（含粘贴的截图、音频）统一落 materials/：附件即资料，项目里不再有 attachments/。
  */
 export async function uploadAttachment(
   nodeId: string,
   nodeTitle: string,
   file: File,
-  store: AttachmentStore = 'materials',
 ): Promise<MessageAttachment | null> {
   const base64 = await fileToBase64(file);
   const resp: Response = await fetch('/api/attachments', {
@@ -114,7 +112,6 @@ export async function uploadAttachment(
       nodeTitle,
       fileName: file.name,
       fileType: file.type || 'application/octet-stream',
-      store,
       data: base64,
     }),
   });
@@ -269,15 +266,15 @@ export function useComposer(opts: UseComposerOptions) {
 
   // ==== 附件添加入口 ====
 
-  /** 上传待发附件（入口①②③ 共用）。opts.store 指定落盘根目录，缺省 materials/ */
+  /** 上传待发附件（入口①②③ 共用），一律落 <项目>/materials/ */
   const handleFileSelect = useCallback(
-    async (files: FileList | null, opts?: { store?: AttachmentStore }) => {
+    async (files: FileList | File[] | null) => {
       if (!files || files.length === 0 || !nodeId) return;
       const fileArray = Array.from(files);
       setUploadingAttachment(true);
       for (const file of fileArray) {
         try {
-          const att = await uploadAttachment(nodeId, nodeTitle, file, opts?.store ?? 'materials');
+          const att = await uploadAttachment(nodeId, nodeTitle, file);
           if (att) setPendingAttachments((prev) => [...prev, att]);
         } catch (e) {
           if (e instanceof DOMException && e.name === 'NotReadableError') {
@@ -354,10 +351,7 @@ export function useComposer(opts: UseComposerOptions) {
       if (disabled) return;
       const items = e.clipboardData?.items;
 
-      // 1) 文件粘贴：作为附件上传。
-      //    整批都是图片（＝剪贴板截图）时落 attachments/：截图是对话级临时素材，
-      //    不该进项目账本的材料层（materials/ 会被材料索引收录、参与 search_materials 检索）。
-      //    粘贴复制的文件（如 Finder 拷来的 PDF）仍按资料处理，走 materials/。
+      // 1) 文件粘贴：作为附件上传（统一落 materials/，粘贴的截图也一样）
       if (items) {
         const files: File[] = [];
         for (let i = 0; i < items.length; i++) {
@@ -369,10 +363,7 @@ export function useComposer(opts: UseComposerOptions) {
         }
         if (files.length > 0) {
           e.preventDefault();
-          const dt = new DataTransfer();
-          files.forEach((f) => dt.items.add(f));
-          const allImages = files.every((f) => f.type.startsWith('image/'));
-          void handleFileSelect(dt.files, allImages ? { store: 'attachments' } : undefined);
+          void handleFileSelect(files);
           return;
         }
       }

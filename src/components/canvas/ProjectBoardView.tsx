@@ -172,11 +172,19 @@ function daysUntil(iso: string): number {
   return Math.round((t - today) / 86400000);
 }
 
-/** 图标墙底色：由项目 id 哈希出稳定色相（0–359），同一项目每次渲染配色一致 */
-function projectHue(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
-  return h;
+/** 图标墙底色：按分类取色，同类项目同色便于成组识别。
+ *  刻意避开红色系——红留给 todo 角标与开庭临近等预警信号，避免与分类底色混淆。 */
+const CATEGORY_TILE_COLOR: Record<string, string> = {
+  诉讼: 'hsl(148 52% 40%)', // 绿
+  常法: 'hsl(214 68% 54%)', // 蓝
+  非诉: 'hsl(190 60% 46%)', // 青
+  破产: 'hsl(272 60% 55%)', // 紫
+  研究: 'hsl(38 78% 46%)', // 琥珀
+};
+
+/** 图标墙底色：分类命中则用该分类色；其他/未分类/未知分类统一中性灰 */
+function categoryTileColor(category?: string): string {
+  return (category && CATEGORY_TILE_COLOR[category]) || 'hsl(220 9% 56%)';
 }
 
 /** 图标墙字形：中文取首字；空格分隔的英文取首字母缩写；其余取前两个字符，空名回退 "?" */
@@ -283,7 +291,7 @@ function TodoPopup({
   const [addStates, setAddStates] = useState<Record<string, 'busy' | 'done' | 'error'>>({});
 
   /** 手动发送到日历（StickyTodo 不自动入日历，2026-09-08 起，行只在用户显式操作时入日历）：
-   *  取待办文本走 /api/wanted/execute 的 /todo 命令写入日历默认时段；
+   *  取待办文本走 /api/core/execute 的 /todo 命令写入日历默认时段；
    *  成功后回调 onMarkCalendared 持久化 eventIds → 该行图标由加号变闹钟 */
   const handleAddToCalendar = (noteId: string, pageId: string, lineIndex: number, text: string) => {
     const page = data?.find((n) => n.noteId === noteId)?.pages.find((pg) => pg.pageId === pageId);
@@ -300,7 +308,7 @@ function TodoPopup({
         });
       }, ms);
     };
-    fetch('/api/wanted/execute', {
+    fetch('/api/core/execute', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: `/todo ${text.trim()}`, project_id: project.id }),
@@ -1862,54 +1870,58 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         </div>
       </div>
 
-      {/* 标签分类筛选：默认标签（分类）在前 + 自定义标签在后（均动态聚合） */}
+      {/* 分类 / 标签筛选：分类保持平铺胶囊，标签收进下拉菜单（均动态聚合） */}
       {(catTags.length > 0 || allTags.length > 0) && (
         <div
-          className="flex flex-wrap items-center gap-1 border-b px-5 py-2"
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-2"
           style={{ borderColor: 'var(--border)', backgroundColor: 'var(--paper, #ffffff)' }}
         >
-          <span className="mr-1 shrink-0 text-xs font-medium" style={{ color: 'var(--ink-faint)' }}>
-            Tags
-          </span>
-          {/* 默认标签（分类） */}
-          {catTags.map((t) => {
-            const active = catFilter === t.name;
-            return (
-              <button
-                key={t.name}
-                type="button"
-                onClick={() => setCatFilter(active ? null : t.name)}
-                className="rounded-full px-2.5 py-1 text-xs font-medium transition-colors"
-                style={
-                  active
-                    ? { color: '#fff', background: 'var(--primary-strong, #5b48d8)', border: '1px solid var(--primary-strong, #5b48d8)' }
-                    : { color: 'var(--primary-strong, #5b48d8)', background: 'transparent', border: '1px dashed var(--primary, #7c5cff)' }
-                }
-                title="Default tag (category)"
+          {/* 分类（默认标签）：平铺胶囊 */}
+          {catTags.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="mr-1 shrink-0 text-xs font-medium" style={{ color: 'var(--ink-faint)' }}>
+                Category
+              </span>
+              {catTags.map((t) => {
+                const active = catFilter === t.name;
+                return (
+                  <button
+                    key={t.name}
+                    type="button"
+                    onClick={() => setCatFilter(active ? null : t.name)}
+                    className="rounded-full px-2.5 py-1 text-xs font-medium transition-colors"
+                    style={
+                      active
+                        ? { color: '#fff', background: 'var(--primary-strong, #5b48d8)', border: '1px solid var(--primary-strong, #5b48d8)' }
+                        : { color: 'var(--primary-strong, #5b48d8)', background: 'transparent', border: '1px dashed var(--primary, #7c5cff)' }
+                    }
+                    title="Default tag (category)"
+                  >
+                    {t.name} {t.count}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {/* 标签：下拉菜单（选中分类后仅列出该分类下的标签） */}
+          {allTags.length > 0 && (
+            <label className="flex shrink-0 items-center gap-1.5 text-xs" style={{ color: 'var(--ink-faint)' }}>
+              <span>Tags</span>
+              <select
+                value={tagFilter ?? ''}
+                onChange={(e) => setTagFilter(e.target.value || null)}
+                className="rounded-lg border bg-transparent px-2 py-1 text-xs font-medium outline-none"
+                style={{ borderColor: 'var(--border)', color: 'var(--ink)' }}
               >
-                {t.name} {t.count}
-              </button>
-            );
-          })}
-          {/* 自定义标签 */}
-          {allTags.map((t) => {
-            const active = tagFilter === t.name;
-            return (
-              <button
-                key={t.name}
-                type="button"
-                onClick={() => setTagFilter(active ? null : t.name)}
-                className="rounded-full px-2.5 py-1 text-xs font-medium transition-colors"
-                style={
-                  active
-                    ? { color: 'var(--primary-strong, #5b48d8)', background: 'color-mix(in oklab, var(--primary, #7c5cff) 12%, transparent)', border: '1px solid var(--primary, #7c5cff)' }
-                    : { color: 'var(--ink-muted)', background: 'transparent', border: '1px solid var(--border)' }
-                }
-              >
-                {t.name} {t.count}
-              </button>
-            );
-          })}
+                <option value="">All tags</option>
+                {allTags.map((t) => (
+                  <option key={t.name} value={t.name}>
+                    {t.name} ({t.count})
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {(catFilter || tagFilter) && (
             <button
               type="button"
@@ -2344,7 +2356,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                   </div>
                   ) : (
                   /* 图标墙视图：每个项目一个方形图标磁贴，图标由项目名自动生成
-                     （中文取首字 / 英文取缩写，底色由 id 哈希出稳定色相，无需素材与迁移）。
+                     （中文取首字 / 英文取缩写，底色按分类取色，同类同色）。
                      交互与网格/列表一致：单击打开右侧详情，悬停显示进入项目入口。 */
                   <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))' }}>
                     {items.map(({ p, isCurrent, isArchived, isTrashed, isSelected, breath }) => (
@@ -2385,7 +2397,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                         <span className="relative block h-14 w-14 shrink-0">
                           <span
                             className="flex h-full w-full items-center justify-center rounded-2xl text-lg font-bold"
-                            style={{ background: `hsl(${projectHue(p.id)} 62% 52%)`, color: '#fff' }}
+                            style={{ background: categoryTileColor(p.category), color: '#fff' }}
                           >
                             {projectGlyph(p.name)}
                           </span>

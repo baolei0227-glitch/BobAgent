@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore } from 'react';
-import { MapPinned as MapIcon, Pin, Inbox, Tags, Orbit } from 'lucide-react';
+import { Pin, Tags, Orbit } from 'lucide-react';
 import type { GraphGateway, NodeKind } from '@/lib/graph/graph-gateway';
 import { computeRadialLayout } from '@/lib/graph/nodemap-layout';
 
@@ -185,16 +185,18 @@ function EdgeHandle({ disconnected, show, midX, midY, onDisconnect, onReconnect,
  *  画布数据访问全部通过 gateway（GraphGateway 统一对接端口，太空舱理念），
  *  不直接触碰 ReactFlow store / window 事件总线。
  */
-export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
+export function NodeMap({ gateway, title, projectId, focusedNodeId, collapsed, onCollapsedChange }: {
   gateway: GraphGateway;
-  left?: number;
   title?: string;
   /** 当前项目 id */
   projectId?: string;
   /** 当前打开的会话（研究）节点 id：焦点经左侧 rail / autoOpen / 删除回退等切换时，红点跟随同步 */
   focusedNodeId?: string | null;
+  /** 展开/折叠受控：开关按钮已迁至左侧栏项目行（项目名右侧、新建会话按钮左侧），
+   *  本组件不再渲染左下角悬浮开关按钮 */
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
 }) {
-  const [collapsed, setCollapsed] = useState(true);
   const [pinned, setPinned] = useState(false);
   /** 名称标签开关（标题栏按钮）：打开后所有圆点常驻显示名称浮层 */
   const [showAllLabels, setShowAllLabels] = useState(false);
@@ -204,20 +206,7 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
   // 正在执行任务的节点 id 集合（AiChatNode 流式执行中广播 node-executing 事件）
   const [executingIds, setExecutingIds] = useState<Set<string>>(new Set());
   // 常驻状态提示（原左侧 rail 底部，2026-09-01 迁移至 NodeMap）：
-  // - BobMail 未读角标（Sidebar bobmail-pending 广播）
-  const [wantedPending, setWantedPending] = useState(0);
-  useEffect(() => {
-    const onPending = (e: Event) => {
-      const d = (e as CustomEvent).detail as { pending?: number } | undefined;
-      if (typeof d?.pending === 'number') setWantedPending(d.pending);
-    };
-    window.addEventListener('bobmail-pending', onPending);
-    // 挂载时主动拉取 BobMail 未读数（Sidebar 已广播过，确保早期打开能拿到）
-    window.dispatchEvent(new Event('bobmail-pending-request'));
-    return () => {
-      window.removeEventListener('bobmail-pending', onPending);
-    };
-  }, []);
+  // 回执未读角标已统一到 ButlerOrb（订阅 butler:inbox-pending），本组件不再重复展示
   // 当前通过 NodeMap 聚焦放大的节点 id
   const [zoomedId, setZoomedId] = useState<string | null>(null);
   const zoomedIdRef = useRef<string | null>(null);
@@ -295,12 +284,12 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     const onReveal = (e: Event) => {
       const d = (e as CustomEvent<{ nodeId?: string }>).detail;
       if (!d?.nodeId) return;
-      setCollapsed(false);
+      onCollapsedChange(false);
       setHighlightNodeId(d.nodeId);
     };
     window.addEventListener('nodemap-reveal-node', onReveal);
     return () => window.removeEventListener('nodemap-reveal-node', onReveal);
-  }, []);
+  }, [onCollapsedChange]);
   // 面板折叠时清除高亮（外部点击/收起后不再残留强调）
   useEffect(() => {
     if (collapsed) setHighlightNodeId(null);
@@ -334,12 +323,16 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
   useEffect(() => {
     if (collapsed || pinned) return;
     const handlePointerDown = (e: PointerEvent) => {
-      if (containerRef.current?.contains(e.target as Node)) return;
-      setCollapsed(true);
+      const target = e.target as Element | null;
+      if (containerRef.current?.contains(target as Node)) return;
+      // 左侧栏的开关按钮在容器之外：豁免它，否则 pointerdown 先折叠、紧随的 click 又展开，
+      // 表现为"点按钮关不掉"（按钮自身负责切换，见 CanvasFlow 项目行）
+      if (target?.closest?.('[data-nodemap-toggle]')) return;
+      onCollapsedChange(true);
     };
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [collapsed, pinned]);
+  }, [collapsed, pinned, onCollapsedChange]);
 
   // 画布 zoom 恒 1（单焦点宿主 2026-09）：旧"zoom 偏离 1 时拉回"的 setViewport 死逻辑已移除。
 
@@ -399,8 +392,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     setManualPositions({});
     setDragDot(null);
     setHoveredEdgeId(null);
-    setCollapsed(false);
-  }, []);
+    onCollapsedChange(false);
+  }, [onCollapsedChange]);
   // ⌘R / Ctrl+R：一键排序（替换旧 React Flow 时代的"Fit canvas & arrange sticky notes"，该处理器早已下线）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -665,19 +658,22 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
     }
   };
 
-  // 无节点时整体隐藏（无总览内容可展示；聚焦/归档恢复入口在左侧节点列）
-  if (nodes.length === 0 || !bounds) return null;
+  // 无节点或已折叠时整体隐藏（无总览内容可展示；聚焦/归档恢复入口在左侧节点列；
+  // 展开/折叠开关按钮在左侧栏项目行，本组件不再渲染左下角悬浮按钮）
+  if (nodes.length === 0 || !bounds || collapsed) return null;
 
+  // 展开态：居中覆盖在中栏对话区之上（2026-09-25 由「画布左下角悬浮」改为居中）。
+  // 容器铺满中栏但 pointer-events-none，点击穿透到画布/对话内容；仅面板本体 pointer-events-auto
+  //（因此点击面板内部不会被下方 pointerdown 判定为"点击外部"，而点击空白处仍会折叠）。
   return (
     <div
       ref={containerRef}
       data-canvas-ui="overlay"
-      className="absolute bottom-4 z-10 flex flex-col items-end gap-2"
-      style={{ fontFamily: "var(--font-sans)", left: left ?? 16 }}
+      className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"
+      style={{ fontFamily: "var(--font-sans)" }}
     >
       {/* 状态提示栈（原左侧 rail 底部按钮，2026-09-01 迁移至 NodeMap 上方）：
-          仅保留应用更新状态；BobMail 未读角标直接落在 NodeMap 的 MapIcon 上，
-          打开入口在展开面板标题栏内。 */}
+          仅保留应用更新状态；回执未读角标由 Butler 悬浮球承担。 */}
       <div className="flex flex-col items-end gap-1.5"></div>
 
       {/* 聚焦圆点的红色光晕呼吸动画 */}
@@ -692,21 +688,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
           50% { box-shadow: 0 0 11px oklch(0.72 0.16 75 / 1); }
         }
       `}</style>
-      {collapsed ? (
-        <button
-          onClick={() => setCollapsed(false)}
-          className="relative flex h-9 w-9 items-center justify-center rounded-lg shadow-md transition-colors hover:bg-[var(--paper-hover)]"
-          style={{
-            backgroundColor: 'var(--paper)',
-            border: '1px solid var(--line)',
-          }}
-          title={`Node Map (${nodes.length})`}
-        >
-          <MapIcon className="h-4 w-4" style={{ color: 'var(--ink-muted)' }} />
-        </button>
-      ) : (
         <div
-          className="rounded-lg shadow-lg overflow-hidden"
+          className="pointer-events-auto rounded-lg shadow-lg overflow-hidden"
           onClick={(e) => e.stopPropagation()}
           style={{
             width: mapW + 16,
@@ -733,29 +716,8 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
             </div>
             <div className="flex shrink-0 items-center gap-0.5">
               {/* 项目相关工具已并入画布左上角项目名称卡片（2026-09-04） */}
-              {/* 分组分隔线：通知 */}
-              <div className="mx-1 h-4 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
-              {/* BobMail 入口（展开态标题栏内）：点击打开通知中心，未读叠加红点；弹窗锚定该按钮上方 */}
-              <button
-                type="button"
-                onClick={(e) => window.dispatchEvent(new CustomEvent('bobmail-toggle', {
-                  detail: { anchor: (e.currentTarget as HTMLButtonElement).getBoundingClientRect() },
-                }))}
-                className="relative flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-[var(--paper-hover)]"
-                style={{ color: 'var(--ink-muted)' }}
-                title={`Notifications (BobMail)${wantedPending > 0 ? ` — ${wantedPending} unread` : ''}`}
-              >
-                <Inbox className="h-3 w-3" />
-                {wantedPending > 0 && (
-                  <span
-                    className="absolute -right-0.5 -top-0.5 flex h-[12px] min-w-[12px] items-center justify-center rounded-full px-0.5 text-7 font-bold leading-none"
-                    style={{ backgroundColor: 'var(--danger)', color: '#fff' }}
-                  >
-                    {wantedPending > 99 ? '99+' : wantedPending}
-                  </span>
-                )}
-              </button>
-              {/* 分组分隔线：通知 │ 工具（固定） */}
+              {/* 回执/通知入口已统一到 Butler 悬浮球（原此处的 BobMail 图标已移除） */}
+              {/* 分组分隔线：工具（固定） */}
               <div className="mx-1 h-4 w-px shrink-0 self-center" style={{ backgroundColor: 'var(--line-soft)' }} />
               {/* 一键排序：丢弃手动拖拽的位置覆盖，回到自动排版（等价的快捷键 ⌘R） */}
               <button
@@ -1171,7 +1133,6 @@ export function NodeMap({ gateway, left, title, projectId, focusedNodeId }: {
             })()}
           </div>
         </div>
-      )}
     </div>
   );
 }

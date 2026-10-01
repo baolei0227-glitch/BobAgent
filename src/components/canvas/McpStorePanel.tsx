@@ -411,7 +411,7 @@ export function McpStorePanel() {
     setBusyId(e.id);
     setNotice(null);
     try {
-      const res = await fetch('/api/wanted/browser-extension-zip');
+      const res = await fetch('/api/browser/browser-extension-zip');
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         flash('err', data?.error || 'bob-browser-mcp is not installed. Run: npm install -g bob-browser-mcp');
@@ -437,7 +437,7 @@ export function McpStorePanel() {
   /** Bob Browser：复制连接地址（桥在线取 mcpUrl/token 派生；离线回退本机 token.json） */
   const handleCopyBindingLink = async (e: McpStoreEntry) => {
     try {
-      const res = await fetch('/api/wanted/browser-bridge-token');
+      const res = await fetch('/api/browser/browser-bridge-token');
       const data = (await res.json()) as { bindingUrl?: string; error?: string };
       if (!res.ok || !data.bindingUrl) {
         flash('err', data?.error || 'No bridge endpoint available. Start bob-browser-mcp once, then retry.');
@@ -453,7 +453,7 @@ export function McpStorePanel() {
   /** Bob Browser：复制纯 token（桥在线取 /setup/status 实时 token；离线回退本机 token.json） */
   const handleCopyToken = async (e: McpStoreEntry) => {
     try {
-      const res = await fetch('/api/wanted/browser-bridge-token');
+      const res = await fetch('/api/browser/browser-bridge-token');
       const data = (await res.json()) as { bindingUrl?: string; token?: string; error?: string };
       if (!res.ok || (!data.token && !data.bindingUrl)) {
         flash('err', data?.error || 'No token available. Start bob-browser-mcp once, then retry.');

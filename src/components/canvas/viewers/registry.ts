@@ -8,7 +8,6 @@
  *
  * 未来扩展示例：
  *   { id: 'video', test: (e) => ['mp4', 'webm', 'mov'].includes(e), load: () => import('./VideoViewer').then((m) => m.VideoViewer) },
- *   { id: 'audio', test: (e) => ['mp3', 'wav', 'flac', 'aac'].includes(e), load: () => import('./AudioViewer').then((m) => m.AudioViewer) },
  */
 import type { FileInfo } from '@/lib/files/types';
 import type { ViewerRenderer } from './types';
@@ -21,8 +20,14 @@ const CODE_EXTS = new Set([
 ]);
 
 export const viewerRegistry: ViewerRenderer[] = [
-  { id: 'docx',   test: (e) => ['docx', 'doc'].includes(e),    load: () => import('./DocxViewer').then((m) => m.DocxViewer) },
   { id: 'xlsx',   test: (e) => ['xlsx', 'xls'].includes(e),    load: () => import('./XlsxViewer').then((m) => m.XlsxViewer) },
+  // 音频必须先于 binary：音频文件同样 type === 'binary'，靠扩展名抢先匹配
+  { id: 'audio',  test: (e) => ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'aiff', 'aif'].includes(e), load: () => import('./AudioViewer').then((m) => m.AudioViewer) },
+  // docx 必须先于 binary：docx/doc 的 type 同样是 'binary'，靠扩展名抢先匹配
+  // 2026-09-30 变更（推翻 2026-09-28 的「docx 全部走 Hippo 整页」）：docx/doc 改为在预览面板内编辑。
+  //   原因：① Hippo guest 无 preload ⇒ 「外部打开」「转 MD 后自动打开」静默失败（预览面板内 deb 适配器/bus 都在，自动恢复）；
+  //         ② 整页要占浏览器标签栏 + 地址栏，正文垂直空间被挤压。
+  { id: 'docx',   test: (e) => ['docx', 'doc'].includes(e),    load: () => import('./DocxEditorViewer').then((m) => m.DocxEditorViewer), ownsZoom: true },
   { id: 'binary', test: (_e, i) => i.type === 'binary',        load: () => import('./BinaryViewer').then((m) => m.BinaryViewer) },
   { id: 'md',     test: (e) => e === 'md',                     load: () => import('./MdViewer').then((m) => m.MdViewer) },
   { id: 'code',   test: (e, i) => !!i.content && CODE_EXTS.has(`.${e}`), load: () => import('./CodeViewer').then((m) => m.CodeViewer) },
@@ -34,7 +39,16 @@ export function matchRenderer(ext: string, fileInfo: FileInfo): ViewerRenderer |
   return viewerRegistry.find((r) => r.test(ext, fileInfo)) ?? null;
 }
 
-/** 文档类（浏览器处理）：html/pdf/图片 —— 不走预览面板/系统默认应用，file.open → Hippo Browser（主进程重定向查看页） */
+/**
+ * 文档类（浏览器处理）：html / pdf / 图片 —— 不走预览面板/系统默认应用，
+ * file.open → Hippo Browser（主进程 localFileToViewerUrl 重定向到对应内置查看页）。
+ *
+ * ⚠️ 此处是「能否交 Hippo」判定的唯一真源，与 CanvasFlow 的 file.open 分发共用；
+ *    新增成员时勿在调用点另抄一份正则（历史上 CanvasFlow 曾硬编码同义白名单，已收敛）。
+ * ⚠️ docx/doc 不在本表（2026-09-30 起）：它们注册进 viewerRegistry，在预览面板内编辑；
+ *    内置整页 /docx-editor 已随之下线。二者互斥——命中 isBrowserDoc 就交 Hippo，
+ *    否则由 viewerRegistry 决定能否在面板内预览。
+ */
 const BROWSER_DOC_RE = /\.(html?|pdf|png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 export function isBrowserDoc(name?: string): boolean {
   return name ? BROWSER_DOC_RE.test(name) : false;

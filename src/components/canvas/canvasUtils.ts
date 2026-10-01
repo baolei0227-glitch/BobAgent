@@ -43,7 +43,9 @@ export function isAbsoluteFsPath(p: string): boolean {
   return typeof p === 'string' && (p.startsWith('/') || p.startsWith('~/') || /^file:\/\//.test(p));
 }
 
-/** 由节点 type 推导 agent 身份（chat/coding/note/butler）；无法识别返回 undefined */
+/** 由节点 type 推导 agent 身份（chat/coding/note/…）；无法识别返回 undefined。
+ *  2026-09-25：butler 不再是画布节点（能力已融合进悬浮球 Butler 抽屉），
+ *  故 type=agent-butler 的节点不会再产生；此处保持通用切片逻辑不变。 */
 export function agentIdentityFromNodeType(type?: string): string | undefined {
   if (type === 'aiChat') return 'chat';
   if (type === 'aiCoding') return 'coding';

@@ -18,6 +18,7 @@
  * 主 Agent 重试被拦截的工具调用 —— 与旧 BobbyNode 行为一致，无需用户手动回复。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { ShieldCheck, ChevronDown, ChevronUp, Square, CircleAlert } from 'lucide-react';
 import { useConfirm } from '@/components/canvas/ConfirmDialog';
 
@@ -39,6 +40,7 @@ async function bobbyPost(body: Record<string, unknown>): Promise<Record<string, 
 }
 
 export function BobbyAuthHost() {
+  const pathname = usePathname();
   const { askChoices, render: confirmRender } = useConfirm();
   /** null = 尚未探测；true = Bobby 插件已启用（MCP 设置面板开启） */
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -187,6 +189,11 @@ export function BobbyAuthHost() {
     const timer = setTimeout(() => setHint(null), 3000);
     return () => clearTimeout(timer);
   }, [hint]);
+
+  // Hippo 对话侧栏（/browser-chat）不该出现 Bobby 授权浮标/弹窗：它是主进程 WebContentsView
+  // 加载的「零 App 外壳」页面，只因没有自己的 layout 才继承根 layout；
+  // 而 bobby:grant-required 只由主窗口的画布（ChatNodeKernel）与 Butler 抽屉广播。
+  if (pathname === '/browser-chat') return null;
 
   // Bobby 未启用：不渲染任何 UI（避免常驻噪声）
   if (enabled !== true) return <>{confirmRender}</>;

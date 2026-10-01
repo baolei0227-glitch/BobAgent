@@ -18,23 +18,6 @@ export function useStarredApps(): [StarredApp[], Dispatch<SetStateAction<Starred
   return [starredApps, setStarredApps];
 }
 
-/**
- * BobMail 未读数（底部品牌区入口角标）：Sidebar（WantedNoticeCenter）统一广播。
- */
-export function useMailPending(): [number, Dispatch<SetStateAction<number>>] {
-  const [mailPending, setMailPending] = useState(0);
-  useEffect(() => {
-    const onPending = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { pending?: number } | undefined;
-      setMailPending(detail?.pending ?? 0);
-    };
-    window.addEventListener('bobmail-pending', onPending);
-    window.dispatchEvent(new CustomEvent('bobmail-pending-request'));
-    return () => window.removeEventListener('bobmail-pending', onPending);
-  }, []);
-  return [mailPending, setMailPending];
-}
-
 /** 品牌 logo 变更广播事件：设置面板 / 分享卡落盘 settings.brandLogo 后发出，侧边栏据此即时跟随 */
 export const BRAND_LOGO_CHANGED_EVT = 'brand-logo-changed';
 

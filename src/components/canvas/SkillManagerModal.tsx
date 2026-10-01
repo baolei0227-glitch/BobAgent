@@ -14,6 +14,9 @@ import {
 import { McpStorePanel } from './McpStorePanel';
 import { AgentStorePanel } from './AgentStorePanel';
 
+/** 技能更新状态：update=官方有更新（一键更新）/ edited=本地已改 / conflict=两边都改过 */
+export type SkillUpdateState = 'synced' | 'update' | 'edited' | 'conflict';
+
 export interface SkillItem {
   name: string;
   description: string;
@@ -22,6 +25,8 @@ export interface SkillItem {
   enabled: boolean;
   /** 场景/领域类别标注（来自技能 frontmatter 或名称映射表） */
   scenes: string[];
+  /** 更新状态（无值 = synced 或无法判定，不亮徽标） */
+  updateState?: SkillUpdateState;
 }
 
 /** 下载制技能（随包源，未下载不可用） */
@@ -33,6 +38,8 @@ export interface DownloadableSkill {
   scenes: string[];
   /** 是否已下载到本地（下载后可自由编辑，且已进入可用技能库） */
   installed: boolean;
+  /** 更新状态（仅已下载时有意义） */
+  updateState?: SkillUpdateState;
 }
 
 interface SkillManagerModalProps {
@@ -61,6 +68,30 @@ const SCENE_FILTERS: { key: string; label: string }[] = [
   { key: 'dev', label: 'Development Tools' },
   { key: 'general', label: 'General' },
 ];
+
+/** 更新状态徽标：Update（官方有更新）/ Edited（本地已改）/ Conflict（两边都改过）；synced 不渲染 */
+function UpdateBadge({ state, className = '' }: { state?: SkillUpdateState; className?: string }) {
+  if (!state || state === 'synced') return null;
+  const meta =
+    state === 'update'
+      ? { label: 'Update', color: 'var(--primary)', hint: 'The bundled official version has changed — update to get it' }
+      : state === 'edited'
+        ? { label: 'Edited', color: 'var(--ink-muted)', hint: 'You edited this skill locally' }
+        : { label: 'Conflict', color: 'var(--danger)', hint: 'Both the official version and your local copy have changed — updating overwrites your edits' };
+  return (
+    <span
+      className={`shrink-0 rounded px-1 py-px text-xs leading-tight ${className}`}
+      style={{
+        color: meta.color,
+        backgroundColor: `color-mix(in oklab, ${meta.color} 10%, transparent)`,
+        border: `1px solid color-mix(in oklab, ${meta.color} 28%, transparent)`,
+      }}
+      title={meta.hint}
+    >
+      {meta.label}
+    </span>
+  );
+}
 
 function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, official = true }: {
   skill: SkillItem;
@@ -128,6 +159,7 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
         <span className="shrink-0 text-xs leading-tight" style={{ color: 'var(--ink-faint)' }}>
           v{skill.version || '1.0.0'}
         </span>
+        <UpdateBadge state={skill.updateState} />
       </div>
 
       <p
@@ -154,8 +186,14 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
           className="mt-2 flex items-center justify-between gap-1.5 rounded-md px-1.5 py-1"
           style={{ backgroundColor: 'color-mix(in oklab, var(--danger) 6%, transparent)' }}
         >
-          <span className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--danger)' }}>
-            {confirmAction === 'reinstall' ? 'Restore official version?' : 'Uninstall this skill?'}
+          <span className="min-w-0 flex-1 text-xs leading-tight" style={{ color: 'var(--danger)' }}>
+            {confirmAction === 'reinstall'
+              ? skill.updateState === 'conflict'
+                ? 'Overwrite local edits with the official version?'
+                : skill.updateState === 'update'
+                  ? 'Apply the official update?'
+                  : 'Restore official version?'
+              : 'Uninstall this skill?'}
           </span>
           <span className="flex shrink-0 items-center gap-1">
             <Button
@@ -203,18 +241,34 @@ function SkillCard({ skill, onToggle, onUninstall, reinstallable, onReinstall, o
             </span>
           </div>
           {isUserSkill && reinstallable && onReinstall && (
-            <Button
-              type="button"
-              onClick={() => setConfirmAction('reinstall')}
-              variant="outline"
-              tone="brand"
-              size="icon-sm"
-              className="shrink-0"
-              title="Reinstall the bundled official version (overwrites your local edits)"
-              aria-label="Reinstall official version"
-            >
-              <RefreshCw className="h-3 w-3" />
-            </Button>
+            skill.updateState === 'update' ? (
+              /* 官方有更新且本地未改：一键更新，无需确认（不会丢任何本地内容） */
+              <Button
+                type="button"
+                onClick={() => onReinstall(skill.name)}
+                variant="solid"
+                tone="brand"
+                size="sm"
+                className="shrink-0"
+                title="Update to the latest official version"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Update
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                onClick={() => setConfirmAction('reinstall')}
+                variant="outline"
+                tone="brand"
+                size="icon-sm"
+                className="shrink-0"
+                title="Reinstall the bundled official version (overwrites your local edits)"
+                aria-label="Reinstall official version"
+              >
+                <RefreshCw className="h-3 w-3" />
+              </Button>
+            )
           )}
           {isUserSkill && onUninstall && (
             <Button
@@ -404,10 +458,12 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
     }
   };
 
-  // 重装官方版：Installed 中随包源技能恢复为随包官方版本（覆盖本地自定义前需二次确认，A 方案）
-  const handleReinstall = async (skillName: string) => {
+  // 重装官方版：Installed 中随包源技能恢复为随包官方版本（覆盖本地自定义前需二次确认，A 方案）；
+  // mode='update' 表示 Market 里的一键更新（官方有更新且本地未改，无需确认、不丢本地内容）
+  const handleReinstall = async (skillName: string, mode: 'reinstall' | 'update' = 'reinstall') => {
     setInstallError('');
     setInstallSuccess('');
+    setDownloadingName(skillName);
     try {
       const resp = await fetch('/api/skills', {
         method: 'POST',
@@ -416,13 +472,20 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
       });
       const data = await resp.json();
       if (!resp.ok || !data.success) {
-        setInstallError(data.error || data.detail || 'Reinstall failed');
+        setInstallError(data.error || data.detail || (mode === 'update' ? 'Update failed' : 'Reinstall failed'));
         return;
       }
-      setInstallSuccess(`Reinstalled official version: ${data.skill?.name ?? skillName}`);
+      const label = data.skill?.name ?? skillName;
+      setInstallSuccess(
+        mode === 'update'
+          ? `Updated to the latest official version: ${label}`
+          : `Reinstalled official version: ${label}`,
+      );
       loadSkills();
     } catch (e: unknown) {
       setInstallError(e instanceof Error ? e.message : 'Network error');
+    } finally {
+      setDownloadingName(null);
     }
   };
 
@@ -829,24 +892,41 @@ export function SkillManagerModal({ open, onOpenChange, initialView }: SkillMana
                               <span className="shrink-0 text-xs leading-tight" style={{ color: 'var(--ink-faint)' }}>
                                 v{d.version || '1.0.0'}
                               </span>
+                              <UpdateBadge state={d.updateState} />
                             </div>
                             <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed" style={{ color: 'var(--ink-muted)' }}>
                               {d.description}
                             </p>
                           </div>
 
-                          {/* 右侧：Install / Installed */}
+                          {/* 右侧：Install / Update（官方有更新，一键更新）/ Installed */}
                           {d.installed ? (
-                            <span
-                              className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium"
-                              style={{
-                                color: 'var(--success)',
-                                border: '1px solid color-mix(in oklab, var(--success) 30%, transparent)',
-                                backgroundColor: 'color-mix(in oklab, var(--success) 6%, transparent)',
-                              }}
-                            >
-                              Installed
-                            </span>
+                            d.updateState === 'update' ? (
+                              <Button
+                                type="button"
+                                disabled={!!downloadingName}
+                                loading={busy}
+                                onClick={() => handleReinstall(d.name, 'update')}
+                                variant="solid"
+                                tone="brand"
+                                size="sm"
+                                className="shrink-0"
+                              >
+                                {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                                {busy ? 'Updating…' : 'Update'}
+                              </Button>
+                            ) : (
+                              <span
+                                className="flex shrink-0 items-center rounded-md px-2.5 py-1.5 text-xs font-medium"
+                                style={{
+                                  color: 'var(--success)',
+                                  border: '1px solid color-mix(in oklab, var(--success) 30%, transparent)',
+                                  backgroundColor: 'color-mix(in oklab, var(--success) 6%, transparent)',
+                                }}
+                              >
+                                Installed
+                              </span>
+                            )
                           ) : (
                             <Button
                               type="button"

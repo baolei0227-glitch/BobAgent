@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Trash, Play, Loader2, Plus, X, Code2, Download, Upload, Star, Boxes, RefreshCw } from 'lucide-react';
+import { Trash, Globe, Loader2, Plus, X, Code2, Download, Upload, Star, Boxes, RefreshCw } from 'lucide-react';
 import {
   loadSettings,
   updateSandboxGraphPermission,
@@ -9,6 +9,7 @@ import {
   type SandboxGraphPermission,
   type SandboxChatPermission,
 } from '@/lib/settings';
+import { openSandboxPreviewInHippo } from '@/lib/sandbox/open-preview';
 import { useConfirm } from './ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { loadStarredApps, toggleStarredApp, subscribeStarred } from '@/lib/sandbox-starred';
@@ -41,7 +42,7 @@ const BRIDGE_ACTIONS: BridgeActionDef[] = [
   },
   {
     action: 'writeWanted',
-    description: 'Write a file to the global wanted/ directory',
+    description: 'Write a file to the global butler/ directory',
     params: ['filename:string', 'content:string'],
     returns: '{ path }',
   },
@@ -110,13 +111,6 @@ interface SandboxTemplate {
   label: string;
   description: string;
   entry: string;
-}
-
-/** 打开预览：派发 open-sandbox-preview 事件，由 CanvasFlow 在右侧悬浮面板打开 sandbox tab */
-function openPreview(app: SandboxApp) {
-  window.dispatchEvent(
-    new CustomEvent('open-sandbox-preview', { detail: { id: app.id, name: app.name } }),
-  );
 }
 
 /**
@@ -235,7 +229,7 @@ export function SandboxPanel({ onClose }: { onClose?: () => void }) {
         setApps((prev) => [data.app, ...prev]);
         setName('');
         setCreateOpen(false);
-        openPreview(data.app);
+        void openSandboxPreviewInHippo({ id: data.app.id, name: data.app.name });
       }
     } catch {
       // ignore
@@ -290,21 +284,6 @@ export function SandboxPanel({ onClose }: { onClose?: () => void }) {
     }
   };
 
-  /** 向所有当前打开的 sandbox 预览 iframe 广播 chat 权限变更事件 */
-  const broadcastChatPermissionChanged = useCallback((appId: string, granted: boolean) => {
-    try {
-      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe[src*="/api/sandbox/preview/"]');
-      iframes.forEach((iframe) => {
-        try {
-          iframe.contentWindow?.postMessage(
-            { type: 'bob_chat_permission_changed', appId, granted },
-            '*',
-          );
-        } catch { /* ignore */ }
-      });
-    } catch { /* ignore */ }
-  }, []);
-
   /** 循环切换某小程序的画布对接授权：none → read → control → none */
   const cyclePermission = async (appId: string) => {
     const cur = permissions[appId] ?? 'none';
@@ -317,23 +296,9 @@ export function SandboxPanel({ onClose }: { onClose?: () => void }) {
         else updated[appId] = next;
         return updated;
       });
-      // 广播给 iframe（badge 内的 graph 系列动作状态感知）
-      broadcastChatPermissionChanged(appId, next !== 'none');
     } catch {
       // ignore
     }
-  };
-
-  /** 刷新对应小程序预览 iframe：权限变更后重新加载以读取最新授权状态 */
-  const reloadAppIframe = (appId: string) => {
-    try {
-      const targetIframe = document.querySelector<HTMLIFrameElement>(
-        `iframe[src*="/api/sandbox/preview/${encodeURIComponent(appId)}"]`,
-      );
-      if (targetIframe?.contentWindow) {
-        targetIframe.contentWindow.location.reload();
-      }
-    } catch { /* ignore */ }
   };
 
   /** 模型调用（bridge chat）三级授权：未授权 → 弹「首次使用模型授权」选择窗（Permanent / Ask Every Time / Deny）；
@@ -359,8 +324,6 @@ export function SandboxPanel({ onClose }: { onClose?: () => void }) {
           delete next[appId];
           return next;
         });
-        broadcastChatPermissionChanged(appId, false);
-        reloadAppIframe(appId);
       } catch { /* ignore */ }
       return;
     }
@@ -390,8 +353,6 @@ export function SandboxPanel({ onClose }: { onClose?: () => void }) {
         else next[appId] = level;
         return next;
       });
-      broadcastChatPermissionChanged(appId, level !== 'none');
-      reloadAppIframe(appId);
     } catch { /* ignore */ }
   };
 
@@ -480,10 +441,10 @@ export function SandboxPanel({ onClose }: { onClose?: () => void }) {
 
                   <div className="rounded-md border p-2" style={{ borderColor: 'var(--line-soft)' }}>
                     <p className="text-xs font-semibold mb-1" style={{ color: 'var(--danger)' }}>
-                      Layer 3 — Global wanted/ Directory (async, for final deliverables)
+                      Layer 3 — Global butler/ Directory (async, for final deliverables)
                     </p>
                     <ul className="text-xs space-y-0.5" style={{ color: 'var(--ink-muted)' }}>
-                      <li><code style={{ fontWeight: 600 }}>await BobStorage.writeWanted(filename, content)</code> — writes to <code>~/BobWork/wanted/</code></li>
+                      <li><code style={{ fontWeight: 600 }}>await BobStorage.writeWanted(filename, content)</code> — writes to <code>~/BobWork/butler/</code></li>
                     </ul>
                   </div>
                 </div>
@@ -550,7 +511,7 @@ const node = await BobWork.request('readNode', {
   nodeId: 'n_abc123'
 });
 
-// Write a final deliverable to wanted/
+// Write a final deliverable to butler/
 await BobStorage.writeWanted('result.txt', 'Hello');
 
 // Discover all actions at runtime
@@ -851,10 +812,10 @@ const actions = await BobWork.listActions();`}
                           variant="solid"
                           tone="brand"
                           size="sm"
-                          onClick={() => { onClose?.(); openPreview(app); }}
-                          title="Open preview in side panel"
+                          onClick={() => { onClose?.(); void openSandboxPreviewInHippo({ id: app.id, name: app.name }); }}
+                          title="Open in Hippo Browser"
                         >
-                          <Play className="h-3 w-3" /> Preview
+                          <Globe className="h-3 w-3" /> Hippo
                         </Button>
                         <Button
                           variant="ghost"

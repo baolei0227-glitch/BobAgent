@@ -173,8 +173,6 @@ export default function QuestionPopup({
     onSubmit(answers, supplement.trim());
   };
 
-  const formatCountdown = (sec: number) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-
   if (submitted) return null;
 
   // 蓝紫色系，与对话窗口暖色区分
@@ -183,8 +181,6 @@ export default function QuestionPopup({
   const accentBorder = 'color-mix(in oklab, var(--info) 20%, transparent)';
   const surfaceBg = 'var(--popover)';
   const cardBg = 'var(--popover)';
-
-  const countdownText = countdown != null && countdown > 0 ? ` · ${formatCountdown(countdown)} left` : '';
 
   // 胶囊模式：弹窗被最小化，右下角常驻提醒；点击胶囊继续作答，× 为显式跳过
   if (minimized) {
@@ -219,7 +215,6 @@ export default function QuestionPopup({
           </span>
           <MessageSquare className="h-3.5 w-3.5" />
           {unanswered > 0 ? `${unanswered} question${unanswered > 1 ? 's' : ''} to answer` : 'Ready to submit'}
-          {countdownText && <span className="font-normal opacity-80">{countdownText.replace(' · ', '')}</span>}
         </button>
         <button
           onClick={onSkip}
@@ -261,16 +256,7 @@ export default function QuestionPopup({
             >
               <HelpCircle className="h-4 w-4" style={{ color: accent }} />
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold tracking-tight" style={{ color: 'var(--ink)' }}>
-                AI needs to confirm the following
-              </p>
-              <p className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-                {step < total
-                  ? `Question ${step + 1} of ${total}${countdownText}`
-                  : `Last step: Additional details${countdownText}`}
-              </p>
-            </div>
+            <span className="flex-1" />
             <button
               onClick={onClose}
               title="Minimize to a floating pill and continue later"
@@ -368,7 +354,6 @@ export default function QuestionPopup({
                       <textarea
                         value={answers[step]?.custom || ''}
                         onChange={(e) => handleCustomChange(step, e.target.value)}
-                        placeholder="Or type your own answer..."
                         rows={2}
                         className="w-full resize-none rounded-lg border px-3.5 py-2.5 text-xs transition-all duration-150 focus:outline-none"
                         style={{
@@ -398,26 +383,11 @@ export default function QuestionPopup({
               ) : (
                 <div>
                   {/* 末页：补充说明 */}
-                  <div className="flex items-start gap-2.5 mb-2">
-                    <span
-                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-xs font-bold"
-                      style={{ backgroundColor: 'var(--purple)', color: '#fff' }}
-                    >
-                      +
-                    </span>
-                    <p className="text-sm font-medium leading-snug pt-px" style={{ color: 'var(--ink)' }}>
-                      Additional details (optional)
-                    </p>
-                  </div>
-                  <p className="ml-7 mb-3 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                    Anything else to add — background, constraints, or preferences? Leave blank if not.
-                  </p>
-                  <div className="ml-7">
+                  <div>
                     <textarea
                       value={supplement}
                       maxLength={SUPPLEMENT_MAX}
                       onChange={(e) => setSupplement(e.target.value)}
-                      placeholder="e.g. Prioritize cost; don't touch production data; postpone to next week..."
                       rows={4}
                       className="w-full resize-none rounded-lg border px-3.5 py-2.5 text-xs transition-all duration-150 focus:outline-none"
                       style={{
@@ -437,9 +407,6 @@ export default function QuestionPopup({
                         e.currentTarget.style.boxShadow = 'none';
                       }}
                     />
-                    <p className="mt-1 text-right text-10" style={{ color: 'var(--ink-muted)' }}>
-                      {supplement.length}/{SUPPLEMENT_MAX}
-                    </p>
                   </div>
                 </div>
               )}
@@ -448,18 +415,9 @@ export default function QuestionPopup({
 
           {/* 底部按钮 */}
           <div
-            className="flex items-center justify-between gap-2 border-t px-6 py-4"
+            className="flex items-center justify-end gap-2 border-t px-6 py-4"
             style={{ borderColor: 'var(--paper-soft)', backgroundColor: cardBg }}
           >
-            <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-              {step < total
-                ? allAnswered
-                  ? 'All answered, ready to submit'
-                  : `${total - answeredCount} question${total - answeredCount === 1 ? '' : 's'} to go`
-                : allAnswered
-                  ? 'All answered, ready to submit'
-                  : `${total - answeredCount} question${total - answeredCount === 1 ? '' : 's'} unanswered`}
-            </span>
             <div className="flex items-center gap-2">
               <button
                 onClick={onSkip}

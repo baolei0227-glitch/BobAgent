@@ -35,8 +35,11 @@ import {
   Filter,
   MessagesSquare,
   AlertTriangle,
+  Link2,
+  FolderInput,
+  PackagePlus,
+  Inbox,
 } from 'lucide-react';
-import { WantedNoticeCenter } from './WantedNoticeCenter';
 import { SkillManagerModal } from './SkillManagerModal';
 import { TrashDialog } from './TrashDialog';
 import { ArchiveDialog } from './ArchiveDialog';
@@ -92,12 +95,12 @@ interface HomeworkOwner {
 
 /** Workspace 浮层最小宽度（保证 Finder 列式浏览可读） */
 const WORKSPACE_MIN_WIDTH = 560;
-/** 项目一级默认目录（homework / materials / attachments）：不提供重命名 / 复制 / 删除 */
-const DEFAULT_ROOT_DIRS = new Set(['homework', 'materials', 'attachments']);
+/** 项目一级默认目录（homework / materials）：不提供重命名 / 复制 / 删除 */
+const DEFAULT_ROOT_DIRS = new Set(['homework', 'materials']);
 /** 上传后「解析中」提示的最长展示时长：超时仍未建索引（无文字 / 解析失败）则自动撤下，避免永久转圈 */
 const PARSING_DEADLINE_MS = 5 * 60 * 1000;
 /** 文件树折叠态的 localStorage 键前缀（按项目分键：前缀 + 项目 id）。
- *  homework / materials 已改为扁平清单，折叠态即整个清单的显隐；attachments 等仍为可折叠树。 */
+ *  homework / materials 已改为扁平清单，折叠态即整个清单的显隐；其余目录仍为可折叠树。 */
 const WS_EXPANDED_LS_PREFIX = 'bob.workspace.expanded.';
 /** homework 清单视图的 localStorage 键前缀（按项目分键：前缀 + 项目 id；'0'=扁平，其余 / 缺失=按来源会话分组） */
 const WS_HOMEWORK_GROUPED_LS_PREFIX = 'bob.workspace.homework-grouped.';
@@ -108,7 +111,7 @@ const WS_ROW_DRAG_MIME = 'application/x-bobwork-ws-row';
 /** 标签筛选中的「无标签」哨兵：以 NUL 开头，与用户可输入的标签（经清洗后必为可见字符）不会撞名 */
 const UNTAGGED_FILTER = '\u0000untagged';
 /** materials 作用域的预设标签：无需先给文件打标签即可直接勾选 */
-const DEFAULT_MATERIAL_TAGS = ['原告', '被告', '法院'];
+const DEFAULT_MATERIAL_TAGS = ['原始材料', '证据材料', '参考资料', '参考判例', '法律依据'];
 /** 标签调色板：12 个可区分的色相（浅底深字由统一饱和度/亮度生成，保证同一色相下的胶囊都清晰可读） */
 const TAG_COLOR_HUES = [352, 20, 42, 95, 145, 172, 197, 222, 252, 282, 312, 332];
 /** 可否分享：分享链接仅支持 .md 文档（/api/share 服务端同样只接受 .md），文件夹不支持 */
@@ -363,36 +366,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     window.addEventListener('pointerup', up);
   }, []);
 
-  // BobMail 受控状态：入口图标统一在 ⌘F 面板底部图标栏，弹层由 WantedNoticeCenter 受控渲染
-  const [wantedOpen, setWantedOpen] = useState(false);
-  const [wantedAnchor, setWantedAnchor] = useState<DOMRect | null>(null);
-  const [wantedPending, setWantedPending] = useState(0);
-  const handleWantedClick = useCallback((anchorRect?: DOMRect | null) => {
-    setWantedAnchor(anchorRect ?? null);
-    setWantedOpen((prev) => !prev);
-  }, []);
-
-  // BobMail 跨组件入口：Sidebar WANTED 图标唤起弹层（bobmail-toggle，携带点击图标 rect 作锚点），
-  // 并同步未读数（bobmail-pending 广播 / bobmail-pending-request 拉取），保证两处入口角标一致。
-  useEffect(() => {
-    const onToggle = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { anchor?: DOMRect | null } | undefined;
-      handleWantedClick(detail?.anchor ?? null);
-    };
-    const onPendingRequest = () => {
-      window.dispatchEvent(new CustomEvent('bobmail-pending', { detail: { pending: wantedPending } }));
-    };
-    window.addEventListener('bobmail-toggle', onToggle);
-    window.addEventListener('bobmail-pending-request', onPendingRequest);
-    return () => {
-      window.removeEventListener('bobmail-toggle', onToggle);
-      window.removeEventListener('bobmail-pending-request', onPendingRequest);
-    };
-  }, [handleWantedClick, wantedPending]);
-  useEffect(() => {
-    // 未读数变化时主动广播（含挂载初始值），Sidebar BobMail 角标即时同步
-    window.dispatchEvent(new CustomEvent('bobmail-pending', { detail: { pending: wantedPending } }));
-  }, [wantedPending]);
+  // 回执收件箱（原 BobMail）已收敛到 Butler：悬浮球 → Butler 抽屉（ButlerHost/ButlerDrawer），
+  // 本组件不再持有收件箱弹层状态与未读扇出。
 
   // Skill Store（独立市场面板）：⌘F 面板图标栏 skill-store-open 唤起，本组件受控渲染 Dialog
   const [skillStoreOpen, setSkillStoreOpen] = useState(false);
@@ -545,7 +520,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     setTagFilter((prev) => ({ ...prev, [scope]: prev[scope] === tag ? '' : tag }));
   }, []);
 
-  /** 某作用域的可选标签：materials 预设标签（原告/被告/法院）在前，其后为该作用域已用过的标签（去重、按本地化排序） */
+  /** 某作用域的可选标签：materials 预设标签在前，其后为该作用域已用过的标签（去重、按本地化排序） */
   const candidateTagsOf = useCallback((scope: TagScope, extra: string[] = []): string[] => {
     const presets = scope === 'materials' ? DEFAULT_MATERIAL_TAGS : [];
     // 归档条目（键以 .archive/ 开头）已从文件树隐藏，其标签不再作为候选
@@ -781,6 +756,19 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState<string | null>(null);
   const renameRef = useRef<HTMLInputElement>(null);
+  // 添加链接弹层：folder 为 materials 根相对的目标子目录（'' = 根）
+  const [linkImport, setLinkImport] = useState<{ folder: string } | null>(null);
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  // 从 bobnotes 收件箱（raw/）取链接去 Hippo 打开：列清单（仅预览 + 来源链接）→ 新标签打开，
+  // 之后由用户用对话栏书签按钮「Current project」把渲染好的正文存进本项目 materials/
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesItems, setNotesItems] = useState<Array<{ id: string; title?: string; source?: string; status?: string; createdAt?: string; preview?: string }>>([]);
+  const [notesBusy, setNotesBusy] = useState(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
+  const [notesQuery, setNotesQuery] = useState('');
+  const [notesOpeningId, setNotesOpeningId] = useState<string | null>(null);
   // 当前激活节点 ID（"发送到当前节点"）由 CanvasFlow 传入，与右侧本地文件面板共用同一 ref
   // 关闭右键菜单（点击任意位置）
   useEffect(() => {
@@ -1517,6 +1505,107 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     if (currentId) loadProjectFiles(currentId);
   }, [handleUploadMaterial, currentId]);
 
+  // 添加链接：抓取网页渲染后的整页 HTML 落成 materials 下的 .html 原件
+  //（Hippo Browser 优先，桥不可用时退回服务端直抓静态 HTML；正文由索引从 HTML 里抽）
+  const handleAddLink = useCallback(async () => {
+    const url = linkUrl.trim();
+    if (!url || !linkImport || linkBusy) return;
+    setLinkBusy(true);
+    setLinkError(null);
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'add_link', url, folder: linkImport.folder }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        setLinkError(data?.error || 'Failed to import the link');
+        return;
+      }
+      // 与上传同口径：可索引文件先标记「解析中」，由轮询在 manifest 出现该路径后移除
+      if (data.file?.indexable && currentId) {
+        const key = `${currentId}::${data.file.path}`;
+        parsingDeadlineRef.current.set(key, Date.now() + PARSING_DEADLINE_MS);
+        setParsingFiles((prev) => new Set(prev).add(key));
+      }
+      showImageAiEditToast(
+        data.via === 'hippo'
+          ? `Imported via Hippo Browser: "${data.file.name}"`
+          : `Imported: "${data.file.name}"`,
+      );
+      setLinkImport(null);
+      setLinkUrl('');
+      if (currentId) loadProjectFiles(currentId);
+    } catch (err) {
+      setLinkError(err instanceof Error ? err.message : 'Failed to import the link');
+    } finally {
+      setLinkBusy(false);
+    }
+  }, [linkUrl, linkImport, linkBusy, currentId, loadProjectFiles]);
+
+  // 收件箱条目的关键词过滤（标题 / 来源 / 预览，纯前端）
+  const filteredNotesItems = useMemo(() => {
+    const q = notesQuery.trim().toLowerCase();
+    if (!q) return notesItems;
+    return notesItems.filter((it) =>
+      `${it.title || ''} ${it.source || ''} ${it.preview || ''}`.toLowerCase().includes(q),
+    );
+  }, [notesItems, notesQuery]);
+
+  /** 列出 bobnotes 收件箱清单（插件只回 120 字预览 + 来源链接，正文不进宿主） */
+  const openNotesPicker = useCallback(async () => {
+    setNotesOpen(true);
+    setNotesBusy(true);
+    setNotesError(null);
+    setNotesQuery('');
+    try {
+      const resp = await fetch('/api/notebook', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'raw_list', status: 'all' }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        setNotesItems([]);
+        setNotesError(data?.error || 'Failed to read the Bob Notes inbox');
+        return;
+      }
+      setNotesItems(Array.isArray(data.items) ? data.items : []);
+    } catch (err) {
+      setNotesError(err instanceof Error ? err.message : 'Failed to read the Bob Notes inbox');
+    } finally {
+      setNotesBusy(false);
+    }
+  }, []);
+
+  // 选中某条 → 用 Hippo 新标签打开它的来源链接；正文与登录态交给 Hippo，
+  // 落进项目仍走已建好的书签按钮「Current project」
+  const handleOpenInHippo = useCallback(async (url: string) => {
+    if (notesOpeningId) return;
+    setNotesOpeningId(url);
+    setNotesError(null);
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'open_in_hippo', url }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        setNotesError(data?.error || 'Failed to open the link in Hippo Browser');
+        return;
+      }
+      showImageAiEditToast('Opened in Hippo Browser — use the bookmark button to save it to this project');
+      setNotesOpen(false);
+      setNotesItems([]);
+    } catch (err) {
+      setNotesError(err instanceof Error ? err.message : 'Failed to open the link in Hippo Browser');
+    } finally {
+      setNotesOpeningId(null);
+    }
+  }, [notesOpeningId]);
+
   // 拖拽上传落点：materials 根（界面已扁平化，不再有可选子目录层级）
   const materialsDropReady = Boolean(currentId) && wsView === 'files';
 
@@ -1564,6 +1653,50 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     e.preventDefault();
     await uploadDroppedFiles(e, '');
   };
+
+  /**
+   * 粘贴链接入库（工作区 Ctrl+V / ⋮ → Paste link）：分流交给服务端按 token 判定——
+   * 本机分享链接复制原始 md，其它链接走既有抓取管线。收尾口径与 handleAddLink 一致。
+   */
+  const importLinkUrl = useCallback(async (rawUrl: string, folder: string) => {
+    const url = rawUrl.trim();
+    if (!url) return;
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'paste_link', url, folder }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        showImageAiEditToast(data?.error || 'Failed to import the link', 'error');
+        return;
+      }
+      // 与上传同口径：可索引文件先标记「解析中」，由轮询在 manifest 出现该路径后移除
+      if (data.file?.indexable && currentId) {
+        const key = `${currentId}::${data.file.path}`;
+        parsingDeadlineRef.current.set(key, Date.now() + PARSING_DEADLINE_MS);
+        setParsingFiles((prev) => new Set(prev).add(key));
+      }
+      showImageAiEditToast(
+        data.via === 'share'
+          ? `Saved shared doc: "${data.file?.name}"`
+          : `Imported: "${data.file?.name}"`,
+      );
+      if (currentId) loadProjectFiles(currentId);
+    } catch (err) {
+      showImageAiEditToast(err instanceof Error ? err.message : 'Failed to import the link', 'error');
+    }
+  }, [currentId, loadProjectFiles]);
+
+  /** 素材区粘贴：只接管「纯链接」文本，其它内容原样放行（不影响面板内既有的粘贴/输入） */
+  const handlePasteLink = useCallback((e: React.ClipboardEvent) => {
+    if (!materialsDropReady) return;
+    const text = e.clipboardData?.getData('text/plain')?.trim() ?? '';
+    if (!/^https?:\/\/\S+$/i.test(text)) return;
+    e.preventDefault();
+    void importLinkUrl(text, '');
+  }, [importLinkUrl, materialsDropReady]);
 
   // 删除文件/文件夹（项目文件树 + materials 共用）
   const handleDeleteMaterial = useCallback(async (path: string, isDir: boolean) => {
@@ -1631,6 +1764,39 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       showImageAiEditToast(`Copied "${String(data.newName || menu.fileName)}"`);
     } catch {
       showImageAiEditToast('Copy failed', 'error');
+    }
+  }, [currentId]);
+
+  /**
+   * 提升为资料（homework 行 ⋮ 菜单）：把工作区里的成果搬 / 复制进当前项目的 materials/，
+   * 由服务端在落位后建立内容索引（照此才可检索、才可被账本引为 `[来源: 材料:materials/…]`）。
+   * 移动会同时清掉 homework 归属清册与标签键（成果已离开工作区），复制保持原件不动。
+   */
+  const handlePromoteToMaterials = useCallback(async (
+    menu: { rel: string; fileName: string; isDir: boolean },
+    copy: boolean,
+  ) => {
+    setRowMenu(null);
+    if (!menu.rel.startsWith('homework/')) return;
+    try {
+      const resp = await fetch('/api/materials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'promote',
+          from: menu.rel.slice('homework/'.length),
+          copy,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        showImageAiEditToast(`Promote failed: ${String(data?.error || 'unknown')}`, 'error');
+        return;
+      }
+      if (currentId) loadProjectFilesRef.current?.(currentId);
+      showImageAiEditToast(`${copy ? 'Copied' : 'Moved'} to materials: ${String(data.name || menu.fileName)}`);
+    } catch (err) {
+      showImageAiEditToast(`Promote failed: ${err instanceof Error ? err.message : 'unknown'}`, 'error');
     }
   }, [currentId]);
 
@@ -1945,8 +2111,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   return (
     <>
       {/* 侧边条 rail 已移除（2026-09-01）：全部按钮迁至 ⌘F 面板底部图标栏；
-          常驻状态提示（BobMail 角标 / 更新进度）迁移至 NodeMap。
-          本组件仅保留浮层渲染（Workspace / BobMail / 回收站 / 新建项目等）。 */}
+          常驻状态提示（应用更新进度）迁移至 NodeMap；回执角标已归 Butler 悬浮球。
+          本组件仅保留浮层渲染（Workspace / 回收站 / 新建项目等）。 */}
 
       {/* Workspace 浮层（可拖动）：项目列表 + 当前项目文件树（完整交互） */}
       {workspaceOpen && typeof document !== 'undefined' && createPortal(
@@ -2144,9 +2310,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               return (
                 <>
 
-                  {/* ── 右栏：当前项目文件清单 ──（拖入 OS 文件上传到 materials 根目录） */}
+                  {/* ── 右栏：当前项目文件清单 ──（拖入 OS 文件上传到 materials 根目录；Ctrl+V 粘贴链接入库） */}
                   <div
-                    className="relative flex min-w-0 flex-1 flex-col"
+                    className="relative flex min-w-0 flex-1 flex-col outline-none"
+                    // tabIndex=-1 仅为了「点一下面板再 Ctrl+V」能把粘贴事件落到本容器内
+                    // （非聚焦容器时 paste 的 target 是 body，React 的 onPaste 收不到）
+                    tabIndex={-1}
+                    onPaste={handlePasteLink}
                     onDragOver={handleMaterialsDragOver}
                     onDragLeave={handleMaterialsDragLeave}
                     onDrop={handleMaterialsDrop}
@@ -3183,14 +3353,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         document.body,
       )}
 
-      {/* BobMail 通知中心：入口图标在 Sidebar（collapsed rail），弹层受控渲染（portal 到 body） */}
-      <WantedNoticeCenter
-        onOpenCalendar={onOpenCalendar}
-        open={wantedOpen}
-        onOpenChange={setWantedOpen}
-        anchorRect={wantedAnchor}
-        onPendingChange={setWantedPending}
-      />
+      {/* 回执收件箱已迁至 Butler 抽屉（ButlerHost），此处不再渲染通知中心 */}
 
       {/* Skill Store（独立面板）：⌘F 面板图标栏入口，Dialog 形态（打开即落在 Market 视图） */}
       <SkillManagerModal
@@ -3709,6 +3872,30 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
             <Copy className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
             Copy
           </button>
+          {/* 提升为资料：仅 homework 非根条目 —— 把成果转成 materials 里的正式材料，
+              落位后由服务端建立内容索引（此后才可检索、才可被账本引为材料出处） */}
+          {rowMenu.rel.startsWith('homework/') && (
+            <>
+              <button
+                onClick={() => { void handlePromoteToMaterials(rowMenu, false); }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink)' }}
+                title="Move it into materials as a source (it leaves the workspace)"
+              >
+                <FolderInput className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                Move to materials
+              </button>
+              <button
+                onClick={() => { void handlePromoteToMaterials(rowMenu, true); }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink)' }}
+                title="Keep the original in the workspace and add an indexed copy to materials"
+              >
+                <PackagePlus className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                Copy to materials
+              </button>
+            </>
+          )}
           {/* 归档：移入 <作用域根>/.archive/（仅 materials / homework 的非根条目；归档后从文件树消失，可在归档箱恢复） */}
           {(() => {
             const rel = rowMenu.rel;
@@ -3807,6 +3994,66 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               <FolderUp className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
               Upload folder
             </button>
+            {/* 添加链接：抓取网页正文落成 .md（服务端直抓优先，登录墙 / JS 渲染回落 Hippo Browser） */}
+            {materialsMenu.scope === 'materials' && (
+              <button
+                onClick={() => {
+                  setMaterialsMenu(null);
+                  setLinkError(null);
+                  setLinkUrl('');
+                  setLinkImport({ folder: matRel });
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink)' }}
+                title="Fetch a web page and save its text into materials as Markdown"
+              >
+                <Link2 className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                Add link
+              </button>
+            )}
+            {/* 粘贴链接：读剪贴板里的链接，按 token 智能分流（本机分享链接复制原件，其它走抓取） */}
+            {materialsMenu.scope === 'materials' && (
+              <button
+                onClick={() => {
+                  setMaterialsMenu(null);
+                  void (async () => {
+                    let text = '';
+                    try {
+                      text = (await navigator.clipboard.readText()).trim();
+                    } catch {
+                      showImageAiEditToast('Could not read the clipboard', 'error');
+                      return;
+                    }
+                    if (!/^https?:\/\/\S+$/i.test(text)) {
+                      showImageAiEditToast('No link in the clipboard', 'error');
+                      return;
+                    }
+                    await importLinkUrl(text, matRel);
+                  })();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink)' }}
+                title="Import the link in your clipboard — a shared document is copied as-is, other links are fetched"
+              >
+                <Link2 className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                Paste link
+              </button>
+            )}
+            {/* 从 bobnotes 收件箱取链接：在 Hippo 新标签打开（正文与登录墙交给 Hippo），再用书签按钮存进本项目 */}
+            {materialsMenu.scope === 'materials' && (
+              <button
+                onClick={() => {
+                  setMaterialsMenu(null);
+                  void openNotesPicker();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                style={{ color: 'var(--ink)' }}
+                title="Open a clipped link from the Bob Notes inbox in Hippo Browser"
+              >
+                <Inbox className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
+                Open from Bob Notes
+              </button>
+            )}
             {/* 进入多选：勾选该作用域下的文件后执行批量删除 / 打标签 / 下载 / 复制 */}
             <button
               onClick={() => startSelection(materialsMenu.scope)}
@@ -3943,6 +4190,162 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
           document.body,
         );
       })()}
+
+      {/* 添加链接弹层（portal 到 body：与重命名弹窗同款容器，避免被画布 UI 层遮挡） */}
+      {linkImport && typeof document !== 'undefined' && createPortal(
+        <div
+          data-ws-add-link
+          className="fixed inset-0 z-[1600] flex items-start justify-center pt-20"
+          style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
+          onClick={() => { if (!linkBusy) { setLinkImport(null); setLinkError(null); } }}
+        >
+          <div
+            className="w-80 rounded-2xl p-4 shadow-2xl"
+            style={{ border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)', backgroundColor: 'var(--popover)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="mb-3 text-sm font-medium font-display" style={{ color: 'var(--ink)' }}>
+              Add link
+            </p>
+            <input
+              type="text"
+              value={linkUrl}
+              onChange={(e) => {
+                setLinkUrl(e.target.value);
+                if (linkError) setLinkError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleAddLink();
+                if (e.key === 'Escape') { setLinkImport(null); setLinkError(null); }
+              }}
+              className="mb-2 w-full rounded-md border px-3 py-2 text-sm outline-none"
+              style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+              placeholder="https://example.com/article"
+              autoFocus
+              disabled={linkBusy}
+            />
+            <p className="mb-3 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              Saves the rendered page as an HTML file; its text is indexed for search. Pages that need a login are fetched through Hippo Browser.
+            </p>
+            {linkError && (
+              <p className="-mt-2 mb-3 text-xs" style={{ color: 'var(--destructive, #dc2626)' }}>
+                {linkError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
+                onClick={() => { setLinkImport(null); setLinkError(null); }}
+                disabled={linkBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="solid"
+                tone="brand"
+                size="sm"
+                onClick={handleAddLink}
+                disabled={!linkUrl.trim() || linkBusy}
+              >
+                {linkBusy ? 'Fetching…' : 'Add'}
+              </Button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* 从 bobnotes 收件箱取链接弹窗（portal 到 body，与 Add link 同口径）：列 raw 清单 → 选中一条用 Hippo 打开 */}
+      {notesOpen && typeof document !== 'undefined' && createPortal(
+        <div
+          data-ws-notes-open
+          className="fixed inset-0 z-[1600] flex items-start justify-center pt-20"
+          style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
+          onClick={() => { if (!notesOpeningId) { setNotesOpen(false); setNotesError(null); } }}
+        >
+          <div
+            className="w-[26rem] rounded-2xl p-4 shadow-2xl"
+            style={{ border: '1px solid color-mix(in oklab, var(--line) 30%, transparent)', backgroundColor: 'var(--popover)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="mb-3 text-sm font-medium font-display" style={{ color: 'var(--ink)' }}>
+              Open from Bob Notes
+            </p>
+            <input
+              type="text"
+              value={notesQuery}
+              onChange={(e) => setNotesQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape' && !notesOpeningId) setNotesOpen(false); }}
+              className="mb-2 w-full rounded-md border px-3 py-2 text-sm outline-none"
+              style={{ borderColor: 'var(--input-border)', color: 'var(--ink)' }}
+              placeholder="Search the inbox…"
+              autoFocus
+              disabled={Boolean(notesOpeningId)}
+            />
+            <p className="mb-3 text-xs" style={{ color: 'var(--ink-muted)' }}>
+              Opens the clipped link in a new Hippo Browser tab. Then use the bookmark button ▸ Current project to save it here.
+            </p>
+            {notesError && (
+              <p className="-mt-2 mb-3 text-xs" style={{ color: 'var(--destructive, #dc2626)' }}>
+                {notesError}
+              </p>
+            )}
+            <div className="mb-3 max-h-72 overflow-y-auto rounded-lg border" style={{ borderColor: 'var(--line)' }}>
+              {notesBusy ? (
+                <p className="px-3 py-6 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>Loading…</p>
+              ) : filteredNotesItems.length === 0 ? (
+                <p className="px-3 py-6 text-center text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  {notesItems.length === 0 ? 'The Bob Notes inbox is empty.' : 'No match.'}
+                </p>
+              ) : (
+                filteredNotesItems.map((it) => {
+                  // 只有带来源链接的条目能在 Hippo 打开（纯文本收藏没有 URL）
+                  const linkable = /^https?:\/\//i.test(String(it.source || ''));
+                  return (
+                    <button
+                      key={it.id}
+                      onClick={() => { if (linkable) void handleOpenInHippo(String(it.source)); }}
+                      disabled={!linkable || Boolean(notesOpeningId)}
+                      className="block w-full border-b px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-[var(--paper-hover)] disabled:opacity-50"
+                      style={{ borderColor: 'var(--line)' }}
+                      title={linkable ? String(it.source) : 'This item has no source link'}
+                    >
+                      <span className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--ink)' }}>
+                        <span className="min-w-0 flex-1 truncate">{it.title || it.id}</span>
+                        {notesOpeningId === it.source && (
+                          <span className="flex-shrink-0 font-normal" style={{ color: 'var(--ink-muted)' }}>Opening…</span>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block truncate text-[11px]" style={{ color: 'var(--ink-muted)' }}>
+                        {linkable ? String(it.source) : `${it.id} · no source link`}
+                      </span>
+                      {it.preview && (
+                        <span className="mt-0.5 block truncate text-[11px]" style={{ color: 'var(--ink-muted)' }}>
+                          {it.preview}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="sm"
+                onClick={() => { setNotesOpen(false); setNotesError(null); }}
+                disabled={Boolean(notesOpeningId)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
 
       {/* 重命名弹窗（portal 到 body：浮层祖先 z-40 会创建 stacking context，不 portal 会被画布 UI 层 z-[1500] 遮挡） */}
       {renaming && typeof document !== 'undefined' && createPortal(

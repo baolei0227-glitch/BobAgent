@@ -2,7 +2,7 @@
 
 import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, CalendarClock, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, Boxes, Mail, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil, GitMerge, GitFork, Network, Archive } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, Boxes, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil, GitMerge, GitFork, Network, Archive, MapPinned } from 'lucide-react';
 import type { HostNode, HostEdge, NodeHostValue } from './node-host';
 import { NodeHostContext } from './node-host';
 import {
@@ -15,7 +15,7 @@ import {
   estimateTabWidth,
   pluginPanelTabIcon,
 } from './canvasUtils';
-import { useStarredApps, useMailPending, useUpdateStatus, usePluginPanels, useBrandLogo } from './canvasHooks';
+import { useStarredApps, useUpdateStatus, usePluginPanels, useBrandLogo } from './canvasHooks';
 
 // —— 宿主自绘画布（2026-09 布局重构）：以本地类型替代旧 React Flow 的 Node/Edge/Connection。
 // 节点 state 统一以 AiChatNodeData 承载（非研究节点 data 语义照旧经断言访问）。
@@ -32,7 +32,6 @@ import { ChatNodeKernel, NodeReaderContext, type ChatNodeKernelProps } from './C
 import { ChatNode } from './ChatNode';
 import { CodingNode } from './CodingNode';
 import { NoteNode } from './NoteNode';
-import { ButlerNode } from './ButlerNode';
 import { BobbyNode } from './BobbyNode';
 import { UsagePanel } from './UsagePanel';
 import { AnnotationNode } from './AnnotationNode';
@@ -56,19 +55,17 @@ import { LocalFileExplorer } from './LocalFileExplorer';
 import { UnifiedPalette } from './UnifiedPalette';
 import { NavSearchBox } from './NavSearchBox';
 import { AICodingCreateDialog } from './AICodingCreateDialog';
+import { isBrowserDoc } from './viewers/registry';
 import type { AiChatNodeData, BobbyNodeData, ProviderConfig, ChatMessage } from '@/lib/types';
 import { DEFAULT_MODEL_ID, DEFAULT_THINKING_LEVEL } from '@/lib/types';
 import type { FileSourceKind } from '@/lib/files/types';
 import type { FileOpenPayload } from '@/lib/files/types';
-import { registerFileSources } from '@/lib/files/sources';
 import { listAgents, agentFlowType } from '@/lib/agents/profiles';
 import { bus, BusEvents } from '@/lib/bus';
 import { edgeTypeToRelation } from '@/lib/edge/relations';
 import type { GraphGateway, GraphSnapshot } from '@/lib/graph/graph-gateway';
 import type { PluginPanelEntry } from '@/lib/plugin-panels';
-import { executeGraphBridgeAction, isGraphBridgeAction } from '@/lib/graph/graph-bridge';
-import { updateSandboxGraphPermission, updateSandboxChatPermission, getSandboxChatPermission, PRESET_THEME_VARIABLES, estimateChatCost, type SandboxChatPermission } from '@/lib/settings';
-import { HOST_CHAT_PERMISSION_ACTIONS } from '@/lib/sandbox/bridge-constants';
+import { openSandboxPreviewInHippo } from '@/lib/sandbox/open-preview';
 import {
   setImageAiEditHidden,
   setImageAiEditKeepAlive,
@@ -90,18 +87,17 @@ const PANEL_W_PERSIST_KEY = 'bobwork.ui.panel.width.v3'; // 持久化 key（v3�
 const PANEL_W_PERSIST_STALE_KEYS = ['bobwork.ui.panel.width', 'bobwork.ui.panel.width.v2']; // 旧 key（启动时清理，避免遗留宽值干扰）
 const PANEL_CONVERSATION_MIN = 160; // 为中间对话区保留的最小宽度（从 200 下调到 160，既放宽面板又不至于挤爆对话区；窄屏模式下会自动提升到 480 保护画布舒适宽度）
 
-// 注册统一文件来源（Step 2）：模块加载时注册，幂等
-registerFileSources();
-
 /** 宿主节点壳统一 props（2026-09 宿主重构）：id/data/selected，identity 由壳内部注入 */
 type HostAgentNodeProps = Omit<ChatNodeKernelProps, 'identity'>;
 
-/** AI 画布节点类型：agent 节点按 AGENT_PROFILES 注册表派生（agent-<id>），避免手写散落。 */
+/** AI 画布节点类型：agent 节点按 AGENT_PROFILES 注册表派生（agent-<id>），避免手写散落。
+ *  2026-09-25：**Butler 不再是画布节点**（能力已融合进悬浮球 Butler 抽屉，见 lib/core/node-chat.ts
+ *  的 streamButlerChat 路径）—— 专属壳已删、菜单项已由 ~/BobWork/.agents.json 的 hiddenMenu 收起。
+ *  其余已装市场 agent（Kar/Buzan/Archivist/legal-* 等）走下面的 genericAgentNodeFor 通用壳。 */
 const AGENT_NODE_SHELLS: Record<string, React.ComponentType<HostAgentNodeProps>> = {
   chat: ChatNode,
   coding: CodingNode,
   note: NoteNode,
-  butler: ButlerNode,
 };
 
 /**
@@ -159,16 +155,16 @@ const NARROW_W_PANEL = NAV_W_COLLAPSED + PANEL_W_MIN + NARROW_COMFORT_CANVAS; //
 
 
 /** 右键菜单 agent 项图标（id → 图标元素；未配置的 agent 用默认聊天气泡）。
- *  颜色与各身份节点实际外框高亮色保持一致：coding 蓝(--info)/Kar 黄(--warn)/Butler 绿(--success)/chat 暖红(--danger)/Buzan 紫(--purple)，
- *  与 ChatNodeKernel 的 accentVar 映射同源。 */
+ *  颜色与各身份节点实际外框高亮色保持一致：coding 蓝(--info)/Kar 黄(--warn)/chat 暖红(--danger)/Buzan 紫(--purple)，
+ *  与 ChatNodeKernel 的 accentVar 映射同源。
+ *  2026-09-25：butler 项已移除（不再是画布节点，能力融合进悬浮球 Butler 抽屉）。 */
 const AGENT_MENU_ICONS: Record<string, { icon: React.ReactNode; color: string; hoverBg: string }> = {
-  // 尺寸：chat 的 Bot 14px；coding/kar/butler/buzan 专属图标 13px（2026-09 视觉校准）
+  // 尺寸：chat 的 Bot 14px；coding/kar/buzan 专属图标 13px（2026-09 视觉校准）
   chat: { icon: <Bot className="h-[14px] w-[14px] shrink-0" />, color: 'var(--danger)', hoverBg: 'var(--danger-soft)' },
   coding: { icon: <Code2 className="h-[13px] w-[13px] shrink-0" />, color: 'var(--info)', hoverBg: 'var(--info-soft)' },
   note: { icon: <NotebookText className="h-[13px] w-[13px] shrink-0" />, color: 'var(--warn)', hoverBg: 'var(--warn-soft)' },
-  butler: { icon: <CalendarClock className="h-[13px] w-[13px] shrink-0" />, color: 'var(--success)', hoverBg: 'var(--success-soft)' },
   mind: { icon: <Network className="h-[13px] w-[13px] shrink-0" />, color: 'var(--purple)', hoverBg: 'var(--purple-soft)' },
-  // Archivist（档案员，项目账本 keeper，2026-09-18 从管家剥离）：青灰 = 档案/冷静，与 Kar 的信息黄、Butler 的事务绿区分
+  // Archivist（档案员，项目账本 keeper，2026-09-18 从管家剥离）：青灰 = 档案/冷静，与 Kar 的信息黄区分
   archivist: { icon: <Archive className="h-[13px] w-[13px] shrink-0" />, color: 'var(--teal)', hoverBg: 'var(--teal-soft)' },
 };
 const AGENT_MENU_DEFAULT_ICON = { icon: <MessageSquareText className="h-[13px] w-[13px] shrink-0" />, color: 'var(--primary-strong)', hoverBg: 'var(--paper-hover)' };
@@ -178,7 +174,6 @@ const AGENT_MENU_LABELS: Record<string, string> = {
   chat: 'Chat',
   coding: 'Coding',
   note: 'Kar',
-  butler: 'Butler',
   mind: 'Buzan',
   archivist: 'Archivist',
 };
@@ -442,7 +437,6 @@ const PINNED_PANEL_PLUGIN_IDS = new Set(['bob-mind-mcp']);
 function UnifiedReaderPanel({
   openReaderIds,
   fileTabs,
-  sandboxTabs,
   readerTitles,
   activePanelTab,
   collapsed,
@@ -451,7 +445,6 @@ function UnifiedReaderPanel({
   onSelectTab,
   onCloseNodeTab,
   onCloseFileTab,
-  onCloseSandboxTab,
   onCloseTemplateTab,
   pluginPanels,
   onClosePluginTab,
@@ -459,7 +452,6 @@ function UnifiedReaderPanel({
   templateInitialScene,
   currentProjectId,
   outcomeModeTabIds,
-  sandboxRefreshTick,
   onPanelWidthChange,
   onPanelWidthCommit,
 }: {
@@ -474,9 +466,8 @@ function UnifiedReaderPanel({
     /** 图片集模式：当前激活的图片路径 */
     activeImagePath?: string;
   }>;
-  sandboxTabs: Array<{ id: string; name: string }>;
   readerTitles: Record<string, string>;
-  activePanelTab: { type: 'node' | 'file' | 'sandbox' | 'template' | 'plugin'; id: string } | null;
+  activePanelTab: { type: 'node' | 'file' | 'template' | 'plugin'; id: string } | null;
   collapsed: boolean;
   /** 面板当前宽度（px），可在 [PANEL_W_MIN, 可用上限] 之间自由缩放 */
   panelWidth: number;
@@ -484,10 +475,9 @@ function UnifiedReaderPanel({
   pluginPanels: PluginPanelEntry[];
   /** 已打开的插件面板 id（按打开顺序）：常驻标签栏，切走仅 display 隐藏，iframe 不重建 */
   openPluginIds: string[];
-  onSelectTab: (type: 'node' | 'file' | 'sandbox' | 'template' | 'plugin', id: string) => void;
+  onSelectTab: (type: 'node' | 'file' | 'template' | 'plugin', id: string) => void;
   onCloseNodeTab: (nodeMdId: string) => void;
   onCloseFileTab: (tabId: string) => void;
-  onCloseSandboxTab: (tabId: string) => void;
   onCloseTemplateTab: () => void;
   onClosePluginTab: (pluginId: string) => void;
   /** 打开模板 tab 时预选的场景名（AI 扫描到模板字段后跳转时携带） */
@@ -496,8 +486,6 @@ function UnifiedReaderPanel({
   currentProjectId: string;
   /** 成果块模式打开的 tab ID 集合 */
   outcomeModeTabIds: Set<string>;
-  /** Bob Sandbox 预览强制刷新信号（Play / 绑定 / AI 写入后递增） */
-  sandboxRefreshTick: number;
   /** 拖拽 handle 实时更新面板宽度（父组件内部 clamp 收敛） */
   onPanelWidthChange?: (newWidth: number) => void;
   /** 拖拽 handle 松手时持久化（父组件读取最新值写入 localStorage） */
@@ -543,40 +531,8 @@ function UnifiedReaderPanel({
     if (activePanelTab?.type === 'template') setTemplatePanelMounted(true);
   }, [activePanelTab?.type]);
 
-  // —— 沙盒预览实时 console 错误（功能：预览 iframe 的 console.error/warn 实时上报，右上角胶囊提示） ——
-  const [sandboxConsole, setSandboxConsole] = useState<Array<{ appId: string; level: 'error' | 'warn'; text: string; ts: number }>>([]);
-  const [sandboxConsoleOpen, setSandboxConsoleOpen] = useState(false);
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      const msg = event.data;
-      if (!msg || msg.type !== 'bob_console' || !Array.isArray(msg.msgs)) return;
-      // 信任校验：只接受来自 sandbox 预览 iframe 的消息
-      const source = event.source as Window | null;
-      if (!source) return;
-      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe[src*="/api/sandbox/preview/"]');
-      let trusted = false;
-      for (let i = 0; i < iframes.length; i++) {
-        try {
-          if (iframes[i].contentWindow === source) { trusted = true; break; }
-        } catch { /* cross-origin access blocked – skip */ }
-      }
-      if (!trusted) return;
-      const appId = String(msg.appId ?? '');
-      setSandboxConsole((prev) =>
-        [
-          ...prev,
-          ...(msg.msgs as Array<{ level?: string; text?: string }>).map((m) => ({
-            appId,
-            level: m.level === 'error' ? ('error' as const) : ('warn' as const),
-            text: String(m.text ?? '').slice(0, 400),
-            ts: Date.now(),
-          })),
-        ].slice(-50),
-      );
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, []);
+  // 标签栏溢出折叠：放得下的标签数量（超出部分收进 "…" 下拉菜单）
+  // 初始为 0，由 useLayoutEffect 在绘制前同步计算真实数量（effect 定义在 allTabs 之后）
 
   // 标签栏溢出折叠：放得下的标签数量（超出部分收进 "…" 下拉菜单）
   // 初始为 0，由 useLayoutEffect 在绘制前同步计算真实数量（effect 定义在 allTabs 之后）
@@ -585,37 +541,7 @@ function UnifiedReaderPanel({
   const tabsWrapRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
 
-  // Bob Sandbox iframe 缓存破除：每次选中/切换/重开小程序 tab 都重新加载预览（AI 写入后可见最新内容）
-  const [sandboxReloadKey, setSandboxReloadKey] = useState(0);
-  // P0#9 soft-reload helper: snapshot then bump reload key
-  const HOST_ORIGIN_SB = typeof window !== 'undefined' ? window.location.origin : '';
-  const softReloadActiveSandbox = useCallback((activeTabId?: string) => {
-    if (!activeTabId) { setSandboxReloadKey((k) => k + 1); return; }
-    const iframe = document.querySelector<HTMLIFrameElement>(
-      `iframe[src*="/api/sandbox/preview/${encodeURIComponent(activeTabId)}"]`,
-    );
-    if (iframe && iframe.contentWindow) {
-      try {
-        const msg = { type: 'bob_soft_reload', id: 'pre_refresh_' + Date.now() };
-        if (HOST_ORIGIN_SB) iframe.contentWindow.postMessage(msg, HOST_ORIGIN_SB);
-        else iframe.contentWindow.postMessage(msg, '*');
-      } catch { /* ignore */ }
-      // Give iframe 80ms to capture + write snapshot (localStorage is sync, so it's cheap)
-      setTimeout(() => setSandboxReloadKey((k) => k + 1), 80);
-    } else {
-      setSandboxReloadKey((k) => k + 1);
-    }
-  }, [HOST_ORIGIN_SB]);
-
-  useEffect(() => {
-    if (activePanelTab?.type === 'sandbox') {
-      softReloadActiveSandbox(activePanelTab.id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePanelTab?.type, activePanelTab?.id, sandboxRefreshTick, softReloadActiveSandbox]);
-
-  const handleSelectTab = (type: 'node' | 'file' | 'sandbox' | 'template' | 'plugin', id: string) => {
-    if (type === 'sandbox') softReloadActiveSandbox(id);
+  const handleSelectTab = (type: 'node' | 'file' | 'template' | 'plugin', id: string) => {
     onSelectTab(type, id);
   };
 
@@ -637,9 +563,8 @@ function UnifiedReaderPanel({
       ...pluginTabs.filter(t => !PINNED_PANEL_PLUGIN_IDS.has(t.id)),
       ...openReaderIds.map(id => ({ id, type: 'node' as const, label: readerTitles[id] || '...' })),
       ...fileTabs.map(t => ({ id: t.id, type: 'file' as const, label: t.fileName })),
-      ...sandboxTabs.map(t => ({ id: t.id, type: 'sandbox' as const, label: t.name })),
     ];
-  }, [openReaderIds, fileTabs, sandboxTabs, readerTitles, openPluginIds, pluginPanels, templatePanelMounted]);
+  }, [openReaderIds, fileTabs, readerTitles, openPluginIds, pluginPanels, templatePanelMounted]);
 
   // 计算可容纳的标签数量：预留 "…" 按钮宽度，按估算宽度逐个累加（面板尺寸/标签变化时重算）
   useLayoutEffect(() => {
@@ -676,11 +601,6 @@ function UnifiedReaderPanel({
   // 查找活跃文件 tab
   const activeFileTab = activePanelTab?.type === 'file'
     ? fileTabs.find(t => t.id === activePanelTab.id)
-    : null;
-
-  // 查找活跃小程序 tab
-  const activeSandboxTab = activePanelTab?.type === 'sandbox'
-    ? sandboxTabs.find(t => t.id === activePanelTab.id)
     : null;
 
   // 折叠态：容器消失，仅保留固定在右上角的展开按钮（与左侧边栏折叠策略一致）
@@ -754,7 +674,7 @@ function UnifiedReaderPanel({
         <div ref={tabsWrapRef} className="flex min-w-0 flex-1 items-center overflow-hidden">
           {allTabs.map((tab, idx) => {
             const isActive = activePanelTab?.id === tab.id && activePanelTab?.type === tab.type;
-            const TabIcon = tab.type === 'file' ? FileText : tab.type === 'sandbox' ? Code2 : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
+            const TabIcon = tab.type === 'file' ? FileText : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
             return (
               <div key={tab.id} className={`group flex shrink-0 items-center ${idx >= visibleCount ? 'hidden' : ''}`}>
                 {/* 圆角胶囊标签：类型图标 + 标签名 + 关闭按钮；选中态以背景+边框高亮，不加下划线 */}
@@ -806,7 +726,6 @@ function UnifiedReaderPanel({
                         onCloseTemplateTab();
                       }
                       else if (tab.type === 'plugin') onClosePluginTab(tab.id);
-                      else onCloseSandboxTab(tab.id);
                     }}
                     className="absolute right-0.5 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 cursor-pointer items-center justify-center rounded bg-[var(--paper)] opacity-0 pointer-events-none transition-opacity group-hover/tab:pointer-events-auto group-hover/tab:opacity-100 hover:bg-[var(--paper-hover)]"
                     style={{ color: 'var(--ink-muted)' }}
@@ -837,7 +756,7 @@ function UnifiedReaderPanel({
               >
                 {allTabs.map((tab) => {
                   const isActive = activePanelTab?.id === tab.id && activePanelTab?.type === tab.type;
-                  const TabIcon = tab.type === 'file' ? FileText : tab.type === 'sandbox' ? Code2 : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
+                  const TabIcon = tab.type === 'file' ? FileText : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
                   return (
                     <button
                       key={tab.id}
@@ -888,56 +807,6 @@ function UnifiedReaderPanel({
             onClickToFront={() => {}}
             mode="floating"
           />
-        )}
-        {/* Bob Sandbox 小程序预览：iframe 直载 preview 接口（带缓存破除参数，重选即刷新） */}
-        {activePanelTab?.type === 'sandbox' && activeSandboxTab && (
-          <div className="relative h-full w-full">
-            <iframe
-              key={activeSandboxTab.id}
-              src={`/api/sandbox/preview/${encodeURIComponent(activeSandboxTab.id)}?t=${sandboxReloadKey}`}
-              title={activeSandboxTab.name}
-              className="h-full w-full border-0"
-              style={{ backgroundColor: 'var(--popover)' }}
-              sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-modals"
-              referrerPolicy="no-referrer-when-downgrade"
-              allow="clipboard-read; clipboard-write"
-            />
-            {/* 实时 console 错误胶囊（预览 iframe 上报 bob_console）：有 error/warn 时显示，点击展开/收起 */}
-            {sandboxConsole.length > 0 && (
-              <div className="absolute right-2 top-2 z-10 overflow-hidden rounded-lg border text-11 shadow-lg"
-                style={{ borderColor: 'var(--line)', backgroundColor: 'color-mix(in srgb, var(--paper) 94%, transparent)', backdropFilter: 'blur(6px)' }}>
-                <button
-                  onClick={() => setSandboxConsoleOpen((o) => !o)}
-                  className="flex w-full items-center gap-1.5 px-2 py-1 text-left"
-                  style={{ color: sandboxConsole.some((m) => m.level === 'error') ? 'var(--danger)' : '#b58900', fontWeight: 600 }}
-                  title="Preview console messages"
-                >
-                  <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: sandboxConsole.some((m) => m.level === 'error') ? 'var(--danger)' : '#b58900' }} />
-                  <span className="shrink-0">Console</span>
-                  <span className="shrink-0 opacity-80">{sandboxConsole.filter((m) => m.level === 'error').length} err · {sandboxConsole.filter((m) => m.level === 'warn').length} warn</span>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setSandboxConsole([]); setSandboxConsoleOpen(false); }}
-                    className="ml-auto px-0.5 hover:opacity-70"
-                    style={{ color: 'var(--ink-muted)' }}
-                    title="Clear"
-                  >
-                    ✕
-                  </button>
-                </button>
-                {sandboxConsoleOpen && (
-                  <div className="max-h-28 overflow-y-auto border-t px-2 py-1" style={{ borderColor: 'var(--line)', color: 'var(--ink-muted)' }}>
-                    {sandboxConsole.slice(-8).map((m, i) => (
-                      <div key={i} className="truncate py-0.5"
-                        style={{ color: m.level === 'error' ? 'var(--danger)' : '#b58900' }}>
-                        <span className="opacity-60">[{m.appId.slice(-8)}]</span> {m.text}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
         )}
         {/* 独立模板插件：预览面板打开，字段填写 + 本地生成，零 AI
             惰性挂载 + display 显隐切换：切走 tab 时保持挂载，填写内容不丢失 */}
@@ -1074,26 +943,8 @@ function CanvasFlowInner() {
   const getNodes = useCallback(() => nodesRef.current as Node<AiChatNodeData>[], []);
   const getEdges = useCallback(() => edgesRef.current, []);
   const nodeIdCounter = useRef(0);
-  // 画布 wrapper 引用：用于计算真实可视宽度（扣除 overlay）
+  // 画布 wrapper 引用：画布点击命中判断用（onHostCanvasClick 判断点击目标是否为画布容器本身）
   const wrapperRef = useRef<HTMLDivElement>(null);
-  // wrapper 节点的 state 镜像：workspace 挂载前 wrapperRef.current 恒为 null，
-  // 若只在挂载前的 effect 里 observe(Ref.current)，该 effect 不会因 DOM 出现而重跑 →
-  // ResizeObserver 永远没挂上 → 右 dock 加宽（打开预览标签）时不再广播可视宽度，
-  // 会话卡片保持原宽被面板覆盖。用回调 ref 同步 state，让广播 effect 随挂载重跑。
-  const [wrapperEl, setWrapperEl] = useState<HTMLDivElement | null>(null);
-  const attachWrapper = useCallback((el: HTMLDivElement | null) => {
-    wrapperRef.current = el;
-    setWrapperEl(el);
-  }, []);
-  // 侧边栏当前宽度 ref（2026-09 布局重构后恒为 0：左列常驻，不参与画布宽度计算）
-  const sidebarWidthRef = useRef(0);
-  // 画布真实可视宽度：wrapper 宽度即对话可视宽度（右 dock 为并列列，不在 wrapper 内）。
-  // 供 ChatNode 展开宽度上限使用，避免展开节点被右侧宽屏面板遮挡（14" 屏 + 宽面板场景）
-  const computeVisibleCanvasWidth = useCallback(() => {
-    const pw = wrapperRef.current?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1200);
-    const sw = sidebarWidthRef.current;
-    return Math.max(pw - sw, 0);
-  }, []);
   // 画布缩放锁定（2026-09 宿主重构后恒为锁定：世界层无缩放/平移，zoom 恒 1）
   const [zoomLocked] = useState(true);
 
@@ -1523,7 +1374,8 @@ function CanvasFlowInner() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
-  // ⌘F / Ctrl+F 统一面板：文件搜索（BobWork 项目按名称 + BobWorkspace 各项目 homework/materials/attachments 子目录）+ WANTED 指令输入。
+  // ⌘F / Ctrl+F 统一面板（纯搜索）：BobWork 项目按名称 + BobWorkspace 各项目 homework/materials/attachments 子目录。
+  // 斜杠指令不在本面板（指令态已于 2026-09 P1-c 移除）——指令入口是 Butler 抽屉与微信桥。
   // ⌘F 专属全局搜索：contenteditable 编辑器不再让行（编辑器内查找替换已改用 ⌘⇧F，见 DocEditor）；文本输入框与专业编辑器仍让行。
   const [paletteOpen, setPaletteOpen] = useState(false);
   useEffect(() => {
@@ -1542,6 +1394,8 @@ function CanvasFlowInner() {
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, []);
+  // 画布日历面板（侧边栏 Calendar 入口）。Butler 抽屉里那个「Calendar」动作 2026-09-28 起
+  // 改为切到抽屉自身的 Butler 日历分区，不再跨宿主唤起这里，故撤掉 butler:open-calendar 监听。
   const [calendarOpen, setCalendarOpen] = useState(false);
   // ===== 原 ⌘F 底部栏按钮迁入左侧边栏所需状态与逻辑（2026-09） =====
   // Markdown：为当前打开的会话生成 homework Markdown 文档（归属当前项目）
@@ -1738,32 +1592,6 @@ function CanvasFlowInner() {
     setLocalExplorerPinned((v) => !v);
   }, []);
 
-  // 画布可视宽度广播：预览面板/本地文件面板/窗口尺寸变化 → dispatch canvas-visible-width，
-  // ChatNode 等订阅者据此实时调整展开宽度上限（避免展开节点被右侧宽屏面板遮挡）。
-  // 面板折叠/宽窄切换/本地面板挂载状态变化时重跑（ResizeObserver 需重挂到最新的元素上）；
-  // 依赖 focusedNodeId：单焦点切换后新挂载节点需要立刻拿到当前面板宽度（否则新节点
-  // 收不到已发生的广播 → 不按已打开面板收窄）。
-  // 依赖 wrapperEl：workspace 挂载晚于本 effect 首次执行，必须等 wrapper 出现后再挂 RO。
-  useEffect(() => {
-    const broadcast = () => {
-      window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
-    };
-    broadcast();
-    // 观察对话容器（wrapper）尺寸：右 dock 折叠/展开会改变 wrapper 宽度
-    const ro = new ResizeObserver(broadcast);
-    if (wrapperEl) ro.observe(wrapperEl);
-    let raf = 0;
-    const onResize = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(broadcast);
-    };
-    window.addEventListener('resize', onResize);
-    return () => {
-      ro.disconnect();
-      cancelAnimationFrame(raf);
-      window.removeEventListener('resize', onResize);
-    };
-  }, [computeVisibleCanvasWidth, wrapperEl, panelCollapsed, panelWidth, localExplorerCollapsed, focusedNodeId]);
   // 侧边栏折叠状态：折叠时 Sidebar 渲染 56px rail（悬浮 overlay），NodeMap 依据该状态左移避开面板
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -1887,31 +1715,19 @@ function CanvasFlowInner() {
         const next = clampPanelWidth(w);
         return next === w ? w : next;
       });
-      // 下面的 rAF 留在 layout effect 里调度不影响——它总是 paint 后才执行
-      requestAnimationFrame(() => {
-        window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
-      });
     }
-  }, [panelCollapsed, clampPanelWidth, computeVisibleCanvasWidth]);
+  }, [panelCollapsed, clampPanelWidth]);
   const toggleNav = useCallback(() => {
-    const next = !navCollapsed;
-    setNavCollapsed(next);
-    // 折叠切换后中栏宽度变化：广播可视宽度（内核据此调整展开宽度上限）
-    requestAnimationFrame(() => {
-      window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
-    });
-  }, [navCollapsed, computeVisibleCanvasWidth]);
+    setNavCollapsed((v) => !v);
+  }, []);
 
-  // 侧边栏展开/折叠仅同步 sidebarWidthRef（2026-09 布局重构后恒为 0，不占画布宽度）与折叠状态；
+  // 侧边栏折叠状态同步（2026-09 布局重构后 Workspace 为临时浮层，不占画布宽度）；
   // 单焦点宿主无画布平移/缩放（zoom 恒 1），不存在"补偿 transform"导致的漂移问题。
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
   sidebarCollapsedRef.current = sidebarCollapsed;
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
-    sidebarWidthRef.current = 0; // 2026-09 布局重构：Workspace 为临时浮层，不占画布宽度
     setSidebarCollapsed(collapsed);
-    // 侧边栏宽度变化会改变画布可视区，立即广播供展开节点宽度上限同步
-    window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: computeVisibleCanvasWidth() } }));
-  }, [computeVisibleCanvasWidth]);
+  }, []);
   const [fileTabs, setFileTabs] = useState<Array<{
     id: string;
     source: FileSourceKind;
@@ -1920,9 +1736,6 @@ function CanvasFlowInner() {
     imagePaths?: string[];
     activeImagePath?: string;
   }>>([]);
-  const [sandboxTabs, setSandboxTabs] = useState<Array<{ id: string; name: string }>>([]);
-  // Bob Sandbox 预览强制刷新信号：Play 按钮点击 / 绑定节点 / AI 写入小程序后 +1，驱动 iframe 重新加载最新内容
-  const [sandboxRefreshTick, setSandboxRefreshTick] = useState(0);
   // 新建节点对话框（双击画布空白触发）：AI Chat / AI Coding 类型选择 + 小程序项目绑定
   const [nodeCreateDialogOpen, setNodeCreateDialogOpen] = useState(false);
   const [nodeCreatePos, setNodeCreatePos] = useState<{ x: number; y: number } | null>(null);
@@ -1930,6 +1743,12 @@ function CanvasFlowInner() {
   const [nodeCreateKind, setNodeCreateKind] = useState<'mini' | 'agent'>('mini');
   // 标题栏「＋」会话类型下拉菜单
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  // NodeMap 展开态：开关按钮置于左侧栏项目行（项目名右侧、＋ 新建会话左侧），
+  // NodeMap 受控于此（面板本体仍悬浮在画布左下角）
+  const [nodeMapOpen, setNodeMapOpen] = useState(false);
+  const handleNodeMapCollapsedChange = useCallback((nextCollapsed: boolean) => {
+    setNodeMapOpen(!nextCollapsed);
+  }, []);
   // Agent 市场已装画像（2026-09-06）：创建菜单与节点类型动态并入 /api/agents 返回的已装市场 agent
   const [marketAgents, setMarketAgents] = useState<Array<{ id: string; label: string }>>([]);
   // 已禁用 agent 名单：＋ Add session 菜单过滤掉禁用项（chat 系统恒可用；2026-09-06）
@@ -1976,7 +1795,7 @@ function CanvasFlowInner() {
     return map;
   }, [marketAgents]);
   const { appVersion, setAppVersion, updateStatus, setUpdateStatus, updateVersion, updateProgress, updateErrText } = useUpdateStatus();
-  const [mailPending, setMailPending] = useMailPending();
+  // 回执未读角标已统一在 ButlerOrb（订阅 butler:inbox-pending），本组件不再持有
   // 标星小程序（与 SandboxPanel 共享数据源）：在 ⌘F 面板输入框下方与功能按钮同排展示，点击直接打开预览
   const [starredApps] = useStarredApps();
   // 底部品牌区 logo：跟随设置里的 Sidebar 品牌头像（settings.brandLogo），默认 hippo-icon.png
@@ -1984,7 +1803,7 @@ function CanvasFlowInner() {
   const [, setProviderConfigs] = useState<ProviderConfig[]>([]);
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
-  const [activePanelTab, setActivePanelTab] = useState<{ type: 'node' | 'file' | 'sandbox' | 'template' | 'plugin'; id: string } | null>(null);
+  const [activePanelTab, setActivePanelTab] = useState<{ type: 'node' | 'file' | 'template' | 'plugin'; id: string } | null>(null);
   // 切换 BobWork 页面（预览面板 tab）时自动收起 Hippo Browser 为胶囊：
   // 浏览器是独立的系统级置顶窗口，不会随页面切换走，留在最上层会遮住新页面。
   // collapse 幂等，主进程会跳过「已收起 / 已关闭 / 用户正在浏览器里操作」的情况。
@@ -2105,8 +1924,6 @@ function CanvasFlowInner() {
           // 切换到文件/小程序标签（如果有）
           if (fileTabs.length > 0) {
             setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
-          } else if (sandboxTabs.length > 0) {
-            setActivePanelTab({ type: 'sandbox', id: sandboxTabs[sandboxTabs.length - 1].id });
           } else {
             setActivePanelTab(null);
           }
@@ -2124,7 +1941,7 @@ function CanvasFlowInner() {
       next.delete(nodeMdId);
       return next;
     });
-  }, [activeReaderId, fileTabs, sandboxTabs]);
+  }, [activeReaderId, fileTabs]);
   // 图片文件扩展名（与后端 local-files read_file 的 imageExts 保持一致）
   const isImageFile = (name: string) => {
     const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -2167,11 +1984,17 @@ function CanvasFlowInner() {
     setPanelCollapsed(false); // 确保预览面板展开，否则点击文件事件看不到内容
   }, []);
 
-  // HTML/PDF 文档直接在 Hippo Browser 中打开，并让就地编辑能回写原文件：
-  //  - 本地绝对路径 → file:// 直接载入（HTML 可原样编辑并落盘；PDF 主进程重定向到内置批注阅读器）
+  // HTML/PDF/图片 文档直接在 Hippo Browser 中打开，并让就地编辑能回写原文件：
+  //  - 本地绝对路径 → file:// 直接载入（HTML 可原样编辑并落盘；PDF/图片 由主进程重定向到内置查看页）
   //  - 项目内相对路径 → 解析到项目真实磁盘绝对路径后同样走 file://
-  //  - 解析失败兜底 → file_proxy 代理（仅只读渲染）
-  const openLocalFileInBrowser = useCallback(async (_source: string, filePath: string, anchor?: { page?: number; query?: string }) => {
+  //  - 解析失败兜底 → file_proxy 代理（仅只读渲染；⚠️ 仅适用于 Chromium 自带 viewer 的类型）
+  // 2026-09-30：docx 不再走这条路，改为 viewers/registry 里的 DocxEditorViewer 在预览面板内编辑
+  const openLocalFileInBrowser = useCallback(async (
+    _source: string,
+    filePath: string,
+    anchor?: { page?: number; query?: string },
+    fileName?: string,
+  ) => {
     if (!isDesktop()) return;
     let target: string;
     if (isAbsoluteFsPath(filePath)) {
@@ -2188,6 +2011,17 @@ function CanvasFlowInner() {
       }
       if (abs) {
         target = 'file://' + abs;
+      } else if (/\.docx?$/i.test(filePath)) {
+        // ⚠️ docx/doc 不能走文件代理兜底：file_proxy 返回的是 HTTP URL，而主进程 localFileToViewerUrl
+        // 只认 file:// 且 pdf/图片 才会重定向到内置查看页；docx 已改为在预览面板内编辑（见 viewers/registry）。
+        // （PDF 之所以「看起来能用」，仅因 Chromium 自带 PDF 查看器。）
+        // 因此 docx 必须解析到磁盘绝对路径；解析失败时明确报错，绝不退代理。
+        window.alert(
+          `无法定位「${fileName || filePath}」的磁盘路径，已取消打开。\n\n` +
+          `该文件不在当前项目内，无法解析为本地绝对路径。\n` +
+          `请改用左侧「本地文件」浏览它，或先切换到它所属的项目。`,
+        );
+        return;
       } else {
         try {
           const list = await (await fetch('/api/projects')).json();
@@ -2211,11 +2045,13 @@ function CanvasFlowInner() {
   // Step 2：订阅 file.open 事件 —— 任意舱（目录浏览器/项目树/搜索/素材）发布打开意图，查看舱统一处理
   useEffect(() => {
     return bus.subscribe<FileOpenPayload>(BusEvents.fileOpen, (p) => {
-      // 文档类（HTML/PDF/图片）不进入预览面板，直接交由 Hippo Browser 打开（PDF/图片由主进程重定向到对应查看页）
-      if (/\.html?$/i.test(p.name) || /\.pdf$/i.test(p.name) || /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(p.name)) {
-        // 仅 PDF 支持定位锚点（页码 / 关键词）；HTML 追加 hash 会误触发页内锚点
+      // 文档类（HTML/PDF/DOCX/图片）不进入预览面板，直接交由 Hippo Browser 打开；
+      // PDF/DOCX/图片由主进程 localFileToViewerUrl 重定向到对应内置查看/编辑页。
+      // 白名单唯一真源 = registry.isBrowserDoc（历史上此处曾硬编码同义正则，已收敛为单一真源）
+      if (isBrowserDoc(p.name)) {
+        // 仅 PDF 支持定位锚点（页码 / 关键词）；HTML/DOCX 追加 hash 会误触发页内锚点
         const anchor = /\.pdf$/i.test(p.name) ? { page: p.page, query: p.query } : undefined;
-        void openLocalFileInBrowser(p.source, p.path, anchor);
+        void openLocalFileInBrowser(p.source, p.path, anchor, p.name);
         return;
       }
       openFileTab(p.source, p.name, p.path);
@@ -2239,69 +2075,6 @@ function CanvasFlowInner() {
       return next;
     });
   }, [activePanelTab, openReaderIds]);
-
-  // Bob Sandbox 预览标签页管理（点击边栏小程序后在此打开 iframe 预览）
-  const openSandboxTab = useCallback((id: string, name: string) => {
-    setSandboxTabs((prev) => {
-      if (prev.some((t) => t.id === id)) return prev;
-      return [...prev, { id, name }];
-    });
-    setActivePanelTab({ type: 'sandbox', id });
-    setPanelCollapsed(false); // 确保预览面板展开
-    setSandboxRefreshTick((t) => t + 1); // 已打开/激活时也强制刷新 iframe，避免 Play 点击无反应
-  }, []);
-
-  // 订阅 sandbox-changed：AI 在 Coding 节点写入/修改小程序文件后广播，自动刷新已打开的预览
-  useEffect(() => {
-    const handler = () => setSandboxRefreshTick((t) => t + 1);
-    window.addEventListener('sandbox-changed', handler);
-    return () => window.removeEventListener('sandbox-changed', handler);
-  }, []);
-
-  // 订阅主题变更：通过 postMessage 实时推送 CSS 变量到 sandbox iframe（无需全量重载）
-  useEffect(() => {
-    const handler = () => {
-      // 从主应用 DOM 读取当前主题的所有 CSS 变量
-      const root = document.documentElement;
-      const style = getComputedStyle(root);
-      const varNames = Object.keys(PRESET_THEME_VARIABLES.warm);
-      const variables: Record<string, string> = {};
-      for (const name of varNames) {
-        const val = style.getPropertyValue(name).trim();
-        if (val) variables[name] = val;
-      }
-      // 判断深色模式：统一主题（dynamic-ui Purple）为浅色；自定义主题按背景亮度判定
-      const dark = (() => {
-          // 自定义主题：检查背景亮度
-          const bg = variables['--background'] || '';
-          const match = bg.match(/oklch\(\s*([\d.]+)/);
-          return match ? parseFloat(match[1]) < 0.5 : false;
-        })();
-      // 提取关键色摘要
-      const keyColors = {
-        primary: variables['--primary'] || '',
-        background: variables['--background'] || variables['--canvas-bg'] || '',
-        surface: variables['--paper'] || variables['--card'] || '',
-        text: variables['--foreground'] || variables['--ink'] || '',
-        border: variables['--border'] || variables['--line'] || '',
-        muted: variables['--muted-foreground'] || variables['--ink-muted'] || '',
-      };
-      // 向所有 sandbox 预览 iframe 推送主题更新
-      const HOST_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
-      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe[src*="/api/sandbox/preview/"]');
-      iframes.forEach((iframe) => {
-        try {
-          const msg = { type: 'bob_theme_update', variables, dark, keyColors };
-          if (HOST_ORIGIN) iframe.contentWindow?.postMessage(msg, HOST_ORIGIN);
-          else iframe.contentWindow?.postMessage(msg, '*');
-        } catch {
-          // iframe 可能跨域或未加载，忽略
-        }
-      });
-    };
-    window.addEventListener('theme-changed', handler);
-    return () => window.removeEventListener('theme-changed', handler);
-  }, []);
 
   // 新建节点对话框创建成功回调：挂载节点；AI Coding 节点额外打开小程序预览并刷新 SandboxPanel
   const handleNodeCreated = useCallback(async (payload: { nodeId: string; title: string; sandboxAppId?: string; appName?: string; initialPrompt?: string }) => {
@@ -2336,8 +2109,7 @@ function CanvasFlowInner() {
     // 单焦点：对话框新建（Coding/Chat）= 打开为新对话
     openNewlyCreatedNode(payload.nodeId);
     if (payload.sandboxAppId && payload.appName) {
-      openSandboxTab(payload.sandboxAppId, payload.appName);
-      window.dispatchEvent(new Event('sandbox-changed'));
+      void openSandboxPreviewInHippo({ id: payload.sandboxAppId, name: payload.appName });
     }
     // 用户在创建对话框里填写了初始需求：同步写入节点 .md，保证刷新/重启后回放也能看到
     if (payload.initialPrompt) {
@@ -2357,17 +2129,7 @@ function CanvasFlowInner() {
         // 写入失败忽略：节点内存里已存在用户消息，不影响 UI
       }
     }
-  }, [nodeCreatePos, openSandboxTab, setNodes, openNewlyCreatedNode]);
-
-  // Step：订阅 open-sandbox-preview 事件 —— SandboxPanel 派发，查看舱统一处理
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ id?: string; name?: string }>).detail;
-      if (detail?.id) openSandboxTab(detail.id, detail.name || 'Sandbox App');
-    };
-    window.addEventListener('open-sandbox-preview', handler);
-    return () => window.removeEventListener('open-sandbox-preview', handler);
-  }, [openSandboxTab]);
+  }, [nodeCreatePos, setNodes, openNewlyCreatedNode]);
 
   // Step：订阅 sandbox-store-open 事件 —— SandboxPanel 头部全屏按钮派发，打开全屏管理页
   useEffect(() => {
@@ -2394,479 +2156,7 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('open-settings', handler);
   }, []);
 
-  // Bob Sandbox postMessage Bridge: 监听来自小程序 iframe 的 bob_request 消息
-  useEffect(() => {
-    // ------- Security helpers for host message listeners -------
-    const HOST_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
-    function trustedMessageSource(source: Window | null): boolean {
-      if (!source) return false;
-      // Same-origin always allowed (dev/electron-local)
-      // Additionally walk all sandbox preview iframes and check if this source is one of them
-      // (covers sandboxed iframe where event.origin is 'null').
-      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe[src*="/api/sandbox/preview/"]');
-      for (let i = 0; i < iframes.length; i++) {
-        try {
-          if (iframes[i].contentWindow === source) return true;
-        } catch { /* cross-origin access blocked – skip */ }
-      }
-      return false;
-    }
-    function postToSource(source: Window, msg: unknown) {
-      try {
-        // Prefer the iframe's own src-derived origin; fall back to HOST_ORIGIN for same-origin preview
-        if (HOST_ORIGIN) {
-          source.postMessage(msg, HOST_ORIGIN);
-          return;
-        }
-      } catch { /* ignore */ }
-      try { source.postMessage(msg, '*'); } catch { /* ignore */ }
-    }
-    // Broadcast a message to every open sandbox preview iframe
-    function broadcastToSandboxes(msg: unknown) {
-      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe[src*="/api/sandbox/preview/"]');
-      iframes.forEach((iframe) => {
-        try {
-          if (iframe.contentWindow) postToSource(iframe.contentWindow, msg);
-        } catch { /* ignore */ }
-      });
-    }
 
-    const handler = async (event: MessageEvent) => {
-      const msg = event.data;
-      if (!msg || msg.type !== 'bob_request') return;
-      // P0#1: verify source is a real sandbox preview iframe (or same-origin)
-      const source = event.source as Window | null;
-      if (!source || !trustedMessageSource(source)) return;
-      const { id, action, data } = msg;
-      try {
-        // P0#3: writeWanted 宿主端用户确认（按 appId 记忆授权，防止小程序静默把投递物塞到 wanted/）
-        if (String(action) === 'writeWanted') {
-          const appId = String((data as Record<string, unknown> | undefined)?._appId ?? 'unknown-app');
-          const filename = String((data as Record<string, unknown> | undefined)?.filename ?? '(unnamed)');
-          const content = String((data as Record<string, unknown> | undefined)?.content ?? '');
-          const preview = content.length > 240 ? content.slice(0, 240) + '\n... (truncated)' : content;
-          const allowed = await confirmAsk({
-            title: 'Wanted Delivery Confirmation',
-            message:
-              `Mini-program "${appId}" wants to write to your global wanted/ directory:\n\n` +
-              `  File name: ${filename}\n` +
-              `  Size: ${content.length} chars\n\n` +
-              `Content preview:\n${preview}\n\n` +
-              `This file will be placed in ~/BobWork/wanted/. Confirm delivery?`,
-            confirmLabel: 'Allow',
-            cancelLabel: 'Block',
-          });
-          if (!allowed) {
-            postToSource(source, { type: 'bob_response', id, success: false, error: 'User blocked writeWanted' });
-            return;
-          }
-        }
-        // GraphGateway 对接动作（太空舱对接协议）：客户端拦截，先鉴权。
-        // 未授权一律拒绝；control 类动作还需已获 control 授权；授权弹窗由用户（控制台）决定。
-        if (isGraphBridgeAction(String(action))) {
-          const appId = String((data as Record<string, unknown> | undefined)?._appId ?? '');
-          const result = await executeGraphBridgeAction(
-            String(action),
-            ((data as Record<string, unknown> | undefined) || {}) as Record<string, unknown>,
-            {
-              appId,
-              gateway: graphGateway,
-              requestPermission: async (aid, level) => {
-                const levelLabel =
-                  level === 'control' ? 'Control (operate canvas)' : 'Read (view canvas)';
-                const ok = await confirmAsk({
-                  title: 'Docking Permission Request',
-                  message:
-                    `Mini-program "${aid}" requests ${levelLabel} access to the canvas.\n\n` +
-                    (level === 'control'
-                      ? 'Granting lets it read and manipulate nodes and edges.'
-                      : 'Granting lets it read nodes and edges.') +
-                    '\nYou can revoke anytime from the Sandbox panel.',
-                  confirmLabel: 'Grant',
-                  cancelLabel: 'Deny',
-                });
-                if (!ok) return 'none';
-                await updateSandboxGraphPermission(aid, level);
-                // 通知 SandboxPanel 同步授权 chip 状态
-                window.dispatchEvent(
-                  new CustomEvent('sandbox-permission-changed', { detail: { appId: aid, level } }),
-                );
-                // 通知所有打开的 sandbox iframe（graph 权限变化与 chat 状态同步）
-                broadcastToSandboxes({ type: 'bob_chat_permission_changed', appId: aid, granted: level !== 'none' });
-                return level;
-              },
-            },
-          );
-          if (result.success) {
-            postToSource(source, { type: 'bob_response', id, success: true, data: result.data });
-          } else {
-            postToSource(source,
-              { type: 'bob_response', id, success: false, error: result.error || 'Unknown error' },
-            );
-          }
-          return;
-        }
-        // 小程序模型调用权限申请（chat）：P1#10 三档选择（None / Per-call / Permanent）
-        if (HOST_CHAT_PERMISSION_ACTIONS.includes(String(action))) {
-          const appId = String((data as Record<string, unknown> | undefined)?._appId ?? '');
-          const currentLevel: SandboxChatPermission = await getSandboxChatPermission(appId);
-
-          // chatGetPermission: 返回结构化 level，兼容旧版 granted boolean
-          if (String(action) === 'chatGetPermission') {
-            postToSource(source, {
-              type: 'bob_response',
-              id,
-              success: true,
-              data: {
-                granted: currentLevel !== 'none',
-                level: currentLevel,
-              },
-            });
-            return;
-          }
-
-          // chatRequestPermission: 三级选择弹窗
-          // Round 1: 主确认（Allow = permanent / Deny = none）
-          const allowPermanent = await confirmAsk({
-            title: 'Model-Call Permission Request',
-            message:
-              `Mini-program "${appId}" requests permission to call your AI models.\n\n` +
-              'Granting lets it send text to your configured models (no file/tool access; ' +
-              'output capped at 2048 tokens per call; every call is recorded in egress-audit.log).\n' +
-              'You can revoke anytime from the Sandbox panel.\n\n' +
-              '▸ "Permanent Allow" = never ask again for this mini-program\n' +
-              '▸ "Ask Every Time" = each call shows a cost-estimate confirm dialog\n' +
-              '▸ "Deny" = block all model calls',
-            confirmLabel: 'Permanent Allow',
-            cancelLabel: 'Ask Every Time',
-          });
-          let chosen: SandboxChatPermission;
-          if (allowPermanent) {
-            chosen = 'permanent';
-          } else {
-            // 第二轮：问用户是 Ask Every Time 还是直接 Deny
-            const allowPerCall = await confirmAsk({
-              title: 'Model-Call: Confirm Mode',
-              message:
-                `Choose permission mode for mini-program "${appId}":\n\n` +
-                '▸ "Ask Every Time" — each call shows a cost-estimate confirm dialog\n' +
-                '▸ "Deny" — block all model calls',
-              confirmLabel: 'Ask Every Time',
-              cancelLabel: 'Deny',
-            });
-            chosen = allowPerCall ? 'per_call' : 'none';
-          }
-          await updateSandboxChatPermission(appId, chosen);
-          const granted = chosen !== 'none';
-          window.dispatchEvent(
-            new CustomEvent('sandbox-chat-permission-changed', { detail: { appId, granted, level: chosen } }),
-          );
-          broadcastToSandboxes({ type: 'bob_chat_permission_changed', appId, granted });
-          postToSource(source, {
-            type: 'bob_response',
-            id,
-            success: true,
-            data: { granted, level: chosen },
-          });
-          return;
-        }
-
-        // P1#10: chat 实际执行前校验三级授权：per_call → 每次确认（附 token/cost 预估）；none → 拒绝
-        if (String(action) === 'chat') {
-          const appId = String((data as Record<string, unknown> | undefined)?._appId ?? data.appId ?? '');
-          const messages = ((data as Record<string, unknown> | undefined)?.messages || []) as Array<{ role?: unknown; content?: unknown }>;
-          const model = typeof (data as Record<string, unknown> | undefined)?.model === 'string'
-            ? ((data as Record<string, unknown>).model as string)
-            : undefined;
-          const maxTokens = typeof (data as Record<string, unknown> | undefined)?.maxTokens === 'number'
-            ? ((data as Record<string, unknown>).maxTokens as number)
-            : undefined;
-          const level = await getSandboxChatPermission(appId);
-          if (level === 'none') {
-            // 首次授权引导：弹窗确认一次 → 写入 permanent，之后该小程序永不弹窗（首次授权后永久生效）
-            const firstGrant = await confirmAsk({
-              title: 'Model-Call: First-Time Grant',
-              message:
-                `Mini-program "${appId}" wants to call your AI models.\n\n` +
-                'Granting remembers the choice (permanent) — this mini-program will not ask again.\n' +
-                'Every call is logged to egress-audit.log.\n' +
-                'You can revoke/set per-call confirmation anytime from the Sandbox panel.',
-              confirmLabel: 'Allow & Remember',
-              cancelLabel: 'Deny This App',
-            });
-            if (!firstGrant) {
-              postToSource(source, {
-                type: 'bob_response',
-                id,
-                success: false,
-                error: 'Chat permission denied by user',
-              });
-              return;
-            }
-            await updateSandboxChatPermission(appId, 'permanent');
-            window.dispatchEvent(
-              new CustomEvent('sandbox-chat-permission-changed', { detail: { appId, granted: true, level: 'permanent' } }),
-            );
-            broadcastToSandboxes({ type: 'bob_chat_permission_changed', appId, granted: true });
-          }
-          if (level === 'per_call') {
-            const est = estimateChatCost({ model, messages, maxTokens });
-            const msgCount = messages?.length || 0;
-            const totalChars = messages?.reduce((acc, m) => acc + (typeof m.content === 'string' ? m.content.length : 0), 0) || 0;
-            const okPerCall = await confirmAsk({
-              title: 'Model-Call: Approve This Request?',
-              message:
-                `Mini-program "${appId}" wants to call the model.\n\n` +
-                `  Model:        ${model || '(auto-picked from configured pool)'}\n` +
-                `  Messages:     ${msgCount} (${totalChars} chars)\n` +
-                `  Est. input:   ${est.promptTokens.toLocaleString()} tokens\n` +
-                `  Max output:   ${est.estOutputTokens.toLocaleString()} tokens\n` +
-                `  Price range:  ${est.priceLabel}\n` +
-                `  Est. cost:    $${est.usd.toFixed(5)}  (~¥${est.cny.toFixed(4)})\n\n` +
-                `Every call is logged to egress-audit.log. Approve this call?`,
-              confirmLabel: 'Approve Call',
-              cancelLabel: 'Deny This Call',
-            });
-            if (!okPerCall) {
-              postToSource(source, {
-                type: 'bob_response',
-                id,
-                success: false,
-                error: 'Chat denied by user (per_call mode)',
-              });
-              return;
-            }
-          }
-        }
-        const resp = await fetch('/api/sandbox/bridge', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, data }),
-        });
-        const result = await resp.json();
-        if (result.success) {
-          postToSource(source, { type: 'bob_response', id, success: true, data: result.data });
-        } else {
-          postToSource(source, { type: 'bob_response', id, success: false, error: result.error || 'Unknown error' });
-        }
-      } catch (e) {
-        postToSource(source, { type: 'bob_response', id, success: false, error: e instanceof Error ? e.message : String(e) });
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [confirmAsk, graphGateway]);
-
-  // Bob Sandbox Chat Stream：监听小程序 iframe 的 bob_chat_stream / bob_chat_cancel，
-  // 转发到服务端 SSE 端点，把增量逐块回传 iframe（流式模型调用）。
-  useEffect(() => {
-    const HOST_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
-    function trustedMessageSource(source: Window | null): boolean {
-      if (!source) return false;
-      const iframes = document.querySelectorAll<HTMLIFrameElement>('iframe[src*="/api/sandbox/preview/"]');
-      for (let i = 0; i < iframes.length; i++) {
-        try {
-          if (iframes[i].contentWindow === source) return true;
-        } catch { /* ignore */ }
-      }
-      return false;
-    }
-    function postToSource(source: Window, msg: unknown) {
-      try {
-        if (HOST_ORIGIN) { source.postMessage(msg, HOST_ORIGIN); return; }
-      } catch { /* ignore */ }
-      try { source.postMessage(msg, '*'); } catch { /* ignore */ }
-    }
-    // 记录进行中的流，key 为 stream id，value 为取消函数
-    const activeStreams = new Map<string, () => void>();
-    const streamHandler = (event: MessageEvent) => {
-      const msg = event.data;
-      if (!msg) return;
-      const source = event.source as Window | null;
-      if (!source || !trustedMessageSource(source)) return;
-
-      // 取消：中止对应流的 AbortController
-      if (msg.type === 'bob_chat_cancel') {
-        const cancel = activeStreams.get(msg.id);
-        if (cancel) {
-          cancel();
-          activeStreams.delete(msg.id);
-        }
-        return;
-      }
-
-      if (msg.type !== 'bob_chat_stream') return;
-      const id = msg.id;
-      const data = (msg.data as Record<string, unknown> | undefined) || {};
-      const controller = new AbortController();
-      activeStreams.set(id, () => controller.abort());
-
-      (async () => {
-        try {
-          // P1#10: chatStream 同 chat 一样做三级授权校验
-          const appIdStream = String((data as Record<string, unknown>)._appId ?? (data as Record<string, unknown>).appId ?? '');
-          const messagesStream = ((data as Record<string, unknown>).messages || []) as Array<{ role?: unknown; content?: unknown }>;
-          const modelStream = typeof (data as Record<string, unknown>).model === 'string' ? ((data as Record<string, unknown>).model as string) : undefined;
-          const maxTokensStream = typeof (data as Record<string, unknown>).maxTokens === 'number' ? ((data as Record<string, unknown>).maxTokens as number) : undefined;
-          const streamLevel = await getSandboxChatPermission(appIdStream);
-          if (streamLevel === 'none') {
-            // 首次授权引导：弹窗确认一次 → 写入 permanent，之后该小程序永不弹窗（首次授权后永久生效）
-            const streamFirstGrant = await confirmAsk({
-              title: 'Model-Call: First-Time Grant',
-              message:
-                `Mini-program "${appIdStream}" wants to stream a model call.\n\n` +
-                'Granting remembers the choice (permanent) — this mini-program will not ask again.\n' +
-                'Every call is logged to egress-audit.log.\n' +
-                'You can revoke/set per-call confirmation anytime from the Sandbox panel.',
-              confirmLabel: 'Allow & Remember',
-              cancelLabel: 'Deny This App',
-            });
-            if (!streamFirstGrant) {
-              postToSource(source,
-                { type: 'bob_chat_error', id, error: 'Chat permission denied by user' },
-              );
-              activeStreams.delete(id);
-              return;
-            }
-            await updateSandboxChatPermission(appIdStream, 'permanent');
-            window.dispatchEvent(
-              new CustomEvent('sandbox-chat-permission-changed', { detail: { appId: appIdStream, granted: true, level: 'permanent' } }),
-            );
-          }
-          if (streamLevel === 'per_call') {
-            const est = estimateChatCost({
-              model: modelStream,
-              messages: messagesStream,
-              maxTokens: maxTokensStream,
-            });
-            const charCount = messagesStream.reduce((acc, m) => acc + (typeof m.content === 'string' ? m.content.length : 0), 0);
-            const proceed = await confirmAsk({
-              title: 'Stream Model-Call: Approve?',
-              message:
-                `Mini-program "${appIdStream}" wants to stream a model call.\n\n` +
-                `  Model:        ${modelStream || '(default)'}\n` +
-                `  Messages:     ${messagesStream.length} (${charCount} chars)\n` +
-                `  Est. input:   ${est.promptTokens.toLocaleString()} tokens\n` +
-                `  Max output:   ${est.estOutputTokens.toLocaleString()} tokens\n` +
-                `  Price range:  ${est.priceLabel}\n` +
-                `  Est. cost:    $${est.usd.toFixed(5)}  (~¥${est.cny.toFixed(4)})\n\n` +
-                `Logged in egress-audit.log. Approve this stream call?`,
-              confirmLabel: 'Approve Call',
-              cancelLabel: 'Deny This Call',
-            });
-            if (!proceed) {
-              postToSource(source,
-                { type: 'bob_chat_error', id, error: 'Stream chat denied by user (per_call mode)' },
-              );
-              activeStreams.delete(id);
-              return;
-            }
-          }
-
-          const resp = await fetch('/api/sandbox/chat-stream', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...data }),
-            signal: controller.signal,
-          });
-          if (!resp.ok || !resp.body) {
-            const err = await resp.json().catch(() => ({}));
-            postToSource(source,
-              { type: 'bob_chat_error', id, error: (err as { error?: string }).error || `HTTP ${resp.status}` },
-            );
-            activeStreams.delete(id);
-            return;
-          }
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          let finishReason: string | undefined;
-          let stopReason: string | undefined;
-          let lastDoneData: unknown = {};
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let idx: number;
-            while ((idx = buffer.indexOf('\n\n')) >= 0) {
-              const chunk = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 2);
-              // 解析 SSE 事件块
-              let ev = 'message';
-              const dataLines: string[] = [];
-              for (const line of chunk.split('\n')) {
-                if (line.startsWith('event:')) ev = line.slice(6).trim();
-                else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
-              }
-              const payload = dataLines.join('\n');
-              if (!payload) continue;
-              if (ev === 'delta') {
-                try {
-                  const parsed = JSON.parse(payload);
-                  if (typeof parsed.text === 'string') {
-                    postToSource(source, { type: 'bob_chat_delta', id, text: parsed.text });
-                  }
-                } catch { /* ignore */ }
-              } else if (ev === 'done') {
-                let parsed: Record<string, unknown> = {};
-                try { parsed = JSON.parse(payload) as Record<string, unknown>; } catch { /* ignore */ }
-                lastDoneData = parsed;
-                // P3#12: backprop finish_reason / stop_reason
-                if (typeof parsed.finish_reason === 'string') finishReason = parsed.finish_reason;
-                if (typeof parsed.stop_reason === 'string') stopReason = parsed.stop_reason;
-              } else if (ev === 'error') {
-                try {
-                  const parsed = JSON.parse(payload) as { error?: string };
-                  postToSource(source, { type: 'bob_chat_error', id, error: parsed.error || 'Unknown stream error' });
-                } catch { /* ignore */ }
-                activeStreams.delete(id);
-              }
-            }
-          }
-          // Emit final done event with finish/stop reasons attached (P3#12)
-          const finalDone: Record<string, unknown> = typeof lastDoneData === 'object' && lastDoneData ? { ...lastDoneData } : {};
-          if (finishReason) finalDone.finish_reason = finishReason;
-          if (stopReason) finalDone.stop_reason = stopReason;
-          postToSource(source, { type: 'bob_chat_done', id, data: finalDone });
-          activeStreams.delete(id);
-        } catch (e) {
-          // 仅当非主动取消时才回传错误
-          if (!controller.signal.aborted) {
-            postToSource(source,
-              { type: 'bob_chat_error', id, error: e instanceof Error ? e.message : String(e) },
-            );
-          }
-          activeStreams.delete(id);
-        }
-      })();
-    };
-    window.addEventListener('message', streamHandler);
-    return () => {
-      window.removeEventListener('message', streamHandler);
-      activeStreams.forEach((cancel) => cancel());
-    };
-  }, []);
-
-
-  const closeSandboxTab = useCallback((tabId: string) => {
-    setSandboxTabs((prev) => {
-      const next = prev.filter((t) => t.id !== tabId);
-      // 如果关闭的是当前活跃的，切换到最后一个未关闭的
-      if (activePanelTab?.type === 'sandbox' && activePanelTab.id === tabId) {
-        if (next.length > 0) {
-          setActivePanelTab({ type: 'sandbox', id: next[next.length - 1].id });
-        } else if (fileTabs.length > 0) {
-          setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
-        } else if (openReaderIds.length > 0) {
-          setActivePanelTab({ type: 'node', id: openReaderIds[openReaderIds.length - 1] });
-          setActiveReaderId(openReaderIds[openReaderIds.length - 1]);
-        } else {
-          setActivePanelTab(null);
-        }
-      }
-      return next;
-    });
-  }, [activePanelTab, fileTabs, openReaderIds]);
 
   // 模板插件 tab：打开（单例，可携带预选场景）；关闭时切回最后打开的其它 tab
   const openTemplateTab = useCallback((scene?: string) => {
@@ -2880,8 +2170,6 @@ function CanvasFlowInner() {
       if (prev?.type !== 'template') return prev;
       if (fileTabs.length > 0) {
         setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
-      } else if (sandboxTabs.length > 0) {
-        setActivePanelTab({ type: 'sandbox', id: sandboxTabs[sandboxTabs.length - 1].id });
       } else if (openReaderIds.length > 0) {
         setActivePanelTab({ type: 'node', id: openReaderIds[openReaderIds.length - 1] });
         setActiveReaderId(openReaderIds[openReaderIds.length - 1]);
@@ -2890,7 +2178,7 @@ function CanvasFlowInner() {
       }
       return prev;
     });
-  }, [fileTabs, sandboxTabs, openReaderIds]);
+  }, [fileTabs, openReaderIds]);
 
   // 订阅 open-template-panel：Sidebar 模板入口 / ChatNode 模板按钮派发，打开预览面板模板 tab
   useEffect(() => {
@@ -2940,8 +2228,6 @@ function CanvasFlowInner() {
       if (prev?.type !== 'plugin' || prev.id !== pluginId) return prev;
       if (fileTabs.length > 0) {
         setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
-      } else if (sandboxTabs.length > 0) {
-        setActivePanelTab({ type: 'sandbox', id: sandboxTabs[sandboxTabs.length - 1].id });
       } else if (openReaderIds.length > 0) {
         setActivePanelTab({ type: 'node', id: openReaderIds[openReaderIds.length - 1] });
         setActiveReaderId(openReaderIds[openReaderIds.length - 1]);
@@ -2950,7 +2236,7 @@ function CanvasFlowInner() {
       }
       return prev;
     });
-  }, [fileTabs, sandboxTabs, openReaderIds, pluginPanels, confirmAskChoices]);
+  }, [fileTabs, openReaderIds, pluginPanels, confirmAskChoices]);
 
   // 订阅 open-plugin-panel：左侧快捷入口 / 其它 UI 派发，打开对应插件面板 tab
   useEffect(() => {
@@ -4271,7 +3557,6 @@ function CanvasFlowInner() {
     <UnifiedReaderPanel
       openReaderIds={openReaderIds}
       fileTabs={fileTabs}
-      sandboxTabs={sandboxTabs}
       readerTitles={readerTitles}
       activePanelTab={activePanelTab}
       collapsed={false}
@@ -4285,7 +3570,6 @@ function CanvasFlowInner() {
       }}
       onCloseNodeTab={closeReader}
       onCloseFileTab={closeFileTab}
-      onCloseSandboxTab={closeSandboxTab}
       onCloseTemplateTab={closeTemplateTab}
       pluginPanels={pluginPanels}
       onClosePluginTab={closePluginPanel}
@@ -4294,17 +3578,16 @@ function CanvasFlowInner() {
       onToggleCollapse={handleTogglePanel}
       currentProjectId={currentProjectId}
       outcomeModeTabIds={outcomeModeTabIds}
-      sandboxRefreshTick={sandboxRefreshTick}
       onPanelWidthChange={setPanelWidthLive}
       onPanelWidthCommit={() => persistPanelWidth(panelWidthRef.current)}
     />
   );
 
   // 功能按钮（2026-09-12 从左侧栏迁回 ⌘F 面板）：渲染在 ⌘F 输入框下方，仅图标 + 悬停显示名称
+  // （Calendar 已于 2026-09-25 移回左列底部品牌栏右侧）
   const navActions: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }> = [
     { key: 'store', label: 'Extensions Store', icon: <Blocks className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('skill-store-open')) },
     { key: 'miniapps', label: 'Mini Programs', icon: <Boxes className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('sandbox-store-open')) },
-    { key: 'calendar', label: 'Calendar', icon: <Calendar className="h-4 w-4 shrink-0" />, onClick: () => setCalendarOpen(true) },
     // Bob Notes 主入口 → 打开 bob-notes-mcp 原厂 Web 面板（宿主定制 UI 壳已去除）
     { key: 'notes', label: 'Bob Notes', icon: <NotebookText className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('open-plugin-panel', { detail: { id: 'bob-notes-mcp' } })) },
   ];
@@ -4348,7 +3631,9 @@ function CanvasFlowInner() {
         // 根容器显式裁剪：全屏应用不应出现 body 滚动。
         // 预览面板等 overlay 依赖 self-stretch/h-full 约束高度，若某渲染时机下约束失效，
         // 长文档会把面板撑到视口底部之外（"文档出现在画布下方 + 界面可滑动"），此处兜底裁剪。
-        <div className="relative flex h-screen w-screen overflow-hidden">
+        // p-[1.5px]：四块区域（左列导航 / 中间会话区 / 预览面板 / 本地文件面板）统一距窗口四边 1.5px，
+        // 整窗呈现一圈 1.5px 缝隙（box-sizing:border-box 下 w/h-screen 含内边距，不产生溢出）。
+        <div className="relative flex h-screen w-screen overflow-hidden p-[1.5px]">
           {/* 顶部拖拽区域：absolute 覆盖在画布之上（z-30，低于悬浮面板 z-40）。
               这样三块面板的 top-[8px] 直接相对窗口顶部，mac 红绿灯覆盖在左侧面板左上角。
               高度必须 ≤ 8px（= 会话卡片标题栏 py-2 的上内边距）：
@@ -4467,7 +3752,7 @@ function CanvasFlowInner() {
             <div aria-hidden className="flex justify-center pb-0.5 pt-2">
               <span className="h-[0.5px] w-52" style={{ background: 'linear-gradient(to right, transparent, var(--line) 25%, var(--line) 75%, transparent)' }} />
             </div>
-            {/* 项目名标题栏：左侧项目名（点击切换项目），右侧 ＋ 添加会话（chat/coding/note/butler/imageGen 等类型下拉） */}
+            {/* 项目名标题栏：左侧项目名（点击切换项目），右侧 ＋ 添加会话（Agent 市场已装 agent 下拉：chat/coding/Kar/Buzan/Archivist/legal-* 等；Butler 已不再是画布节点） */}
             <div className="flex shrink-0 items-center gap-1 px-2 pb-1.5">
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -4492,7 +3777,7 @@ function CanvasFlowInner() {
                         {currentProjectMeta?.category && (
                           <span
                             className="rounded px-1 py-px text-10"
-                            style={{ backgroundColor: 'color-mix(in oklab, var(--paper) 18%, transparent)' }}
+                            style={{ backgroundColor: 'color-mix(in oklab, var(--ink) 8%, transparent)' }}
                           >
                             {currentProjectMeta.category}
                           </span>
@@ -4508,6 +3793,23 @@ function CanvasFlowInner() {
                   </div>
                 </TooltipContent>
               </Tooltip>
+              {/* Node Map 开关（2026-09-25）：项目名右侧、＋ 新建会话左侧；展开态高亮。
+                  data-nodemap-toggle：NodeMap 的"点击外部折叠"据此豁免本按钮，避免 pointerdown 先折叠、click 又展开 */}
+              <button
+                type="button"
+                data-nodemap-toggle
+                disabled={nodes.length === 0}
+                onClick={() => setNodeMapOpen((v) => !v)}
+                title="Node map"
+                aria-label="Node map"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--paper-hover)] disabled:cursor-default disabled:opacity-40"
+                style={{
+                  color: nodeMapOpen ? 'var(--primary)' : 'var(--ink-muted)',
+                  backgroundColor: nodeMapOpen ? 'color-mix(in oklab, var(--primary) 12%, transparent)' : 'transparent',
+                }}
+              >
+                <MapPinned className="h-[13px] w-[13px] shrink-0" />
+              </button>
               <div className="relative -ml-1 shrink-0">
                 <button
                   type="button"
@@ -4538,8 +3840,6 @@ function CanvasFlowInner() {
                           onClick = () => { setNodeCreateKind('mini'); setNodeCreatePos(pos); setNodeCreateDialogOpen(true); };
                         } else if (a.id === 'note') {
                           onClick = () => createNoteAgentNode(pos);
-                        } else if (a.id === 'butler') {
-                          onClick = () => createAgentNode('butler', 'Butler', pos);
                         } else {
                           onClick = () => createPlainNode(pos);
                         }
@@ -4814,7 +4114,8 @@ function CanvasFlowInner() {
                 />
               </div>
             </div>
-            {/* 底部品牌区：logo + BobWork + 版本号连排（左侧），右侧 BobMail 入口 */}
+            {/* 底部品牌区：logo + BobWork + 版本号连排（回执入口已统一到 Butler 悬浮球）；
+                最右侧 Calendar 入口（2026-09-25 自 ⌘F 面板图标栏迁入） */}
             <div className="shrink-0 px-2 py-1.5">
               <div className="flex items-center gap-0.5">
                 <button
@@ -4916,27 +4217,16 @@ function CanvasFlowInner() {
                     </>
                   )}
                 </button>
-                <div className="flex-1" />
-                {/* BobMail 入口：唤起通知中心（Sidebar 受控渲染弹层），带未读角标 */}
+                {/* Calendar：贴本栏最右侧（ml-auto），图标尺寸与左栏其他工具按钮一致 */}
                 <button
                   type="button"
-                  title="BobMail"
-                  aria-label="BobMail"
-                  onClick={(e) => {
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    window.dispatchEvent(new CustomEvent('bobmail-toggle', { detail: { anchor: rect } }));
-                  }}
-                  className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
+                  onClick={() => setCalendarOpen(true)}
+                  title="Calendar"
+                  aria-label="Calendar"
+                  className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--paper-hover)]"
+                  style={{ color: 'var(--ink-muted)' }}
                 >
-                  <Mail className="h-4 w-4" />
-                  {mailPending > 0 && (
-                    <span
-                      className="absolute -right-0.5 -top-0.5 flex min-w-[14px] items-center justify-center rounded-full px-1 text-9 font-semibold"
-                      style={{ backgroundColor: 'var(--danger)', color: '#fff', lineHeight: '14px' }}
-                    >
-                      {mailPending > 99 ? '99+' : mailPending}
-                    </span>
-                  )}
+                  <Calendar className="h-[13px] w-[13px] shrink-0" />
                 </button>
               </div>
             </div>
@@ -4964,33 +4254,12 @@ function CanvasFlowInner() {
                 </ToolBtn>
                 <ToolBtn title="Trash (deleted nodes)" onClick={() => window.dispatchEvent(new Event('trash-open'))}><Trash className="h-[13px] w-[13px]" /></ToolBtn>
               </div>
-              {/* 折叠态底部：BobMail（未读角标）在上，品牌（Settings 入口）在下 */}
+              {/* 折叠态底部：品牌（Settings 入口）之上是 Calendar（对应展开态品牌栏最右侧的 Calendar 入口）。
+                  回执/通知入口统一在 Butler 悬浮球 */}
               <div className="flex shrink-0 flex-col items-center gap-0.5 px-1 pb-2 pt-1">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="BobMail"
-                      onClick={(e) => {
-                        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                        window.dispatchEvent(new CustomEvent('bobmail-toggle', { detail: { anchor: rect } }));
-                      }}
-                      className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
-                    >
-                      {/* 折叠态 rail 内图标统一 13px（与 ToolBtn 一致）；未读角标锚在按钮容器右上角，不随图标缩放 */}
-                      <Mail className="h-[13px] w-[13px]" />
-                      {mailPending > 0 && (
-                        <span
-                          className="absolute -right-0.5 -top-0.5 flex min-w-[14px] items-center justify-center rounded-full px-1 text-9 font-semibold"
-                          style={{ backgroundColor: 'var(--danger)', color: '#fff', lineHeight: '14px' }}
-                        >
-                          {mailPending > 99 ? '99+' : mailPending}
-                        </span>
-                      )}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">BobMail</TooltipContent>
-                </Tooltip>
+                <ToolBtn title="Calendar" onClick={() => setCalendarOpen(true)}>
+                  <Calendar className="h-[13px] w-[13px]" />
+                </ToolBtn>
                 <ToolBtn title={`BobWork${appVersion ? ` v${appVersion}` : ''} — Settings`} noHoverBg onClick={() => setSettingsOpen(true)}>
                   {/* 同上：默认图标用 multiply 去掉不透明白底；自定义 logo 直接叠加 */}
                   <img src={brandLogo.src} alt="BobWork" className="h-4 w-4 shrink-0 rounded object-contain" style={brandLogo.multiply ? { mixBlendMode: 'multiply' } : undefined} draggable={false} />
@@ -5003,7 +4272,7 @@ function CanvasFlowInner() {
 
           {/* 画布区域：承载当前聚焦会话（TraeWork 式单会话宿主，画布交互已移除） */}
           <div
-            ref={attachWrapper}
+            ref={wrapperRef}
             className="relative min-w-0 flex-1 overflow-hidden"
             onClick={onHostCanvasClick}
             data-host-canvas
@@ -5039,13 +4308,15 @@ function CanvasFlowInner() {
         </div>
       </div>
 
-      {/* NodeMap 左下角悬浮（2026-09-06 恢复挂载）：折叠态 MapIcon 贴中栏左下角，点击展开连线管理缩略图 */}
+      {/* NodeMap 连线管理缩略图（展开态居中覆盖在中栏上）：开关按钮在左侧栏项目行
+          （项目名右侧、＋ 新建会话左侧），展开态受控于 nodeMapOpen */}
       <NodeMap
         gateway={graphGateway}
-        left={16}
         title={currentProjectTitle || undefined}
         projectId={currentProjectId || undefined}
         focusedNodeId={focusedNodeId}
+        collapsed={!nodeMapOpen}
+        onCollapsedChange={handleNodeMapCollapsedChange}
       />
 
       {/* 空态提示：无聚焦会话时中栏居中提示 */}
@@ -5072,9 +4343,10 @@ function CanvasFlowInner() {
           initialSection={settingsSection}
         />
 
-        {/* ⌘F 统一面板：文件搜索 + WANTED 指令（原 GlobalSearch + TaskPanel）。
-            2026-09-12：功能按钮（Extensions Store / Mini Programs / Calendar / Bob Notes）
-            从左侧边栏迁回本面板，渲染在输入框下方，仅图标 + 悬停显示名称 */}
+        {/* ⌘F 统一面板：纯搜索（原 GlobalSearch + TaskPanel；斜杠指令态已于 P1-c 移除，指令走 Butler 抽屉）。
+            2026-09-12：功能按钮（Extensions Store / Mini Programs / Bob Notes）
+            从左侧边栏迁回本面板，渲染在输入框下方，仅图标 + 悬停显示名称；
+            2026-09-25：Calendar 移回左列底部品牌栏右侧 */}
         <UnifiedPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}

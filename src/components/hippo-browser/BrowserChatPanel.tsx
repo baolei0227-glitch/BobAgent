@@ -15,12 +15,15 @@
  *  3. ContextEnvelope：网页上下文作为**本轮 user 消息前缀**注入（绝不进 system，守前缀缓存红线），
  *     复用既有的两条零改造通道：node-ask-question 事件 → kernel 的引用标签。
  *
- * 工具面：默认 identity='browser'（fixed scenes: browser + ledger，剔除文件/命令类内核）；
- * 用户显式解锁后切 identity='chat'，与画布会话能力一致。
+ * 工具面：只有一档 —— 身份恒为 'browser'（fixed scenes: browser + ledger，
+ * 剔除文件/命令类内核）。侧边栏就是为浏览器而生的：它的工具面只围绕「更好地借助浏览器执行任务」，
+ * 不提供文件/命令能力，也不承担上传附件（画布会话才有）。Research 是这档里的开关
+ * （researchMode），只加调研纪律，不换工具面。
+ * 面板内提示统一走窗口工具栏的 toast（单一实现），本面板不再自建浮层。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Compass, FileText, Globe, History, Loader2, Lock, Plus, Send, Trash2, Unlock } from 'lucide-react';
+import { Check, Globe, History, Loader2, Plus, Send, Telescope, Trash2 } from 'lucide-react';
 
 import { ChatNodeKernel, type ChatNodeIdentity } from '@/components/canvas/ChatNodeKernel';
 import { NodeHostContext, type HostEdge, type HostNode, type NodeHostValue } from '@/components/canvas/node-host';
@@ -47,32 +50,17 @@ interface ChatSessionEntry {
   updatedAt: string;
 }
 
-/** 对话栏档位（工具栏「模式」下拉）：Ask = 只问答不动浏览器 / Browse = 缺省，可读写页面 / Research = Browse + 多源取证纪律。
- *  档位不新造工具面，只切换 Agent 身份 —— 工具与规则都跟着画像走（见 lib/agents/profiles.ts）。 */
-type BrowserMode = 'ask' | 'browse' | 'research';
+/** 唯一身份：浏览器画像（见 lib/agents/profiles.ts BROWSER_PROFILE）。侧边栏就是为浏览器而生的 ——
+ *  工具与规则都跟着这一张画像走（fixed scenes: browser + ledger，剔除文件/命令类内核），不再有档位切换。 */
+const SIDEBAR_IDENTITY = AGENT_IDS.browser as ChatNodeIdentity;
 
-/** 档位 → Agent 身份：Ask 无 browser 场景（无 browser_* 工具、不注入操作纪律），Research 与 Browse 同工具面、多一层调研纪律 */
-const MODE_IDENTITY: Record<BrowserMode, ChatNodeIdentity> = {
-  ask: AGENT_IDS.browserAsk as ChatNodeIdentity,
-  browse: AGENT_IDS.browser as ChatNodeIdentity,
-  research: AGENT_IDS.browserResearch as ChatNodeIdentity,
-};
-
-/** 档位选项（下拉顺序即此顺序；hint 为菜单里的一行说明，UI 文案一律英文） */
-const MODE_OPTIONS: Array<{ value: BrowserMode; label: string; hint: string }> = [
-  { value: 'ask', label: 'Ask', hint: 'Answer only — no browser control' },
-  { value: 'browse', label: 'Browse', hint: 'Read and operate the page' },
-  { value: 'research', label: 'Research', hint: 'Multi-source facts with citations' },
-];
-
-/** 读档位（缺省 / 脏值一律回落 browse） */
-function readMode(win: string): BrowserMode {
-  const raw = localStorage.getItem(storageKey(win, 'mode'));
-  return raw === 'ask' || raw === 'research' ? raw : 'browse';
+/** 读 Research 开关（缺省关） */
+function readResearch(win: string): boolean {
+  return localStorage.getItem(storageKey(win, 'research')) === '1';
 }
 
 /** 会话 / 偏好在本机的键：localStorage 与主窗口同源，务必带 bob-hippo-chat 前缀避免碰撞 */
-function storageKey(win: string, kind: 'sessions' | 'active' | 'unlocked' | 'mode'): string {
+function storageKey(win: string, kind: 'sessions' | 'active' | 'research'): string {
   return `bob-hippo-chat:${kind}:${win}`;
 }
 
@@ -209,21 +197,19 @@ function buildAmbientContext(url: string, title: string): string {
 }
 
 /** 网页上下文（ContextEnvelope）→ 注入文本：只放真实拿到的事实，拿不到的行直接省略。
- *  note = 主进程给出的正文可读性提示（PDF / 登录墙 / 空壳未渲染），紧跟在标题后，
+ *  URL / 标题不在这里重复 —— ambientContext 每轮已把 [Current web page] 前置进同一条 user 消息；
+ *  本函数只补本次抽取独有的东西：可读性提示、其他打开的标签、正文。
+ *  note = 主进程给出的正文可读性提示（PDF / 登录墙 / 空壳未渲染），
  *  让模型先知道「这次抽取不可信」，再去读可能只是导航噪声的正文。 */
 function buildContextText(
-  state: { url: string; title: string },
+  currentUrl: string,
   tabs: Array<{ title: string; url: string }>,
   extractedMarkdown?: string,
-  selection?: string,
   note?: string,
 ): string {
-  const lines: string[] = ['[Web page context]'];
-  if (state.url) lines.push(`URL: ${state.url}`);
-  if (state.title) lines.push(`Title: ${state.title}`);
+  const lines: string[] = ['[Web page content]'];
   if (note) lines.push(`Note: ${note}`);
-  if (selection) lines.push('', 'Selected text:', selection);
-  const others = tabs.filter((t) => t.url).filter((t) => t.url !== state.url);
+  const others = tabs.filter((t) => t.url && t.url !== currentUrl);
   if (others.length > 0) {
     lines.push(`Other open tabs: ${others.map((t) => `${t.title || t.url} (${t.url})`).join(' | ')}`);
   }
@@ -254,7 +240,7 @@ async function fetchPdfText(url: string): Promise<{ text: string; note?: string 
     return {
       text,
       note: clipped
-        ? `PDF text (${j.pages || '?'} pages, ${j.chars ?? text.length} chars) — only the beginning is attached. Read further with the browser_read_pdf tool (Browse / Research mode).`
+        ? `PDF text (${j.pages || '?'} pages, ${j.chars ?? text.length} chars) — only the beginning is attached. Read further with the browser_read_pdf tool.`
         : undefined,
     };
   } catch {
@@ -271,26 +257,27 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
   const [session, setSession] = useState<{ nodeId: string; data: AiChatNodeData } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [bootKey, setBootKey] = useState(0);
-  const [unlocked, setUnlocked] = useState(false);
-  /** 当前档位（Ask / Browse / Research）：按窗口持久化，缺省 browse */
-  const [mode, setMode] = useState<BrowserMode>('browse');
-  const [page, setPage] = useState<{ url: string; title: string; loading: boolean }>({ url: '', title: '', loading: false });
+  const [page, setPage] = useState<{ url: string; title: string }>({ url: '', title: '' });
   const [tabs, setTabs] = useState<Array<{ id: number; title: string; url: string }>>([]);
-  const [notice, setNotice] = useState<string | null>(null);
-  /** 整页正文抽取中的在途标记（仅 Ask 档按钮会用到） */
-  const [attaching, setAttaching] = useState(false);
   /** 本窗口的会话索引（侧边栏可多开分支；每项对应一个 node_type='browser' 节点） */
   const [sessions, setSessions] = useState<ChatSessionEntry[]>([]);
   /** 当前激活会话的节点 id；null = 尚未完成引导 */
   const [activeId, setActiveId] = useState<string | null>(null);
   const [creatingSession, setCreatingSession] = useState(false);
+  /** Research 开关：只加「多源取证纪律 + 来源清单卡片」，不换工具面 */
+  const [research, setResearch] = useState(false);
 
   // 浏览器桥（仅 Electron 环境存在；本面板只在 Hippo 窗口的 chatView 内挂载）
   const bridge = typeof window !== 'undefined' ? window.api?.hippoBrowser : undefined;
 
+  /** 面板内提示：统一转给窗口工具栏的 toast（同一实现），本面板不再自建浮层与定时器。
+   *  toast 用可选调用：侧边栏走 Next 构建、preload 走 electron 构建，两者可能先后到达。 */
+  const notify = useCallback((text: string) => {
+    void bridge?.toast?.(text);
+  }, [bridge]);
+
   useEffect(() => {
-    setUnlocked(localStorage.getItem(storageKey(winId, 'unlocked')) === '1');
-    setMode(readMode(winId));
+    setResearch(readResearch(winId));
   }, [winId]);
 
   // ---------- 网页上下文订阅（url/标题/标签列表由主进程广播） ----------
@@ -298,10 +285,10 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
     if (!bridge) return;
     let alive = true;
     void bridge.getState().then((s) => {
-      if (alive && s) setPage({ url: s.url, title: s.title, loading: s.loading });
+      if (alive && s) setPage({ url: s.url, title: s.title});
     });
     const offState = bridge.onState((s) => {
-      if (alive) setPage({ url: s.url, title: s.title, loading: s.loading });
+      if (alive) setPage({ url: s.url, title: s.title});
     });
     const offTabs = bridge.onTabs((d) => {
       if (!alive) return;
@@ -417,11 +404,11 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
       localStorage.setItem(storageKey(winId, 'active'), id);
       setActiveId(id);
     } catch (e) {
-      setNotice(e instanceof Error ? e.message : String(e));
+      notify(e instanceof Error ? e.message : String(e));
     } finally {
       setCreatingSession(false);
     }
-  }, [creatingSession, winId]);
+  }, [creatingSession, notify, winId]);
 
   /** 删除一条会话（用户手动清理）：先摘本地索引（立即生效），再删落盘节点（软删进回收站）。
    *  删的正好是当前会话 → 切到下一条；一条不剩 → 新建一条，避免停在空白引导态。 */
@@ -440,9 +427,9 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
         }
       }
       const ok = await deleteSessionNode(id);
-      if (!ok) setNotice('Chat removed from the list, but its archived node could not be deleted');
+      if (!ok) notify('Chat removed from the list, but its archived node could not be deleted');
     },
-    [winId, activeId, startNewSession],
+    [winId, activeId, notify, startNewSession],
   );
 
   /** 打开会话菜单时刷新标题：未被访问过的分支也拿到「首问摘要」 */
@@ -470,40 +457,33 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
     [session],
   );
 
-  /** 每轮自动跟随的环境上下文（当前页 URL / 标题）：仅随 url/title 变化重建，
-   *  loading 抖动不触发；由 kernel 在发送时前置进模型侧内容，不占引用标签槽位 */
+  /** 每轮自动跟随的环境上下文（当前页 URL / 标题）：仅随 url/title 变化重建；
+   *  由 kernel 在发送时前置进模型侧内容，不占引用标签槽位 */
   const ambientContext = useMemo(() => buildAmbientContext(page.url, page.title), [page.url, page.title]);
 
   /** 带正文的注入：DOM → markdown 由主进程完成（含 SPA 等待）。
-   *  入口两个：划词浮层的 Page text，以及 Ask 档工具栏按钮（Ask 档模型没有 browser_* 工具，这是它读到正文的唯一通道） */
+   *  入口是页面内划词浮层的 Page text —— 模型虽有 browser_* 工具，手动挂整页正文仍是最省的取正文方式。 */
   const attachPageContent = useCallback(async () => {
     if (!session) return;
-    setAttaching(true);
-    try {
-      const r = await bridge?.extract();
-      let md = r?.ok ? r.markdown ?? r.text ?? '' : '';
-      let note = r?.ok ? r.note : undefined;
-      // PDF 分流：DOM 里没有正文，改由宿主路由取真实文本；取不到才退回成因提示（note）
-      if (r?.ok && r.kind === 'pdf' && r.url) {
-        const pdf = await fetchPdfText(r.url);
-        if (pdf) {
-          md = pdf.text;
-          note = pdf.note;
-        }
+    const r = await bridge?.extract();
+    let md = r?.ok ? r.markdown ?? r.text ?? '' : '';
+    let note = r?.ok ? r.note : undefined;
+    // PDF 分流：DOM 里没有正文，改由宿主路由取真实文本；取不到才退回成因提示（note）
+    if (r?.ok && r.kind === 'pdf' && r.url) {
+      const pdf = await fetchPdfText(r.url);
+      if (pdf) {
+        md = pdf.text;
+        note = pdf.note;
       }
-      // 有 note 就照常注入：让模型知道这次抽取不可信、该换工具，
-      // 而不是把「没抽到正文」当成「页面没内容」死在按钮上
-      if (!md.trim() && !note) {
-        setNotice('Page content unavailable');
-        return;
-      }
-      attachContext(
-        buildContextText({ url: r?.url || page.url, title: r?.title || page.title }, tabs, md || undefined, undefined, note),
-      );
-    } finally {
-      setAttaching(false);
     }
-  }, [attachContext, bridge, page, tabs, session]);
+    // 有 note 就照常注入：让模型知道这次抽取不可信、该换工具，
+    // 而不是把「没抽到正文」当成「页面没内容」静默丢掉
+    if (!md.trim() && !note) {
+      notify('Page content unavailable');
+      return;
+    }
+    attachContext(buildContextText(r?.url || page.url, tabs, md || undefined, note));
+  }, [attachContext, bridge, notify, page.url, tabs, session]);
 
   /** 划词浮层动作的处理体（Ask Bob = 挂选区，Page text = 挂整页正文）。
    *  每轮渲染后刷新到 ref，订阅只装一次 —— 否则 page/tabs/session 一变就要重订 IPC。 */
@@ -523,27 +503,12 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
     return bridge.onSelectionAction((p) => selectionActionRef.current(p));
   }, [bridge]);
 
-  useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 2600);
-    return () => clearTimeout(t);
-  }, [notice]);
-
-  // ---------- 档位（模式）切换 ----------
-  /** 切档位：落盘 + 立即生效（下一轮请求按新身份取工具面与规则；本轮在途不受影响） */
-  const selectMode = useCallback(
-    (m: BrowserMode) => {
-      localStorage.setItem(storageKey(winId, 'mode'), m);
-      setMode(m);
-    },
-    [winId],
-  );
-
-  // ---------- 工具面解锁 ----------
-  const toggleUnlock = useCallback(() => {
-    setUnlocked((prev) => {
+  // ---------- Research 开关 ----------
+  /** Research 开关：只加「多源取证纪律 + 来源清单卡片」，不换工具面（下一轮请求即生效）。 */
+  const toggleResearch = useCallback(() => {
+    setResearch((prev) => {
       const next = !prev;
-      localStorage.setItem(storageKey(winId, 'unlocked'), next ? '1' : '0');
+      localStorage.setItem(storageKey(winId, 'research'), next ? '1' : '0');
       return next;
     });
   }, [winId]);
@@ -558,7 +523,7 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
       const j = await r.json();
       const conversations = (j?.node?.conversations ?? []) as StoredConversation[];
       if (!conversations.length) {
-        setNotice('Nothing to send yet');
+        notify('Nothing to send yet');
         return;
       }
       const nodeId = crypto.randomUUID();
@@ -596,13 +561,13 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
       }
       // 通知主窗口把新节点挂进画布并置焦点（主进程转发 → 主窗口 preload → CanvasFlow）
       await bridge?.chatSendToCanvas?.({ nodeId, title, conversations });
-      setNotice('Sent to canvas');
+      notify('Sent to canvas');
     } catch (e) {
-      setNotice(e instanceof Error ? e.message : String(e));
+      notify(e instanceof Error ? e.message : String(e));
     } finally {
       setSending(false);
     }
-  }, [bridge, page.title, sending, session]);
+  }, [bridge, notify, page.title, sending, session]);
 
   if (error) {
     return (
@@ -630,93 +595,180 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
   }
 
   return (
-    <div className="relative flex h-full w-full min-w-0 flex-col bg-white" style={{ fontFamily: 'var(--font-sans)' }}>
+    <div
+      className="relative flex h-full w-full min-w-0 flex-col border-l bg-white"
+      style={{
+        fontFamily: 'var(--font-sans)',
+        // 与网页区的分界只靠这一条竖线：内核卡片在侧边栏已去壳（见 ChatNodeKernel 的 isSidebar）
+        borderColor: 'color-mix(in oklab, var(--line) 55%, transparent)',
+      }}
+    >
       <Toolbar
-        pageTitle={page.title}
-        pageUrl={page.url}
-        pageLoading={page.loading}
-        unlocked={unlocked}
-        attaching={attaching}
         sending={sending}
-        notice={notice}
         sessions={sessions}
         activeId={activeId}
         creatingSession={creatingSession}
-        mode={mode}
-        onSelectMode={selectMode}
-        onAttachContent={() => void attachPageContent()}
-        onToggleUnlock={toggleUnlock}
+        research={research}
+        onToggleResearch={toggleResearch}
         onSendToCanvas={() => void sendToCanvas()}
         onSelectSession={selectSession}
         onNewSession={() => void startNewSession()}
         onDeleteSession={(id) => void deleteSession(id)}
         onRefreshSessions={() => void refreshSessionTitles()}
+        pageUrl={page.url}
+        pageTitle={page.title}
       />
       <div className="min-h-0 flex-1 overflow-hidden">
         <ChatSidebarKernel
           key={session.nodeId}
           nodeId={session.nodeId}
           data={session.data}
-          identity={unlocked ? (AGENT_IDS.chat as ChatNodeIdentity) : MODE_IDENTITY[mode]}
+          identity={SIDEBAR_IDENTITY}
           ambientContext={ambientContext}
+          researchMode={research}
         />
       </div>
+      <ChatResizeHandle />
     </div>
   );
 }
 
-/** 顶部 slim 工具条：当前页指示 + 档位 + 会话切换 + 工具面解锁 + 投送画布（全部英文文案）。
- *  当前页 URL/标题每轮自动跟随（见 ambientContext），此处只做展示；
- *  整页正文按钮只在 Ask 档出现 —— 该档没有 browser_* 工具，是模型读到正文的唯一通道；
- *  Browse/Research 下模型自己就能实时读页，再挂一份快照反而是重复与浪费。 */
+/** 对话栏左边缘拖拽热区（无可见按钮）：拖动改宽度。
+ *  钳制（320–720，且为网页保留最小宽度）、落盘、重排全在主进程，这里只上报目标宽度；
+ *  本视图占满整条对话栏，故 window.innerWidth 即当前宽度。 */
+function ChatResizeHandle() {
+  const [dragging, setDragging] = useState(false);
+  const startRef = useRef<{ x: number; width: number } | null>(null);
+  const pendingRef = useRef<number | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  // 拖动期间锁光标与文本选择，避免划过其他元素时光标闪烁、误选中
+  useEffect(() => {
+    if (!dragging) return;
+    const prevCursor = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevSelect;
+    };
+  }, [dragging]);
+
+  /** 合并同一帧内的多次移动，避免拖动时 IPC 洪泛 */
+  const flush = () => {
+    rafRef.current = null;
+    const w = pendingRef.current;
+    if (w === null) return;
+    pendingRef.current = null;
+    void window.api?.hippoBrowser?.chatSetWidth(w);
+  };
+
+  const endDrag = (e: { currentTarget: HTMLDivElement; pointerId: number }) => {
+    if (!startRef.current) return;
+    startRef.current = null;
+    setDragging(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    flush();
+  };
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      title="Drag to resize"
+      onPointerDown={(e) => {
+        if (!window.api?.hippoBrowser?.chatSetWidth) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        // 必须用 screenX：拖的是本视图自己的左边缘，视图随拖动移动会让 clientX 反向位移，
+        // 用 clientX 会形成负反馈（宽度只走指针位移的一半、越拖越跟不上）
+        startRef.current = { x: e.screenX, width: window.innerWidth };
+        setDragging(true);
+      }}
+      onPointerMove={(e) => {
+        const start = startRef.current;
+        if (!start) return;
+        // 拖的是左边缘：向左移 = 变宽
+        pendingRef.current = Math.round(start.width - (e.screenX - start.x));
+        if (rafRef.current === null) rafRef.current = requestAnimationFrame(flush);
+      }}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      className="absolute left-0 top-0 z-20 h-full w-3.5 touch-none cursor-col-resize"
+    />
+  );
+}
+
+/** 顶部 slim 工具条：当前页链接（只读）+ Research 开关 + 会话切换 + 投送画布（全部英文文案）。
+ *  链接只做展示：模型侧每轮由 ambientContext 自动前置，这里补回用户可见的「现在看的是哪一页」；
+ *  面板内提示走窗口工具栏 toast（见 notify），本工具条不自建浮层。 */
 function Toolbar(props: {
-  pageTitle: string;
-  pageUrl: string;
-  pageLoading: boolean;
-  unlocked: boolean;
-  attaching: boolean;
   sending: boolean;
-  notice: string | null;
   sessions: ChatSessionEntry[];
   activeId: string | null;
   creatingSession: boolean;
-  mode: BrowserMode;
-  onSelectMode: (m: BrowserMode) => void;
-  onAttachContent: () => void;
-  onToggleUnlock: () => void;
+  /** Research 开关：只加调研纪律与来源清单卡片，不换工具面 */
+  research: boolean;
+  onToggleResearch: () => void;
   onSendToCanvas: () => void;
   onSelectSession: (id: string) => void;
   onNewSession: () => void;
   onDeleteSession: (id: string) => void;
   onRefreshSessions: () => void;
+  /** 当前页（只读展示：链接随导航自动跟随，不做挂载入口） */
+  pageUrl: string;
+  pageTitle: string;
 }) {
-  const { pageTitle, pageUrl, pageLoading, unlocked, attaching, sending, notice } = props;
-  const host = (() => {
-    try {
-      return pageUrl ? new URL(pageUrl).host : '';
-    } catch {
-      return '';
-    }
-  })();
-  const label = pageTitle || host || (pageLoading ? 'Loading…' : 'New Tab');
+  const { sending } = props;
   return (
     <div
       className="relative flex h-10 shrink-0 items-center gap-1.5 border-b px-2"
       style={{ borderColor: 'var(--line)' }}
     >
-      <div
-        title={pageUrl || undefined}
-        className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1"
-      >
-        {pageLoading ? (
-          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" style={{ color: 'var(--ink-muted)' }} />
-        ) : (
-          <Globe className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
-        )}
-        <span className="truncate text-xs" style={{ color: 'var(--ink-muted)' }}>{label}</span>
+      {/* 左侧：当前页链接（只读，随导航自动跟随；按钮组仍靠右排布） */}
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        {props.pageUrl ? (
+          <>
+            <Globe className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+            <span
+              className="min-w-0 truncate text-xs"
+              style={{ color: 'var(--ink-muted)' }}
+              title={props.pageTitle ? `${props.pageTitle}\n${props.pageUrl}` : props.pageUrl}
+            >
+              {props.pageUrl}
+            </span>
+          </>
+        ) : null}
       </div>
 
-      <ModeMenu mode={props.mode} disabled={props.unlocked} onSelect={props.onSelectMode} />
+      <button
+        type="button"
+        aria-pressed={props.research}
+        title={
+          props.research
+            ? 'Research on — multi-source facts with citations'
+            : 'Research — multi-source facts with citations'
+        }
+        onClick={props.onToggleResearch}
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-black/[0.06]"
+        style={
+          props.research
+            ? {
+                // 点亮：实心主题色底 + 主题前景色图标（随主题走），比原先的灰底更醒目
+                color: 'var(--primary-foreground, #fff)',
+                backgroundColor: 'var(--primary)',
+                boxShadow: '0 1px 5px color-mix(in oklab, var(--primary) 45%, transparent)',
+              }
+            : { color: 'var(--ink-muted)' }
+        }
+      >
+        <Telescope className="h-3.5 w-3.5" />
+      </button>
 
       <SessionMenu
         sessions={props.sessions}
@@ -727,35 +779,6 @@ function Toolbar(props: {
         onDelete={props.onDeleteSession}
         onRefresh={props.onRefreshSessions}
       />
-
-      {props.mode === 'ask' && (
-        <button
-          type="button"
-          title="Attach full page text — Ask mode cannot read the page on its own"
-          onClick={props.onAttachContent}
-          disabled={!pageUrl || attaching}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-black/[0.06] disabled:opacity-40"
-        >
-          {attaching ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--ink-muted)' }} />
-          ) : (
-            <FileText className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
-          )}
-        </button>
-      )}
-
-      <button
-        type="button"
-        title={unlocked ? 'Lock down tools (file & command access is on)' : 'Unlock full tools (file & command access)'}
-        onClick={props.onToggleUnlock}
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-black/[0.06]"
-      >
-        {unlocked ? (
-          <Unlock className="h-3.5 w-3.5" style={{ color: 'var(--danger)' }} />
-        ) : (
-          <Lock className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
-        )}
-      </button>
 
       <button
         type="button"
@@ -770,85 +793,6 @@ function Toolbar(props: {
           <Send className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />
         )}
       </button>
-
-      {notice && (
-        <span
-          className="pointer-events-none absolute right-2 top-9 z-20 max-w-[80%] truncate rounded-md border px-2 py-1 text-[11px]"
-          style={{ borderColor: 'var(--line)', backgroundColor: 'var(--popover)', color: 'var(--ink-muted)' }}
-        >
-          {notice}
-        </span>
-      )}
-    </div>
-  );
-}
-
-/** 模式菜单（Ask / Browse / Research）：当前档位直接显示在按钮上，避免「图标认得、档位不认得」 */
-function ModeMenu(props: {
-  mode: BrowserMode;
-  /** 解锁全量工具后身份固定为 chat，档位不再决定工具面 → 置灰并说明 */
-  disabled: boolean;
-  onSelect: (m: BrowserMode) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  const current = MODE_OPTIONS.find((o) => o.value === props.mode) ?? MODE_OPTIONS[1];
-
-  useEffect(() => {
-    if (!open) return;
-    const onDocDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', onDocDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDocDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  return (
-    <div ref={ref} className="relative shrink-0">
-      <button
-        type="button"
-        title={props.disabled ? 'Mode is ignored while full tools are unlocked' : `Mode — ${current.label}: ${current.hint}`}
-        onClick={() => setOpen((v) => !v)}
-        disabled={props.disabled}
-        className="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] transition-colors hover:bg-black/[0.06] disabled:opacity-40"
-        style={{ color: 'var(--ink-muted)' }}
-      >
-        <Compass className="h-3.5 w-3.5 shrink-0" />
-        <span>{current.label}</span>
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 top-7 z-30 w-56 rounded-lg border py-1 shadow-lg"
-          style={{ borderColor: 'var(--line)', backgroundColor: 'var(--popover)' }}
-        >
-          {MODE_OPTIONS.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              onClick={() => {
-                setOpen(false);
-                props.onSelect(o.value);
-              }}
-              className="flex w-full items-start gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-black/[0.05]"
-            >
-              <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                {o.value === props.mode && <Check className="h-3.5 w-3.5" style={{ color: 'var(--ink-muted)' }} />}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-xs" style={{ color: 'var(--ink)' }}>{o.label}</span>
-                <span className="block text-[11px]" style={{ color: 'var(--ink-muted)' }}>{o.hint}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -987,8 +931,10 @@ function ChatSidebarKernel(props: {
   identity: ChatNodeIdentity;
   /** 当前页 URL/标题（每轮自动前置给模型；由 panel 随页面切换更新） */
   ambientContext: string;
+  /** Research 开关：透传给 kernel —— 服务端注入调研纪律与这里渲染来源清单卡片读的是同一个值 */
+  researchMode: boolean;
 }) {
-  const { nodeId, data, identity, ambientContext } = props;
+  const { nodeId, data, identity, ambientContext, researchMode } = props;
   const [nodes, setNodes] = useState<HostNode[]>(() => [
     { id: nodeId, type: 'agent-browser', position: { x: 0, y: 0 }, data },
   ]);
@@ -1000,14 +946,6 @@ function ChatSidebarKernel(props: {
   useEffect(() => {
     listenersRef.current.forEach((l) => l());
   }, [nodes]);
-
-  // 让 kernel 按真实面板宽度计算外壳宽（画布侧由 CanvasFlow 广播同一事件）
-  useEffect(() => {
-    const push = () => window.dispatchEvent(new CustomEvent('canvas-visible-width', { detail: { width: window.innerWidth } }));
-    push();
-    window.addEventListener('resize', push);
-    return () => window.removeEventListener('resize', push);
-  }, []);
 
   const host = useMemo<NodeHostValue>(
     () => ({
@@ -1034,7 +972,7 @@ function ChatSidebarKernel(props: {
 
   return (
     <NodeHostContext.Provider value={host}>
-      <ChatNodeKernel id={nodeId} data={data} identity={identity} ambientContext={ambientContext} />
+      <ChatNodeKernel id={nodeId} data={data} identity={identity} ambientContext={ambientContext} researchMode={researchMode} surface="sidebar" />
     </NodeHostContext.Provider>
   );
 }

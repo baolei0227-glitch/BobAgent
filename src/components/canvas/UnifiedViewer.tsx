@@ -9,8 +9,19 @@ import {
   ZoomIn, ZoomOut,
 } from 'lucide-react';
 import type { ViewerRenderProps } from './viewers/types';
-import type { FileInfo, FileSourceKind } from '@/lib/files/types';
+import type { FileInfo, FileSourceKind, IWritableSource } from '@/lib/files/types';
 import { getSource } from '@/lib/files/registry';
+import { registerFileSources } from '@/lib/files/sources';
+
+/**
+ * 注册统一文件来源（Step 2）。
+ *
+ * 放在这里而不是应用外壳（CanvasFlow）里：`getSource()` 的调用点只有本组件，
+ * 把注册留在消费者自己身上，职责才闭环 —— 否则一旦有人在 CanvasFlow 之外
+ * 挂载 UnifiedViewer（独立查看页、单测、Storybook…），就会拿到
+ * `未注册的文件来源: local` 而整页 500。注册函数内部是 Map.set，幂等。
+ */
+registerFileSources();
 import { matchRenderer } from './viewers/registry';
 import { desktop } from '@/lib/desktop-adapter';
 import { OutcomeEditor } from './OutcomeEditor';
@@ -173,6 +184,12 @@ export function UnifiedViewer({
 
   // extension 可能带点号（如 ".pdf"），统一去掉后再做类型分发
   const ext = (effectiveFileInfo?.extension || filePath?.split('.').pop() || '').replace(/^\./, '').toLowerCase();
+
+  // 渲染器自带缩放时（docx 分页编辑器按面板宽度自算适配缩放），外层不再套 CSS `zoom`，否则双重缩放
+  const viewerOwnsZoom = useMemo(
+    () => (effectiveFileInfo ? matchRenderer(ext, effectiveFileInfo)?.ownsZoom === true : false),
+    [ext, effectiveFileInfo],
+  );
 
   useEffect(() => {
     visibleRef.current = true;
@@ -403,6 +420,34 @@ export function UnifiedViewer({
     return () => { cancelled = true; };
   }, [effectiveFileInfo, ext]);
 
+  // =================== 未保存结果（transient）落盘 ===================
+  // transient 来源的内容驻留内存（如会议纪要草稿）：建议路径存于 full_path，由用户显式保存进当前项目。
+  const transientSavePath = !isNodeMode && effectiveSource === 'transient'
+    ? (effectiveFileInfo?.full_path || effectiveFileInfo?.name || '')
+    : '';
+  const [transientSaved, setTransientSaved] = useState<string | null>(null);
+  const [savingTransient, setSavingTransient] = useState(false);
+  const saveTransient = useCallback(async () => {
+    if (!transientSavePath || !effectiveFileInfo?.content) return;
+    setSavingTransient(true);
+    try {
+      const src = getSource('project');
+      if (!('write' in src)) throw new Error('Project source is not writable');
+      await (src as IWritableSource).write(transientSavePath, effectiveFileInfo.content);
+      setTransientSaved(transientSavePath);
+      // 落盘成功后按项目来源重开一份（可见已保存的真实文件）
+      bus.publish(BusEvents.fileOpen, {
+        source: 'project',
+        path: transientSavePath,
+        name: transientSavePath.split('/').pop() || transientSavePath,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setSavingTransient(false);
+    }
+  }, [transientSavePath, effectiveFileInfo]);
+
   // =================== Renderers ===================
 
   // Effective node data: from direct node mode or discovered from sidebar file
@@ -560,6 +605,26 @@ export function UnifiedViewer({
       {/* Content area */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
+      {/* 未保存结果条：transient 来源（如会议纪要草稿）顶部给出显式落盘出口 */}
+      {transientSavePath && !loading && (
+        <div
+          className="flex shrink-0 items-center gap-2 px-3 py-1.5"
+          style={{ borderBottom: '1px solid var(--line-soft)', backgroundColor: 'var(--info-soft)' }}
+        >
+          <span className="min-w-0 flex-1 truncate text-11" style={{ color: 'var(--ink-muted)' }} title={transientSavePath}>
+            {transientSaved ? `Saved to ${transientSaved}` : 'Not saved yet'}
+          </span>
+          <Button
+            onClick={(e) => { e.stopPropagation(); void saveTransient(); }}
+            disabled={savingTransient || !!transientSaved}
+            variant="solid"
+            tone="info"
+            size="sm"
+          >
+            Save to current project
+          </Button>
+        </div>
+      )}
       {loading ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3">
           <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-r-transparent" style={{ color: 'var(--info)' }} />
@@ -603,7 +668,7 @@ export function UnifiedViewer({
       ) : effectiveFileInfo ? (
         ActiveViewer ? (
           <div className="flex flex-1 flex-col overflow-hidden">
-            <div style={{ zoom: zoom }} className="flex-1 overflow-auto">
+            <div style={viewerOwnsZoom ? undefined : { zoom }} className="flex-1 overflow-auto">
               <ActiveViewer
                 fileInfo={effectiveFileInfo}
                 proxyUrl={proxyUrl}
