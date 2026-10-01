@@ -30,9 +30,16 @@ import {
 } from '@/lib/db';
 import type { StickyNote, StickyNotePage } from '@/app/api/sticky-notes/route';
 import { parseTodoTime } from '@/lib/todo-time-parse';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
-import { parseTasksWithModel } from '@/lib/wanted/task-summarize';
+import { resolveTaskModel } from '@/lib/core/task-model';
+import { parseTasksWithModel } from '@/lib/core/task-summarize';
 import { getProjectById } from '@/lib/project/project-manager';
+// 冲突检测（2026-09-25）：三条入日历路径共用同一套重叠查询，见 lib/calendar/overlaps.ts
+import {
+  findEventOverlaps,
+  formatOverlapNote,
+  stripOverlapNote,
+  type OverlapResult,
+} from '@/lib/calendar/overlaps';
 
 /** 每行解析结果（与前端 CanvasStickyNotes.parseTodoLines 语义一致） */
 type TodoLine = { text: string; done: boolean };
@@ -523,18 +530,30 @@ function toLocalIso(d: Date): string {
  *  - 已入日历且归模型排期（source_ref.aiTitle + autoTime）的行：行文本与 source_ref.autoText 不一致
  *    （或上次漏读日期、时间落在「无时间线索」默认值上）时**原地重排**同一事件（标题/时间/地点），不新建；
  *  - 已勾选行、空行、kind='note' 页不参与；无目标行时不调模型（零成本）。
+ *  - **冲突检测（2026-09-25）**：本路径没有可弹卡的 UI，故建/重排事件前用
+ *    lib/calendar/overlaps.findEventOverlaps 查一次同窗口占位；有重叠就把
+ *    「注意 · 与已有安排重叠：09:00–11:00 某某案开庭」写进事件 description（重排时先摘掉旧提示再写，
+ *    不动用户手写备注），并把命中行数累加进返回值的 conflicts 供上层提示。
  */
 export async function autoAddStickyLinesToCalendar(
   projectId: string,
   note: StickyNote,
-): Promise<{ note: StickyNote; created: number; rescheduled: number }> {
+): Promise<{ note: StickyNote; created: number; rescheduled: number; conflicts: number; conflictTitles: string[] }> {
   const pages = Array.isArray(note.pages) ? note.pages : [];
   const db = await getCalendarDb();
   const projectName = await projectNameOf(projectId);
 
   /** 行级可变元数据（逐页准备一次，最后统一写回） */
   type Prepared = { page: StickyNotePage; lines: TodoLine[]; evs: string[][]; cal: boolean[] };
-  type Target = { prep: Prepared; index: number; text: string; rescheduleId?: string; curStart?: string | null };
+  type Target = {
+    prep: Prepared;
+    index: number;
+    text: string;
+    rescheduleId?: string;
+    curStart?: string | null;
+    /** 重排前的原事件备注：用来「只摘掉我们写过的冲突行、保留用户手写内容」 */
+    curDesc?: string | null;
+  };
 
   const prepared: Prepared[] = [];
   const targets: Target[] = [];
@@ -568,11 +587,14 @@ export async function autoAddStickyLinesToCalendar(
           text,
           rescheduleId: anchored[0],
           curStart: row?.start_time ?? null,
+          curDesc: row?.description ?? null,
         });
       }
     }
   }
-  if (targets.length === 0) return { note, created: 0, rescheduled: 0 };
+  if (targets.length === 0) {
+    return { note, created: 0, rescheduled: 0, conflicts: 0, conflictTitles: [] };
+  }
 
   // 模型解析（并行，一行一次 single 调用）；模型不可用或单行失败 → 该行退回正则+默认时段
   const cfg = await resolveTaskModel().catch(() => null);
@@ -591,6 +613,8 @@ export async function autoAddStickyLinesToCalendar(
 
   let created = 0;
   let rescheduled = 0;
+  let conflicts = 0;
+  const conflictTitles: string[] = [];
   for (let k = 0; k < targets.length; k++) {
     const t = targets[k];
     const plan = plans[k];
@@ -643,12 +667,34 @@ export async function autoAddStickyLinesToCalendar(
     // 重排保护：新解析结果落在「无时间线索」默认值上、而事件原本是一个明确时间时，保留原时间（只更新标题/地点）
     const keepTime = !!t.rescheduleId && isNoTimeFallback(start) && !isNoTimeFallback(t.curStart);
 
+    // 冲突检测（2026-09-25）：三条入日历路径共用 lib/calendar/overlaps。
+    // 本路径没有可弹卡的 UI → 有重叠就把提示写进事件 description，并计数回传给 /api/sticky-notes。
+    // 查询放在各分支内，因为要排除「本次会被复用/正在重排的同一个事件」（否则会把自己算成冲突）。
+    const trackOverlap = (ov: OverlapResult): string => {
+      if (ov.total > 0) {
+        conflicts += 1;
+        conflictTitles.push(...ov.items.map((i) => i.title));
+      }
+      return formatOverlapNote(ov);
+    };
+
     try {
       if (t.rescheduleId) {
+        // keepTime 时事件时间保持原值，故按原时间查重叠，并排除自己
+        const ovNote = trackOverlap(
+          await findEventOverlaps(keepTime ? t.curStart ?? start : start, keepTime ? null : end, {
+            excludeEventId: t.rescheduleId,
+          }),
+        );
+        // 备注合并：以模型新给的 description 为准；模型没给就保留原备注里「非冲突」的部分
+        //（stripOverlapNote 只删我们写的那行，用户手写内容原样保留）；旧提示过期时写空以清掉残留。
+        const mergedDesc = [description ?? (stripOverlapNote(t.curDesc) || undefined), ovNote]
+          .filter(Boolean)
+          .join('\n');
         await updateEvent(db, t.rescheduleId, {
           title,
           ...(location ? { location } : {}),
-          ...(description ? { description } : {}),
+          description: mergedDesc,
           ...(categoryPath?.length ? { category_path: categoryPath } : {}),
           reminder_minutes: reminder,
           ...(keepTime ? {} : { start_time: start, end_time: end, all_day: allDay ?? false }),
@@ -663,13 +709,19 @@ export async function autoAddStickyLinesToCalendar(
              LIMIT 1`,
           )
           .get(projectId, title, start) as { event_id: string } | undefined;
+        // 排除将被复用的同一事件（同标题同起点 = 本次要复用的既有事件，不是冲突）
+        const ovNote = trackOverlap(
+          await findEventOverlaps(start, end, { excludeEventId: dedupe?.event_id ?? null }),
+        );
+        const mergedDesc =
+          [description, ovNote].filter(Boolean).join('\n') || undefined;
         const eventId =
           dedupe?.event_id ??
           (await createEvent(db, {
             project_id: projectId,
             title,
             ...(location ? { location } : {}),
-            ...(description ? { description } : {}),
+            ...(mergedDesc ? { description: mergedDesc } : {}),
             ...(priority ? { priority } : {}),
             ...(categoryPath?.length ? { category_path: categoryPath } : {}),
             start_time: start,
@@ -702,6 +754,8 @@ export async function autoAddStickyLinesToCalendar(
     note: { ...note, pages: updatedPages, updatedAt: new Date().toISOString() },
     created,
     rescheduled,
+    conflicts,
+    conflictTitles: [...new Set(conflictTitles)],
   };
 }
 

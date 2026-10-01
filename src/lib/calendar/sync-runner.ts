@@ -14,7 +14,7 @@ import {
 import { decryptSecret } from '@/lib/secrets';
 import { parseIcs, buildIcs } from '@/lib/calendar/ical';
 import { fetchCalendarEvents, pushEvent, fetchWebcal } from '@/lib/calendar/sync';
-import { scanDueEventReminders } from '@/lib/wanted/event-reminder';
+import { scanDueEventReminders } from '@/lib/core/event-reminder';
 
 /** 全局日历同步互斥标记（跨模块/热重载保持单例） */
 declare global {
@@ -96,6 +96,9 @@ async function pullCalDav(accountId: string, projectId: string): Promise<{ added
           external_url: ev.href,
           sync_provider: 'caldav',
           sync_etag: ev.etag,
+          // 外部 VTODO → 提升为任务（只升不降，避免把本地任务因 VEVENT 投影改回 event）
+          ...(p.component === 'VTODO' ? { kind: 'task' as const } : {}),
+          ...(p.due_at ? { due_at: p.due_at } : {}),
         });
         updated++;
       } else {
@@ -115,6 +118,8 @@ async function pullCalDav(accountId: string, projectId: string): Promise<{ added
           external_url: ev.href,
           sync_provider: 'caldav',
           sync_etag: ev.etag,
+          kind: p.component === 'VTODO' ? 'task' : 'event',
+          due_at: p.due_at,
         });
         added++;
       }
@@ -172,6 +177,8 @@ async function pullWebCal(accountId: string, projectId: string): Promise<{ added
         tags: p.tags,
         external_url: account.server_url,
         sync_provider: 'webcal',
+        ...(p.component === 'VTODO' ? { kind: 'task' as const } : {}),
+        ...(p.due_at ? { due_at: p.due_at } : {}),
       });
       updated++;
     } else {
@@ -190,6 +197,8 @@ async function pullWebCal(accountId: string, projectId: string): Promise<{ added
         external_id: p.external_id,
         external_url: account.server_url,
         sync_provider: 'webcal',
+        kind: p.component === 'VTODO' ? 'task' : 'event',
+        due_at: p.due_at,
       });
       added++;
     }
@@ -225,6 +234,7 @@ async function pushLocalToCalDav(accountId: string, projectId: string, syncBaseA
   const rows = db.prepare(`
     SELECT * FROM events
     WHERE project_id = ?
+      AND COALESCE(kind, 'event') <> 'log'
       AND (sync_provider = 'caldav' OR (sync_provider IS NULL AND external_id IS NULL))
       AND (status NOT IN ('done', 'cancelled') OR updated_at > COALESCE(?, '1970-01-01T00:00:00.000Z'))
   `).all(projectId, syncBaseAt) as EventRow[];
@@ -255,11 +265,17 @@ async function pushLocalToCalDav(accountId: string, projectId: string, syncBaseA
         await addSyncLog(db, accountId, projectId, 'warn', `Push conflict (412) for "${row.title}", skipped`);
         continue;
       }
-      await updateEvent(db, row.event_id, {
-        external_id: uid,
-        external_url: hrefPath,
-        sync_provider: 'caldav',
-      });
+      await updateEvent(
+        db,
+        row.event_id,
+        {
+          external_id: uid,
+          external_url: hrefPath,
+          sync_provider: 'caldav',
+        },
+        // 推送只回写「同步绑定字段」（uid/url/provider），不改变本地计划 → 不置 stale
+        { markStale: false },
+      );
       pushed++;
     } catch (e) {
       await addSyncLog(db, accountId, projectId, 'error', `Push failed for "${row.title}": ${e instanceof Error ? e.message : String(e)}`);

@@ -142,6 +142,9 @@ const PRESET_COLORS = ['#F59E0B', '#EF4444', '#3B82F6', '#10B981', '#8B5CF6', '#
 const HOUR_HEIGHT = 44;
 const HOURS = Array.from({ length: 24 }, (_, h) => h);
 
+/** 面板默认宽度：居中浮层，两侧留出画布可视区；拖拽左缘可继续调整（下次打开仍回到此默认值） */
+const PANEL_DEFAULT_WIDTH = '82vw';
+
 /** 事件文字样式：分类色交由左侧色条表达，文字统一中性色；完成/取消沉为灰 + 删除线 */
 function eventTextStyle(status: CalendarEvent['status']): React.CSSProperties {
   const finished = status === 'done' || status === 'cancelled';
@@ -706,11 +709,11 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     return () => window.removeEventListener('pointerdown', onPointerDown);
   }, [onClose]);
 
-  // 左边缘拖拽调整面板宽度
+  // 左边缘拖拽调整面板宽度（面板居中：以中线为轴左右对开，故宽度 = 中线到光标的 2 倍）
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       if (!resizingRef.current) return;
-      const next = window.innerWidth - e.clientX;
+      const next = 2 * (window.innerWidth / 2 - e.clientX);
       setPanelWidth(Math.min(Math.max(next, 560), window.innerWidth));
     };
     const onUp = () => {
@@ -954,8 +957,8 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
       fetchEvents();
       // 通知全局：日历已变更（删除事件可能反向移除便签待办行，便签层据此重载）
       window.dispatchEvent(new Event('calendar-events-changed'));
-      // 联动 BobMail：日历删除事件后，通知中心引用该事件的条目同步删除
-      window.dispatchEvent(new CustomEvent('bobmail-event-sync', { detail: { eventId, action: 'deleted' } }));
+      // 联动 Butler 收件箱：日历删除事件后，引用该事件的回执条目同步删除
+      window.dispatchEvent(new CustomEvent('butler-event-sync', { detail: { eventId, action: 'deleted' } }));
     } catch (err) {
       console.error('Delete error:', err);
       setConfirmDelete(null);
@@ -974,9 +977,9 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
       fetchEvents();
       // 通知全局：事件状态已变更（⌘F 面板据此立即拉取一次到期提醒，而非等 30s 轮询）
       window.dispatchEvent(new Event('calendar-events-changed'));
-      // 联动 BobMail：日历标记完成后，通知中心引用该事件的条目自动完成
+      // 联动 Butler 收件箱：日历标记完成后，引用该事件的回执条目自动完成
       if (newStatus === 'done') {
-        window.dispatchEvent(new CustomEvent('bobmail-event-sync', { detail: { eventId: ev.event_id, action: 'done' } }));
+        window.dispatchEvent(new CustomEvent('butler-event-sync', { detail: { eventId: ev.event_id, action: 'done' } }));
       }
     } catch (err) {
       console.error('toggleStatus error:', err);
@@ -1027,13 +1030,14 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     <div
       ref={panelRef}
       data-calendar-panel
-      className="fixed right-0 top-0 z-[51] flex h-full flex-col overflow-hidden"
+      className="fixed left-1/2 top-0 z-[51] flex h-full -translate-x-1/2 flex-col overflow-hidden"
       style={{
-        // 默认占满屏幕宽度（面板贴右、左侧待办栏 260px，其余宽度全给日历区）
-        width: panelWidth === null ? '100vw' : `${panelWidth}px`,
-        maxWidth: panelWidth === null ? 'none' : '100vw',
+        // 居中显示：以视口水平中线为轴（宽度由 PANEL_DEFAULT_WIDTH 给定，或拖拽后的像素值）
+        width: panelWidth === null ? PANEL_DEFAULT_WIDTH : `${panelWidth}px`,
+        maxWidth: '100vw',
         backgroundColor: 'var(--paper)',
         borderLeft: '1px solid var(--line)',
+        borderRight: '1px solid var(--line)',
         boxShadow: 'var(--shadow-lg)',
         fontFamily: "var(--font-sans)",
         WebkitAppRegion: 'no-drag',

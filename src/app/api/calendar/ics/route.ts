@@ -8,7 +8,7 @@ import {
 } from '@/lib/db';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { parseIcs, buildIcs } from '@/lib/calendar/ical';
-import { scanDueEventReminders } from '@/lib/wanted/event-reminder';
+import { scanDueEventReminders } from '@/lib/core/event-reminder';
 
 /** 无当前项目时的占位 project_id（日历与项目独立） */
 const GLOBAL_PROJECT_ID = '__global__';
@@ -111,8 +111,10 @@ export async function GET(req: NextRequest) {
     const rangeEnd = searchParams.get('range_end') || new Date(Date.now() + 365 * 86400 * 1000).toISOString();
 
     const rows = await listEventsInRange(db, null, rangeStart, rangeEnd);
+    // 记录集（kind='log'）不对外投影
+    const visible = rows.filter((r) => (r.kind ?? 'event') !== 'log');
     const ics = buildIcs(
-      rows.map((r) => ({
+      visible.map((r) => ({
         // UID 必须稳定：外部导入事件沿用原 external_id；本地事件用数据库主键 event_id 兜底，
         // 与订阅 feed 保持同一规则，避免 Date.now() 每次导出都变导致重复
         external_id: r.external_id || r.event_id,

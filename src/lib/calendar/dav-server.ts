@@ -214,6 +214,7 @@ function buildCalendarCollectionPropfind(baseHref: string): string {
         <cal:calendar-description>${CALENDAR_DESCRIPTION}</cal:calendar-description>
         <cal:supported-calendar-component-set>
           <cal:comp name="VEVENT"/>
+          <cal:comp name="VTODO"/>
         </cal:supported-calendar-component-set>
         <cs:allow-create-calendar-component-set/>
         <resourcetype>
@@ -312,6 +313,9 @@ interface DavEventInfo {
   created_at: string;
   updated_at: string;
   sync_provider?: string | null;
+  /** 实体三分：'log' 记录集不对外投影 */
+  kind?: string | null;
+  due_at?: string | null;
 }
 
 /** 转换为 ParsedIcalEvent（buildIcs 需要的格式） */
@@ -330,6 +334,9 @@ function toParsedIcalEvent(ev: DavEventInfo): ParsedIcalEvent {
     priority: (ev.priority as 'high' | 'normal' | 'low') || 'normal',
     color: ev.color ?? null,
     tags,
+    // 对外投影统一按 VEVENT 呈现（本阶段 task 也发 VEVENT，保持既有客户端与便签锚点兼容）
+    component: 'VEVENT',
+    due_at: ev.due_at ?? null,
   };
 }
 
@@ -340,7 +347,8 @@ async function listAllEvents(): Promise<DavEventInfo[]> {
       GROUP_CONCAT(t.tag, ',') as tags_agg
     FROM events e
     LEFT JOIN event_tags t ON e.event_id = t.event_id
-    WHERE e.status != 'cancelled' OR e.updated_at > datetime('now', '-7 days')
+    WHERE (e.status != 'cancelled' OR e.updated_at > datetime('now', '-7 days'))
+      AND COALESCE(e.kind, 'event') <> 'log'
     GROUP BY e.event_id
     ORDER BY e.start_time DESC
   `).all() as DavEventInfo[];
@@ -370,11 +378,13 @@ async function getEventById(eventId: string): Promise<DavEventInfo | null> {
 async function createOrUpdateEvent(eventId: string, icalText: string): Promise<DavEventInfo> {
   const db = await getCalendarDb();
   const parsed = parseIcs(icalText);
-  if (parsed.length === 0) throw new Error('No VEVENT found in iCalendar data');
+  if (parsed.length === 0) throw new Error('No VEVENT/VTODO found in iCalendar data');
   const ev = parsed[0];
 
   const now = new Date().toISOString();
   const existing = await getEventById(eventId);
+  // VTODO（外部待办）→ kind='task'；VEVENT → kind='event'（不覆盖既有的 log/task 语义时以外部组件为准）
+  const kind = ev.component === 'VTODO' ? 'task' : 'event';
 
   if (existing) {
     db.prepare(`
@@ -390,6 +400,8 @@ async function createOrUpdateEvent(eventId: string, icalText: string): Promise<D
         color = ?,
         updated_at = ?,
         external_id = ?,
+        kind = ?,
+        due_at = ?,
         sync_provider = 'caldav'
       WHERE event_id = ?
     `).run(
@@ -404,6 +416,8 @@ async function createOrUpdateEvent(eventId: string, icalText: string): Promise<D
       ev.color,
       now,
       ev.external_id || eventId,
+      kind,
+      ev.due_at,
       eventId,
     );
     // 更新标签
@@ -417,8 +431,9 @@ async function createOrUpdateEvent(eventId: string, icalText: string): Promise<D
         event_id, project_id, title, description, location,
         start_time, end_time, all_day, status, priority,
         color, tags_json, scope, source_node_id, source_raw,
+        kind, due_at,
         external_id, sync_provider, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       eventId,
       '__global__',
@@ -435,6 +450,8 @@ async function createOrUpdateEvent(eventId: string, icalText: string): Promise<D
       'global',
       null,
       null,
+      kind,
+      ev.due_at,
       ev.external_id || eventId,
       'caldav',
       now,

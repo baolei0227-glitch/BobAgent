@@ -16,7 +16,8 @@ import {
   type UpdateEventData,
 } from '@/lib/db';
 import { getCurrentProject } from '@/lib/project/project-manager';
-import { scanDueEventReminders } from '@/lib/wanted/event-reminder';
+import { coerceRecurrence, parseRecurrence } from '@/lib/calendar/recurrence';
+import { scanDueEventReminders } from '@/lib/core/event-reminder';
 import { syncAllAccounts } from '@/lib/calendar/sync-runner';
 import { deleteDavEvent } from '@/lib/calendar/sync';
 import { decryptSecret } from '@/lib/secrets';
@@ -66,6 +67,7 @@ function rowToFrontend(row: EventRow) {
   // 'null' = 明确关闭提醒，与 '[]'（未配置 → 扫描时按默认 30 分钟）区分：
   // 前端据此回显「无提醒」，否则打开事件自动保存会把它悄悄改回 30 分钟
   const reminder_disabled = row.reminder_minutes_json === 'null';
+  const recurrence = parseRecurrence(row.recurrence_json);
   return {
     event_id: row.event_id,
     project_id: row.project_id,
@@ -82,7 +84,18 @@ function rowToFrontend(row: EventRow) {
     category_path,
     reminder_minutes,
     reminder_disabled,
+    // 周期重复规则（{freq,until} 或 null）；前端不编辑也应原样回传，避免保存时丢失
+    recurrence,
     scope: row.scope,
+    kind: row.kind ?? 'event',
+    due_at: row.due_at ?? null,
+    estimated_minutes: row.estimated_minutes ?? null,
+    actual_minutes: row.actual_minutes ?? null,
+    started_at: row.started_at ?? null,
+    completed_at: row.completed_at ?? null,
+    schedule_status: row.schedule_status ?? 'n/a',
+    block_locked: row.block_locked === 1,
+    scheduled_by: row.scheduled_by ?? null,
     source_node_id: row.source_node_id,
     source_raw: row.source_raw,
     // 来源锚点：非空且 kind='sticky' = 由 StickyTodo 便签行入日历；null = 日历直接添加/外部同步
@@ -96,6 +109,7 @@ function rowToFrontend(row: EventRow) {
 
 /** GET: 查询事件（全局日历库，与项目完全独立）
  *  支持参数：
+ *    - event_id: 按 id 取**单个**事件（通知详情点开日程提醒时读完整信息用）
  *    - range_start, range_end: 按时间范围查询（ISO 字符串）
  *    - status: scheduled | done | cancelled
  *    - all: 任意非空值 = 返回所有事件（无状态过滤）
@@ -105,13 +119,22 @@ function rowToFrontend(row: EventRow) {
 export async function GET(req: NextRequest) {
   try {
     const searchParams = req.nextUrl.searchParams;
+    const eventId = searchParams.get('event_id');
     const rangeStart = searchParams.get('range_start');
     const rangeEnd = searchParams.get('range_end');
     const status = searchParams.get('status');
     const all = searchParams.get('all');
     const keyword = searchParams.get('keyword');
+    const kindParam = searchParams.get('kind');
 
     const db = await getDb();
+
+    // 单事件查询：通知条目只带 title/时间，地点 / 备注 / 结束时间等要到日历库现取
+    if (eventId) {
+      const row = await getEvent(db, eventId);
+      if (!row) return NextResponse.json({ success: false, error: 'Event not found' }, { status: 404 });
+      return NextResponse.json({ success: true, event: rowToFrontend(row) });
+    }
 
     let rows: EventRow[];
     if (keyword && keyword.trim()) {
@@ -134,9 +157,14 @@ export async function GET(req: NextRequest) {
       rows = await listEventsInRange(db, null, from, to);
     }
 
+    // kind 过滤：显式指定 kind → 只返回该类型；未指定 → 默认排除 'log'（记录集不进入日历视图）
+    const filtered = kindParam
+      ? rows.filter((r) => (r.kind ?? 'event') === kindParam)
+      : rows.filter((r) => (r.kind ?? 'event') !== 'log');
+
     return NextResponse.json({
       success: true,
-      events: rows.map(rowToFrontend),
+      events: filtered.map(rowToFrontend),
     });
   } catch (e) {
     console.error('calendar GET error:', e);
@@ -176,9 +204,15 @@ export async function POST(req: NextRequest) {
         tags: it.tags ?? [],
         category_path: Array.isArray(it.category_path) ? it.category_path : undefined,
         scope,
+        kind: it.kind ?? undefined,
+        due_at: it.due_at ?? undefined,
+        estimated_minutes: typeof it.estimated_minutes === 'number' ? it.estimated_minutes : undefined,
+        block_locked: it.block_locked === true ? true : undefined,
+        scheduled_by: it.scheduled_by ?? undefined,
         source_node_id: it.source_node_id ?? undefined,
         source_raw: it.source_raw ?? undefined,
         reminder_minutes: Array.isArray(it.reminder_minutes) ? it.reminder_minutes : undefined,
+        recurrence: coerceRecurrence(it.recurrence),
         external_id: it.external_id ?? undefined,
         external_url: it.external_url ?? undefined,
         sync_provider: it.sync_provider ?? undefined,
@@ -301,9 +335,12 @@ export async function PATCH(req: NextRequest) {
     const writable = updateData as Record<string, unknown>;
     for (const k of ['title', 'description', 'location', 'start_time', 'end_time',
       'all_day', 'status', 'priority', 'color', 'tags', 'category_path', 'scope',
+      'kind', 'due_at', 'estimated_minutes', 'actual_minutes', 'block_locked', 'scheduled_by',
       'source_node_id', 'source_raw', 'reminder_minutes']) {
       if (raw[k] !== undefined) writable[k] = raw[k];
     }
+    // 周期重复规则单独归一化：body 可能是对象 / JSON 字符串；null = 明确取消重复
+    if (raw.recurrence !== undefined) updateData.recurrence = coerceRecurrence(raw.recurrence);
     if (updateData.title !== undefined) updateData.title = String(updateData.title).trim();
     if (updateData.tags && !Array.isArray(updateData.tags)) {
       return NextResponse.json({ success: false, error: 'tags 必须是数组' }, { status: 400 });
@@ -406,11 +443,13 @@ export async function DELETE(req: NextRequest) {
 
       // 匹配与日期范围有交集的事件：
       // start_time 在范围内，或 end_time 在范围内，或事件跨越该范围
+      // 无 end_time 的事件按 start+30min 的点事件参与判定（否则清理某个日期范围时会连带删掉
+      // 所有更早的无结束时间待办）
       conds.push(`start_time IS NOT NULL`);
       conds.push(`status = 'scheduled'`);
       conds.push(`datetime(start_time) < datetime(?)`);
       params.push(rangeEnd);
-      conds.push(`(end_time IS NULL OR datetime(end_time) > datetime(?))`);
+      conds.push(`datetime(COALESCE(NULLIF(TRIM(end_time), ''), datetime(start_time, '+30 minutes'))) > datetime(?)`);
       params.push(rangeStart);
 
       const rows = db.prepare(`

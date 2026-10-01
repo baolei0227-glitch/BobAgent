@@ -22,13 +22,17 @@ export interface ParsedIcalEvent {
   title: string;
   description: string | null;
   location: string | null;
-  start_time: string;          // ISO 8601
+  start_time: string | null;   // ISO 8601；VTODO 无 DTSTART 时为 null（无时段清单项）
   end_time: string | null;     // ISO 8601
   all_day: boolean;
   status: 'scheduled' | 'cancelled' | 'done';
   priority: 'high' | 'normal' | 'low';
   color: string | null;
   tags: string[];
+  /** 组件类型：'VEVENT' | 'VTODO'（VTODO 视为任务，可带 DUE 截止时间） */
+  component: 'VEVENT' | 'VTODO';
+  /** VTODO 截止时间（DUE），无则 null */
+  due_at: string | null;
 }
 
 /** 把 DATE-TIME 值解析为 ISO 字符串。tzid 为 TZID 参数（如 "Asia/Shanghai"） */
@@ -61,14 +65,17 @@ function toISO(value: string, tzid: string | null): string {
   return new Date().toISOString();
 }
 
-/** 解析 .ics 文本，返回事件数组（去重按 UID，一个 UID 只保留最后一个） */
+/** 解析 .ics 文本，返回事件/待办数组（去重按 UID，一个 UID 只保留最后一个）。
+ *  同时接受 VEVENT 与 VTODO：只切 VEVENT 会让第三方 PUT 的 VTODO 被静默忽略，
+ *  进而在 dav-server 的 createOrUpdateEvent 抛 "No VEVENT found" 直接 500。 */
 export function parseIcs(text: string): ParsedIcalEvent[] {
   const unfolded = text.replace(FOLD, UNFOLD);
-  const blocks = unfolded.split(/BEGIN:VEVENT/i);
+  const blocks = unfolded.split(/BEGIN:(VEVENT|VTODO)/i);
   const out = new Map<string, ParsedIcalEvent>();
 
-  for (let i = 1; i < blocks.length; i++) {
-    const body = blocks[i].split(/END:VEVENT/i)[0];
+  for (let i = 1; i + 1 < blocks.length; i += 2) {
+    const component: 'VEVENT' | 'VTODO' = (blocks[i] || '').toUpperCase() === 'VTODO' ? 'VTODO' : 'VEVENT';
+    const body = blocks[i + 1].split(/\nEND:(VEVENT|VTODO)/i)[0];
     const props: Record<string, string[]> = {};
     for (const line of body.split('\n')) {
       const idx = line.indexOf(':');
@@ -84,26 +91,36 @@ export function parseIcs(text: string): ParsedIcalEvent[] {
     const uid = props.UID?.[0] ?? '';
     const summary = props.SUMMARY?.[0] ?? '(Untitled)';
     const dtstart = props.DTSTART?.[0] ?? '';
+    const dueRaw = props.DUE?.[0] ?? '';
     const dtend = props.DTEND?.[0];
     const dtend2 = (props.DTEND?.[1] ?? '') as string;
-    const tzMatch = /^DTSTART;TZID=([^:]+):/.exec(blocks[i].split('\n').find((l) => /^DTSTART/i.test(l)) ?? '');
+    const tzMatch = /^DTSTART;TZID=([^:]+):/.exec(body.split('\n').find((l) => /^DTSTART/i.test(l)) ?? '');
     const tzid = tzMatch ? tzMatch[1] : null;
 
     const allDay = /^\d{8}$/.test(dtstart);
-    const startIso = toISO(dtstart, tzid);
+    // VTODO 允许没有 DTSTART（= 无时段清单项）→ start_time 为 null
+    const startIso = dtstart ? toISO(dtstart, tzid) : null;
     let endIso: string | null = null;
     if (dtend) {
       endIso = toISO(dtend, tzMatch ? tzMatch[1] : tzid);
     } else if (dtend2) {
       endIso = toISO(dtend2, tzid);
-    } else if (allDay) {
+    } else if (allDay && startIso) {
       // 全天事件默认当天结束
       const d = new Date(startIso);
       endIso = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).toISOString();
     }
+    // VTODO 的 DUE = 截止时间（与执行时段 start_time/end_time 分离）
+    const dueIso = dueRaw ? toISO(dueRaw, null) : null;
 
     const status = (props.STATUS?.[0] ?? 'CONFIRMED').toUpperCase();
     const bobStatus = (props['X-BOB-STATUS']?.[0] ?? '').toUpperCase();
+    const percent = Number(props['PERCENT-COMPLETE']?.[0] ?? '0');
+    const isDone =
+      bobStatus === 'DONE' ||
+      status === 'COMPLETED' ||
+      props.COMPLETED?.[0] !== undefined ||
+      (Number.isFinite(percent) && percent >= 100);
     const prioRaw = props.PRIORITY?.[0];
 
     const tags = (props.CATEGORIES?.[0] ?? '')
@@ -119,13 +136,15 @@ export function parseIcs(text: string): ParsedIcalEvent[] {
       start_time: startIso,
       end_time: endIso,
       all_day: allDay,
-      status: bobStatus === 'DONE' ? 'done' : (status === 'CANCELLED' ? 'cancelled' : 'scheduled'),
+      status: isDone ? 'done' : (status === 'CANCELLED' ? 'cancelled' : 'scheduled'),
       priority:
         prioRaw === undefined || prioRaw === '' || prioRaw === '5'
           ? 'normal'
           : Number(prioRaw) <= 3 ? 'high' : Number(prioRaw) >= 7 ? 'low' : 'normal',
       color: null,
       tags,
+      component,
+      due_at: dueIso,
     });
   }
   return Array.from(out.values());

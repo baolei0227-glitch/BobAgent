@@ -25,9 +25,11 @@ export async function GET(req: NextRequest) {
     const rangeStart = new Date(Date.now() - 365 * 86400 * 1000).toISOString();
     const rangeEnd = new Date(Date.now() + 365 * 86400 * 1000).toISOString();
     const rows = await listEventsInRange(db, null, rangeStart, rangeEnd);
+    // 记录集（kind='log'）不对外投影
+    const visible = rows.filter((r) => (r.kind ?? 'event') !== 'log');
 
     const ics = buildIcs(
-      rows.map((r) => ({
+      visible.map((r) => ({
         // UID 必须稳定：外部导入事件沿用原 external_id；本地事件用数据库主键 event_id 兜底，
         // 禁止 Date.now() 之类每次请求都变化的兜底（否则 Apple 日历把同一事件当成全新事件反复追加/不更新）
         external_id: r.external_id || r.event_id,
