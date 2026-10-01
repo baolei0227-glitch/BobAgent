@@ -13,7 +13,7 @@
  * 不依赖打包资源，dev/打包一致。
  */
 
-import { WebContentsView, BrowserWindow, Menu, session, ipcMain, shell, clipboard, nativeImage, app, type MenuItemConstructorOptions } from 'electron';
+import { WebContentsView, BrowserWindow, Menu, session, ipcMain, shell, clipboard, nativeImage, app, dialog, type MenuItemConstructorOptions } from 'electron';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
@@ -272,7 +272,10 @@ function downloadsToJson(): HippoDownload[] {
 
 function broadcastDownloads(): void {
   if (!win || win.isDestroyed()) return;
-  win.webContents.send('hippo-browser:downloads', { downloads: downloadsToJson() });
+  const payload = { downloads: downloadsToJson() };
+  // 工具栏只消费角标数字，列表明细在独立浮层窗口里渲染
+  win.webContents.send('hippo-browser:downloads', payload);
+  if (dlWin && !dlWin.isDestroyed() && !dlWin.webContents.isDestroyed()) dlWin.webContents.send('hippo-browser:downloads', payload);
 }
 
 /** 默认存入系统"下载"目录；重名时追加 " (n)" 后缀，避免覆盖已有文件 */
@@ -460,7 +463,15 @@ function isAllowedUrl(raw: string): boolean {
   }
 }
 
-/** 本地文档扩展名 → 内置查看页：pdf → 批注阅读器 /pdf-viewer；图片 → 查看/标注/AI 编辑 /image-viewer */
+/**
+ * 本地文档扩展名 → 内置查看页（均由本机 aiServer 提供）：
+ *   pdf          → /pdf-viewer    批注阅读器
+ *   png/jpg/...  → /image-viewer  查看 / 标注 / AI 编辑
+ *
+ * 2026-09-30：docx/doc 的内置编辑页 /docx-editor 已下线，改为在应用右侧预览面板内编辑
+ *   （docx 已注册进 viewers/registry）。因此这里不再重定向 docx —— 在 Hippo 里打开
+ *   file://*.docx 会走 Chromium 默认行为。要编辑 docx 请从应用的本地文件面板 / 搜索打开。
+ */
 const VIEWER_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'];
 /** 从 file:// 的 hash（#page=3&q=xx）或查询串解析查看页定位锚点（hash 优先） */
 function parseFileAnchor(u: URL): URLSearchParams {
@@ -1128,8 +1139,12 @@ const execHost: ExecHost = {
     if (!isAllowedUrl(target)) return { ok: false, error: 'Only http/https/file links are supported' };
     const t = spawnTab();
     t.view.webContents.loadURL(target).catch(() => {});
-    if (activate !== false) activateTabById(t.id);
-    reveal();
+    // activate:false = 后台标签：连窗口都不该被抬到前台，否则「不抢焦点」名不副实
+    //（materials 链接导入就是靠它安静抓页；工具侧另有 tabId 直接指定读哪个标签）
+    if (activate !== false) {
+      activateTabById(t.id);
+      reveal();
+    }
     return { ok: true, id: t.id };
   },
 };
@@ -1234,6 +1249,38 @@ function bridgeStart(): void {
         }
         return;
       }
+      if (p === '/wechat-mp') {
+        // 公众号专用通道（Butler 联系人列搜索栏的数据源）：在一条专属后台标签里跑搜狗微信，
+        // 全程不激活标签、不 reveal 窗口，不打扰用户当前页面。
+        // action='search'（默认）：关键词检索候选；action='read'：读取指定文章正文。
+        const action = body.action === 'read' ? 'read' : 'search';
+        aiToolBegin(action === 'read' ? 'wechat_read' : 'wechat_search');
+        try {
+          if (action === 'read') {
+            const url = typeof body.url === 'string' ? body.url.trim() : '';
+            if (!url || !isAllowedUrl(url)) {
+              await bridgeSend(res, 400, { ok: false, error: 'Invalid article url' });
+              return;
+            }
+            const r = await sogouWechatRead(url);
+            await bridgeSend(res, 200, { ok: true, ...r });
+          } else {
+            const query = typeof body.query === 'string' ? body.query.trim() : '';
+            const maxResults = Math.min(10, Math.max(1, Number(body.maxResults) || 6));
+            if (!query) {
+              await bridgeSend(res, 400, { ok: false, error: 'Missing search keyword (query)' });
+              return;
+            }
+            const r = await sogouWechatSearch(query, maxResults);
+            await bridgeSend(res, 200, { ok: true, ...r });
+          }
+        } catch (e) {
+          await bridgeSend(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        } finally {
+          aiToolEnd();
+        }
+        return;
+      }
       await bridgeSend(res, 404, { ok: false, error: `unknown action: ${p}` });
     } catch (e) {
       await bridgeSend(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -1298,6 +1345,153 @@ async function searchWeb(
     }
   }
   return { engine: 'bing', query, results };
+}
+
+// ============ 搜狗微信（公众号检索，专属后台标签） ============
+// Butler 联系人列搜索栏的公众号数据源：在一条专属后台标签里访问 weixin.sogou.com 检索文章，
+// 全程不激活标签、不 reveal 窗口，不干扰用户当前页面；共用 persist:hippo-browser 分区以延续反爬 cookie。
+// 关键约束：结果链接保持 `/link?url=…` 原样返回（前端点击交给 Hippo 打开它；展开成文章直链会触发反爬）。
+
+/** 专属后台标签 id（0 = 尚未创建）；标签被用户关掉后自动重建 */
+let wechatMpTabId = 0;
+/** 搜狗微信首页（用于创建专属标签的落地页） */
+const WECHAT_MP_HOME = 'https://weixin.sogou.com/';
+
+/** 加载 URL 并等待完成；失败或超时都不抛错（交给抽取脚本如实反映结果） */
+async function loadInTab(wc: Electron.WebContents, url: string, timeoutMs = 20000): Promise<void> {
+  await Promise.race([
+    wc.loadURL(url).catch(() => {}),
+    new Promise<void>((r) => setTimeout(r, timeoutMs)),
+  ]);
+}
+
+/** 定位/创建专属后台标签：优先复用我们自己的，其次认领后台的搜狗标签，最后新建 */
+function findWechatMpTab(): BrowserTab {
+  if (wechatMpTabId) {
+    const t = tabs.find((x) => x.id === wechatMpTabId && !x.view.webContents.isDestroyed());
+    if (t) return t;
+    wechatMpTabId = 0;
+  }
+  // 用户自己开过搜狗微信时直接认领它的后台标签；若它正是当前激活标签则不碰（避免打断用户）
+  const claimed = tabs.find(
+    (t) => !t.view.webContents.isDestroyed() && t.id !== activeTabId && /weixin\.sogou\.com/i.test(t.view.webContents.getURL() || ''),
+  );
+  if (claimed) {
+    wechatMpTabId = claimed.id;
+    return claimed;
+  }
+  // 新建后台标签：spawnTab 不加入 contentView、不激活、不 reveal
+  const t = spawnTab();
+  t.view.webContents.loadURL(WECHAT_MP_HOME).catch(() => {});
+  wechatMpTabId = t.id;
+  return t;
+}
+
+/** 搜索结果页抽取脚本：返回 { captcha, results:[{title,url,account,snippet}] } */
+const WECHAT_SEARCH_SCRIPT = `
+(() => {
+  const abs = (href) => { try { return new URL(href, location.origin).href; } catch (e) { return href; } };
+  const txt = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+  const title = document.title || '';
+  const head = ((document.body && document.body.innerText) || '').slice(0, 500);
+  const captcha = /验证码|请输入验证码|antispider|异常访问/.test(title)
+    || /请输入验证码|验证码/.test(head)
+    || !!document.querySelector('#seccode, .seccode, .verify, #captcha, .captcha, .sogou-captcha');
+  if (captcha) return { captcha: true, results: [] };
+  const out = [];
+  const seen = new Set();
+  const items = document.querySelectorAll('ul.news-list > li, .news-list li, .news-box li');
+  for (const li of items) {
+    const a = li.querySelector('h3 a') || li.querySelector('.txt-box h3 a') || li.querySelector('a.txt-box-link');
+    if (!a) continue;
+    const href = a.getAttribute('href') || '';
+    if (!href) continue;
+    const url = abs(href);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const snippet = txt(li.querySelector('.txt-info')) || txt(li.querySelector('p.txt-info'));
+    let account = txt(li.querySelector('.s-p .account')) || txt(li.querySelector('.account'));
+    if (!account) { const sp = li.querySelector('.s-p'); if (sp) { const x = sp.querySelector('a'); if (x) account = txt(x); } }
+    out.push({ title: txt(a), url, account, snippet });
+  }
+  return { captcha: false, results: out };
+})()
+`;
+
+/** 搜狗微信搜索：在专属后台标签里搜索公众号文章 */
+async function sogouWechatSearch(
+  query: string,
+  maxResults: number,
+): Promise<{ engine: string; query: string; captcha: boolean; results: SearchResultItem[] }> {
+  const wc = findWechatMpTab().view.webContents;
+  const url = `https://weixin.sogou.com/weixin?type=2&query=${encodeURIComponent(query)}`;
+  await loadInTab(wc, url);
+  const raw = (await wc.executeJavaScript(WECHAT_SEARCH_SCRIPT, true)) as {
+    captcha?: boolean;
+    results?: Array<{ title: string; url: string; account: string; snippet: string }>;
+  };
+  if (raw.captcha) return { engine: 'sogou-wechat', query, captcha: true, results: [] };
+  const results = (raw.results || [])
+    .filter((r) => r.url && r.title)
+    .slice(0, maxResults)
+    .map((r) => ({ title: r.title, url: r.url, snippet: r.snippet }));
+  return { engine: 'sogou-wechat', query, captcha: false, results };
+}
+
+/** 正文短于该字符数视为“未拿到正文”（可能是跳转页/反爬页/删文） */
+const WECHAT_MP_MIN_TEXT = 200;
+
+/** 文章正文抽取脚本：返回 { captcha, text, title, account, missing } */
+const WECHAT_READ_SCRIPT = `
+(() => {
+  const txt = (el) => (el ? (el.innerText || el.textContent || '').trim() : '');
+  const title = document.title || '';
+  const head = ((document.body && document.body.innerText) || '').slice(0, 500);
+  const captcha = /验证码|请输入验证码|antispider|异常访问/.test(title)
+    || /请输入验证码|验证码/.test(head)
+    || !!document.querySelector('#seccode, .seccode, .verify, #captcha, .captcha, .sogou-captcha');
+  if (captcha) return { captcha: true, text: '', title, account: '', missing: true };
+  const body = document.querySelector('#js_content')
+    || document.querySelector('.rich_media_content')
+    || document.querySelector('#page-content')
+    || document.querySelector('#img-content');
+  const text = txt(body);
+  const account = txt(document.querySelector('#js_name'))
+    || txt(document.querySelector('.rich_media_meta_nickname'))
+    || txt(document.querySelector('#profileBt'));
+  const h1 = txt(document.querySelector('#activity-name')) || txt(document.querySelector('.rich_media_title'));
+  return { captcha: false, text, title: h1 || title, account, missing: text.length < ${WECHAT_MP_MIN_TEXT} };
+})()
+`;
+
+/**
+ * 搜狗微信文章正文读取：复用专属后台标签打开文章页并抽取正文。
+ * 注意：链接是 `/link?url=…` 跳转页，loadURL 后需等跳转到 mp.weixin.qq.com 再抽取，
+ * 因此这里在加载完成后追加一次短暂等待，再执行抽取脚本。
+ */
+async function sogouWechatRead(
+  url: string,
+): Promise<{ engine: string; url: string; captcha: boolean; missing: boolean; title: string; account: string; text: string }> {
+  const wc = findWechatMpTab().view.webContents;
+  await loadInTab(wc, url);
+  // 搜狗跳转页需一小段时间才落到目标文章，避免抽到跳转页空壳
+  await new Promise<void>((r) => setTimeout(r, 1200));
+  const raw = (await wc.executeJavaScript(WECHAT_READ_SCRIPT, true)) as {
+    captcha?: boolean;
+    text?: string;
+    title?: string;
+    account?: string;
+    missing?: boolean;
+  };
+  return {
+    engine: 'sogou-wechat',
+    url,
+    captcha: !!raw.captcha,
+    missing: raw.missing !== false,
+    title: raw.title || '',
+    account: raw.account || '',
+    text: (raw.text || '').slice(0, 12000),
+  };
 }
 
 // ============ 窗口显隐 ============
@@ -1391,12 +1585,18 @@ function toolbarHtml(): string {
   .tl .g { background: linear-gradient(#3dd860, #22c23a); }
   /* ===== 地址框（书签星内嵌） ===== */
   .addrbox { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; -webkit-app-region: no-drag; }
-  .addrbox .addr { flex: 1; padding: 0 34px 0 14px; }
+  .addrbox .addr { flex: 1; padding: 0 62px 0 14px; }
   .addrbox .addr:focus { border-color: #7c6cf0; }
-  .addrStar { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 26px; height: 26px; border: none;
+  /* 地址框右侧两个内嵌按钮：★ 网址书签（最右）、⬇ 收藏当前页到 BobWork（其左） */
+  .addrStar, .addrClip { position: absolute; top: 50%; transform: translateY(-50%); width: 26px; height: 26px; border: none;
     background: transparent; color: #b9b9c8; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
     border-radius: 6px; -webkit-app-region: no-drag; }
-  .addrStar:hover { background: #ececf4; }
+  .addrStar { right: 4px; }
+  .addrClip { right: 32px; }
+  .addrStar:hover, .addrClip:hover { background: #ececf4; }
+  /* 新建标签页（无网页可存）时收藏按钮置灰 */
+  .addrClip:disabled { opacity: .35; }
+  .addrClip:disabled:hover { background: transparent; }
   .addrStar.on { color: #f5b301; }
   /* ===== 书签标签栏（标星的网址，位于地址栏下方） ===== */
   .bmtabs { display: flex; align-items: center; gap: 5px; padding: 3px 8px; min-height: 28px; flex: none; width: 100%;
@@ -1430,6 +1630,11 @@ function toolbarHtml(): string {
   .progbar { position: fixed; top: 0; left: 0; height: 2px; width: 0; z-index: 999; opacity: 0; pointer-events: none;
     background: linear-gradient(90deg, #6b5cf0, #9d8cff); transition: width .18s ease-out, opacity .3s ease; }
   .progbar.on { opacity: 1; }
+  /* ===== 轻量提示浮层（收藏落盘结果，2.6s 自动消失；纯展示，不拦截点击） ===== */
+  .toast { position: fixed; top: 52px; right: 10px; z-index: 1000; max-width: 320px; padding: 7px 11px; border-radius: 8px;
+    background: rgba(34,34,44,.94); color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 20px rgba(0,0,0,.18);
+    opacity: 0; transform: translateY(-4px); transition: opacity .18s ease, transform .18s ease; pointer-events: none; }
+  .toast.show { opacity: 1; transform: translateY(0); }
   /* ===== 页面内查找条（Ctrl/Cmd+F） ===== */
   .findbar { display: none; align-items: center; gap: 6px; padding: 4px 8px; flex: none; width: 100%;
     border-bottom: 1px solid #e4e4ec; background: #fbfbfe; -webkit-app-region: no-drag; }
@@ -1453,7 +1658,7 @@ function toolbarHtml(): string {
   .mi:disabled:hover { background: transparent; }
   .mi svg { flex: none; }
   .mi .lbl { flex: 1; }
-  /* ===== 下载按钮 + 下载面板 ===== */
+  /* ===== 下载按钮 + 未完成数角标（列表明细在独立浮层子窗口里） ===== */
   .dlWrap { position: relative; -webkit-app-region: no-drag; }
   .dlBadge { position: absolute; top: 1px; right: 0; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px;
     background: #6b5cf0; color: #fff; font-size: 9.5px; line-height: 14px; text-align: center; display: none; }
@@ -1464,31 +1669,6 @@ function toolbarHtml(): string {
   .aiDriving.show { display: inline-flex; }
   .aiDriving i { width: 6px; height: 6px; border-radius: 50%; background: #6b5cf0; animation: aiPulse 1.1s ease-in-out infinite; }
   @keyframes aiPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.7); } }
-  .dlPanel { position: fixed; top: 44px; right: 10px; width: 340px; max-height: 62vh; background: #fff; border: 1px solid #e0e0ea;
-    border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.12); z-index: 998; display: none; flex-direction: column;
-    overflow: hidden; -webkit-app-region: no-drag; }
-  .dlPanel.show { display: flex; }
-  .dlHead { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #eeeef6; flex: none;
-    -webkit-app-region: no-drag; }
-  .dlHead .dlTitle { flex: 1; font-size: 13px; font-weight: 600; color: #333; }
-  .dlHead .fbtn { flex: none; height: 24px; min-width: 24px; padding: 0 6px; border: none; border-radius: 6px;
-    background: transparent; color: #888; font-size: 14px; cursor: pointer; -webkit-app-region: no-drag; }
-  .dlHead .fbtn:hover { background: #f2f2f8; }
-  .dlList { overflow-y: auto; padding: 6px; }
-  .dlItem { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 8px; }
-  .dlItem:hover { background: #f6f6fb; }
-  .dlItem .dlMain { flex: 1; min-width: 0; }
-  .dlItem .dlName { font-size: 12.5px; color: #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dlItem .dlMeta { font-size: 11px; color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dlItem .dlAct { flex: none; display: flex; gap: 4px; }
-  .dlItem .dlAb { height: 24px; padding: 0 8px; border: none; border-radius: 6px; background: #eef0f8; color: #555;
-    font-size: 12px; cursor: pointer; font-family: inherit; }
-  .dlItem .dlAb:hover { background: #e2e5f2; }
-  .dlItem .dlAb.primary { background: #6b5cf0; color: #fff; }
-  .dlItem .dlAb.primary:hover { background: #5a4be0; }
-  .dlProg { height: 3px; border-radius: 2px; background: #ececf4; margin-top: 5px; overflow: hidden; }
-  .dlProg > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #6b5cf0, #9d8cff); transition: width .2s; }
-  .dlEmpty { padding: 18px 10px; text-align: center; color: #b0b0c0; font-size: 12px; }
   /* ===== HTML 编辑器面板（默认隐藏，进入编辑态 body.editing 时显示） ===== */
   .editor { display: none; flex-direction: column; flex: 1; min-height: 0; background: #fff; }
   body.editing .editor { display: flex; }
@@ -1524,10 +1704,11 @@ function toolbarHtml(): string {
 </style></head>
 <body>
 <div class="progbar" id="progbar"></div>
+<div class="toast" id="toast"></div>
 <div class="bar">
   <span class="tl">
-    <button class="r" id="winClose" title="Close" aria-label="Close"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" aria-hidden="true"><path d="M1.9 1.9 6.1 6.1"></path><path d="M6.1 1.9 1.9 6.1"></path></svg></button>
-    <button class="y" id="winMin" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" aria-hidden="true"><path d="M1.7 4h4.6"></path></svg></button>
+    <button class="r" id="winClose" title="Close all pages" aria-label="Close all pages"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" aria-hidden="true"><path d="M1.9 1.9 6.1 6.1"></path><path d="M6.1 1.9 1.9 6.1"></path></svg></button>
+    <button class="y" id="winMin" title="Minimize to capsule" aria-label="Minimize to capsule"><svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" aria-hidden="true"><path d="M1.7 4h4.6"></path></svg></button>
     <button class="g" id="winMax" title="Zoom" aria-label="Zoom"><svg viewBox="0 0 8 8" aria-hidden="true"><path d="M4.5 1.2h2.3v2.3z" fill="currentColor"></path><path d="M3.5 6.8H1.2V4.5z" fill="currentColor"></path></svg></button>
   </span>
   <button class="btn" id="back" title="Back">
@@ -1541,6 +1722,7 @@ function toolbarHtml(): string {
   </button>
   <span class="addrbox">
     <input class="addr" id="addr" placeholder="Search or enter address" spellcheck="false" />
+    <button class="addrClip" id="clip" title="Save this page — to the current project, or to Bob Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path><line x1="12" y1="7" x2="12" y2="13"></line><line x1="9" y1="10" x2="15" y2="10"></line></svg></button>
     <button class="addrStar" id="bm" title="Bookmark this page"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2.9 6.3 6.9.6-5.2 4.6 1.5 6.8L12 16.9 5.9 20.3l1.5-6.8L2.2 8.9l6.9-.6z"></path></svg></button>
   </span>
   <span class="aiDriving" id="aiDriving" title="AI is operating this browser"><i></i>AI</span>
@@ -1586,19 +1768,6 @@ function toolbarHtml(): string {
   <textarea id="edSrc" spellcheck="false" wrap="off"></textarea>
   <div id="edPreviewPane"><iframe id="edFrame" sandbox="allow-scripts allow-same-origin"></iframe></div>
 </div>
-<!-- 下载面板必须排在全部拖拽区（.bar / .tabbar / .bmtabs 都是 -webkit-app-region: drag）
-     之后：Chromium 按文档顺序累加拖拽区，后出现的 drag 元素会重新盖住先前声明的 no-drag 区域，
-     面板排在前头时其头部（Clear / Close，y≈52~76）正落在标签条 / 书签栏的拖拽带内，
-     点击被当作拖动窗口吞掉，而面板下半部分仍可点 —— 故只有 Clear / Close 失效。
-     面板为 position: fixed，移动其 DOM 位置不影响布局。 -->
-<div class="dlPanel" id="dlPanel">
-  <div class="dlHead">
-    <span class="dlTitle">Downloads</span>
-    <button class="fbtn" id="dlClear" title="Clear finished downloads">Clear</button>
-    <button class="fbtn" id="dlClose" title="Close">×</button>
-  </div>
-  <div class="dlList" id="dlList"></div>
-</div>
 <script>
   const $ = (id) => document.getElementById(id);
   // 注意：不能用局部变量名 api——preload 通过 contextBridge 暴露的全局 api 对象，
@@ -1627,11 +1796,23 @@ function toolbarHtml(): string {
     chatOn: () => $('chatBtn').classList.toggle('active', true),
     chatOff: () => $('chatBtn').classList.toggle('active', false),
   };
-  // 主进程回传的菜单动作：工具有 act 表；书签右键菜单用 bm: 前缀单独分发
+  // 主进程回传的菜单动作：工具有 act 表；书签右键菜单用 bm: 前缀、收藏菜单用 clip: 前缀单独分发
   if (BAPI && BAPI.onMenuCmd) BAPI.onMenuCmd((a) => {
-    if (typeof a === 'string' && a.indexOf('bm:') === 0) { onBmMenuCmd(a); return; }
+    if (typeof a !== 'string') return;
+    if (a.indexOf('bm:') === 0) { onBmMenuCmd(a); return; }
+    if (a.indexOf('clip:') === 0) { if (BAPI.savePage) BAPI.savePage(a.slice(5)); return; }
+    if (a.indexOf('saveMsg:') === 0) { showToast(a.slice(8)); return; }
     const f = act[a]; if (f) f();
   });
+  /* ===== 轻量提示浮层（收藏落盘结果） ===== */
+  let toastTimer = null;
+  function showToast(text) {
+    const el = $('toast'); if (!el || !text) return;
+    el.textContent = text;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+  }
   $('winClose').onclick = () => BAPI && BAPI.close();
   $('winMin').onclick = () => BAPI && BAPI.minimize();
   $('winMax').onclick = () => BAPI && BAPI.toggleMaximize();
@@ -1641,6 +1822,13 @@ function toolbarHtml(): string {
   $('back').onclick = () => BAPI && BAPI.back();
   $('fwd').onclick = () => BAPI && BAPI.forward();
   $('reload').onclick = () => { const st = current; if (st && st.loading) BAPI.stop(); else BAPI.reload(); };
+  // 收藏当前页：由主进程在按钮下方弹三去向菜单（独立浮层子窗口，避免被网页 view 遮挡）
+  $('clip').onclick = (e) => {
+    e.stopPropagation();
+    if (!BAPI || !BAPI.saveMenu) return;
+    const r = $('clip').getBoundingClientRect();
+    BAPI.saveMenu({ right: r.right });
+  };
   $('addr').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -1714,6 +1902,8 @@ function toolbarHtml(): string {
     $('pinBtn').title = s.alwaysOnTop ? 'Turn off always-on-top' : 'Always on top';
     // 状态广播很频繁：仅 URL 变化时才拉取书签并重建书签栏 DOM，其余只更新 ★ 高亮状态
     const u = s.url || '';
+    // 收藏按钮只在有真实网页时可点（新建标签页 / 空地址没有正文可存）
+    $('clip').disabled = isNewTab || !u;
     if (u !== lastStateUrl) { lastStateUrl = u; refreshBmStar(); }
     else refreshStar();
   };
@@ -1824,9 +2014,6 @@ function toolbarHtml(): string {
     const b = bm ? Math.ceil(bm.getBoundingClientRect().bottom) : 0;
     let h = Math.max(a, b, 48);
     if (fb && fb.classList.contains('show')) h = Math.max(h, Math.ceil(fb.getBoundingClientRect().bottom));
-    // 下载面板展开时同样下移网页 view，避免面板被不透明 view 盖住
-    const dp = $('dlPanel');
-    if (dp && dp.classList.contains('show')) h = Math.max(h, Math.ceil(dp.getBoundingClientRect().bottom) + 6);
     if (h !== chromeSent && BAPI) { chromeSent = h; BAPI.setChromeHeight(h); }
   }
   window.addEventListener('resize', syncChromeTop);
@@ -1930,96 +2117,15 @@ function toolbarHtml(): string {
     aiEl.title = on ? 'AI is operating this browser — ' + (d.tool || 'browser task') : 'AI is operating this browser';
   });
 
-  /* ===== 下载面板（面板展开时同步抬高 chrome，网页 view 自动下移让位） ===== */
+  /* ===== 下载角标（列表明细在独立浮层子窗口里，不占网页 view 空间） ===== */
   let downloads = [];
-  function fmtBytes(n) {
-    if (typeof n !== 'number' || !isFinite(n) || n <= 0) return 'Unknown size';
-    const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = n;
-    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
-  }
-  function dlMetaText(d) {
-    if (d.state === 'progressing') {
-      if (d.totalBytes > 0) return Math.round((d.receivedBytes / d.totalBytes) * 100) + '% · ' + fmtBytes(d.receivedBytes) + ' / ' + fmtBytes(d.totalBytes);
-      return fmtBytes(d.receivedBytes) + ' / unknown size';
-    }
-    if (d.state === 'completed') return 'Done · ' + fmtBytes(d.totalBytes || d.receivedBytes);
-    if (d.state === 'cancelled') return 'Cancelled';
-    return 'Interrupted';
-  }
-  function renderDownloads() {
-    const list = $('dlList'); if (!list) return;
+  function renderDlBadge() {
     const running = downloads.filter((d) => d.state === 'progressing').length;
     const badge = $('dlBadge');
     if (badge) { badge.textContent = String(running); badge.classList.toggle('show', running > 0); }
-    list.innerHTML = '';
-    if (!downloads.length) {
-      const empty = document.createElement('div'); empty.className = 'dlEmpty'; empty.textContent = 'No downloads';
-      list.appendChild(empty); syncChromeTop(); return;
-    }
-    downloads.forEach((d) => {
-      const item = document.createElement('div'); item.className = 'dlItem';
-      const main = document.createElement('div'); main.className = 'dlMain';
-      const name = document.createElement('div'); name.className = 'dlName';
-      name.textContent = d.fileName || d.url; name.title = d.savePath || d.url;
-      const meta = document.createElement('div'); meta.className = 'dlMeta'; meta.textContent = dlMetaText(d);
-      main.appendChild(name); main.appendChild(meta);
-      if (d.state === 'progressing' && d.totalBytes > 0) {
-        const pg = document.createElement('div'); pg.className = 'dlProg';
-        const fill = document.createElement('i');
-        fill.style.width = Math.max(2, Math.min(100, (d.receivedBytes / d.totalBytes) * 100)) + '%';
-        pg.appendChild(fill); main.appendChild(pg);
-      }
-      item.appendChild(main);
-      const acts = document.createElement('div'); acts.className = 'dlAct';
-      if (d.state === 'progressing') {
-        const c = document.createElement('button'); c.className = 'dlAb'; c.textContent = 'Cancel';
-        c.onclick = (e) => { e.stopPropagation(); if (BAPI) BAPI.downloadCancel(d.id); };
-        acts.appendChild(c);
-      } else {
-        const o = document.createElement('button'); o.className = 'dlAb primary'; o.textContent = 'Open';
-        o.onclick = (e) => {
-          e.stopPropagation();
-          if (BAPI) BAPI.downloadOpen(d.id).then((r) => { if (r && !r.ok && r.error) alert(r.error); }).catch(() => {});
-        };
-        acts.appendChild(o);
-        if (d.state === 'completed') {
-          const rv = document.createElement('button'); rv.className = 'dlAb'; rv.textContent = 'Reveal';
-          rv.onclick = (e) => { e.stopPropagation(); if (BAPI) BAPI.downloadReveal(d.id); };
-          acts.appendChild(rv);
-        }
-      }
-      item.appendChild(acts);
-      list.appendChild(item);
-    });
-    syncChromeTop();
   }
-  function setDlPanel(show) {
-    const p = $('dlPanel'); if (!p) return;
-    p.classList.toggle('show', show);
-    syncChromeTop();
-    if (show && BAPI) {
-      BAPI.downloadsList().then((r) => { if (r && r.downloads) { downloads = r.downloads; renderDownloads(); } }).catch(() => {});
-    }
-  }
-  $('dlBtn').onclick = (e) => { e.stopPropagation(); setDlPanel(!$('dlPanel').classList.contains('show')); };
-  $('dlClose').onclick = (e) => { e.stopPropagation(); setDlPanel(false); };
-  $('dlClear').onclick = (e) => {
-    e.stopPropagation();
-    if (!BAPI) return;
-    BAPI.downloadClear().then((r) => { if (r && r.downloads) { downloads = r.downloads; renderDownloads(); } }).catch(() => {});
-  };
-  // 点击面板/按钮之外收起（网页区域由 WebContentsView 覆盖，不触发本层事件，用 Esc 兜底）
-  document.addEventListener('click', (e) => {
-    const p = $('dlPanel'); if (!p || !p.classList.contains('show')) return;
-    const t = e.target;
-    if (t && t.closest && (t.closest('.dlWrap') || t.closest('.dlPanel'))) return;
-    setDlPanel(false);
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && $('dlPanel').classList.contains('show')) { e.preventDefault(); setDlPanel(false); }
-  });
-  if (BAPI && BAPI.onDownloads) BAPI.onDownloads((data) => { downloads = (data && data.downloads) || []; renderDownloads(); });
+  $('dlBtn').onclick = (e) => { e.stopPropagation(); if (BAPI) BAPI.downloadsPanel(); };
+  if (BAPI && BAPI.onDownloads) BAPI.onDownloads((data) => { downloads = (data && data.downloads) || []; renderDlBadge(); });
 
   /* ===== HTML 编辑器 ===== */
   let editing = false;
@@ -2178,9 +2284,44 @@ function newTabDataUrl(): string {
 
 // ============ IPC（模块加载时注册一次） ============
 
+/** 对话栏（侧边栏 view）请求弹提示：转成既有 menu-cmd 的 saveMsg 指令，交给窗口工具栏的 toast 渲染 ——
+ *  全窗口只有一份提示实现，侧边栏不再自建浮层 */
+ipcMain.handle('hippo-browser:toast', (_e, text: string) => {
+  if (win && !win.isDestroyed()) win.webContents.send('hippo-browser:menu-cmd', `saveMsg:${String(text ?? '')}`);
+  return { ok: true };
+});
 ipcMain.handle('hippo-browser:get-state', () => currentState());
 ipcMain.handle('hippo-browser:open', () => { reveal(); return currentState(); });
-ipcMain.handle('hippo-browser:close', () => { if (win && !win.isDestroyed()) win.hide(); broadcastState(); return currentState(); });
+// 新建标签打开 URL（小程序预览等场景：在 Hippo 独立页打开，不覆盖当前标签）
+ipcMain.handle('hippo-browser:open-url-new-tab', (_e, url: string) => {
+  const target = typeof url === 'string' ? url.trim() : '';
+  if (!target) return { ok: false, error: 'URL cannot be empty' };
+  if (!isAllowedUrl(target)) return { ok: false, error: 'Only http/https/file links are supported' };
+  if (!isHippoReady()) return { ok: false, error: 'Hippo Browser 未就绪' };
+  openInNewTab(target);
+  return { ok: true };
+});
+// 关闭 = 关闭全部已打开页面（区别于「缩小为胶囊」：胶囊保留页面，可随时恢复）。
+// 关掉全部标签会丢失用户正在浏览的内容，故先弹确认框；确认后逐个关闭标签并隐藏窗口。
+ipcMain.handle('hippo-browser:close', async () => {
+  if (!win || win.isDestroyed()) return currentState();
+  const pages = countOpenPages();
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    buttons: ['Close All Pages', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: 'Close Hippo Browser',
+    message: pages > 1 ? `Close all ${pages} open pages?` : 'Close all open pages?',
+    detail: 'All open pages will be closed. To keep them, use Minimize to capsule instead.',
+  });
+  if (response === 0) {
+    closeAllTabs();
+    hideWindow();
+  }
+  return currentState();
+});
 ipcMain.handle('hippo-browser:capsule-toggle', () => {
   if (win && !win.isDestroyed()) {
     if (capsuleMode) reveal();
@@ -2578,6 +2719,14 @@ ipcMain.handle('hippo-browser:download-clear', () => {
   broadcastDownloads();
   return { ok: true, downloads: downloadsToJson() };
 });
+// 下载面板：切换/关闭独立浮层窗口，以及面板上报自然高度后重排窗口
+ipcMain.handle('hippo-browser:downloads-panel', () => { toggleDownloadsPanel(); return { ok: true }; });
+ipcMain.handle('hippo-browser:downloads-panel-close', () => { closeDownloadsPanel(); return { ok: true }; });
+ipcMain.handle('hippo-browser:downloads-panel-size', (_e, h: number) => {
+  dlPanelNeedH = Math.max(0, Math.round(Number(h) || 0));
+  syncDlPanelBounds();
+  return { ok: true };
+});
 
 // ============ 生命周期 ============
 
@@ -2884,6 +3033,265 @@ function openToolMenu(): void {
   toolMenuWin.on('closed', () => { toolMenuWin = null; });
 }
 function closeToolMenu(): void { if (toolMenuWin && !toolMenuWin.isDestroyed()) toolMenuWin.close(); toolMenuWin = null; }
+
+// ================= 收藏菜单（地址框内 ⬇ 打开：三个去向，同为独立浮层子窗口） =================
+let saveMenuWin: BrowserWindow | null = null;
+const SAVEMENU_W = 264;
+const SAVEMENU_H = 178;
+const SAVEMENU_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><style>
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,'PingFang SC',sans-serif; background:#fff; padding:6px; }
+  .mi { display:flex; flex-direction:column; align-items:flex-start; gap:2px; padding:7px 10px; border-radius:7px; cursor:pointer; }
+  .mi:hover { background:#f2f2f8; }
+  .mi .t { font-size:13px; color:#333; }
+  .mi .h { font-size:11px; color:#9a9aac; line-height:1.35; }
+  html * { cursor: default !important; }
+</style></head><body>
+  <div class="mi" data-a="clip:project"><span class="t">Current project</span><span class="h">Save as Markdown into materials/ — can be cited by the ledger</span></div>
+  <div class="mi" data-a="clip:notes"><span class="t">Bob Notes</span><span class="h">Clip into the raw inbox — not compiled yet</span></div>
+  <div class="mi" data-a="clip:notes-compiled"><span class="t">Bob Notes (compile now)</span><span class="h">Clip into the raw inbox and compile it right away</span></div>
+  <script>
+    const BAPI = window.api && window.api.hippoBrowser;
+    document.querySelectorAll('.mi').forEach((el) => el.addEventListener('click', () => {
+      const a = el.getAttribute('data-a');
+      if (BAPI) BAPI.menuExec(a);
+    }));
+  </script>
+</body></html>`;
+/** 在收藏按钮（地址框内）下方弹出去向菜单：right = 按钮右边缘在工具栏内的 CSS 像素坐标 */
+function openSaveMenu(right: number): void {
+  const bw = win;
+  if (!bw || bw.isDestroyed()) return;
+  if (saveMenuWin && !saveMenuWin.isDestroyed()) { closeSaveMenu(); return; }
+  saveMenuWin = new BrowserWindow({
+    width: SAVEMENU_W, height: SAVEMENU_H, frame: false, resizable: false, show: false,
+    alwaysOnTop: true, skipTaskbar: true, parent: bw, visualEffectState: 'active',
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, preload: join(__dirname, 'preload.js') },
+  });
+  saveMenuWin.setAlwaysOnTop(true, 'floating');
+  saveMenuWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(SAVEMENU_HTML));
+  // 右对齐到按钮并收拢进窗口（留 8px 边距），纵向与工具菜单同一基线（chrome 之下）
+  const cb = bw.getContentBounds();
+  const x = Math.max(cb.x + 8, Math.min(cb.x + cb.width - SAVEMENU_W - 8, cb.x + Math.round(right) - SAVEMENU_W));
+  saveMenuWin.setBounds({ x, y: cb.y + chromeTop, width: SAVEMENU_W, height: SAVEMENU_H });
+  saveMenuWin.once('ready-to-show', () => saveMenuWin?.show());
+  saveMenuWin.on('blur', () => closeSaveMenu());
+  saveMenuWin.on('closed', () => { saveMenuWin = null; });
+}
+function closeSaveMenu(): void { if (saveMenuWin && !saveMenuWin.isDestroyed()) saveMenuWin.close(); saveMenuWin = null; }
+
+/** 收藏当前页 → POST 本机 Next 的 /api/materials（服务端自己读 Hippo 当前标签，不重复抓取）。
+ *  三去向由菜单给出；结果经 menu-cmd 的 saveMsg: 前缀回传工具栏弹提示，不阻塞 UI。 */
+async function savePageToBobWork(target: string): Promise<void> {
+  const toToolbar = (msg: string) => {
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+      win.webContents.send('hippo-browser:menu-cmd', `saveMsg:${msg}`);
+    }
+  };
+  toToolbar('Saving the current page…');
+  try {
+    const res = await fetch(`${aiServerUrl}/api/materials`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'save_page',
+        target: target === 'project' ? 'project' : 'notes',
+        compile: target === 'notes-compiled',
+      }),
+    });
+    const data = (await res.json().catch(() => null)) as
+      | { success?: boolean; error?: string; title?: string; file?: { name?: string } }
+      | null;
+    if (!res.ok || !data?.success) { toToolbar(data?.error || 'Failed to save the page'); return; }
+    if (target === 'notes-compiled') toToolbar(`Clipped to Bob Notes, compiling in background: ${data.title ?? ''}`);
+    else if (target === 'notes') toToolbar(`Clipped to Bob Notes (not compiled): ${data.title ?? ''}`);
+    else toToolbar(`Saved to materials: ${data.file?.name ?? ''}`);
+  } catch (e) {
+    toToolbar(e instanceof Error ? e.message : String(e));
+  }
+}
+
+// ================= 下载面板（独立浮层子窗口） =================
+// 面板原先挂在工具栏 HTML 层：网页是叠加在其上的原生 WebContentsView，浮层会被整个盖住，
+// 于是只能靠「展开时把 chromeTop 抬到面板底部」把网页 view 整体下移让位 —— 代价是页面 viewport
+// 真的变矮（触发网页响应式重排、滚动位置跳动，最多吃掉 62vh）。改为与工具菜单同构的浮层子窗口后，
+// 浮层落在网页 view 之上，网页 view 尺寸恒定不变。
+let dlWin: BrowserWindow | null = null;
+/** 面板内容自然高度（由面板渲染层上报），窗口高度在此基础上按可用空间钳制 */
+let dlPanelNeedH = 0;
+/** 面板最近一次因失焦收起的时间戳（见 toggleDownloadsPanel 的防弹回判据） */
+let dlBlurClosedAt = 0;
+const DL_PANEL_WIDTH = 340;
+/** 面板列表最大内容高度（与面板样式里的上限保持一致），超出部分在面板内滚动 */
+const DL_LIST_MAX_H = 320;
+const DLPANEL_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><style>
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; flex-direction: column; overflow: hidden; background: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, 'PingFang SC', sans-serif; }
+  .dlHead { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #eeeef6; flex: none; }
+  .dlHead .dlTitle { flex: 1; font-size: 13px; font-weight: 600; color: #333; }
+  .dlHead .fbtn { flex: none; height: 24px; min-width: 24px; padding: 0 6px; border: none; border-radius: 6px;
+    background: transparent; color: #888; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .dlHead .fbtn:hover { background: #f2f2f8; }
+  .dlList { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
+  .dlItem { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 8px; }
+  .dlItem:hover { background: #f6f6fb; }
+  .dlItem .dlMain { flex: 1; min-width: 0; }
+  .dlItem .dlName { font-size: 12.5px; color: #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dlItem .dlMeta { font-size: 11px; color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dlItem .dlAct { flex: none; display: flex; gap: 4px; }
+  .dlItem .dlAb { height: 24px; padding: 0 8px; border: none; border-radius: 6px; background: #eef0f8; color: #555;
+    font-size: 12px; cursor: pointer; font-family: inherit; }
+  .dlItem .dlAb:hover { background: #e2e5f2; }
+  .dlItem .dlAb.primary { background: #6b5cf0; color: #fff; }
+  .dlItem .dlAb.primary:hover { background: #5a4be0; }
+  .dlProg { height: 3px; border-radius: 2px; background: #ececf4; margin-top: 5px; overflow: hidden; }
+  .dlProg > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #6b5cf0, #9d8cff); transition: width .2s; }
+  .dlEmpty { padding: 18px 10px; text-align: center; color: #b0b0c0; font-size: 12px; }
+  /* 指针统一为箭头，与浏览器窗口其余界面一致 */
+  html * { cursor: default !important; }
+</style></head><body>
+  <div class="dlHead">
+    <span class="dlTitle">Downloads</span>
+    <button class="fbtn" id="dlClear" title="Clear finished downloads">Clear</button>
+    <button class="fbtn" id="dlClose" title="Close">×</button>
+  </div>
+  <div class="dlList" id="dlList"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const BAPI = window.api && window.api.hippoBrowser;
+    let downloads = [];
+    let lastNeedH = 0;
+    function fmtBytes(n) {
+      if (typeof n !== 'number' || !isFinite(n) || n <= 0) return 'Unknown size';
+      const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = n;
+      while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+      return (v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+    }
+    function dlMetaText(d) {
+      if (d.state === 'progressing') {
+        if (d.totalBytes > 0) return Math.round((d.receivedBytes / d.totalBytes) * 100) + '% · ' + fmtBytes(d.receivedBytes) + ' / ' + fmtBytes(d.totalBytes);
+        return fmtBytes(d.receivedBytes) + ' / unknown size';
+      }
+      if (d.state === 'completed') return 'Done · ' + fmtBytes(d.totalBytes || d.receivedBytes);
+      if (d.state === 'cancelled') return 'Cancelled';
+      return 'Interrupted';
+    }
+    // 上报自然高度，主进程据此定窗口高（scrollHeight 与窗口高度无关，不会形成回环）
+    function reportSize() {
+      const head = document.querySelector('.dlHead'); const list = $('dlList');
+      const need = Math.ceil((head ? head.getBoundingClientRect().height : 40)
+        + Math.min(list ? list.scrollHeight : 0, 320) + 2);
+      if (need !== lastNeedH && BAPI && BAPI.downloadsPanelSize) { lastNeedH = need; BAPI.downloadsPanelSize(need); }
+    }
+    function render() {
+      const list = $('dlList'); if (!list) return;
+      list.innerHTML = '';
+      if (!downloads.length) {
+        const empty = document.createElement('div'); empty.className = 'dlEmpty'; empty.textContent = 'No downloads';
+        list.appendChild(empty); reportSize(); return;
+      }
+      downloads.forEach((d) => {
+        const item = document.createElement('div'); item.className = 'dlItem';
+        const main = document.createElement('div'); main.className = 'dlMain';
+        const name = document.createElement('div'); name.className = 'dlName';
+        name.textContent = d.fileName || d.url; name.title = d.savePath || d.url;
+        const meta = document.createElement('div'); meta.className = 'dlMeta'; meta.textContent = dlMetaText(d);
+        main.appendChild(name); main.appendChild(meta);
+        if (d.state === 'progressing' && d.totalBytes > 0) {
+          const pg = document.createElement('div'); pg.className = 'dlProg';
+          const fill = document.createElement('i');
+          fill.style.width = Math.max(2, Math.min(100, (d.receivedBytes / d.totalBytes) * 100)) + '%';
+          pg.appendChild(fill); main.appendChild(pg);
+        }
+        item.appendChild(main);
+        const acts = document.createElement('div'); acts.className = 'dlAct';
+        if (d.state === 'progressing') {
+          const c = document.createElement('button'); c.className = 'dlAb'; c.textContent = 'Cancel';
+          c.onclick = (e) => { e.stopPropagation(); if (BAPI) BAPI.downloadCancel(d.id); };
+          acts.appendChild(c);
+        } else {
+          const o = document.createElement('button'); o.className = 'dlAb primary'; o.textContent = 'Open';
+          o.onclick = (e) => {
+            e.stopPropagation();
+            if (BAPI) BAPI.downloadOpen(d.id).then((r) => { if (r && !r.ok && r.error) alert(r.error); }).catch(() => {});
+          };
+          acts.appendChild(o);
+          if (d.state === 'completed') {
+            const rv = document.createElement('button'); rv.className = 'dlAb'; rv.textContent = 'Reveal';
+            rv.onclick = (e) => { e.stopPropagation(); if (BAPI) BAPI.downloadReveal(d.id); };
+            acts.appendChild(rv);
+          }
+        }
+        item.appendChild(acts);
+        list.appendChild(item);
+      });
+      reportSize();
+    }
+    $('dlClose').onclick = () => { if (BAPI) BAPI.downloadsPanelClose(); };
+    $('dlClear').onclick = () => {
+      if (!BAPI) return;
+      BAPI.downloadClear().then((r) => { if (r && r.downloads) { downloads = r.downloads; render(); } }).catch(() => {});
+    };
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); if (BAPI) BAPI.downloadsPanelClose(); }
+    });
+    if (BAPI && BAPI.onDownloads) BAPI.onDownloads((data) => { downloads = (data && data.downloads) || []; render(); });
+    if (BAPI) BAPI.downloadsList().then((r) => { downloads = (r && r.downloads) || []; render(); }).catch(() => {});
+  </script>
+</body></html>`;
+
+/** 面板可用高度：窗口内容区扣除 chrome 与被面板覆盖不到的余量 */
+function dlPanelAvailableH(): number {
+  if (!win || win.isDestroyed()) return DL_LIST_MAX_H;
+  return Math.max(96, win.getContentBounds().height - chromeTop - 16);
+}
+
+/** 面板窗口贴齐：右上角对齐下载按钮，纵向紧贴 chrome 之下，高度取内容自然高并按可用空间钳制 */
+function syncDlPanelBounds(): void {
+  if (!dlWin || dlWin.isDestroyed() || !win || win.isDestroyed()) return;
+  const cb = win.getContentBounds();
+  const h = Math.max(96, Math.min(dlPanelNeedH || 96, dlPanelAvailableH()));
+  dlWin.setBounds({ x: cb.x + cb.width - DL_PANEL_WIDTH - 12, y: cb.y + chromeTop, width: DL_PANEL_WIDTH, height: h });
+}
+
+function openDownloadsPanel(): void {
+  if (!win || win.isDestroyed()) return;
+  if (dlWin && !dlWin.isDestroyed()) return;
+  closeToolMenu(); // 两个浮层互斥，避免叠在一起
+  dlPanelNeedH = 0;
+  const cb = win.getContentBounds();
+  dlWin = new BrowserWindow({
+    width: DL_PANEL_WIDTH, height: Math.min(DL_LIST_MAX_H + 44, dlPanelAvailableH()),
+    x: cb.x + cb.width - DL_PANEL_WIDTH - 12, y: cb.y + chromeTop,
+    frame: false, resizable: false, show: false,
+    alwaysOnTop: true, skipTaskbar: true, parent: win, visualEffectState: 'active',
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, preload: join(__dirname, 'preload.js') },
+  });
+  dlWin.setAlwaysOnTop(true, 'floating');
+  dlWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(DLPANEL_HTML));
+  syncDlPanelBounds();
+  dlWin.once('ready-to-show', () => {
+    if (!dlWin || dlWin.isDestroyed()) return;
+    syncDlPanelBounds();
+    dlWin.show();
+    dlWin.focus();
+  });
+  // 失焦即收起（点网页/工具栏都算点外面；与工具菜单同款交互）
+  dlWin.on('blur', () => { dlBlurClosedAt = Date.now(); closeDownloadsPanel(); });
+  dlWin.on('closed', () => { dlWin = null; });
+}
+
+function closeDownloadsPanel(): void {
+  if (dlWin && !dlWin.isDestroyed()) dlWin.close();
+  dlWin = null;
+}
+
+function toggleDownloadsPanel(): void {
+  if (dlWin && !dlWin.isDestroyed()) { closeDownloadsPanel(); return; }
+  // 面板已被同一次点击引起的失焦收起（点工具栏下载按钮会先让父窗口抢焦点）：这次点击视为关闭，不再弹回
+  if (Date.now() - dlBlurClosedAt < 400) { dlBlurClosedAt = 0; return; }
+  openDownloadsPanel();
+}
 /** 执行一次元素级就地 AI 编辑并应用，返回结果（供 inline-edit 与 aiedit-go 复用） */
 async function runInlineAiEdit(instruction: string | undefined): Promise<{ ok: boolean; html?: string; error?: string }> {
   const wc = view?.webContents;
@@ -2975,8 +3383,18 @@ export function setupHippoBrowser(): void {
     return true;
   });
   ipcMain.handle('hippo-browser:tool-menu', () => { openToolMenu(); return true; });
+  // 收藏菜单：弹出去向子窗口 / 执行收藏（三去向，落盘走本机 Next，见 savePageToBobWork）
+  ipcMain.handle('hippo-browser:save-menu', (_e, payload: { right?: number }) => {
+    openSaveMenu(Number(payload?.right) || 0);
+    return true;
+  });
+  ipcMain.handle('hippo-browser:save-page', (_e, target: string) => {
+    void savePageToBobWork(String(target || 'project'));
+    return true;
+  });
   ipcMain.handle('hippo-browser:menu-exec', (_e, action: string) => {
     closeToolMenu();
+    closeSaveMenu();
     // 广告拦截开关在主进程侧生效，无需转发到渲染层
     if (action === 'adblock') {
       const on = toggleAdBlock();
@@ -3071,6 +3489,10 @@ export function setupHippoBrowser(): void {
   win.on('closed', () => {
     win = null;
     view = null;
+    // 浮层子窗口随父窗口一起销毁，这里只清引用防悬垂
+    dlWin = null;
+    toolMenuWin = null;
+    saveMenuWin = null;
     // 对话栏视图随窗口销毁一起释放（WebContentsView 由 Electron 回收，这里只清引用防悬垂）
     chatView = null;
     tabs = [];
@@ -3176,7 +3598,7 @@ function activateTabById(id: number): BrowserTab | null {
   return t;
 }
 
-/** target 是否为本地查看页 URL（本机 next-standalone 提供的 pdf/image viewer） */
+/** target 是否为本地查看页 URL（本机 next-standalone 提供的 pdf / image viewer） */
 function isLocalViewer(target: string): boolean {
   try {
     const u = new URL(target);
@@ -3415,6 +3837,24 @@ async function copyExtractedMarkdown(): Promise<void> {
     const r = await extractContent();
     if (r.markdown) clipboard.writeText(r.markdown);
   } catch { /* 忽略 */ }
+}
+
+/** 统计真正在浏览的页面数（排除初始空白新标签页），供关闭确认文案使用 */
+function countOpenPages(): number {
+  return tabs.filter((t) => {
+    try {
+      const u = t.view.webContents.getURL();
+      return !!u && !u.startsWith('data:text/html');
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+/** 关闭全部标签页：逐个走 closeTabById —— 关掉最后一个时会自动补建一个空白标签，
+ *  保证窗口重新打开时仍有可加载网址的标签（与「无页面时始终保留一个标签」约定一致）。 */
+function closeAllTabs(): void {
+  for (const id of tabs.map((t) => t.id)) closeTabById(id);
 }
 
 /** 关闭标签：先清空其视图，若关的是当前激活，切到相邻标签 */

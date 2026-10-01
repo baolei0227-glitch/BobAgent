@@ -5,7 +5,7 @@
  * 生产模式下从打包资源中启动 Next.js 服务；开发模式下连接 pnpm dev。
  */
 
-import { app, BrowserWindow, shell, ipcMain, Notification, dialog, session, nativeTheme, globalShortcut, systemPreferences, clipboard, nativeImage, screen } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, Notification, dialog, session, nativeTheme, globalShortcut, systemPreferences, clipboard, nativeImage, screen, desktopCapturer } from 'electron';
 import { spawn, spawnSync, execFile, execFileSync, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
@@ -274,7 +274,14 @@ function startNextServer(): ChildProcess & { startupReady: Promise<void> } {
       const probeStart = Date.now();
       const probeInterval = setInterval(() => {
         http.get(`http://localhost:${PORT}/`, (res) => {
-          if (res.statusCode === 200 || res.statusCode === 307 || res.statusCode === 302) {
+          // 401 也算「服务已起」：远程访问 strict 模式下，本探针不带 Token，会被自定义
+          // server 的鉴权网关挡下 —— 能返回 401 恰恰说明 HTTP 服务已经可用。
+          if (
+            res.statusCode === 200 ||
+            res.statusCode === 307 ||
+            res.statusCode === 302 ||
+            res.statusCode === 401
+          ) {
             if (!settled) {
               settled = true;
               clearInterval(probeInterval);
@@ -469,8 +476,11 @@ const rendererCrashAt = new Map<number, number>();
 
 /** 创建主窗口（加载完成前保持隐藏，由欢迎窗口先行展示） */
 function createWindow(): BrowserWindow {
+  // 默认按主屏可用宽度开窗（此前固定 1400，宽屏上左右留白、达不到屏幕宽度；
+  // 窗口状态不落盘，重启即回到固定值，故此处直接取屏幕可用宽度）
+  const workArea = screen.getPrimaryDisplay().workAreaSize;
   const win = new BrowserWindow({
-    width: 1400,
+    width: workArea.width,
     height: 900,
     minWidth: 900,
     minHeight: 600,
@@ -2341,6 +2351,35 @@ function setupAutoUpdater(): void {
 app.whenReady().then(async () => {
   log(`App ready. isDev=${isDev}, PORT=${PORT}`);
 
+  // ── 远程访问鉴权：strict 模式下桌面端（localhost）也需 Bearer，这里在网络层自动补 Token ──
+  // 仅对发往本机 BobWork server 的请求注入；loopback-exempt 模式下回环本就豁免，无需注入。
+  // webRequest 在网络层拦截，覆盖渲染进程所有 fetch / XHR，无需改动前端代码。
+  let remoteAccessToken = '';
+  let remoteAccessMode: 'loopback-exempt' | 'strict' = 'loopback-exempt';
+  const refreshRemoteAccess = async () => {
+    try {
+      const s = await readSettingsFromFile();
+      remoteAccessToken = s.remoteAccess?.token || '';
+      remoteAccessMode = s.remoteAccess?.mode === 'strict' ? 'strict' : 'loopback-exempt';
+    } catch {
+      /* 忽略读取失败 */
+    }
+  };
+  await refreshRemoteAccess();
+  setInterval(refreshRemoteAccess, 5000).unref();
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    const requestHeaders = { ...details.requestHeaders };
+    if (
+      remoteAccessMode === 'strict' &&
+      remoteAccessToken &&
+      details.url.startsWith(SERVER_URL) &&
+      !requestHeaders['Authorization']
+    ) {
+      requestHeaders['Authorization'] = `Bearer ${remoteAccessToken}`;
+    }
+    callback({ requestHeaders });
+  });
+
   // 确保工作区目录存在
   let workspaceDir = path.join(app.getPath('home'), 'BobWork', '.sandbox');
   if (process.env.BOBWORK_HOME) {
@@ -2614,6 +2653,38 @@ app.whenReady().then(async () => {
   );
 
 
+  // 系统音频采集（会议模式的远端参会人音源）：渲染层 getDisplayMedia({audio:true}) 时，
+  // 主进程静默授权首个屏幕源并附 loopback 系统音轨（不弹选择器）。
+  // 平台支持：macOS 14.2+（Apple CoreAudio Tap）/ Windows；Linux 无 loopback，降级为仅麦克风。
+  // 注意：macOS 必须在 Info.plist 声明 NSAudioCaptureUsageDescription（见 scripts/build-electron.sh
+  // 与 scripts/package-release.sh 的 plist）。dev 模式下责任进程是终端/IDE，其无该键 →
+  // 系统音频**只能在打包版验证**；终端里跑 electron 只会拿到空音轨。
+  try {
+    session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize: { width: 0, height: 0 }, // 不要缩略图：省去每个源的图像处理，只要 id/name
+        });
+        if (sources.length === 0) {
+          callback({});
+          return;
+        }
+        const supportsLoopback = process.platform === 'darwin' || process.platform === 'win32';
+        callback({
+          video: sources[0],
+          ...(request.audioRequested && supportsLoopback ? { audio: 'loopback' as const } : {}),
+        });
+      } catch (err) {
+        log(`display-media handler failed: ${String(err)}`);
+        callback({});
+      }
+    });
+    log('系统音频采集 handler 已注册（display media / loopback）');
+  } catch (err) {
+    log(`系统音频采集 handler 注册失败: ${String(err)}`);
+  }
+
   setupAutoUpdater();
 
   // GitCode CDN 的 releases/download 路由对带任何 query 的请求返回 404，
@@ -2802,7 +2873,7 @@ app.on('window-all-closed', () => {
   }
 });
 
-// 退出前清理 WANTED 临时项目（/chat 残留）再杀服务进程：
+// 退出前清理 Butler 临时项目（/chat 残留）再杀服务进程：
 // 发送 DELETE 请求由服务端删除临时项目，收到响应/出错/超时后终止 Next.js 子进程。
 // 用 quitCleanupStarted 防止 before-quit 重复触发时重复清理。
 let quitCleanupStarted = false;
@@ -2816,7 +2887,7 @@ app.on('before-quit', () => {
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
   const cleanupTempProjectOnExit = () => {
-    const req = http.request(`${SERVER_URL}/api/wanted/node-chat`, { method: 'DELETE' }, (res) => {
+    const req = http.request(`${SERVER_URL}/api/core/node-chat`, { method: 'DELETE' }, (res) => {
       res.resume();
       killNextServer();
     });

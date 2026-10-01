@@ -67,18 +67,25 @@ for f in "${FILES[@]}"; do
 done
 
 # ---------- 2. 提取 Release Notes ----------
-RELEASE_NOTES=$(python3 - "$PROJECT_DIR/RELEASES.md" "$TAG" <<'PYEOF'
-import json, re, sys
-path, tag = sys.argv[1], sys.argv[2]
-try:
-    text = open(path, encoding="utf-8").read()
-    m = re.search(r"^## " + re.escape(tag) + r"[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-    notes = m.group(1).strip() if m else ""
-except Exception:
-    notes = ""
-print(json.dumps(notes))
-PYEOF
-)
+# 用 node 而非 python3：macOS 的 /usr/bin/python3 是 Xcode 垫片，未同意 Xcode 许可协议时
+# 会直接抛「You have not agreed to the Xcode license agreements」并以 69 退出，整个上传
+# 还没发请求就失败（2026-10-01 实测：v0.7.664 因此漏发，远端 latest 仍停在上一版）。
+# 语义与原先的 python 版本一致：取 `## <tag>` 标题行之后的正文，直到下一个 `## ` 标题或文末，再 strip。
+RELEASE_NOTES=$(node -e '
+const fs = require("fs");
+const [file, tag] = process.argv.slice(1);
+let notes = "";
+try {
+  const lines = fs.readFileSync(file, "utf8").split("\n");
+  const start = lines.findIndex((l) => l.startsWith("## " + tag));
+  if (start !== -1) {
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((l) => l.startsWith("## "));
+    notes = (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
+  }
+} catch {}
+process.stdout.write(JSON.stringify(notes));
+' "$PROJECT_DIR/RELEASES.md" "$TAG")
 
 # ---------- 3. 创建 Release ----------
 log "创建 GitCode Release $TAG ..."

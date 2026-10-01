@@ -174,6 +174,10 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>BobWork 需要使用麦克风来接收您的语音输入并转成文字。</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>BobWork 需要在会议模式中采集系统音频，以便记录远端参会人的发言。</string>
 </dict>
 </plist>
 PLIST

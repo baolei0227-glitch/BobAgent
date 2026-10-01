@@ -58,6 +58,8 @@ export interface Envelope {
 const LOAD_TIMEOUT_MS = 20000;
 const CLICK_SETTLE_MS = 350;
 const SNAPSHOT_TIMEOUT_MS = 15000;
+/** browser_get_html 的字符上限（clean 快照是落盘「原件」，默认 20000 会把它截成残页） */
+const HTML_SNAPSHOT_MAX_CHARS = 4_000_000;
 const POLL_INTERVAL_MS = 120;
 const RING_CAP = 300;
 const DIALOG_GRACE_MS = 4000;
@@ -296,6 +298,72 @@ function ok(value: unknown, startedAt: number, wc: WebContents | null): Envelope
 
 function fail(phase: string, message: string, hint?: string): Envelope {
   return { ok: false, error: { phase, message, hint } };
+}
+
+/**
+ * 单次调用的目标标签：args.tabId 指向的标签优先。
+ *
+ * 为什么需要：后台标签的读取（materials 链接导入的整页快照）不应为了读一次就把
+ * 用户的当前标签切走 —— 但读的工具必须能指定「读哪个标签」，否则只能读到旧的活动标签。
+ * tabId 缺失或标签已失效 → 回落活动标签，与旧行为完全一致。
+ */
+function targetWc(host: ExecHost, args: Record<string, unknown>, fallback: WebContents): WebContents {
+  const id = Number(args.tabId);
+  if (!Number.isFinite(id) || id <= 0) return fallback;
+  const t = host.webContentsOfTab(id);
+  return isAlive(t) ? t : fallback;
+}
+
+/**
+ * 整页快照脚本（browser_get_html 的 clean=true）——「原件」抓取用：
+ * 剥 script/noscript/iframe/template 与注释 → 去掉 on* 内联事件与 javascript: 链接
+ * → src/href/srcset/poster/form[action]/style url(...) 绝对化 → data-src* 懒加载属性提升为真实属性。
+ *
+ * 为什么必须在页内做：只有活在文档里的 DOM 才拿得到 <base> 参与解析后的绝对地址，
+ * 也只有活 DOM 上的懒加载属性还没被浏览器覆盖。落盘后的 HTML 要能离线打开、并作为
+ * 正文提取的唯一原件，所以一次在这里洗干净，服务端只负责「HTML → 文本」。
+ */
+function cleanCaptureScript(outer: boolean): string {
+  return `(() => {
+  const doc = document;
+  const base = doc.baseURI || doc.location.href;
+  const abs = (v) => { try { return new URL(v, base).href; } catch (e) { return v; } };
+  const absSrcset = (v) => String(v).split(',').map((part) => {
+    const bits = part.trim().split(/\\s+/);
+    if (!bits[0]) return '';
+    bits[0] = abs(bits[0]);
+    return bits.join(' ');
+  }).filter(Boolean).join(', ');
+  const direct = { src: 1, href: 1, poster: 1, action: 1 };
+  const lazy = { 'data-src': 'src', 'data-original': 'src', 'data-lazy-src': 'src', 'data-srcset': 'srcset' };
+  const src = ${outer ? 'doc.documentElement' : '(doc.body || doc.documentElement)'};
+  const root = src ? src.cloneNode(true) : null;
+  if (!root) return '';
+  root.querySelectorAll('script, noscript, iframe, template').forEach((el) => el.remove());
+  const tw = doc.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+  const comments = [];
+  while (tw.nextNode()) comments.push(tw.currentNode);
+  comments.forEach((n) => { if (n.parentNode) n.parentNode.removeChild(n); });
+  const all = [root].concat(Array.from(root.querySelectorAll('*')));
+  for (const el of all) {
+    for (const name of Array.from(el.getAttributeNames() || [])) {
+      const lower = name.toLowerCase();
+      const val = el.getAttribute(name) || '';
+      if (lower.length > 2 && lower.slice(0, 2) === 'on') { el.removeAttribute(name); continue; }
+      if (/^\\s*javascript:/i.test(val)) { el.removeAttribute(name); continue; }
+      if (direct[lower]) { el.setAttribute(name, abs(val)); continue; }
+      if (lower === 'srcset') { el.setAttribute(name, absSrcset(val)); continue; }
+      if (lower === 'style' && val.indexOf('url(') !== -1) {
+        el.setAttribute(name, val.replace(/url\\(\\s*(['"]?)([^'")]+)\\1\\s*\\)/gi, (m, q, u) => 'url(' + q + abs(u) + q + ')'));
+        continue;
+      }
+      if (lazy[lower] && !el.hasAttribute(lazy[lower])) {
+        el.setAttribute(lazy[lower], lower === 'data-srcset' ? absSrcset(val) : abs(val));
+      }
+    }
+  }
+  return ${outer ? "'<!DOCTYPE html>\\n' + (root.outerHTML || '')" : "(root.innerHTML || '')"};
+})()`;
 }
 
 /**
@@ -1256,19 +1324,21 @@ export async function execBrowserTool(
       case 'browser_wait_network_idle': {
         const idleMs = Math.min(5000, Math.max(100, Number(args.idleMs) || 500));
         const timeoutMs = Math.min(60000, Math.max(500, Number(args.timeoutMs) || 15000));
-        const t = await ensureTelemetry(wc);
+        // 遥测按 webContents 记：等后台标签的静默必须用该标签自己的会话，等活动标签会立刻返回
+        const target = targetWc(host, args, wc);
+        const t = await ensureTelemetry(target);
         const t0 = Date.now();
         let quietSince = Date.now();
         for (;;) {
           if (t.inflight.size === 0) {
             if (Date.now() - quietSince >= idleMs) {
-              return ok({ idle: true, inflight: 0, elapsedMs: Date.now() - t0 }, startedAt, wc);
+              return ok({ idle: true, inflight: 0, elapsedMs: Date.now() - t0 }, startedAt, target);
             }
           } else {
             quietSince = Date.now();
           }
           if (Date.now() - t0 >= timeoutMs) {
-            return ok({ idle: false, inflight: t.inflight.size, elapsedMs: Date.now() - t0 }, startedAt, wc);
+            return ok({ idle: false, inflight: t.inflight.size, elapsedMs: Date.now() - t0 }, startedAt, target);
           }
           await new Promise((r) => setTimeout(r, 100));
         }
@@ -1615,14 +1685,18 @@ export async function execBrowserTool(
       }
 
       case 'browser_get_html': {
-        const maxChars = Math.min(100000, Math.max(500, Number(args.maxChars) || 20000));
+        const maxChars = Math.min(HTML_SNAPSHOT_MAX_CHARS, Math.max(500, Number(args.maxChars) || 20000));
         const outer = args.outer === true;
+        const clean = args.clean === true;
+        const target = targetWc(host, args, wc);
         const html = await run<string>(
-          wc,
-          `(() => { const h = ${outer ? 'document.documentElement.outerHTML' : '(document.body ? document.body.innerHTML : "")'}; return h || ''; })()`,
+          target,
+          clean
+            ? cleanCaptureScript(outer)
+            : `(() => { const h = ${outer ? 'document.documentElement.outerHTML' : '(document.body ? document.body.innerHTML : "")'}; return h || ''; })()`,
         );
         const truncated = html.length > maxChars;
-        return ok({ html: html.slice(0, maxChars), truncated, bytes: html.length }, startedAt, wc);
+        return ok({ html: html.slice(0, maxChars), truncated, bytes: html.length }, startedAt, target);
       }
 
       case 'browser_get_viewport': {

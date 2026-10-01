@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * cleanup-sessions.mjs — 清理过期的 WANTED /chat 会话与其 BobMail inbox 线程
+ * cleanup-sessions.mjs — 清理过期的 Butler /chat 会话与其 BobMail inbox 线程
  *
  * 存储：<appRoot>/.inbox.db（BOBWORK_HOME 优先，默认 ~/BobWork）
  *   - chat_sessions：会话上下文。source='wechat' 的行 expires_at = 写入时间 + 24h（panel 长期，expires_at=null）

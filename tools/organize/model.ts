@@ -14,7 +14,7 @@
  */
 import { readSettingsFromFile } from '@/lib/settings-server';
 import { PROVIDER_PRESETS, type ProviderConfig } from '@/lib/types';
-import { resolveTaskModel, resolveProviderModel, type ResolvedModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel, resolveProviderModel, type ResolvedModel } from '@/lib/core/task-model';
 
 export type { ResolvedModel };
 

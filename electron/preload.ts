@@ -105,6 +105,8 @@ export interface HippoBrowserApi {
   close: () => Promise<HippoBrowserState>;
   toggle: () => Promise<HippoBrowserState>;
   navigate: (url: string) => Promise<{ ok: boolean; error?: string }>;
+  /** 在 Hippo 新建标签打开 URL（不覆盖当前标签）：小程序预览等场景 */
+  openUrlInNewTab: (url: string) => Promise<{ ok: boolean; error?: string }>;
   /** 按工具菜单的「打开方式」开关打开链接（书签点击用）：新标签 / 覆盖当前标签 */
   openLink: (url: string) => Promise<{ ok: boolean; error?: string }>;
   back: () => Promise<{ ok: boolean; error?: string }>;
@@ -137,6 +139,8 @@ export interface HippoBrowserApi {
   }>;
   /** 网页内划词浮层的动作投递：action='ask' 带选区文本，action='page' 只要整页正文（主进程已展开侧边栏） */
   onSelectionAction: (callback: (payload: { action: 'ask' | 'page'; text: string }) => void) => () => void;
+  /** 在窗口工具栏弹一条轻量提示（侧边栏与窗口 chrome 共用同一 toast 实现） */
+  toast: (text: string) => Promise<{ ok: boolean }>;
   /** 截图：fullPage=true 走整页长截图 */
   capture: (opts?: { fullPage?: boolean }) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
   /** 打印当前页：弹系统打印面板 */
@@ -204,6 +208,10 @@ export interface HippoBrowserApi {
   menuExec: (action: string) => Promise<void>;
   /** 工具下拉菜单：主进程转发的命令回调（back/fwd/reload/ext/shot/extopen/edit/linkNewTab/linkCurrentTab） */
   onMenuCmd: (callback: (action: string) => void) => () => void;
+  /** 收藏当前页：在地址框收藏按钮下方弹三去向菜单（独立浮层子窗口）；right = 按钮右边缘的工具栏内坐标 */
+  saveMenu: (payload: { right: number }) => Promise<void>;
+  /** 收藏当前页：执行落盘，target = project | notes | notes-compiled */
+  savePage: (target: string) => Promise<void>;
   /** 上报工具栏 chrome 实际高度（书签栏随内容变化），用于定位网页视图下边 */
   setChromeHeight: (height: number) => Promise<boolean>;
   /** 窗口：最小化 */
@@ -228,6 +236,12 @@ export interface HippoBrowserApi {
   downloadReveal: (id: number) => Promise<{ ok: boolean }>;
   /** 下载：清除已结束（完成/取消/中断）的记录 */
   downloadClear: () => Promise<{ ok: boolean; downloads: HippoDownloadRecord[] }>;
+  /** 下载：切换下载列表面板（独立浮层子窗口，不挤占网页视图） */
+  downloadsPanel: () => Promise<{ ok: boolean }>;
+  /** 下载面板：上报列表内容自然高度，主进程据此贴合窗口高 */
+  downloadsPanelSize: (height: number) => Promise<{ ok: boolean }>;
+  /** 下载面板：收起面板窗口（面板内的关闭按钮 / Esc 调用） */
+  downloadsPanelClose: () => Promise<{ ok: boolean }>;
   /** 下载：订阅列表与进度变化 */
   onDownloads: (callback: (data: { downloads: HippoDownloadRecord[] }) => void) => () => void;
   /** AI 驱动指示：AI 正在操作本窗口时点亮工具栏徽标（单向推送 { active, tool }） */
@@ -389,6 +403,7 @@ const api: Api = {
     toggleMaximize: () => ipcRenderer.invoke('hippo-browser:toggle-maximize'),
     toggle: () => ipcRenderer.invoke('hippo-browser:toggle'),
     navigate: (url: string) => ipcRenderer.invoke('hippo-browser:navigate', url),
+    openUrlInNewTab: (url: string) => ipcRenderer.invoke('hippo-browser:open-url-new-tab', url),
     openLink: (url: string) => ipcRenderer.invoke('hippo-browser:open-link', url),
     back: () => ipcRenderer.invoke('hippo-browser:back'),
     forward: () => ipcRenderer.invoke('hippo-browser:forward'),
@@ -413,6 +428,7 @@ const api: Api = {
       ipcRenderer.on('hippo-browser:selection-action', wrapper);
       return () => ipcRenderer.removeListener('hippo-browser:selection-action', wrapper);
     },
+    toast: (text: string) => ipcRenderer.invoke('hippo-browser:toast', text),
     capture: (opts?: { fullPage?: boolean }) => ipcRenderer.invoke('hippo-browser:capture', opts),
     print: () => ipcRenderer.invoke('hippo-browser:print'),
     getState: () => ipcRenderer.invoke('hippo-browser:get-state'),
@@ -467,6 +483,8 @@ const api: Api = {
     setChromeHeight: (height: number) => ipcRenderer.invoke('hippo-browser:set-chrome-height', height),
     toolMenu: () => ipcRenderer.invoke('hippo-browser:tool-menu'),
     menuExec: (action: string) => ipcRenderer.invoke('hippo-browser:menu-exec', action),
+    saveMenu: (payload: { right: number }) => ipcRenderer.invoke('hippo-browser:save-menu', payload),
+    savePage: (target: string) => ipcRenderer.invoke('hippo-browser:save-page', target),
     onMenuCmd: (callback: (action: string) => void) => {
       const wrapper = (_e: Electron.IpcRendererEvent, action: string) => callback(action);
       ipcRenderer.on('hippo-browser:menu-cmd', wrapper);
@@ -485,6 +503,9 @@ const api: Api = {
     downloadOpen: (id: number) => ipcRenderer.invoke('hippo-browser:download-open', id),
     downloadReveal: (id: number) => ipcRenderer.invoke('hippo-browser:download-reveal', id),
     downloadClear: () => ipcRenderer.invoke('hippo-browser:download-clear'),
+    downloadsPanel: () => ipcRenderer.invoke('hippo-browser:downloads-panel'),
+    downloadsPanelSize: (height: number) => ipcRenderer.invoke('hippo-browser:downloads-panel-size', height),
+    downloadsPanelClose: () => ipcRenderer.invoke('hippo-browser:downloads-panel-close'),
     onDownloads: (callback: (data: { downloads: HippoDownloadRecord[] }) => void) => {
       const wrapper = (_e: Electron.IpcRendererEvent, data: { downloads: HippoDownloadRecord[] }) => callback(data);
       ipcRenderer.on('hippo-browser:downloads', wrapper);

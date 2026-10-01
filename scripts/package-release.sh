@@ -46,6 +46,30 @@ ok()   { echo "${C_GREEN}✅ $*${C_RESET}"; }
 warn() { echo "${C_YELLOW}⚠️  $*${C_RESET}"; }
 err()  { echo "${C_RED}❌ $*${C_RESET}"; }
 
+# ---------- 构建新鲜度守卫 ----------
+# 历史问题：多次出现「安装版不含修复」——源码在编译/组装期间被改动，产物落后于源码，
+# 而脚本照常打包上传，直到用户装上新版才发现改动缺失。此处从打包链路根治：
+#   1) 构建前 rm -rf .next，强制全量编译（消除 Next 增量缓存复用旧 chunk）；
+#   2) 记录构建起始时间戳，打包前校验期间无源文件改动，有则中止（不产出、不上传）。
+BUILD_MARKER="$OUTPUT_DIR/.build-marker"
+
+assert_build_fresh() {
+  [ -f "$BUILD_MARKER" ] || return 0
+  local stale
+  stale="$(find "$PROJECT_DIR/src" "$PROJECT_DIR/electron" "$PROJECT_DIR/public" "$PROJECT_DIR/assets" \
+    -type d \( -name node_modules -o -name dist -o -name .next \) -prune -o \
+    -type f -newer "$BUILD_MARKER" -print 2>/dev/null | sed -n '1,20p')"
+  if [ -n "$stale" ]; then
+    echo ""
+    err "严重错误：以下源文件在本次构建期间被修改，产物已陈旧，中止打包（不产出、不上传）："
+    echo "$stale" | sed 's/^/     /'
+    echo ""
+    err "   请确认源码已保存稳定后重新执行：rm -rf .next && bash ./scripts/package-release.sh"
+    exit 1
+  fi
+  ok "构建新鲜度校验通过（编译/组装期间无源文件改动）"
+}
+
 # 发布规则（2026-08 起）：仅生成 ARM 架构，both / x64 一律降级为 arm64
 if [ "${1:-}" != "" ] && [ "$1" != "arm64" ]; then
   warn "发布规则：仅支持 arm64，忽略参数 '$1'，按 arm64 构建"
@@ -93,6 +117,8 @@ check_version_conflict
 # ---------- 1. 清理并准备 ----------
 rm -rf "$OUTPUT_DIR" >/dev/null 2>&1 || true
 mkdir -p "$OUTPUT_DIR"
+# 构建起始标记：供 assert_build_fresh 校验「构建期间源码是否被改动」
+touch "$BUILD_MARKER"
 # 注意：不使用 exec > >(tee ...) 进程替换（部分沙箱环境不允许 /dev/fd/）
 # 改为直接重定向到日志文件，同时在 stderr 输出关键进度
 exec > "$LOG_FILE" 2>&1
@@ -115,8 +141,9 @@ log "============================================"
 
 # ---------- 2. 构建 Next.js standalone ----------
 if [ "${SKIP_NEXT_BUILD:-0}" != "1" ]; then
-  # 清空上次构建的 standalone 残留（避免项目根目录/旧产物被污染进打包）
-  rm -rf "$PROJECT_DIR/.next/standalone" "$PROJECT_DIR/.next/standalone 2" 2>/dev/null || true
+  # 全量清空 .next：Next 增量构建会复用旧 cache chunk，曾多次导致「源码改动未进包」
+  # （用户装上新版仍看不到修复）。Release 构建必须全量，宁可慢也要准。
+  rm -rf "$PROJECT_DIR/.next" "$PROJECT_DIR/.next/standalone 2" 2>/dev/null || true
   log "Step 1/6: 构建 Next.js (standalone mode) ..."
   NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=4096" corepack pnpm next build
   ok "Next.js 构建完成"
@@ -280,6 +307,19 @@ rm -f "$STAGING/next-standalone/README.md" \
       "$STAGING/next-standalone/next.config.ts" \
       2>/dev/null || true
 
+# 5e. 自定义 server 入口（远程访问鉴权网关 + CalDAV 自定义 HTTP 方法）
+# 为什么必须覆盖：Electron 启动的是 next-standalone/server.js（见 electron/main.ts），
+# 而 Next build 生成的该文件是「原生 standalone wrapper」——只有 startServer，不含任何
+# 自定义逻辑。不覆盖的话，远程访问 Token 网关与 CalDAV 的 PROPFIND/REPORT/MKCOL 等方法
+# 在打包版里全部失效（2026-10-01 实测：整包搜不到 remote-login / PROPFIND 路由）。
+# 产物同时覆盖 dist/server.js，避免包内残留上一轮构建的陈旧副本。
+log "编译自定义 server 入口 (src/server.ts) ..."
+corepack pnpm tsup src/server.ts \
+  --format cjs --platform node --target node20 \
+  --outDir "$STAGING/next-standalone/dist" --no-splitting --no-minify
+cp "$STAGING/next-standalone/dist/server.js" "$STAGING/next-standalone/server.js"
+ok "自定义 server 已就位（$(wc -c < "$STAGING/next-standalone/server.js" | tr -d ' ') bytes）"
+
 cp -R "$PROJECT_DIR/.next/static" "$STAGING/next-standalone/.next/"
 cp -R "$PROJECT_DIR/public" "$STAGING/next-standalone/"
 # 内置技能（assets/skills）随包分发：打包版 cwd 为 next-standalone，loader 读取 ./assets/skills
@@ -293,6 +333,11 @@ cp "$PROJECT_DIR/src/lib/pdf/core/ocr_vision.swift" "$STAGING/next-standalone/sc
 cp "$PROJECT_DIR/src/lib/docx/ooxml-revise.py" "$STAGING/next-standalone/scripts/ooxml-revise.py"
 # Python 包生命周期清理脚本（AI 安装包超过30天未使用自动卸载）
 cp "$PROJECT_DIR/src/lib/python/py-pkg-lifecycle.py" "$STAGING/next-standalone/scripts/py-pkg-lifecycle.py"
+# 声纹提取 C 源码（speaker-embed 运行时用 clang 现场编译，不是 import 出来的）：
+# 打包收尾会删掉 next-standalone/src，靠 outputFileTracingIncludes 追踪进来的源码会随之丢失，故显式复制
+cp "$PROJECT_DIR/src/lib/stt/native/spk_embed.c" "$STAGING/next-standalone/scripts/spk_embed.c"
+# 常驻标点服务 C 源码（punct-server 同款：运行时 clang 现场编译；同样必须绕开被删的 src 树）
+cp "$PROJECT_DIR/src/lib/stt/native/punct_server.c" "$STAGING/next-standalone/scripts/punct_server.c"
 # 独立 docx-template-mcp 包脚本（scan_placeholders / fill_template）随包分发：
 # 复制到 next-standalone/docx-template-mcp/assets/scripts/（匹配 resolveDocxTemplateScript 的 cwd 候选，
 # 否则安装版字段识别会因脚本缺失而静默失败）
@@ -520,6 +565,10 @@ build_arch() {
     <string>BobWork 需要访问下载文件夹来读取您上传的材料。</string>
     <key>NSRemovableVolumesUsageDescription</key>
     <string>BobWork 需要访问外接磁盘来读取您的项目或导出资料。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>BobWork 需要使用麦克风来接收您的语音输入并转成文字。</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>BobWork 需要在会议模式中采集系统音频，以便记录远端参会人的发言。</string>
 </dict>
 </plist>
 PLIST
@@ -629,6 +678,9 @@ case "$ARCH" in
   arm64|x64) build_arch "$ARCH" ;;
   *) echo "❌ 未知架构: $ARCH"; exit 1 ;;
 esac
+
+# 打包前最后一道关：确认没有源文件在本次构建期间被改动，否则产物陈旧，直接中止
+assert_build_fresh
 
 # ---------- 8. 生成 ZIP + DMG ----------
 log "生成压缩包 ..."
