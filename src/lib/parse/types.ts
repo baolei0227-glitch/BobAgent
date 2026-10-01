@@ -5,6 +5,8 @@ export interface ParseResult {
   file_type: 'image' | 'pdf' | 'video' | 'audio';
   mime_type: string;
   extracted_text: string;
+  /** 纯正文（不含 `音频转写（…）` 抬头与 `[mm:ss]` 时间戳前缀）：音频转写回填输入框等「直接当文本用」的场景 */
+  plain_text?: string;
   page_count?: number;
   frame_count?: number;
   parse_method: 'vision' | 'text_extract' | 'frame_extract' | 'stt';
