@@ -7,6 +7,7 @@ import OpenAI from 'openai';
 import {
   PROVIDER_PRESETS,
   isDeclaredV4Model,
+  isPresetVisionModel,
   type ProviderType,
   type ThinkingLevel,
   type OutputFileItem,
@@ -15,7 +16,7 @@ import {
 import { TOOL_DEFINITIONS, executeTool, getToolSummary, describeToolCall } from './tools';
 import type { ToolScene } from './tools';
 // K2-S1 工具面 runtime service 抽取，行为不变：注册/组装/排序/CacheGuard 收敛进 ToolRuntime
-import { ToolRuntime } from '@/lib/runtime/tools';
+import { ToolRuntime, SANDBOX_BLOCKED_TOOLS, isBridgeWriteAllowed } from '@/lib/runtime/tools';
 // K2-S2 会话态 runtime service 抽取，行为不变：chatStickyScenes 收敛进 SessionRuntime 单例
 import { sessionRuntime } from '@/lib/runtime/session';
 // K2-S3 动态上下文链 runtime service 抽取，行为不变：路径/授权/偏好/OCR 文本生成收敛进 ContextRuntime
@@ -23,7 +24,7 @@ import { contextRuntime } from '@/lib/runtime/context';
 // 项目级后台调度：用户对话 > 成果块提炼 > 账本编译（本轮请求是最高优先级，持有期间后台让位）
 import { enterUserTurn } from '@/lib/runtime/project-scheduler';
 import type { AgentId } from '@/lib/agents/profiles';
-import { AGENT_IDS, codingPhaseForTool } from '@/lib/agents/profiles';
+import { codingPhaseForTool, skillExclusionsFor } from '@/lib/agents/profiles';
 import { resolveAgentProfile } from '@/lib/agents/store';
 import { loadInstalledAgentProfiles } from '@/lib/agents/market-server';
 import { MCP_PRESETS } from '@/lib/mcp/types';
@@ -61,7 +62,15 @@ type ButlerCard = {
   allDay: boolean;
   reminderMinutes: number[];
   targetLabel: string;
+  /** 同窗口已有安排（when 为 `09:00–11:00` 区间；跨日带日期） */
   conflicts: { title: string; when: string }[];
+  /** 重叠命中总数；> conflicts.length 说明被截断（卡片显示「共 N 条」） */
+  conflictTotal: number;
+  /** 潜在风险（紧邻空档不足 / 相邻异地 / 同日全天）——与 assessEventSlot 同一判定真源，
+   *  text 为卡片展示用英文（面向模型的原始 message 是中文，不走卡片） */
+  risks: { kind: string; text: string }[];
+  /** 净空替代时段标签（`Today 15:00–16:00`）；仅在有冲突/风险时给出 */
+  alternatives: string[];
 };
 
 function pad2(n: number): string {
@@ -80,25 +89,56 @@ function toLocalTimeStr(iso?: string | null): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** 冲突提示：与 [start,end) 有交集且仍 scheduled 的事件（排除自身） */
-async function nearbyConflicts(
+/** 时段评估（冲突 + 潜在风险 + 替代时段）：与 create_scheduled_todo 执行器共用
+ *  lib/calendar/overlaps.assessEventSlot（判定单一真源）。
+ *  2026-09-27：卡片是排程的**唯一确认点**——冲突/风险必须在卡上先讲清，
+ *  用户点确认即为知情同意（handleButlerCard 随后注入 force=true，执行器不再二次拦截，
+ *  避免「卡片批准后执行器再拒一次 → 模型再问 → 第二张卡」的两次确认）。 */
+async function assessButlerSlot(
   startIso: string | null,
   endIso: string | null,
-  excludeEventId?: string,
-): Promise<{ title: string; when: string }[]> {
-  if (!startIso) return [];
-  try {
-    const { getCalendarDb, listEventsInRange } = await import('@/lib/db');
-    const db = await getCalendarDb();
-    const end = endIso || new Date(new Date(startIso).getTime() + 30 * 60_000).toISOString();
-    const rows = await listEventsInRange(db, null, startIso, end);
-    return rows
-      .filter((r) => r.status === 'scheduled' && r.event_id !== excludeEventId)
-      .slice(0, 5)
-      .map((r) => ({ title: r.title, when: toLocalTimeStr(r.start_time) || '—' }));
-  } catch {
-    return [];
-  }
+  opts?: { location?: string; allDay?: boolean; excludeEventId?: string },
+): Promise<{
+  conflicts: { title: string; when: string }[];
+  total: number;
+  risks: { kind: string; text: string }[];
+  alternatives: string[];
+}> {
+  const { assessEventSlot } = await import('@/lib/calendar/overlaps');
+  const res = await assessEventSlot({
+    startIso,
+    endIso,
+    location: opts?.location,
+    allDay: opts?.allDay,
+    excludeEventId: opts?.excludeEventId,
+  });
+  // assessEventSlot 的 message / label 面向模型（中文），卡片是 UI（文案一律英文）——两者分轨，
+  // 这里用结构化字段重建英文展示文案（when 字段本身是 `09:00–11:00` 这类语言中性的片段）。
+  const now = new Date();
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  const dayEn = (d: Date) =>
+    sameDay(d, now) ? 'Today' : sameDay(d, new Date(now.getTime() + 86_400_000)) ? 'Tomorrow' : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const hmEn = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return {
+    conflicts: res.overlaps.map((i) => ({ title: i.title, when: i.when || '—' })),
+    total: res.total_overlaps,
+    risks: res.risks.map((r) => {
+      const when = r.when ? ` (${r.when})` : '';
+      const text =
+        r.kind === 'tight_gap'
+          ? `Only ${r.gap_minutes ?? 0} min between "${r.title ?? ''}"${when} and this event.`
+          : r.kind === 'remote_shift'
+            ? `"${r.title ?? ''}"${when} is at a different place — only ${r.gap_minutes ?? 0} min to get there.`
+            : `An all-day event "${r.title ?? ''}" is already on this day.`;
+      return { kind: r.kind, text };
+    }),
+    alternatives: res.alternatives.map((a) => {
+      const s = new Date(a.start);
+      const e = new Date(a.end);
+      return Number.isNaN(s.getTime()) ? a.label : `${dayEn(s)} ${hmEn(s)}–${hmEn(e)}`;
+    }),
+  };
 }
 
 /** 把工具参数转成结构化卡片；构建失败（如待改/删事件不存在）返回 null（跳过卡片直接执行） */
@@ -116,7 +156,23 @@ async function buildButlerCard(
       const endIso = str(args?.end_time) || null;
       const allDay = args?.all_day === true;
       const reminderMinutes = numArr(args?.reminder_minutes);
-      const conflicts = await nearbyConflicts(startIso, endIso);
+      const location = str(args?.location).trim();
+      // 模型未给 end_time 时补上执行器将要写入的默认块长（估时 或 60 分钟）：
+      // 让卡片的时段评估窗口 = 真正写入的窗口，卡上「时长」也与最终提交一致
+      // （否则卡片按 30 分钟默认窗口评估、执行器按 60 分钟写入，两边结论可能不一致）。
+      const estMin =
+        typeof args?.estimated_minutes === 'number' &&
+        Number.isFinite(args.estimated_minutes) &&
+        args.estimated_minutes > 0
+          ? Math.round(args.estimated_minutes)
+          : undefined;
+      const startDate = new Date(startIso ?? '');
+      const endIsoResolved =
+        endIso ??
+        (!allDay && startIso && !Number.isNaN(startDate.getTime())
+          ? new Date(startDate.getTime() + (estMin ?? 60) * 60_000).toISOString()
+          : null);
+      const ov = await assessButlerSlot(startIso, endIsoResolved, { location, allDay });
       return {
         tool: toolName,
         mode: 'create',
@@ -124,11 +180,14 @@ async function buildButlerCard(
         title,
         date: toLocalDateStr(startIso),
         start: toLocalTimeStr(startIso),
-        end: toLocalTimeStr(endIso),
+        end: toLocalTimeStr(endIsoResolved),
         allDay,
         reminderMinutes,
         targetLabel: '',
-        conflicts,
+        conflicts: ov.conflicts,
+        conflictTotal: ov.total,
+        risks: ov.risks,
+        alternatives: ov.alternatives,
       };
     }
     const eventId = str(args?.event_id);
@@ -138,6 +197,10 @@ async function buildButlerCard(
     const row = await getEvent(db, eventId);
     if (!row) return null;
     if (toolName === 'todo_delete') {
+      // 删日程的卡片只在「删除会连带改动日历之外的数据」时才弹：事件源自便签行（source_ref 非空）时，
+      // 删除会同时移除用户便签上的那一行（见 /api/calendar/events DELETE 的反向联动）——这个副作用值得先告知。
+      // 普通日历事件无冲突、无副作用 → risks 空 → handleButlerCard 判 'noop'，直接软删（可恢复），不再拦人。
+      const noteLinked = !!row.source_ref;
       return {
         tool: toolName,
         mode: 'delete',
@@ -150,6 +213,16 @@ async function buildButlerCard(
         reminderMinutes: [],
         targetLabel: row.title,
         conflicts: [],
+        conflictTotal: 0,
+        risks: noteLinked
+          ? [
+              {
+                kind: 'note_link',
+                text: 'This event came from a note line — deleting it also removes that line from your note.',
+              },
+            ]
+          : [],
+        alternatives: [],
       };
     }
     // todo_update：以现有事件为默认，可被 args 覆盖
@@ -168,7 +241,8 @@ async function buildButlerCard(
       args?.reminder_minutes !== undefined && args?.reminder_minutes !== null
         ? numArr(args.reminder_minutes)
         : rowReminders;
-    const conflicts = await nearbyConflicts(startIso, endIso, eventId);
+    const location = str(args?.location).trim() || str(row.location).trim();
+    const ov = await assessButlerSlot(startIso, endIso, { location, allDay, excludeEventId: eventId });
     return {
       tool: toolName,
       mode: 'update',
@@ -180,12 +254,287 @@ async function buildButlerCard(
       allDay,
       reminderMinutes,
       targetLabel: row.title,
-      conflicts,
+      conflicts: ov.conflicts,
+      conflictTotal: ov.total,
+      risks: ov.risks,
+      alternatives: ov.alternatives,
     };
   } catch {
     return null;
   }
 }
+
+// ── Butler 规则草案卡（v6 §3.2「拟稿回显 → 确认」，Phase 1）──
+// 与排程卡并列的另一条 butler 卡片通道，复用同一 `butler_confirm` 挂起型形态。
+// rule_create + 全局作用域时先弹**可编辑草案卡**：approved 才落盘（回落通用执行 → toolRuleCreate），
+// denied/超时 → 不落盘 + 记一条否定。Phase 2 起「流程（含判断步）」也走拟稿回显（承诺=会启动并尽力，
+// §8.5）；项目作用域规则仍不拟稿。命中后的执行语义见 rule_exec / rule_create 回执。
+const BUTLER_RULE_DRAFT_TOOLS = new Set(['rule_create']);
+
+// 技能草案卡（Phase 3 §3.5）：skill_draft 恒走可编辑草案卡 —— approved 才落 .skills/<id>.md
+// （回落通用执行 → toolSkillDraft），denied/超时 → 不落盘 + 记一条否定。与规则草案卡同款三段（复用挂起容器）。
+const BUTLER_SKILL_DRAFT_TOOLS = new Set(['skill_draft']);
+
+type RuleDraftStep = {
+  kind: 'deterministic' | 'judgment';
+  text: string;
+  annex?: boolean;
+  action?: 'create_todo' | 'create_scheduled_todo';
+  actionParams?: { when?: string };
+};
+
+type RuleDraftCard = {
+  kind: 'rule_draft';
+  tool: string;
+  name: string;
+  intentRaw: string;
+  steps: RuleDraftStep[];
+  keywords: string[];
+  /** 承诺级别：固定原词（必做到 / 基本做到），§8.5 —— 不在卡上做英文意译 */
+  commitment: string;
+};
+
+/** 从 rule_create 入参构建规则草案卡；非「规则 + 全局」→ null（不拟稿，交回宿主照常执行） */
+async function buildRuleDraftCard(args: Record<string, unknown> | null): Promise<RuleDraftCard | null> {
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const name = str(args?.name).trim();
+  const intentRaw = str(args?.intent_raw).trim();
+  if (!name || !intentRaw) return null;
+  if (str(args?.scope_target).trim()) return null; // 项目作用域规则不走草案卡
+  const rawSteps = Array.isArray(args?.steps) ? args.steps : [];
+  const steps: RuleDraftStep[] = [];
+  for (const s of rawSteps) {
+    if (typeof s === 'string') {
+      const t = s.trim();
+      if (t) steps.push({ kind: 'deterministic', text: t });
+      continue;
+    }
+    if (!s || typeof s !== 'object') continue;
+    const o = s as { kind?: unknown; text?: unknown; annex?: unknown; action?: unknown; action_params?: unknown };
+    const text = str(o.text).trim();
+    if (!text) continue;
+    const kind = o.kind === 'judgment' ? 'judgment' : 'deterministic';
+    const step: RuleDraftStep = { kind, text };
+    if (kind === 'judgment' && o.annex === true) step.annex = true;
+    if (kind === 'deterministic') {
+      const action = o.action === 'create_todo' || o.action === 'create_scheduled_todo' ? o.action : undefined;
+      if (action) step.action = action;
+      const ap = o.action_params as { when?: unknown } | undefined;
+      if (ap && typeof ap === 'object' && typeof ap.when === 'string' && ap.when) step.actionParams = { when: ap.when };
+    }
+    steps.push(step);
+  }
+  if (steps.length === 0) return null;
+  const { deriveCommitment } = await import('@/lib/butler/rules-shared');
+  // Phase 2：含主体判断步的「流程」也走拟稿回显（承诺级别 = 会启动并尽力，§8.5）
+  const keywords = Array.isArray(args?.keywords)
+    ? args.keywords.map(String).map((x) => x.trim()).filter(Boolean)
+    : [];
+  return { kind: 'rule_draft', tool: 'rule_create', name, intentRaw, steps, keywords, commitment: deriveCommitment(steps) };
+}
+
+/** 规则草案卡挂起处理：弹卡 → 等确认 → approved 回落执行 / denied·超时落否定并中止 */
+async function handleRuleDraftCard(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  // 聚合链路收不到卡片确认回传 → 直接说明不执行
+  if (ctx.channel) return denyOnAggregateChannel(ctx, '固化规则需要你在可编辑草案卡上点一下确认。');
+  const card = await buildRuleDraftCard(ctx.args);
+  if (!card) return 'noop';
+  const { confirmId, promise } = createPendingConfirm(ctx.name, ctx.execArgs ?? '', ctx.nodeId);
+  ctx.send({
+    butler_confirm: {
+      confirmId,
+      name: ctx.name,
+      card,
+      timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
+    },
+    nodeId: ctx.nodeId,
+  });
+  const keepalive = setInterval(() => {
+    ctx.send({ tool_call_update: { name: ctx.name, phase: 'running', spanId: ctx.spanId, startAt: ctx.startAt }, nodeId: ctx.nodeId });
+  }, 20000);
+  let res: ConfirmResult;
+  try {
+    res = await promise;
+  } finally {
+    clearInterval(keepalive);
+  }
+  if (res.verdict !== 'approved') {
+    // denied / 超时 → 不落盘 + 记一条否定（与 rule_dismiss 同一写口；供后续修订/拉黑共用）。
+    // 草案尚无真实规则 id，故用「本可生成」的 id 落账，语义为「用户否决了这个模式」。
+    try {
+      const { generateRuleId } = await import('@/lib/butler/rules');
+      const { recordUserDismissed } = await import('@/lib/butler/rule-signals');
+      await recordUserDismissed(generateRuleId(), 1, 'draft_denied');
+    } catch {
+      /* 记否定失败不阻断「不落盘」语义 */
+    }
+    const deniedResult =
+      res.verdict === 'timeout'
+        ? `规则固化因等待确认超时（${Math.ceil(CONFIRM_TIMEOUT_MS / 60_000)} 分钟内未收到你的确认）而自动跳过，未落盘。请如实告知用户并询问是否继续。`
+        : '你放弃了这条规则草案（未确认即不落盘）。请停止该操作，向用户说明并征询意见。';
+    ctx.send({
+      tool_result: {
+        name: ctx.name,
+        result: deniedResult,
+        durationMs: 0,
+        success: false,
+        phase: 'error',
+        spanId: ctx.spanId,
+        startAt: ctx.startAt,
+        endAt: Date.now(),
+      },
+      nodeId: ctx.nodeId,
+    });
+    ctx.commitToolError?.(deniedResult);
+    return 'handled_continue';
+  }
+  // approved：用户可能编辑过草案 → 用编辑后的参数覆盖执行，回落通用执行 → toolRuleCreate 真正落盘
+  const editedArgs = res.edited?.toolArgs;
+  const execArgs =
+    editedArgs && typeof editedArgs === 'object' ? (editedArgs as Record<string, unknown>) : ctx.args;
+  ctx.setExecArgs?.(JSON.stringify(execArgs));
+  return 'handled_fallback';
+}
+
+/** 技能草案卡上的可编辑/只读字段（Phase 3 §3.5：卡片必须让用户看懂 4 件事） */
+type SkillDraftStep = { primitive: string; text?: string; params?: Record<string, string> };
+type SkillDraftCard = {
+  kind: 'skill_draft';
+  tool: string;
+  /** ① 这技能要干什么（一句） */
+  name: string;
+  description: string;
+  /** ② 什么时候会被自动调用（适用条件，必须显式） */
+  when: { keywords: string[]; scenes?: string[]; objectTypes?: string[]; preconditions?: string[] };
+  runtime: 'compose' | 'script';
+  steps: SkillDraftStep[];
+  /** ③ 它要什么权限（grant；默认空 = 无额外权限） */
+  grants: { fs?: string[]; net?: boolean; process?: boolean };
+  /** ④ 会产生什么副作用（写文件 / 进日历 / 发消息）——由 grants 派生，供卡片展示 */
+  effects: string[];
+};
+
+/** 从 skill_draft 入参构建技能草案卡；缺 name/description → null（不拟稿，交回宿主照常执行） */
+async function buildSkillDraftCard(args: Record<string, unknown> | null): Promise<SkillDraftCard | null> {
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const name = str(args?.name).trim();
+  const description = str(args?.description).trim();
+  if (!name || !description) return null;
+
+  const whenArg = args?.when && typeof args.when === 'object' ? (args.when as Record<string, unknown>) : {};
+  const keywords = Array.isArray(whenArg.keywords) ? whenArg.keywords.map(String).map((x) => x.trim()).filter(Boolean) : [];
+  const scenes = Array.isArray(whenArg.scenes) ? whenArg.scenes.map(String).map((x) => x.trim()).filter(Boolean) : [];
+  const objectTypes = Array.isArray(whenArg.object_types)
+    ? whenArg.object_types.map(String).filter((x) => ['todo', 'schedule', 'note', 'meeting', 'project'].includes(x))
+    : [];
+  const preconditions = Array.isArray(whenArg.preconditions) ? whenArg.preconditions.map(String).map((x) => x.trim()).filter(Boolean) : [];
+
+  const rawSteps = Array.isArray(args?.steps) ? args.steps : [];
+  const steps: SkillDraftStep[] = [];
+  for (const s of rawSteps) {
+    if (!s || typeof s !== 'object') continue;
+    const o = s as { primitive?: unknown; text?: unknown; params?: unknown };
+    const primitive = str(o.primitive).trim();
+    if (!primitive) continue;
+    const step: SkillDraftStep = { primitive };
+    if (str(o.text).trim()) step.text = str(o.text).trim();
+    if (o.params && typeof o.params === 'object' && !Array.isArray(o.params)) {
+      const params: Record<string, string> = {};
+      for (const [k, v] of Object.entries(o.params as Record<string, unknown>)) if (typeof v === 'string') params[k] = v;
+      if (Object.keys(params).length > 0) step.params = params;
+    }
+    steps.push(step);
+  }
+
+  const { describeEffects, normalizeGrants } = await import('@/lib/butler/skills-shared');
+  const grants = normalizeGrants(
+    (args?.grants && typeof args.grants === 'object' ? args.grants : undefined) as
+      | import('@/lib/butler/skills-shared').SkillGrants
+      | undefined,
+  );
+  const explicitEffects = Array.isArray(args?.effects) ? args.effects.map(String).map((x) => x.trim()).filter(Boolean) : [];
+  const effects = explicitEffects.length > 0 ? explicitEffects : describeEffects(grants);
+
+  return {
+    kind: 'skill_draft',
+    tool: 'skill_draft',
+    name,
+    description,
+    when: {
+      keywords,
+      ...(scenes.length > 0 ? { scenes } : {}),
+      ...(objectTypes.length > 0 ? { objectTypes } : {}),
+      ...(preconditions.length > 0 ? { preconditions } : {}),
+    },
+    runtime: args?.runtime === 'script' ? 'script' : 'compose',
+    steps,
+    grants,
+    effects,
+  };
+}
+
+/** 技能草案卡挂起处理：弹卡 → 等确认 → approved 回落执行 / denied·超时落否定并中止（与规则草案卡同款） */
+async function handleSkillDraftCard(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
+  if (ctx.channel) return denyOnAggregateChannel(ctx, '固化技能需要你在可编辑草案卡上点一下确认。');
+  const card = await buildSkillDraftCard(ctx.args);
+  if (!card) return 'noop';
+  const { confirmId, promise } = createPendingConfirm(ctx.name, ctx.execArgs ?? '', ctx.nodeId);
+  ctx.send({
+    butler_confirm: {
+      confirmId,
+      name: ctx.name,
+      card,
+      timeoutSec: Math.ceil(CONFIRM_TIMEOUT_MS / 1000),
+    },
+    nodeId: ctx.nodeId,
+  });
+  const keepalive = setInterval(() => {
+    ctx.send({ tool_call_update: { name: ctx.name, phase: 'running', spanId: ctx.spanId, startAt: ctx.startAt }, nodeId: ctx.nodeId });
+  }, 20000);
+  let res: ConfirmResult;
+  try {
+    res = await promise;
+  } finally {
+    clearInterval(keepalive);
+  }
+  if (res.verdict !== 'approved') {
+    // denied / 超时 → 不落盘 + 记一条否定（复用 user_dismissed 写口，供后续修订 / 隔离共用）。
+    // 草案尚无真实技能 id，故用「本可生成」的 id 落账，语义为「用户否决了这个技能模式」。
+    try {
+      const { generateSkillId } = await import('@/lib/butler/skills');
+      const { recordUserDismissed } = await import('@/lib/butler/rule-signals');
+      await recordUserDismissed(generateSkillId(), 1, 'draft_denied');
+    } catch {
+      /* 记否定失败不阻断「不落盘」语义 */
+    }
+    const deniedResult =
+      res.verdict === 'timeout'
+        ? `技能固化因等待确认超时（${Math.ceil(CONFIRM_TIMEOUT_MS / 60_000)} 分钟内未收到你的确认）而自动跳过，未落盘。请如实告知用户并询问是否继续。`
+        : '你放弃了这条技能草案（未确认即不落盘）。请停止该操作，向用户说明并征询意见。';
+    ctx.send({
+      tool_result: {
+        name: ctx.name,
+        result: deniedResult,
+        durationMs: 0,
+        success: false,
+        phase: 'error',
+        spanId: ctx.spanId,
+        startAt: ctx.startAt,
+        endAt: Date.now(),
+      },
+      nodeId: ctx.nodeId,
+    });
+    ctx.commitToolError?.(deniedResult);
+    return 'handled_continue';
+  }
+  // approved：用户可能编辑过草案 → 用编辑后的参数覆盖执行，回落通用执行 → toolSkillDraft 真正落盘
+  const editedArgs = res.edited?.toolArgs;
+  const execArgs =
+    editedArgs && typeof editedArgs === 'object' ? (editedArgs as Record<string, unknown>) : ctx.args;
+  ctx.setExecArgs?.(JSON.stringify(execArgs));
+  return 'handled_fallback';
+}
+
 import { createPendingQuestions, QUESTIONS_TIMEOUT_MS, type PendingQuestionItem, type PendingAnswerEntry } from '@/lib/chat/questions-pending';
 import { classifyOutputKind } from '@/lib/homework/kind';
 import { createPendingLogin, LOGIN_TIMEOUT_MS } from '@/lib/chat/login-pending';
@@ -221,7 +570,8 @@ import { readManifest, extractKeywords } from '@/lib/nodes/manifest';
 import { internSearchNode } from '@/lib/nodes/intern';
 import { matchTerms } from '@/lib/legal/synonyms';
 import { SANDBOX_DIRNAME, resolveAppRoot } from '@/lib/app-root';
-import { resolveProviderModel, resolveTaskModel, resolveAgentRoleModel } from '@/lib/wanted/task-model';
+import { resolveProviderModel, resolveTaskModel, resolveAgentRoleModel, resolveVisionChatModel } from '@/lib/core/task-model';
+import type { ButlerPersona } from '@/lib/butler/threads-shared';
 import { EventLog, genSpanId, genTaskId, persistEventLog, CORE_EVENT } from '@/lib/trajectory/event-log';
 
 interface ChatMessage {
@@ -617,10 +967,10 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 | 法律检索 | "查一下相关法条/这份合同的法律风险" | 法条检索+判例，可追溯原文 |
 | 音频转写 | "转写这段录音" | 真实转写，禁止凭元数据编造 |
 | 图片/PDF 文字识别 | "识别这张扫描件/图片里的文字" | 印刷体识别+手写复核 |
-| 记忆/待办/偏好 | "记住这个偏好/我的待办有哪些" | 全局长期记忆+项目待办 |
+| 记忆/待办/偏好 | "记住这个偏好/我的待办有哪些" | 统一长期记忆（记的是用户，所有联系人共享）+项目待办 |
 | 界面主题/前端 | "按当前主题配色做一个页面" | 读取真实主题 CSS 变量 |
 | 技能按需加载 | "用 slide-craft/docx 技能做 PPT" | 仅已下载技能可 load_skill；缺技能去 设置→技能→Download |
-| 知识库/笔记 | "查一下笔记里的X/把这段存进知识库" | 笔记能力由「知识库（Kar）节点」专职承载，本对话不注入笔记工具 → 引导打开画布 Kar 节点，或使用 ⌘F / 微信的 /note 指令（/note check 查阅） |
+| 知识库/笔记 | "查一下笔记里的X/把这段存进知识库" | 笔记读写由「知识库（Kar）节点」与管家（Butler）承载；本对话若未注入 read_notebook / create_note → 引导用户去 Kar 节点或 Butler 悬浮球，不要声称已记录/已查到 |
 | 想法/灵感/思维导图 | "记一下这个想法/我之前记过的点子呢/理一理脑海里的几条思路" | 思维导图能力（BobMind）由「Mind（Buzan）节点」专职承载，本对话不注入 mind 工具 → 引导打开画布 Mind 节点，或去 Extensions Store 安装 Buzan 并启用 bob-mind-mcp 插件 |
 若不确定某能力是否就绪、或本轮 tools 中缺少对应工具，**唯一确定性动作是调用 \`search_capabilities\` 工具进行能力检视与激活**（该工具常驻可用）；禁止凭空调用 tools 中不存在的工具名，也不要靠"说一句自然语言"等待注入——意图驱动只是宿主的自动感知机制，缺工具时以 \`search_capabilities\` 为准。
 
@@ -703,6 +1053,7 @@ const BROWSER_RULES_HIPPO = `
 - **ref 命名空间（shadow DOM / 子帧已打通）**：ref 可能是 \`e3\`（主文档）、\`s1-e2\`（页面里 web component 的 shadow root 内）、\`f1-e4\`（页面内 iframe 的子帧）、\`f1-s2-e5\`（子帧内的 shadow root）—— 前缀即作用域路径，直接原样传回 \`browser_click\` / \`browser_type\` 即可，**不要**试图去掉前缀或自己拼选择器。子帧元素由宿主在帧内执行（返回里带 \`frame\` 与 \`via: 'in-frame'\`）；页内脚本 \`bb.$\` 跨不到子帧，这些元素只能用工具层操作。返回里的 \`frames\` 一节列出本次扫到的子帧及其元素数，是「有 iframe 但没内容」时的判断依据
 - **常用增强**：页面是异步渲染时用 \`browser_wait_for\`（等元素）/ \`browser_wait_for_text\`（等文本）/ \`browser_wait_network_idle\`（等请求静默）；多标签用 \`browser_list_tabs\` / \`browser_switch_tab\` / \`browser_open_tab\` / \`browser_close_tab\`；需要归档页面用 \`browser_export_pdf\`（落盘 homework/.evidence/），读已打开的 PDF 用 \`browser_read_pdf\`
 - **PDF 页换工具，不要判空（重要）**：当前页是 PDF（地址以 \`.pdf\` 结尾，或落在内置 pdf-viewer 查看页）时 \`browser_extract_text\` 拿不到正文 —— 直接调 \`browser_read_pdf\` 取文本（无需参数＝读当前页，长文件传 \`maxChars\`），**不要因为提取为空就断言"页面没有内容"**
+- **扫描件 PDF 走 OCR（重要）**：\`browser_read_pdf\` 返回的文本为空或只有零星几个字符（扫描件没有文字层），把该返回里的 \`path\` 直接交给 \`ocr_document\` 做识别，拿逐页文本 + \`qualityScore\`；质量低时它默认自动升级视觉模型。手写字段（姓名 / 日期 / 印章 / 签名）识别结果波动属正常，**不要整页反复重试** —— 改用 \`crop_image\` 裁出可疑区域单独复核，并在答复里标注【需人工复核】。远程 PDF 拿不到本地 \`path\` 时，先 \`browser_export_pdf\` 落盘，再对返回的落盘路径做 OCR
 - **\`browser_extract_text\` 带 \`note\` 时按它执行**：返回里的 \`[PDF]\` / \`[LOGIN]\` / \`[EMPTY]\` 前缀即成因分类 —— \`PDF\` → 改用 \`browser_read_pdf\`；\`LOGIN\` → 登录墙，按上面凭据红线如实告知用户手动登录；\`EMPTY\` → 页面可能尚未渲染完，先 \`browser_wait_for_text\` / \`browser_wait_network_idle\` 再重试。\`note\` 是成因提示，**不要把它当成页面正文写进答复**
 - **脚本优先（PTC for browser，重要）**：同一页面要连续 ≥3 步交互（多字段表单、"展开更多"、翻找列表），或**只要页面里的某些字段**（列表 / 价格 / 链接 / 计数 / 表格行）时，用 \`browser_page_script\` 在页内一次做完并只返回需要的字段——**不要用 \`browser_extract_text\` 把整页正文灌进上下文**，整页文本是回答窄问题最贵的做法。脚本里可用 \`bb.$(refOrSelector)\` / \`bb.ref(ref)\` 定位（ref 就是 \`browser_snapshot\` 给的那些）、\`bb.fill(target, text)\` 填写（原生 setter + input/change，受控组件能正常同步）、\`bb.click(target)\` / \`bb.press(key)\` / \`bb.scroll(...)\` 交互、\`bb.text(target, {maxChars})\` 只取需要的段落、\`bb.waitFor\` / \`bb.waitText\` 等渲染、\`bb.snapshot()\` 在脚本内取元素表。定位先确认锚点存在再取值；\`bb.click\` 走页内合成点击，页面若无视它（坐标派发 / isTrusted 校验）就改用 \`browser_click\`。整页正文只在确实要通读全文时用（合同、长文、判决书）
 - **跨页面流程**：常规做法是 \`browser_navigate\` / \`browser_open_tab\` / \`browser_switch_tab\` 切页，然后在**新页面上重新下发一次脚本**——导航会让页内 ref 与脚本内的引用全部失效。脚本内的 \`bb.goto(url)\` 需要对该次调用显式传 \`allowNav=true\`，且它会**终止脚本**（其后语句一律不执行），跳转由宿主完成并返回 \`{ navigated, url, title }\`；脚本里 \`bb.click\` 点到链接触发跳转时同样以 \`{ navigated, url, title }\` 收尾（其后语句未执行）。不要把 \`bb.goto\` 或会跳转的点击放在脚本中间指望后面的语句生效
@@ -722,16 +1073,48 @@ const BROWSER_RESEARCH_RULES = `
 ## 调研作业纪律（Research 模式已开启）
 - **先拆子问题再动手**：把问题拆成 2-5 个可独立核查的子问题，逐个取证；清单不必给用户看，但每一步都要对着某个子问题
 - **多源交叉，不靠单一页面**：关键结论至少要有两个**相互独立**的来源（不同站点/机构，不是同一篇稿子的转载）；只拿到一个来源时，如实标注「单一来源，未交叉验证」
-- **搜索结果不是证据**：搜索页摘要只用来挑候选来源，结论必须落到打开后的正文；引用一律给完整可点击 URL
+- **搜索结果不是证据**：搜索页摘要只用来挑候选来源，结论必须落到打开后的正文；引用一律用脚注角标（格式见下条「引用格式」）
 - **读全文而非片段**：抓正文按页面类型分流 —— 网页用 \`browser_extract_text\`（返回 \`note\` 时按其指示换工具）、PDF 用 \`browser_read_pdf\`；长文按返回的 offset 续读到 EOF（续读必须回到同一个工具，字数口径不可混用）；只要若干字段时用 \`browser_page_script\` 只取字段，不要整页灌进上下文
 - **记录反证**：遇到与主结论冲突的材料一并写进答复（「与此相反的说法是…，来源…」），不要只留支持自己判断的部分
 - **区分事实与推断**：来源里写明的标「据来源」，你自己推的标「据此推断」并说明依据；数字/时间/口径都要挂出处
-- **收尾给三件事**：结论（每条挂来源）、不确定之处（哪里证据薄）、下一步建议（若继续查该查什么）
+- **读过的来源会自动汇总成候选清单**：本轮你用 \`browser_navigate\` / \`browser_open_tab\` / \`web_fetch\` 真正打开过的页面，宿主会自动列进答复下方的 「Sources Read」 卡片，用户勾选后一键导入项目 \`materials/\`（自动登记账本并建索引）。由此三条纪律：① 取证必须真的打开页面——搜索页摘要里看到的链接不算「读过」，没打开就不会进清单；② 脚注里的 URL 必须与你实际打开的地址一致，用户才能与清单对上号；③ 清单由宿主生成，你**不要**在答复里另抄一份来源列表，也不要输出任何来源标记块
+- **按综述骨架组织答复**（六节顺序与内容不可缺，标题一律论文式多级编号）：\`# <主题>\` 作全文一级标题（交付物就是本轮答复正文：本次调研以会话内综述交付，不要为"存成文件"另起工具链，也不要因此中断任务），六节依次为 \`## 1 研究问题\` → \`## 2 检索范围\` → \`## 3 主题综合\` → \`## 4 争议与不一致\` → \`## 5 缺口\` → \`## 6 结论与下一步建议\`；子问题落在 \`### 3.1\` / \`### 3.2\`… 需要再细分时用 \`#### 3.1.1\`，最多四级。内容口径：1 研究问题一句话；2 检索范围只交代查了哪类来源、用什么条件筛，**不要罗列 URL**（来源清单由宿主卡片生成，见上条）；3 主题综合一个子问题一节，同一问题的多个来源并起来讲，**不要逐篇罗列**；4 争议与不一致给各方主张与各自依据；5 缺口写哪里证据薄、没查到什么；6 结论与下一步建议每条结论挂角标，并交代继续查该查什么
+- **引用格式（脚注角标 + 文末引用表）**：正文每个出处写成 GFM 脚注角标 \`[^n]\`，n 按首次出现顺序从 1 递增，紧跟被支撑句子的末尾，**正文里不出现裸 URL**；文末另起一段逐行给定义，形如 \`[^n]: 来源名称 — 完整URL\`（一行一条，顺序与角标一致）。渲染后角标是可点击上标，文末自动生成引用表——这是本档报告唯一的引用形式，也不要另抄一份来源清单
+`;
+
+/** 浏览器对话栏（browser 画像）两条动态纪律（随当前轮 user 消息注入，不进 system）：
+ *  【一】落盘约定豁免：该档沿用通用 BASE（账本/引用规范仍以 BASE 为唯一事实来源，不做第二套），
+ *  但 BASE 里的「长篇报告写 homework/ + OutputFile」「产出存储位置默认 homework/」一类
+ *  **落盘约定在该档执行不了** —— 该档没有 write_file / execute_script / run_command
+ *  （见 profiles.ts BROWSER_CORE_EXCLUSIONS）。不做这条减法，模型会照 BASE 去找一个不存在的
+ *  写文件工具：历史故障里侧边栏调研任务跑了 39 轮 58 次工具调用，末轮自述"我将用它把报告写入
+ *  项目 homework/ 目录"，随后无工具调用被判定为终答，任务零产物结束。
+ *  【二】窄栏输出风格：模型每轮都在工具调用之间写过程叙述（"我先搜索…""让我加载技能看看…"），
+ *  这些文字逐轮累加进同一条正文（前端"去双轨"刻意不剥离，见 ChatNodeKernel 的 tool_call 分支），
+ *  三十几轮下来答复被过程叙述淹没 —— 侧边栏窄栏读不下这些，故显式要求只写交付物。 */
+const BROWSER_SIDEBAR_RULES = `
+## 本档落盘约定豁免（浏览器对话栏没有文件工具）
+- 本档工具面是**浏览器操作 + 项目档案读取 + OCR 识别**，**没有** \`write_file\` / \`execute_script\` / \`run_command\`：
+  BASE 中一切"写入 homework/ / 正文末尾输出 OutputFile / 落盘成文件"的约定在本档**一律不适用** ——
+  不要照它去找写文件工具，也不要说"我将把结果写入…""请稍候等待写入"这类话。
+  （扫描件用 \`ocr_document\` / \`crop_image\` 是**识别手段**、不是交付通道，不违反本条。）
+- **交付物就是本轮答复正文**：报告、综述、结论直接写在答复里（该详则详，不必为压缩而截断），
+  不要中途停下等一个不存在的写入能力。
+- 需要留档时走本档既有通道：读过的来源自动汇总成答复下方的 **Sources Read** 卡片（用户勾选即导入
+  项目 \`materials/\`）；整页归档用 \`browser_export_pdf\`（落盘 homework/.evidence/）。
+- 用户明确要的产物是文件（Word / Excel / 图片 / 独立 HTML 等）时，如实说明"本对话栏只做浏览器任务、
+  不产出文件，请到画布会话中处理"，不要假装已生成。
+
+## 输出风格（窄栏阅读）
+- **工具调用之间不写过程叙述**：不要"我先搜索…""让我加载技能看看…""接下来我会…"这类过渡句 ——
+  正文只写最终交付物；跑了哪些工具由界面的 Process 行呈现，用户点开即可看到。
+- 需要交代取舍或不确定时，最多一句话，写在**最终答复**里，不要每轮都汇报一次进度。
 `;
 
 /** 报告插图约定（2026-08-30 从 BASE_SYSTEM_PROMPT 移出）：
  *  仅生成报告/调研/分析类交付物时需要，常驻 system 纯浪费固定 token →
- *  报告意图（detectSceneHints 命中 report 信号词）时 prependDynamicContext 注入当前轮 user 消息。 */
+ *  报告意图（命中强交付词）时 prependDynamicContext 注入当前轮 user 消息；
+ *  浏览器 Research 档不注入（那档由 BROWSER_RESEARCH_RULES 的综述骨架管答复形态）。 */
 const REPORT_RULES = `
 ## 报告插图约定（自动配图 + 禁止询问路径）
 - **配图由你根据报告内容自动判断，无需用户点名**：报告含数据趋势/对比/占比/流程/结构等适合可视化的内容时，自动生成图表插图（widget 仅对话内联展示，落盘插图用 matplotlib/脚本）；纯文字叙事报告不强配图；用户明确要求"带图/配图"时必配
@@ -823,9 +1206,12 @@ function extractLastUserContent(messages: ChatMessage[]): string {
 export function detectSceneHints(text: string): Set<ToolScene> {
   const scenes = new Set<ToolScene>();
   if (!text) return scenes;
-  // butler：事务域——记忆/待办/偏好/工作报告/日历（含复盘/习惯/计划等高频信号词；沿用 wanted 作为输入别名）
+  // butler：事务域——记忆/待办/偏好/工作报告/日历/会议记录（含复盘/习惯/计划等高频信号词；沿用 wanted 作为输入别名）
+  // 会议记录（会议/纪要/开会/参会/meeting）归 butler 的理由：会议三件套 meeting_start/append/end 在
+  //   SCENED_TOOLS 里标 butler —— 主对话（画布 chat 节点）要靠本规则命中才能拿到这三件工具；
+  //   原先只有管家画像固定放行，主对话无从进入会议链路（开会成功也拿不到 meeting_append）。
   // 计费维护词（模型计费/单价/调价/新增模型）也归 butler：由管家用 get_model_price / set_model_price 落盘单价覆盖
-  if (/wanted|记忆|待办|偏好|工作报告|日历|记住|查询|复盘|习惯|总结|计划|安排|清单|收藏|备忘|遗忘|便签|todo|notebook|preference|work.?report|calendar|reminder|daily.?report|计费|单价|调价|改价|定价|按量计费|模型.*(计费|单价|价格|调价)|token.*(价|计费)/i.test(text)) {
+  if (/wanted|记忆|待办|偏好|工作报告|日历|记住|查询|复盘|习惯|总结|计划|安排|清单|收藏|备忘|遗忘|便签|会议|纪要|开会|参会|会务|meeting|todo|notebook|preference|work.?report|calendar|reminder|daily.?report|计费|单价|调价|改价|定价|按量计费|模型.*(计费|单价|价格|调价)|token.*(价|计费)/i.test(text)) {
     scenes.add('butler');
   }
   // legal：法律场景（含协议/起草/拟定等高频触发词，及刑事法核心术语）
@@ -907,7 +1293,7 @@ const CAPABILITY_CATALOG: CapabilityEntry[] = [
   { scene: 'legal', name: '法律检索/咨询', keywords: ['法律', '法条', '合同', '诉讼', '律师', '法规', '判例', '文书', '起诉', '司法', '执行', '清偿', '本金', '利息', '债权', '迟延履行', '加倍', '抵充'], description: '法条检索、判例查询、文书起草（含防幻觉约束）', triggerPhrase: '"查一下相关法条"' },
   { scene: 'audio', name: '音频转写', keywords: ['音频', '录音', '转写', '语音', '字幕', '听写'], description: '真实音频转写，禁止凭元数据编造', triggerPhrase: '"转写这段录音"' },
   { scene: 'ocr', name: '图片/PDF 文字识别', keywords: ['识别', '扫描', 'ocr', '图片文字', 'pdf文字', '票据', '证件', '文字识别'], description: '印刷体识别 + 手写复核', triggerPhrase: '"识别这张扫描件"' },
-  { scene: 'butler', name: '记忆/待办/偏好', keywords: ['记忆', '待办', '偏好', '笔记', '日历', '提醒', '便签', '收藏', '备忘'], description: '全局长期记忆、项目待办、用户偏好', triggerPhrase: '"记住这个偏好"' },
+  { scene: 'butler', name: '记忆/待办/偏好', keywords: ['记忆', '待办', '偏好', '笔记', '日历', '提醒', '便签', '收藏', '备忘'], description: '统一长期记忆（记的是用户，所有联系人共享）、项目待办、用户偏好', triggerPhrase: '"记住这个偏好"' },
   { scene: 'design', name: '界面主题/前端', keywords: ['主题', '配色', '前端', '界面', 'ui', '美化', '网页', '页面'], description: '读取真实主题 CSS 变量，前端/页面生成', triggerPhrase: '"按当前主题配色做页面"' },
   { scene: 'skill', name: '技能检索/安装', keywords: ['技能', 'skill', '安装技能', '能力缺口', '技能库'], description: '受控技能库检索与安装', triggerPhrase: '"有没有能做 PPT 的技能"' },
   { scene: 'office', name: 'Word 模板', keywords: ['word', 'docx', '模板', '文档模板', '占位符', '合同模板'], description: 'Word 模板批量填充/占位符扫描', triggerPhrase: '"批量填写 Word 模板"' },
@@ -921,8 +1307,18 @@ export function matchCapabilities(query: string): CapabilityEntry[] {
   return CAPABILITY_CATALOG.filter((c) => c.keywords.some((k) => q.includes(k.toLowerCase())));
 }
 
-/** 构造 search_capabilities 的 tool_result 文本：匹配项 + 激活说明 */
-function buildCapabilityResultText(query: string, matched: CapabilityEntry[], newlyActivated: ToolScene[]): string {
+/** 构造 search_capabilities 的 tool_result 文本：匹配项 + 激活说明。
+ *  activationSupported=false（fixed 画像：工具面恒等于 fixedScenes ∪ core，能力检索不会增减工具）
+ *  时必须**如实说明本档不可用** —— 否则模型照旧话术"等待工具就绪"，在无工具可等的情况下
+ *  把"已激活/请稍候"当成交付（本轮无工具调用 = 最终答复）直接结束任务。
+ *  历史故障：侧边栏（browser 画像）调研任务 39 轮 58 次调用、无一次 write_file，末轮激活 local
+ *  后输出"等待工具就绪"收工，全程零产物。 */
+function buildCapabilityResultText(
+  query: string,
+  matched: CapabilityEntry[],
+  newlyActivated: ToolScene[],
+  activationSupported: boolean,
+): string {
   if (matched.length === 0) {
     return (
       `未在能力目录中找到匹配「${query}」的能力。可用能力：网页浏览/抓取、企业工商查询、本地软件操控、` +
@@ -930,16 +1326,25 @@ function buildCapabilityResultText(query: string, matched: CapabilityEntry[], ne
       `请尝试用更明确的意图短语描述（如"查企业""转写音频""识别扫描件"）。`
     );
   }
-  const activatedList = newlyActivated.length > 0
-    ? `，本轮已激活: ${newlyActivated.join(', ')}`
-    : '（已在可用状态）';
   const lines = matched.map(
     (c) => `- ${c.name}：${c.description}。触发语句示例：${c.triggerPhrase}`,
   );
+  if (!activationSupported) {
+    return `能力目录匹配「${query}」（**本档不可用**）：\n${lines.join('\n')}\n\n` +
+      `本档工具面固定（浏览器操作 + 项目档案读取 + OCR 识别），能力检索**不会**为本档增减任何工具——` +
+      `上述能力在当前档位拿不到，请**不要**再等它出现、也不要用"已激活 / 请稍候"当作答复。` +
+      `改用现有工具（browser_* / web_fetch 等）尽力完成任务，交付物直接写进本轮答复正文；` +
+      `确需该能力时如实告知用户：本对话栏不提供该能力，请到画布会话中使用。`;
+  }
+  const activatedList = newlyActivated.length > 0
+    ? `，本轮已激活: ${newlyActivated.join(', ')}`
+    : '（已在可用状态）';
   return `能力目录匹配「${query}」${activatedList}：\n${lines.join('\n')}\n\n` +
-    `已激活的能力其对应工具会在**下一个工具回合**立即注入（本轮剩余的工具调用序列请立即结束）。` +
-    `**禁止**继续用 web_search / web_fetch 等网页方式兜底查询（反爬会拦截且查不到结构化工商/企业数据）——` +
-    `请结束本轮工具调用，等待工具就绪后直接调用对应工具完成查询。`;
+    `已激活的能力其对应工具会在**下一个回合立即注入**（本轮剩余的工具调用序列请立即结束，不必再补兜底调用）。` +
+    `**注意**：结束本轮工具调用 ≠ 结束任务 —— 下一个回合请**立刻调用**刚注入的工具把活干完；` +
+    `不要把"已激活 / 请稍候 / 等待工具就绪"这类状态说明当作答复（本轮若没有任何工具调用，` +
+    `系统会判定为最终答复、任务就此交付，你就再没有机会调用它了）。\n` +
+    `**禁止**继续用 web_search / web_fetch 等网页方式兜底查询（反爬会拦截且查不到结构化工商/企业数据）。`;
 }
 
 // ── P4a 三段化骨架：首批宿主接管注册（scenario_activate，行为与迁移前的 if-else 判定一致）──
@@ -1059,6 +1464,33 @@ async function handleAskUserQuestions(ctx: HostTakeoverContext): Promise<HostTak
       allowCustom: item.allowCustom !== false,
     };
   });
+  // ①.5 聚合链路（带 channel：微信桥 / ⌘F 面板 /chat 都经 /api/core/node-chat 把上游 SSE 聚合成
+  //     一句 JSON 才返回，调用方拿不到 questions_request 这类挂起帧）→ 不登记挂起（否则空等到
+  //     QUESTIONS_TIMEOUT_MS 才收口），改为把问题与候选选项以文本回灌给模型，
+  //     由它用自然语言在同一轮里追问用户。
+  if (ctx.channel) {
+    const rendered = pendingQuestions
+      .map((q, i) => `${i + 1}. ${q.question}${q.options.length > 0 ? `（可选：${q.options.join(' / ')}）` : ''}`)
+      .join('\n');
+    const questionText =
+      '当前通道没有可点选的选项卡片，你的提问没有展示给用户。请直接用自然语言把下面的问题' +
+      '（含候选选项）写成一条消息发给用户，用户会在下一条消息里回答：\n' + rendered;
+    ctx.send({
+      tool_result: {
+        name: ctx.name,
+        result: questionText,
+        durationMs: 0,
+        success: true,
+        phase: 'done',
+        spanId: ctx.spanId,
+        startAt: ctx.startAt,
+        endAt: Date.now(),
+      },
+      nodeId: ctx.nodeId,
+    });
+    ctx.commitToolResult(questionText);
+    return 'handled_continue';
+  }
   // ② 登记挂起项 + SSE questions_request（载荷字段与原分支一致：requestId / questions / timeoutSec）
   const { requestId, promise, getSupplement } = createPendingQuestions(pendingQuestions, ctx.nodeId);
   ctx.send({
@@ -1111,6 +1543,40 @@ registerHostTakeover({
 });
 
 // ── P4a-3-2 迁移 tool_confirm（需手动确认名单通用确认），行为不变 ──
+/**
+ * 聚合链路通道收口（ctx.channel 存在）：以 tool_result 说明「未执行」并结束本轮工具轮，不登记挂起项。
+ * 背景：聚合入口走 /api/core/node-chat 的聚合分支（把上游 SSE 读到流结束才聚合成一句 JSON 返回），
+ * 确认回传永远到不了挂起项 —— 若照桌面流式流程 createPendingConfirm，聚合请求会空等到
+ * CONFIRM_TIMEOUT_MS（10 分钟）才以 timeout 收口，用户侧表现为「发完一条卡十分钟」。
+ * 故该链路下确认类动作与写类工具一律「回话说明 + 不执行」，由模型如实转述（微信白名单例外，见调用点）。
+ * 注：Butler 抽屉走 streamButlerChat（不传 channel）—— 它属可弹卡链路，不经过本收口；
+ *     ctx.channel === 'panel' 分支当前不可达（⌘F 面板 P1-c 已退化为纯搜索），保留仅为语义完整。
+ */
+function denyOnAggregateChannel(ctx: HostTakeoverContext, reason: string): HostTakeoverVerdict {
+  const label =
+    ctx.channel === 'wechat' ? '微信通道' : ctx.channel === 'feishu' ? '飞书通道' : '当前聚合通道';
+  const advice =
+    ctx.channel === 'wechat' || ctx.channel === 'feishu'
+      ? '如需办理，请在桌面端悬浮球（Butler 抽屉）里说一遍——那里会弹可编辑确认卡，或按审批策略直接放行。'
+      : '如需办理，请在桌面端 Butler 悬浮球（左下角抽屉）里说一遍——那里会弹可编辑确认卡。';
+  const resultText = `${label}未执行「${ctx.name}」：${reason} ${advice}`;
+  ctx.send({
+    tool_result: {
+      name: ctx.name,
+      result: resultText,
+      durationMs: 0,
+      success: false,
+      phase: 'error',
+      spanId: ctx.spanId,
+      startAt: ctx.startAt,
+      endAt: Date.now(),
+    },
+    nodeId: ctx.nodeId,
+  });
+  ctx.commitToolError?.(resultText);
+  return 'handled_continue';
+}
+
 // P4b-1 追加：本 handler 名单判定后接入审批策略层（decideToolApproval，approval.ts）——默认
 // allow_scope 档与迁移前逐位一致（名单内 request、名单外 noop 放行）；ask/never 为新档位（默认
 // 不启用，经 settings.approval.defaultStrategy 开启、route 咨询点注入 ctx.approvalStrategy）。
@@ -1144,7 +1610,15 @@ async function handleToolConfirm(ctx: HostTakeoverContext): Promise<HostTakeover
     inConfirmList: confirmTools.includes(ctx.name),
     strategy: approvalStrategy,
   });
-  if (approval === 'allow') return 'noop';
+  if (approval === 'allow') {
+    // 聚合链路（带 channel）：副作用工具默认不执行 —— 默认 allow_scope 档下名单外写工具会被静默执行，
+    // 而聚合链路拿不到任何确认机会。写权限按通道分档：微信 = WECHAT_ALLOWED_WRITES（排程三件套 +
+    // 便签，手机端高频低风险，无确认卡直接写）；panel（⌘F 面板 /chat）= 只读，写类一律拒。
+    if (ctx.channel && SANDBOX_BLOCKED_TOOLS.has(ctx.name) && !isBridgeWriteAllowed(ctx.channel, ctx.name)) {
+      return denyOnAggregateChannel(ctx, '它是会产生副作用的写类工具，本通道不放行写操作。');
+    }
+    return 'noop';
+  }
   if (approval === 'deny') {
     // never 档：名单内或写类工具一律拒绝执行（读类已在 decideToolApproval 判 'allow'，不会到达此处）
     const deniedResult =
@@ -1166,6 +1640,12 @@ async function handleToolConfirm(ctx: HostTakeoverContext): Promise<HostTakeover
     });
     ctx.commitToolError?.(deniedResult);
     return 'handled_continue';
+  }
+  // 聚合链路（带 channel）：「需手动确认」名单内的工具不登记挂起（该链路收不到确认回传），
+  // 改为说明 + 不执行。微信白名单例外：排程三件套 + 便签即便落在确认名单里也直接执行（手机端高频）。
+  if (ctx.channel) {
+    if (isBridgeWriteAllowed(ctx.channel, ctx.name)) return 'noop';
+    return denyOnAggregateChannel(ctx, '它属于「需手动确认」名单，需要你当面确认。');
   }
   // approval === 'request' → 原挂起确认流程（与迁移前逐位一致）：
   // ② 登记挂起项 + SSE tool_confirm（载荷字段与原分支一致：confirmId/name/arguments/timeoutSec；
@@ -1239,12 +1719,34 @@ registerHostTakeover({
 // approved+edited.toolArgs 覆盖路径逐位一致（原 if 分支体见 git 历史 4049-4116）。
 async function handleButlerCard(ctx: HostTakeoverContext): Promise<HostTakeoverVerdict> {
   // ① 身份 + 工具名单判定（与迁移前 if 条件逐位一致：butler 专属节点的排程 创建/改/删 才走卡片）
-  if (ctx.identity !== 'butler' || !BUTLER_CARD_TOOLS.has(ctx.name)) return 'noop';
+  if (ctx.identity !== 'butler') return 'noop';
+  // ①.2 规则草案卡（rule_create）：与排程卡并列的另一条 butler 卡片通道
+  if (BUTLER_RULE_DRAFT_TOOLS.has(ctx.name)) return handleRuleDraftCard(ctx);
+  // ①.3 技能草案卡（skill_draft）：同上，approved 才落 .skills/<id>.md
+  if (BUTLER_SKILL_DRAFT_TOOLS.has(ctx.name)) return handleSkillDraftCard(ctx);
+  if (!BUTLER_CARD_TOOLS.has(ctx.name)) return 'noop';
+  // ①.5 聚合链路（带 channel）：结构化确认卡到不了该链路用户手里，登记挂起只会空等 10 分钟。
+  //      微信白名单：排程三件套 → 不弹卡、'noop' 交还宿主直接执行；其余（含 panel 通道，
+  //      该通道只读）仍按「说明 + 不执行」收口。
+  if (ctx.channel) {
+    if (isBridgeWriteAllowed(ctx.channel, ctx.name)) return 'noop';
+    return denyOnAggregateChannel(ctx, '它需要你在可编辑确认卡上点一下才会真正写入。');
+  }
   // ② 卡片构建（buildButlerCard：create 由参数预填；update/delete 拉库内事件行 + 冲突提示）；
   //    构建失败（缺 event_id / 库内无此事件 / 异常）→ 不弹卡，交还宿主（noop）走下方 tool_confirm
   //    consult —— 与迁移前 if(card) 不进入、随后 tool_confirm 的 usesButlerCard 覆盖判定等价。
   const card = await buildButlerCard(ctx.name, ctx.args);
   if (!card) return 'noop';
+  // ②.5 「没情况就不弹卡」（2026-09-27 用户反馈：描述已经很清楚，为什么还要弹窗确认）：
+  //   卡片是「有冲突/风险要用户拍板」的界面 —— 只有**确有话要对用户说**时才弹，否则直接执行：
+  //   · create / update：新时段无冲突、无风险（用户得选：接受原时段还是换一个）→ 'noop' 交还宿主，
+  //     执行器自行评估后直接落库/应用，模型用一句话回报；
+  //   · delete：不做时段评估；仅当事件源自便签行（source_ref，删除会连带移除便签那一行）时才带 risk 弹卡，
+  //     普通事件的删除（默认软删、可恢复）直接执行；
+  //   · 模型已带 force（用户此前已明确坚持原时段）→ 不弹。
+  //   缺时间 / 时间非法 / 已过去同样不需要卡片：assessEventSlot 无 startIso 即判干净 → noop 后由
+  //   执行器的硬校验返回 need_more_info / invalid_time / past_time，模型一句话征询。
+  if (ctx.args.force === true || (card.conflicts.length === 0 && card.risks.length === 0)) return 'noop';
   // ③ 登记挂起项 + SSE butler_confirm（载荷字段与原分支一致：confirmId/name/card/timeoutSec）
   const { confirmId, promise } = createPendingConfirm(ctx.name, ctx.execArgs ?? '', ctx.nodeId);
   ctx.send({
@@ -1296,8 +1798,27 @@ async function handleButlerCard(ctx: HostTakeoverContext): Promise<HostTakeoverV
   }
   // approved：用户可能编辑过卡片 → 用编辑后的参数覆盖执行
   const editedArgs = cardRes.edited?.toolArgs;
-  if (editedArgs && typeof editedArgs === 'object') {
-    ctx.setExecArgs?.(JSON.stringify(editedArgs as Record<string, unknown>));
+  const execArgs =
+    editedArgs && typeof editedArgs === 'object'
+      ? (editedArgs as Record<string, unknown>)
+      : ctx.args;
+  // 卡片即唯一确认点：卡上已把冲突/风险/时段讲清，用户点确认 = 知情同意。
+  // create_scheduled_todo 的执行器还会再评估一次时段 + 时间硬校验（用于拦「模型绕过卡片直写」），
+  // 若不在批准后注入 force，同一冲突或「已过去时间」会被拒第二次 → 模型再问一轮 → 第二张卡
+  // （= 用户看到的「弹窗两次」根因）。
+  // 仅在**卡片时段与即将写入的时段一致**时注入 force —— 此时卡片展示的冲突/风险就是最终要写的东西，
+  // 用户确认即知情同意；若用户改了时间，则卡片没告知过新时段的冲突，交回执行器重判（严谨优先）。
+  const finalStart = typeof execArgs.start_time === 'string' ? execArgs.start_time : null;
+  const finalEnd = typeof execArgs.end_time === 'string' ? execArgs.end_time : null;
+  const slotUnchanged =
+    card.mode === 'create' &&
+    card.date === toLocalDateStr(finalStart) &&
+    card.start === toLocalTimeStr(finalStart) &&
+    card.end === toLocalTimeStr(finalEnd);
+  if (ctx.name === 'create_scheduled_todo' && slotUnchanged) {
+    ctx.setExecArgs?.(JSON.stringify({ ...execArgs, force: true }));
+  } else {
+    ctx.setExecArgs?.(JSON.stringify(execArgs));
   }
   return 'handled_fallback';
 }
@@ -1339,6 +1860,29 @@ registerTakeover({
     try {
       const parsed = JSON.parse(_args) as Record<string, unknown>;
       parsed.mode = 'bobwork';
+      return JSON.stringify(parsed);
+    } catch {
+      return null;
+    }
+  },
+});
+// 技能闸门（args_transform pre）：load_skill / read_skill_resource 只按名字在技能库里查，**不做身份校验**
+// —— L1 目录剔除（BROWSER_SKILL_EXCLUSIONS）挡得住"模型看见"，挡不住"凭名调用"（模型可见已加载过的技能名）。
+// 故把按身份剔除的清单随请求参数注入，由技能工具在执行点拒绝，并给出可执行的替代路径。
+// 清单与 L1 目录同源（profiles.ts skillExclusionsFor），不会「目录里没有、却能凭名调进来」。
+// 空清单返回 null（原样执行），对其它身份零影响。与节点参数注入 / browser.login mode 注入共用
+// takeoverOfKind(toolName,'args_transform') 咨询点，三者 match 互不重叠。
+registerTakeover({
+  kind: 'args_transform',
+  phase: 'pre',
+  name: '__skill_gate__',
+  match: (name) => name === 'load_skill' || name === 'read_skill_resource',
+  transformArgs(_name, args, ctx) {
+    try {
+      const excluded = skillExclusionsFor(ctx.agentId ?? '');
+      if (excluded.length === 0) return null;
+      const parsed = JSON.parse(args) as Record<string, unknown>;
+      parsed.__disallowed_skills = [...excluded];
       return JSON.stringify(parsed);
     } catch {
       return null;
@@ -1496,8 +2040,16 @@ function injectSkillContext(
 
   if (!enabledSet.size) return { messages, matchedSkillNames: [], skillDetails: [] };
 
+  // 侧边栏（browser 身份）剔除重产出型技能：本档没有 write_file / run_command，依赖落盘的
+  // 技能跑到最后一步必然失败（见 profiles.ts BROWSER_SKILL_EXCLUSIONS），且其报告模板会与
+  // Research 强制的骨架/脚注规范冲突。
+  // 清单与技能调用的执行侧闸门同源（profiles.ts skillExclusionsFor → 本文件 __skill_gate__）：
+  // 这里管「目录里看不见」，那里管「凭名调不动」，两处读同一函数不会脱节。
+  const agentSkillExclusions = new Set<string>(skillExclusionsFor(agentId));
+  const skillAllowed = (name: string) => !agentSkillExclusions.has(name);
+
   const availableSkills = allDefs
-    .filter(d => enabledSet.has(d.meta.name))
+    .filter(d => enabledSet.has(d.meta.name) && skillAllowed(d.meta.name))
     .map(d => d.meta);
 
   const defMap = new Map(allDefs.map(d => [d.meta.name, d]));
@@ -1515,7 +2067,7 @@ function injectSkillContext(
     console.log('[技能注入] forcedSkills 参数:', forcedSkills);
     // 强制技能：仅注入全局仍启用的，构造满分类匹配（L2 正文直接注入）
     const forcedDefs = allDefs.filter(
-      d => forcedSkills.includes(d.meta.name) && enabledSet.has(d.meta.name)
+      d => forcedSkills.includes(d.meta.name) && enabledSet.has(d.meta.name) && skillAllowed(d.meta.name)
     );
     allMatches = forcedDefs.map(d => ({
       skillMeta: d.meta,
@@ -1659,6 +2211,39 @@ function prependDynamicContext(messages: ChatMessage[], text: string): ChatMessa
   return result;
 }
 
+/** 会话人设字段长度上限（与 node-chat/session 路由的清洗保持一致，这里再兜一层） */
+const PERSONA_FIELD_MAX = 200;
+
+/**
+ * 会话级人设注入文本（新建会话时弹窗设定，与该会话同行存储、随会话删除）。
+ *
+ * 只覆盖**身份 / 语气 / 自称**——工具能力、权限边界、确认与安全规则一律不动，
+ * 否则「填个人设」就变成了提权通道。仅在 identity==='butler' 且 persona.name 非空时调用。
+ * 注入到 C8 低频通道（当前轮 user 消息前缀），system 缓存头保持字节稳定。
+ */
+function buildPersonaInjection(persona?: ButlerPersona | null): string {
+  const name = typeof persona?.name === 'string' ? persona.name.trim().slice(0, PERSONA_FIELD_MAX) : '';
+  if (!name) return '';
+  const field = (k: keyof ButlerPersona): string => {
+    const v = persona?.[k];
+    return typeof v === 'string' ? v.trim().slice(0, PERSONA_FIELD_MAX) : '';
+  };
+  const lines = [`【本次会话人设】你正在以「${name}」的身份与用户对话，请始终以该身份自称与应答。`];
+  const personality = field('personality');
+  const role = field('role');
+  const style = field('style');
+  const addressUser = field('addressUser');
+  if (personality) lines.push(`- 性格：${personality}`);
+  if (role) lines.push(`- 身份 / 职责：${role}`);
+  if (style) lines.push(`- 说话风格：${style}`);
+  if (addressUser) lines.push(`- 称呼用户为：${addressUser}`);
+  lines.push(
+    '以上仅改变你的身份、语气与自称；工具能力、权限边界、安全与确认规则一律不变。' +
+      '与默认管家口吻冲突时，以本节为准。',
+  );
+  return lines.join('\n');
+}
+
 /**
  * Bob-Mind 插件面板地址（宿主 iframe 嵌入同一实例；面板未运行时 fetch 失败即跳过）。
  * 端口由宿主编排时按实例分配（见 mcp manager），运行时表优先，未登记时回退预置固定地址。
@@ -1723,6 +2308,11 @@ async function buildMindChangesInjection(agentId: string): Promise<string> {
 const STALL_LIMIT = 3;
 /** 同一工具+相同参数的最大重复次数 */
 const MAX_DUPLICATE_CALLS = 2;
+/** 页面状态已变（同参数调用之后发生过页面交互）时的放宽上限。
+ *  交互（切 tab / 展开 / 加载更多 / 脚本改 DOM）不改 URL，却会让上一次的读取结果失效；
+ *  此时若仍按 2 次封顶，模型会被回灌「请基于已有结果回答」——等于逼它用陈旧内容。
+ *  放宽到 6 给足「每次交互后重读一次」的余量，同时保留硬顶，防止「读-滚-读」原地打转。 */
+const MAX_DUPLICATE_CALLS_AFTER_INTERACTION = 6;
 /** OCR 识别重试预算：同一文件被 ocr_document/crop_image 反复识别的最大次数。
  * 超过即判定手写字段识别不收敛，注入提示要求停止重试并报 NEED_REVIEW（治"15+ 轮空转"）。 */
 const OCR_REOCR_BUDGET = 4;
@@ -1915,10 +2505,12 @@ function verifyNoteReadClaims(
  *  与模型池/API 标注同源（model-tags.isVisionModel），并排除 ocr 专用转录模型
  *  （qwen-vl-ocr 等只能走 OCR 工具转录，不能作为对话看图模型）。 */
 function chatModelSupportsVision(modelId?: string): boolean {
-  // 两种口径取或：名字正则（model-tags）∪ 模型池能力注册表（supports_vision 等厂商声明）。
-  // 二者对齐后，deepseek-v4.1-flash 这类「名字无视觉字样但厂商声明多模态」的模型也能直连，
-  // 不会因正则漏判而错误降级为 bob-ocr 描述注入。
-  return isVisionModel(modelId || '') || isDeclaredVisionModel(modelId || '');
+  // 三种口径取或：名字正则（model-tags）∪ 模型池能力注册表（supports_vision 等厂商声明）
+  // ∪ 预设显式声明（spec.capabilities 含 'vision'）。
+  // 二者/三者对齐后，deepseek-flash（V4.1-Flash）这类「名字无视觉字样但厂商声明多模态」
+  // 的模型也能直连，不会因正则漏判而错误降级为 bob-ocr 描述注入。
+  // 预设声明是同步可读的，不依赖 /api/models 先把注册表填好（重启后未拉模型列表也可判定）。
+  return isVisionModel(modelId || '') || isDeclaredVisionModel(modelId || '') || isPresetVisionModel(modelId || '');
 }
 
 /** Vision Bridge：自动检测图片附件，用视觉模型描述后注入文本 */
@@ -2788,17 +3380,18 @@ async function autoDispatchIntern(
   return outs.length > 0 ? outs.join('\n\n') : null;
 }
 
-/** 检查是否重复调用同一工具+相同参数 */
+/** 检查是否重复调用同一工具+相同参数（max 可放宽：页面交互过的浏览器读取见调用点） */
 function isDuplicateCall(
   toolName: string,
   args: Record<string, unknown>,
   history: Array<{ toolName: string; arguments: Record<string, unknown> }>,
+  max: number = MAX_DUPLICATE_CALLS,
 ): boolean {
   const argKey = JSON.stringify(args);
   const count = history.filter(
     (h) => h.toolName === toolName && JSON.stringify(h.arguments) === argKey,
   ).length;
-  return count >= MAX_DUPLICATE_CALLS;
+  return count >= max;
 }
 
 /** DeepSeek V4 硬上下文上限（deepseek-harness C7）：2^20 = 1,048,576 tokens */
@@ -3028,6 +3621,34 @@ function isPageStateTool(toolName: string): boolean {
   return toolName.includes('browser_');
 }
 
+/** 会改变当前页面内容的交互工具（DOM 写操作 / 会话跳转 / 视口变化）。
+ *  这些操作多数不改 URL，但会让上一次的内容读取结果失效——URL 指纹抓不到这种变化。
+ *  MCP 通道为 `mcp__<server>__browser_xxx` 下划线形式，故按后缀匹配。 */
+const PAGE_INTERACTION_TOOLS = [
+  'browser_click', 'browser_click_coordinates', 'browser_type', 'browser_fill_form',
+  'browser_press_key', 'browser_submit', 'browser_check', 'browser_uncheck',
+  'browser_select_option', 'browser_hover', 'browser_drag', 'browser_scroll',
+  'browser_mouse_wheel', 'browser_run_js', 'browser_page_script', 'browser_upload_file',
+  'browser_handle_dialog', 'browser_back', 'browser_forward', 'browser_reload',
+  'browser_switch_tab', 'browser_close_tab', 'browser_resize_viewport',
+];
+
+function isPageInteractionTool(toolName: string): boolean {
+  return PAGE_INTERACTION_TOOLS.some((n) => toolName === n || toolName.endsWith(`__${n}`));
+}
+
+/** 下标 fromIndex 之后是否发生过成功的页面交互（失败的操作没改变页面，不计） */
+function hasPageInteractionAfter(
+  history: Array<{ toolName: string; success?: boolean }>,
+  fromIndex: number,
+): boolean {
+  for (let i = fromIndex + 1; i < history.length; i++) {
+    const h = history[i];
+    if (h.success !== false && isPageInteractionTool(h.toolName)) return true;
+  }
+  return false;
+}
+
 /** 是否 browser.login 工具（BobWork 登录弹窗流程的触发点）。工具名为 MCP fullName（下划线形式）。 */
 function isBrowserLoginTool(toolName: string): boolean {
   return toolName === 'browser.login' || /^mcp__.*__browser_login$/.test(toolName);
@@ -3159,10 +3780,21 @@ export async function POST(request: NextRequest) {
       enabledMcpIds?: string[];
       /** Agent 标识（chat | coding）：决定工具画像与专项 prompt（见 @/lib/agents/profiles） */
       identity?: AgentId;
-      /** 显式指定项目上下文（如 wanted 临时问答），仅本次请求生效，不切换全局当前项目 */
+      /** Research 开关（Hippo 侧边栏）：开启时在浏览器操作纪律之外再叠一层调研纪律（BROWSER_RESEARCH_RULES），
+       *  并让答复走综述骨架（据此排除 REPORT_RULES）。它与 browser 身份工具面正交，不改变工具集。 */
+      researchMode?: boolean;
+      /** 显式指定项目上下文（如 Butler 临时问答），仅本次请求生效，不切换全局当前项目 */
       projectId?: string;
-      /** 沙盒模式（如 wanted Node 模式）：过滤写类工具，禁止 AI 产生文件/待办/日历等副作用 */
+      /** 会话级人设（Butler 会话专属，见 lib/butler/threads-shared.ButlerPersona）：仅身份/语气/自称层覆盖，
+       *  不改工具面与权限；仅 identity==='butler' 时生效，其它身份一律忽略 */
+      persona?: ButlerPersona;
+      /** 无确认回传链路（sandbox:true 编排链路）：过滤写类工具，禁止 AI 产生文件/待办/日历/笔记等副作用 */
       sandbox?: boolean;
+      /** 调用通道：**非 undefined = 聚合链路**（微信桥 = 'wechat'，飞书桥 = 'feishu'；panel 为保留语义，
+       *  ⌘F 面板已退化为纯搜索），该链路收不到确认回传 → 确认类/写类工具据此改「回话说明 + 不执行」，
+       *  避免空等 10 分钟挂起或静默写入（桥接通道按 WECHAT_ALLOWED_WRITES 白名单放行排程/便签/笔记
+       *  写类，其它通道只读）；缺省 = 桌面流式通道，行为不变 */
+      channel?: 'wechat' | 'feishu' | 'panel';
       /** 多智能体协作模式（chat 界面开关）：激活 team 场景并注入「用户代理」规则，主 agent 用 team_run 交
        *  goal，宿主拉起队长（captain）会话做规划与整合 */
       multiAgentMode?: boolean;
@@ -3191,8 +3823,11 @@ export async function POST(request: NextRequest) {
       forcedSkills,
       enabledMcpIds,
       identity,
+      researchMode,
       projectId,
+      persona,
       sandbox,
+      channel,
       multiAgentMode,
       teamMainModel,
       teamWorkerModel,
@@ -3209,7 +3844,8 @@ export async function POST(request: NextRequest) {
     // 兜底解析：
     //  - providerModelId 形如 "provider:modelId" → 从已配置 providers 按供应商解析 apiKey/baseUrl
     //  - 未显式指定 → 先按请求 identity 查 agentModels 专属池（resolveAgentRoleModel），
-    //    再回退默认聊天模型（resolveTaskModel = 候选池有序首选）——与前端 Auto 选路语义一致
+    //    再回退默认聊天模型（resolveTaskModel = 候选池有序首选）——兜底来自未带模型的外部
+    //    HTTP 客户端与迁移前的旧节点（模型选择器已下线 Auto，节点侧始终带具体模型）
     //  - 显式指定但供应商未配置 → 明确 400（不悄悄降级默认模型，避免用户以为选模型已生效）
     if (!apiKey || !baseUrl || !providerModelId) {
       const resolved = providerModelId
@@ -3226,6 +3862,32 @@ export async function POST(request: NextRequest) {
           JSON.stringify({ error: `Provider "${pname}" is not configured (missing API key). Please configure it in BobWork Manage Models first.` }),
           { status: 400, headers: { 'Content-Type': 'application/json' } },
         );
+      }
+    }
+
+    // 视觉兜底：模型选择器已下线 Auto（节点始终带具体模型），带图轮次若当前模型读不了图，
+    // 在此改选候选池里第一个视觉模型（开关 settings.chatModel.autoVisionOnImage，默认开），
+    // 让下方「直连多模态」判定成立；池内无视觉模型则保持原模型，继续走 Vision Bridge 描述兜底。
+    if (providerModelId && !chatModelSupportsVision(providerModelId)) {
+      const hasImageInRequest =
+        Array.isArray(messages) &&
+        messages.some(
+          (m: ChatMessage) =>
+            m.role === 'user' &&
+            /图片/.test(m.content || '') &&
+            /路径: (?:materials|attachments|assets)\//.test(m.content || ''),
+        );
+      if (hasImageInRequest) {
+        const chatModelSettings = (await readSettingsFromFile().catch(() => null))?.chatModel;
+        if (chatModelSettings?.autoVisionOnImage !== false) {
+          const visionResolved = await resolveVisionChatModel(chatModelSupportsVision).catch(() => null);
+          if (visionResolved) {
+            apiKey = visionResolved.apiKey;
+            baseUrl = visionResolved.baseUrl;
+            providerModelId = visionResolved.model;
+            console.log(`[vision-fallback] 当前模型读不了图，本轮改用候选池视觉模型 model=${providerModelId}`);
+          }
+        }
       }
     }
 
@@ -3272,7 +3934,6 @@ export async function POST(request: NextRequest) {
       harnessPure: thinkingSettings.thinking?.harnessPure !== false,
       downgradeOnExecution: thinkingSettings.thinking?.downgradeOnExecution !== false,
       trivialPromptOff: thinkingSettings.thinking?.trivialPromptOff !== false,
-      injectThinkGuide: thinkingSettings.thinking?.injectThinkGuide !== false,
     };
 
     // C1（deepseek-harness）：琐碎对话判定（问候/致谢等，避免白烧 reasoning tokens）——
@@ -3326,12 +3987,15 @@ export async function POST(request: NextRequest) {
     let messagesWithPdf = messagesWithVision;
     let currentProjectPath = '';
     let projectRoot = '';
+    // 当前项目 id（Butler 规则裁决的作用域具体度判定用；在下方 PDF Bridge 解析处顺带捕获）
+    let activeProjectId = '';
     try {
       const project = await resolveNodeProject(nodeId, projectId);
       if (project) {
         messagesWithPdf = await applyPdfBridge(messagesWithVision, project.path);
         currentProjectPath = project.path.replace(homedir(), '~');
         projectRoot = project.path;
+        activeProjectId = project.id;
       }
     } catch (e) {
       console.warn('PDF Bridge 执行失败:', e);
@@ -3383,9 +4047,9 @@ export async function POST(request: NextRequest) {
     const { messages: messagesWithSkill, matchedSkillNames, skillDetails } = injectSkillContext(messagesWithNodeBridge, mergedForcedSkills, profile.id);
     // 基础系统提示按 Agent 隔离：专项 Agent（coding）用自己的专属 base，不背通用 chat 向内容
     const agentBasePrompt = profile.baseSystemPrompt ?? BASE_SYSTEM_PROMPT;
-    // Phase 2b（全面 DSH 化）：DeepSeek V4 不再注入思考引导（原生 reasoning_content，纯 API reasoning_effort 驱动），
-    // 非 V4 推理模型按 settings.thinking.injectThinkGuide 决定是否注入 <think> 标签引导（默认注入）
-    const shouldInjectThink = shouldInjectThinkPrompt(isDeepseekV4, modelSupportsThinking, thinkingPolicyConfig);
+    // Phase 2b（全面 DSH 化）：DeepSeek V4 不注入思考引导（原生 reasoning_content，纯 API reasoning_effort 驱动），
+    // 非 V4 推理模型恒注入  thinking 标签引导（其思考块显示依赖该格式，属正确性前提，不设开关）
+    const shouldInjectThink = shouldInjectThinkPrompt(isDeepseekV4, modelSupportsThinking);
     let finalMessages = shouldInjectThink
       ? injectThinkingPrompt(messagesWithSkill, effectiveLevel, modelSupportsThinking, agentBasePrompt)
       : messagesWithSkill;
@@ -3397,11 +4061,20 @@ export async function POST(request: NextRequest) {
       finalMessages = prependDynamicContext(finalMessages, pathContextInjection);
     }
 
+    // ===== 当前时间锚点注入（全身份 · 相对时间解析必需）=====
+    // 模型没有「现在几点 / 今天几号」的内在感知：用户说"明天下午三点""下周三"时，
+    // 不知道锚点就只能反问或凭记忆猜，对话式建日程首轮必卡。每轮现算注入；
+    // 走动态通道（当前轮 user 消息内），system 缓存前缀字节不变。
+    const nowInjection = contextRuntime.buildNowInjection();
+    if (nowInjection) {
+      finalMessages = prependDynamicContext(finalMessages, nowInjection);
+    }
+
     // 包安装镜像指引 / 工具并行化 / 按需能力提示 已挪进 BASE_SYSTEM_PROMPT（字节固定，吃缓存）。
     // 此处仅保留「低频变化」动态内容（项目路径 / 用户偏好 / OCR 引擎现状）prepend 到 user 消息。
 
-    // ===== 用户偏好注入（全局长期记忆，类型目录模式：只注入目录，完整记录按需 read_preferences 调取） =====
-    // K2-S3：偏好类型目录文本（listPreferences 读取/type 统计/拼装）收敛进
+    // ===== 用户记忆注入（统一长期记忆，所有联系人共享；分档：常驻档注入正文 + 目录档按需调取） =====
+    // K2-S3：记忆注入文本（listPreferences 读取/分档拼装）收敛进
     // ContextRuntime.buildUserPreferencesInjection；注入动作 prependDynamicContext 仍保留在 route 原位。
     // 缓存前缀稳定化：偏好目录属「低频变化」动态内容。若注入 system（缓存头），
     // 用户新增/删除偏好 → system 字节变化 → 前缀整段失效，历史缓存全部作废。
@@ -3410,6 +4083,61 @@ export async function POST(request: NextRequest) {
     const prefInjection = await contextRuntime.buildUserPreferencesInjection();
     if (prefInjection) {
       finalMessages = prependDynamicContext(finalMessages, prefInjection);
+    }
+
+    // ===== 会议进行中状态注入（全身份 · P1-b /meeting 工具化） =====
+    // 会议缓冲是服务端**全局单场状态**（lib/core/meeting-session.ts，P1-d 起落 SQLite .inbox.db），
+    // 模型看不见它——不注入的话，会议进行中用户每条补充内容都会被当新任务处理（回话/建日程），
+    // 而不会用 meeting_append 原样记录，会议链路就断了。
+    // 原先只在 identity==='butler' 分支内注入（/meeting 曾是管家命令）→ 主对话（画布 chat 节点）
+    // 即使开会成功，第二轮起模型也不知道"会议进行中"，meeting_append 链路必断；
+    // 现放宽为全身份注入（下 gate 排除拿不到会议三件套的固定画像）：
+    // 无进行中会议 → 空串，不产生任何注入（仅一次 SQLite 单行读）。
+    // meetingActive 供下方场景过滤使用（会议进行中放行 butler 场景 = 会议三件套所在场景）。
+    // 管家侧保持原有顺序（命令表 → 会议 → 人设），故下方 butler 分支内仍注入一次、字节序不变。
+    let meetingActive = false;
+    // 只有"手里可能有会议三件套"的画像才注入：dynamic 画像（主对话）经下方场景放行即可拿到；
+    // fixed 画像须自身 fixedScenes 含 butler（browser 侧栏 / coding 节点的 fixedScenes 不含 →
+    // 不注入，避免出现「注入要求调 meeting_append、工具却不在手里」的反向错位）。
+    const canCarryMeetingTools = profile.scenes === 'dynamic'
+      || (profile.fixedScenes ?? []).includes('butler');
+    if (identity !== 'butler' && canCarryMeetingTools) {
+      const meetingInjection = await contextRuntime.buildMeetingStateInjection();
+      meetingActive = meetingInjection.length > 0;
+      if (meetingInjection) {
+        finalMessages = prependDynamicContext(finalMessages, meetingInjection);
+      }
+    }
+
+    // ===== Butler 斜杠命令表注入（P0 · 统一入口） =====
+    // 仅当本次为管家身份（identity==='butler'）时注入：命令表是宿主层唯一真源（BUTLER_COMMANDS），
+    // 管家提示词被物化为 agent.json 对已装用户不生效，故改走本动态通道（每轮现算，已装用户即刻生效）。
+    // C8 低频通道：与偏好/OCR 一致 prepend 到当前轮 user 消息，system 缓存头保持字节稳定。
+    if (identity === 'butler') {
+      const cmdInjection = contextRuntime.buildButlerCommandsInjection();
+      if (cmdInjection) {
+        finalMessages = prependDynamicContext(finalMessages, cmdInjection);
+      }
+      // 排期纪律（2026-09-27）：与命令表同因——管家提示词被物化为 agent.json，改常量对已装用户
+      // 不生效；「无冲突直接落地 + 一句话、有潜在冲突先确认」这条口径必须立刻对所有人生效。
+      const scheduleInjection = contextRuntime.buildScheduleDisciplineInjection();
+      if (scheduleInjection) {
+        finalMessages = prependDynamicContext(finalMessages, scheduleInjection);
+      }
+      // 会议进行中：注入当前会议状态（P1-b /meeting 工具化）——详见上方「全身份注入」段；
+      // 此处为管家保留原有注入位置（命令表 → 会议 → 人设，字节序不变），仅补记 meetingActive 供场景过滤。
+      const meetingInjection = await contextRuntime.buildMeetingStateInjection();
+      meetingActive = meetingInjection.length > 0;
+      if (meetingInjection) {
+        finalMessages = prependDynamicContext(finalMessages, meetingInjection);
+      }
+      // ===== 会话人设注入（新建会话时弹窗设定，与该会话同行存储、随会话删除） =====
+      // 放在管家命令表之后：命令表是宿主层能力真源，人设只调身份/语气，不让它压过能力说明。
+      // 无 persona（旧会话 / 未设定）→ 空串 → 不注入，行为与改造前逐字节一致。
+      const personaInjection = buildPersonaInjection(persona);
+      if (personaInjection) {
+        finalMessages = prependDynamicContext(finalMessages, personaInjection);
+      }
     }
 
     // ===== OCR/视觉引擎事实注入（防 system 硬编码引擎断言与插件真实配置脱节） =====
@@ -3473,9 +4201,26 @@ export async function POST(request: NextRequest) {
       // 只并 'ledger'（read_ledger / search_materials），不并 'ledger-keeper'（写工具只归档案员 Archivist）。
       // 只对**已有非空 fixedScenes** 的画像并集：fixedScenes 缺失时不动（空集合原本只给内核工具，
       // 若在这里补 ['general'] 会顺带把 general 场景工具也放进来——那是另一件事，不顺手做）。
+      //
+      // 管家（profile.id === 'butler'）在此再并 'notebook'（P1 统一入口）：管家要能自己应答
+      // 「记一下 / 查笔记 / /note check / /note raw」，不再只把用户推去 Kar 节点（commands.ts 的
+      // capability 字段与 registry.ts 的收归说明同源）。同样走**运行时并集**而非改 agent.json
+      // ——后者安装时已物化，改 manifest 对已装用户不生效（同 ledger 的理由）。
+      // 破坏性维护（delete_notebook）仍只归 Kar：管家 coreExclusions 剔除，避免微信/语音这类
+      // 短指令（「那条删了吧」）误删笔记。
       const fixedScenes = profile.scenes === 'fixed' ? profile.fixedScenes : undefined;
-      const toolProfile = projectRoot && fixedScenes && fixedScenes.length > 0 && !fixedScenes.includes('ledger')
-        ? { ...profile, fixedScenes: [...fixedScenes, 'ledger' as ToolScene] }
+      const extraScenes: ToolScene[] = [];
+      if (projectRoot && fixedScenes && !fixedScenes.includes('ledger')) extraScenes.push('ledger');
+      if (profile.id === 'butler' && fixedScenes && !fixedScenes.includes('notebook')) extraScenes.push('notebook');
+      const toolProfile = fixedScenes && fixedScenes.length > 0 && extraScenes.length > 0
+        ? {
+            ...profile,
+            fixedScenes: [...fixedScenes, ...extraScenes],
+            // 管家并 'notebook' 时同步剔除不可逆的删除（其余笔记工具照常：读 / 写 / 编译 / 维护）
+            ...(extraScenes.includes('notebook')
+              ? { coreExclusions: [...(profile.coreExclusions ?? []), 'delete_notebook'] }
+              : {}),
+          }
         : profile;
       const toolRuntime = new ToolRuntime({ settings: settingsForTools, profile: toolProfile, sandbox: !!sandbox, enabledMcpIds });
       await toolRuntime.register();
@@ -3517,9 +4262,9 @@ export async function POST(request: NextRequest) {
       //   - chat（通用）：核心常驻 + 动态场景激活（省上下文固定税）。
       //     已激活场景会话内 sticky（仅 nodeId 存在时持久化）：首次激活后该会话保持注入，
       //     避免工具集在轮次间抖动 → 前缀缓存只在首次激活变化一次，后续轮次字节稳定。
-      //     注意：检测词含宽泛高频词（如 wanted 的"总结/计划"、admin 的"配置/设置"），
+      //     注意：检测词含宽泛高频词（如 Butler 的"总结/计划"、admin 的"配置/设置"），
       //     实际效果近似"常用场景工具逐步常驻"，省上下文收益主要来自从未激活的场景工具不注入。
-      //   - coding（专项）：固定场景子集，剔除 legal/wanted/ocr/audio/skill 等编码无关的
+      //   - coding（专项）：固定场景子集，剔除 legal/core/ocr/audio/skill 等编码无关的
       //     专属工具与领域 MCP，过滤结果是节点类型决定的确定集合 → 工具前缀逐轮字节稳定。
       if (!sandbox && profile.scenes === 'dynamic') {
         const stickyKey = nodeId;
@@ -3527,6 +4272,32 @@ export async function POST(request: NextRequest) {
           // K2-S2 会话态 service，行为不变：sticky 读回合并 + 过滤写回
           // （同 nodeId 跨请求聚合）收敛进 SessionRuntime.mergeStickyScenes
           sessionRuntime.mergeStickyScenes(stickyKey, activeScenes);
+        }
+      }
+
+      // 会议进行中：补放行 butler 场景 —— 会议三件套（meeting_start / meeting_append / meeting_end）
+      // 在 SCENED_TOOLS 里归 butler，不补就会出现「注入要求调 meeting_append、工具却不在手里」的反向错位
+      // （主对话原先无会议链路，模型只能看着注入干瞪眼）。
+      // 刻意放在 sticky 合并**之后**、不写入会话 sticky：会议结束即恢复原工具面，不长期占用上下文。
+      if (meetingActive) activeScenes.add('butler');
+
+      // ===== Butler 规则裁决段（v6 §9.3 ②③④；Phase 3 §3.2 收敛进运行时门面）=====
+      // 场景判定（detectSceneHints）之后、工具注入之前跑一次宿主侧裁决：
+      //   ② 候选生成 → ③ 裁决（execute / ask / need_user / silent）→ ④ 执行（确定性动作，如建待办）。
+      // 自 Phase 3 起，②③④ 不再就地拼接，改由**运行时门面 butlerTick** 统一编排
+      // （能力匹配 → 裁决 → 执行 → 信号回写；含定时候选与幂等去重）。此处只负责注入一行状态陈述。
+      // 硬约束（计划 D6）：裁决**不改本轮工具集**，只决定「是否执行确定性动作」并注入一行状态陈述。
+      // 聚合链路（channel 非 undefined）不跑：询问/提议回传不到用户手里，跑也是空等。
+      if (activeScenes.has('butler') && !channel) {
+        try {
+          const { butlerTick } = await import('@/lib/butler/runtime');
+          const adj = await butlerTick({
+            trigger: { kind: 'speech', text: extractLastUserContent(messagesWithNodeBridge) },
+            anchor: { projectId: activeProjectId || undefined, threadId: nodeId },
+          });
+          if (adj.notice) finalMessages = prependDynamicContext(finalMessages, adj.notice);
+        } catch (e) {
+          console.warn('Butler 规则裁决失败:', e);
         }
       }
 
@@ -3574,8 +4345,8 @@ export async function POST(request: NextRequest) {
       // browser 工具随 tools 注入时，模型同步获得完整操作纪律。
       // 规则文本按 AI Browser 通道分流：hippo 通道的工具面无 mcp__ 前缀且能力面不同（见 BROWSER_RULES_HIPPO）。
       // 缺省（undefined）= hippo（默认通道）：仅显式 'chrome' 才注入 Bob Browser 版规则。
-      // 判据口径：fixed 画像（浏览器对话栏 Ask/Browse/Research、市场 agent）的浏览器能力由 fixedScenes 决定，
-      // 动态场景检测对它无效 —— 仍按 activeScenes 判定会出现「指引有、工具没有」（如 Ask 档命中网页词被灌操作纪律）。
+      // 判据口径：fixed 画像（浏览器对话栏 Sidebar、市场 agent）的浏览器能力由 fixedScenes 决定，
+      // 动态场景检测对它无效 —— 仍按 activeScenes 判定会出现「指引有、工具没有」。
       const browserSceneActive = profile.scenes === 'fixed'
         ? (profile.fixedScenes ?? []).includes('browser')
         : activeScenes.has('browser');
@@ -3584,10 +4355,17 @@ export async function POST(request: NextRequest) {
           finalMessages,
           settingsForTools.aiBrowser === 'chrome' ? BROWSER_RULES : BROWSER_RULES_HIPPO,
         );
-        // Research 档：浏览器操作纪律之外再叠一层调研纪律（工具面与 Browse 档完全相同，只差提示词）
-        if (profile.id === AGENT_IDS.browserResearch) {
-          finalMessages = prependDynamicContext(finalMessages, BROWSER_RESEARCH_RULES);
-        }
+      }
+      // 侧边栏动态纪律（落盘约定豁免 + 窄栏输出风格）：判据是画像本身而非上面的浏览器场景
+      // —— 该档没有文件/命令工具，而 BASE 仍按通用会话给了 homework/ 落盘约定；且窄栏读不下
+      // 逐轮累加的过程叙述（成因与故障见 BROWSER_SIDEBAR_RULES 注释）。
+      if (profile.id === 'browser') {
+        finalMessages = prependDynamicContext(finalMessages, BROWSER_SIDEBAR_RULES);
+      }
+      // Research 开关：浏览器操作纪律之外再叠一层调研纪律（工具面与默认浏览器画像完全相同，只差提示词）。
+      // 判据是开关本身，与画像条件彼此独立（REPORT_RULES 那边按 researchMode 排除）。
+      if (researchMode) {
+        finalMessages = prependDynamicContext(finalMessages, BROWSER_RESEARCH_RULES);
       }
 
       // 「ledger 判据统一」的另一半：有激活项目即注入 —— 与工具放行（上面的 activeScenes.add('ledger')
@@ -3624,7 +4402,14 @@ export async function POST(request: NextRequest) {
       // 已从 system 移出，仅生成报告类交付物时需要，避免常驻浪费固定 token。
       // 收敛信号词：只保留强交付词（报告/调研/研报/白皮书/可行性/尽调/意见书），
       // 去掉"XX分析"等模糊词（"深度分析这个问题"≠生成报告，避免误注入 REPORT_RULES）。
-      if (!sandbox && /报告|调研|研报|白皮书|可行性|尽调|意见书/i.test(extractLastUserContent(messagesWithNodeBridge))) {
+      // Research 开关打开时排除：该档已由 BROWSER_RESEARCH_RULES 的综述骨架管「答复怎么组织」，
+      // 两套同注入会把答复推向「homework/ 交付物」口吻（骨架要的是会话内综述）。
+      // 开关关闭时不排除：没有综述骨架，报告交付物约定仍是唯一相关指引。
+      if (
+        !sandbox &&
+        !researchMode &&
+        /报告|调研|研报|白皮书|可行性|尽调|意见书/i.test(extractLastUserContent(messagesWithNodeBridge))
+      ) {
         finalMessages = prependDynamicContext(finalMessages, REPORT_RULES);
       }
 
@@ -4420,8 +5205,16 @@ export async function POST(request: NextRequest) {
                   for (let i = kctx.allToolCalls.length - 1; i >= 0; i--) {
                     const h = kctx.allToolCalls[i];
                     if (h.toolName === toolName && JSON.stringify(h.arguments) === argKey) {
-                      // 该工具上次执行时的页面 URL 与当前不同 → 页面已变化，上次结果已失效，允许重新执行
-                      if (h.pageUrl && h.pageUrl !== kctx.lastPageUrl) skipDuplicate = false;
+                      if (h.pageUrl && h.pageUrl !== kctx.lastPageUrl) {
+                        // 该工具上次执行时的页面 URL 与当前不同 → 页面已变化，上次结果已失效，允许重新执行
+                        skipDuplicate = false;
+                      } else if (hasPageInteractionAfter(kctx.allToolCalls, i)) {
+                        // 同 URL 但中间发生过页面交互（切 tab / 点击 / 脚本改 DOM）——URL 指纹抓不到这种变化，
+                        // 上次读到的内容同样已失效。按放宽上限判重，而不是直接放行：保留硬顶防「读-滚-读」打转。
+                        skipDuplicate = isDuplicateCall(
+                          toolName, parsedArgs, kctx.allToolCalls, MAX_DUPLICATE_CALLS_AFTER_INTERACTION,
+                        );
+                      }
                       break;
                     }
                   }
@@ -4486,6 +5279,9 @@ export async function POST(request: NextRequest) {
                     send,
                     spanId: toolSpanId,
                     startAt: toolStartAt,
+                    // 调用通道：**非 undefined = 聚合链路**（微信桥 / ⌘F 面板 /chat），该链路无选项卡片
+                    // 也收不到挂起帧，据此改「文本回灌 + 不挂起」
+                    channel,
                     // 结果落账三连（顺序与原分支一致：kctx.allToolCalls → 对话历史 → eventLog.TOOL_RESULT）；
                     // round / taskId / tool_call_id / pageUrl 等请求态在闭包内绑定当前值。
                     commitToolResult: (resultText) => {
@@ -4524,7 +5320,12 @@ export async function POST(request: NextRequest) {
                     scenarioDecision ?? { scenes: [], sticky: false },
                     takeoverServices,
                   );
-                  const resultText = buildCapabilityResultText(query, matched, newlyActivated);
+                  // fixed 画像（浏览器对话栏）的能力检索是空转：computeActiveToolDefs 对 fixed
+                  // 只用 fixedScenes（见 lib/runtime/tools.ts），激活再多场景也不改工具面 —— 必须如实告知，
+                  // 否则模型会等一个永远不会到来的工具（历史故障见 buildCapabilityResultText 注释）。
+                  const resultText = buildCapabilityResultText(
+                    query, matched, newlyActivated, profile.scenes !== 'fixed',
+                  );
                   send({
                     tool_call: { name: toolName, arguments: parsedArgs, phase: 'done', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose },
                     nodeId,
@@ -4600,6 +5401,7 @@ export async function POST(request: NextRequest) {
                     startAt: toolStartAt,
                     // 请求作用域注入：身份（butler 专属判定）+ 挂起登记用原始参数串 + 编辑覆盖写回通道
                     identity,
+                    channel,
                     execArgs,
                     setExecArgs: (raw) => {
                       butlerEditedExecArgs = raw;
@@ -4686,6 +5488,7 @@ export async function POST(request: NextRequest) {
                     // （P4b-1：复用上面同一取值的 effectiveApprovalStrategy，默认档与现网逐位一致）
                     // + 挂起登记用原始参数串
                     identity,
+                    channel,
                     confirmTools: settingsForTools.confirmTools ?? DEFAULT_CONFIRM_TOOLS,
                     approvalStrategy: effectiveApprovalStrategy,
                     execArgs,
@@ -4750,11 +5553,12 @@ export async function POST(request: NextRequest) {
                 // bob-sandbox/apps/<appId>/（不落 homework）。P4a-2a 迁移：名单与注入规则收敛为
                 // 注册式 args_transform 接管（tool-pipeline.ts，行为不变）——命中返回注入后的参数
                 // 字符串、未命中/解析失败返回 null 原样执行。
-                // K3 hook: args_transform (consult seq #5 · before_execute；节点参数注入 + browser.login mode 注入两注册条目共用本咨询点)
+                // K3 hook: args_transform (consult seq #5 · before_execute；节点参数注入 + browser.login mode 注入 + 技能闸门三注册条目共用本咨询点，match 互不重叠)
                 const nodeParamTakeover = takeoverOfKind(toolName, 'args_transform');
                 const injectedExecArgs = nodeParamTakeover?.transformArgs?.(toolName, execArgs, {
                   currentNodeId: nodeId,
                   sandboxAppId: toolLoopSandboxAppId,
+                  agentId: profile.id,
                 });
                 if (injectedExecArgs !== null && injectedExecArgs !== undefined) {
                   execArgs = injectedExecArgs;
@@ -4790,6 +5594,9 @@ export async function POST(request: NextRequest) {
                     // 内层分片上限跟外层同源：read_attachment 等读取类工具按此收缩单次返回，
                     // 保证续读 offset 提示不被外层截断（小窗口模型也能一段段读完长材料）
                     maxOutputChars: callCap,
+                    // 宿主自身绝对 base（Node fetch 不支持相对路径）：工具内自调用宿主 API 用
+                    // （如管家会议工具 meeting_end → /api/core/meeting 整理纪要）
+                    baseUrl: new URL(request.url).origin,
                     // OCR 过程级进度（read_attachment 扫描件/图片识别走 bob-ocr-mcp）：插件实时上报引擎/页码
                     // → 转为 vision_progress(phase='ocr') SSE 事件，前端显示"正在识别 第N/M页 · 本地 Vision"等
                     onOcrProgress: (p) =>

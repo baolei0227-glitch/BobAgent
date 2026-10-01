@@ -31,7 +31,7 @@ async function toolReadNotebook(args: Record<string, unknown>): Promise<string> 
     const groups = Array.isArray(data.groups) ? (data.groups as Array<{ name?: string; tags?: Array<{ tag?: string; count?: number }> }>) : [];
 
     if (total === 0) {
-      return 'Wiki is empty. No notes have been compiled yet. Use /note or /clip in the WANTED panel to drop material — it will be compiled into the wiki.';
+      return 'Wiki is empty. No notes have been compiled yet. Use /note in the Butler panel to drop material — it will be compiled into the wiki.';
     }
 
     if (mode === 'index') {
@@ -247,22 +247,28 @@ async function toolWriteNotebookAnswer(args: Record<string, unknown>): Promise<s
 
 /** create_note 工具 — 用户主动记笔记（Karpathy raw-first）：内容作为素材投放 raw/ 并触发一次编译，
  *  由插件大脑决定标题/结构/标签并把同主题内容归并入既有笔记（更正/新知识自动更新原条目）。
- *  与 /note 语义等价；不再由人/对话模型直写 wiki 层。 */
+ *  与 /note 语义等价；不再由人/对话模型直写 wiki 层。
+ *  raw_only=true 时只囤素材不编译（等价 `/note raw`）：留待 ingest_notes 统一编译。 */
 async function toolCreateNote(args: Record<string, unknown>): Promise<string> {
   const title = typeof args.title === 'string' ? args.title.trim() : '';
   const content = typeof args.content === 'string' ? args.content.trim() : '';
+  const rawOnly = args.raw_only === true;
   if (!title && !content) return 'Error: title / content required（内容必填）';
   try {
     const { callNotes } = await import('@/lib/mcp/notes-bridge');
     const add = await callNotes('add_raw', { text: content, ...(title ? { title } : {}) });
     if (!add.ok) return `投放失败: ${add.error}`;
     const raw = (add.data || {}).raw as { id?: string; title?: string } | undefined;
+    const label = raw?.title ?? title ?? content.slice(0, 20);
+    if (rawOnly) {
+      const rawId = raw?.id ? `（id: ${raw.id}）` : '';
+      return `已投放素材「${label}」${rawId}到待编译区，未编译。需要时用 ingest_notes 编译。`;
+    }
     const ing = await callNotes('ingest', {});
     if (!ing.ok) return `素材已投放，但编译失败: ${ing.error}`;
     const d = ing.data || {};
     const entries = Array.isArray(d.entries) ? (d.entries as Array<Record<string, unknown>>) : [];
     const compiled = typeof d.compiled === 'number' ? d.compiled : 0;
-    const label = raw?.title ?? title ?? content.slice(0, 20);
     if (compiled === 0) {
       return `已投放素材「${label}」，暂未生成新笔记（同主题可能已归并入既有条目，或待 ingest）。`;
     }
@@ -312,7 +318,7 @@ async function toolReadRawInbox(args: Record<string, unknown>): Promise<string> 
     };
     const items = Array.isArray(d.items) ? d.items : [];
     if (items.length === 0) {
-      const hint = status === 'all' ? '素材箱是空的。用 /clip 或 /note 投放素材后再来。' : `没有 ${status} 状态的素材。`;
+      const hint = status === 'all' ? '素材箱是空的。用 /note raw 或 /note 投放素材后再来。' : `没有 ${status} 状态的素材。`;
       return hint;
     }
     const lines = items.map((it, i) => {
@@ -576,12 +582,13 @@ export const notebookToolDefs: Tool[] = [
   },
   {
     name: 'create_note',
-    description: 'Record material the user wants kept into the notes system (raw-first capture loop, equivalent to /note). Use when the user asks to record/save/keep something (帮我记一笔 / 把这段记到笔记里), shares an idea worth keeping, or corrects an earlier note. Content drops into raw/ and the notes brain compiles it — the brain decides title/type/tags/links and merges same-topic content into existing notes, so feed corrections here too. Only update_notebook/delete_notebook for structural fixes (rename/delete).',
+    description: 'Record material the user wants kept into the notes system (raw-first capture loop, equivalent to /note). Use when the user asks to record/save/keep something (帮我记一笔 / 把这段记到笔记里), shares an idea worth keeping, or corrects an earlier note. Content drops into raw/ and the notes brain compiles it — the brain decides title/type/tags/links and merges same-topic content into existing notes, so feed corrections here too. Set raw_only=true to stash into raw/ without compiling (equivalent to /note raw) — compile later with ingest_notes. Only update_notebook/delete_notebook for structural fixes (rename/delete).',
     parameters: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'Optional short title/label for the material (<=30 chars). The brain decides the final wiki title.' },
         content: { type: 'string', description: 'The material body (markdown). Required. Corrections/updates of existing notes: put the new/corrected facts here.' },
+        raw_only: { type: 'boolean', description: 'true = only stash into raw/ and do NOT compile (equivalent to /note raw). Omit/false = capture and compile now (equivalent to /note).' },
       },
       required: ['content'],
     },

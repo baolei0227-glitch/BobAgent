@@ -15,14 +15,20 @@ import type { Tool, ToolCategory, ToolDefinition, ToolScene } from './index';
  *  - butler:    事务域（记忆/待办/偏好/日程）意图才暴露
  *  - legal:     法律意图才暴露
  *  - node:      画布节点对话（nodeId 存在）才暴露——节点树/画布结构依赖工具
+ *  - console:   应用状态只读查询（已装 agent / 项目 / 节点 / 插件连接 / 收件箱）才暴露
  *  - audio/skill/design/ocr: 均按 L2 动态意图检测放行（见 route.ts activeScenes） */
 export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   // ---- butler 连通（记忆/待办/偏好/工作报告/日历 = 事务域统一场景）----
   read_todo: ['butler'],
   remember_preference: ['butler'],
-  // ---- notebook（bob-notes 插件域 = Kar 专职子 agent 独有）----
-  // 2026-09-06 试点收归：笔记能力不再随 butler 注入普通对话（chat/sandbox/butler 均不含 notebook 场景），
-  // 笔记诉求引导到 Kar（知识库）节点或 /note 指令——主 agent 不背负插件能力，子 agent 按业务方向专职。
+  // ---- notebook（bob-notes 插件域：Kar 专职子 agent + 管家 Butler）----
+  // 2026-09-06 试点收归：笔记能力不再随 butler 注入普通对话（chat/sandbox 均不含 notebook 场景），
+  // 笔记诉求引导到 Kar（知识库）节点——主 agent 不背负插件能力，子 agent 按业务方向专职。
+  // 2026-09-25 P1 统一入口**改口**：管家（Butler）恢复笔记能力——两端入口（微信 / Butler 抽屉）
+  // 统一为管家后，/note（含 /note raw）要能在会话里直接办，否则微信里说「记一下」只能把人推去 Kar 节点。
+  // 落地方式：route.ts 对 profile.id === 'butler' 做 fixedScenes **运行时并集** 'notebook'（不走
+  // agent.json——安装时已物化，改 manifest 对已装用户不生效）；同处给管家 coreExclusions 剔除
+  // delete_notebook（不可逆删除仍只归 Kar，防微信短指令误删）。其余画像（chat/coding/市场 agent）照旧不含。
   // 注：维护回路（read_raw_inbox / ingest_notes / review_notes / lint_notes / read_note_rules / set_note_rules）本就在 notebook 场景。
   read_notebook: ['notebook'],
   read_note: ['notebook'],
@@ -50,16 +56,45 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   ledger_lint: ['ledger-keeper'],
   // 项目页（p-… 创作闭环）：一件要产出的事开一页，属档案员的整理职责（其他 agent 只读）。
   ledger_project: ['ledger-keeper'],
+  // 规则文件（SCHEMA.md）读写：分区/类型两张机器解析表 + 补充条款。
+  // 2026-09-24 补齐：此前 SCHEMA.md 只有「宿主种子/迁移 + 人手改文件」两个写入方，
+  // 档案员只能提醒用户去改隐藏目录；结论仍是「宪章由人定」——工具只在用户明确要求时用。
+  ledger_schema: ['ledger-keeper'],
   // 注意：read_preferences 保持通用——系统提示条件式指示「任务涉及输出格式/引用规范等偏好时调用」，
   //   触发由模型自主判断（如用户说"用表格输出"无偏好字样），门控会阻断偏好遵循链路
   delete_preference: ['butler'],
   update_preference: ['butler'],
+  // ---- 规则原语（v6 §5.1；Phase 0 只固化与可见，不自动执行）----
+  // 与偏好同归 butler 场景；用户发起即免确认（确认闸按「谁发起」切）。
+  read_rules: ['butler'],
+  rule_create: ['butler'],
+  rule_update: ['butler'],
+  rule_pause: ['butler'],
+  rule_retire: ['butler'],
+  // 规则信号闭环（v6 §7 / §3.2）：否定与修订落地原语，同样归 butler 场景
+  rule_dismiss: ['butler'],
+  rule_revise: ['butler'],
+  // 冲突裁决落地（v6 §9.3）：need_user 后用户选定方的回传原语
+  rule_resolve_conflict: ['butler'],
+  // 技能账本（Phase 3 §3.5）：AI 起草一条技能（程序化能力），经可编辑草案卡审固后落 .skills/<id>.md。
+  // 与 Rules 同归 butler 场景；本工具只**起草**，确认链路复用规则草案卡的三段（弹卡 → 等确认 → 落盘）。
+  skill_draft: ['butler'],
   // 便签（画布/记忆类）：按事务域意图触发（记忆/备忘/便签关键词）；butler 专项固定画像放行
   create_sticky_note: ['butler'],
+  // 新建项目（应用结构写动作）：归 butler——管家对话里「新建一个项目：X」直接办；
+  // butler 固定画像直接放行，普通 chat 不注入（避免随口一句"新建项目"产生副作用）。
+  // 副作用收口：列入 runtime/tools.ts 的 SANDBOX_BLOCKED_TOOLS（工具面 = 能力边界）。
+  create_project: ['butler'],
   // ---- butler（管家：日程/待办）----
   query_schedule: ['butler'],
   query_todos: ['butler'],
   create_scheduled_todo: ['butler'],
+  plan_schedule: ['butler'],
+  // 时间解析 / 可用性查询（确定性时间计算：把「算时间」交给代码，别让模型心算）
+  resolve_datetime: ['butler'],
+  query_free_slots: ['butler'],
+  // 排程状态只读查询（schedule_meta）：回答「计划是否最新 / 还有什么没排上」
+  query_schedule_status: ['butler'],
   // 待办修改/删除：与 query_todos 对齐挂 butler（2026-09-12 收敛：wanted 场景并入 butler，
   // 事务域工具统一归 butler；butler 固定画像直接放行，
   // 普通 chat 说"改/删待办"时 detectSceneHints 命中 butler 注入，否则 0 成本）。
@@ -75,14 +110,28 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   // 普通 chat 说"某模型改价了/新增了某模型，更新计费"时由 detectSceneHints 命中 butler 注入。
   get_model_price: ['butler'],
   set_model_price: ['butler'],
+  // ---- butler 会议记录（P1-b：/meeting 工具化——会议缓冲是会话状态，
+  //      模型经注入的会议状态知晓"进行中"，用这三件开启/累积/收尾）----
+  //      主对话（画布 chat 节点）经 detectSceneHints 的「会议/纪要/开会/meeting」命中本场景；
+  //      会议进行中 route 亦直接补放行本场景（会议状态注入与工具必须同时在场）。----
+  meeting_start: ['butler'],
+  meeting_append: ['butler'],
+  meeting_end: ['butler'],
+
+  // ---- meeting 过往会议归档（会议记录员 Recorder 专属；2026-09-27）----
+  //  这两枚工具挂在**新场景 meeting** 上——只有 recorder 画像的 fixedScenes 含它，
+  //  管家（butler）/ 画布主对话 / 微信桥都拿不到（工具面 = 能力边界）。
+  meeting_search: ['meeting'],
+  meeting_summarize: ['meeting'],
 
   // ---- 节点树/画布结构依赖（画布节点对话 nodeId 存在才暴露）----
   read_upstream_node: ['node'],
   read_manifest: ['node'],
   intern_search: ['node'],
   draw: ['node'],
-  // ---- 音频转写（转写/录音/语音关键词或音频附件才暴露）----
+  // ---- 音频转写（转写/录音/语音关键词或音频附件才暴露）；语音合成与之同域（"用语音回复"意图）----
   transcribe_audio: ['audio'],
+  text_to_speech: ['audio'],
   // ---- 主题设计（coding 节点自动放行，普通对话按主题/前端关键词放行）----
   get_current_theme: ['design'],
   // ---- OCR 文字识别（OCR/扫描关键词或图片/PDF 附件才暴露）----
@@ -103,6 +152,16 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   set_app_icon: ['admin'],
   sandbox_rollback: ['admin'],
   sandbox_export: ['admin'],
+
+  // ---- console（应用状态只读查询：给 Chief of Staff 型助理「查应用」的能力）----
+  // 2026-09-24 新增：list_agents / list_projects / list_nodes / get_app_status / read_inbox
+  // 全部只读（不改 DB、不挂载插件、不写文件）， Butler 画像 via fixedScenes 放行；
+  // 普通对话命中 console 意图时才注入，其余画像 0 成本。
+  list_agents: ['console'],
+  list_projects: ['console'],
+  list_nodes: ['console'],
+  get_app_status: ['console'],
+  read_inbox: ['console'],
 };
 
 /**

@@ -37,15 +37,37 @@ export const bus = new TypedBus();
 export const BusEvents = {
   fileOpen: 'file.open',
   addAttachmentToNode: 'add-attachment-to-node',
-  wantedNotice: 'wanted.notice',
-  wantedExecuting: 'wanted.executing',
+  butlerNotice: 'butler.notice',
+  butlerExecuting: 'butler.executing',
   traceInspect: 'trace.inspect',
 } as const;
+
+/**
+ * 公众号检索命中的一篇文章（检索结果富卡片的数据源）。
+ *
+ * 由「小微」搜索综述消息携带：卡片随消息一起落库（`ChatMessage.cards`），
+ * 使「检索到了哪些文章」成为**会话历史的一部分**（刷新后可回看、可点开原文），
+ * 而不是只活在某个临时浮层里。
+ */
+export interface WechatArticleCard {
+  title: string;
+  url: string;
+  account?: string;
+  /** 一句话摘要（读正文后由模型生成；缺省时前端退化为候选片段） */
+  summary?: string;
+  /** 文章关键要点短语（用于卡片角标） */
+  keypoint?: string;
+}
 
 /** 聊天消息（仅 kind === 'chat' 时携带，用于邮件式线程回复） */
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /**
+   * 检索到的文章卡片（仅「小微」搜索综述的 assistant 消息携带）。
+   * 可选：其余消息不写此字段；服务端线程存储原样透传（见 lib/butler/threads.ts parseThread）。
+   */
+  cards?: WechatArticleCard[];
 }
 
 /** 轨迹事件检查负载（TraceTimeline 选中事件 → UnifiedViewer 右侧检查器） */
@@ -56,8 +78,8 @@ export interface TraceInspectPayload {
   span: import('@/lib/types').TraceSpan;
 }
 
-/** WANTED 通知负载（由 ⌘F 面板 / 每日报告 等发布，WantedNoticeCenter 消费） */
-export interface WantedNoticePayload {
+/** Butler 通知负载（由 ⌘F 面板 / 每日报告 等发布，ButlerNoticeHost 消费） */
+export interface ButlerNoticePayload {
   /** kind：task=任务已建 / calendar=日历提醒 / note=想法已存 / notes=笔记列表（/note check） / todo_del=日程已删 / check=日程查询（/todo check） / info=通用 / web=一键整理网页报告 / daily-report=每日报告 / inspect=跨项目 sticky 待办检查 */
   kind: 'task' | 'calendar' | 'note' | 'notes' | 'todo_del' | 'check' | 'info' | 'web' | 'daily-report' | 'inspect';
   title: string;
@@ -68,8 +90,8 @@ export interface WantedNoticePayload {
   /** 点击通知时执行的动作 */
   action?: { type: 'open-calendar' };
   /** 结构化待办列表（每日报告 / 日程查询邮件）：通知中心顶部据此渲染标签栏，点击标签筛选该类待办 */
-  items?: WantedNoticeItem[];
-  /** 通知来源：panel=WANTED 面板输入 / wechat=微信桥 / scheduled=定时（日报等） */
+  items?: ButlerNoticeItem[];
+  /** 通知来源：panel=Butler 面板输入 / wechat=微信桥 / scheduled=定时（日报等） */
   source?: 'panel' | 'wechat' | 'scheduled';
   /** 去重 key：防止同一事件被并发 publish 两遍；消费端按此 key 做窗口内去重
    *  - calendar 提醒：evt:<projectId>:<eventId>（由服务端写入 pending.json）
@@ -89,8 +111,8 @@ export interface WantedNoticePayload {
   toast?: boolean;
 }
 
-/** WANTED 命令执行状态负载（⌘F 面板执行 / 命令期间发布，WantedNoticeCenter 消费渲染右上角"执行中"浮层） */
-export interface WantedExecutingPayload {
+/** Butler 命令执行状态负载（⌘F 面板执行 / 命令期间发布，ButlerNoticeHost 消费渲染"执行中"浮层） */
+export interface ButlerExecutingPayload {
   /** true = 进入执行中；false = 执行结束（浮层消失） */
   executing: boolean;
   /** 顶部浮层展示的文案，如 "Running /todo…"，结束时可省略 */
@@ -98,7 +120,7 @@ export interface WantedExecutingPayload {
 }
 
 /** 通知中的结构化待办项 */
-export interface WantedNoticeItem {
+export interface ButlerNoticeItem {
   key: string;
   title: string;
   time: string;
@@ -106,15 +128,27 @@ export interface WantedNoticeItem {
   status?: string;
   priority?: string;
   allDay?: boolean;
-  /** 日报分区：today=今日待办 / overdue=已过期待办（非日报项无此字段） */
+  /** 日报分区：today=今日待办 / 已过期待办（非日报项无此字段） */
   section?: 'today' | 'overdue';
   /** 笔记正文（kind === 'notes' 时携带，供笔记列表邮件逐条展示） */
   content?: string;
+  /**
+   * 点击完成时接的真实链路（缺省 = 只翻转通知内的本地勾选，不动任何底层数据）：
+   *  - 'event'：key 即日历事件 id（日报 Schedule 页）→ PATCH 事件状态，日历 / 便签侧随之联动
+   *  - 'sticky'：便签待办行（日报 Sticky 页）→ 勾掉便签正文对应行，该行已入日历则事件同步完成
+   */
+  source?: 'event' | 'sticky';
+  /** source='sticky' 的行定位：项目 + 便签 / 页 + 行号（text 用于行号漂移后的兜底匹配） */
+  sticky?: { projectId: string; noteId: string; pageId: string; lineIndex: number; text?: string };
+  /** sticky 项所属项目名（Sticky 页按项目分组渲染） */
+  group?: string;
+  /** sticky 项的次级归属（便签标题；与项目同名 / 只有一张便签时为空，不占一行） */
+  subgroup?: string;
 }
 
 /**
  * 剥离回复中的思考块（<think>...</think>，大小写不敏感、可跨行、兼容未闭合标签）。
- * 方案 B：微信 / BobMail 展示层只保留回复正文；chat_sessions 存储仍保留完整（含思考）。
+ * 方案 B：微信 / Butler 抽屉展示层只保留回复正文；chat_sessions 存储仍保留完整（含思考）。
  * 放本模块（前后端共用的纯类型模块）而非 node-chat.ts，避免前端组件拉入 better-sqlite3 等 Node 依赖。
  */
 export function stripThinkTags(content: string): string {

@@ -36,12 +36,15 @@ import { officeToolDefs } from './office';
 import { audioToolDefs } from './audio';
 import { adminToolDefs } from './admin';
 import { notebookToolDefs } from './notebook';
+import { meetingToolDefs } from './meeting';
+import { meetingArchiveToolDefs } from './meeting-archive';
 import { ledgerToolDefs } from './ledger';
 import { materialsToolDefs } from './materials';
 import { nodeToolDefs } from './node';
 import { skillToolDefs, SKILLS_DIR } from './skill';
 import { agentPackageToolDefs, setAgentCoreToolNames } from './agent-package';
 import { designToolDefs } from './design';
+import { consoleToolDefs } from './console';
 import { registry, SCENED_TOOLS } from './registry';
 import { webToolDefs } from './web';
 import { attachmentToolDefs } from './attachment';
@@ -99,6 +102,11 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   if (has('ledger_pending')) return `查看账本待编译登记`;
   if (has('ledger_lint')) return `项目账本自检`;
   if (has('ledger_project')) return `项目页 ${take(['title']) ?? take(['action']) ?? ''}`;
+  if (has('ledger_schema')) {
+    const act = take(['action']);
+    const verb = act === 'set_parties' ? '声明当事人分区' : act === 'add_types' ? '追加条目类型' : act === 'append' ? '追加补充条款' : '查看';
+    return `账本规则${verb}`;
+  }
 
   // OCR / 图像
   if (has('ocr_document', 'ocr')) return `OCR 识别 ${path() ?? text() ?? '文件'}`;
@@ -132,11 +140,16 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   if (has('interact_preview')) return '浏览器交互测试';
 
   // 待办 / 日程 / 计划（butler）
+  if (has('create_project')) return `新建项目：${text() ?? ''}`;
   if (has('create_sticky_note')) return `创建待办：${text() ?? ''}`;
   if (has('create_scheduled_todo', 'create_todo')) return `排程：${text() ?? ''}`;
+  if (has('plan_schedule')) return '自动排程';
+  if (has('query_schedule_status')) return '查看排程状态';
   if (has('todo_update')) return `更新待办/日程：${text() ?? ''}`;
   if (has('todo_delete')) return `删除待办/日程`;
   if (has('query_schedule')) return '查询日程';
+  if (has('query_free_slots')) return '查找空闲时段';
+  if (has('resolve_datetime')) return `解析时间：${text() ?? ''}`;
   if (has('query_todos', 'read_todo')) return '查询待办';
   if (has('project_plan_start')) return `创建计划：${text() ?? ''}`;
   if (has('project_plan_add_steps')) return '追加计划步骤';
@@ -293,8 +306,11 @@ export type ToolCategory = '文件' | '系统' | '网络' | '技能' | '配置' 
  *  - ledger:    存在激活项目（画布下恒真）才暴露——项目档案只读入口（read_ledger / search_materials）
  *  - ledger-keeper: 账本维护者（档案员 Archivist）专属——账本写工具只给 keeper，其他 agent 只读
  *  - mind:      思维导图/灵感（BobMind）——Bob-Mind MCP 工具只给 Buzan（mind）画像，
- *               普通 chat/其他 agent 不再随 general 常驻注入 */
-export type ToolScene = 'general' | 'coding' | 'legal' | 'node' | 'audio' | 'skill' | 'design' | 'ocr' | 'admin' | 'office' | 'browser' | 'company' | 'team' | 'local' | 'notebook' | 'butler' | 'ledger' | 'ledger-keeper' | 'mind';
+ *               普通 chat/其他 agent 不再随 general 常驻注入
+ *  - meeting:   会议记录员（Recorder）专属——过往会议检索与按需出总结（meeting_search / meeting_summarize），
+ *               只给 recorder 画像，管家与画布主对话都拿不到
+ */
+export type ToolScene = 'general' | 'coding' | 'legal' | 'node' | 'audio' | 'skill' | 'design' | 'ocr' | 'admin' | 'office' | 'browser' | 'company' | 'team' | 'local' | 'notebook' | 'butler' | 'ledger' | 'ledger-keeper' | 'mind' | 'console' | 'meeting';
 
 /** OpenAI function calling 格式的工具定义 */
 export interface ToolDefinition {
@@ -342,6 +358,10 @@ export interface ToolExecContext {
   teamQuestionText?: string;
   /** 当前项目 id（透传给队长会话的 /api/chat，用于项目上下文） */
   projectId?: string;
+  /** 宿主自身的绝对 base（`new URL(request.url).origin`，route 注入）。
+   *  工具内**自调用宿主 API** 时用：Node fetch 不支持相对路径（见 /api/core/execute 的同类处理），
+   *  如会议工具 meeting_end 调 /api/core/meeting 整理纪要。未注入（无 HTTP 宿主）= 缺省。 */
+  baseUrl?: string;
 }
 
 /** 增强工具结果：给 LLM 的精简文本 + 给用户的结构化卡片 HTML（方案 B：数据驱动渲染，绕过 LLM 转述） */
@@ -1467,6 +1487,7 @@ const toolDefs: Tool[] = [
   ...audioToolDefs,
   ...skillToolDefs,
   ...designToolDefs,
+  ...consoleToolDefs,
   {
     name: 'ask_user_questions',
     description: 'Pause to ask the user structured questions and wait for their answers before continuing — use whenever you need info/clarification/a decision to proceed. The host pops up a form; the answers return to you as the tool result. Prefer over free-text questions.',
@@ -1521,6 +1542,8 @@ const toolDefs: Tool[] = [
     maxOutput: 3000,
   },
   ...butlerToolDefs,
+  ...meetingToolDefs,
+  ...meetingArchiveToolDefs,
   ...agentPackageToolDefs,
   {
     name: 'team_run',

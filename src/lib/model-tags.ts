@@ -27,6 +27,21 @@ export const isOcrModel = (id: string): boolean => OCR_MODEL_PATTERN.test((id ||
 export const isVisionModel = (id: string): boolean =>
   VISION_MODEL_PATTERN.test((id || '').toLowerCase()) && !isOcrModel(id);
 
+/** 语音合成（TTS）模型判定：用于把 audio 分类再分成「合成」与「识别」。
+ *  /api/models 的 audio 正则（tts|asr|whisper|speech|qwen-audio）把两类混在一起，
+ *  导致 TTS 模型会混进 STT 角色候选池（反之亦然）。命中本规则视为 TTS，否则视为 STT。 */
+export const TTS_MODEL_PATTERN = /tts|fishaudio|speech-1\.5|cosyvoice|chattts|melotts|vits|kokoro|zipvoice|f5-tts|index-tts/i;
+
+/** 是否语音合成模型（audio 分类内与语音识别区分） */
+export const isTtsModel = (id: string): boolean => TTS_MODEL_PATTERN.test((id || '').toLowerCase());
+
+/** 非对话模型排除正则（Butler 会话选型用）：视觉 / 向量 / 重排 / 音频（含 TTS、ASR）不参与对话。
+ *  单一来源：服务端自动选型（lib/butler/entry.ts）与抽屉模型下拉共用，两处不会漂移。 */
+export const NON_CHAT_MODEL_PATTERN = /vision|vl|embedding|rerank|audio/i;
+
+/** 是否可用作**对话**模型（自动选型 / 模型下拉的过滤判据） */
+export const isChatModel = (id: string): boolean => !NON_CHAT_MODEL_PATTERN.test((id || '').toLowerCase());
+
 /** 厂商推断（按模型 id 前缀/关键词，兼容聚合平台的 "system" 占位 owned_by） */
 export const MODEL_VENDOR_PATTERNS: Array<{ pattern: RegExp; vendor: string }> = [
   { pattern: /^(?:qwen|qvq|qwq|tongyi|wan|z-image|gui-|fun-asr|codeqwen|florence)/i, vendor: 'Qwen' },

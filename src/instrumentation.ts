@@ -19,17 +19,29 @@ export async function register() {
     console.error('[skills-registry] 加载失败:', e);
   }
   try {
-    // 启动清理 /chat 过期会话：进程存活时的 60s 周期 sweep，在"未退出直接关应用"的场景下
-    // 不会执行，需在启动时兜底清理过期会话（wechat 15min TTL，只删过期行）。
-    const { startChatSessionSweeper } = await import('@/lib/wanted/chat-session');
-    // 周期清理：进程存活期间，每 60s 删除过期会话（wechat 15min TTL）
-    startChatSessionSweeper();
+    // Butler 线程存储（Phase 4）：先领取旧 chat_sessions 的历史数据（幂等，只跑一次），
+    // 再启动清理与过期兜底。进程存活期间的 60s 周期 sweep 在"未退出直接关应用"的场景下
+    // 不会执行，需在启动时兜底清理过期线程（wechat 24h TTL，只删过期行）。
+    const { migrateLegacyThreads } = await import('@/lib/butler/threads-migrate');
+    await migrateLegacyThreads();
+    const { startThreadSweeper, purgeRetiredWechatThread } = await import('@/lib/butler/threads');
+    // 周期清理：进程存活期间，每 60s 删除过期线程（wechat 24h TTL）
+    startThreadSweeper();
+    // 一次性退役清理：删除旧「Bobby」微信桥常驻线程（2026-09-28 微信消息改并入通知助理线程）。
+    // 幂等；失败只记日志，不影响启动。
+    purgeRetiredWechatThread()
+      .then((removed) => {
+        if (removed) console.log('[butler/threads] 已清除退役的 Bobby 微信线程');
+      })
+      .catch((e) => {
+        console.error('[butler/threads] 退役线程清理失败:', e);
+      });
   } catch (e) {
-    console.error('[chat-session] 启动清理加载失败:', e);
+    console.error('[butler/threads] 启动清理加载失败:', e);
   }
   try {
     // 每日自动报告调度：每天 9:00 或当天首次打开软件时发送 Morning 报告
-    const { startDailyReportScheduler } = await import('@/lib/wanted/daily-report');
+    const { startDailyReportScheduler } = await import('@/lib/core/daily-report');
     setTimeout(() => {
       startDailyReportScheduler().catch((e) => {
         console.error('[daily-report] 调度启动失败:', e);
@@ -39,8 +51,24 @@ export async function register() {
     console.error('[daily-report] 调度加载失败:', e);
   }
   try {
+    // 历史日报回执清理：日报三页签已整体移交 Today 面板（Bobby 不再推送日报），
+    // 存量收件箱里的 Progress / Morning / Sticky 回执一次性删除（幂等，无匹配行为 0）。
+    const { purgeInboxDailyReports } = await import('@/lib/core/inbox');
+    setTimeout(() => {
+      purgeInboxDailyReports()
+        .then((n) => {
+          if (n > 0) console.log(`[inbox] 已清理历史日报回执 ${n} 条（日报已移交 Today 面板）`);
+        })
+        .catch((e) => {
+          console.error('[inbox] 历史日报回执清理失败:', e);
+        });
+    }, 3000);
+  } catch (e) {
+    console.error('[inbox] 历史日报回执清理加载失败:', e);
+  }
+  try {
     // 日历到期提醒调度：事件到点即提醒 + 应用打开时补发遗漏到期提醒
-    const { startEventReminderScheduler } = await import('@/lib/wanted/event-reminder');
+    const { startEventReminderScheduler } = await import('@/lib/core/event-reminder');
     setTimeout(() => {
       startEventReminderScheduler().catch((e) => {
         console.error('[event-reminder] 调度启动失败:', e);
@@ -108,6 +136,18 @@ export async function register() {
     }, 5000);
   } catch (e) {
     console.error('[wechat-bridge] 加载失败:', e);
+  }
+  try {
+    // 延迟启动飞书桥：与微信桥同构，复用上面的 2s /api/chat 预热窗口。
+    // 无凭证时 start() 内部直接 idle 返回，不建连、不报错。
+    const { feishuBridge } = await import('@/lib/bridge/feishu-bridge');
+    setTimeout(() => {
+      feishuBridge.start().catch((e) => {
+        console.error('[feishu-bridge] 启动失败:', e);
+      });
+    }, 5000);
+  } catch (e) {
+    console.error('[feishu-bridge] 加载失败:', e);
   }
   try {
     // 项目工作区目录监听：用户手动往 BobWorkspace 拖入/删除文件夹时，

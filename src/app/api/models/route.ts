@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normalizeVendorName } from '@/lib/model-tags';
 import { registerVisionModels } from '@/lib/model-capabilities';
-import { PROVIDER_PRESETS, sanitizeBaseUrl } from '@/lib/types';
+import { PROVIDER_PRESETS, sanitizeBaseUrl, isPresetVisionModel } from '@/lib/types';
 
 interface ModelsRequest {
   provider: string;
@@ -270,7 +270,9 @@ export async function POST(request: NextRequest) {
       }
       // 2) 厂商声明的能力元数据（L1 权威分类，不依赖命名——
       //    解决"模型名不含视觉关键词（vl/vision/4v…）却被误判为 chat"的核心场景）
-      if (extractDeclaredVision(m)) {
+      //    ∪ 预设显式声明（spec.capabilities 含 'vision'）：补齐 DeepSeek /models 不返回
+      //    能力位、名字也无视觉字样的型号（如 deepseek-flash = V4.1-Flash）
+      if (extractDeclaredVision(m) || isPresetVisionModel(m.id)) {
         return {
           modelId: m.id,
           ownedBy,

@@ -79,14 +79,13 @@ describe('thinking policy: isTrivialPrompt', () => {
 
 describe('thinking policy: shouldInjectThinkPrompt seam', () => {
   it('V4 恒不注入（纯 API 驱动）', () => {
-    expect(shouldInjectThinkPrompt(true, true, LEGACY_ON)).toBe(false);
-    expect(shouldInjectThinkPrompt(true, false, LEGACY_ON)).toBe(false);
+    expect(shouldInjectThinkPrompt(true, true)).toBe(false);
+    expect(shouldInjectThinkPrompt(true, false)).toBe(false);
   });
-  it('非 V4 推理模型默认注入 think 引导，可经 injectThinkGuide 关闭', () => {
-    expect(shouldInjectThinkPrompt(false, true, LEGACY_ON)).toBe(true);
-    expect(shouldInjectThinkPrompt(false, true, { ...LEGACY_ON, injectThinkGuide: false })).toBe(false);
+  it('非 V4 推理模型恒注入 think 引导（思考块显示前提，不设开关）', () => {
+    expect(shouldInjectThinkPrompt(false, true)).toBe(true);
   });
   it('非推理模型不注入', () => {
-    expect(shouldInjectThinkPrompt(false, false, LEGACY_ON)).toBe(false);
+    expect(shouldInjectThinkPrompt(false, false)).toBe(false);
   });
 });

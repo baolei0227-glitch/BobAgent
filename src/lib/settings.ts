@@ -3,7 +3,9 @@
  *
  * 所有全局设置存储于 ~/BobWork/settings.json：
  *   Electron: 主进程通过 IPC 读写文件
- *   浏览器(dev): 降级为 localStorage
+ *   浏览器/IDE 内嵌 webview: 经 /api/settings 读写**同一份文件**（设置含引擎选择，
+ *     必须让服务端看到；早期版本在此降级为 localStorage，会出现"选了模型却不生效"）
+ *   服务端不可达: 降级为 localStorage 兜底
  *
  * 扩展方式：只需在 AppSettings 接口中加字段即可。
  *
@@ -29,7 +31,7 @@ export interface TaskModelSettings {
   defaultModel?: string;
   apiKey?: string;
   baseUrl?: string;
-  /** Auto 模式「上下文带图片附件 → 优先选视觉模型」开关（默认开；关 = 即使带图也不为视觉模型加权） */
+  /** 「本轮带图但选中模型读不了图 → 改选候选池视觉模型」开关（默认开；关 = 即使带图也不改选，走描述兜底） */
   autoVisionOnImage?: boolean;
   /** 候选池：该角色可用模型（多选，默认取候选池首个 defaultModel 为首选）；运行时首选不可用时按序回退 */
   pool?: Array<{ provider: string; modelId: string }>;
@@ -37,16 +39,78 @@ export interface TaskModelSettings {
 
 /**
  * 音频转写（STT）配置。
- * 云端多厂商自由选择（火山豆包 / 阿里 DashScope / SiliconFlow / OpenAI 兼容）。
+ * 引擎单选：云端厂商（火山豆包 / 阿里 DashScope / SiliconFlow / OpenAI 兼容，需 API Key）
+ * 或本地离线模型（sherpa-onnx，无需 Key）——二者互斥，选哪个就用哪个。
  */
 export interface SttSettings {
-  /** 转写厂商：doubao | dashscope | siliconflow | openai（云端需 API Key）| bobmultimodal（本地，无需 Key） */
+  /** 转写厂商：doubao | doubao-stream | agentplan | codingplan | dashscope | siliconflow | openai（云端需 API Key）
+   *  | sherpa-local（离线备选，CLI + 模型按需下载到 BOBWORK_HOME/.stt，见 lib/stt/sherpa） */
   provider?: string;
   model?: string;
   apiKey?: string;
   baseUrl?: string;
-  /** STT 候选池（与 Chat 统一）：多选候选，首个模型（model）为活动模型 */
+  /** STT 候选池（与 Chat 统一）：**单选**，池内首个即当前活动模型 */
   pool?: Array<{ provider: string; modelId: string }>;
+  /** 显式选定的本地离线模型 id（见 lib/stt/sherpa 的 LOCAL_STT_MODELS）。
+   *  与云端互斥：仅当 provider='sherpa-local' 时生效；没有显式选择就不会使用本地引擎 */
+  localModel?: string;
+}
+
+/**
+ * 语音合成（TTS）配置（2026-09-24 B4 新增，镜像 SttSettings）。
+ * 云端厂商须支持 OpenAI 兼容 POST /audio/speech（JSON：model/input/voice/response_format）：
+ *   - openai（tts-1 / tts-1-hd / gpt-4o-mini-tts）
+ *   - siliconflow（fishaudio/fish-speech-1.5 等，需自备 Key）
+ *   - 自定义兼容端点（baseUrl 覆盖）
+ *   - sherpa-local（本地神经 TTS，离线，模型按需下载，见 lib/tts/sherpa-local）
+ * 引擎与 STT 同款：云端模型池与本地引擎 **互斥单选**（用户选哪个用哪个，不自动兜底）；
+ * 未配置（provider/model 皆空）时 TTS 链路整体不可用，调用方应明确报"未配置"而非静默失败。
+ */
+export interface TtsSettings {
+  /** 合成厂商：openai | siliconflow | sherpa-local（本地引擎，无需 Key）| 自定义（留空按 baseUrl 推断，默认 openai） */
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  /** 音色（厂商相关，如 alloy/echo/nova；留空用厂商默认） */
+  voice?: string;
+  /** 输出格式（默认 mp3）；仅云端引擎生效——本地神经引擎固定输出 wav（见 lib/tts/sherpa-local） */
+  format?: 'mp3' | 'wav' | 'opus' | 'aac';
+  /** 语速（OpenAI 兼容 0.25-4.0；留空用厂商默认） */
+  speed?: number;
+  /** TTS 候选池（设置面板多选；引擎只取首个 model 为活动模型，本字段是 UI 态持久化） */
+  pool?: Array<{ provider: string; modelId: string }>;
+  /** 本地神经 TTS 模型 id（见 lib/tts/sherpa-local 的 LOCAL_TTS_MODELS）；provider='sherpa-local' 时必填 */
+  localModel?: string;
+  /** 零样本音色克隆（ZipVoice）的参考音频绝对路径（24kHz 单声道 wav；内置参考音与自定义上传统一为绝对路径） */
+  localRefAudio?: string;
+  /** 与 localRefAudio **逐字一致**的参考文本；不一致会显著掉质量 */
+  localRefText?: string;
+  /** 多音色本地模型的音色 id（见 sherpa-local 的 LocalTtsVoice.id，如 vits-zh-ll 的 gunian）；
+   *  未知/缺省由合成层回落到模型首条音色 */
+  localVoice?: string;
+}
+
+/**
+ * Butler 主动推送的「克制」策略（2026-09-25 B5 新增，见 lib/core/quiet-hours.ts）。
+ *
+ * 裁决口径（按「谁定的」而非内容区分）：
+ *   - 用户自订的日历提醒（kind='reminder'）**永不被免打扰静默**，只受单日上限约束；
+ *   - 助理主动发起的汇报类推送在免打扰时段内静默，由调用方顺延到窗口结束。
+ *
+ * ⚠️ `enabled` **默认开启**（2026-09-25 拍板「开箱即克制」）：省略 `butlerNotify` 或省略
+ * `enabled` 都视为启用；只有**显式写 `enabled:false`** 才是回滚开关（回到「有推必推」）。
+ * ⚠️ 例外：settings 读取失败时按「未开启」放行——策略层故障不得吞推送。
+ */
+export interface ButlerNotifySettings {
+  /** 总开关；**缺省 = true**（显式 false 才关闭） */
+  enabled?: boolean;
+  /** 免打扰开始时间 'HH:mm'（默认 22:00；支持跨夜，如 22:00 → 08:00） */
+  quietStart?: string;
+  /** 免打扰结束时间 'HH:mm'（默认 08:00） */
+  quietEnd?: string;
+  /** 单日主动推送上限（默认 6；0 = 不限）。含用户自订提醒，避免刷屏式关心 */
+  dailyPushLimit?: number;
 }
 
 /** 图像编辑（Image Edit）配置：独立于聊天模型（图像编辑走 images API，不兼容 chat completions）。
@@ -212,8 +276,6 @@ export interface ThinkingSettings {
   harnessPure?: boolean;
   downgradeOnExecution?: boolean;
   trivialPromptOff?: boolean;
-  /** 非 V4 推理模型的 <think> 标签引导注入开关（DeepSeek V4 恒不注入） */
-  injectThinkGuide?: boolean;
 }
 
 /** 文件自动整理（投递箱就地整理）：把文件丢进 inboxDir，
@@ -253,6 +315,32 @@ export interface ModelPriceOverride {
   updatedAt: string;
 }
 
+/** 会议专属设置（会议模式入口面板里的可折叠区块）：
+ *  - recordingSource：录音源——麦克风 / 系统音频 / 两者（系统音频走 getDisplayMedia loopback，macOS 14.2+）
+ *  - speakers：参会人数口径，注入纪要整理 prompt（auto = 交由模型按内容判断）
+ *  - autoSummarize：会后是否自动整理纪要（false = 只保留全文转写，不做 AI 整理）
+ *  说明：**没有「实时分人」开关**——会议进行中不做说话人识别，`[说话人 N]` 一律来自会后的整段重转。
+ *  （旧配置里残留的 `liveSpeakers` 字段会被忽略，不影响读取。） */
+export type MeetingRecordingSource = 'microphone' | 'system' | 'both';
+export type MeetingSpeakers = 'auto' | 'solo' | 'duo' | 'group';
+export interface MeetingSettings {
+  recordingSource: MeetingRecordingSource;
+  speakers: MeetingSpeakers;
+  autoSummarize: boolean;
+}
+
+/** 会议设置兜底：容错旧配置 / 部分字段缺失，返回完整对象 */
+export function meetingSettingsOf(s?: AppSettings): MeetingSettings {
+  const m = s?.meeting;
+  const src = m?.recordingSource;
+  const spk = m?.speakers;
+  return {
+    recordingSource: src === 'system' || src === 'both' ? src : 'microphone',
+    speakers: spk === 'solo' || spk === 'duo' || spk === 'group' ? spk : 'auto',
+    autoSummarize: m?.autoSummarize !== false,
+  };
+}
+
 export interface AppSettings {
   version: number;
   providers: ProviderConfig[];
@@ -272,6 +360,11 @@ export interface AppSettings {
    *  本字段仅供旧版本配置文件读取兼容，宿主不再读写。 */
   notesModel?: TaskModelSettings;
   stt: SttSettings;
+  /** 语音合成（TTS）配置：未配置时 TTS 链路不可用（见 TtsSettings 注释） */
+  tts?: TtsSettings;
+  /** Butler 主动推送克制策略（免打扰 / 单日上限，见 lib/core/quiet-hours.ts）；
+   *  缺省 = **开启**（开箱即克制：默认 22:00→08:00、单日上限 6）；显式 `enabled:false` 才关闭 */
+  butlerNotify?: ButlerNotifySettings;
   /** 图像编辑（Image Edit）模型配置：图片 AI 编辑专用（独立于聊天/视觉模型） */
   imageEdit?: ImageEditSettings;
   ui: UISettings;
@@ -308,6 +401,16 @@ export interface AppSettings {
   xhsPaper?: string;
   /** 3:4 竖版分享卡标签笔刷样式：oil/calligraphy/marker/crayon/watercolor/paint/bristle；undefined = oil */
   xhsBrush?: string;
+  /** 远程访问鉴权：手机经私有隧道（Tailscale / Cloudflare Tunnel）远程操作本机 BobWork 时，
+   *  非本机请求必须持 Bearer Token；桌面端（localhost）默认豁免。
+   *  token 由服务端随机生成（randomBytes(12).toString('base64url')），存于本文件，泄露即等于放开本机。 */
+  remoteAccess?: {
+    enabled: boolean;
+    token: string;
+    /** loopback-exempt（默认）：仅非本机请求需 Token，Tailscale/WireGuard 直连精准命中；
+     *  strict：所有请求（含本机）强制 Token，用于 Cloudflare Tunnel（其本地跳为 loopback，会绕过豁免）。 */
+    mode?: 'loopback-exempt' | 'strict';
+  };
   /** 分享卡正文字体（ShareCard SHARE_FONTS 的 key，如 sans/songti/kaiti…）；undefined = sans */
   shareFont?: string;
   /** 全局截图 OCR（Cmd+Shift+O）功能开关；undefined = 启用。
@@ -351,6 +454,8 @@ export interface AppSettings {
   sandboxChatPermissions?: Record<string, SandboxChatPermission>;
   /** 思考档位策略开关（Phase 2-2a 新增）；undefined = 两开关默认开（与策略抽取前行为一致）。不改设置 UI */
   thinking?: ThinkingSettings;
+  /** 会议专属设置（录音源 / 参会人数 / 会后自动整理）；undefined = 走默认，见 meetingSettingsOf */
+  meeting?: MeetingSettings;
   /** 工具审批策略（P4b-1 新增）；undefined = 走默认（approval.defaultStrategy = 'allow_scope'，
    *  与现网逐位一致：仅 confirmTools 名单内需确认、其余工具自动放行）。ask / never 为新档位，
    *  默认不启用（默认档零变化）；UI 暂无编辑入口，改 settings.json 即可生效。 */
@@ -361,6 +466,17 @@ export interface AppSettings {
   };
   /** 文件自动整理投递箱（目录 / 开关 / 分类清单） */
   fileOrganizer?: FileOrganizerSettings;
+  /** 排程器工作时段（Phase ②）：未配置 → 周一至周五 09:00–18:00 / Asia/Shanghai / 10min buffer。
+   *  排程器据此为未排程任务找执行块；改 settings.json 即生效，暂无 UI 编辑入口。 */
+  calendarWorkingHours?: {
+    tz?: string;
+    /** 工作日：0=周日 … 6=周六 */
+    days?: number[];
+    /** 本地时刻 'HH:MM' */
+    start?: string;
+    end?: string;
+    bufferMinutes?: number;
+  };
 }
 
 /** 图像生成/编辑模型名的通用判定正则（从 Model Pool 绑定模型中兜底识别图像模型）。
@@ -561,11 +677,13 @@ export function defaultSettings(): AppSettings {
     fontScale: 'l',
     // Phase 2-2a/2b（S2a/S2b）：思考档位策略开关——harnessPure 默认 true（纯 DSH 固定档），
     // 显式 false 才启用旧业务插件行为（执行轮降级 + C1）；下两开关仅 harnessPure=false 生效
-    thinking: { harnessPure: true, downgradeOnExecution: true, trivialPromptOff: true, injectThinkGuide: true },
+    thinking: { harnessPure: true, downgradeOnExecution: true, trivialPromptOff: true },
     // P4b-1：审批策略默认 allow_scope —— 与现网行为逐位一致（仅 confirmTools 名单内需确认）
     approval: { defaultStrategy: 'allow_scope' },
     // 文件自动整理：默认关闭、未配置投递箱；分类清单留空 = 用内置默认分类
     fileOrganizer: { enabled: false, inboxDir: '', categories: [] },
+    // 会议专属默认：仅麦克风 / 参会人数交模型判断 / 会后自动整理
+    meeting: { recordingSource: 'microphone', speakers: 'auto', autoSummarize: true },
   };
 }
 
@@ -757,6 +875,13 @@ export function normalizeCustomThemes(settings: AppSettings): AppSettings {
 
 /**
  * 读取全局设置（前端调用）
+ *
+ * 三种宿主按顺序回落：
+ *   1) Electron 窗口：preload IPC（主进程读写 ~/BobWork/.settings.json）
+ *   2) 浏览器/IDE 内嵌 webview（无 desktopAPI）：GET /api/settings —— 同样读服务端那份文件。
+ *      必须走服务端：引擎（TTS/STT/OCR…）在服务端按该文件决策，若只读浏览器 localStorage，
+ *      界面里改了模型/引擎会"看起来选了却没生效"。
+ *   3) 服务端不可达（纯静态/远端只读）：localStorage 兜底。
  */
 export async function loadSettings(): Promise<AppSettings> {
   if (hasElectronAPI()) {
@@ -766,6 +891,16 @@ export async function loadSettings(): Promise<AppSettings> {
       if (result) return normalizeCustomThemes({ ...defaultSettings(), ...result });
     } catch {
       // IPC 失败降级
+    }
+  } else if (typeof window !== 'undefined') {
+    try {
+      const res = await fetch('/api/settings', { cache: 'no-store' });
+      const data = (await res.json()) as { success?: boolean; settings?: Partial<AppSettings> };
+      if (res.ok && data?.success !== false && data?.settings) {
+        return normalizeCustomThemes({ ...defaultSettings(), ...data.settings });
+      }
+    } catch {
+      // 服务端不可达：降级 localStorage
     }
   }
   return normalizeCustomThemes(readFromLocalStorage());
@@ -793,6 +928,24 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
       }
       throw e;
     }
+  }
+  if (typeof window !== 'undefined') {
+    // 浏览器/IDE 内嵌 webview：落服务端同一份文件（否则引擎侧读到的还是旧值）
+    let rejected: Error | null = null;
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      });
+      const data = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (res.ok && data?.success !== false) return;
+      // 服务端明确拒绝（如防覆盖保护）：如实抛错，别静默写进 localStorage 假装成功
+      rejected = new Error(data?.error || `Failed to save settings (HTTP ${res.status})`);
+    } catch {
+      // 网络异常 / 服务端不可达：降级 localStorage 兜底
+    }
+    if (rejected) throw rejected;
   }
   writeToLocalStorage(settings);
 }
@@ -885,6 +1038,13 @@ export async function updateSearch(search: SearchConfig): Promise<void> {
 export async function updateStt(stt: SttSettings): Promise<void> {
   const settings = await loadSettings();
   settings.stt = stt;
+  await saveSettings(settings);
+}
+
+/** 更新语音合成（TTS）配置 */
+export async function updateTts(tts: TtsSettings): Promise<void> {
+  const settings = await loadSettings();
+  settings.tts = tts;
   await saveSettings(settings);
 }
 

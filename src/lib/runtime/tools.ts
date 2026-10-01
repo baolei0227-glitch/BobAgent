@@ -30,17 +30,92 @@ import { NODE_MCP_TOOL_IDS, type McpServerConfig } from '@/lib/mcp/types';
 import { resolveAppRoot } from '@/lib/app-root';
 import type { AppSettings } from '@/lib/settings';
 
-/** 沙盒模式（wanted Node 模式）下禁用的写类工具：避免 AI 产生文件/待办/日历/脚本等副作用 */
-const SANDBOX_BLOCKED_TOOLS = new Set([
+/** 无确认回传链路下禁用的写类工具：避免 AI 产生文件/待办/日历/笔记/脚本等副作用。
+ *
+ *  命名沿革：原名取自已退役的「Butler Node 模式（沙盒模式）」，Node 模式退役（P1-e）后
+ *  实际生效路径已改为 route 的 `ctx.channel` 收口与 `sandbox: true` 编排链路，语义不变。
+ *  该名单是「副作用工具」的单一真源，被两处消费：
+ *   ① `ToolRuntime.computeActiveToolDefs`：请求体 `sandbox: true`（organize-send 编排链路）
+ *      → 直接从工具面过滤掉（写接口不给，只读查询仍可用）；
+ *   ② route `denyOnAggregateChannel` 收口：聚合链路（微信桥等拿不到确认回传）按
+ *      `SANDBOX_BLOCKED_TOOLS.has(name) && !WECHAT_ALLOWED_WRITES.has(name)` 拒（回话说明 + 不执行）。
+ *  历史教训：旧 Node 模式提示词曾声称「不写入待办、日历」，但本名单只挡文件/命令类 →
+ *  提示词说「不能写」、工具面却给着写接口，模型在两份矛盾指令间摇摆（实测 ` thinking`
+ *  出现 "tools list includes create_scheduled_todo… There's tension"）。
+ *  2026-09-25 补上「待办 / 日历」写类；P2 再补「笔记」写类（create_note / update_notebook /
+ *  write_notebook_answer / restore_note / ingest_notes / review_notes / set_note_rules /
+ *  delete_notebook），令「工具面 = 声称的能力边界」成立；微信通道由 WECHAT_ALLOWED_WRITES
+ *  单独放行（delete_notebook 不放行——已被管家 coreExclusions 剔除，且属破坏性操作）。
+ *  （偏好 remember/update/delete_preference 与 set_model_price 同为写类，暂不拦——
+ *    避免顺手改出无关行为差异；微信通道另有 WECHAT_ALLOWED_WRITES 白名单单独放行。）
+ *  注：lint_notes 是只读自检（仅产出报告，不改数据），故不列入本名单。 */
+export const SANDBOX_BLOCKED_TOOLS = new Set([
   'write_file',
   'rename_file',
   'delete_file',
   'run_command',
   'execute_script',
-  'set_app_icon', // 修改程序配置属写操作，Node 模式禁止（get_app_config 只读仍可用）
+  'set_app_icon', // 修改程序配置属写操作，禁写（get_app_config 只读仍可用）
   'update_provider_config',
   'manage_mcp_server',
+  // 待办 / 日历（提示词「不写入待办、日历」的落地：写接口不给，只读查询仍可用）
+  'create_scheduled_todo',
+  'todo_update',
+  'todo_delete',
+  'plan_schedule',
+  'create_sticky_note',
+  // 新建项目（应用结构写动作：落目录 + 改全局项目配置）
+  'create_project',
+  // 笔记写类（P2 补齐：此前散落名单外 → 在聚合链路被静默直接执行、不弹确认）
+  'create_note',
+  'update_notebook',
+  'write_notebook_answer',
+  'restore_note',
+  'ingest_notes',
+  'review_notes',
+  'set_note_rules',
+  'delete_notebook', // 破坏性：微信白名单亦不放行（管家工具面已由 coreExclusions 剔除）
 ]);
+
+/** 微信通道（channel='wechat'）**放行**的写类工具白名单（C 档）。
+ *
+ *  背景：微信桥是聚合链路（把上游 SSE 读到流结束才聚合成一句 JSON），确认卡/弹窗永远到不了
+ *  用户手里 —— 若照桌面流程登记挂起，请求会空等到 CONFIRM_TIMEOUT_MS（10 分钟）。
+ *  P0 统一入口后微信里一切写入都靠管家工具，若照旧「全部写类一律拒」，微信将彻底只能问答。
+ *  故按「手机端高频且低风险」挑出下列工具放行（**无确认卡，直接执行**）：
+ *    - 排程三件套：建 / 改 / 删日程与待办（手机端最常用）
+ *    - 便签创建
+ *    - 笔记写类（P2 补齐并显式化）：create_note / update_notebook / write_notebook_answer /
+ *      restore_note / ingest_notes / review_notes / set_note_rules —— 微信里「记一下 / 查笔记 /
+ *      /note raw / /note ingest」都要能真正落库（P1 统一入口目标），故一并放行。
+ *  仍禁：文件读写 / 命令脚本 / 程序配置（手机上既难表达又高风险）、delete_notebook（破坏性）。
+ *  消费点：route 的 `ctx.channel` 判定（butler 卡片 / tool_confirm / ask_user 三处）——
+ *    微信（channel='wechat'）`SANDBOX_BLOCKED_TOOLS.has(name) && !WECHAT_ALLOWED_WRITES.has(name)` 才拒；
+ *    其它聚合通道（channel='panel'）保持只读：白名单仅在 wechat 下生效，写类一律拒。
+ *    （注：⌘F 面板已于 P1-c 退化为纯搜索，panel 通道当前无仓内调用方，语义按「聚合即只读」保留。） */
+export const WECHAT_ALLOWED_WRITES = new Set([
+  'create_scheduled_todo',
+  'todo_update',
+  'todo_delete',
+  'plan_schedule',
+  'create_sticky_note',
+  // 新建项目（低风险且可逆：只建目录不删改；与便签同为「创建容器」类，微信直接放行）
+  'create_project',
+  'create_note',
+  'update_notebook',
+  'write_notebook_answer',
+  'restore_note',
+  'ingest_notes',
+  'review_notes',
+  'set_note_rules',
+]);
+
+/** 桥接外部通道（聚合链路，拿不到确认卡回传）：微信与飞书共用同一写类白名单。
+ *  消费点：route 的 `ctx.channel` 判定（butler 卡片 / tool_confirm / ask_user 三处）——
+ *  桥接通道放行白名单内写类，其余聚合通道（channel='panel'）保持只读。 */
+export function isBridgeWriteAllowed(channel: string | undefined, tool: string): boolean {
+  return (channel === 'wechat' || channel === 'feishu') && WECHAT_ALLOWED_WRITES.has(tool);
+}
 
 // ===== CacheGuard：缓存前缀守卫（Reasonix "hash + pinned" 的代码级落实）=====
 // 实际发送的 tools 段（loopToolDefs，已按工具名确定性排序）是跨对话共享缓存前缀
@@ -128,7 +203,7 @@ function diffToolFingerprints(prev: Map<string, string>, cur: Map<string, string
  *  按意图激活/不激活导致工具集增减属预期行为——CacheGuard 应豁免此类变化，
  *  只对 core 内置 / 自定义工具的异常漂移告警，避免每会话首次激活刷屏误导诊断。
  *  2026-09-09 语义随 getToolLayer 修复扩展：SCENED_TOOLS 场景门控内置工具（butler/
- *  wanted/todo 系）也归 ondemand → 一并豁免（此前默认 core 被误判异常漂移）。
+ *  butler/todo 系）也归 ondemand → 一并豁免（此前默认 core 被误判异常漂移）。
  *  导出供单测回归锁定豁免边界。 */
 export function isDynamicSceneTool(name: string): boolean {
   return getToolSource(name) === 'mcp' || getToolLayer(name) === 'ondemand';
@@ -285,7 +360,7 @@ export interface ToolRuntimeOptions {
   settings: AppSettings;
   /** 请求解析出的 Agent 画像（resolveAgentProfile 结果） */
   profile: AgentProfile;
-  /** 沙盒模式（wanted Node 模式）：过滤写类工具（SANDBOX_BLOCKED_TOOLS） */
+  /** 无确认回传链路（sandbox:true 编排链路）：过滤写类工具（SANDBOX_BLOCKED_TOOLS） */
   sandbox: boolean;
   /** 节点"强制使用"MCP（复选框）：仅对 Store 中全局 enabled 的 server 生效；缺省/空 = 跟随全局 */
   enabledMcpIds?: string[];
@@ -366,7 +441,7 @@ export class ToolRuntime {
   }
 
   /** 场景/画像两层过滤组装（computeActiveToolDefs，逻辑原样随迁 route.ts）：
-   *  L1 静态（节点类型：coding/wanted/node）+ L2 动态（对话意图）场景已由调用方合并进 activeScenes；
+   *  L1 静态（节点类型：coding/butler/node）+ L2 动态（对话意图）场景已由调用方合并进 activeScenes；
    *  此处按 activeScenes / profile 画像（scenes=fixed 用固定场景子集、coreExclusions 剔除）过滤，
    *  再兜底校验工具名（OpenAI API ^[a-zA-Z0-9_-]+$），最后并入节点"强制使用"MCP（mergeForcedMcpToolDefs）。 */
   private computeActiveToolDefs(activeScenes: Set<ToolScene>): ToolDefinition[] {

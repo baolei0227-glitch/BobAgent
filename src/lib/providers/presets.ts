@@ -52,7 +52,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         temperature: 1,
         family: 'deepseek-v4',
         spec: {
-          capabilities: ['conversation', 'coding', 'reasoning', 'analysis', 'multilingual', 'long-context'],
+          capabilities: ['vision', 'conversation', 'coding', 'reasoning', 'analysis', 'multilingual', 'long-context'],
           strengths: ['Fast response', 'Strong code generation', 'Agent capability', '1M context', 'Supports thinking mode'],
           weaknesses: ['Weaker than Pro on complex reasoning'],
           useCases: ['Daily conversation', 'Code writing', 'Agent tasks', 'Translation', 'Long document analysis'],
@@ -687,7 +687,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         temperature: 0.7,
         family: 'deepseek-v4',
         spec: {
-          capabilities: ['conversation', 'coding', 'reasoning', 'analysis', 'long-context', 'multilingual'],
+          capabilities: ['vision', 'conversation', 'coding', 'reasoning', 'analysis', 'long-context', 'multilingual'],
           strengths: ['1M context window', 'Fast responses', 'Cost-effective', 'Supports thinking mode'],
           weaknesses: ['Weaker than Pro on complex reasoning'],
           useCases: ['Large codebase analysis', 'Long document processing', 'Multi-turn conversation'],
@@ -775,7 +775,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         temperature: 0.7,
         family: 'deepseek-v4',
         spec: {
-          capabilities: ['conversation', 'coding', 'reasoning', 'analysis', 'long-context', 'multilingual'],
+          capabilities: ['vision', 'conversation', 'coding', 'reasoning', 'analysis', 'long-context', 'multilingual'],
           strengths: ['1M context window', 'Fast responses', 'Cost-effective', 'Supports thinking mode'],
           weaknesses: ['Weaker than Pro on complex reasoning'],
           useCases: ['Large codebase analysis', 'Long file editing', 'Multi-file refactoring'],

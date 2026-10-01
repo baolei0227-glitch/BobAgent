@@ -86,9 +86,9 @@ export const OFFICIAL_PACKAGES: AgentPackageManifest[] = [
     id: 'butler',
     name: 'Butler',
     description:
-      'Conversational to-do & schedule assistant. Records statements as private stickytodo rows (never auto-added to the calendar) and only creates calendar events when you schedule an item at a concrete time — queries merge those unscheduled rows so nothing is lost. Guards duplicates/conflicts and reuses scheduling preferences. Optional plan-tree for multi-step goals. Reads the project ledger to locate materials, but does not write it — project archive maintenance (ledger entries, claim checks, project pages) belongs to the Archivist package; it points you there instead.',
-    version: '1.0.0',
-    fixedScenes: ['general', 'node', 'butler', 'ledger'],
+      'Chief-of-staff style personal assistant for BobWork — it cares whether your day holds together, not about delivering big artifacts. Routes professional work to the right agent or node (team_run for multi-step jobs, Kar for the personal knowledge library, Archivist for the project ledger, Coding for code) and keeps its own hands on the transactional domain: todos, schedule, plan tree, preferences and model pricing. Answers questions about the app (projects, nodes, capabilities, connection state, unread receipts) only from real tool results and says so when it cannot look something up. Confirms before any outward action, stays proactive but quiet when there is nothing worth interrupting for. Todos land as stickytodo rows and auto-enter the calendar when the note is settled — a line with a concrete time is scheduled to that time, otherwise it takes a near-term default slot; moving one is always todo_update, never a re-create. Before proposing any arrangement it queries the schedule window, states any overlap and offers genuinely free alternative slots. Reads the project ledger to locate materials but never writes it.',
+    version: '1.2.0',
+    fixedScenes: ['general', 'node', 'butler', 'ledger', 'console'],
     prompt: BUTLER_BASE_SYSTEM_PROMPT,
   },
   {

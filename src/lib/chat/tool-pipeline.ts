@@ -270,6 +270,9 @@ export interface ArgsTransformContext {
   readonly currentNodeId: string | undefined;
   /** Coding 节点沙箱 appId（truthy 时注入 node_sandbox_app_id；非沙箱会话为 undefined 不注入） */
   readonly sandboxAppId: string | undefined;
+  /** 当前 Agent 身份（注入按身份剔除的技能清单 __disallowed_skills，见 route.ts __skill_gate__）；
+   *  省略该键 = 该调用点不做身份级能力过滤 */
+  readonly agentId?: string;
 }
 
 /** result_compact 执行结果：压缩后的文本 + 是否实际发生压缩（宿主据此发 SSE tool_compact 帧与日志） */
@@ -443,6 +446,13 @@ export interface HostTakeoverContext {
    *  continue）。未注入（undefined）= 兜底按现网 allow_scope 语义（名单外一律放行）——
    *  向后兼容不破坏既有 kind API。butler 结构化卡覆盖判定仍在 handler 内先于本策略执行。 */
   readonly approvalStrategy?: ApprovalStrategy;
+  /** 调用通道（route 请求体 channel 透传）。**非 undefined = 聚合链路**（微信桥 / ⌘F 面板 /chat 都经
+   *  /api/core/node-chat 把上游 SSE 读到流结束才聚合成一句 JSON 返回，**确认回传永远到不了挂起项**）：
+   *  确认类 handler 据此改为「回话说明 + 不执行」，不登记挂起（否则空等到 CONFIRM_TIMEOUT_MS 十分钟）；
+   *  写类工具亦据此拒绝，避免默认 allow_scope 档下名单外写工具被静默执行（微信另按
+   *  WECHAT_ALLOWED_WRITES 白名单放行排程三件套 + 便签，panel 保持只读）。
+   *  缺省 undefined = 桌面流式通道（Butler 抽屉），确认卡链路完整，行为不变。 */
+  readonly channel?: 'wechat' | 'feishu' | 'panel';
   /** exec 前原始参数字符串（tc.function.arguments；确认类挂起登记 createPendingConfirm 第二参，
    *  与 ctx.args 的已解析对象解耦；butler 卡编辑后亦可能已更新） */
   readonly execArgs?: string;

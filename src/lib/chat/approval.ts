@@ -19,9 +19,9 @@
  *   2. .local-roots 路径授权是 scope gate，前置于工具执行（run_command / execute_script 等的
  *      个人目录读写拦截 readableError），未经授权路径仍由原 readableError 拒绝 —— 与本层正交，
  *      本层不重复判定路径。
- *   3. 与 route SANDBOX_BLOCKED_TOOLS（wanted Node 沙箱模式的禁写全集，面向「该模式一律禁止
+ *   3. 与 route SANDBOX_BLOCKED_TOOLS（无确认回传链路的禁写全集，面向「该链路一律禁止
  *      副作用」，含 write_file / run_command / set_app_icon / update_provider_config /
- *      manage_mcp_server 等）的差异：本层写类判定服务于 ask/never 档的「可确认 / 需拦截」启发，
+ *      manage_mcp_server / 待办日历 / 笔记写类等）的差异：本层写类判定服务于 ask/never 档的「可确认 / 需拦截」启发，
  *      面向主对话工具全集（内置 + browser MCP），宁保守（少误判写类、避免拦截读工具）但要覆盖
  *      主流写工具（文件/命令/脚本 + browser 页面操纵与存储写入）。
  *

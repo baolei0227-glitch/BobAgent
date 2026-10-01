@@ -14,11 +14,12 @@
 import { promises as fs, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
-import { defaultSettings, normalizeCustomThemes, DEFAULT_QUICK_PROMPTS, type AppSettings } from './settings';
+import { defaultSettings, normalizeCustomThemes, DEFAULT_QUICK_PROMPTS, type AppSettings, type SttSettings } from './settings';
 import { resolveAppRoot } from './app-root';
-import { encryptSettings, decryptSettings, hasPlainSecrets } from './secrets';
+import { encryptSettings, decryptSettings, hasPlainSecrets, hasLegacySecrets } from './secrets';
 import { sanitizeBaseUrl } from './types';
 import { MCP_PRESETS, DEFAULT_MCP_SERVERS, type McpServerConfig } from './mcp/types';
+import { LOCAL_STT_MODELS, isLocalSttBinaryInstalled, isLocalSttModelReady } from './stt/sherpa';
 
 /** 清理所有 provider 的 baseUrl：去掉误存的端点后缀（如 .../images/generations），
  * 避免运行时/连接测试拼接端点后得到 .../images/generations/chat/completions → 404 */
@@ -178,6 +179,45 @@ function resolveSettings(settings: AppSettings): AppSettings {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 单引擎单选迁移（2026-09-26）
+//
+// STT / TTS 从「云端为主 + 本地隐式兜底」改为「云端与本地互斥单选、不做自动回退」，
+// 配置里的 localEnabled 字段已删除。老配置（localEnabled:true 且从未显式选过引擎）
+// 升级后会直接报「未配置引擎」，语音输入 / 朗读静默失效——为不打断老用户，
+// 这里把「曾经开启本地兜底」一次性固化为「显式选中本地引擎」：
+//   STT → provider='sherpa-local' + 第一个已就绪的本地模型（引擎已装且模型文件齐全）
+// 仅在本机本地引擎确实可用时才迁移；迁移后即删掉 localEnabled，故只生效一次。
+// 已显式配过云端引擎（model / pool 非空）的配置一律不动。
+// （TTS 侧迁移分支已随 macOS say 引擎下线一并移除，不再把老配置固化为某个本地引擎。）
+// ---------------------------------------------------------------------------
+async function migrateLegacyEngineSelection(settings: AppSettings): Promise<AppSettings> {
+  const stt = settings.stt as (SttSettings & { localEnabled?: boolean }) | undefined;
+  if (stt?.localEnabled === true && !stt.localModel && !stt.model && !stt.pool?.length) {
+    const readyId = await firstReadyLocalSttModel();
+    if (readyId) {
+      delete stt.localEnabled; // 字段已下线：迁移后不再写回，保证只迁移一次
+      stt.provider = 'sherpa-local';
+      stt.model = undefined;
+      stt.pool = [];
+      stt.localModel = readyId;
+    }
+  }
+
+  return settings;
+}
+
+/** 第一个「引擎已安装 + 模型文件齐全」的本地 STT 模型 id；都不就绪返回 null。
+ *  只认 batch 能力：realtime 模型只服务实时链路，被选成批量转写引擎会直接报错。 */
+async function firstReadyLocalSttModel(): Promise<string | null> {
+  if (!(await isLocalSttBinaryInstalled())) return null;
+  for (const def of LOCAL_STT_MODELS) {
+    if (!def.capabilities.batch) continue;
+    if (await isLocalSttModelReady(def.id)) return def.id;
+  }
+  return null;
+}
+
 export async function readSettingsFromFile(): Promise<AppSettings> {
   try {
     const APP_ROOT = resolveAppRoot();
@@ -217,13 +257,15 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
       }
     }
 
-    // 解密敏感字段；如果有明文，顺便回写成加密版（透明迁移）
+    // 解密敏感字段；明文（老数据）或「历史机器指纹加密」的密文都顺手回写成主指纹加密版（透明迁移）
     const decrypted = decryptSettings(merged);
-    if (hasPlainSecrets(parsed)) {
+    if (hasPlainSecrets(parsed) || hasLegacySecrets(parsed)) {
       try {
         await writeSettingsToFile(decrypted);
       } catch { /* 回写失败不影响读取 */ }    }
-    return resolveSettings(decrypted);
+    // 单引擎单选迁移：须在 resolveSettings 之前，保证 UI 与运行时读到同一份已迁移配置
+    const migrated = await migrateLegacyEngineSelection(decrypted);
+    return resolveSettings(migrated);
   } catch (err) {
     // 文件不存在（首次运行）：返回正常默认配置，允许后续保存创建文件
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {

@@ -4,8 +4,8 @@
 // （四段低频变化注入文本的 provider）收敛为 ContextRuntime 单例 service：
 //   ① 项目路径注入文本（原 projectPathInjection，route 2899-2901）；
 //   ② 授权目录清单文本（原 authorizedRootsInjection，route 2904-2917）；
-//   ③ 用户偏好类型目录文本（原 prefInjection，route 2941-2962 的 listPreferences/统计/拼装部分）；
-//   ④ OCR/视觉引擎现状事实文本（原 module 级 buildOcrEngineFactInjection，route 1604-1674）。
+//   ③ 用户记忆注入文本（原 prefInjection，route 2941-2962 的 listPreferences/分档/拼装部分）；
+//   ④ OCR/视觉引擎现状事实文本（原 module 级 buildOcrEngineFactInjection，route 1604-1674）；
 // 统一入口 buildChain 按原 route 注入顺序（pathContext → userPreferences → ocrFact）依次生成，
 // 各段独立容错（单段读取/解析失败仅该段返回 ''，不阻断后续段）——与原 route 各段独立 try/catch
 // 语义一致；空串段 = 原代码该段不调用 prependDynamicContext。
@@ -27,6 +27,9 @@ import { pluginDataHome } from '@/lib/extensions/data-home';
 import type { NodeMarkdown } from '@/lib/node-markdown';
 import { readAppEntry, hasAppImplementation } from '@/lib/sandbox/apps';
 import { getBridgeActionsText } from '@/lib/sandbox/bridge';
+import { BUTLER_COMMANDS } from '@/lib/core/commands';
+import { BUTLER_SCHEDULE_DISCIPLINE } from '@/lib/agents/profiles';
+import { getMeetingState } from '@/lib/core/meeting-session';
 
 /** 项目路径/授权目录段生成所需的最小入参（route 已解析好的请求级上下文） */
 export interface PathContextInput {
@@ -40,7 +43,7 @@ export interface PathContextInput {
 export interface ContextInjectionChain {
   /** 段①+②：项目路径文本 + 授权目录文本（原 pathContextInjection = projectPathInjection + authorizedRootsInjection） */
   pathContextInjection: string;
-  /** 段③：用户偏好类型目录文本（无偏好/读取失败 = ''，不注入） */
+  /** 段③：用户记忆注入文本（无记忆/读取失败 = ''，不注入） */
   userPreferencesInjection: string;
   /** 段④：OCR/视觉引擎现状事实文本（未配置/读取失败 = ''，不注入） */
   ocrEngineFactInjection: string;
@@ -56,6 +59,36 @@ export class ContextRuntime {
     return currentProjectPath
       ? `\n\n当前项目路径：${currentProjectPath}\n产出文档默认 .md，用 ${nodeHomeworkDir}/ 前缀相对路径写入（如 write_file(path="${nodeHomeworkDir}/报告.md")），不要写入 homework/.ai-workspace/ 临时工作区。\n【产物声明】写文件成功后，在最终回答末尾另起一行输出 \`OutputFile: ${nodeHomeworkDir}/文件名\`（每行一个），前端据此生成可点击打开的产物卡片；禁止声明未写入或写入失败的路径。\n【模板填充产物路径】模板填充生成的 .docx 保存在 homework/template/ 目录（Finder 可见），读取/检查须用 homework/template/ 前缀。`
       : `\n\n当前没有激活项目：所有相对路径将解析到临时工作区 ~/BobWork/.sandbox。如果你的产出属于某个项目，请提醒用户先在 BobWork 中激活该项目，再把文件写入该项目的 homework/ 目录。`;
+  }
+
+  /**
+   * 段⓪：当前时间锚点注入文本（恒非空）。
+   *
+   * 模型没有「现在几点 / 今天几号」的内在感知：用户说「明天下午三点」「下周三」时，
+   * 不知道锚点就无法推算绝对时间，只能反问或凭记忆猜——对话式建日程因此首轮必卡。
+   * 故每轮现算一次本机时间（含时区偏移与星期）注入。与 task-summarize.ts 的 /todo
+   * 解析同一个思路（那里把 nowIso() 写进系统提示）。
+   *
+   * 缓存影响：走 prependDynamicContext 动态通道（落在当前轮 user 消息内），
+   * system + 工具 + 历史前缀字节不变，不影响前缀缓存命中。
+   */
+  buildNowInjection(): string {
+    const now = new Date();
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const weekday = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][now.getDay()];
+    // 本机 UTC 偏移（分钟）→ ±HH:MM 字面量，供模型直接拼进 ISO
+    const offMin = -now.getTimezoneOffset();
+    const sign = offMin >= 0 ? '+' : '-';
+    const abs = Math.abs(offMin);
+    const off = `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+    const local = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())} ${weekday}`;
+    return (
+      `\n\n## 当前时间（相对时间锚点）\n` +
+      `现在是 ${local}（UTC${off}）。\n` +
+      `用户说"今天 / 明天 / 后天 / 下周三 / 周五下午三点 / 一小时后"等相对时间时，必须以此刻为锚点推算绝对时间，` +
+      `并把 start_time / end_time / due_at 写成带 ${off} 偏移的 ISO（形如 YYYY-MM-DDTHH:mm:ss${off}）。` +
+      `不要凭记忆猜测当前日期与星期。`
+    );
   }
 
   /** 段②：授权目录清单注入文本（无授权目录/读取失败返回 ''，原 route try/catch 忽略语义） */
@@ -78,27 +111,122 @@ export class ContextRuntime {
     }
   }
 
-  /** 段③：用户偏好类型目录注入文本（listPreferences 读取 + type 分组统计 + 目录文本，原 route 2941-2962 纯生成部分）。
-   *  无偏好/读取失败返回 ''（原代码 prefs.length > 0 才注入、读取异常被 catch 忽略）。 */
+  /** 段③：用户记忆注入文本（listPreferences 读取 + 注入分档，原 route 2941-2962 纯生成部分）。
+   *  分档：常驻档（身份画像 / 偏好习惯）注入正文；其余类型只注入 type 目录，按需 read_preferences 取全文。
+   *  安全阀：常驻档条目数超过 ALWAYS_INJECTED_MAX 时整体退化为只注入目录，避免 token 无上限增长。
+   *  无记忆/读取失败返回 ''（原代码 prefs.length > 0 才注入、读取异常被 catch 忽略）。 */
   async buildUserPreferencesInjection(): Promise<string> {
     try {
-      const { listPreferences } = await import('@/lib/wanted/preferences');
+      const { listPreferences, ALWAYS_INJECTED_TYPES, ALWAYS_INJECTED_MAX } = await import('@/lib/core/preferences');
       const prefs = await listPreferences();
       if (prefs.length === 0) return '';
-      // 类型目录：按 type 分组统计条数（不注入具体内容，节省上下文、避免无关偏好干扰）
+
+      // 常驻档：条数少、每轮都用，注入正文；超阈值则整体退化为目录（安全阀）
+      const residentOverflow =
+        prefs.filter((p) => ALWAYS_INJECTED_TYPES.includes(p.type)).length > ALWAYS_INJECTED_MAX;
+      const isResident = (type: string) => !residentOverflow && ALWAYS_INJECTED_TYPES.includes(type);
+      const resident = prefs.filter((p) => isResident(p.type));
+      const rest = prefs.filter((p) => !isResident(p.type));
+
+      const blocks: string[] = [];
+      const hints: string[] = [];
+      if (resident.length > 0) {
+        const lines = resident.map((p) => `- [${p.type}] ${p.content}`).join('\n');
+        blocks.push(`**常驻档（${ALWAYS_INJECTED_TYPES.join(' / ')}，每轮注入正文）**\n${lines}`);
+        hints.push('上方常驻档每轮随上下文给出全文');
+      }
+      // 目录档：按 type 分组统计条数（不注入具体内容，节省上下文、避免无关记忆干扰）
       const typeCounts = new Map<string, number>();
-      for (const p of prefs) {
+      for (const p of rest) {
         typeCounts.set(p.type, (typeCounts.get(p.type) || 0) + 1);
       }
-      const typeLines = Array.from(typeCounts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([type, count]) => `- [${type}] ×${count}`)
-        .join('\n');
-      return `\n\n## 用户偏好（全局长期记忆，类型目录，按需调取）\n已记录 ${prefs.length} 条偏好，类型目录：\n${typeLines}\n\n当前任务涉及上述某类偏好时（输出格式、引用规范、任务流程、沟通风格等），调用 read_preferences(type) 读取该类完整记录并严格遵守；需要全部记录时调用 read_preferences()。若用户明确要求记住新偏好，调用 remember_preference 写入（可带 type 分类）；遗忘用 delete_preference（按序号）。`;
+      if (typeCounts.size > 0) {
+        const typeLines = Array.from(typeCounts.entries())
+          .sort((a, b) => b[1] - a[1])
+          .map(([type, count]) => `- [${type}] ×${count}`)
+          .join('\n');
+        blocks.push(`**目录档（按需调取）**\n${typeLines}`);
+        hints.push(
+          '目录档只给分类，当前任务涉及某类时（工作上下文、事实经历、目标计划、关系边界），调用 read_preferences(type) 读取该类完整记录并严格遵守；需要全部记录时调用 read_preferences()'
+        );
+      }
+
+      return `\n\n## 用户记忆（统一长期记忆，所有联系人共享，记的是用户本人）\n已记录 ${prefs.length} 条。${hints.join('；')}。识别到持久的偏好/事实时主动调用 remember_preference 写入（type 取六类：身份画像 / 偏好习惯 / 工作上下文 / 事实经历 / 目标计划 / 关系边界）；写入前先 read_preferences 查同类：有矛盾走 update_preference 覆盖、同一件事（哪怕措辞不同）合并成一条，而非重复追加或另起条目；密码/密钥/token/证件号等敏感信息不记录；遗忘用 delete_preference（按序号）。\n\n${blocks.join('\n\n')}`;
     } catch {
-      // 偏好读取失败忽略（与原 route 内联 try/catch 一致）
+      // 记忆读取失败忽略（与原 route 内联 try/catch 一致）
       return '';
     }
+  }
+
+  /**
+   * 段⑤：Butler 斜杠命令表注入（P0 · 统一入口）。
+   *
+   * 为什么走动态注入而不是写进系统提示词：管家提示词（BUTLER_BASE_SYSTEM_PROMPT）在安装时被
+   * 物化为 `<APP_ROOT>/agents/butler/agent.json`，改常量对**已安装用户不生效**；而命令表
+   * （BUTLER_COMMANDS）是宿主层唯一真源，必须让已装用户也立刻看到变化 → 每轮从真源现算、
+   * 经 prependDynamicContext 低频通道注入（注入动作仍在 route 原位，本方法只产出文本）。
+   *
+   * 缓存影响：注入落在所有历史之后（当前轮 user 消息内），system + 工具 + 历史前缀字节不变。
+   *
+   * 两端通用：微信 / Butler 抽屉的斜杠输入经 normalizeSlashInput 翻译为
+   * 「意图：…」+ 正文后交给本画像，故只需注入一次即可覆盖全部入口。
+   * （⌘F 面板的指令态已于 2026-09 P1-c 移除，不再是斜杠输入入口：见 UnifiedPalette.tsx 头注释。）
+   */
+  buildButlerCommandsInjection(): string {
+    const lines = BUTLER_COMMANDS.map((c) => {
+      const cap = c.capability
+        ? `你可用：${c.capability}`
+        : '**该能力不在你手里**：如实说明并引导用户去对应节点（不要假装执行）';
+      return `- /${c.keyword} — ${c.label}（意图：${c.intent}）→ ${cap}`;
+    });
+    return (
+      `\n\n## 斜杠命令（用户的快捷语法，两端通用：微信 / Butler 抽屉）\n` +
+      `命令清单（唯一真源，勿编造）：\n${lines.join('\n')}\n\n` +
+      `收到以「意图：…」开头的文本时，按该意图调用你手里的工具（标注「不在你手里」的如实说明并引导）。` +
+      `用户发 /help 或未知命令（如 /foo）时，用上面的清单如实列出或指出不存在，不要编造命令名。`
+    );
+  }
+
+  /**
+   * 段⑤：Butler 排期纪律注入（P0 · 与命令表同一理由）。
+   *
+   * 为什么走动态注入：与命令表完全同因——管家提示词被物化为
+   * <APP_ROOT>/agents/butler/agent.json，改 profiles.ts 的常量对**已装用户不生效**，
+   * 而「建日程回复太长」这条纪律必须立刻对所有人生效。故把
+   * BUTLER_SCHEDULE_DISCIPLINE（与 BUTLER_BASE_SYSTEM_PROMPT 内插值同一常量）经本通道注入。
+   *
+   * 缓存影响：注入落在所有历史之后（当前轮 user 消息内），system + 工具 + 历史前缀字节不变。
+   */
+  buildScheduleDisciplineInjection(): string {
+    // 已装用户的 agent.json 里是旧版排期纪律，故显式声明「以本段为准」避免两条规则打架
+    return `\n\n以下是宿主层下发的最新排期口径（与提示词里的旧版不一致时，一律以本段为准）：\n${BUTLER_SCHEDULE_DISCIPLINE}`;
+  }
+
+  /**
+   * 段⑤：进行中的会议状态注入（P1-b · `/meeting` 工具化）。
+   * route 注入位置：管家在命令表之后；其他身份（主对话等）在命令表段之前单独注入。
+   *
+   * 会议缓冲是服务端**全局单场状态**（lib/core/meeting-session.ts，P1-d 起落 SQLite .inbox.db），
+   * 模型看不见它——不注入的话，会议进行中用户每条补充内容都会被当成新任务处理
+   * （回话/建日程），而不会用 meeting_append 原样记录，会议链路就断了。
+   * 无进行中会议 → 空串（不注入）。与命令表同走低频动态通道
+   * （prepend 到当前轮 user 消息，system 缓存前缀字节稳定）。
+   *
+   * 覆盖面：P1-b 起仅管家（identity==='butler'）注入；2026-09-26 放宽为全身份——
+   * 主对话（画布 chat 节点）开会后同样需要"会议进行中"这条状态，否则第二轮起链路必断。
+   * route 侧按画像 gate：dynamic 画像（主对话）恒可注入；fixed 画像须 fixedScenes 含 butler
+   * （browser 侧栏 / coding 节点拿不到会议三件套，故不注入，避免"指引有、工具没有"）。
+   */
+  async buildMeetingStateInjection(): Promise<string> {
+    const st = await getMeetingState();
+    if (!st.active) return '';
+    return (
+      `\n\n## 进行中的会议记录\n` +
+      `会议「${st.title}」正在记录中（已记录 ${st.count} 条）。用户本条消息默认是**补充会议内容**：` +
+      `调用 meeting_append 原样记录（不要总结、不要回应内容、不要另起任务）；` +
+      `用户要求结束或整理纪要（如 /meeting out）→ 调用 meeting_end 并把纪要转述给用户；` +
+      `用户明确要做别的事 → 照常办，并提示会议仍在记录中。`
+    );
   }
 
   /**
@@ -294,7 +422,7 @@ export class ContextRuntime {
         `    * 若小程序 UI 自带模型绑定状态展示（如自定义开关徽章），或右上角有自有按钮会遮挡，主动设为 false 关闭宿主注入，用自定义 UI 配合 BobWork.request('chatGetPermission') / 'chatRequestPermission' 自行管理。\n` +
         `\n=== BobWork Host Bridge API（亲儿子待遇：主动对接、深度融合） ===\n` +
         `\n【小程序定位 — BobWork 亲儿子功能组件】\n` +
-        `小程序是 BobWork 原生功能组件，不是外部"外勤物种"。鼓励主动对接主程序资源（WANTED 待办、节点、主题、模型、技能、项目、日历等），让小程序成为用户在 BobWork 中的信息门户和工作面板，而非孤立的独立页面。\n` +
+        `小程序是 BobWork 原生功能组件，不是外部"外勤物种"。鼓励主动对接主程序资源（Butler 待办、节点、主题、模型、技能、项目、日历等），让小程序成为用户在 BobWork 中的信息门户和工作面板，而非孤立的独立页面。\n` +
         `只要功能合理且不会误操作，直接在代码中调用 Bridge API 即可，不需要等待用户明确要求。\n` +
         `\n【持久化 API — 默认允许主动使用】\n` +
         `以下为小程序自身的持久化能力（私有数据），用户提到"加持久化"、"保存记录"、"关掉再打开还在"、"恢复上次状态"、"存历史记录"等场景时，应主动使用，无需用户额外说明：\n` +
@@ -310,12 +438,12 @@ export class ContextRuntime {
         `  选择原则：表单临时状态/UI 偏好 → 用 set/get（快，不需要等待 Promise）；历史记录/长存档/重要数据 → 用 save/load（写入磁盘，跨重启保留）。\n` +
         `\n【主程序共享资源 API — 鼓励主动对接，只读接口默认自由使用】\n` +
         `小程序作为 BobWork 亲儿子组件，默认鼓励主动调用以下 Bridge 只读接口读取主程序资源，打造信息门户/工作面板类体验：\n` +
-        `  - WANTED 系列：readWantedTodo（待办看板）、readWantedNotebook（个人记录索引）、readWantedPreferences（偏好配置）—— 做全局待办面板、个人偏好驱动 UI 等场景直接用\n` +
+        `  - Butler 系列：readWantedTodo（待办看板）、readWantedNotebook（个人记录索引）、readWantedPreferences（偏好配置）—— 做全局待办面板、个人偏好驱动 UI 等场景直接用\n` +
         `  - 节点信息系列：listNodes、readNode、getNodeAncestorChain、getNodeManifest —— 做节点导航/检索/目录页等场景直接用\n` +
         `  - 技能与模型：searchSkills、listConfiguredModels —— 做能力缺口检测、模型选择 UI 等场景直接用\n` +
         `  - 项目与配置：listProjects、getAppConfig、getProjectInfo、getTheme —— 做项目切换、主题适配、总览仪表盘等场景直接用\n` +
         `  - 日历提醒：listCalendarEvents —— 做今日日程/待办提醒面板直接用\n` +
-        `  - 写入类接口（writeWanted）：仍需用户明确提及"写入 wanted"场景才使用，避免误写全局交付目录\n` +
+        `  - 写入类接口（writeWanted）：仍需用户明确提及"写入 butler"场景才使用，避免误写全局交付目录\n` +
         `  - 通过注入的 window.BobWork.request(action, data) 调用：\n` +
         getBridgeActionsText() + '\n' +
         `  - 调用示例：const nodes = await BobWork.request('listNodes', {}); const todo = await BobWork.request('readWantedTodo', {});\n` +

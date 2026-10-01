@@ -8,7 +8,7 @@
  *
  * 工具面分两层（软规定：入口给到 + 提示词引导，不做硬门禁）：
  *   - read_ledger：全体 agent 可见（账本场景随「存在激活项目」激活）——先读档案定位资料；
- *   - ledger_record / ledger_pending / ledger_lint / ledger_challenge / ledger_project：
+ *   - ledger_record / ledger_pending / ledger_lint / ledger_challenge / ledger_project / ledger_schema：
  *     仅 keeper（档案员，ledger-keeper 场景）——账本由档案员维护，其他 agent 只读
  *     （见 official-packages.ts 的 Archivist 包 fixedScenes）。
  *
@@ -16,10 +16,13 @@
  */
 
 import type { Tool } from './index';
-import type { LedgerEntry, LedgerItem, LedgerSide, ProjectStage } from '@/lib/mcp/ledger';
+import type { LedgerEntry, LedgerItem, LedgerSide, LedgerTypeDef, ProjectStage } from '@/lib/mcp/ledger';
 import type { MaterialIndexHit } from '@/lib/materials/indexer';
 
 const NO_PROJECT = '当前没有激活项目：项目账本仅在有项目的画布下可用。';
+
+/** 当事人立场白名单（与 lib/mcp/ledger.ts 的 LedgerSide 一致）：写入前本地校验，非法值不猜、直接跳过 */
+const LEDGER_SIDE_KEYS: readonly LedgerSide[] = ['ours', 'theirs', 'neutral'];
 
 /** 条目单行渲染 */
 function itemLine(item: LedgerItem): string {
@@ -27,8 +30,10 @@ function itemLine(item: LedgerItem): string {
   const src = item.source ? ` — 出处：${item.source}` : '';
   // 「需复核」必须在行内可见：所依据材料已变更的结论不能被当成现行事实引用
   const stale = item.stale === true ? ' · 需复核' : '';
+  // 论断的验证状态（open 是待办信号）：索引里就能看出哪些命题还没结论
+  const claim = item.type === 'claim' && item.claimStatus ? ` · ${item.claimStatus}` : '';
   const sum = item.summary ? `\n    ${item.summary}` : '';
-  return `- ${tag}${item.title} \`${item.id}\`${stale}${src}${sum}`;
+  return `- ${tag}${item.title} \`${item.id}\`${claim}${stale}${src}${sum}`;
 }
 
 /** 批量形态的边界：一次最多返回多少条、每条首段最多多少字 */
@@ -121,8 +126,9 @@ async function toolReadLedger(args: Record<string, unknown>): Promise<string> {
       const tag = entry.tags && entry.tags.length > 0 ? `[${entry.tags.join(' · ')}] ` : '';
       const src = entry.source ? `\n出处：${entry.source}` : '';
       const kind = entry.kind === 'raw' ? '原始登记' : entry.kind === 'project' ? '项目页' : '概览条目';
+      const claim = entry.type === 'claim' && entry.claimStatus ? `\n状态：${entry.claimStatus}` : '';
       const stale = entry.stale === true ? `\n⚠️ 需复核：${entry.staleReason ?? '所依据材料已变更'}（复核后更新本条即自动清除标记；复核前不得当作现行事实引用）` : '';
-      return `- 📁 ${tag}${entry.title}（${kind} \`${entry.id}\`）${src}${stale}\n\n${entry.body}`;
+      return `- 📁 ${tag}${entry.title}（${kind} \`${entry.id}\`）${src}${claim}${stale}\n\n${entry.body}`;
     }
 
     const index = readLedgerIndex(root, query);
@@ -186,6 +192,10 @@ async function toolLedgerRecord(args: Record<string, unknown>): Promise<string> 
     const statedBy = typeof args.statedBy === 'string' ? args.statedBy.trim() : '';
     const statedAt = typeof args.statedAt === 'string' ? args.statedAt.trim() : '';
     const type = typeof args.type === 'string' ? args.type.trim() : '';
+    // 研究取向字段（仅对 claim/evidence 生效，库层按类型校验并回 warning）
+    const status = typeof args.status === 'string' ? args.status.trim() : '';
+    const claimRef = typeof args.claim === 'string' ? args.claim.trim() : '';
+    const points = typeof args.points === 'string' ? args.points.trim() : '';
     const r = recordLedgerEntry(root, {
       title,
       content,
@@ -197,6 +207,9 @@ async function toolLedgerRecord(args: Record<string, unknown>): Promise<string> 
       ...(statedBy ? { statedBy } : {}),
       ...(statedAt ? { statedAt } : {}),
       ...(type ? { type } : {}),
+      ...(status ? { status } : {}),
+      ...(claimRef ? { claim: claimRef } : {}),
+      ...(points ? { points } : {}),
     });
     return `✅ 已${r.created ? '登记' : '更新'}账本条目 \`${r.id}\`「${title}」，索引已刷新。`
       + (origin === 'user' ? '\n已登记为用户陈述（不可核，引用时标 [来源: 用户陈述 · 日期]）。' : '')
@@ -507,6 +520,83 @@ async function toolLedgerChallenge(args: Record<string, unknown>): Promise<strin
 }
 
 /**
+ * ledger_schema 工具（keeper）— 读 / 改账本规则文件（SCHEMA.md）。
+ *
+ * 改宪章是重动作（规则本身约束档案员自己）：只写用户明确要求的内容，
+ * 且必须把结果（含 warnings）如实转述给用户，不能默默改掉口径。
+ */
+async function toolLedgerSchema(args: Record<string, unknown>): Promise<string> {
+  const action = typeof args.action === 'string' ? args.action.trim() : 'read';
+  try {
+    const mod = await import('@/lib/mcp/ledger');
+    const root = await mod.currentProjectRoot();
+    if (!root) return NO_PROJECT;
+
+    if (action === 'read') {
+      const content = mod.readLedgerRules(root);
+      if (!content) return '账本规则为空（账本尚未初始化）。';
+      return `账本规则文件（SCHEMA.md）：\n${content.length > 6000 ? `${content.slice(0, 6000)}\n…（截断）` : content}`;
+    }
+
+    if (action === 'set_parties') {
+      const raw = Array.isArray(args.parties) ? args.parties : [];
+      const parties: Array<{ key: LedgerSide; label: string; dirs: string[] }> = [];
+      for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const o = item as Record<string, unknown>;
+        const key = String(o.side ?? '').trim() as LedgerSide;
+        if (!LEDGER_SIDE_KEYS.includes(key)) continue; // 非法 side 直接跳过（不猜）
+        parties.push({
+          key,
+          label: String(o.label ?? '').trim(),
+          dirs: (Array.isArray(o.dirs) ? o.dirs : []).map((d) => String(d)),
+        });
+      }
+      if (raw.length > 0 && parties.length === 0) {
+        return 'set_parties 未写入：parties 里没有合法条目（side 只能是 ours / theirs / neutral）。';
+      }
+      const res = mod.writeLedgerParties(root, parties);
+      if (!res.ok) return `set_parties 失败：${res.error}`;
+      const now = mod.readLedgerParties(root);
+      const lines = now.length > 0
+        ? now.map((p) => `- ${p.key} | ${p.label} | ${p.dirs.join(', ') || '（未声明目录）'}`)
+        : ['（已清空声明：本项目不做分侧检查）'];
+      return [`已写入「当事人与材料分区」段（${res.path}）：`, ...lines, ...res.warnings.map((w) => `⚠ ${w}`)].join('\n');
+    }
+
+    if (action === 'add_types') {
+      const raw = Array.isArray(args.types) ? args.types : [];
+      const defs: LedgerTypeDef[] = [];
+      for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const o = item as Record<string, unknown>;
+        defs.push({
+          key: String(o.key ?? '').trim(),
+          label: String(o.label ?? '').trim(),
+          ...(o.skeleton ? { skeleton: String(o.skeleton) } : {}),
+        });
+      }
+      if (defs.length === 0) return 'add_types 未写入：types 为空。';
+      const res = mod.addLedgerTypes(root, defs);
+      if (!res.ok) return `add_types 失败：${res.error}`;
+      const declared = mod.readLedgerTypes(root).map((t) => t.key).join(', ');
+      return [`已按需追加条目类型（${res.path}）。当前声明：${declared}`, ...res.warnings.map((w) => `⚠ ${w}`)].join('\n');
+    }
+
+    if (action === 'append') {
+      const clause = typeof args.clause === 'string' ? args.clause : '';
+      const res = mod.appendLedgerClause(root, clause);
+      if (!res.ok) return `append 失败：${res.error}`;
+      return `已追加补充条款到「补充条款」段（${res.path}）。既有段落未改动。`;
+    }
+
+    return `未知 action：${action}（可用 read / set_parties / add_types / append）。`;
+  } catch (e) {
+    return `账本规则写入失败: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/**
  * ledger 场景工具定义。
  * 场景标注在 registry.ts 的 SCENED_TOOLS（静态表，同时决定工具分层 ondemand）。
  */
@@ -548,7 +638,7 @@ export const ledgerToolDefs: Tool[] = [
   },
   {
     name: 'ledger_record',
-    description: 'KEEPER ONLY (project ledger). Write or update a ledger entry (a conclusion, a materials survey, a naming/usage convention, a task outcome summary). ALWAYS cite project-relative paths (materials/…, homework/…) in the content or the source field; when the entry compiles earlier raw registrations, list their ids in rawIds so they stop counting as pending. Pass id to update an existing entry instead of creating a new one; updating an entry also clears its needs-review flag. Tag the entry with type so the ledger can be browsed by kind. Record both sides of a dispute and never adjudicate — the model compares, the human decides. Not for personal notes (use create_note) and not for one-off chat.',
+    description: 'KEEPER ONLY (project ledger). Write or update a ledger entry (a conclusion, a materials survey, a naming/usage convention, a task outcome summary). ALWAYS cite project-relative paths (materials/…, homework/…) in the content or the source field; when the entry compiles earlier raw registrations, list their ids in rawIds so they stop counting as pending. Pass id to update an existing entry instead of creating a new one; updating an entry also clears its needs-review flag. Tag the entry with type so the ledger can be browsed by kind. Record both sides of a dispute and never adjudicate — the model compares, the human decides. Research-oriented entries carry extra fields: a claim takes status (open|supported|refuted|unclear), and an evidence card takes claim (the w-… id it bears on) plus points (supports|refutes). Not for personal notes (use create_note) and not for one-off chat.',
     parameters: {
       type: 'object',
       properties: {
@@ -593,7 +683,21 @@ export const ledgerToolDefs: Tool[] = [
         },
         type: {
           type: 'string',
-          description: 'Optional entry type key declared in .ledger/SCHEMA.md (条目类型 section; built-ins: fact, entity, issue, comparison, analysis, note). Pick fact only when the body rests on materials/ original text; pick comparison only when the body sets the two sides (ours/theirs) against each other — a one-sided statement is not a comparison. An undeclared key is written as unclassified and returned as a warning.',
+          description: 'Optional entry type key declared in .ledger/SCHEMA.md (条目类型 section; built-ins: fact, entity, issue, comparison, analysis, note, plus research-oriented concept, claim, evidence, timeline, method). Pick fact only when the body rests on materials/ original text; pick comparison only when the body sets the two sides (ours/theirs) against each other — a one-sided statement is not a comparison; claim and analysis are not facts and must never be cited as fact by another entry; evidence must carry a stance and point at a claim; method should record the search/filter criteria so the conclusion is reproducible. An undeclared key is written as unclassified and returned as a warning.',
+        },
+        status: {
+          type: 'string',
+          enum: ['open', 'supported', 'refuted', 'unclear'],
+          description: 'Only for type="claim": how far the hypothesis has been verified — open (awaiting evidence, the default), supported, refuted, or unclear. Shown on the index line; a claim left open for ~30 days is reported by ledger_lint. Ignored (with a warning) for other types.',
+        },
+        claim: {
+          type: 'string',
+          description: 'Only for type="evidence": the id (w-…) of the claim this evidence card bears on. An evidence card without a valid claim target (missing, nonexistent, or pointing at a non-claim entry) is reported by ledger_lint as an orphan. Ignored (with a warning) for other types.',
+        },
+        points: {
+          type: 'string',
+          enum: ['supports', 'refutes'],
+          description: 'Only for type="evidence": the direction — supports or refutes the claim it points at. Required on evidence cards: a claim with evidence on only one side is reported by ledger_lint. Ignored (with a warning) for other types.',
         },
       },
       required: ['title', 'content'],
@@ -612,7 +716,7 @@ export const ledgerToolDefs: Tool[] = [
   },
   {
     name: 'ledger_lint',
-    description: 'KEEPER ONLY (project ledger). Mechanical self-check of the ledger (zero tokens, deterministic): entries missing a source path, duplicate titles, broken raw links, project pages referencing a missing w- entry or materials/ path, index out of sync with the files, backlog of uncompiled registrations, one-sided entries, fact/comparison type violations, adjudicating wording (the model compares, it never decides), and entries needing review because their source material changed. Run it periodically and fix what it reports.',
+    description: 'KEEPER ONLY (project ledger). Mechanical self-check of the ledger (zero tokens, deterministic): entries missing a source path, duplicate titles, broken raw links, project pages referencing a missing w- entry or materials/ path, index out of sync with the files, backlog of uncompiled registrations, one-sided entries, fact/comparison type violations, adjudicating wording (the model compares, it never decides), entries needing review because their source material changed, and research-oriented issues (orphan evidence cards, a claim with evidence on only one side, a claim left open for ~30 days). Run it periodically and fix what it reports.',
     parameters: { type: 'object', properties: {}, required: [] },
     category: '文件',
     execute: toolLedgerLint,
@@ -660,6 +764,74 @@ export const ledgerToolDefs: Tool[] = [
     },
     category: '文件',
     execute: toolLedgerProject,
+    maxOutput: 6000,
+  },
+  {
+    name: 'ledger_schema',
+    description: 'KEEPER ONLY (project ledger). Read or edit the ledger RULES file (.ledger/SCHEMA.md) — the charter you obey on every compile and review. It carries two machine-parsed tables plus free clauses. Actions: read = the whole file; set_parties = rewrite the 当事人与材料分区 table (the very table ledger_lint and ledger_challenge use to tell our side from theirs) — pass the COMPLETE table as parties=[{side:"ours"|"theirs"|"neutral", label, dirs:["materials/我方"]}], where dirs are project-relative path prefixes; an empty array clears the declaration and disables the two-sided check; the section\'s explanatory prose is preserved either way. add_types = declare extra entry-type keys (append-only: existing rows are never touched, so removing a type stays a manual edit). append = append a free-form clause to the 补充条款 section (append-only, nothing else is rewritten). WHEN TO WRITE: only when the user explicitly asks for the change or confirms your proposal — never rewrite the charter on your own initiative; it is the rule that binds you. After any write, relay exactly what changed (including the ⚠ lines) to the user.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['read', 'set_parties', 'add_types', 'append'],
+          description: 'read = whole SCHEMA.md; set_parties = rewrite the party/material partition table; add_types = declare additional entry types; append = append a clause.',
+        },
+        parties: {
+          type: 'array',
+          description: 'set_parties: the COMPLETE declaration table (it replaces the previous one). Omit or pass [] to clear the declaration.',
+          items: {
+            type: 'object',
+            properties: {
+              side: {
+                type: 'string',
+                enum: ['ours', 'theirs', 'neutral'],
+                description: 'Which party this bucket of materials belongs to (neutral = neither, e.g. court documents).',
+              },
+              label: {
+                type: 'string',
+                description: 'Human-readable name (e.g. 我方 / 被告 / 法院).',
+              },
+              dirs: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Project-relative path prefixes (e.g. materials/我方). Materials under them are auto-classified into this side. No absolute paths, no "..".',
+              },
+            },
+            required: ['side'],
+          },
+        },
+        types: {
+          type: 'array',
+          description: 'add_types: additional entry types to declare; keys already declared are skipped and reported back.',
+          items: {
+            type: 'object',
+            properties: {
+              key: {
+                type: 'string',
+                description: 'Type key stored in front-matter (letters/digits/_/-, must start with a letter).',
+              },
+              label: {
+                type: 'string',
+                description: 'Short explanation shown in the entry-type list.',
+              },
+              skeleton: {
+                type: 'string',
+                description: 'Optional body skeleton for entries of this type.',
+              },
+            },
+            required: ['key'],
+          },
+        },
+        clause: {
+          type: 'string',
+          description: 'append: the clause text (markdown) appended to the 补充条款 section.',
+        },
+      },
+      required: ['action'],
+    },
+    category: '文件',
+    execute: toolLedgerSchema,
     maxOutput: 6000,
   },
   {

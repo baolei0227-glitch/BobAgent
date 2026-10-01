@@ -198,8 +198,8 @@ async function toolCheckMcpGaps(args: Record<string, unknown>): Promise<string> 
 
 /** 聊天厂商 type 白名单 */
 const CHAT_PROVIDER_TYPES = new Set(['deepseek', 'glm', 'moonshot', 'qwen', 'openai', 'doubao']);
-/** STT 厂商 type 白名单 */
-const STT_PROVIDER_TYPES = new Set(['doubao-stream', 'doubao', 'dashscope', 'siliconflow', 'openai']);
+/** STT 厂商 type 白名单（sherpa-local = 离线本地引擎，无需 Key，模型需先在设置面板下载） */
+const STT_PROVIDER_TYPES = new Set(['doubao-stream', 'doubao', 'dashscope', 'siliconflow', 'openai', 'sherpa-local']);
 
 /** get_app_config 工具：只读当前配置摘要 */
 async function toolGetAppConfig(_args: Record<string, unknown>): Promise<string> {
@@ -710,7 +710,7 @@ export const adminToolDefs: Tool[] = [
   },
   {
     name: 'update_provider_config',
-    description: '修改模型配置并即时生效。target=provider 设聊天厂商 API Key/自定义 baseUrl/勾选模型（provider: deepseek/glm/moonshot/qwen/openai/doubao；model 如 qwen-vl-max）；target=vision 设视觉角色；target=task/outcome = 改主对话模型（已归入 chatModel）；target=stt 设音频转写（doubao-stream/doubao/dashscope/siliconflow/openai）。apiKey 空=清空；baseUrl 空=恢复默认端点。',
+    description: '修改模型配置并即时生效。target=provider 设聊天厂商 API Key/自定义 baseUrl/勾选模型（provider: deepseek/glm/moonshot/qwen/openai/doubao；model 如 qwen-vl-max）；target=vision 设视觉角色；target=task/outcome = 改主对话模型（已归入 chatModel）；target=stt 设音频转写（doubao-stream/doubao/dashscope/siliconflow/openai/sherpa-local；sherpa-local 为离线本地引擎，无需 Key）。apiKey 空=清空；baseUrl 空=恢复默认端点。',
     parameters: {
       type: 'object',
       properties: {

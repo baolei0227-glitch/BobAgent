@@ -30,7 +30,7 @@ const CONSULT_POINTS: readonly string[] = [
  */
 const ALL_REGISTRABLE_KINDS: readonly ToolTakeoverKind[] = [
   'scenario_activate', // pre：search_capabilities（#2）；post：load_skill（#8）→ 两个咨询点
-  'args_transform', // pre（#5）：节点参数注入 + browser.login mode 注入两注册条目同一咨询点合并一项
+  'args_transform', // pre（#5）：节点参数注入 + browser.login mode 注入 + 技能闸门三注册条目同一咨询点合并一项
   'result_compact', // post（#9）
   'ask_user', // pre（#1）
   'tool_confirm', // pre（#4）

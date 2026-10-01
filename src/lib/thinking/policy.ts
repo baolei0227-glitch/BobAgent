@@ -36,9 +36,6 @@ export interface ThinkingPolicyConfig {
   harnessPure: boolean;
   downgradeOnExecution: boolean;
   trivialPromptOff: boolean;
-  /** 非 V4 推理模型的「<think> 标签引导」注入开关（Phase 2b）：
-   *  默认 true；DeepSeek V4 恒不注入（原生 reasoning_content，纯 API 驱动）。 */
-  injectThinkGuide?: boolean;
 }
 
 /** UI 档位 → reasoning_effort 基映射（S2b 四档语义）：off→none、low→low、medium(legacy)→high、high→high、max→max */
@@ -149,19 +146,18 @@ export function isTrivialPrompt(messages: TrivialPromptMessage[]): boolean {
 }
 
 /**
- * 思考提示注入开关（Phase 2b：全面 DSH 化）：
+ * 思考提示注入（Phase 2b：全面 DSH 化）：
  *  - DeepSeek V4：**恒不注入** —— 原生返回 reasoning_content，思考纯由 API 驱动
- *    （V4 已统一走 reasoning_effort，但仍是原生 reasoning_content，无需 <think> 标签引导），
- *    注入「<think> 引导/提问限制」反而与关思考（effort none）产生矛盾（prompt 叫它想 / API 不让想）；
- *  - 非 V4 推理模型：默认注入 <think> 标签引导（其思考块显示依赖该格式），可由
- *    settings.thinking.injectThinkGuide=false 关闭；
+ *    （V4 已统一走 reasoning_effort，但仍是原生 reasoning_content，无需  thinking 标签引导），
+ *    注入「 thinking 引导/提问限制」反而与关思考（effort none）产生矛盾（prompt 叫它想 / API 不让想）；
+ *  - 非 V4 推理模型：**恒注入**  thinking 标签引导（其思考块显示依赖该格式，属正确性前提而非偏好，
+ *    故不设开关；关掉只会让这些模型的思考块显示不正常）；
  *  - 非推理模型：不注入（原「清洗版思考引导」也随之移除，DSH 语义）。
  */
 export function shouldInjectThinkPrompt(
   isV4: boolean,
   supportsThinking: boolean,
-  config: ThinkingPolicyConfig,
 ): boolean {
   if (isV4) return false;
-  return supportsThinking && config.injectThinkGuide !== false;
+  return supportsThinking;
 }

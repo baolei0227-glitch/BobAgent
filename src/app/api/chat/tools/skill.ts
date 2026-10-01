@@ -147,6 +147,22 @@ function resolveSkillResource(skillName: string, resourceFile: string | undefine
   return null;
 }
 
+/** 技能闸门（执行侧）：宿主经 args_transform 注入 __disallowed_skills（按 Agent 身份剔除的技能名，
+ *  见 route.ts __skill_gate__ / profiles.ts skillExclusionsFor）。L1 目录剔除只挡得住"模型看见"，
+ *  挡不住"凭名调用"——本工具按名字查库、不做身份校验，故闸门必须落在执行点：
+ *  本档跑不完的技能（如浏览器对话栏没有 write_file，deep-research 最后一步必然落空）直接拒绝，
+ *  并给出可执行的替代路径，避免模型加载后跑到最后一步才发现做不了（历史故障：侧边栏 39 轮零产物）。 */
+function skillGateBlocks(args: Record<string, unknown>, skillName: string): string | null {
+  const raw = args.__disallowed_skills;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  if (!raw.map((s) => String(s)).includes(skillName)) return null;
+  return (
+    `Error: 技能 "${skillName}" 在当前档位不可用 —— 它依赖本档没有的文件 / 命令工具（落盘、跑脚本），` +
+    `加载了也跑不完。请改用现有工具完成任务，交付物直接写进答复正文；` +
+    `确需该技能时告知用户：本对话栏不提供该能力，请到画布会话中使用。`
+  );
+}
+
 /**
  * load_skill 工具执行器（DSH 模式）：按名称加载技能库中某技能的完整 SKILL.md 正文。
  * 系统提示只列出技能名称+一句话简介，完整操作指令由模型按需调用本工具获取。
@@ -154,6 +170,8 @@ function resolveSkillResource(skillName: string, resourceFile: string | undefine
 async function toolLoadSkill(args: Record<string, unknown>): Promise<string> {
   const skillName = String(args.skill_name ?? '').trim();
   if (!skillName) return 'Error: skill_name is required';
+  const blocked = skillGateBlocks(args, skillName);
+  if (blocked) return blocked;
   try {
     const { getAllSkills } = await import('@/lib/skills/loader-server');
     const all = await getAllSkills();
@@ -206,6 +224,8 @@ async function toolReadSkillResource(args: Record<string, unknown>): Promise<str
     const skillName = String(args.skill_name ?? '').trim();
     const resourceRaw = args.resource === undefined || args.resource === null ? undefined : String(args.resource);
     if (!skillName) return JSON.stringify({ ok: false, error: 'skill_name 必填' });
+    const blocked = skillGateBlocks(args, skillName);
+    if (blocked) return JSON.stringify({ ok: false, error: blocked });
 
     // 1) 无 resource → 返回索引（resources/ + references/ + 技能根目录内的文件一次列全）
     if (resourceRaw === undefined || resourceRaw.trim() === '') {
