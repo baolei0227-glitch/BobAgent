@@ -600,9 +600,16 @@ export async function downloadMediaItem(media: InboundMedia): Promise<string> {
   }
 }
 
-/** 构造单个任意类型 item（供 sendRawItems 批量发送） */
-type OutboundItem =
-  | { type: number; text_item?: { text: string }; image_item?: { content_base64?: string; url?: string; mime?: string } };
+/** 构造单个任意类型 item（供 sendRawItems 批量发送）。
+ *  voice_item / file_item 的出站字段结构为推定（iLink 上行协议待端上验证，见 sendVoice 注释），
+ *  故以宽松类型描述 + 调用处 as OutboundItem 收口，验证定稿后再收紧。 */
+type OutboundItem = {
+  type: number;
+  text_item?: { text: string };
+  image_item?: { content_base64?: string; url?: string; mime?: string };
+  voice_item?: { content_base64?: string; mime?: string; duration?: number };
+  file_item?: { content_base64?: string; mime?: string; file_name?: string; file_size?: number };
+};
 
 /**
  * 通用发消息：按 item 列表逐条发送。
@@ -657,14 +664,70 @@ export async function sendImage(
   await sendRawItems(creds, toUser, [item], contextToken);
 }
 
+/**
+ * 出站发送语音：本地音频读 base64 作为 voice_item.content_base64 发出。
+ *
+ * ⚠️ 协议待端上验证（2026-09-24 B4 门禁探针）：voice_item 的字段名/嵌套结构是从入站
+ * item 解析（L417 'voice_item'）与 sendImage 的出站形态**推定**的——iLink 上行是否接受
+ * voice_item.content_base64 未实测。探针脚本见 scripts/ 下 wechat-send-probe。
+ * 验证不通过时：调用方降级为文本 + 文件卡片（B4 降级方案）。
+ */
+export async function sendVoice(
+  creds: WechatCredentials,
+  toUser: string,
+  audioFilePath: string,
+  contextToken: string,
+): Promise<void> {
+  const buf = await readFile(audioFilePath);
+  const ext = extname(audioFilePath).toLowerCase().replace('.', '');
+  const mime = (
+    ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'opus', 'amr', 'flac'].includes(ext)
+      ? `audio/${ext === 'mp3' ? 'mpeg' : ext}`
+      : 'audio/mpeg'
+  );
+  const item: OutboundItem = {
+    type: ILINK_MSG_TYPE.VOICE,
+    // 推定结构：与 image_item 同为 { content_base64, mime }；iLink 侧可能另要求时长字段
+    voice_item: { content_base64: buf.toString('base64'), mime },
+  };
+  await sendRawItems(creds, toUser, [item], contextToken);
+}
+
+/**
+ * 出站发送文件：本地文件读 base64 作为 file_item.content_base64 发出（PDF / docx / 报告文档等）。
+ *
+ * ⚠️ 协议待端上验证（同 sendVoice）：file_item 出站结构推定自入站命名，iLink 是否接受
+ * 大体积 base64（微信一般 200MB 内，但 bot 通道可能更严）需实测。大文件建议优先给
+ * 本地路径转文字说明，仅小体积文件走本通道。
+ */
+export async function sendFile(
+  creds: WechatCredentials,
+  toUser: string,
+  filePath: string,
+  contextToken: string,
+): Promise<void> {
+  const buf = await readFile(filePath);
+  const name = filePath.split('/').pop() ?? 'file';
+  const item: OutboundItem = {
+    type: ILINK_MSG_TYPE.FILE,
+    file_item: {
+      content_base64: buf.toString('base64'),
+      mime: 'application/octet-stream',
+      file_name: name,
+      file_size: buf.length,
+    },
+  };
+  await sendRawItems(creds, toUser, [item], contextToken);
+}
+
 /** 适配器能力声明 */
 export const WECHAT_CAPABILITIES: AdapterCapabilities = {
   platform: 'wechat',
   media: {
     text: true,
     image: true,  // 入站：下载→OCR→文本化；出站：sendImage base64
-    voice: true,  // 入站：下载→STT→文本化
-    file: true,   // 入站：PDF→OCR；其余格式提示暂不支持
+    voice: true,  // 入站：下载→STT→文本化；出站：sendVoice（⚠️ iLink 上行协议待端上验证）
+    file: true,   // 入站：PDF→OCR；其余格式提示暂不支持；出站：sendFile（⚠️ 同上待验证）
     video: false, // MVP：仍拒绝
   },
 };

@@ -1,12 +1,13 @@
 /**
- * 微信 iLink ↔ WANTED 桥接层
+ * 微信 iLink ↔ Butler 桥接层
  *
  * 职责：
  *   - 启动时读凭证，有则恢复轮询；无则等待扫码绑定
- *   - 收到微信消息 → 解析指令 → 调用共享执行器（与 WANTED 面板同逻辑）→ 回复确认
+ *   - 收到微信消息 → 解析指令 → 交给**统一会话层**（管家画像，与悬浮球/⌘F 同一入口）→ 回复
  *   - 暴露绑定状态机（供 /api/wechat 与前端 UI 轮询）
  *
- * 设计：协议细节在 wechat-adapter.ts；指令执行在 executor.ts；
+ * 设计（P0 统一入口）：协议细节在 wechat-adapter.ts；对话在 /api/butler/threads（线程层 SSOT）；
+ * 仅 /meeting 与会议进行中暂留宿主 executor（会议缓冲是进程内状态，P1 才工具化）；
  * 本文件只做编排，不写任何业务逻辑。
  */
 import {
@@ -26,11 +27,15 @@ import {
   type InboundMessage,
   type InboundMedia,
 } from './wechat-adapter.ts';
-import { executeWantedCommand, finalizeMeeting, type ExecResult } from '@/lib/wanted/executor';
-import { consumeExpiredMeeting, getMeetingState, isMeetingRemindDue, markMeetingReminded } from '@/lib/wanted/meeting-session';
+import { executeButlerCommand, type ExecResult } from '@/lib/core/executor';
+import { finalizeMeeting, recordMeetingTranscript } from '@/lib/core/meeting-finalize';
+import { consumeExpiredMeeting, getMeetingState, isMeetingActive, isMeetingRemindDue, markMeetingReminded } from '@/lib/core/meeting-session';
 import { stripThinkTags } from '@/lib/bus';
-import { buildHelpText } from '@/lib/wanted/commands';
+import { buildHelpText, detectCommand, mergeSteeringInput, normalizeSlashInput } from '@/lib/core/commands';
+import { NOTIFY_THREAD_ID } from '@/lib/butler/storage';
 import { readSettingsFromFile } from '@/lib/settings-server';
+// 会议专属设置（录音源/参会人数/会后自动整理）：超时收尾须尊重 autoSummarize，故读同一份 settings.json
+import { meetingSettingsOf } from '@/lib/settings';
 import { acquireMessageLock, releaseMessageLock } from './msg-dedupe';
 import { extname, basename } from 'path';
 import { unlink } from 'fs/promises';
@@ -69,6 +74,15 @@ class WechatBridge {
   private baseUrl: string;
   /** 会议静默提醒/自动收尾定时器（每 30s tick） */
   private meetingTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * B5「中途改」：在飞任务登记表（key = 用户 id）。
+   * 轮询是 fire-and-forget（`wechat-adapter.ts:381` 不 await），所以长任务没跑完时
+   * 后到的消息会立刻进 onMessage —— 改前是**并发再起一个任务**（两个长任务各回执一次）。
+   * 有了这张表：新消息可以先把旧任务打断，再按「原任务 + 补充要求」重跑。
+   * `steerable` 标记该任务是否在可打断路径上（统一入口后会话层链路均可打断 → 恒真，
+   * 会议分支虽走 executor 但累积是瞬时的，打断无害；见下方入表处）。
+   */
+  private inflightTasks = new Map<string, { abort: AbortController; startedAt: number; input: string; steerable: boolean }>();
 
   /** 计算消息指纹：优先用服务端 msg.id；否则走内容签名兜底 */
   private messageFingerprint(msg: InboundMessage): string {
@@ -88,8 +102,38 @@ class WechatBridge {
     await releaseMessageLock(this.messageFingerprint(msg));
   }
 
+  /**
+   * B5「中途改」：结算该用户可能存在的在飞任务，算出本次真正要执行的输入。
+   *
+   * 返回：
+   *   - `input`：本次执行的输入（无打断时原样返回）
+   *   - `note` ：需要先推给用户的打断说明（无打断返回 ''）
+   *
+   * 规则（确定性，不做语义猜测）：
+   *   1. 上一条**不在可打断路径**上（如 `/todo`）→ 不干预，两条各自跑完各自回执（= 改前行为）。
+   *   2. 新消息以已知指令开头（`/todo` `/note` …）→ 视为**新指令**：只打断，不合并。
+   *   3. 否则视为对上一条的**补充要求** → 与原任务合并重跑。
+   *      这一步必须合并而不是直接跑新文本：否则「改成 3 页」会丢掉原任务，用户得重述一遍。
+   */
+  private supersedeInflight(to: string, input: string): { input: string; note: string } {
+    const prior = this.inflightTasks.get(to);
+    if (!prior || !prior.steerable) return { input, note: '' };
+
+    prior.abort.abort(new Error('superseded by a newer message'));
+    this.inflightTasks.delete(to);
+
+    if (detectCommand(input)) {
+      return { input, note: '⏹️ 已打断上一条（它还没跑完），先按这条新指令执行。' };
+    }
+
+    return {
+      input: mergeSteeringInput(prior.input, input),
+      note: '⏹️ 已打断上一条，按你的补充要求重跑（原任务 + 新要求）。',
+    };
+  }
+
   constructor() {
-    // Node 端 self 地址，用于调用本地 wanted API
+    // Node 端 self 地址，用于调用本地 Butler API
     const port = process.env.PORT || '5000';
     this.baseUrl = `http://localhost:${port}`;
   }
@@ -144,6 +188,12 @@ class WechatBridge {
     this.running = false;
     this.credentials = null;
     this.boundUserId = undefined;
+    // B5：解绑/停止时一并打断在飞任务并清表，避免登记项与其上游 fetch 悬空、
+    // 或下一轮绑定后被一条来自上一会话的「补充要求」误合并。
+    for (const t of this.inflightTasks.values()) {
+      try { t.abort.abort(new Error('bridge stopped')); } catch { /* ignore */ }
+    }
+    this.inflightTasks.clear();
   }
 
   getStatus(): BridgeStatus {
@@ -157,18 +207,112 @@ class WechatBridge {
   }
 
   /**
-   * 主动向最近一次会话推送文本（定时报告 / 关闭前总结用）。
-   * 未绑定 / 尚无会话 / 轮询未运行时不推送，返回 false。
+   * 服务端主动推送文本（日程提醒 / 定时报告 / 关闭前总结用）。
+   *
+   * 收件人优先取最近一次会话，其次退回凭证里绑定的用户 id —— 应用重启后还没收到过入站消息时
+   * `lastFrom` 仍是空的，只看它会让「重启后的第一条日程提醒」静默丢推（这正是微信端收不到
+   * 日程通知的一个原因）。未绑定 / 无收件人 / 轮询未运行时返回 false。
    */
   async pushText(text: string): Promise<boolean> {
-    if (!this.credentials || !this.lastFrom || !this.running) return false;
+    const to = this.lastFrom?.to || this.credentials?.userId;
+    if (!this.credentials || !to || !this.running) return false;
     try {
       // 主动推送无消息上下文，contextToken 传空串即可
-      await sendMessage(this.credentials, this.lastFrom.to, text, this.lastFrom.token || '');
+      await sendMessage(this.credentials, to, text, this.lastFrom?.token || '');
       return true;
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
       return false;
+    }
+  }
+
+  /**
+   * 出站媒体探针（B4 门禁）：向最近一次会话依次发送 文本标记 → 语音 → 文件 三条消息。
+   *
+   * 目的：验证 iLink 上行 voice_item / file_item 协议（sendVoice / sendFile 的字段结构是推定的，
+   * 见 wechat-adapter.ts 注释）。用户在手机微信端看实际收到什么，回报结果——
+   *   - 三条都收到 → 协议成立，B4 语音/文件推送全量推进；
+   *   - 只收到文本 → iLink 不接受该 voice/file 结构 → 降级方案（文本+文件说明）。
+   *
+   * 前置：已绑定（credentials）且 lastFrom 就位（绑定后至少收到过一条微信消息）。
+   * 素材程序生成（1 秒静音 WAV + 小文本文件），不依赖 TTS 配置；产物落临时目录用后即删。
+   */
+  async probeOutboundMedia(): Promise<{
+    ok: boolean;
+    reason?: string;
+    results: Array<{ kind: 'text' | 'voice' | 'file'; sent: boolean; error?: string }>;
+  }> {
+    if (!this.credentials || !this.lastFrom) {
+      return { ok: false, reason: '未绑定或尚无会话：请先扫码绑定，并在微信里给 bot 发一条消息，再运行探针', results: [] };
+    }
+    const { sendMessage, sendVoice, sendFile } = await import('./wechat-adapter');
+    const { writeFile, unlink, mkdir } = await import('fs/promises');
+    const { join } = await import('path');
+    // 走 resolveAppRoot() 而非硬编码 homedir/BobWork —— 后者会绕开 BOBWORK_HOME 覆盖，
+    // 导致开发隔离（dev isolation）下把产物写到真实用户目录。
+    const { resolveAppRoot } = await import('@/lib/app-root');
+
+    const results: Array<{ kind: 'text' | 'voice' | 'file'; sent: boolean; error?: string }> = [];
+    const tmpDir = join(resolveAppRoot(), 'butler', 'tts');
+    await mkdir(tmpDir, { recursive: true });
+    const stamp = Date.now();
+    const wavPath = join(tmpDir, `probe-${stamp}.wav`);
+    const txtPath = join(tmpDir, `probe-${stamp}.txt`);
+
+    // 1 秒静音 16kHz 16bit 单声道 WAV（44 字节头 + 32000 数据字节），程序生成、零依赖
+    const sampleRate = 16000;
+    const dataBytes = sampleRate * 2;
+    const header = Buffer.alloc(44);
+    header.write('RIFF', 0);
+    header.writeUInt32LE(36 + dataBytes, 4);
+    header.write('WAVE', 8);
+    header.write('fmt ', 12);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20); // PCM
+    header.writeUInt16LE(1, 22); // 单声道
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(sampleRate * 2, 28);
+    header.writeUInt16LE(2, 32);
+    header.writeUInt16LE(16, 34);
+    header.write('data', 36);
+    header.writeUInt32LE(dataBytes, 40);
+    await writeFile(wavPath, Buffer.concat([header, Buffer.alloc(dataBytes)]));
+    await writeFile(txtPath, `BobWork outbound probe ${new Date().toISOString()}\n这是探针文件：若你在微信里看到它，说明 file_item 上行协议成立。\n`, 'utf-8');
+
+    const to = this.lastFrom.to;
+    const token = this.lastFrom.token || '';
+    try {
+      // ① 文本标记（基线：sendMessage 是已验证链路，它失败说明会话/token 问题，不是媒体协议问题）
+      try {
+        await sendMessage(this.credentials, to, `🔧 探针开始（${new Date().toLocaleTimeString('zh-CN')}）：接下来 10 秒内应收到 1 条语音 + 1 个文件`, token);
+        results.push({ kind: 'text', sent: true });
+      } catch (e) {
+        results.push({ kind: 'text', sent: false, error: e instanceof Error ? e.message : String(e) });
+      }
+
+      // ② 语音（待验证协议）
+      try {
+        await sendVoice(this.credentials, to, wavPath, token);
+        results.push({ kind: 'voice', sent: true });
+      } catch (e) {
+        results.push({ kind: 'voice', sent: false, error: e instanceof Error ? e.message : String(e) });
+      }
+
+      // ③ 文件（待验证协议）
+      try {
+        await sendFile(this.credentials, to, txtPath, token);
+        results.push({ kind: 'file', sent: true });
+      } catch (e) {
+        results.push({ kind: 'file', sent: false, error: e instanceof Error ? e.message : String(e) });
+      }
+
+      const ok = results.every((r) => r.sent);
+      if (!ok) this.lastError = results.find((r) => !r.sent)?.error;
+      return { ok, results };
+    } finally {
+      // 探针素材用后即删（失败也删，避免 butler/tts 里堆 probe-* 垃圾）
+      await unlink(wavPath).catch(() => {});
+      await unlink(txtPath).catch(() => {});
     }
   }
 
@@ -191,15 +335,15 @@ class WechatBridge {
   /**
    * 会议静默监控（每 30s 一次）：
    *  1) 距最后消息 ≥5 分钟且未提醒 → 提醒"5 分钟后自动结束整理"（幂等，只提醒一次）
-   *  2) 距最后消息 ≥10 分钟 → 自动收尾：AI 整理纪要 → BobMail + 推送纪要摘要到微信
+   *  2) 距最后消息 ≥10 分钟 → 自动收尾：AI 整理纪要 → Butler 收件箱 + 推送纪要摘要到微信
    */
   private async tickMeetingSession(): Promise<void> {
     if (!this.credentials || !this.lastFrom || !this.running) return;
     try {
       // 1) 5 分钟静默提醒（提醒后用户继续发言会重置，进入下一轮计时）
-      if (isMeetingRemindDue()) {
-        markMeetingReminded();
-        const st = getMeetingState();
+      if (await isMeetingRemindDue()) {
+        await markMeetingReminded();
+        const st = await getMeetingState();
         await sendMessage(
           this.credentials,
           this.lastFrom.to,
@@ -208,16 +352,20 @@ class WechatBridge {
         );
         return;
       }
-      // 2) 10 分钟静默超时：自动收尾（AI 整理 → BobMail 收件箱），并推送纪要摘要
-      const expired = consumeExpiredMeeting();
+      // 2) 10 分钟静默超时：自动收尾，并推送结果
+      const expired = await consumeExpiredMeeting();
       if (expired) {
-        const minutes = await finalizeMeeting(expired, this.baseUrl);
-        await sendMessage(
-          this.credentials,
-          this.lastFrom.to,
-          `会议「${expired.title}」已超时自动结束，纪要已发送到 BobMail：${minutes ? `\n\n${minutes}` : '\n\n（纪要整理失败，请稍后在面板重试）'}`,
-          this.lastFrom.token || '',
-        );
+        // 尊重会议设置「会后自动整理」：关 = 只留全文转写，不调模型
+        const settings = meetingSettingsOf(await readSettingsFromFile());
+        let reply: string;
+        if (settings.autoSummarize) {
+          const minutes = await finalizeMeeting(expired, this.baseUrl, settings.speakers);
+          reply = `会议「${expired.title}」已超时自动结束，纪要已发送到 Butler：${minutes ? `\n\n${minutes}` : '\n\n（纪要整理失败，请稍后在面板重试）'}`;
+        } else {
+          await recordMeetingTranscript(expired);
+          reply = `会议「${expired.title}」已超时自动结束，未生成纪要（会议设置里「会后自动整理」已关闭）；全文转写已发送到 Butler。`;
+        }
+        await sendMessage(this.credentials, this.lastFrom.to, reply, this.lastFrom.token || '');
       }
     } catch { /* 定时任务失败静默，下轮重试 */ }
   }
@@ -358,13 +506,11 @@ class WechatBridge {
       if (!this.welcomeSent) {
         this.welcomeSent = true;
         await saveCredentials({ ...creds, welcomeSent: true });
-        const welcome =
-          'BobWork connected! Just send a message — it will be auto-parsed.\n\n' +
-          'Default: /todo (AI parses → calendar event + todo list)\n' +
-          'For notes/ideas: start with /note\n' +
-          'Query schedule: just ask in chat (e.g. "今天有什么安排", "最近三天的日程", "已过期的待办") — AI queries the calendar directly\n' +
-          'Ask AI a question: start with /chat\n' +
-          'View all commands: send /help';
+        // 欢迎语**直接复用 buildHelpText()**（commands.ts 的 BUTLER_COMMANDS 是唯一真源），
+        // 不再手写一份指令清单 —— 手写副本会与实现漂移：旧文案曾声称「发消息即自动解析」、
+        // 「直接问日程」，但 executor 的无指令分支早已改为**硬性拒绝**（AI 语义路由 2026-08 移除），
+        // 导致新用户按欢迎语操作必然失败。复用它以后，增删命令/改子命令都会自动同步。
+        const welcome = 'BobWork connected!\n\n' + buildHelpText();
         await sendMessage(creds, msg.from, welcome, msg.contextToken);
       }
 
@@ -417,11 +563,38 @@ class WechatBridge {
       const finalInput = (extractedFromMedia + (msg.text || '')).trim();
       if (!finalInput) return;
 
+      const to = msg.from;
+      const contextToken = msg.contextToken;
+
+      // ── B5「中途改」：上一条还在跑就先打断，再按新要求重跑（详见 supersedeInflight） ──
+      const steering = this.supersedeInflight(to, finalInput);
+      const runInput = steering.input;
+      if (steering.note) {
+        try {
+          await sendMessage(creds, to, steering.note, contextToken);
+        } catch { /* 打断说明送达失败不影响主流程 */ }
+      }
+
       // 执行超时保护：90s 内未完成先回一句"正在整理…"，完成后再异步推送结果。
       // 避免用户发"写一份 100 页合同"等任务让 typing 卡死、以为服务挂掉。
       const EXEC_TIMEOUT_MS = 90_000;
-      const to = msg.from;
-      const contextToken = msg.contextToken;
+      const ac = new AbortController();
+      // 统一入口（P0）：微信里所有输入都交给**管家**（会话层），斜杠命令先归一化成
+      // 「意图：…」+ 正文（normalizeSlashInput），由管家按命令表调用自己的工具。
+      // 暂留宿主 executor（P2 收敛后为宿主服务函数）的只有两类：
+      //   · /meeting：会议缓冲是全局单场状态（非模型意图，需宿主直接读写）；
+      //   · 会议进行中：一切输入都要累积进会议。
+      const firstCmd = detectCommand(runInput);
+      const execOnly =
+        firstCmd?.id === 'meeting' ||
+        (await isMeetingActive());
+      this.inflightTasks.set(to, {
+        abort: ac,
+        startedAt: Date.now(),
+        input: runInput,
+        // 会话层链路均可打断（恒真）：会议分支虽走 executor，但累积是瞬时的，打断无害
+        steerable: true,
+      });
       let repliedProgress = false;
       const timeoutHandle = setTimeout(() => {
         repliedProgress = true;
@@ -434,12 +607,52 @@ class WechatBridge {
 
       let result: ExecResult;
       try {
-        result = await executeWantedCommand(finalInput, { baseUrl: this.baseUrl, source: 'wechat' });
+        if (execOnly) {
+          result = await executeButlerCommand(runInput, { baseUrl: this.baseUrl });
+        } else {
+          // 会话层（/api/butler/threads → askButler）：恒管家身份 + channel='wechat'
+          // （该通道按 WECHAT_ALLOWED_WRITES 白名单放行排程三件套/便签，其余写类只回话不执行）。
+          // threadIdHint 固定为常驻通知助理「Bobby」线程（2026-09-28 起，原先的独立「Bobby」联系人退役，
+          // 其名字与形象由通知助理沿用）：
+          // 微信里说的话与桌面打开「Bobby」看到的是同一条会话 —— 跨端续聊共享上下文，且系统推送类
+          // 通知（日程提醒等）也归在同一条流里，手机端天然能看到自己的这条会话。
+          // **不再**借用「当前活动的桌面线程」（那会把微信消息串进用户正开着的好友会话，
+          // 且桌面 30min 无活动就会话过期消失，用户回桌面找不到）。
+          // source='panel' 让这条常驻会话长期保留（永不过期）；通道能力靠上面的 channel 显式给
+          // —— 二者解耦（source 只管 TTL），node-chat 里 channel 优先取显式入参。
+          const resp = await fetch(`${this.baseUrl}/api/butler/threads`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: ac.signal,
+            body: JSON.stringify({
+              text: normalizeSlashInput(runInput),
+              source: 'panel',
+              channel: 'wechat',
+              threadIdHint: NOTIFY_THREAD_ID,
+            }),
+          });
+          const data = (await resp.json()) as {
+            success?: boolean; reply?: string; threadId?: string; aborted?: boolean; error?: string;
+          };
+          result = data.success
+            ? { ok: true, reply: data.reply ?? '', command: null, threadId: data.threadId }
+            : {
+                ok: false,
+                reply: data.error ?? '请求失败，请稍后重试',
+                command: null,
+                aborted: data.aborted === true,
+                threadId: data.threadId,
+              };
+        }
       } finally {
         clearTimeout(timeoutHandle);
+        // 仅当登记项仍是「自己」时才清理（若已被后来者替换，映射里已是新任务，不能误删）
+        if (this.inflightTasks.get(to)?.abort === ac) this.inflightTasks.delete(to);
         // 执行完成（无论成功失败）：释放 inflight 强锁，避免后续异常导致锁泄漏
         await this.releaseInflightMessage(msg);
       }
+      // 被主动打断（用户改需求）→ 本次不回执：重跑的那次会给结果，否则用户会先收到一条无意义回执
+      if (result.aborted) return;
       // 微信通道只回推正文：剥离 <think> 思考块（会话存储仍保留完整，多轮上下文不丢）
       const reply = result.ok ? stripThinkTags(result.reply) : `❌ ${result.reply}`;
       try {
@@ -451,7 +664,7 @@ class WechatBridge {
           await sendMessage(creds, to, reply, contextToken);
         }
       } catch (se) {
-        // 主动回推失败时记录，用于用户手动查看 wanted 面板结果
+        // 主动回推失败时记录，用于用户手动查看 Butler 抽屉结果
         this.lastError = `Failed to push reply: ${se instanceof Error ? se.message : String(se)}`;
       }
     } catch (e) {
