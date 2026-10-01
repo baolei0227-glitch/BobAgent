@@ -57,7 +57,7 @@ Create zero-dependency, animation-rich HTML presentations that run entirely in t
 
 ## Phase 1: Content Discovery
 
-**Ask ALL questions in a single AskUserQuestion call:**
+**Ask ALL questions in a single ask_user_questions call:**
 
 | Header | Question | Options |
 |--------|----------|---------|
@@ -75,7 +75,7 @@ Remember the editing choice — determines if edit-related code is included in P
 2. View each — Use Read tool (multimodal)
 3. Evaluate — USABLE or NOT, concept, colors
 4. Co-design outline — Design around images + text together
-5. Confirm — AskUserQuestion: "Does this outline look right?"
+5. Confirm — ask_user_questions: "Does this outline look right?"
 
 ---
 

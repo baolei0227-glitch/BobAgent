@@ -68,7 +68,7 @@ src/
 │   │   ├── Sidebar.tsx        # 侧边栏（项目/文件/WANTED）
 │   │   ├── CalendarPanel.tsx  # 日历面板
 │   │   ├── UnifiedPalette.tsx # ⌘F 统一面板（文件搜索 + WANTED 指令）
-│   │   ├── WantedNoticeCenter.tsx # WANTED 通知中心（收件箱）
+│   │   ├── butler/            # Butler 助理（悬浮球 + 对话框收件箱 + Today/记忆/文档面板）
 │   │   ├── SettingsModal.tsx  # 设置面板
 │   │   ├── SkillManagerModal.tsx # 技能管理器
 │   │   ├── TemplateLibraryModal.tsx # 工作流模板库

@@ -17,10 +17,10 @@ agent_created: true
 本 Skill 不适用于以下场景（应由对应 Skill 承担）：
 
 - 法律咨询、案件分析、法律风险评估 → 转 `intern-lawyer`
-- 合同审查、合同风险排查、合同审核 → 转 `legal-contract-reviewer-cn`
-- 深度法律研究、类案检索、裁判规则梳理 → 转 `deep-legal-research`
+- 合同审查、合同风险排查、合同审核 → 转 `bob-contract-review`
+- 深度法律研究、类案检索、裁判规则梳理 → 走 `mcp__pkulaw__*`（法规 + 案例检索）
 
-> **技能内资源读取**：本文件中出现的相对路径（如 `references/xxx.md`）均相对本技能目录，一律用 `read_skill_resource(skill_name="legal-drafter", resource="<相对路径>")` 读取（可加 `section` 只读某一节）；不要用 `read_file` / `list_directory` 拼绝对路径（如 `~/.trae-cn/skills/…`），那不在可读范围、会被直接拒绝。
+> **技能内资源读取**：本文件中出现的相对路径（如 `references/xxx.md`）均相对本技能目录，一律用 `read_skill_resource(skill_name="legal-drafter", resource="<相对路径>")` 读取（可加 `section` 只读某一节）；不要用 `read_file` / `list_directory` 拼绝对路径（如 `~/BobWork/skills/…`），那不在可读范围、会被直接拒绝。
 
 ## 基本原则
 
@@ -35,23 +35,12 @@ agent_created: true
 
 起草、撰写、写、拟、帮我写、帮我起草、修改、修订、增补、增加条款、调整条款、律师函、起诉状、答辩状、上诉状、申请书、法律意见书、声明、授权委托书、公司决议、合同、协议、法律分析意见书、法律分析报告。
 
-## 团队协作模式（Legal Orchestrator 专用）
-
-当本 skill 被 Legal Orchestrator 的唐伯虎（legal-writer）调用时，**禁止独立生成或写入任何文件**：
-
-- 文书正文通过 SendMessage 回传给主理人（王语嫣），使用 ```text 代码块包裹
-- 不得调用 Write 或任何文件生成工具，不得调用 present_files
-- 不得自动生成可点击文件链接
-- 交付物由王语嫣统一整合后生成唯一文件（`综合法律方案_{案件简称}_{日期}.md`）
-
-**独立使用模式**（用户直接调用，非团队协作）仍正常生成 .md 文件并提供链接。
-
 ## 用户上传 PDF 材料处理
 
 用户上传 PDF 文件（如现有合同、判决书、证据材料）时，按以下流程处理：
 
-1. **首选直接读取**：使用 `Read` 工具尝试读取 PDF 文件。若成功提取文本，直接进入文书起草或条款修改流程。
-2. **自动切换 scanned-pdf-reader**：若 `Read` 工具返回无法读取（如二进制文件、无文本层、扫描件 PDF），**自动加载 `scanned-pdf-reader` skill** 提取文本，不得要求用户手动转换格式或重新上传。
+1. **首选 `read_attachment`**：用 `read_attachment` 读取 PDF 文件（含文本层的直接提取，扫描件自动走 OCR）。若成功提取文本，直接进入文书起草或条款修改流程。
+2. **兜底 `ocr_document`**：若 `read_attachment` 返回无法读取或识别质量过低（如二进制文件、无文本层、扫描件 PDF），改用内置 `ocr_document` 工具重新识别（经 bob-ocr-mcp 识别链路，自带质量分与本地 OCR 兜底），不得要求用户手动转换格式或重新上传。
 3. **提取后继续起草**：将提取的文本内容视为用户提供的原始材料，纳入文书起草或合同条款修改流程。
 
 注意事项：
@@ -86,14 +75,14 @@ agent_created: true
 
 ## 文书输出规则
 
-- 文书正文不使用代码块预览，直接生成正式文件并通过 `present_files` 工具呈现给用户。
+- 文书正文不使用代码块预览，直接用 `write_file` 落盘到项目 `homework/` 目录，由宿主自动呈现为输出卡片。
 - 文书正文应尽量完整，缺失信息可用 `[待补充]` 占位。
 - 转为 Markdown 生成文件时，禁止使用 `---` 水平分割线；条款之间以编号（第一条、第二条等）和空行自然分隔，章节之间以标题（`##`、`###`）分隔。
 - 对话中仅允许展示文件链接（见"下载与导出格式"）及合同条款修改说明（仅限合同修改场景）；禁止添加总结、目录、风险提示、使用说明或其他额外段落。
 
 ## 下载与导出格式
 
-- 生成文书正文后自动生成正式文件并通过 `present_files` 工具呈现，无需用户额外要求。
+- 生成文书正文后自动用 `write_file` 落盘到项目 `homework/` 目录，宿主会将文件呈现为输出卡片，无需用户额外要求。
 - 一律生成 Markdown `.md` 文件，用于预览、二次编辑与正式交付。
 
 > **完整导出规范**：格式选择、PDF/飞书文档生成、文件命名与交付规则，见 `references/export-format-rules.md`。

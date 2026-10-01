@@ -8,7 +8,7 @@ agent_created: true
 
 ## 目的
 
-对中国法律法规进行精准检索、时效性审查与系统分析，补足 deep-legal-research（类案检索）在成文法维度的覆盖。核心能力包括：法条原文精准引用、新旧法对比、司法解释汇编、法律竞合分析、**法条时效性审查**（现行有效性确认、修订状态追踪、废止/替代关系核查）。
+对中国法律法规进行精准检索、时效性审查与系统分析，补足 `mcp__pkulaw__*` 类案检索在成文法维度的覆盖。核心能力包括：法条原文精准引用、新旧法对比、司法解释汇编、法律竞合分析、**法条时效性审查**（现行有效性确认、修订状态追踪、废止/替代关系核查）。
 
 ## 何时使用
 
@@ -45,14 +45,14 @@ agent_created: true
 **检索渠道优先级：**
 
 1. **北大法宝（pkulaw）MCP**（当前环境已接入）：法条原文、法规列表、时效信息以工具返回为准，结果自带 pkulaw.com 原文链接，可追溯复核。
-2. **WebSearch 降级**：仅当 pkulaw 工具不可用（未授权/未订阅/积分用尽/报错）时使用，优先全国人大官网（npc.gov.cn）、国家法律法规数据库（flk.npc.gov.cn）等权威来源，并标注"需进一步核实"。
+2. **web_search 降级**：仅当 pkulaw 工具不可用（未授权/未订阅/积分用尽/报错）时使用，优先全国人大官网（npc.gov.cn）、国家法律法规数据库（flk.npc.gov.cn）等权威来源，并标注"需进一步核实"。
 
 根据不同检索目标执行对应操作：
 
 #### A. 具体法条检索
 
-1. 若用户已指明确切法条引用（如《民法典》第一千零七十七条），优先调用北大法宝「法条精确查询」（`get_article`，参数：title=法律名称，number=**中文条号**如"第一千零七十七条"）取单条原文；若只有自然语言描述，用「法条语义检索」（`search_article`，参数：text=问题描述）。
-2. 若 pkulaw 不可用，通过 WebSearch 检索该法条的权威版本（优先全国人大官网 / pkulaw / 国家法律法规数据库）。
+1. 若用户已指明确切法条引用（如《民法典》第一千零七十七条），优先调用北大法宝「法条精确查询」（`mcp__pkulaw__mcp-law-search-service_get_article`，参数：title=法律名称，number=**中文条号**如"第一千零七十七条"）取单条原文；若只有自然语言描述，用「法条语义检索」（`mcp__pkulaw__mcp-law-search-service_search_article`，参数：text=问题描述）。
+2. 若 pkulaw 不可用，通过 web_search 检索该法条的权威版本（优先全国人大官网 / pkulaw / 国家法律法规数据库）。
 3. 输出格式：
    ```
    ## 《中华人民共和国XX法》第 X 条
@@ -65,14 +65,14 @@ agent_created: true
 
 #### B. 专题法规汇编
 
-1. 针对某一法律问题，优先调用北大法宝「法规列表」（`get_law_list`，参数：title/fulltext 至少一个，可按 timeliness/effectiveness 筛选现行有效与效力层级），列出全部相关法律、行政法规、司法解释、部门规章
+1. 针对某一法律问题，优先调用北大法宝「法规列表」（`mcp__pkulaw__mcp-law_get_law_list`，参数：title/fulltext 至少一个，可按 timeliness/effectiveness 筛选现行有效与效力层级），列出全部相关法律、行政法规、司法解释、部门规章
 2. 按效力层级排列（法律 > 行政法规 > 司法解释 > 部门规章 > 地方性法规）
 3. 对每项注明施行/修订时间、关键条款号，并附 pkulaw.com 原文链接
-4. pkulaw 不可用时，通过 WebSearch 检索并标注"需进一步核实"
+4. pkulaw 不可用时，通过 web_search 检索并标注"需进一步核实"
 
 #### C. 新旧法对比
 
-1. 优先用北大法宝「法规列表」（`get_law_list`）获取新旧法的时效状态（TimelinessDic：现行有效/已废止/已被修改）与实施日期，再用「法条精确查询」（`get_article`）分别取新旧法对应条文原文
+1. 优先用北大法宝「法规列表」（`mcp__pkulaw__mcp-law_get_law_list`）获取新旧法的时效状态（TimelinessDic：现行有效/已废止/已被修改）与实施日期，再用「法条精确查询」（`mcp__pkulaw__mcp-law-search-service_get_article`）分别取新旧法对应条文原文
 2. 若同一问题在旧法和新法中有不同规定，逐项对比：
    - 旧法规定（法名 + 条款号 + 原文）
    - 新法规定（法名 + 条款号 + 原文）
@@ -83,7 +83,7 @@ agent_created: true
 #### D. 法律竞合分析
 
 当同一事实可能适用多部法律时：
-1. 优先用北大法宝「法条语义检索」（`search_article`）或「法规列表」（`get_law_list`）收集可能适用的全部法律/条款
+1. 优先用北大法宝「法条语义检索」（`mcp__pkulaw__mcp-law-search-service_search_article`）或「法规列表」（`mcp__pkulaw__mcp-law_get_law_list`）收集可能适用的全部法律/条款
 2. 对每项分析适用条件和法律后果
 3. 判断竞合关系：想象竞合/法条竞合/请求权竞合
 4. 给出适用建议（择一选择或分别主张）
@@ -104,11 +104,11 @@ agent_created: true
 
 #### 审查流程
 
-1. 优先采信北大法宝返回的时效字段：`search_article` / `get_article` 的 `timeliness`（如"现行有效"）、`get_law_list` 的 `TimelinessDic` / `EffectivenessDic`（含"废止或失效/已被修改"等中文状态），无需再另行检索
+1. 优先采信北大法宝返回的时效字段：`mcp__pkulaw__mcp-law-search-service_search_article` / `mcp__pkulaw__mcp-law-search-service_get_article` 的 `timeliness`（如"现行有效"）、`mcp__pkulaw__mcp-law_get_law_list` 的 `TimelinessDic` / `EffectivenessDic`（含"废止或失效/已被修改"等中文状态），无需再另行检索
 2. 时效字段显示"废止或失效/已被修改"时，检索替代法律（新法）的施行日期及衔接规则，并显式提示"已废止/已修改，仅供参考"
 3. 确认当前引用条款号和内容对应最新版本；条款号或内容不确定时标注"需进一步核实"
 4. 根据案件事实发生时间，判断应适用新旧法中的哪一部
-5. 仅当 pkulaw 不可用时，通过 WebSearch 检索效力状态（关键词：法律名称 + "废止"/"修订"/"现行有效"/"最新版本"），优先全国人大官网（npc.gov.cn）、国家法律法规数据库（flk.npc.gov.cn），并标注"需进一步核实"
+5. 仅当 pkulaw 不可用时，通过 web_search 检索效力状态（关键词：法律名称 + "废止"/"修订"/"现行有效"/"最新版本"），优先全国人大官网（npc.gov.cn）、国家法律法规数据库（flk.npc.gov.cn），并标注"需进一步核实"
 
 #### 时效性标签
 
@@ -165,9 +165,8 @@ agent_created: true
 
 | 相关 Skill | 关系 |
 |-----------|------|
-| pkulaw（北大法宝 MCP） | 本 skill 的优先检索工具：法条精确查询（`get_article`）/ 法规列表（`get_law_list`）/ 法条语义检索（`search_article`），结果自带 pkulaw.com 原文链接与时效字段 |
-| deep-legal-research | 本 skill 补足成文法维度，deep-legal-research 补足判例维度——二者结合形成完整法律研究 |
+| pkulaw（北大法宝 MCP） | 本 skill 的优先检索工具：法条精确查询（`mcp__pkulaw__mcp-law-search-service_get_article`）/ 法规列表（`mcp__pkulaw__mcp-law_get_law_list`）/ 法条语义检索（`mcp__pkulaw__mcp-law-search-service_search_article`），结果自带 pkulaw.com 原文链接与时效字段 |
+| 类案 / 判例检索（北大法宝案例库） | 本 skill 补足成文法维度，判例检索补足案例维度——二者结合形成完整法律研究 |
 | intern-lawyer | 检索结果可作为法律分析的法规依据，时效性标签确保引用准确 |
 | legal-drafter | 起草法律文书时提供法条引用支持，时效性审查避免引用已废止法条 |
-| trial-preparation | 庭审文书中引用法条前，先经时效性审查确保法条现行有效 |
-| criminal-defense | 刑事辩护中引用刑法条文及司法解释时，确认是否为最新修订版本 |
+

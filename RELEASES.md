@@ -15,6 +15,1371 @@
 ***
 
 
+## v0.7.665 (2026-10-01)
+
+> 本版是 **v0.7.664 之后的增量**。664 构建于 08:12–08:13，因上传脚本踩到 Xcode 许可问题漏发，已于 08:56 用修复后的脚本补传并校验（远端 `latest` 已指向 664）；本批改动是 **08:13 之后**对 `components/butler/ButlerDrawer.tsx` 的重写，不在 664 包内。
+
+### 新增
+
+* **Butler 右栏「检索实况」（Search Live）—— 本轮公众号检索的逐篇账本**（`components/butler/ButlerDrawer.tsx`）：中栏只呈现**结果**（小微落库的综述 + 精选卡片），右栏呈现**过程判定** —— 召回的全部文章、哪几篇被留下、哪几篇被判掉。
+  * **为什么把「判掉的」也留着**：AI 一次只精读 3 篇，剩下十几篇是**被判掉而不是没搜到**；用户被蒙在鼓里就无从判断这轮检索靠不靠谱。判掉的照样能点开，只标一枚拇指向下，说明「模型看过它、没选它」。
+  * **分三段**：留下 / 判定中（检索结束则显示「未判定」）/ 去除；段内保持召回原顺序（序即检索排序，不重排以免对不上号）。判定语言统一为拇指：`ThumbsUp` = 留下（已精读）、`ThumbsDown` = 去除（灰）、`Loader2` 转圈 = 待判定。
+  * **起搜即切右栏**：点下去那一刻就把右栏切到实况并清空上一轮账本（先写「正在检索…」），候选一到就逐篇入账，不必等综述写完；若文档预览正占着右栏会先收掉，否则实况被它挡住。
+  * **过程态临时、不落库**：`curated` / `article` / `summary` 三类帧**只用于判定展示**（哪篇留下、正文是否读到、逐篇一句摘要），记的是判定过程而非结果内容，故不算镜像真源；`digest` 帧仍刻意不接（综述是结果态，中栏已有落库的那一份）。精选未入选的按下标 / url 双键置为 `dropped`；精编中断时把仍 `pending` 的一律落定为 `dropped`，免得留一排永远转圈的「判定中」。
+  * 附带信息：正文未读到时标「正文未读到」（说明只有搜索摘要可用）；`keypoint` 以主色小标签展示。
+  * **入口刻意不占左栏键**：实况是**这次检索的附属视图**而不是独立去处——检索在联系人列顶部发起，回看也在那里；左栏管的是右栏分区（Today / Calendar / Meeting 这类常驻去处），两条轴各管一段。
+
+### 修复与优化
+
+* **点击抽屉外任意处收起 Butler 抽屉**（`components/butler/ButlerDrawer.tsx`）：用一层铺满视口的**透明挡板**（`z-1299`）承接点击，而不是给 `document` 挂 `mousedown` 监听。
+  * **语义要的是「吞掉」这次点击**：被点中的画布节点 / 侧栏 / 树节点不该同时响应；监听器只能决定「收不收抽屉」，拦不住外部元素自己的动作，一层挡板天然吞掉。
+  * **层级取 1299 的两头考量**：高于全部常规页面内容（画布 UI `z-40`、旧面板 `z-1200/1250`）而**低于悬浮球 `z-1300`** —— 贴着抽屉取值会把球一起盖住（点不动、拖不动、hover 也没了）。高于抽屉的浮层（toast `1350` / 排程确认卡与 PersonaDialog `1400` / 画布侧栏弹窗 `1600` / ConfirmDialog `9999`）都在挡板之上，点击不受影响，也就不必为「有弹窗时不要收起」逐项加判断。
+  * 不做可见遮罩（抽屉刻意「无遮罩」，这里只挡事件、不压暗画面）；只认主键，右键（`button !== 0`）放行，画布右键菜单照常。
+* **修复上传脚本漏发：`python3` 换成 `node`**（`scripts/upload-to-gitcode.sh`）：macOS 的 `/usr/bin/python3` 是 Xcode 垫片，未同意 Xcode 许可协议时会直接抛 `You have not agreed to the Xcode license agreements` 并以 69 退出 —— 整个上传**还没发出任何请求就失败**，而调用点只 `warn` 不中断，于是「构建成功」的假象下产物从未上线（v0.7.664 实测：远端 `latest-mac.yml` 仍停在 0.7.663）。提取 Release Notes 改用 node（脚本本就依赖 node 取版本号），语义与原 python 版本一致。
+
+## v0.7.664 (2026-10-01)
+
+> 本版是 **v0.7.663 之后的增量**。663 构建于 07:04–07:07 并于 07:07 发布；本批改动全部发生在 **07:56–08:07**（会议 / 播客相关 5 个文件），不在 663 包内。
+
+### 修复与优化
+
+* **删除会议产物时一并回收本地音频 —— 不再留孤儿文件**（`app/api/butler/meeting/route.ts`）：此前 `DELETE` 只删那一份 md，录音分片与播客音频原样留在磁盘上。
+  * **只认两类来源，其余一律不碰**：① md 首行音频指针 `<!-- bob-audio: … -->` 指到的那批（Live 的录音分片 / 合并件与播客音频 `local:podcast/*.wav` 都挂在这条指针上，通配正好覆盖 `part-*`）；② 指针落空时的同目录兜底 `录音 - <标题> - part-*.webm` 与 `录音 - <标题>.webm`（老产物可能没指针）。
+  * **明确排除用户的原始材料**：指针落在 `materials/` 下时（导入录音指向的就是原件）不删 —— 那是资料不是产物。
+  * **顺序有讲究**：音频清单必须在删 md **之前**算好（指针就在它的首行）；逐个删除、单个失败不阻断其余（例如已被手工清理过）。响应体新增 `removed` 字段回报实际删掉的文件名。
+  * 代价（用户拍板接受）：删任一份产物都会一并回收该场次的录音，同场次另一份产物的 ▶ 回放入口随之消失。
+* **播客来源支持行内删除**（`components/butler/MeetingStart.tsx`）：来源列表每行右侧新增删除按钮，点击后**就地替换成确认行**（与 History 删除同款，不弹原生对话框）；确认后走 `DELETE /api/materials?scope=materials&path=…` —— 与文件管理器**同一个接口**，删的是 `materials/` 下的真实文件（连带回收内容索引 / 标签 / 标注 sidecar），不是只把这一行藏起来。删掉的正好是当前选中项时清空选择，避免把已不存在的路径提交给生成。
+* **BobMultimodal 的 TTS 音色改为固定枚举下拉**（`lib/core/podcast.ts` / `components/canvas/SettingsModal.tsx` / `lib/core/podcast.test.ts`）：该厂商（Qwen3-TTS CustomVoice）的 `voice` 是服务端固定枚举，**传枚举外的值直接 500**。
+  * 音色名单取自本地 MLX 服务 `GET /api/tts/voices`，共九条（`vivian` / `serena` / `uncle_fu` / `ryan` / `aiden` / `ono_anna` / `sohee` / `eric` / `dylan`），首项 `vivian` 与 `TTS_PROVIDER_PRESETS` 的默认音色一致。
+  * 设置面板在该厂商下把音色输入框换成下拉限定，**其余厂商仍为自由输入**（未核实的音色不编造）；播客页的音色候选同步列出九条，自动配对为 `vivian` / `serena`。
+  * 新增单测覆盖九枚举与自动配对。
+
+## v0.7.663 (2026-10-01)
+
+> 本版是 **v0.7.662 之后的增量**。662 构建于 01:40–01:43 并于 01:43 发布；本批改动全部发生在 **02:24–02:35**（13 个文件，含 4 个新增文件），不在 662 包内。
+
+### 新增
+
+* **飞书（Feishu / Lark）机器人桥 —— 与微信桥同构的第二条外部通道**（新增 `lib/bridge/feishu-adapter.ts` / `lib/bridge/feishu-bridge.ts` / `app/api/feishu/route.ts` / `components/canvas/FeishuBindModal.tsx`，依赖 `@larksuiteoapi/node-sdk`）：
+  * **分层与微信桥一致**：`feishu-adapter.ts` 只做协议与凭证（SDK 细节封死在文件内），`feishu-bridge.ts` 只做编排，上层只看得到 `verifyCredentials` / `sendText` / `normalizeInbound` 三个动作。
+  * **传输只走官方 SDK 长连接（WebSocket）**：桌面端没有公网地址，Webhook 方案不可用；飞书长连接**仅支持企业自建应用**。凭证落在 `<appRoot>/.feishu-credentials.json`（0600，tmp→rename 原子写），只有 App ID / App Secret 两项，无需扫码。
+  * **启动即校验**：App ID 先按 `cli_` + 16 位十六进制预校验（SDK 内部同规则，不匹配会**静默不建连**，故提前拦截给明确提示）；再用一次 `tenant_access_token` 做真实连通性校验，失败原样抛出 code / msg。握手设 15s 超时（SDK 缺省不设，卡住的 DNS / 代理会让连接永久悬挂）。
+  * **入站**：`im.message.receive_v1` 事件归一化并过滤（非真人、非私聊直接丢弃）→ 交给**统一会话层** `/api/butler/threads`（线程层 SSOT）→ 回复。出站 `im.message.reply` / `im.message.create`，超长按 4000 字符分段续发。
+  * **首版刻意裁剪**（对齐微信桥的能力裁剪）：媒体下载与识别（图片 / 文件 / 语音一律回「暂不支持，请发文字」）、「B5 中途改」打断重跑与 90s 进度提示、`/meeting` 与会议进行中分支。
+  * **设置面板新增「Feishu Bot」段**（`SettingsModal.tsx` + `FeishuBindModal`，支持 embedded 模式内嵌右栏）；`GET /api/feishu?action=status` 带**冷恢复**（有凭证但连接未跑时自动拉起），避免前端查到僵尸绑定态。
+  * **通道语义打通**：`channel` 联合类型扩为 `'panel' | 'wechat' | 'feishu'`（`api/butler/threads/route.ts` / `lib/butler/entry.ts` / `lib/chat/tool-pipeline.ts` / `api/chat/route.ts`）；`lib/runtime/tools.ts` 抽出 `isBridgeWriteAllowed()`，微信与飞书**共用同一写类白名单**，其余聚合通道（`panel`）维持只读。
+  * **日程提醒并行直推两条通道**（`lib/core/event-reminder.ts`）：原 `pushReminderToWechat` 改为 `pushReminderToBridges`，用 `Promise.allSettled` 保证任一通道失败既不影响另一通道、也不影响桌面队列原链路。
+  * **随包依赖**：`package.json` 增加 `@larksuiteoapi/node-sdk@^1.74.0`。
+
+### 修复与优化
+
+* **Butler 托盘支持挂载本地文件夹**（`components/butler/ButlerDrawer.tsx`）：回形针右侧新增「本地文件夹」按钮，走 `desktop.selectDirectory()` 选择目录。
+  * **不上传、不复制**：只带绝对路径引用（一个目录可能有成千上万个文件，复制进 Butler 存储空间既不划算、也会在用户不知情时吃掉磁盘）；选中后调 `/api/local-files?action=add_root` 登记一次，复用画布 `LocalFileExplorer` 的**同一端点、同一份 browseRoots**，避免「Butler 侧选了目录、画布侧却不认」。端点幂等，重复选同一目录不叠加。
+  * **附件提示区分目录与文件**：目录类附件只有路径没有正文，`read_attachment` 直读会 `EISDIR`，故提示改为「标 Folder 的是目录，先用 `list_directory` 看内容，再对具体文件 `read_file`，不要对目录路径调 `read_attachment`」；混发（文件 + 目录）时只出目录版提示（它同时覆盖文件的取法）。
+  * 附件标签显示「folder」而非体积（目录 `size` 恒 0，写 0 B 会让模型误判为空文件），并给完整路径的悬停提示；浏览器 dev 下无目录选择器时给可见提示，而不是点了没反应。
+
+## v0.7.662 (2026-10-01)
+
+> 本版是 **v0.7.661 之后的增量**。661 构建于 01:08–01:13 并于 01:13 发布；本批改动全部发生在 **01:33–01:34**（`app/butler/page.tsx`、`server.ts`），不在 661 包内。
+
+### 修复与优化
+
+* **远程访问：手机经隧道访问时报 unauthorized —— 服务端内部自调用被自家网关拦下**（`server.ts`）：手机发起对话时，「Next 路由 → 服务端内部再 fetch `/api/chat`」这一步的 `baseUrl` 取 `new URL(request.url).origin`，即**本机的隧道 IP**（如 Tailscale 的 `100.x`）而非 `localhost`；这条自调用的 `remoteAddress` 因此不是 loopback、过不了 `isLoopback`，被自身鉴权网关判成外部请求返回 401 —— 表现为**手机端对话提示 unauthorized，而桌面走 localhost 一切正常**。
+  * **修法**：新增 `selfAddresses()` 取本机全部网卡地址（含 Tailscale / 局域网等虚拟网卡，TTL 60s 缓存，兼顾「应用先起、隧道后连」），把「本机自有地址」也视同 loopback 放行（`isSelfRequest`）。其他设备（手机的隧道 IP）不在本机网卡列表里，仍照常鉴权，安全性不受影响。
+  * 顺带处理 dual-stack socket 上 IPv4 连接带 `::ffff:` 前缀的情况（`normalizeAddr`）。
+* **`/butler` 移动端页视觉重做**（`app/butler/page.tsx`）：从「能用」推到「像原生 App」——
+  * **顶栏改磨砂玻璃**（`color-mix` + `backdrop-filter`），保留刘海安全区；会话视图顶栏换成「头像 + 标题 + 状态点（Ready / Replying…）」，列表视图换成品牌标记 + New 胶囊按钮。
+  * **图标改为 `lucide-react`**（`Menu` / `Plus` / `Sparkles` / `ArrowUp` / `Loader2`），替掉原先的字符图标（`☰`、`↑`）；发送中显示旋转指示。
+  * **列表行重构**：标题与时间同行、预览与未读角标同行，未读角标加大加粗。
+  * **空态补齐**：列表与对话各有独立空态（图标 + 标题 + 提示）。
+  * **观感微调**：气泡圆角与渐变（用户侧渐变 + 投影）、输入框胶囊化并加聚焦光环、发送键圆形渐变、列表与气泡入场动画（`bwm-in` / `bwm-pop`）。
+
+## v0.7.661 (2026-10-01)
+
+> 本版是 **v0.7.660 之后的增量**。660 构建于 00:44–00:48 并于 00:48 发布；本批改动全部发生在 **01:01–01:08**，不在 660 包内。
+
+### 新增
+
+* **`/butler` 移动端单栏页 —— PWA 的主入口**（新增 `app/butler/page.tsx`）：iPhone「添加到主屏幕」后 `start_url` 指向本路由，而桌面工作台（`/`）是「无限画布 + Butler 默认关闭的抽屉」，在手机上只剩一个空画布。
+  * **单栏、全屏、无画布**：把桌面的「联系人列 → 会话」压成「列表视图 ↔ 对话视图」两屏，用汉堡键切换。
+  * **不复制生成链路**：数据面复用既有契约（`GET /api/butler/threads` 列表 / 单线程全文、`POST /api/butler/threads` 的 `stream:true` → SSE、`POST /api/butler/threads/session` 新建）；正文复用画布的 `StreamingMarkdown`，结构化提问复用 `QuestionPopup`（docked 模式），排程确认复用 `ButlerConfirmModal` —— **三类挂起帧必须接住**，否则服务端会空等 600s（与 `ButlerDrawer` 同款处理，口径见 `lib/butler/entry.ts`）。
+  * 气泡模型是页内专用的极简结构（不复用桌面抽屉那套带删除 / 多选的 `ChatMessage`），并保留「模型只吐思考没吐正文时也给一句交代」的兜底。
+
+### 修复与优化
+
+* **移动端「启动」与「登录成功」都落到 `/butler`**（`app/manifest.ts` / `server.ts`）：`start_url` 由 `/` 改为 `/butler`；远程访问登录成功后由 `window.location.replace('/')` 改为 `'/butler'`。
+* **maskable 图标改用专用图**（`app/manifest.ts` + 新增 `public/icon-maskable-512.png`）：此前 maskable 直接复用 `icon-512.png`，而河马造型接近满幅，会被圆形蒙版裁掉鼻子与尾巴；新图留了安全区。
+* **`/butler` 不渲染 Butler 悬浮球**（`components/butler/ButlerOrb.tsx`）：页面本身就是 Butler，再挂一个「打开桌面抽屉」的球是多余入口（与 `/browser-chat` 同款处理，两处判定各加一个路由）。
+* **应用图标重做**（`app/apple-icon.png` / `public/icon-192.png` / `public/icon-512.png`）：四张图统一替换，体积显著下降（icon-512 374KB → 139KB）。
+
+## v0.7.660 (2026-10-01)
+
+> 本版是 **v0.7.659 之后的增量**。659 的包构建于 00:22–00:30 并于 00:26 发布，只含 659 条目所列改动；本版修掉一个**长期存在的释包管线缺陷**：打包版从不运行自定义 server。
+
+### 修复
+
+* **打包版从不运行自定义 server —— 远程访问鉴权网关与 CalDAV 自定义方法全部失效**（`scripts/package-release.sh` / `src/server.ts` / `electron/main.ts`）：
+  * **取证**：v0.7.659 整包搜索 `remote-login` / `requireRemoteToken` 命中 0；包内 `next-standalone/server.js` 仅 **3,299 字节**，是 Next 生成的「原生 standalone wrapper」（只有 `startServer`，`PROPFIND` 命中 0）。而 Electron 启动的正是这个文件（`electron/main.ts` 的 `serverPath`），并非 `src/server.ts` 编译出的那份。安装版 0.7.658 同一情形 —— 这是长期存在的缺陷，不是 659 引入的。
+  * **根因**：`package-release.sh` 全文只有一处 tsup，只编译 Electron 主进程；`src/server.ts` 从未被该脚本编译。包里那份 `next-standalone/dist/server.js` 是 **09-28 17:59** 的陈旧产物，且无任何代码引用它（`electron/main.ts` 里 `dist/server.js` 命中 0）。
+  * **修复**：打包时用 tsup 编译 `src/server.ts`，产物**覆盖** `next-standalone/server.js`（同时刷新 `next-standalone/dist/server.js`，不再往包里塞陈旧副本）。效果：远程访问 Token / Cookie 网关重新生效，CalDAV 的 `PROPFIND` / `REPORT` / `MKCOL` 等方法恢复可用，后台日历同步 worker 也随之启动。
+  * **两处配套**（缺一即坏）：
+    * `src/server.ts` 的 `dev` 判定改为 `NODE_ENV !== 'production' && COZE_PROJECT_ENV !== 'PROD'`。打包版由 Electron 以 `NODE_ENV=production` 启动、不设 `COZE_PROJECT_ENV`，只判后者会把打包版误认成 dev —— 那时 Next 会去现场编译已被打包脚本删掉的 `src/`。
+    * `src/server.ts` 补 `__NEXT_PRIVATE_STANDALONE_CONFIG` 注入（读 `.next/required-server-files.json` 的 `config`）。打包脚本会删掉 `next.config.ts`，Next 官方 wrapper 靠这个环境变量还原构建期配置，自定义入口必须做同样的事，否则 `images.remotePatterns`、`experimental` 等静默丢失（远端图片优化会直接 400）。
+    * `electron/main.ts` 的启动探针接受 `401`：strict 模式下该探针不带 Token，会被自家网关挡下，此时能返回 401 恰恰说明 HTTP 服务已经可用。
+  * **实测**（就地跑编译产物 + 隔离 `BOBWORK_HOME`，模拟打包版已删 `next.config.ts` 的布局）：`/` 200 且标题正确、`/manifest.webmanifest` 200、`PROPFIND /api/dav` **200**（原生 wrapper 下是 405）、`_next/image` 远端 URL **200**（证明配置注入生效）。开启 strict + token 后：无凭据 **401**、`Accept: text/html` **302** → `/remote-login`、登录页 200、错误 token 401、正确 token 200 并下发 `bw_remote=…; HttpOnly; SameSite=Lax; Path=/; Max-Age=15552000`、带 Cookie 200、带 Bearer 200、坏 Cookie 401；rotate token 后旧 Cookie 立即失效、关闭开关后无凭据放行。
+
+## v0.7.659 (2026-10-01)
+
+> 本版是 **v0.7.658 之后的增量**。658 的安装包构建于 09-30 22:47 并已于 22:50 发布；下列改动全部发生在 23:03 之后，**不在 658 包内**（658 条目中已随包出货的"会议记录按停顿切句群"，不在此重复计入）。
+
+### 新增
+
+* **远程访问支持浏览器 / PWA 登录（Cookie 会话）**（`server.ts` / `app/manifest.ts` / `app/apple-icon.png` / `app/layout.tsx` / `public/icon-192.png` / `public/icon-512.png`）：此前远程访问只认 `Authorization: Bearer`，而**浏览器发起的导航请求带不了这个头** —— Safari、以及「添加到主屏幕」后的 PWA 一律被挡在 401，偏偏这正是自用最省事的访问方式（不需要 Xcode / $99）。
+  * 新增自包含登录页 `GET /remote-login` 与换票接口 `POST /api/remote-access/login`：提交 token 校验通过 → 下发 httpOnly 会话 Cookie。登录端点**必须先于鉴权网关**处理，否则会被自身的 401 拦截、形成无法登录的死循环。
+  * Cookie 值 = `HMAC-SHA256(key=token, 'bw-remote-session-v1')`，**不落任何服务端会话表**：rotate token 后派生值随之改变，已下发的 Cookie 自动失效，无需维护黑名单。属性 `HttpOnly; SameSite=Lax; Max-Age=180天`（iOS 独立 Web App 退出进程会清掉会话 Cookie，不给长有效期就得每次打开重登）。
+  * 鉴权三道闸：① `Bearer` 头（Expo 壳 / curl / strict 模式下 Electron 网络层注入）→ ② 会话 Cookie → ③ 浏览器文档导航 302 跳登录页，其余仍 401；loopback 豁免与 strict 语义不变。
+  * PWA 化：`app/manifest.ts` 输出 `/manifest.webmanifest`（`standalone` / `portrait` / 主题色 `#6a5acd`）+ 192/512 图标（含 `maskable`）；`layout.tsx` 补 iOS `appleWebApp`（独立启动、标题 BobWork）与 `viewport-fit=cover`。
+
+### 修复与优化
+
+* **实时会议字幕每 45 秒卡一次、期间说的话直接丢字**（`components/butler/MeetingConsole.tsx` / `api/stt/stream` / `lib/stt/voice-providers.ts`）：转写通道原先每 `SEGMENT_MS = 45s` 主动 `finish(false)` 换块，而 `finish` 会 `detachWorklet()` + `teardown()`（关掉采集用的 16k AudioContext），之后还要等服务端 `is_eof`、等整段标点、再 `start()` 重建（新建 AudioContext → `/api/stt/stream` → `addModule` → 新 WebSocket）——这段空窗里麦克风音频**没有任何人在采**，是彻底丢字（实测 0.5~1.5s / 45s），字幕草稿同时被清空。现在**整场会议只开一条转写会话**（录音分片仍按 45s 一块，与字幕无关）。
+  * 伴生两条兜底（一条会话就是唯一命脉，必须自愈）：`/api/stt/stream` 新增 `action: 'keepalive'`（复用同一实例、只续期空闲回收计时，由实时 provider 每 60s 自发一次，否则常驻引擎会在开录 3 分钟后被空闲回收杀掉）；`voice-providers.ts` 新增 `onSessionLost` + **卡死看门狗**（连续 8s 收不到任何下行即主动断链，实测服务端每帧都会回消息、静音里也有），控制台据此收尾当前轮并自动重开，不再"字幕一直不动到会议结束"。
+  * 顺带修掉：`emitSegments` 不再把空段回调给调用方（rule1 可在纯静音上定稿，空段会白白吃掉一个句首时刻锚点并在字幕里落空行）。
+
+* **下线「会议进行中识别说话人」**（删除 `lib/stt/live-diar.ts` / `lib/stt/audio-gate.ts` / `components/butler/usePcmTap.ts` 及各自单测；`api/butler/meeting` 去掉 `diar_window` 动作与 `diarAvailable`；`diarize.ts` 去掉 `diarizeWindow()` / `liveClusteringArgs()` / `livePartition()` / `niceLow()`；`meeting-session.ts` 去掉 `labelMeetingVoiceMessages()`；`settings.ts` 去掉 `liveSpeakers`）。理由：十几秒滚动窗口的聚类天然不稳（同一人的话会被劈成两簇、窗口末尾静音会被算给上一位说话人），且每 4~6 秒就要起一整个分离 CLI（实测 12s 窗口 ≈1s CPU，另有 ffmpeg 与声纹进程），与流式转写抢 CPU 的表现就是"说话人乱跳 + 字幕卡"。
+  * **口径**：会议进行中字幕不带说话人，也不再有「Live speaker labels」开关；`[说话人 N]` 一律来自**会后的整段重转**（`retranscribe` → `parseAudio` + `ensureDiarization`，对整段音频只分离一次，编号全局一致）。旧配置里残留的 `liveSpeakers` 字段会被忽略。
+  * 一并回退为它配套加的间接层：`formatTimestampedTranscript` 的 `labels` 选项、`speakerLabelText()`、`TranscriptSegment.name` 与名字形式的 `[说话人 张三]` 解析、实时字幕按说话人成段的 `groupCaptionsBySpeaker()` / `joinCaptionText()`。
+
+* **「自动换段落」在实时字幕上实际是「每 20 秒硬切一刀」**（`lib/stt/sherpa.ts`）：原先 `rule1/rule2 = 3.0s` + rule3 默认 20s，正常对话里几乎不会静默满 3 秒，于是段落实际由 rule3 决定——实测 44.9s 真实录音只产出 3 段，切点正好落在 20.3s / 40.5s，全是句子中间的硬切。现在 `rule1 = rule2 = 1.5s`（自然句末 / 轮次停顿）、`rule3 = 10s` 且**要求 0.5s 停顿**才切：同一段录音 → 5~6 段，切点落在小停顿上。
+
+* **公众号检索：文章卡片与检索进度并入「小微」对话**（`lib/bus.ts` / `lib/core/butler-search.ts` / `api/butler/wechat-search/enrich/route.ts` / `components/butler/ButlerDrawer.tsx`）：此前综述经 `recordSearchExchange()` 落库、以真实气泡呈现，而**文章卡片与阶段进度只活在临时面板里**（`WechatResultInline`，关掉即失、刷新更无）——用户看到综述却看不到"检索了哪些文章"，检索过程中也没有任何反馈。
+  * **结果态落库**：`ChatMessage` 新增 `cards` 字段（`title / url / account / summary / keypoint`），`recordSearchExchange(query, md, cards)` 把卡片挂在综述那条 assistant 消息上一并落库 → 每篇文章成为会话历史的一部分，刷新后仍在、整卡点击在 Hippo 打开原文。
+  * **过程态临时**：`WechatResultInline` → `WechatSearchLive`（只剩"已拆为 N 个检索方向" chips + 阶段文案 + 三态兜底），门控收敛为 `还在跑 / 要验证 / 有兜底说明`，跑完即卸载不留残影；同时删掉前端对内容的镜像状态（`WechatAIState` 的 `picks / articles / digest / points` 已无人读，收敛为 `WechatPhase` + `wechatFailed`）。
+  * **两条兜底落库**（原先整轮静默消失）：① 模型不可用（`resolveModelConfig` 返回空）② 精编中途抛错——两种情形都用 `fallbackCards(hits)` 把候选落库，用户至少能看到"检索了哪些文章" + 一句说明。
+  * **修 `searchQ` 一词两用**：搜索栏那串字对小微是**检索关键词**而非过滤器，`isSearchContact` 时中栏不再按它过滤消息、联系人列也永不筛掉小微（否则起搜后刚落库的综述与卡片会被滤成 "No matching content"）。起搜改为 `focusSearchThread()`：先加载小微真源消息再切会话，收尾再重载一次；"滚到底部"的依赖补上 `wechatBusy / wechatPlan / wechatNotice / wechatCaptcha`，空态 `h-full` 块加 `!wechatLiveOpen` 门控。
+  * `AssistantBubble` 渲染卡片列表；朗读与操作条分开判定，只有卡片没有正文时仍可删除 / 复制（复制退化为标题列表）。
+
+* **系统身份头像调整**（`lib/butler/avatar.ts` / `components/butler/PersonaAvatar.tsx`）：
+  * **Bobby 与小微互换**两个条目的形象与底色（一起走，否则绿色卫衣失去呼应）——小微接管原 Bobby 的专用件 `wechat`（微信绿卫衣 + 胸前对话气泡）+ 微信绿底 `hue 149`；Bobby 的底色**保持** `hue 210`（蓝）。
+  * **Bobby 补一张专用件 `bell`**（第 12 张美术件，深色短发呆毛 + 蓝制服 + 胸前铃铛/回执母题）：互换后 Bobby 一度借用性格原型 `rigorous`，会与"严谨"人设的普通好友同形，而系统身份的设计目标是"一眼分得开"。`SYSTEM_AVATAR_IDS` 变为 `['wechat', 'bell']`，两张各钉一个身份、均不入名字散列兜底池。同一张钉死表驱动联系人列与中栏工具行，故只需改数据。
+
+* **新增单测**：`lib/butler/avatar.test.ts`（钉死映射 Bobby=bell/210°、小微=wechat/149°、Recorder=kuudere/32°；三者两两可辨、不受人设影响、专用件不被名字散列抽给普通好友）、`lib/core/butler-search.test.ts`（4 例，锁住落库往返契约）。
+
+## v0.7.658 (2026-09-30)
+
+### 修复与优化
+
+* **实时会议：字幕每 45 秒卡一次、期间说的话直接丢字**（`components/butler/MeetingConsole.tsx`）。转写通道原先每 `SEGMENT_MS = 45s` 主动 `finish(false)` 换块，而 `finish` 一进来就 `detachWorklet()` + `teardown()`（关掉采集用的 16k AudioContext），之后还要等服务端 `is_eof`、等整段标点、再重新 `start()`（新建 AudioContext → `/api/stt/stream` → `addModule` → 新 WebSocket）——这段空窗里麦克风音频**没有任何人在采**，是彻底丢字（实测 0.5~1.5s/45s），字幕草稿同时被清空、冒出 Transcribing…。现在**整场会议只开一条会话**：换块原本只为绕开 provider 的单次录音上限（`FINALIZE_MAX_SAMPLES` 10 分钟），而会议模式走 `skipFinalizeRefine` 根本不累积 PCM，该上限不适用；转写会话只在暂停 / 结束时收尾（录音分片仍按 45s 一块，与字幕无关）。
+  * 伴生两条兜底（一条会话就是唯一命脉，必须自愈）：`/api/stt/stream` 新增 `action: 'keepalive'`（按需复用同一实例、只续期空闲回收计时），由实时 provider 自己每 60s 发一次——否则常驻引擎会在开录 3 分钟后被空闲回收杀掉（心跳放在 provider 里：它是会话持有者，只有真的走实时链路时才续期）；`voice-providers.ts` 新增 `onSessionLost` + **卡死看门狗**（连续 8s 收不到任何下行即主动断链，实测服务端每帧都会回消息、静音里也有），由控制台收尾当前轮并自动重开一轮，不再「字幕一直不动到会议结束」。
+  * 顺带清掉两个小坑：`emitSegments` 链路不再把空段回调给调用方（rule1 可在纯静音上定稿，空段会白白吃掉一个「句首时刻」锚点并在字幕里落空行）。
+
+* **下线「会议进行中识别说话人」**（删除 `lib/stt/live-diar.ts` / `lib/stt/audio-gate.ts` / `components/butler/usePcmTap.ts` 及各自单测；`api/butler/meeting` 去掉 `diar_window` 动作与 `diarAvailable`；`diarize.ts` 去掉 `diarizeWindow()` / `liveClusteringArgs()` / `livePartition()` / `niceLow()`；`meeting-session.ts` 去掉 `labelMeetingVoiceMessages()`；`settings.ts` 去掉 `liveSpeakers`）。理由：十几秒滚动窗口的聚类天然不稳（同一个人的话会被劈成两簇、窗口末尾静音会被算给上一位说话人），而且每 4~6 秒就要起一整个分离 CLI（实测 12s 窗口 ≈1s CPU，另有 ffmpeg 与声纹进程），与流式转写抢 CPU 的表现就是「说话人乱跳 + 字幕卡」。
+  * **口径**：会议进行中字幕不带说话人、不再有「Live speaker labels」开关；`[说话人 N]` 一律来自**会后的整段重转**（`retranscribe` → `parseAudio` + `ensureDiarization`，那条链路对**整段**音频只分离一次，编号全局一致）。旧配置里残留的 `liveSpeakers` 字段会被忽略。
+  * 一并回退为它配套加的间接层：`formatTimestampedTranscript` 的 `labels` 选项、`speakerLabelText()`、`TranscriptSegment.name` 与名字形式的 `[说话人 张三]` 解析、实时字幕按说话人成段的 `groupCaptionsBySpeaker()` / `joinCaptionText()`。
+
+* **「自动换段落」在实时字幕上实际是「每 20 秒硬切一刀」**（`lib/stt/sherpa.ts`）。原先 `rule1/rule2 = 3.0s` + rule3 默认 20s：正常对话里几乎不会静默满 3 秒，于是段落实际由 rule3 决定——实测 44.9s 真实录音只产出 3 段，切点正好落在 20.3s / 40.5s，全是句子中间的硬切。现在 `rule1 = rule2 = 1.5s`（自然句末 / 轮次停顿）、`rule3 = 10s` 且**要求 0.5s 停顿**才切：同一段录音 → 5~6 段，切点落在小停顿上。
+
+* **会议记录变成「一整坨没有段落、没有时间轴」的正文**（新增 `lib/parse/audio-chunking.ts`；`lib/parse/audio-parser.ts` / `lib/stt/sherpa.ts`）。这是「自动换段落不好用」在**落盘产物**上的根因，比实时字幕那一条更直接：无多说话人标签时整段转写退回**固定 60 秒网格**，而时间戳只在 `segCount > 1` 时才写——于是短于 60 秒的录音只切出一块 → **一个 `[mm:ss]` 都没有**，文稿是一整坨无段落正文，回放也失去「点一句跳到那一刻」（实测用户最近一份 `会议记录 - 会议 09-30 21-35.md`：668 字节，戳行数 0，全文一段）。
+  * 现在没有多说话人标签时按**停顿**切「句群」：新增纯函数 `parseSilenceDetect()` / `planChunkCuts()`（ffmpeg silencedetect 找 ≥0.8s 的停顿，切在**停顿中点**——两侧留余量，避免切口落在音节边缘把字吃掉；实测切在 `silence_end` 会出现「这个会议识别功能我。/ 做了好久」，「也」被边界吞掉），单段上限 20s、下限 3s，切点过多则退回原网格。同一段 44.9s 录音：**0 段 → 7 段**，段首时间戳落在句末处。
+  * 切碎不会成倍加载模型：`sherpa.ts` 新增 `sherpaTranscribeMany()`（**一次 CLI 调用转多个文件**，实测 SenseVoice small：1 个文件 1.68s、3 个文件 1.77s——每多一个文件只多 ~0.03s 推理），按 32 个一批分批；输出行数与入参不符直接抛错（`parseSherpaStdoutLines` 的配对守卫），调用方退回逐段转写。云端 STT 仍走固定网格（按段计费/计延迟，切碎不划算）。
+  * 切块口径进了缓存键（`CHUNK_VERSION`）：否则老录音会一直命中旧缓存，用户看不到任何变化。
+
+* **新增单测**：`lib/parse/audio-chunking.test.ts`（10 例）、`lib/stt/sherpa-parse.test.ts`（4 例）。`pnpm test` **755 例全绿**，`tsc -p tsconfig.typecheck.json` 通过。
+
+* **公众号检索：文章卡片与检索进度并入「小微」对话**（`lib/bus.ts` / `lib/core/butler-search.ts` / `api/butler/wechat-search/enrich/route.ts` / `components/butler/ButlerDrawer.tsx`）。此前综述经 `recordSearchExchange()` 落库、以真实气泡呈现，而**文章卡片与阶段进度只活在临时面板里**（`WechatResultInline`，关掉即失、刷新更无）——用户看到综述却看不到「检索了哪些文章」，检索过程中也没有任何反馈。
+  * **结果态落库**：`ChatMessage` 新增 `cards` 字段（`title / url / account / summary / keypoint`），`recordSearchExchange(query, md, cards)` 把卡片挂在综述那条 assistant 消息上一并落库 → 每篇文章成为会话历史的一部分，刷新后仍在、整卡点击在 Hippo 打开原文。
+  * **过程态临时**：`WechatResultInline` → `WechatSearchLive`（只剩「已拆为 N 个检索方向」chips + 阶段文案 + 三态兜底），门控收敛为 `还在跑 / 要验证 / 有兜底说明`，跑完即卸载不留残影；同时删除前端对内容的镜像状态（`WechatAIState` 的 `picks / articles / digest / points` 已无人读，收敛为 `WechatPhase` + `wechatFailed`，`applyEnrichEvent` 只接 `captcha / phase / error / done` 四帧）。
+  * **两条兜底落库**（原先整轮静默消失）：① 模型不可用（`resolveModelConfig` 返回空）② 精编中途抛错（`chatText` 在 HTTP 非 2xx 时 `throw`、`chatJson` 不吞）——两种情形都用 `fallbackCards(hits)` 把候选落库，用户至少能看到「检索了哪些文章」+ 一句说明。
+  * **修 `searchQ` 一词两用**：搜索栏那串字对小微是**检索关键词**而非过滤器，`isSearchContact` 时中栏不再按它过滤消息、联系人列也永不筛掉小微（否则起搜后刚落库的综述与卡片会被滤成「No matching content」）。
+  * **修「过程中无感知」**：过程块挂在会话流末尾，起搜时消息条数不变 → 把 `wechatBusy / wechatPlan / wechatNotice / wechatCaptcha` 计入「滚到底部」的依赖；空态 `h-full` 块加 `!wechatLiveOpen` 门控（此前会把它顶出可视区），小微另写空态文案。起搜改为 `focusSearchThread()`：先加载小微真源消息再切会话（原先只切 ID，中栏残留上一个会话），收尾再重载一次。
+  * `AssistantBubble` 渲染卡片列表；朗读与操作条分开判定，只有卡片没有正文时仍可删除 / 复制（复制退化为标题列表）。
+  * 新增 `lib/core/butler-search.test.ts`（4 例）锁住落库往返契约。`tsc -p tsconfig.typecheck.json` 通过。
+
+* **系统身份头像调整**（`lib/butler/avatar.ts` / `components/butler/PersonaAvatar.tsx`）：
+  * **Bobby 与小微互换**两个条目的形象与底色（一起走，否则绿色卫衣失去呼应）——小微接管原 Bobby 的专用件 `wechat`（微信绿卫衣 + 胸前对话气泡）+ 微信绿底 `hue 149`；Bobby 的底色**保持** `hue 210`（蓝）。
+  * **Bobby 补一张专用件 `bell`**（第 12 张美术件，深色短发呆毛 + 蓝制服 + 胸前铃铛/回执母题）：互换后 Bobby 一度借用性格原型 `rigorous`，会与「严谨」人设的普通好友同形，而系统身份的设计目标是「一眼分得开」，故补上；`SYSTEM_AVATAR_IDS` 变为 `['wechat', 'bell']`，两张各钉一个身份、均不入名字散列兜底池。同一张钉死表驱动联系人列与中栏工具行，故只需改数据。
+  * 新增 `lib/butler/avatar.test.ts`：钉死映射（Bobby=bell/210°、小微=wechat/149°、Recorder=kuudere/32°）、三者两两可辨、不受人设影响、**专用件不被名字散列抽给普通好友**。
+
+***
+
+## v0.7.657 (2026-09-30)
+
+### 新增
+
+* **Butler 常驻联系人「小微」（搜索与资料整理助手）**：公众号搜索结果不再住右侧浮层，而是作为小微的回复内联在中栏，搜索终于有了归属会话。
+  * 新增 `src/lib/core/butler-search.ts`：`ensureSearchThread()` 幂等创建常驻线程（`SEARCH_THREAD_ID = 'butler-search'`，真源在 `lib/butler/storage.ts`）并写入默认人设（`personality: 严谨、干练、信息密度高`）；`buildSearchSummary()` 产出 `pinned: true` + `systemRole: 'search'` 的摘要行（预览取最后一条 assistant 回复，剥 think 后按 `PREVIEW_MAX = 60` 截断）；`recordSearchExchange()` 把一次搜索作为一轮对话落库。
+  * `GET /api/butler/threads` 置顶顺序变为 **Bobby → Recorder → 小微 → 普通线程**，并在列表过滤中剥离常驻 id；`DELETE` 拒绝删除常驻身份（400 `resident thread cannot be deleted`）。
+  * `lib/butler/storage.ts` 新增 `SEARCH_THREAD_ID` / `SEARCH_TITLE = '小微'`，并把小微的角色目录固定为 `sanitizeRoleName('小微')`，保证其附件 / 产物落点稳定；`lib/butler/avatar.ts` 小微复用 `rigorous` 原型头像、`hue: 210`（蓝），与 Bobby 微信绿、Recorder 琥珀橙区分；`lib/butler/threads-shared.ts` 的 `systemRole` 联合类型新增 `'search'`。
+  * `lib/butler/threads.ts` 新增 `appendThreadMessages()`：向已有线程**尾部追加**消息（不覆盖历史），与 `upsertThread` 同锁、同 `trimThreadMessages` 裁剪、同 transcript 落盘口径。
+  * `ButlerDrawer.tsx`：起搜即把中栏切到小微；人设弹窗对常驻身份（Bobby / 小微）锁名并隐藏删除入口。
+
+* **公众号检索前 query 规划（问题拆解 / 关键词改写）**：`GET /api/butler/wechat-search` 先让模型把用户输入规划成 1–3 个搜狗微信关键词串，再顺序扇出检索、按 URL 去重合并。
+  * 新增 `PLAN_SYSTEM` / `planQueries()`（`temperature 0.2`，`chatJson` 失败重试 1 次）；模型不可用或规划失败 → **降级原句直搜**（与改动前行为一致，零回归）；响应新增 `decomposed` / `intent` / `queries` 字段。
+  * 扇出参数：合并上限 `MERGE_CAP = 12`；单条检索 `maxResults = 6`，多条时取 `max(4, ceil(12 / N))`；命中验证码（`captcha`）立即中断，按 `url` 去重。
+  * `ButlerDrawer.tsx` 新增 `wechatPlan` 状态，以 chips 明示「已拆为 N 个检索方向（意图）」；新组件 `WechatResultInline` 把综述渲染成对话气泡（头像 + `StreamingMarkdown`），精选 / 候选文章每篇一张卡片、点击在 Hippo 打开原文（卡片右侧 `Hippo ↗`）；loading / 验证码 / 无结果三态各自兜底。
+  * `wechat-search/enrich/route.ts` 请求体新增 `intent` / `queries`，`SYNTH_SYSTEM` / `VERIFY_SYSTEM` 提示词加入「检索方向」（综述与要点需覆盖这些方向、校验时一并确认）；digest 完成后调用 `recordSearchExchange()`，把「用户提问 + 综述（要点带来源标题）」写进小微常驻线程。
+
+* **小程序（Sandbox）预览搬到 Hippo Browser 独立页（含桥的自托管中继）**：
+  * 新增 `src/lib/sandbox/open-preview.ts`：`openSandboxPreviewInHippo()` → 先确保 Hippo 就绪（`desktop.hippoBrowser.open()`）再 `openUrlInNewTab(origin + '/api/sandbox/preview/<id>')`，避免覆盖当前标签；非桌面 / 异常回退 `window.open`。
+  * 新增 IPC `hippo-browser:open-url-new-tab`（`electron/hippo-browser.ts`）：空 URL / 非 http(s)|file / Hippo 未就绪分别返回错误，实际打开复用既有 `openInNewTab()`（首个仍是空标签页时直接覆盖，不新增标签）；`electron/preload.ts` 暴露 `openUrlInNewTab`，`src/lib/desktop-adapter.ts` 加同名透传。
+  * `src/lib/sandbox/bridge.ts` 新增自托管模式：顶层页（`window.parent === window`）时 `IS_STANDALONE` 分支直连服务端 —— 普通动作走 `relayRequest` → `POST /api/sandbox/bridge`（人工确认型动作超时 `MANUAL_CONFIRM_TIMEOUT`，其余 30s），流式调用走 `relayChatStream` → `POST /api/sandbox/chat-stream` 并解析 SSE `delta/done/error`；画布对接类 `graph*` 动作在独立页明确拒绝（"当前为独立页面（Hippo），不支持画布对接操作"），人工确认型动作退化为页内 `window.confirm`（服务端权限闸仍生效）。
+  * `SandboxPanel.tsx` / `UnifiedPalette.tsx` / `ChatNodeKernel.tsx`：预览入口统一改调 `openSandboxPreviewInHippo`，图标 Play → Globe，按钮文案 Preview → Hippo（title: Open in Hippo Browser）。
+
+* **Word 编辑器：A4 视觉分页**（新增 `docx-pagination.ts`）：A4 @96dpi 白纸 794×1123px、页边距 96px、页间灰隙 24px，换页 spacer 高 `PAGE_SPACER = 2×96 + 24 = 216px`；用 ProseMirror widget 装饰插入不可编辑的 `.docx-page-spacer` + 页码角标 `.docx-page-num`（手动分页符显示「第 N 页 · 分页符」）。
+  * 换页是**纯视觉层**（装饰不进文档模型，`getJSON` / `docToBlocks` 不带 spacer，docx 字节保真不受影响）；`measurePagination()` 遍历顶层块 DOM 累加高度，超过单页可用区（1123 − 2×96 = 931px）或该段 `pageBreakBefore === true` 即作为新页首块，经 `requestAnimationFrame` 防抖 + 装载后 80ms / 600ms 两趟复测覆盖图片与字体异步布局。
+
+* **Word 编辑器：查找 / 替换（⌘F）**（新增 `docx-search.ts`）：`DocxSearch` 扩展 + `docxSearch` 插件，命令 `setSearchTerm / findNext / findPrev / replaceCurrent / replaceAll / clearSearch`；支持区分大小写与全词，命中用 inline 装饰高亮（`.docx-search-hit` / 当前命中 `.docx-search-active`），全部替换从后往前执行避免位移；导航类事务打 `DOCX_SEARCH_NAV_META` 标记，**不计入脏块**。首版匹配限定在单个文本节点内（跨 mark 拆分的词不合并），已在源码注释中标注为取舍。
+
+* **Word 编辑器：字符 / 段落格式与 Ribbon 扩充**（`docx-tiptap-extensions.ts` / `docx-schema.ts` / `DocxTiptapEditor.tsx`）：新增命令 `setTextAlign` / `setPageBreak` / `setParaFormat` / `setRunFormat` / `setVertAlign` / `toggleBulletList` / `toggleNumberedList` / `increaseListLevel` / `decreaseListLevel`。
+  * 开始页签补齐：剪贴板（复制 / 剪切 / 粘贴）、字体（宋体 / 黑体 / 微软雅黑 / Calibri / Arial / Times New Roman / Cambria / 仿宋 / 楷体 / Consolas）、字号（8–72pt）、字体颜色、样式库（正文 / H1–H3）、左中右两端对齐、项目符号与编号列表（列表缩进 ±1，`ilvl` 上限 8）、左缩进 / 首行缩进 / 段前 / 段后（界面单位 pt，落库 twips ×20）、行距（1 / 1.15 / 1.5 / 2 / 2.5 / 3 倍）、上标 x² / 下标 x₂、清除格式、分页符。
+  * 新增「引用 / 审阅 / 视图」三个 Ribbon 页签（目录 / 脚注 / 题注 / 交叉引用 / 批注 / 导航窗格为 disabled 的「即将支持」占位；视图页签内含缩放与页眉页脚入口）。
+  * 段落级 `pageBreakBefore / spaceBefore / spaceAfter / indentLeft / indentFirstLine / lineSpacing` 与 `align` 全部进入 ProseMirror schema 与双向适配器；`runFormat` mark 新增 `vertAlign`（DOM `data-va`，渲染 `vertical-align: super/sub`）。
+
+### 修复与优化
+
+* **段落对齐（w:jc）此前既不回显也不落盘**：双向适配器把对齐写在 `Block` 顶层的 `block.align`，而引擎只认 `Block.format.align`（`parse.ts` 从 `w:jc` 写入、`generate.ts` 读取并生成 `w:jc`），顶层字段无人消费 —— 后果是文档原有对齐在编辑区看不出来、在编辑器里设的对齐保存后丢失。现在读写统一经 `format`：`blocks-to-tiptap` 读 `fmt.align`，`tiptap-to-blocks` 经 `mergeFmt('align', …)` 回写，原有对齐可回显、编辑器改动可落盘。
+* **`setParaFormat` 命令声明类型补齐 `pageBreakBefore`**：运行时实现本就把 attrs 展开进节点属性（扩展的 `addAttributes` 已声明该字段），但 `docxParagraph` / `docxHeading` 的命令签名漏列该字段，导致「清除格式」传 `pageBreakBefore: null` 时构建期类型检查报「多余属性」而中断发布。现补齐签名，运行行为不变。
+* **字符格式合并设置，避免「设字体清掉字号 / 颜色」**：`setRunFormat` 改为合并式 —— 先把选区（或光标处）已有的 `color / sizeHalfPoints / font / vertAlign` 收进来，再叠加本次传入字段，全为 null 时直接返回 false；此前 `setMark` 走默认值会把同域其它字段一并清空。
+* **输入框右侧 70px 死区**：`ButlerDrawer.tsx` 输入框去掉 `pr-[70px]`（改为 `pr-3`）。该内边距是「`pl-8` → `pl-3`」改造漏掉的对称项，导致每行右侧 70px 打不进字（源码注释注明「2026-09-30 修，见 e2e 实测」）。
+* **独立页里的小程序请求不再无声失败**：桥在无父窗口时过去只能 `postMessage` 给不存在的宿主，现在直连服务端中继；`graph*` 动作给出明确中文报错而不是挂起。
+* **检索链路全程可降级**：模型不可用 / 规划失败 → 原句直搜；桥离线 → 前端静默不显示公众号内容；`VERIFY_SYSTEM` 保留「只依据给定材料、不得编造」约束。
+* **列表项按层级缩进**（`docx-nodeviews.tsx`）：`ListItemNodeView` 读 `ilvl` 并以 `marginLeft = ilvl × 1.4em` 呈现，多级列表在编辑区可读。
+
+### 改进
+
+* **常驻会话排序与删除口径统一**：`GET /api/butler/threads` 的 `sessions` 固定为 `[notify, recorder, search, ...threads]`，并在过滤里剥掉这三个常驻 id（否则用户在常驻线程里追问过之后，它们会以普通线程身份再次出现在列表里）；`DELETE` 对三个常驻 id 一律 400。
+* **搜索综述与问题对齐**：enrich 的综述 / 校验提示词统一前置 `用户意图：… / 检索方向：…`，让要点覆盖问题的主要侧面而不是复述材料顺序。
+* **Butler 模型选型 Auto 下线**：模型下拉移除 Auto 项（`currentModelLabel` 由 `'Auto'` 改为 `'Select model'`）；新增迁移 effect —— 候选池就绪后把空值 / 已失效标签落成具体模型（优先 `settings.chatModel.pool` 的有序首选，池空取下拉首项），即改即存（`persistModelSettings`），切回该联系人仍是同一模型；一个对话模型都没配时保持空串、发送留 `null` 交服务端兜底（与画布对话节点同口径）。
+* **Run / 段落格式字节保真**：`tiptap-to-blocks.ts` 回写时以 `orig.format` 为基底叠加编辑器节点属性（`mergeFmt` 逐字段），未触碰字段（如 `shading`）原样保留；`align` 亦纳入该口径。
+* **标题字号与版式**（`DocxTiptapEditor.tsx`）：`.ProseMirror h1/h2/h3` 设为 24pt / 19pt / 15pt（Word 风格）；编辑区去掉 `min-height: 60vh` 与白页 `margin: 0 auto`，改由分页容器与左侧竖标尺（`.docx-vruler`）承载版式。
+
+### 界面细节
+
+* Word 编辑器右侧新增缩放控件（40%–200%，步进 10%）与底部**状态栏**：`第 X / Y 页`、`字数 N`（非空白字符数）、上一页 / 下一页 + 页码输入框跳转（`goToPage`，平滑滚动到该页内容偏移）。
+* Ribbon 页签由 3 个（开始 / 插入 / 布局）扩到 6 个（+ 引用 / 审阅 / 视图）。
+* 查找面板：查找输入框 + 区分大小写 / 全词两个勾选 + ↑↓ + `x/y` 计数 + 替换为 + 替换 / 全部替换 / 关闭；`Esc` 关闭、`Enter` 下一个（`Shift+Enter` 上一个）。
+* 小程序相关文案与图标全面改口：Sandbox 面板按钮 `Preview`(Play) → `Hippo`(Globe)，`title` 改为 `Open in Hippo Browser`。
+* Butler 抽屉输入框底部按钮带重排：思考档位 + 模型移到**右侧**紧邻麦克风（`right-16`，弹层右对齐向左展开），回形针独占左下角；**录音 / 转写期间整簇隐藏**，把槽位让给录音条。
+* 小微头像为蓝色（`rigorous` 原型、`hue: 210`），与 Bobby 微信绿、Recorder 琥珀橙区分。
+
+***
+
+## v0.7.656 (2026-09-30)
+
+### 修复与优化
+
+* **docx 保存时 body 尾部重复追加 `w:sectPr`（每存一次多一个）**：`parseDocx` 把 body 末尾的 `<w:sectPr>` 输出为 `hidden: true` 的 passthrough 块，但适配器 A（`blocksToDoc`）忽略了该标记，把它也建成编辑器节点；适配器 B 回灌时又丢掉了 `hidden`，于是 `saveDocx` 的「跳过 hidden 块」约束失效 —— 该 `sectPr` 被当正文写进 body，同时引擎又自行追加了一份尾部 `sectPr`。
+  * 现在 `blocksToDoc` 跳过 `hidden` 块、不为其建节点，尾部 `sectPr` 完全交由 `saveDocx` 追加。
+  * 附带：编辑器里不再出现多余的 "Section properties" 占位条。
+
+### 其他
+
+* `src/lib/docx-engine/VENDOR.md`：记录引擎目录下那份临时 `node_modules/` 已移除（顶层 pnpm 布局已具备完整依赖闭包，裸 import 正常解析），并加醒目警示 —— Turbopack 会优先命中该嵌套树而遮蔽 pnpm 布局，直接导致构建期 `Module not found`（v0.7.654 首次构建即栽在此处）。
+* 测试：修正 `passthrough` / `docx-fidelity` / `edit-round-trip` 三个用例，使其与 09-30 的编辑器升级一致（图片改为真实 `docxImage` 节点、`tableMeta` 按结构比较、单可见块文档命中「过半即全量」而合法返回 `null`）。
+
+## v0.7.655 (2026-09-30)
+
+### 修复与优化
+
+* **原生 C 源随包分发（常驻标点服务 + 声纹提取）**：`punct_server.c` 与 `spk_embed.c` 靠 `outputFileTracingIncludes` 追踪，落点却在 `next-standalone/src/` 树下 —— 而打包收尾会整棵删掉 `src`，源码随之丢失。后果是**安装版静默退化**：常驻标点服务退回「每段 spawn 一次 CLI」（每次重载约 75 MB 模型），声纹提取不可用。
+  * 现在由 `package-release.sh` 显式复制两份 C 源到 `next-standalone/scripts/`（与 `ooxml-revise.py`、`pdf_extractor.py` 等同款落法）。
+  * 运行时查找顺序改为 `cwd/scripts/*.c` → `cwd/src/lib/stt/native/*.c` → `__dirname/native/*.c`，同时覆盖 **打包版 / 开发 / 就地跑 `.next/standalone`** 三种场景。
+  * `next.config.ts` 的追踪配置保留（服务「就地跑 standalone」），注释改为如实说明它不足以支撑打包版。
+
+### 新增
+
+* **Word 编辑器第二轮：Ribbon 工具条 + 表格/图片/列表 + 页眉页脚**：上一版只能改文字，本版补齐结构编辑。
+  * 新增 Ribbon 工具条（开始 / 插入 / 布局三段）：插入表格、插入图片、表格增删行列、页眉页脚编辑；编辑区改为白页 + 标尺的所见即所得版式。
+  * 新增 NodeView 渲染层（`docx-nodeviews.tsx`）：表格按 `colgroup` 还原列宽与 `colSpan`/`rowSpan`（`vMerge=continue` 的延续单元格按 Word 语义隐藏）、图片按 data URL 显示（缺失时显示占位）、列表项渲染 marker 前缀且正文可编辑。
+  * 适配器升级：非文本块由「只读占位」变为**可编辑真实节点** —— 表格整模型存入 `tableMeta`、图片为原子节点、列表项按 `ilvl`/`numId` 计数；回写时单元格内容取编辑器、其余字段（列宽/边框/对齐等）从 `tableMeta` 合并，保持保真。
+  * 新增渲染脏块路由器（`render-dirty.ts`）：表格 → 重新生成 XML；已有图片与 passthrough 块 → 原样字节；新插入图片 → `NewImage`（仅 png / jpeg / gif，其它格式明确报错）。
+
+* **Word 编辑器 AI 修订（Track Changes）**：
+  * 选区浮层可对选中文本发起 AI 改写，结果以 `w:ins` / `w:del` 修订形式落入文档（Track Changes 开关控制）。
+  * 右侧新增修订面板：单条或全部接受 / 拒绝；「接受并写回原稿」复用既有 `save_to_original` 冲突防护。
+  * 新增**整文档修订**：取 `/api/docx/audit-revise` 的审计报告 → AI 逐条生成操作 → 依次 apply，顶部显示进度条。
+  * 旧 `DocxViewer`（docx-preview 只读渲染）已删除，AI 修订等能力并入编辑器；`isPreviewable('docx')` 变为 false，docx 一律走 `/docx-editor`。
+
+* **会议实时说话人标注（Live speaker labels）**：会议进行中的字幕现在会实时标出说话人，不再只在回放里才有名字。
+  * 新增 `usePcmTap`：旁挂一路 16k AudioContext 采样（复用既有 AudioWorklet），滚动保留近 60 秒 PCM 并记录每段墙钟时刻；Pause → 停止采样，Resume → 恢复。
+  * 新增 `live-diar.ts`：客户端每 6 秒送最近 12 秒音频到新的 `diar_window` action，服务端跑一次离线分离（复用 `diarizeWindow`），把结果换算成绝对时间回填到尚未贴标签的字幕；跨窗口靠声纹质心 + 本场内存花名册稳定编号，**只读**项目声纹库、不写库。
+  * 新增会议设置 **`liveSpeakers`**（默认开启）：仅在 live 视图且本地分离模型就绪时露出该开关。
+  * 字幕标签改为「只在换人处标一次」，避免每行重复人名。
+
+### 改进
+
+* **端点判停放宽**：新增 `--rule1-min-trailing-silence=3.0` 与 `--rule2-min-trailing-silence=3.0`（默认 rule2 为 1.2 秒，导致字幕切得过碎；rule1 需同步抬高）。
+* **窗口分离新入口**：`diarize.ts` 新增 `diarizeWindow()`，专供实时窗口使用 —— 不走缓存（窗口键零命中且会挤掉 LRU），只做分区还原与同人相邻合并，不做极小簇归并和 60 秒网格兜底；原整段流程不变。
+* **说话人回填收口**：`meeting-session.ts` 新增 `labelMeetingVoiceMessages()`，仅给 `type === 'voice'` 且尚无标签的消息写入说话人，并返回写入条数。
+* 三处 route 的注释文案随 `DocxViewer` 删除同步更新为 `DocxTiptapEditor`。
+
+***
+
+## v0.7.654 (2026-09-29)
+
+### 新增
+
+* **Word 文档编辑器（DOCX 引擎正式接入运行时）**：上一版引擎已 vendor 入库但只有单测引用、未进安装包；本版真正接进 `/docx-editor`——打开本地 `.docx` 从只读预览升级为**可编辑**，编辑后写回原文件。
+  * 新增 docx 模型 ↔ ProseMirror 双向适配器（`blocks-to-tiptap.ts` / `tiptap-to-blocks.ts`）：一条 Run 对应一个 mark 文本节点，段落/标题挂 `docxIndex` 锚点，非文本块以只读占位呈现；回写时按 `docxIndex` 从 `originalBlocks` 回带 `rawPPr`/`format`/`styleId`，未被碰过的格式原样保留。
+  * 新增 docx 形 ProseMirror schema 与同名 Tiptap 扩展集（`docx-schema.ts` / `docx-tiptap-extensions.ts`）、编辑内核（`DocxTiptapEditor.tsx`）：`parseDocx → blocksToDoc → 编辑 → docToBlocks → buildSaveBlocks → saveDocx → POST /api/local-files` 全链路。
+  * 新增块级脏追踪 `DocDirtyTracker`（`doc-dirty.ts`）：脏集锚定持久身份 `docxIndex`（非顶层下标），再换算回数组下标——插入/删除不会让标记错位。
+  * 非文本块（table / image / listItem / passthrough）即使被标脏也强制按 `original` 原样保留（`save-blocks.ts`），避免重新生成导致表格、图片、编号损坏。
+  * TIFF 解码由顶部静态 import 改为按需动态 import `utif2`（`tiff.ts`），`decodeTiff` / `tiffToDataUrl` 转 async，功能与保存结果不变。
+
+* **本地说话人身份（声纹库）**：说话人分离从「只有簇号」升级为「跨录音认人」。
+  * 新增原生批量声纹 CLI `native/spk_embed.c`：dlopen sherpa-onnx C API 批量提取声纹，首次按 `clang -O2` 编到 `.stt/bin/spk-embed`（按 mtime 幂等），复用已下载的 diarize 3dSpeaker 模型，**无需新模型**。
+  * 新增 `speaker-embed.ts`（16k 单声道 wav → 512 维向量、余弦/归一化/质心纯函数）与 `speaker-lib.ts`（项目级声纹库 `<project>/.speakers/lib.json`，余弦阈值 0.5，同名质心按次数加权）。
+  * 会议回放字幕段首直接显示人名（按色板着色），播放器下方名单可**改名**并写回声纹库；旧录音无声纹缓存时显示 **Identify speakers** 按钮补跑分离。
+  * 声纹是增强项：模型/引擎缺失时静默跳过，不阻断切块转写。
+
+* **Butler 会话级模型选型**：每个会话（线程）可独立指定模型与思考档位（`modelId` / `thinkingLevel`），设置随线程落盘、切换联系人时回填；未指定或指定失效时静默回退自动选型。线程会话接口（`POST`/`PATCH /api/butler/threads/session`）与消息接口同步支持。
+
+* **Customize 脑图首屏**：规则面板新增 `BrainMap` 入口（中枢 + 四分区节点），点击进入对应分区，`← All` 返回。
+
+### 改进
+
+* **会议字幕「一行一句」**：不再按固定 45s 换行——说话人停顿即定稿交稿，收尾只交余量。`SEGMENT_MS` 现在只决定换块、不决定换行；配套新增句首时刻 FIFO、串行落库队列，字幕与最终转写逐句对齐。
+* **说话人分离算法调优**：聚类阈值放宽（0.6/0.45 → 0.9/0.8）、`--min-duration-on` 由 0 → 0.3、DIAR_VERSION 1 → 3；新增重叠段按说话人还原为分区（`partitionBySpeaker`）、不足主说话人 5% 的假簇并入相邻簇（`mergeTinyClusters`）、置信度解析与 `compute-confidence`；每簇声纹质心写入分离缓存作为身份层。
+* **History 按会议聚合**：由「扁平产物行」改为按 `source:目录:标题` 聚合成会议行，默认折叠、点父行展开，子行按 Minutes / Transcript / Podcast 排序显示本场落了几份；回放入口只挂会议行（优先带音频的 transcript）。仅一份产物的会议不聚合，行为同前。
+* **对话模型选型收口**：新增 `isChatModel()`，把 vision / embedding / rerank / audio 类模型排除出对话选型。
+* **主窗口宽度自适应**：由固定 1400 改为跟随主显示器工作区宽度。
+
+### 界面细节
+
+* Butler 左栏 Memories 键移除并并入 Customize（换 Brain 图标），Meeting 键 Mic → Video 图标；标题栏「批量多选」入口移除。
+* 规则面板四段调整：原 Preferences 段取消（偏好聚合并入 Memories 段），负样本 **Blocked patterns** 迁入 Rules 段。
+* 输入框底部新增会话级选型控件：思考档位（月相图标）+ 模型下拉（含 Auto）。
+
+***
+
+## v0.7.653 (2026-09-29)
+
+### 修复与优化
+
+* **一段空碎片不再毁掉整段转写**：说话人分离的边界抖动会切出几十毫秒的空块（实测 34ms = 1166 字节），云端 STT 对这类无内容音频直接返回 HTTP 422（"转写结果为空" / "Cannot compute mel spectrogram of empty audio"），**一块碎片就足以让整段录音的转写全部失败**。两处收口（`lib/parse/audio-parser.ts`）：
+  * 新增微碎片下限 `MIN_CHUNK_WAV_BYTES`（0.2s，按 16k 单声道 s16le 折算 6400 字节），低于该值的切片直接丢弃不送 STT；丢弃时保留原下标，说话人标签仍按原下标对齐，时间戳与「N 段拼接」计数改用实际送转写的段数。
+  * 422 按「本段无语音」处理并继续转写其余段，不再当作致命错误；全段皆空时仍由既有 `!extracted` 兜底报错，401/403 等鉴权类错误照旧致命。
+
+***
+
+## v0.7.652 (2026-09-29)
+
+### 修复与优化
+
+* **打包链路加固**：构建前 `rm -rf .next` 强制全量编译（消除 Next 增量缓存复用旧 chunk 导致「源码改动未进包」），并新增构建新鲜度守卫——打包前校验编译/组装期间 `src`/`electron`/`public`/`assets` 无源文件改动，有则中止且不产出、不上传。
+* **空音频文件明确报错**：音频转写前先拦 0 字节文件（`lib/parse/audio-parser.ts`）。此前空文件会被 ffmpeg 以「Format mp3 detected only with low score / Invalid argument」的原始报错兜出，看不出根因，容易被误判成「格式不支持」；现在直接提示文件为空、需重录或换有效文件。
+
+***
+
+## v0.7.651 (2026-09-29)
+
+### 修复与优化
+
+* 更新打包发布（本版无源码改动，仅重出安装包）
+
+***
+
+## v0.7.650 (2026-09-29)
+
+### 新增
+
+* **本地 TTS 引擎 BobMultimodal（Qwen3-TTS）**：`lib/tts` 接入 BobMultimodal 的 OpenAI 兼容端点（本地 MLX 服务，默认 `http://127.0.0.1:8080/v1`，模型 `Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit`）。该端点有两处与 OpenAI 不同的行为，已分别收口：
+  * **恒返 WAV**：`response_format` 被忽略，强制以 `wav` 落盘，避免 WAV 字节被写成 `.mp3` 导致播放失败；
+  * **支持 `language` 参数**：按文本含 CJK 汉字与否粗判 Chinese / English（缺省 English 会把中文当英文合成）；`voice` 为固定枚举，预设服务端默认 `vivian`（沿用 `alloy` 会 500）。
+
+### 修复与优化
+
+* **TTS 与 STT 从同一分类中拆开**：`/api/models` 的 audio 正则把「识别」与「合成」混为一类，导致 TTS 模型混进 STT 角色候选池（反之亦然）。新增 `TTS_MODEL_PATTERN` / `isTtsModel()`（覆盖 tts / fishaudio / cosyvoice / melotts / vits / kokoro / zipvoice / f5-tts / index-tts 等），audio 分类按模型名二分；模型池新增 **TTS** 用途标签，TTS 角色候选池改按 `tts` 过滤（原先误用 `stt`）。
+
+***
+
+## v0.7.649 (2026-09-29)
+
+### 新增
+
+* **DOCX 内核（vendor 入库）**：引入完整 Word 文档读写内核 `src/lib/docx-engine/`（45 个模块 / 约 3 万行），取自上游 `genspark-ai/genoffice` 的 `packages/docx-engine`（Apache-2.0，未发布 npm，快照 commit `05b4bd6`）。本地仅两处改动：`parse.ts` 的 `@genoffice/pptx-engine/custgeom` 引用改指 `./vendor/pptx/custgeom`；`vendor/pptx/types.ts` 裁剪为仅保留 `CustomGeometry`，避免经类型位置动态 import 牵入 6 文件 / 3,366 行的 chart 闭包。运行期依赖 `jszip` / `fast-xml-parser`（≥5.3.4）/ `utif2` 已在 package.json 显式声明。
+  * 已验证：零改动往返逐字节一致；单块替换时 20 个 zip 条目中 18 项保持字节不变；保存幂等；10 KB 文档 `parseDocx` ≈ 46–60 ms、零改动 `saveDocx` ≈ 2 ms。
+* **Word 编辑器页面 `/docx-editor`**：Hippo Browser 打开本地 `file://*.docx` 时，主进程将其重定向到 `http://localhost:<port>/docx-editor?path=<绝对路径>`，与 `/pdf-viewer` 同一契约（零 App 外壳、标签名由服务端 `generateMetadata` 按 `?path=` 写入）。支持渲染、修订四视图、AI 改写与保存写回。
+* **远程访问鉴权**：新增 `/api/remote-access` 路由（启用 / 关闭 / 旋转 token / 模式切换）与 `server.ts` 的 `requireRemoteToken()` 网关——默认 `loopback-exempt`（仅回环免鉴权），严格模式或非本地请求强制 `Bearer` 校验；Electron 主进程在严格模式下自动补 token。
+* **`console` 场景只读工具**：`list_agents` / `list_projects` / `list_nodes` / `get_app_status` / `read_inbox`。
+
+### 重构
+
+* **Butler 线程化**：会话存储从 `chat_sessions` 表迁移为「一线程一文件」，落 `<APP_ROOT>/butler/.state/threads/<threadId>.json`（新 id 前缀 `b-`，历史 id 原样保留）。新增 `lib/butler/threads.ts` / `threads-shared.ts` / `threads-migrate.ts` 与 4 个 REST 路由（threads / session / messages / search）；启动期自动完成幂等迁移与过期线程清理。
+* **Butler 抽屉 IA 重写**：改为微信式四栏（联系人列 / 当前会话 / 详情分区 / Today·规则·日历·会议），数据源切到 `/api/butler/threads`；通知卡「普通消息化」（未读红点、类型图标、待办进度徽标）；消息卡新增复制 / 删除 / 多选 / 朗读等控件。
+* **画布文件打开分流**：HTML / PDF / DOCX / 图片不再进入预览面板，直接交由 Hippo Browser 打开；`registry.ts` 注册 `docx/doc` viewer 作为非桌面环境兜底。
+
+### 修复与优化
+
+* 新增 `node-executing` 执行状态广播与发送队列 `pendingSendRef`（流式生成 / 持久化期间新消息入队），避免并发写同一节点文件。
+* `HtmlRenderer.tsx` 正文中的项目相对路径引用统一改为发布 `file.open` 事件。
+
+### 界面细节
+
+* 设置面板新增「远程访问鉴权」区块（启用 / 关闭 / 旋转 token、模式选择）。
+
+***
+
+## v0.7.648 (2026-09-28)
+
+### 新增
+
+* **Butler 技能账本（Skills，Phase 3）**：新增 `lib/butler/skills.ts` —— 技能一条一个文件，落 `<APP_ROOT>/butler/.skills/<id>.md`（id 白名单 `sk-<8 位日期>-<hex>`），全局存储，复用规则那套并发与乐观锁；frontmatter 承载 `id / name / description / when / runtime / steps / grants / effects / lifecycle / version / createdAt / updatedAt / revisions`。新增 `skills-shared.ts` 定义类型：`SkillOrigin = ai | user`、`SkillLifecycle = active | quarantine | retired`、`SkillRuntime = compose | script`、适用条件 `SkillWhen`（keywords / scenes / objectTypes / preconditions）、权限声明 `SkillGrants`（fs / net / process 白名单）、失败隔离阈值 `SKILL_FAIL_QUARANTINE = 3` 与 `LIFECYCLE_LABELS` / `ORIGIN_LABELS` / `RUNTIME_LABELS`。当前**只支持 `compose`（受审原语编排）**，`script` 需真沙箱、明确不支持。
+* **技能沙箱**：新增 `lib/butler/skill-sandbox.ts` —— `planSkill()` 执行前静态拦截（拒绝 `script`、空步骤、超步骤数、未受审原语、权限不足；**默认最小权限**，fs / net / process 未显式声明即拒绝），`runSkill()` 执行（读技能 → 校验 lifecycle 为 active → 生成步骤计划 → 逐步调用 `executeDeterministicRule` → 记成功 / 失败 / 超时）。
+* **Butler 心跳与统一运行时**：新增 `lib/butler/runtime.ts` —— `ButlerTrigger` 新增 `skill-match`（与 timer / speech / scene 共用同一套能力匹配与执行内核），`butlerTick()` 作为唯一门面；新增 `POST /api/butler/tick`：**独立触发端点、不依赖对话**（定时唤醒 Butler），可选 `projectId` / `threadId` 作运行锚点，返回 decision / notice / producedRef，幂等复用 hits 去重。
+* **技能 REST 与治理**：新增 `/api/butler/skills` —— `GET` 返回技能列表 + 成败信号（`revision` 与 `runs: { ok, failed, dismissed, consecutiveFailures }`）；`POST` **只承载生命周期治理**（`retire` / `unquarantine`，带 `expected_version` 冲突检测），不提供内容编辑。
+* **`skill_draft` 工具（`butler` 场景，本版唯一新增工具）**：AI 起草一条技能（程序化能力），经**可编辑草案卡**审固后落 `.skills/<id>.md`；复用规则草案卡的三段链路（弹卡 → 等确认 → 落盘），`/api/chat` 新增 `BUTLER_SKILL_DRAFT_TOOLS`，卡片可改 Name / What it does / Trigger keywords，未操作则按时超时。
+* **常驻标点服务（原生 C，免去每次加载 75MB 模型）**：新增 `lib/stt/native/punct_server.c`（直接调 sherpa-onnx C API，`dlopen` 载入 `libsherpa-onnx-c-api`；模型**只加载一次**、每段推理约 3ms）与 `lib/stt/punct-server.ts`（按需用 `clang -O2` 现场编译到 `.stt/bin/punct-server`，幂等缓存、失败回退；stdin/stdout 单行协议 `READY` / `OK` / `ERR` 并做双向转义；空闲回收 `PUNCT_IDLE_MS`、就绪超时 `PUNCT_READY_TIMEOUT_MS`、单条请求超时 `PUNCT_REQUEST_TIMEOUT_MS`）。`punctuateText()` 优先走常驻服务、失败回退单次 CLI，未就绪 / 空文本 / 失败一律**原样返回**，绝不影响语音输入链路。`next.config.ts` 新增 `outputFileTracingIncludes`，把 `src/lib/stt/native/**/*` 显式带进 standalone——否则打包版会**静默**退化成每段 spawn CLI 的慢路径。
+* **常驻进程管理器抽公共层**：新增 `lib/stt/resident-process.ts` —— `createResidentManager` / `ResidentInstance` / `ResidentRequest` / `ResidentStopReason = reaped | replaced | crashed` / `LOG_TAIL_MAX = 40`，把「复用、空闲回收、孤儿清理、失败回收」统一到一处。
+* **测试**：新增 `lib/butler/skills.test.ts`（`sk-` id 生成、落盘默认值 `version=1` + `lifecycle=active` + `origin=ai` + `runtime=compose`、非法 id、删除、成功写 hits 与失败写 `skill_failure` 及连续失败计数）与 `lib/butler/skill-sandbox.test.ts`（权限边界默认最小权限、静态拦截 `script` / 空步骤 / 超上限 / 未受审原语、执行前门禁）。
+
+### 重构
+
+* **规则动作枚举接入技能**：`RuleStep.action` 由 `create_todo | create_scheduled_todo` 扩为 `create_todo | create_scheduled_todo | skill`（新增 `actionParams.skillId`）；`rules.ts` 把 `'skill'` 加入确定性动作白名单并从 frontmatter 回填 `skillId`；`rule-exec.ts` 遇 `action === 'skill'` 交给 `runSkill` —— 技能是**规则动作枚举的动态扩展**，不是平行执行路径。
+* **裁决调用收敛到 `butlerTick`**：`/api/chat` 改调 `butlerTick`（`speech` 触发），与 `/api/butler/tick`（`timer` 触发）共用同一入口，规则与技能走同一套裁决。
+* **`stream-server.ts` 改为复用常驻管理器**：自身只留它特有的三件事——端口分配（`listen(0)` 取号 + spawn 后 TCP 探测确认真在听）、就绪判定（失败时回读 stderr 尾巴给原因）、启动参数；`waitForPort` 支持 `AbortSignal`，子进程已退出 / 报错时**立即**返回，不再干等满超时。
+* **会议链路的模型编辑开关一拆二**：`voice-providers.ts` 把原来的 `deferRefine` 拆成 `skipSegmentPunctuation`（每段定稿不做标点，字幕保持引擎原文）与 `skipFinalizeRefine`（收尾不做离线重转定稿，且**不再累积整段 PCM，省最多 38MB 内存**），缺省都开 = 原行为。**会议模式只关后者**：45s 一段时重转只会拖慢分段且无必要，但标点必须留着——字幕要像飞书那样带句读。`useVoiceInput` 的参数随之由 `deferRefine` 改为 `skipFinalizeRefine`。
+* **播客配对改为「同模型一男一女优先」**：`podcast.ts` 新增 `modelHasPair` / `preferredPairModel` —— Host A 优先在同模型内成对，Host B 优先同模型内相反性别，取不到才回落跨模型（v0.7.647 是纯跨模型配对）。
+* **本地 TTS 模型表调整**：`sherpa-local.ts` 移除 `matcha-zh-baker` 单音色模型，改以 `vits-zh-ll` 作为中文男女双声预置（`gunian` 男 + `fushiyu` 女）；零样本通用参考音的女声来源也从 matcha 改为 `vits-zh-ll` 的 `fushiyu`（新增 `GenericRefSource` 类型，按 `preset` / `clone` 分支合成参考音）。
+* **播客音频拼接改为纯 PCM 合并**：`meeting/route.ts` 由 ffmpeg concat 滤镜转码 `.m4a` 改为**直接解析 WAV 头 + 按 PCM 字节追加**（新增 `parseWav` 与格式一致性校验），输出 `.wav`，不再依赖 ffmpeg 编解码。
+
+### 界面细节
+
+* **规则面板扩为四段总览页**：`ButlerRulesPanel.tsx` 由三段（rules / signals / preferences）扩为四段，新增 **Skills** 分区 —— 技能列表（适用条件 / 版本 / 来源 / 成败 / 生命周期）+ 详情（步骤 / 副作用 / 修订历史）+ 治理动作（Retire 停用 / Unquarantine 解封），数据源 `/api/butler/skills`；新增 `describeWhen()` / `describeEffects()` 把适用条件与副作用转成一行可读英文。
+* **搜索栏 AI 摘要卡升级**：`ButlerDrawer.tsx` 的综合综述由「`· ` 前缀散列要点」改为 **AI Summary 卡**（白底 + 左侧 3px 主色边条 + `Sparkles` 图标 + AI 标签，与下方来源行拉开层级），校验通过时右侧显示 `Grounded` 勾选徽标。
+
+## v0.7.647 (2026-09-28)
+
+### 新增
+
+* **播客双主播跨模型配对（本地离线）**：本地 TTS 引擎新增音色性别标注 —— `sherpa-local.ts` 新增 `LocalVoiceGender = 'male' | 'female'`（可标在模型级或音色级，音色级缺省回落模型级）、`LocalPresetVoice`（`id` 单音色模型 = 模型 id、多音色模型 = `<模型 id>:<音色 id>`，含 `label` / `modelId` / `voiceId?` / `gender?`）与 `listPodcastVoices`（只列**已就绪**的本地预置音色、可跨模型；未下载完成的列不出来「配了也合成不出」，零样本模型走参考音那一支故不参与）。`podcast.ts` 据此把本地预置从「同一模型内找两条音色」改为**跨模型配对**、默认一男一女：Host A 取「UI 指定 > 用户已选 > 首选女声 > 首条」，Host B 取另一性别，`presetSettings` 把候选落成该主播的合成设置（只换 `localModel` / `localVoice`，其余字段原样透传）。
+* **两种兜底文案显式引导**：只就绪一个预置模型（跨模型也凑不出第二条）→ `NOTE_SINGLE_PRESET_LOCAL`：两位主播同音，并指名去 `Settings → Roles → Audio TTS Model` 再下一个（如 VITS zh-ll）；一个就绪模型都没有 → `NOTE_NO_LOCAL_MODEL`。两种情况**照常出产物**，只附一句说明，不静默降级。
+
+### 修复与优化
+
+* **修「跨模型播客音频变快变尖、时长缩水」**：拼接由 **concat demuxer 改为 concat 滤镜**。demuxer 要求各段同参，而两位主播可能来自**不同模型**（matcha 22.05kHz / vits-zh-ll 16kHz / ZipVoice 24kHz），混拼会把 16kHz 段按第一段的 22.05kHz 播放 —— 实测 23.4s 素材只剩 18.2s，且变快变尖，附带 `Non-monotonous DTS` 警告。滤镜按各输入的**真实采样率**解码，再统一 `-ar 24000 -ac 1` 重编码为 **AAC**（`libmp3lame` 未必编进各平台 ffmpeg，AAC 是内置编码器最稳），产物由 `.mp3` 改为 `.m4a`。
+* **测试**：`podcast.test.ts` 新增「本地引擎跨模型预置配对」用例 —— 锁定两条自动音色互不相同、且 `hostA` / `hostB` 的 `localModel:localVoice` 键不同（通常即跨模型），并验证显式 override 能精确落到指定模型与音色。
+
+### 界面细节
+
+* **播客形式说明改短**：`Q&A` → "One asks, one explains"、`Relay` → "Both carry the story forward"、`Debate` → "Opposing sides, no invented facts"、`Chat` → "Casual, faithful to the source"（原为整句解释）。
+* **会议三入口副标题精简**：Live / Podcast / Transcribe 分别改为 "Records the microphone; saves notes and audio below." / "Markdown or text file → two-host podcast." / "Audio file → meeting minutes."；空态改为 "No audio — upload above." / "No documents — upload above."；屏幕录制提示改为 "Captures what this computer plays (macOS 14.2+)."
+* **确认弹窗减字**：倒计时从夹在说明句里改为独立一行 `Auto-cancels in N min`（规则卡与冲突卡各一处）；头部整段说明（"AI parsed the following; review or edit before confirming." 与规则卡的长解释）删除；风险标签改为 `⚠ Note:` / `⚠ Tight fit:`；冲突区改为 `⚠ Conflicts (n/total):` 与 `Free slots:`。
+* **问询弹窗（QuestionPopup）去掉头部**：删除「AI needs to confirm the following」标题区、图标块与 ` · M:SS left` 倒计时文案，只留选项列表 + 底部边框按钮区（`flex-1` 撑开）。
+* **抽屉确认文案精简**：手动确认工具的长句（含 `auto-skipped without execution if no action within N min`）删除，只留 `Params:`；删除会话改为 `“标题” · N messages`（原为整句 will be removed permanently）；语音输入失败去掉后半句解释。
+* **「我的定制」文案精简**：头部副标题删除；空态统一为一行 `Nothing yet.` / `No rules yet.` / `Select a rule.` / `None.`；负样本栏改为 `Patterns you said no to. Unblock to re-enable.`（原为整句），两栏标题改为 `No longer ask` / `Not a habit`；信号行改为 `Dismissed N% of last M hits` / `Needs M hits`。
+
+## v0.7.646 (2026-09-28)
+
+### 新增
+
+* **规则从「只存」到「能跑」**：新增 `lib/butler/rule-exec.ts` —— `executeDeterministicRule` 执行确定性规则，支持 `create_todo`（Phase 1 便签待办）与 `create_scheduled_todo`（Phase 2 日历日程待办，带精确时刻）两类动作；`adjudicateAndExecute` 是调度枢纽（加载 active 规则 → 生成候选 → 裁决 → 执行 → 落结果），`attributeOutputEdited` 把用户后来的修改归因回规则。执行器负责项目落点解析、日程时刻计算、日历冲突降级、`producedRef` 回执。调用点在 `/api/chat` 请求链路内（不是后台常驻循环）。
+* **定时触发**：新增 `lib/butler/rule-timer.ts` —— `dueTimerRules` 按 `trigger.time` 算出到期候选，回看窗口 `TIMER_LOOKBACK_MS = 24h`；用 hits 日志里的 `occurrence`（实例时刻 ms）做幂等去重，避免同一实例重复执行或补跑历史实例。
+* **三通道触发裁决**：`rule-decision.ts` —— 硬命中 / 软命中 / 定时三条路径决定规则进入执行、询问还是静默；软通道相似度门限 `SOFT_SIMILARITY_THRESHOLD = 0.4`（刻意**放宽**：「多问」已被限流封顶成常数，而「漏问」的代价是永久静默，宁可多产候选）。
+* **弱触发与「提议固化」（near-miss）**：新增 `lib/butler/rule-nearmiss.ts`，三层互相独立 —— ① 弱触发信号（`WEAK_SIGNALS` 同域动词，如 待办/提醒我/安排/日程/记一下/会议/新建项目）产生候选；② 限流 `NEAR_MISS_ASK_LIMIT = 2`（同一模式累计询问上限，「问过即计数」，与「被否」是两个计数）；③ 拉黑（两类负样本各按 `(objectType, class)` 独立读判据，互不误伤）。模式键**只由对象类型构成**——对象类型是有限枚举、措辞是无限集，弱触发词只作信号、不进键。重复行为阈值 `NEAR_MISS_BEHAVIOR_N = 3` 触发固化提议。状态落既有 `.state/`（`rule-behavior.json` / `rule-nearmiss.json`），不新建存储根。
+* **负样本两栏与解封**：新增 `/api/butler/rules/negative-samples` —— `GET ?object_type=&class=` 返回 `{ samples, blocked, grouped }`，`DELETE ?object_type=&pattern=&class=` 解封（追加一条 `action='unblocked'`，**不删历史**，读侧 latest-wins 立即恢复候选）。两类负样本共用展示通道但不共用：`signal_mismatch`（「我把信号理解错了」→ 不该走某条已有规则，压制 near-miss 询问）与 `not_a_habit`（「这次的行为不是习惯」→ 不该固化成新规则，压制固化提议）。「我的定制」Preferences 段分「不再问 / 不想固化」两栏，附 "Patterns Butler stopped raising after you said no. Unblock to let them surface again."。扫描分片 `NEGATIVE_OBJECT_TYPES = todo / schedule / note / meeting / project / rule`（含 Phase 1 遗留 `rule` 分片只读兼容，不迁移）。
+* **规则创建改为「拟稿 → 确认」**：`/api/chat` 新增 `BUTLER_RULE_DRAFT_TOOLS`（限定 `rule_create`）与 `buildRuleDraftCard()`，把工具参数构造成规则草案卡；`ButlerConfirmModal` 新增 `RuleDraftCard` / `ButlerConfirmState`，用户可在「New rule draft / Review or edit before saving…」卡片里改参数再 `Confirm create`，approved 时才用**编辑后**的参数落盘（`ctx.setExecArgs`）。
+* **新工具 `rule_resolve_conflict`**（`butler` 场景）：两条规则同时命中且宿主无法裁决（`need_user`）时，记录用户的选择；按**有序规则 id 对**写入 conflict-resolution 信号，使同类输入不再重复询问。
+* **Butler 搜索栏 · 微信公众号检索（搜狗微信通道）**：`electron/hippo-browser.ts` 新增 `/wechat-mp` 通道（`search` / `read` 两个动作），在一条**专属后台标签**里完成检索与读正文（`findWechatMpTab` 优先复用/认领，否则新建），**不激活、不 reveal**，既保住反爬 cookie 又不打扰用户当前页面；返回 `engine / captcha / results / text`。服务端新增 `/api/butler/wechat-search`（读 `.runtime/hippo-bridge.json` 定位主进程桥，`POST /wechat-mp { query, maxResults: 6 }`；桥离线即未启动桌面端时返回 `ok:false`，前端静默降级）与 `/api/butler/wechat-search/enrich`（**AI 精选**，SSE 逐阶段推送 `curate → read → summarize → digest → verify`）。
+* **AI 精选流水线**：LLM 先从候选（标题/摘要/公众号）里判出最相关的 **3 篇** → 经桥 `read` 串行抽正文 → 逐篇一句摘要 + 一段带来源的综合综述 → 简版 **CoVe 校验**（论断须在正文有支撑，否则剔除或改写）。只在 3 篇上读正文与做摘要，成本可控；模型不可用时前端保留原始列表。抽屉搜索栏新增对应状态机（`WechatAIState.phase`）与文章结构（title / url / account / ok / excerpt / summary / keypoint）。
+* **播客可选「形式」与「音色」**：`podcast.ts` 的 `PODCAST_VOICES` 由固定双音色改为可枚举音色表（`listPodcastVoices`），`generatePodcastScript` 新增 `form` 参数，`FORMAT_DYNAMICS` 提供 `qa / relay / debate / chat` 四种双主播互动形式（含 `isPodcastForm` 校验）；`resolveHostVoices` 新增 `overrides`，UI 选定的 Host A / Host B 音色可覆盖自动派生。会议面板新增 Format 选择区（`PODCAST_FORMS` = Q&A / Relay / Debate / Chat）与 Voices 选择区（留空 = Auto，与历史行为一致；可用音色不足两条时整块隐藏）；`podcast_generate` 新增 `form? / voiceA? / voiceB?` 参数，并新增 `podcast_voices` 查询返回 provider / voices / autoA / autoB / note。
+* **测试**：新增 `lib/butler/rule-exec.test.ts`、`rule-timer.test.ts`、`rule-nearmiss.test.ts`、`lib/core/podcast.test.ts`，并扩充 `rule-signals.test.ts`、`rule-logs.test.ts`。
+
+### 修复与优化
+
+* **日志与命中口径细分**：`rule-logs.ts` 的日志类型扩为 `hits / output_edited / rule_violated / user_dismissed / conflict-resolution / negative-sample`；`HitEntry` 新增 `occurrence`（定时候选的实例时刻，语面命中不带）与 `producedRef`（产出对象引用，供 `output_edited` 归因）；新增 `NegativeSampleClass` 类型，Phase 1 旧记录无 `class` 字段时读侧按 `signal_mismatch` 兼容。
+* **「否决即拉黑」**：用户在裁决时否决某条规则，除记录否决外**立即**额外落一条 `class='signal_mismatch'` 的负样本，使该对象类型的 near-miss 询问不再产生候选——不需要用户再去面板手动拉黑。
+
+## v0.7.645 (2026-09-28)
+
+### 新增
+
+* **Butler 规则集（Rules）**：新增 `lib/butler/rules.ts` + `rules-shared.ts` —— 把用户的「长期承诺」从偏好层独立出来，落盘 `~/BobWork/butler/.rules/<rule_id>.md`（`r-YYYYMMDD-hex` 命名，字段 `id / name / kind / intentRaw / trigger / steps / commitment / scope / scopeTarget / priority / status / version / createdAt / lastHit`）；更新带乐观锁（变更后 `version++`）。本版为 **Phase 0：只存放与可见，不自动执行**。
+* **5 枚规则工具**（挂 `butler` 场景）：`read_rules` / `rule_create` / `rule_update` / `rule_pause` / `rule_retire`；REST `/api/butler/rules` 提供 `GET / POST / PATCH / DELETE`，面板与工具读写同源同一份 `.rules/*.md`。
+* **否定式表达路由（偏好 vs 承诺的分流）**：`preferences-shared.ts` 新增纯函数 `detectNegation()`，`addPreference` / `updatePreference` 增加第三道闸 —— 判据落在「**能否确定执行 + 是否存在中间态**」而非语气强弱（「回复里不要用感叹号」是硬约束→规则；「我不太喜欢很长的回复」是倾向→偏好），并刻意避开「特别 / 区别 / 识别 / 别人 / 别的」等含「别」的非否定词。命中返回 `routed` 信号，由 `remember_preference` 转成 `createRuleFromNegation()` 落规则集（偏好层不再承载承诺性内容）。
+* **规则面板**：新增 `ButlerRulesPanel.tsx`，`ButlerSection` 新增 `'rules'`，新事件 `BUTLER_RULES_EVENT = 'butler:open-rules'`（`ButlerHost` 新增 `onRules` 处理器）。面板副标题 "Standing commitments Butler holds for you · stored, not yet auto-run"。
+* **本地离线说话人分离（Speaker diarization）**：新增 `lib/stt/diarize.ts` —— 给整段录音标注「谁在什么时候说」，全局聚类 + 按音频指纹的独立结果缓存，档位 `DiarMode` = `solo / duo / group / auto`；导出 `ensureDiarization` / `buildSpeakerChunks` / `clipChunks` / `parseDiarizationOutput` / `DIAR_VERSION`。切块保证「单块单一说话人且无空隙」，相邻同人合并、换人切块、插入语吸收、快速对话不吞人、超长块切分。
+* **STT 面板新增第 4 组 `Speaker diarization`（可选）**：模型状态带 `diarizes` 能力位，文案 "Labels who spoke when in imported recordings — offline, on this Mac."；**仅服务导入录音**，会议设置面板不加新控件。
+* **文本转播客（Text to Podcast）**：新增 `lib/core/podcast.ts` —— `generatePodcastScript` 把 md/txt 资料改写成 A/B 双主播对谈脚本（严格 JSON，便于逐句取说话人）、`resolveHostVoices` 把设置里已选的那一款 TTS 拆成两位主播各一份 `TtsSettings` 副本（云端改 voice、本地改 localRefAudio/localRefText，**TTS 引擎零改动、不新增配置项**）、`renderPodcastMarkdown` 产物首行音频指针 + 逐行台词（与会议记录同口径，History 直接出 ▶ 回放）。上限：输入 20,000 字 / 成片 3,000 字 / 单条 200 字 / 150 行。会议产物新增 `podcast` 类型（`MeetingKind` 扩展），文件名前缀「播客」。只有一条可用音色时**照常出产物但回一条 note 显式提示**，不静默降级。
+
+### 重构
+
+* **常驻系统身份命名收口为 Bobby + Recorder**：通知助理显示名定为 **Bobby**（前身 Alfred，中间曾短暂用 Xiao Wei），真源 `NOTIFY_TITLE`；微信桥入站消息自 2026-09-28 起统一落 Bobby 线程（`threadIdHint: NOTIFY_THREAD_ID`），原先独立的「Bobby」/微信桥常驻会话退役，启动时 `purgeRetiredWechatSession()` 幂等清理（`chat-session.ts` 新增 `systemRole?: 'notify' | 'recorder'` 取代「靠 `pinned` 猜」——置顶行不止一条，`find(pinned)` 不再唯一）。Recorder 改为钉在「Bobby」正下方。
+* **系统身份头像钉死**：`avatar.ts` 新增 `SYSTEM_AVATAR_IDS = ['wechat']`（第 11 张形象，不入名字散列兜底池），新增 `SYSTEM_IDENTITIES` 按**显示名**钉死形象与底色 —— Bobby 固定微信绿 `#07C160`，否则名字散列会把绿色冲成随机色相；Bobby 允许用户设人设，但头像不随性格变（Recorder 则不可改人设、不可删）。
+* **项目归属从「显式收口」改为「显式优先 + 兜底可见」**：新增 `resolveProjectWithFallback` 与 `ProjectSource = 'explicit' | 'current_explicit' | 'current_fallback' | 'global'` —— 用户点名项目按 id/名称解析；没点名则落当前激活项目，但**必须在工具回执里回显 `project_source`**，让「写偏」立刻可见（此前静默写当前项目，模型看不到落点，于是反复「建→撤→建」）。`create_sticky_note` 未传 `project` 不再拒绝。
+* **会议结束流程再收口**：结束前先停录并**等待分片落盘**，再发 `action=end`；无论后续是否重转，都**先落一份全文转写**作为回放字幕的时间轴来源，并记录 `recordHandle` 供后台重转复用（`end` 回执新增 `segments`）。
+* **会议 API 新增三动作**：`punctuate`（批量给语音段补标点，含段数与长度上限、失败保留原文）、`retranscribe`（配合新增的 `shiftTranscriptStamps` 把切片内的转写时间戳平移回合并音频时间轴，避免回放字幕错位）、`podcast_generate`（materials 的 md/txt → 双人对谈脚本 → 逐句 TTS → ffmpeg 拼接，NDJSON 返回 md/audio，落 `butler/podcast/`）。action 全集现为 19 个。
+* **导入录音接入说话人分离**：`import_probe` 触发整段分离并显示 `Analyzing speakers…`，随后串行 `import_segment` / `import_finish`，按说话人切块转写。
+
+### 修复与优化
+
+* **微信日程提醒可直推**：`event-reminder` 产出提醒时并行 `wechatBridge.pushText()`（应用后台运行、手机端也能收到）；微信桥未绑定 / 未运行时静默 no-op，桌面队列照常投递；用动态 import 避免与微信桥形成模块初始化环。
+* **修「重启后第一条日程提醒静默丢推」**：`pushText` 收件人由「只看最近一次会话」改为「最近会话 → 退回凭证里绑定的 userId」。
+* **修「Bobby 没有未读项却亮着角标」**：通知行回执补上 `persona`，避免 thread_id 为空、既不属于任何联系人又被角标计入。
+* **日报正文减负**：`daily-report` 的 `text` 每个分区最多 10 条要点（`TEXT_PREVIEW`），超出补一行 `… (+N more)`；`items` 仍给全量快照（面板可展开、可勾选）；`degraded` 非空时明示告警，避免「查询失败 = 今天很空」被误读。
+* **Today 快照限量**：`butler/today` 单段事件列表上限 `EVENT_CAP = 200`，只为兜住极端量级（几千条逾期）撑爆 payload；正常量级 `count === events.length`，面板据此整段摊开。
+* **日历单事件查询**：`/api/calendar/events` 新增 `event_id` 参数按 id 取单个事件（通知详情点开日程提醒时读完整信息），未命中返回 404。
+* **纪要防幻觉**：会议纪要 prompt 增加说话人标签说明，明确 `[说话人 N]` 是标签而非姓名，避免模型臆造成真实人名。
+
+### 界面细节
+
+* **月相图标观感再调**：暗面由「半透明微弱透出」改为**恒在的整轮不透明深灰蓝球面**（真实月亮的夜面是深暗的，不是透明）；亮面改为暖灰白月壤并明确 limb darkening（亮度随入射角余弦下降，月缘变暗）；档位**不再用配色染色**、只靠相位区分；明暗界线保持锐利不做柔化（月球无大气，投射线即硬边）。
+* **Today 页签条吸顶**：面板自身就是滚动区，页签滚出视野后无从判断所在页 —— 用 `tabSticky` 钉在滚动区顶端（横向负边距 + 等量内边距让不透明底色铺满整宽，底色与右栏 / 浮窗面板同为 `--popover`）；Schedule 页每个分区默认 10 条（`SCHEDULE_PREVIEW`），余下折成一行可点的「N more」。
+* **Report 页签 markdown 样式**：`globals.css` 新增 `.butler-report .html-renderer` 一套（标题 13/700/ink-strong 对正文 12/400/ink-muted，字号 + 字重 + 颜色三重差异），把裸 markdown 的层级真正做出来；按样式面板 token 给，换主题不用改这里。
+* **人设弹窗增强**：`PersonaDialog` 新增 `fixedName`（系统身份名字钉死、不渲染姓名输入框）、`expandAdvanced`（打开即展开「高级」，首次完整人设引导用）、`heading`（覆盖标题栏文案）与 `template` 提交字段。
+* **测试**：新增 `lib/butler/rules.test.ts`、`lib/stt/diarize.test.ts`、`lib/core/meeting-session.test.ts`，并扩充 `lib/project/resolve-explicit-project.test.ts`。
+
+## v0.7.644 (2026-09-28)
+
+### 新增
+
+* **Butler 周期日程（recurrence）**：新增 `lib/calendar/recurrence.ts`（`RecurrenceRule` = freq / interval / byday / count / exdate / overrides / tzid / until，导出 `parseRecurrence` / `serializeRecurrence` / `coerceRecurrence` / `recurrenceLabel` / `occurrencesInWindowDetailed`），支持 `daily` / `weekly`；`events` 表新增 `recurrence_json` 列（旧库 `ALTER TABLE` 自动迁移，未迁移库读 `NULL AS recurrence_json` 兜底）；`createEvent` / `updateEvent` 支持 `recurrence`（`null` = 明确取消重复，不传 = 不改）。
+* **空闲时段查询**：新增 `lib/calendar/availability.ts`（`mergeIntervals` / `computeFreeSlots` / `findFreeSlots`）——区间合并 + first-fit 找空档 + gap 缓冲 + 工作日时段限定 + 全天占用与跨日顺延。
+* **两枚确定性日程工具**（挂 `butler` 场景）：`resolve_datetime`（自然语言时间 → `date` / `time` / `start_time`(UTC ISO) / `weekday` / `all_day_hint` / `topic`，要求在任何建日程工具前**先行**调用，禁止模型心算相对日期）、`query_free_slots`（按 `range_start` / `range_end` / `duration_minutes` 返回 `free[]` 与 `busy[]`，每条 free 自带可直接展示的 label）。
+* **相对时刻表达**：`todo-time-parse` 新增「N分钟后」「N小时后」「半小时后」「一个半小时后 / 两个半小时后」（数字支持阿拉伯与中文数字一~十，正确跨午夜）——与既有「N天后」的整天语义刻意区分，服务「提醒我 10 分钟后喝水」这类即时提醒。
+
+### 修复与优化
+
+* **周期提醒按实例展开**：`event-reminder` 扫描时按需展开落在本次窗口内的实例（不物料化事件行、不新建调度器），并支持多个提前提醒时间；`reminder_sent_json` 改为 `<实例开始ms>:<提前分钟>` **复合键**——否则「昨天 9:00 已发 30 分钟提醒」会被误读成「今天 9:00 也发过了」，周期提醒从第二天起静默失效。历史遗留的纯数字偏移读取时按本事件 `start_time` 归一化，行为与改造前一致。
+* **错过的提前提醒可补发**：放宽 `now < 实例开始` 限制，应用关闭期间错过的提醒在下次打开且未超过补发窗口时仍会推送；周期实例时长沿用原始 start→end 跨度，被 DETACH 改写的实例取改写后的标题。
+* **日历 API 透传重复规则**：`/api/calendar/events` GET 原样回传 `recurrence`（避免前端保存时静默丢失），POST 经 `coerceRecurrence` 归一化后写入。
+
+### 测试
+
+* 新增三份纯计算单测：`calendar/availability.test.ts`（区间合并 / 零长区间丢弃 / first-fit / gap 缓冲 / `notBefore` / 全天占用与跨日顺延）、`calendar/recurrence.test.ts`、`todo-time-parse.test.ts`。
+
+### 界面细节
+
+* **月相档位图标重新对档**：四档照亮比改为与标准月相 emoji 🌒🌓🌔🌕 逐一对应（off=娥眉月 0.25 / low=上弦 0.5 / high=凸月 0.75 / max=满月 1，原为 0 / 0.25 / 0.5 / 1），绘制路径去掉条件包裹、亮面直接出图。
+
+## v0.7.643 (2026-09-27)
+
+### 新增
+
+* **Recorder · 会议记录员常驻联系人**：Butler 联系人列新增第三个系统身份 Recorder，钉在 Xiao Wei 正下方（`RECORDER_THREAD_ID` / `RECORDER_TITLE` 真源在 `lib/butler/storage.ts`）；专属画像 `RECORDER_PROFILE`（`fixedScenes: ['meeting']`），不可改人设、不可删；头像复用 kuudere 形象 + 琥珀橙底色（录制指示灯），与 Alfred 藏蓝、Xiao Wei 微信绿拉开。
+* **两枚只读会议工具**：`meeting_search`（无参数 = 最近会议清单；带 `query` = 跨会议正文检索，大小写不敏感子串、多词 AND、返回命中片段；带 `path` = 取某场全文）与 `meeting_summarize`（按用户 `instruction` 原样透传重新出总结，**只回对话、不落库、不写收件箱**）；挂在 `meeting` 场景，管家 / 画布主对话 / 微信桥均拿不到（工具面即能力边界）。
+* **会议归档检索与阅读**：`/api/butler/meeting` 新增 `search` / `read` 两个 action——检索前先剥离音频指针与 `[mm:ss]` 时间戳（标记只对回放器有意义，喂模型只会干扰行文）。
+
+### 重构
+
+* **实时会议结束改为两段式**：`action=end` 只结束会话、不再同步跑模型，改为先把全文转写落到会议输出目录并立刻跳转 History；纪要由后台新增的 `action=summarize` 生成后补落，生成期间列表顶部显示 "Generating…"（`MeetingWrapUp` 模块级状态跨控制台卸载传递）。
+* **`summarizeMeetingText` 抽取**：从 `finalizeMeetingText` 拆出「只调模型、不落库」的出纪要入口（新增 `instruction` 透传），`finalizeMeetingText` 改调它再落收件箱——实时与导入两路出口口径保持一致。
+* **会议面板信息架构重写**：主界面即过往会议列表（History 即家）——可打开产物 / 回放录音 / 行内二次确认删除；**Live meeting** 与 **Transcribe audio** 收为标题栏两枚入口按钮，子流程整块让位并带 Back 返回主界面。
+* **Import 支持直接上传录音**：子视图 Upload 走 `POST /api/materials`（与画布输入框附件同一落点 `materials/`），上传完自动选中该条，点一次即转写。
+
+### 修复与优化
+
+* **实时字幕流分两层**：本地流式链路新增「实时草稿行」（`onPartial` 边说边写），定稿（`onText`）时被正式条目替换；云端录制链路不产中间结果，草稿行不出现（同一句不会显示两遍）。
+* **支持删除历史产物**：新增 `action=delete`，只删该份 md（路径须落在对应根内且为会议产物），面板行内二次确认 + 删除中禁用重复点击。
+
+### 界面细节
+
+* **月相思考档位图标升级为月面仿真**：球面明暗（以日下点为圆心的径向渐变，亮度向明暗界线衰减）+ 月海/高地暗斑（按亮面 `clipPath` 裁剪，只出现在受照区）+ 恒在暗面（地球反照微透）；渐变与裁剪 id 用 `useId` 派生，避免同页多实例（输入框按钮 + 档位菜单）互相串色。
+
+
+## v0.7.642 (2026-09-27)
+
+### 新增
+- **会议回放（对标妙记）**（新增 `src/components/butler/MeetingReplay.tsx`；改 `src/app/api/butler/meeting/route.ts`、`src/components/butler/MeetingStart.tsx`、`src/components/butler/MeetingConsole.tsx`、`src/lib/core/meeting-session.ts`）：
+  - 新增整块回放视图：上方录音播放器 + 下方带 `[mm:ss]` 戳的转写，点一句即跳转、播放时高亮当前段并跟随滚动；由 History 行右侧 ▶ 进入，在会议分区内部切换（Back 返回），不动抽屉结构。
+  - 音频降级链：已合并件 → 服务端 `concat_audio` 合并（结果落盘复用）→ 客户端按序拼接分片（提示 seek 可能偏差）→ 无音频则纯转写 + 顶部提示，绝不整屏报错；全程 blob 抓取（项目文件代理不支持 Range / 206）。
+  - 新增 `replay_audio`（返回带戳转写 + 音频分片清单 + 已合并件 + `missing`；点的是纪要时服务端自动换成同目录转写作字幕源）与 `concat_audio`（ffmpeg 合并分片为单个 webm 并写回同目录 `录音 - <标题>.webm`；`-c copy` 失败回退 libopus 重编码）。
+  - **音频指针约定**：转写 md 首行写不可见的 HTML 注释 `<!-- bob-audio: local|project:<glob> -->`，回放据此定位录音；含 `*` 按分片序号通配（Live），无 `*` 即单文件（Import 录音在 `materials/`，靠指针跨目录定位）。History 条目新增 `hasAudio` 嗅探，决定是否显示播放入口。
+  - 转写对齐真实时间轴：`append` 新增 `time`（该段在录音时间轴上的绝对毫秒），`meeting-session` 新增 `formatTimestampedTranscript`，`end` 返回带 `[mm:ss]` 的全文转写。
+- **记忆升级为「统一长期记忆」，新增两道写入门禁**（改 `src/lib/core/preferences.ts`、`src/app/api/chat/tools/butler.ts`、`src/lib/runtime/context.ts`、`src/components/butler/ButlerMemoryPanel.tsx`）：
+  - 主语收敛为**用户本人**，所有联系人共享同一份记忆；「按联系人不同」改由会话人设承担，不再算记忆维度。
+  - 写入口径由「仅显式记住」改为「识别到持久事实 / 偏好即自主写入、无需先问」，但写前须先 `read_preferences` 查同类：矛盾走 `update_preference` 覆盖、同一件事合并，禁止重复追加。
+  - 类型收敛为六类固定目录：`身份画像 / 偏好习惯 / 工作上下文 / 事实经历 / 目标计划 / 关系边界`（缺省「通用」）。
+  - 新增 `detectSensitive` 敏感信息守卫：凭证 / 证件 / 银行卡 / CVV 等一律拒写（不落盘、并提示模型不复述原文）；新增同类型相似度硬闸 `CONFLICT_SIMILARITY_THRESHOLD(0.5)`——命中返回既有序号 + 相似度，倒逼走更新而非追加。
+  - 注入分档：新增 `ALWAYS_INJECTED_TYPES`（身份画像 / 偏好习惯为常驻档，每轮注入正文）与安全阀 `ALWAYS_INJECTED_MAX=20`（常驻档超 20 条整体退化为只给目录，控 token）；其余类型只注入目录、需 `read_preferences` 按需调取。
+  - 记忆面板按类型分组（六类固定顺序在前，词表外的存量类型归入 Other 并显示原始 type，空组不显示），组标题标注注入档位（`always in context` / `on demand`），类型控件由文本框改英文下拉（原值不在词表时保留一个原值选项，不静默改写存量）。
+  - 新增守卫回归测试 `preferences.guard.test.ts`：守护「敏感拒写且不落盘 / 普通偏好不误判 / 同类型高相似拦截并回执序号内容分数 / 低相似放行 / 跨类型不拦 / 完全重复仍走原 `duplicate` 路径」。
+
+### 重构
+- **Butler 工具全面补「写入后回读校验」**（改 `src/app/api/chat/tools/butler.ts`）：`create_scheduled_todo` / `create_sticky_note` / `todo_update` / `todo_delete` 一律在写入后回读落库结果，与预期不符或回读失败即返回 `write_verification_failed`，不再静默通过。
+  - `create_scheduled_todo` 新增回传落点来源 `project_source`（`explicit` / `current_explicit` / `current_fallback` / `global`）；未显式传项目而兜底到当前项目时附 `warning`，提示「若写偏请用 `todo_update` 改归属、勿重复创建」。
+  - 标题纪律：`title` 只写简短动作摘要，用户原话 / 来源 / 背景放 `description`（`create_sticky_note` 无此字段，需保留原文时改走 `create_scheduled_todo`）。
+- **`create_project` 支持建完即切换为当前项目**（改 `src/app/api/chat/tools/butler.ts`、`src/lib/project/project-manager.ts`）：新增 `make_current` / `makeCurrent` 参数，回执新增 `is_current`；当前项目切换条件由「首个项目或无当前项目」扩展为 `makeCurrent || 首个 || 无当前`。
+- **项目引用支持基名兜底匹配**（改 `src/lib/project/resolve-explicit-project.ts`）：引用不含日期后缀时，用基名匹配 `createProject` 生成的 `<基名>_YYYYMMDD`；唯一命中 `via='name'`，多命中返回 `project_ambiguous`（附候选、不猜）；给了日期后缀则严格精确匹配（跨日期不配）。原有 `project_required` / `no_current_project` / `project_not_found` 口径不变，仅新增这一层匹配；配套新增 3 例单测。
+- **会议视图由「中栏接管」改为「右栏分区」**（改 `src/components/butler/ButlerDrawer.tsx`）：`ButlerSection` 新增 `'meeting'`，中栏**恒为聊天**，会议开始面板与控制台改在右栏渲染；会议激活即自动展开右栏并切到该分区。
+  - 右栏改「常驻挂载 + hidden」：新增 `rightMounted`，会议期间收起 / 切分区只隐藏不卸载（卸载即停录）；会议分区宽度 480。控制台新增 `visible` 传参，`onEnded` 只刷新会议状态、不再关面板。
+- **Today 面板首屏瘦身**（改 `src/components/butler/ButlerTodayPanel.tsx`）：移除顶部建议卡（含「去处理」按钮）与底部「收件箱」「报告文档」两块，打开即 Report / Schedule / Sticky 三页签；嵌入态连日期头一并去掉（顶部条已写 Today）。移除 `openButlerDoc` / `ReportDoc` 与 `/api/butler/report-doc` 拉取；文案批量英文化。
+- **本地 STT 精简候选**（改 `src/lib/stt/sherpa.ts`）：移除 Whisper 候选（编码器 / 解码器 / tokens 与启动参数），本地模型仅剩 SenseVoice-small（批量）+ Streaming Zipformer（实时）+ Punctuation。
+
+### 修复与优化
+- **同名联系人目录消歧**（改 `src/lib/butler/storage.ts`）：新增 `shortIdHash`（djb2 → base36）与 `disambiguateRoleDir`，目录名被其他角色占用时追加 threadId 稳定短后缀（4 → 全长），保证「一角色一目录」，避免同名联系人的附件 / 文档 / 记录串在一起；`resolveRole` 的占用检查扩展到新线程首次解析（旧目录不存在才可直接采用新名）。
+  - 修的是「只在同 threadId 改名时才做占用检查」的历史 bug；配套新增 `storage.resolve-role.test.ts`（无 threadId → 未分类 / 两个同名角色必须落不同目录 / 重复解析幂等）。
+- **会议纪要回执归属修正**（改 `src/lib/core/meeting-finalize.ts`、`src/lib/core/butler-notify.ts`）：纪要 / 转写两条回执各加 `threadId`，落进常驻通知线程；`NOTIFY_KINDS` 由 3 项扩为 `daily-report / calendar / inspect / meeting`，修掉「无未读却亮角标」。
+- **Live 落盘拆成两份文件**（改 `src/components/butler/MeetingConsole.tsx`、`src/components/butler/MeetingStart.tsx`）：**总是**写 `会议记录 - <标题>.md`（首行音频指针 + 全文转写，回放字幕的时间轴来源），自动整理开启时**另写** `会议纪要 - <标题>.md`（不含时间戳）；只在真录到分片时才写指针，打开哪份按有无纪要决定。
+  - 字幕时间轴锚点修正：`append` 带上本段**采集起点**而不是转写返回时刻，避免每条字幕偏晚一次往返、暂停后续段整段错位；Import 侧改用引擎 60 秒分块的**绝对** `[mm:ss]`（不再叠窗口头）。
+- **日程提醒补 `source` 字段**（改 `src/lib/core/event-reminder.ts`、`src/components/butler/ButlerDrawer.tsx`）：收件箱项新增 `source: 'event'`（key = 日历事件 id），勾选完成即可联动 PATCH 事件状态；抽屉侧对 `source === 'event' || kind === 'calendar'` 一律按事件处理，兼容改造前未写 `source` 的存量行。
+- **Today 红点轻量探针**（改 `src/app/api/butler/today/route.ts`、`src/lib/core/daily-report.ts`）：新增 `?status=1` 分支，只调新增的 `readProgressDigestDate()` 返回当日摘要日期键，不构建 Today 快照（轮询要便宜）；服务端不存阅读态，由客户端记。
+
+### 界面细节
+- **Butler 抽屉全量英文化**（改 `src/components/butler/ButlerDrawer.tsx`）：等待话术三档、消息操作、多选条、工具行 / 输入区 / 右栏的 title 与 aria-label、空态提示、人设弹窗错误、附件系统提示、周几与月名、日期分隔条等全部改英文；右栏分区名与左栏同字对齐（记忆 → Memories、日历 → Calendar），窗口键改为 Close / Zoom。
+- **思考档位改月相图标**（改 `src/components/canvas/chatNodeKernelParts.tsx`、`src/components/canvas/ChatNodeKernel.tsx`）：新增纯 SVG `MoonPhaseIcon`（off 新月 / low 娥眉月 / high 与 medium 上弦 / max 满月，含月海斑点与描边，随 currentColor 着色），替换原 Brain 图标 + O/L/H/X 角标，按钮色改用档位配色。
+- **左栏 Today 键新增红点**（改 `src/components/butler/ButlerDrawer.tsx`）：`RailItem` 支持描边红点；30 秒轮询 `?status=1` 取当日摘要日期键，并监听窗口 `focus` 与自定义事件 `butler-today-digest-loaded` 即时重查；已读按日期键存 localStorage，真正打开 Today 才熄灭。
+- **通知助理已读视图不再显示追问气泡**（改 `src/components/butler/ButlerDrawer.tsx`）：对话正文只在未读视图出现，已读视图仅剩回执卡片（普通联系人不受影响）；在已读视图发消息时自动切回未读，避免新气泡被隐藏像没发出。
+- **通知补会议样式**（改 `src/components/butler/ButlerNoticeHost.tsx`）：通知类型映射表新增 `meeting`（Mic 图标、标签 MEETING、primary 色）。
+
+
+***
+
+
+## v0.7.641 (2026-09-27)
+
+### 重构
+- **日报改由 Today 面板承载，三页签取代通知中心推送**（改 `src/lib/core/daily-report.ts`、`src/app/api/butler/today/route.ts`、`src/app/api/butler/daily-report/route.ts`、`src/lib/butler/today.ts`、`src/lib/butler/report-group.ts`、`src/components/butler/ButlerTodayPanel.tsx`、`src/components/butler/ButlerDrawer.tsx`）：
+  - 日报不再由通知助理推送；原 Progress / Morning / Sticky 三份报告改为 Today 面板的 **Report / Schedule / Sticky** 三页签，按需读取。
+  - `DailyReportType` 由 `progress | morning | sticky | notes` 收缩为 `progress | notes`：删除 `sendDailyReport()`（晨报）、`sendStickyReport()`、`buildMorningReport()`、`fetchEvents()`、`dayRange()`，以及免打扰顺延闸门 `shouldHoldMorningReport()`——Morning 并入 Schedule 页、Sticky 降为实算段。
+  - 新增 `buildScheduleSection()`：直接由 Today 快照派生，不查库、不发通知；计数用快照真实 `count`，溢出补 `… (+N more)`，快照降级时加 `⚠ Partial data unavailable` 告警行。
+  - `sendStickyReport` 改造为 `buildStickySection()`：每次请求实算，返回 `{ text, items, totalPending, projectCount }`，不进通知中心、不推微信，结构化项构建失败退纯文本。
+  - `sendProgressReport()` → `generateProgressDigest()`：不再写待办、不推微信，改写 `state/digest-YYYY-MM-DD.md` 缓存 + 落报告文档，新增 `readProgressDigest()` 供 Today 读取；昨日无活动仍不写缓存。标记语义由「当日只发一次」变为「当日只生成一次」。
+  - 调度器精简：每日 9:00 只补做 `progress + notes` 两项，移除 morning / sticky 到点发送与免打扰按住；`pushPending` 的 kind 统一为 `daily-report`（去掉 sticky 的 `inspect`）。
+  - `/api/butler/today` 新增 `reports: { progress, schedule, sticky }`（sticky 构建失败容忍为 null，不拖垮整页）；`lib/butler/today.ts` 新增具名类型 `TodayEvent`，`overdue` 补齐 `end_time` / `all_day` / `priority` 字段并剔除「今天开始」的事件，`count` 改用过滤后真实总数（今天 / 逾期两块与 Schedule 页同源）。
+- **Today 面板从只读扩为可勾选待办 + 承载三页签**（改 `src/components/butler/ButlerTodayPanel.tsx`）：新增 Report / Schedule / Sticky 页签条替换原顶层「今天 / 逾期」两块，默认停在 Schedule。
+  - 新增 `ItemRow` + `toggleItem`：Schedule 行 PATCH 日历事件（`status: done` / `scheduled`）、Sticky 行 POST `sticky-notes` 的 `toggle_line`；勾选只翻转本地列表、不 PATCH 收件箱。
+  - Sticky 段按项目分组展示。
+- **抽屉撤出日报归组与三页签**（改 `src/components/butler/ButlerDrawer.tsx`，本轮该文件为纯减法）：移除 `reportGroupKey` / `mates` 归组、右栏日报三页签与 Schedule 结构化渲染、Sticky 按项目分组清单，以及全部 6 个 `butler/report-group` 导入。
+  - 中栏每条回执各成一张卡片（标题直出，不再替换为组名、不再显示页签提示）；右栏详情回归「标题 + 正文 + 待办 chip」单一形态。
+  - 已读语义与批量删除由「组级联动」改回「单条」：`markRead` 只处理传入的那一条，卡片眼睛按钮与右栏已读药丸改读单条状态。
+
+### 修复与优化
+- **历史日报回执一次性清理**（新增 `purgeInboxDailyReports()`；改 `src/lib/core/inbox.ts`、`src/instrumentation.ts`、`src/lib/butler/report-group.ts`）：按日报识别口径（去重键优先、标题兜底）物理删除 Progress / Morning / Sticky 类孤儿日报回执，分批 500 条规避 SQLite 绑定变量上限、幂等（不含 Notes 每日维护）。
+  - 启动流程在事件提醒调度之前延迟 3s 调用，有清理则打印条数；失败仅记日志，不影响后续启动项。
+- **流式 Zipformer 换 fp32 解码器修复复读**（改 `src/lib/stt/sherpa.ts`）：decoder / joiner 由 int8 改 fp32，消除「今天今天」「公公园」等自回归复读，encoder 保持 int8；文件名与启动参数同步更新，体积约 +10MB。
+
+### 界面细节
+- **折叠态侧栏新增 Calendar 入口**（改 `src/components/canvas/CanvasFlow.tsx`）：在品牌 / Settings 按钮之上加入 Calendar 按钮，对齐展开态品牌栏最右侧入口。
+- **本地 STT 面板去掉分组标题与说明文字**（改 `src/components/canvas/LocalSttPanel.tsx`）：实时与标点模型不再有分类标题和底部说明，各自单列一行直接渲染（纯展示精简，无新增模型组或开关）。
+- **通知与免打扰注释同步**（改 `src/lib/core/quiet-hours.ts`、`src/components/butler/ButlerNoticeHost.tsx`）：标注日报已移交 Today 面板、不再产生待办，report 档位规则保留供会议纪要等复用；轮询①改述为「每日任务回执」，现仅剩 Notes 每日维护。仅注释，通知口径无变更。
+
+
+***
+
+
+## v0.7.640 (2026-09-27)
+
+### 新增
+- **会议面板新增「导入录音整理成纪要」Import 模式**（改 `src/components/butler/MeetingStart.tsx`、`src/app/api/butler/meeting/route.ts`、`src/components/butler/MeetingConsole.tsx`）：
+  - 面板顶部新增 Live / Import 分段切换；Import 从项目 `materials/` 里挑音频（按扩展名筛 mp3 / wav / m4a / webm 等），主行显示文件名（即会议标题）、副行显示所在会话 / 目录。
+  - 长音频按 25 分钟窗口**客户端串行**分窗转写（规避引擎 30 分钟上限），逐段调 `import_segment` 并补 `[mm:ss]` 时间戳；面板显示「第几段」进度并提供 Cancel（整场作废、不落产物）。
+  - 收尾走 `import_finish`，产物落盘口径与 Live 完全一致（`会议纪要` / `会议记录 - 标题.md`），落盘后直接发 `fileOpen` 打开文件。
+  - 配套：录音源设置（Audio source 与系统音频提示）改为只在 Live 模式显示；会议控制台的 `safeName` / `writeOutput` 改为导出，供 Import 复用，保证两条路径落盘口径一致。
+- **会议 History 过往产物列表**（改 `src/components/butler/MeetingStart.tsx`、`src/app/api/butler/meeting/route.ts`）：新增默认折叠的 History 区，展开时懒加载。
+  - 新增 `action: 'history'`：服务端扫 butler 根 + 当前项目根（深度 4、跳过隐藏 / 内部目录），按 `(会议纪要|会议记录) - *.md` 识别，返回 `source` / `path` / `place` / `time`，新 → 旧取上限 30 条。
+  - 点开即打开产物文件（区分 Minutes / Transcript，并显示时间与落点）。
+- **设置读写支持浏览器 / IDE 内嵌 webview**（改 `src/lib/settings.ts`；新增 `src/app/api/settings/route.ts`）：`loadSettings` / `saveSettings` 新增 webview 分支——经 `/api/settings` 读写**服务端同一份文件**（引擎选择必须让服务端看到），服务端不可达才降级 localStorage；PUT 被服务端拒绝时抛错，不静默写本地。
+  - 新路由 GET 返回解密后设置、PUT 落盘（写盘前统一加密与防覆盖保护）；仅本机（`localhost` / `127.0.0.1` / `::1`）可访问，非本机一律 403，失败如实回报 `{success:false,error}`。
+- **离线 TTS 新增开箱即用的内置参考音（通用男 / 女声）**（改 `src/lib/tts/sherpa-local.ts`、`src/components/canvas/LocalTtsPanel.tsx`）：ZipVoice 零样本克隆预置女声与男声各一，用户无需自己录音或上传。
+  - 女声由 Matcha 预置模型合成后经 ffmpeg 转码为 24kHz 单声道 PCM wav；男声用 ZipVoice 自带男声参考音**自举**（同模型内部克隆）。
+  - 缓存于 `<APP_ROOT>/.tts/refs/builtin/`（与用户上传的 `.tts/refs/*.wav` 隔离），生成幂等 + 单例在途 promise（面板轮询并发去重），单条失败只跳过、下次重试。
+  - 选中 zero-shot 但未挑参考音时不再直接报错，自动取内置默认音色，修正「选中了却没声音」的假失败；`listBuiltinRefs` 返回值改为「内置通用男 / 女声在前 + 模型自带样例在后」（导出签名不变）。
+  - 新引入 ffmpeg 转码依赖（`resolveFfmpegPath`），ffmpeg 缺失则放弃，不留半个文件。
+
+### 界面细节
+- **已读通知区支持批量多选 / 删除**（改 `src/components/butler/ButlerDrawer.tsx`）：工具行新增多选入口（仅归档视图出现），卡片行首出勾选框，底部浮出操作条（全选 / 删除所选 / 退出）。
+  - 日报组按**整组**勾选与删除（按卡片 key `daily:日期` 展开成组内全部成员 id）；待办项不摊开，归档区只做清理、不做逐条完成。
+  - 与既有对话气泡的多选**并列不复用**（独立状态，避免跨助理串选）；删除条不含「复制所选」；切视图 / 切会话退出多选，多选态下卡片整行点击改为勾选并隐藏已读眼睛按钮。
+
+
+***
+
+
+## v0.7.639 (2026-09-27)
+
+### 新增
+- **语音链路 provider 化重构 + 「定稿 / 标点」两步收尾**（新增 `src/lib/stt/voice-providers.ts`、`src/app/api/stt/finalize/route.ts`、`src/app/api/stt/punctuate/route.ts`；改 `src/components/ui/voice-input.tsx`、`src/lib/stt/sherpa.ts`）：
+  - 两条转写链路整体抽到 `voice-providers.ts`：新增 `SttProvider` / `VoiceRuntime` 抽象与 `createRealtimeProvider()` / `createRecorderProvider()` 工厂，hook 退化为「建共用采集 → 按能力选链路 → 交结果」的编排层；采集源节点改为惰性复用（波形与实时共用同一 source，避免振幅叠加）。
+  - 状态机由模式枚举（`idle` / `streaming` / `recorder`）改为 provider 句柄 + 启动相位（新增相位锁防连点重复启动）；收尾契约收敛为 `provider.finish(cancel)`；实时启动失败改走 `abort()` + `onDiscard()`，失败路径会彻底停轨、清计时器与 RAF、关 AudioContext。
+  - 实时链路收尾从「一次 WS `Done` / `is_eof` 直接出定稿」演进为「定稿（finalize）+ 标点（punctuate）」两段式；启动探测由 `GET /api/stt/stream` 的 `available` 改为 `createRealtimeProvider().probe()`。
+- **STT 模型按「能力」而非「类型」组织，新增标点模型组**（改 `src/lib/stt/sherpa.ts`、`src/lib/settings-server.ts`、`src/components/canvas/LocalSttPanel.tsx`）：
+  - `kind: 'offline' | 'streaming'` 被 `capabilities: { batch, realtime, punctuates }` 取代，UI 分组与编排决策改按能力位判断；新增 `isBatchModel` / `isRealtimeModel` 类型守卫（能力字段嵌在 `capabilities` 里 TS 无法自动收窄）；`setSttState` 返回的 models 结构随之变化，`firstReadyLocalSttModel` 改按 `capabilities.batch` 过滤。
+  - 新增第三种模型形态 Punctuation 与模型 `punct-ct-transformer-zh-en`（CT-Transformer 中英 int8，75.5MB 模型 + 4.2MB tokens），改用 hf-mirror 等价镜像下载（官方 int8 包本机带宽拉不动）；设置面板新增第三组 `Punctuation (optional)`：仅下载 / 删除、不参与引擎单选、下载即生效，未下载时实时链路照常输出无标点文本。
+  - 新增 `punctuateText()`：调 `sherpa-onnx-offline-punctuation`，只取 stdout 末行（stderr 全为日志不可信）；未就绪 / 空文本 / 调用失败一律**原样返回**——标点属可选增强，绝不打断语音输入。
+- **流式 WS 服务端生命周期外移到独立模块**（新增 `src/lib/stt/stream-server.ts`；改 `src/lib/stt/sherpa.ts`）：把端口分配与等待、进程终止、孤儿进程回收、进程状态与退出钩子整体迁到 `stream-server`，对外提供 `startStreamServer` / `stopStreamServer`；`startLocalSttStreamServer` 瘦身为「校验 + 组装 `buildStreamingArgs`」，删除 / 卸载模型改调 `stopStreamServer`。
+- **「昨日项目进展」升级为独立日报 Progress**（改 `src/lib/core/daily-report.ts`、`src/lib/butler/report-group.ts`、`src/app/api/butler/daily-report/route.ts`、`src/lib/project/daily-digest.ts`、`src/components/butler/ButlerDrawer.tsx`）：
+  - 上一版作为晨报正文小节的进展归纳，改为日报组里与 Morning / Sticky 并列的独立一份：新增 `sendProgressReport()`（标记 `progress:YYYY-MM-DD`，**仅 Butler 不推微信**；昨天全项目无活动时不发且占标记防重复，归纳失败留痕并返回 `sent:true`）；晨报回到纯待办清单，删除 Morning 内的进展归纳与正文追加。
+  - 日报组由两页签扩为 **Progress → Morning → Sticky** 三页签（`DailyReportType` 增 `'progress'`，去重与标题正则增 `Progress Report — 日期`）；删除 `DAILY_PROGRESS_HEADING` 常量与 `splitDailyProgress()`（进展已是独立报告，不再从正文拆分），`buildDailyProjectDigest` 的 markdown 只输出正文并不再依赖日报归组模块；调度器新增 `safeSend('progress')`（免打扰顺延闸门仍只管 Morning）。
+
+### 修复与优化
+- **右栏日报去重标题 + 分区回切修复**（改 `src/components/butler/ButlerDrawer.tsx`）：新增 `isDailyReportMember`——日报组成员（Progress / Sticky 等无 items 者）只渲染正文，不再重复打印 `… Report — 日期` 标题（中栏卡片与右栏头部已呈现）；点回执时新增 `onSectionChange('detail')`，修掉「右栏停在 Today / 记忆 / 日历分区时点开 Daily Report 却仍显示 Today」。
+
+
+***
+
+
+## v0.7.638 (2026-09-27)
+
+### 新增
+- **日程落地前的时段风险评估**（改 `src/lib/calendar/overlaps.ts`）：新增 `assessEventSlot`，一次调用返回分档结果 + 可直接转述给用户的中文说明 + 替代时段，把「先查一遍再报告」的多轮流程压成一次判定。
+  - 三档：`none`（可直接落地）/ `potential`（先确认）/ `hard`（重叠，不许落地）；全天日程不计入 `hard`，只作 `potential` 提示；支持 `excludeEventId`（改期时排除自身）。
+  - 三类潜在冲突：紧邻空档不足（`tight_gap`，默认 <15 分钟）、相邻事项异地需通勤（`remote_shift`，两边都有地点、地点不同且间隔 <60 分钟）、与全天日程同日（`all_day`）。
+  - 地点比对做容错：去空白标点 / 括号地址后，完全一致、互相包含、或字符二元组 Jaccard ≥0.5 即判同场所（同楼不同房间不算异地），避免别名 / 错字误报。
+  - 替代时段仅在有冲突时给出：在默认工作时段内挑 1–2 个真正空着的净空档，按「请求时刻之后最近 → 当日更早 → 后续两天」排序，候选之间互不重叠，过去时刻不作候选。
+- **`create_scheduled_todo` 从「多轮仪式」改为「校验后直接落地」**（改 `src/app/api/chat/tools/butler.ts`、`src/lib/agents/profiles.ts`）：
+  - 排期纪律整段重写：无冲突直接落地并一句话回报，`potential` / `hard` 先确认，不再强制先调 `query_schedule` 查占位；冲突与时间校验由代码强制，不靠提示词自觉。
+  - 时间硬校验：缺 `start_time` → `need_more_info`（附 suggested 默认时段）、不可解析 → `invalid_time`、已过去（5 分钟容差，全天按日期比）→ `past_time`，三者均不落库；落地前调 `assessEventSlot`，仅 `none` 才落，否则返回 `conflict_level` / `conflicts` / `risks` / `alternatives`。
+  - 新增 `force` 参数：用户明知风险仍坚持、或补记历史时强制落库（仅放行冲突与已过去时间，缺时间 / 非法时间不放行）；新增 `location` 参数，写入事件并用于相邻异地通勤风险判定。
+  - 项目归属口径调整：`create_scheduled_todo` 未提及项目时不再回问，自动落当前激活项目；无激活项目则落全局日历（`scope='global'`），仅「同名多命中 / 未找到」才澄清；全局日历场景只建事件、不追加便签行。（便签与计划树工具仍要求显式 `project`。）
+- **全身份注入当前时间锚点**（改 `src/lib/runtime/context.ts`、`src/app/api/chat/route.ts`）：新增 `buildNowInjection`，每轮现算本机「现在几点 / 星期 / 时区偏移」并 prepend 到当前轮 user 消息——相对时间（今天 / 明天 / 下周三）解析必需；走动态通道，不动 system 提示的缓存前缀。
+- **排期纪律单一真源 + 动态注入**（改 `src/lib/agents/profiles.ts`、`src/lib/runtime/context.ts`、`src/app/api/chat/route.ts`）：新增导出常量 `BUTLER_SCHEDULE_DISCIPLINE`，被系统提示与新增的 `buildScheduleDisciplineInjection` 两处共用；动态注入绕开已装用户物化的 `agent.json`，使新口径立即生效，并显式声明「与旧提示词冲突以本段为准」。
+- **晨报新增「昨日项目进展」**（改 `src/lib/core/daily-report.ts`、`src/lib/butler/report-group.ts`，`src/lib/project/daily-digest.ts` 提供摘要）：Morning 正文在待办清单之后追加一节，归纳各项目昨天的流水。
+  - 与待办清单互不影响：该节无活动或归纳失败都只是缺席，绝不影响晨报整体发送；结构化 `items` 不含这一段。
+  - 新增常量 `DAILY_PROGRESS_HEADING` 与 `splitDailyProgress()`，生产侧与展示侧共用同一常量，避免文案漂移。
+
+### 界面细节
+- **语音流式中间结果改写进输入框**（改 `src/components/ui/voice-input.tsx`、`src/components/butler/ButlerDrawer.tsx`、`src/components/canvas/ChatNodeKernel.tsx`）：是上一版「边说边出字」的交互改版——中间结果由录音条内显示改为**边说边写进输入框**。
+  - 新增 `onPartial` / `onDiscard` 回调，移除录音条内的实时文字（只留波形 / 计时 / `Transcribing…`）；抽屉与画布两处输入框加草稿基线，`onPartial` 写「基线 + 中间文本」、`onDiscard` 还原录音前草稿、`onText` 定稿覆盖。
+- **中栏对话区加宽**（改 `src/components/butler/ButlerDrawer.tsx`）：`CHAT_MAX_W` 由 420 放宽回 560，余量优先给中栏、右栏先保自身期望宽度，靠抽屉整体加宽而非挤压右栏。
+- **右栏日报排版分级**（改 `src/components/butler/ButlerDrawer.tsx`）：详情顶部条显示组名 `Daily Report — 日期` 作加粗深色一级标题、页名（Morning / Sticky）退为类型标签；「昨日项目进展」小节经 `splitDailyProgress` 摘出，在待办清单下方单独渲染，空则整块不出现；今日 / 已逾期分区名升为深色半粗一级、计数退成小徽标。
+- **Today 面板排版重排**（改 `src/components/butler/ButlerTodayPanel.tsx`）：按「标题 > 建议卡 > 分区头 > 扁平行」重排层级。
+  - 新增 `SectionHead`（分区名深色半粗 + 计数小徽标，逾期用 warn 变体）；行去掉灰底，靠字重与缩进分主次。
+  - 嵌入右栏时不再重复「Today」标题、只留一行日期（一级标题交给顶部条），独立浮窗保留完整标题；可点击的报告文档行加 hover 底色，与静态行区分。
+
+
+***
+
+
+## v0.7.637 (2026-09-27)
+
+### 新增
+- **本地实时流式语音输入（边说边出字）**（新增 `src/app/api/stt/stream/route.ts`；改 `src/lib/stt/sherpa.ts`、`src/components/ui/voice-input.tsx`、`src/components/canvas/{LocalSttPanel.tsx,SettingsModal.tsx}`、`src/lib/settings-server.ts`）：
+  - 语音输入新增「实时链路」：AudioWorklet 采 16k 单声道 PCM 直连本地 `ws://127.0.0.1:<port>`（端口由 `/api/stt/stream` 拉起常驻 WS 服务端后分配，音频不经 HTTP 接口），边录边出中间文本；实时链路不可用时自动回退「录完再转写」。
+  - `sherpa.ts` 新增 `kind:'streaming'` 模型形态（streaming-zipformer）与常驻 WS 服务端生命周期（按需 spawn、空闲回收、孤儿进程回收）；批量转写入口 `sherpaTranscribe` 拒绝 streaming 模型。
+  - 设置面板新增 `kind='streaming'` 的「Real-time voice input」模型组：只提供下载 / 删除、装完即自动启用，不参与 STT 引擎单选；`firstReadyLocalSttModel` 加 `offline` 过滤，避免流式模型被选成批量转写引擎。
+- **会话消息可单条删除 / 多选批量操作**（新增 `src/app/api/core/node-chat/messages/route.ts`；改 `src/app/api/core/node-chat/route.ts`、`src/components/butler/ButlerDrawer.tsx`）：气泡 hover 浮出「复制 / 删除 / 多选」三键，多选进入选择模式（气泡左侧勾选框 + 时间线与输入框之间的批量条：全选 / 复制所选 / 删除所选 / 退出）。
+  - 删除走 `DELETE /api/core/node-chat/messages`：按 `role + 正文` 认领目标、`index` 仅作提示，删完不动会话 `updated_at`；`GET /api/core/node-chat` 新增与消息同序同长的逐条下标 `indexes[]`，供前端拼气泡 id 与删除认领。
+- **好友会话未读与「置为已读」**（改 `src/lib/core/chat-session.ts`、`src/lib/core/butler-wechat.ts`、`src/lib/core/butler-notify.ts`、`src/app/api/core/node-chat/session/route.ts`、`src/components/butler/{ButlerDrawer.tsx,ButlerNoticeHost.tsx}`）：`ChatSession` 新增 `readAt`、摘要新增 `unread`，新建会话即写 `read_at`；新增 `markChatSessionRead` / `countUnreadAssistant` / `countUnreadChatMessages` / `deleteChatMessages`。
+  - `PATCH /api/core/node-chat/session` 新增 `{ read: true }` 作为好友未读角标的清零出口（常驻通知助理与小微也允许置已读，但彻底不改人设）；联系人列每行显示未读角标（通知助理行 = 未读回执、其余会话行 = 未读消息数），角标由标题行尾挪到头像右上角。
+  - 悬浮球未读数改为 `inbox.unread + chats.unread` 求和；store 变化只当触发信号，400ms 去抖后取服务端全量。
+- **每日报告同日归组**（新增 `src/lib/butler/report-group.ts`；改 `src/lib/butler/today.ts`、`src/components/butler/{ButlerDrawer.tsx,butlerNotices.ts}`）：同一天的 Morning 与 Sticky 报告在中栏并成一张卡片（标题 `Daily Report — 日期`），右栏顶部按页签 Morning / Sticky 切换；已读 / 归档与未读角标按**组级**统一（任一未读即整组未读，角标按组折叠计 1）。
+- **麦克风启动失败上屏**（改 `src/components/ui/voice-input.tsx`、`src/components/canvas/ChatNodeKernel.tsx`、`src/components/butler/ButlerDrawer.tsx`）：新增 `onStartError` 出口——`getUserMedia` 未启动（无权限 / 无设备 / 被占用 / 非安全上下文）时不再只写 `console.warn`，改为按 `DOMException` 分类给出可照做的说明，并在画布与抽屉弹出「Microphone unavailable」确认层。
+
+### 修复与优化
+- **修复存量日历库索引创建顺序**（改 `src/lib/db/index.ts`）：`idx_events_kind_due` 从内联建表串移出，改由 `ensureCalendarTaskColumns` 在 ALTER 补列之后创建，修掉存量库因 `no such column: kind` 中止 `db.exec`、导致日历全线不可用的启动问题。
+- **新增会话未读与 TTL 单测**（新增 `src/lib/core/chat-session.test.ts`）：覆盖 `countUnreadAssistant`、以及 `notify` 类长期会话永不过期（`sessionExpiresAt('notify')` 恒 `null`）等断言。
+
+### 界面细节
+- **等待行并入助手气泡**（改 `src/components/butler/ButlerDrawer.tsx`）：等待行由时间线末尾的裸文字改为「头像 + 灰底气泡（口语句 + 行尾跳动点）」，与正式回复同款气泡样式；`WAIT_LINES` 三档文案整体重写（句式不重样、只写永远成立的话、不以「…」收尾）。
+
+
+***
+
+
+## v0.7.636 (2026-09-27)
+
+### 新增
+- **确定性日程排期（Scheduling）**（新增 `src/lib/calendar/scheduler/{solve.ts,index.ts}`、`src/app/api/calendar/schedule/route.ts`；改 `src/lib/db/index.ts`、`src/lib/runtime/tools.ts`、`src/app/api/chat/tools/butler.ts`）：
+  - 纯函数求解器 first-fit 贪心排程，同输入必同输出；硬约束为不与忙块重叠、整块落工作时段、due 前完成、不越 horizon、锁定块不参与；软约束用固定排序键（due 近 → 优先级 → 创建早 → id），15min 网格、默认 30min 块、默认工作时段 09:00–18:00 / Asia/Shanghai。
+  - IO 层候选 = 未排程任务 + 排程器排过且未锁定、开始时刻仍在未来的块（`scheduled_by='user'` 与 `block_locked` 永不移动、只作忙块）；落库一律 `markStale:false` 防自激，落不下的清回未排程；变更后 `scheduleReplan` 3s 去抖重排。
+  - 新接口 `GET/POST /api/calendar/schedule`（返回排程 meta、计数、未排任务；POST 支持 `horizon_days`、`dry_run`）；新工具 `plan_schedule`（可预览、`horizon_days` 默认 14 上限 120，回报已排块与排不上原因）与只读 `query_schedule_status`。
+- **事件实体三分 `kind`（event / task / log）**（改 `src/lib/db/index.ts`、`src/app/api/calendar/events/route.ts`）：events 表新增 `kind` 与排程列（`due_at` / `estimated_minutes` / `actual_minutes` / `started_at` / `completed_at` / `schedule_status` / `block_locked` / `scheduled_by`），新建单行 `schedule_meta` 表与 `(kind,due_at)` 索引；项目库与全局日历库各自幂等增量迁移。`GET` 支持 `?kind=`，未指定时默认排除 `kind='log'`。
+  - 「变更即重排」集中记账：`create/update/deleteEvent` 默认 `markScheduleStale`，仅把「scheduler 排过且未锁定」的行标 stale，再动态 import 排程器触发去抖重排（动态 import 打断 db ⇄ scheduler 循环依赖）。
+  - 「完成时必记」：`status→done` 且首次完成自动补 `completed_at` 与 `actual_minutes`（优先按 `started_at→now`，无则退回执行块时长），日历 UI / Butler 工具 / 便签三条完成路径共用此唯一写入漏斗。
+- **估时校准反哺排程（闭环）**（新增 `src/lib/calendar/analytics.ts`）：三条只读统计（按分类 `AVG(actual/estimated)` 估时偏差、按周完成率、按分类时间分配）；产出分类校准乘子（样本 ≥3、clamp 到 [0.5,2]）在排程入口乘到 block 长度（下限 15min 与网格对齐），任务行 `estimated_minutes` 不动，求解器保持纯函数。
+- **本地离线神经 TTS（第三档引擎）**（新增 `src/lib/tts/sherpa-local.ts`；改 `src/lib/tts/index.ts`、`src/lib/settings.ts`、`src/app/api/tts/local/route.ts`、`src/components/canvas/{LocalTtsPanel.tsx,SettingsModal.tsx}`）：基于 `sherpa-onnx-offline-tts`，内置 matcha-zh-baker（单音色）与 kokoro-multi-lang（8 中文音色）模型清单；Audio TTS Model 由「云端 vs macOS `say`」二选一扩为**云端池 / macOS `say` / Offline neural 三态互斥单选**，不做自动兜底。
+  - 引擎与模型均支持后台下载 + 1.2s 轮询进度条 + 断点续传，已下载模型可就地删除（二次确认释放磁盘），就绪后可就地**试听**（合成样例即时回放）；多音色模型选中后可展开音色下拉。引擎复用 STT 的 shared 包，不重复下载。
+  - 保存契约：`tts.provider` 写 `say` / `sherpa-local`，新增 `localModel`，`localVoice` 语义随引擎变化（`say`=音色名、sherpa=sid）；朗读按引擎自适应分段长度（本地神经引擎用 800 字，压低首字延迟）。
+- **微信「小微」常驻联系人**（新增 `src/lib/core/butler-wechat.ts`；改 `src/lib/bridge/wechat-bridge.ts`、`src/lib/butler/storage.ts`、`src/lib/core/{node-chat.ts,chat-session.ts,butler-notify.ts}`）：微信消息固定落常驻线程 `butler-wechat`（标题「小微」），弃用旧的「借用桌面活动线程」绑定，跨端续聊且会话永不过期；置顶联系人由 1 个变 2 个（通知助理 + 小微），两者都不可删除、无人设入口（后端同样拒绝删 / 改人设），未读红角标仍只挂通知助理；列表改用 `systemRole` 身份标记区分（不再靠 `pinned` 猜）。
+- **Butler 可直接新建项目**（改 `src/lib/agents/profiles.ts`、`src/lib/runtime/tools.ts`、`src/app/api/chat/tools/butler.ts`）：提示词把「应用结构 / 新建项目」纳入自有范围；新增 `create_project` 工具（缺名先问、直接创建不切换当前项目、广播刷新侧边栏），加入写类白名单与微信放行名单，工具有独立工具行摘要「新建项目：X」。
+- **项目归属显式收口**（新增 `src/lib/project/resolve-explicit-project.ts` + 测试）：把用户口中的项目引用解析为真实项目并硬校验——空引用返回 `project_required`、哨兵仅限用户明确说「当前项目」、只匹配活跃项目，同名多命中 / 未命中返回候选供回问，杜绝静默写入当前项目。`create_scheduled_todo` / `create_sticky_note` 与 4 个计划树工具一律要求显式 `project`，不再回落当前活跃项目。
+- **iCal / CalDAV 支持 VTODO**（改 `src/lib/calendar/{ical.ts,dav-server.ts,sync-runner.ts}`、`src/app/api/calendar/{ics,ics/feed}/route.ts`）：`parseIcs` 同时切分 VEVENT / VTODO 并输出 `component`，新增 `due_at`（DUE），VTODO 允许无 DTSTART（`start_time=null`），完成判定扩展（`COMPLETED` / `PERCENT-COMPLETE≥100` / `X-BOB-STATUS=DONE`），修 TZID 从整段取值的旧缺陷；`supported-calendar-component-set` 增加 `VTODO`，PUT 时 VTODO→`kind='task'`、VEVENT→`kind='event'`；同步拉取时外部 VTODO 只升不降地提升为 task 并写 `due_at`，推送仅回写同步绑定字段（`markStale:false`）、不再改动本地计划。ICS 导出与订阅两处均过滤 `kind='log'`，记录集不对外投影。
+- **下载逻辑抽公共模块 + 多镜像轮换**（新增 `src/lib/net/download.ts`；改 `src/lib/stt/sherpa.ts`）：把 STT 原有的 curl 断点续传 / 重试 / tar.bz2 解压抽到 `net/download.ts` 并新增多 URL 镜像链轮换；STT 侧改为引用，并导出引擎状态与路径供 TTS 复用。
+
+### 修复与优化
+- **任务元信息（截止 / 估时 / 锁定）贯通 Butler 工具**（改 `src/app/api/chat/tools/butler.ts`）：`create_scheduled_todo` 新增 `due_at`（排程硬约束）、`estimated_minutes`（未给 `end_time` 时由估时推执行块长度，否则仍 1 小时）、`block_locked`（用户钉死、排程器不移动）；`todo_update` 可改这三项（`due_at` 传空串 = 清除）；`query_schedule` 每条输出尾部追加 `[due … · est …m · locked · stale]` 后缀。
+- **长期会话不可被降级**（改 `src/lib/core/chat-session.ts`、`src/lib/core/node-chat.ts`）：`prev.source` 为 `notify` / `panel` 时沿用原 source，避免从微信等短通道对同一条桌面会话提问被压成 24h TTL 而过期删除整段历史；新增显式 `channel` 入参，把「通道能力」与「会话 source」解耦（source 只管 TTL，channel 管工具面与权限分档）；`threadIdHint` 升级为权威落点，首次微信消息也不会漏进随机新会话。
+- **新增排程器工作时段配置**（改 `src/lib/settings.ts`）：`Settings` 新增 `calendarWorkingHours`（tz / 工作日 / HH:MM 起止 / buffer），缺省周一至周五 09:00–18:00，排程器据此为未排程任务找执行块（暂无 UI 入口，改 settings.json 即生效）。
+- **新增回归测试**（新增 `src/lib/calendar/scheduler/solve.test.ts`、`src/lib/calendar/analytics.test.ts`、`src/lib/project/resolve-explicit-project.test.ts`）：覆盖排程器确定性、忙块与工作时段约束，以及「估时偏差 → 校准系数 → 反哺 block 长度」闭环。
+
+### 界面细节
+- **通知已读交互改版**（改 `src/components/butler/ButlerDrawer.tsx`）：**点开卡片不再自动置已读**，改由卡片右端一颗眼睛按钮显式切换（睁眼 = 未读、闭眼 = 已读、再点恢复未读）；键盘回车 / 空格只认落在卡片头部本行，避免行内眼睛 / 待办按钮冒泡误开右栏。
+- **中栏视图开关简化为单颗「已读」**（改 `src/components/butler/ButlerDrawer.tsx`）：原「待处理 / 已归档」两段式改为单颗「已读」开关（点亮 = 只看已读，再点回到当前未读）；切视图不再清空右栏选中，避免详情凭空消失。
+- **日历面板新增排程过期提示与手动重排**（改 `src/components/butler/ButlerCalendarPanel.tsx`）：任务 / 日程变更使计划 stale 时，顶部出现「Plan may be out of date」提示与「Replan」按钮，可立即运行排程器；数秒内自动重排后回读一次自动收起提示（不轮询），重排后触发 `calendar-events-changed` 联动刷新。
+- **Butler 聊天区改用微信式灰色画布**（改 `src/components/butler/ButlerDrawer.tsx`）：栏底座保持白底，滚动区压成灰，白 / 绿气泡在灰底上浮起，贴近微信观感。
+- **朗读未配置引擎文案补充离线神经选项**（改 `src/app/api/tts/speak/route.ts`）：`not_configured` 报错提示由「云端模型 / 内置 macOS 音色」扩为包含「离线神经模型」。
+
+
+***
+
+
+## v0.7.635 (2026-09-27)
+
+### 新增
+- **Butler 回复支持「朗读」**（新增 `src/app/api/tts/speak/route.ts`、`src/components/butler/useReadAloud.ts`、`src/lib/tts/plain-text.ts`；改 `src/components/butler/ButlerDrawer.tsx`）：每条 AI 回复气泡下沿新增朗读键（hover 显形，进行中 / 出错时常显），点击即朗读该条回复，播放中可暂停 / 继续 / 停止，同一时刻只出一条声音。
+  - 引擎 = 设置里已选中的那一款 TTS（云端 / macOS `say` 互斥单选，不另立兜底），经 `POST /api/tts/speak` 合成后**直接把音频字节回给客户端播放**（Content-Type 按实际格式给：云端 mp3 / `say` 降级 m4a），不走只服务项目相对路径的 attachments 通道。
+  - 回复先由 Markdown 净化为「人话」（丢代码围栏、去表格竖线 / 加粗符号 / URL / emoji，标题与列表行尾补句号），再按句子边界切段（≤600 字）；分段串行 + 预取下一段，段间无缝、首字延迟小，同段文本本会话内缓存 blob URL 重播不重复合成。
+  - 朗读为模块级单例：关抽屉 / 切联系人 / 起新一条均一条命令全停；未配置 TTS 或合成失败把后端原话就地红字显示，不静默失败。产物落 `<APP_ROOT>/butler/tts`，调用时顺手清理 7 天前旧文件（该目录此前只增不减）。
+
+### 修复与优化
+- **打包脚本补声明麦克风权限**（改 `scripts/build-electron.sh`、`scripts/package-release.sh`）：两个脚本写入的 `Info.plist` 各补一条 `NSMicrophoneUsageDescription`（中文说明「BobWork 需要使用麦克风来接收您的语音输入并转成文字。」）。此前 App 未声明该键，macOS 下无法获得麦克风授权；补上后首次录音会正常弹出系统授权提示，上一版的语音输入才能真正取到麦克风。
+- **语音输入与离线转写准确度修正**（改 `src/components/ui/voice-input.tsx`、`src/lib/parse/audio-parser.ts`、`src/lib/stt/sherpa.ts`）：
+  - 录音码率显式提到 128 kbps（MediaRecorder 默认 AAC 码率偏低会拖低转写准确率）。
+  - 转写前加静音门限：转 WAV 后用 ffmpeg `volumedetect` 量峰值音量，低于 -50 dB 直接判「没人说话」并抛错，绝不把纯静音喂给离线模型（实测 SenseVoice 会在静音上硬造韩文）；量不出时不拦截。
+  - SenseVoice 锁定中文（`--sense-voice-language=zh`），避免短音频 / 带口音时中文被误判成韩 / 日文。
+
+### 界面细节
+- **对话界面改白底、对方气泡改灰**（改 `src/components/butler/ButlerDrawer.tsx`）：聊天画布与输入区由灰底 `--paper-soft` 改白底 `--panel-bg`，对方（AI）气泡由白改淡灰 `--paper-soft`（与两侧灰侧栏一致），只在白底上留一层极淡分色、不描边；自己一侧仍是绿气泡。
+- **「我」的头像改用河马线稿**（改 `src/components/butler/ButlerDrawer.tsx`）：自己一侧头像由「我」派生的 emoji 改成与 Butler 侧栏同一张 `/butler-orb.png`（白底圆角方格、1px 描边），同一抽屉里读到同一个身份。
+- **抽屉内分割线进一步变淡**（改 `src/components/butler/ButlerDrawer.tsx`）：左轨 / 联系人列 / 中栏工具行 / 右栏等区域边界统一改用 `DIVIDER_SOFT`（比 `--line-soft` 再淡两档），白底上只留「看得出分区」的程度；描边（输入框、头像、选中态）仍用 `--line`。
+- **联系人行重排**（改 `src/components/butler/ButlerDrawer.tsx`）：时间从预览行首挪到标题右侧，且当天只给时间「21:30」、更早只给日期「09-26」（跨年补年份）；预览行独占一行、无预览不占空行，行高更稳；行尾删除键移除。
+- **删除好友挪进人设弹窗**（改 `src/components/butler/{ButlerDrawer.tsx,PersonaDialog.tsx}`）：删除键由联系人行尾（悬停才现、紧邻切换热区易误点）挪到「编辑人设」弹窗标题栏右侧，仅编辑态出现（常驻通知助理无编辑入口故无删除键）；点击仍走既有确认 + `removeChatSession` 路径。
+- **等待行与正文吐字衔接**（改 `src/components/butler/ButlerDrawer.tsx`）：等待行改为只在「发送中且末尾占位气泡还没吐字」时显示，第一个字落下即卸载，不再出现「正文在长、旁边还挂着等待句」；思考跳动点由文字左侧移到句尾右侧。
+- **输入框排版**（改 `src/components/butler/ButlerDrawer.tsx`）：输入框改白底 + 1px 描边定区（不再压灰成「洞里一块」）；正文与 placeholder 改贴左，底部用 `pb-9` 让出 34px 按钮带，长文本换行不再压到左下角回形针。
+
+
+***
+
+
+## v0.7.634 (2026-09-26)
+
+### 新增
+- **聊天输入框新增语音输入**（新增 `src/components/ui/voice-input.tsx`；改 `src/components/butler/ButlerDrawer.tsx`、`src/components/canvas/ChatNodeKernel.tsx`）：麦克风 → 录音浮层（实时波形 + ✕取消 / ✓完成）→ 转文字追加进草稿框，不自动发送、不落盘。录音状态机与浮层抽为公共模块，Butler 抽屉与画布聊天节点共用；转写失败改为直接丢弃并提示（不再挂起录音、不再有待发录音计数 chip）。
+- **联系人头像**（新增 `src/lib/butler/avatar.ts`；改 `src/components/butler/ButlerDrawer.tsx`）：会话列表与中栏工具行新增圆角方头像，动物 emoji 由人设性格关键词命中决定（未命中按名字 FNV-1a 散列兜底），底色由名字加盐散列派生；纯本地派生、不落库不联网，两处渲染恒定一致。
+- **收件箱支持「标记未读」**（改 `src/lib/core/inbox.ts`、`src/app/api/butler/inbox/route.ts`）：新增 `markInboxUnread`（与 `markInboxRead` 对称、可反悔），PATCH body 新增可选 `read:false`；旧 `{ids}` / `{all:true}` / `{ids,done}` / `{items}` 行为不变。
+- **本地语音引擎可卸载释放磁盘**（改 `src/lib/stt/sherpa.ts`、`src/app/api/stt/local/route.ts`、`src/components/canvas/LocalSttPanel.tsx`）：新增 `removeLocalSttModel` / `uninstallLocalSttBinary`（残留 `.part` 一并清理，幂等）；下载仍为异步 + GET 轮询，删除为同步、直接返回最新状态供 UI 立即刷新，前端配二次确认。
+- **Butler 抽屉可拖动、缩放、最大化**（改 `src/components/butler/ButlerDrawer.tsx`）：左栏空白处拖动移动、右缘/下缘/右下角热区改尺寸、绿键铺满可用区域；几何写入 localStorage 关后再开保持，窗口尺寸变化自动钳回视口。
+
+### 修复与优化
+- **STT/TTS 引擎改为「云端 vs 本地」互斥单选，彻底取消自动兜底**（改 `src/lib/parse/audio-parser.ts`、`src/lib/tts/index.ts`、`src/lib/settings.ts`、`src/lib/stt/sherpa.ts`、`src/lib/settings-server.ts`、`src/components/canvas/{LocalSttPanel.tsx,LocalTtsPanel.tsx,SettingsModal.tsx}`）：
+  - 删掉上一版引入的「云端为主 + 本地隐式兜底」双路径与 `localEnabled` 开关，选哪个用哪个、没选则明确报错；选中本地引擎即切换并清空云端池。
+  - 未知 STT provider 不再静默回落到豆包（避免拿别家 Key 打火山端点报 401），改为直接抛错；标签只标注实际选中的那一个引擎。本地 STT 模型清单精简为 SenseVoice / Whisper（移除 `paraformer-zh-small`），STT 侧下线 `bobmultimodal` 厂商与 `NO_AUTH_STT_PROVIDERS` 白名单。
+  - 老配置一次性迁移（`migrateLegacyEngineSelection`）：把「曾开启本地兜底」的旧配置固化为显式本地引擎（STT→第一个引擎已装且模型齐全的项、TTS→`say`），迁移后删除 `localEnabled` 故只生效一次；已显式配过云端的不动。
+- **回滚「用户档案常驻注入」**（改 `src/lib/runtime/context.ts`、`src/app/api/chat/route.ts`、`src/components/butler/ButlerMemoryPanel.tsx`；删除 `src/lib/core/profile.ts`）：撤销上一版引入的每轮全量身份注入，注入链恢复为 pathContext → userPreferences → ocrFact 三段；记忆面板移除 Profile 四栏表单，面板只剩偏好列表。
+- **附件统一落 materials/**（改 `src/app/api/attachments/route.ts`、`src/components/canvas/composer/useComposer.ts`、`src/components/canvas/Sidebar.tsx`）：请求体不再接受 `store` 字段，粘贴的截图不再落 `attachments/`，一律进 `<项目>/materials/`（截图因此也会进项目材料并被检索）；`AttachmentStore` 类型删除，项目不再有 `attachments/` 一级目录。
+- **通知状态收敛为单维度「已读 ≡ 归档」**（改 `src/components/butler/{ButlerDrawer.tsx,ButlerNoticeHost.tsx,butlerEvents.ts,butlerNotices.ts,ButlerOrb.tsx}`、`src/lib/butler/today.ts`、`src/lib/core/butler-notify.ts`、`src/lib/core/chat-session.ts`）：合并原 done / read 两个维度——点开一张卡片即已读并退到「已归档」，反悔走右栏底部「标为已读 / 标为未读」（唯一状态出入口）。抽屉打开不再自动替用户置已读；`unreadRows` 与行内「眼镜」严格同源，联系人行角标改由前端 store 现算、点开一条当场减 1，与悬浮球、左栏三处一致；`buildNotifySummary` 移除 `badge` 字段（连带删除 `countPendingInbox`）。
+- **语音与音频工具文案英文化**（改 `src/lib/parse/audio-parser.ts`、`src/lib/stt/sherpa.ts`、`src/lib/tts/{index.ts,local-say.ts}`、`src/app/api/chat/tools/audio.ts`）：原中文指引统一改为简短英文，并明确「只跑设置里选定的单一引擎、无自动回退」；STT 厂商 label 改为 `Doubao` / `DashScope` 等英文名。`LOCAL_SAY_PROVIDER` 常量下沉到 `local-say.ts` 由 index 转出，避免 `settings-server` 循环依赖。
+- **日程提醒标题去掉 `⏰` 前缀**（改 `src/lib/core/event-reminder.ts`）：抽屉卡片类型图标已表达日程，仅保留表达「已过期」的 `⚠️`。
+
+### 界面细节
+- **Butler 抽屉四栏布局重排 + 视觉降噪**（改 `src/components/butler/ButlerDrawer.tsx`）：左栏 84→48px、联系人列 200→168px、中栏宽度上限 560→420；右栏展开改为「增量加宽抽屉」而非挤压中栏；左栏与联系人列同改淡灰底、分割线降为 `--line-soft`。
+  - 搜索框由中栏工具行移到联系人列顶部，同一个词同时过滤联系人列表与中栏时间线，两处各自给出空态；新建会话键改名 `Buddy`，记忆 / 日历改英文 `Memories` / `Calendar`，删掉与联系人列重复的「详情」键与底部「关闭」键。
+  - 窗口键只留两颗（对齐原生 titleBar）：红 = 关闭（收起抽屉并清当前会话指针，下次为全新会话）、绿 = 放大 / 还原。
+- **微信式对话气泡与时间分隔**（改 `src/components/butler/ButlerDrawer.tsx`）：自己 = 绿气泡在右、对方 = 白气泡在左，头像在最外侧、气泡贴头像侧带小尖角；聊天底压成灰；时间不再逐条贴气泡，改为居中灰色分隔条（相邻间隔超 5 分钟才插一条，文案随远近在口语 / 精确间切换）。
+- **流式等待有交代**（改 `src/components/butler/ButlerDrawer.tsx`）：回答期间时间线末尾挂一条「等待行」，只按会话人设口吻说一句人话，不报「思考」、不报工具名、不带秒表，整轮收尾即卸载且不入会话历史。
+- **去掉批量选择与右栏列表层**（改 `src/components/butler/ButlerDrawer.tsx`）：「已归档」改为只读展示（无勾选控件、待办不摊开）；右栏只剩阅读器一种形态、未选中显示空态；「待处理 / 已归档」开关自右栏挪到中栏工具行。
+- **通知卡片细节**（改 `src/components/butler/ButlerDrawer.tsx`）：单条待办并入卡片头部行（不再同一件事写两行）；时间改显事件开始时间（日历项不再显示裸 ISO 串）；报告类标题与正文仅在无结构化待办时显示。
+- **点消息区空白即聚焦输入框**（改 `src/components/butler/ButlerDrawer.tsx`）：气泡、空隙、包裹层等任意落点均可聚焦（按钮 / 链接 / 输入控件放行），原先只有点在滚动容器本身才生效。
+- **截图 OCR 引线改指向文字中心**（改 `src/components/screen-ocr/ScreenOcrEditor.tsx`）：引线终点改为沿「气泡中心 ← 起点」射线求交，箭头正对文字中心，不再斜插到气泡角落。
+- **截图 OCR 画完线可直接微调**（改 `src/components/screen-ocr/ScreenOcrEditor.tsx`）：文字 / 下划线工具下也做标注命中检测，刚画完的线或字可直接选中拖动，不必先切回「选择」工具。
+
+
+***
+
+
+## v0.7.633 (2026-09-26)
+
+### 新增
+- **Butler 抽屉重构为微信式「联系人」模型**（改 `src/components/butler/ButlerDrawer.tsx`、`src/lib/core/chat-session.ts`、`src/lib/core/node-chat.ts`、`src/app/api/core/node-chat/route.ts`；新增 `src/app/api/core/node-chat/session/route.ts`）：
+  - 左栏新增 200px 联系人列（CHATS）：置顶常驻「通知助理」，其余为一个助理一条会话；中栏只渲染当前联系人的消息流，不再每条通知前都叠「全部回执」。
+  - 右栏改为默认不显示、可单独收起（栏首关闭键不再关整个抽屉）；会话指针经 localStorage（`butler-active-thread`）持久化，关抽屉再打开会接回上次会话；新增会话（左栏 `+`）支持删除。
+  - `GET /api/core/node-chat`：`?threadId=` 返回单会话（含与消息平行的逐条时间戳 `times[]`），无参返回摘要列表；`DELETE ?threadId=` 支持单条删除；`POST/PATCH /api/core/node-chat/session` 建会话与改人设。
+  - `chat-session.ts` 新增 `listChatSessions`（只回摘要，避免长历史拖慢抽屉）与逐条时间戳列 `tail_times`（含老库 `ALTER TABLE` 迁移），用尾部重合长度对齐增量，会话被裁头后仍能正确判出本轮新消息。
+- **会话级人设（Persona）**（新增 `src/components/butler/PersonaDialog.tsx`；改 `src/lib/core/chat-session.ts`、`src/lib/core/node-chat.ts`、`src/app/api/chat/route.ts`）：
+  - 人设与 `chat_sessions` 同行存储（含老库迁移），删除会话即删除人设；`createChatSession` 幂等建会话，`setChatPersona` 刻意不动 `updated_at`，避免改名字把会话顶到最前。
+  - 新建/编辑弹窗只露「姓名 + 性格」，性格给 7 个模板 chips（傲娇/元气/天然呆/三无/温柔治愈/病娇/自定义），身份职责与称呼方式收进默认折叠的「高级」。
+  - 注入仅当 `identity==='butler'` 且姓名非空，只覆盖身份与语气层、不动工具面与权限；坏 JSON / 无姓名一律当无人设。
+- **Butler 抽屉支持附件上传**（新增 `src/app/api/butler/attachments/route.ts`、`src/lib/files/attachment-type.ts`；改 `src/components/butler/ButlerDrawer.tsx`、`src/app/api/attachments/route.ts`）：
+  - 输入框新增回形针 / 拖拽 / 粘贴三条入口，文件落 `<角色>/<日期>/attachments/`（同名自动加序号、上限 500MB、<2MB 附 `dataUrl`），回传绝对路径供 `read_attachment` 直读。
+  - 与画布节点附件、项目 materials 刻意不复用（无 nodeId、不进材料清单）；待发附件以 chip 呈现、可移除（仅解除引用不删盘上文件），有附件无正文也可发送，切换联系人清空。
+  - 附件类型判定抽为公共模块 `getAttachmentType`，两个附件入口共用，避免同一文件被判成不同类型。
+- **常驻「通知助理」线程**（新增 `src/lib/core/butler-notify.ts`、`src/lib/butler/storage.ts`；改 `src/lib/core/inbox.ts`、`src/app/api/butler/inbox/route.ts`、`src/components/butler/{butlerEvents.ts,butlerNotices.ts,ButlerNoticeHost.tsx,ButlerOrb.tsx}`）：
+  - 只收纳系统推送类（日程提醒 / 每日报告 / 跨项目检查），用户操作类回执不进；幂等建 `source='notify'` 会话，并把上线前 `thread_id` 为空的存量通知一次性归位。
+  - 会话源新增 `'notify'`，与 panel 一样永不过期、清扫器不删；`upsert` 时锁定源，防止用户追问一次被写成 `panel` 丢掉常驻语义。
+  - 角标口径由「未读」统一为「未归档」：读一遍不清零、归档才清零，且改为从 `/api/butler/today` 取服务端全量（本地 store 只装 50 条会少报）；列表接口合成通知助理摘要恒置顶并 `pinned:true`，批量删除通知时跳过常驻线程。
+- **Butler 存储按「角色 × 日期」重构**（新增 `src/lib/butler/storage.ts`、`src/lib/butler/transcript.ts`；改 `src/lib/butler/report-doc.ts`、`src/lib/core/daily-report.ts`、`src/app/api/butler/report-doc/route.ts`）：
+  - 落盘从扁平目录改为 `butler/<角色>/<YYYY-MM-DD>/{attachments,docs,chat}`，角色取会话人设姓名，无会话上下文归「通知助理 / 未分类」；`roles.json` 维护映射，改名时整目录 rename。
+  - 目录名经白名单清洗（剔除非法字符、去 `..`、不以点开头、截断 64 字）防目录穿越；`roles.json` 写入先 tmp 再 rename 并加锁串行化。
+  - 会话消息按「消息当天」幂等重写到 `<角色>/<日期>/chat/YYYY-MM-DD.md`（跨天会话拆多天，`system` 不入、`think` 剥离，落盘失败不阻断保存）。
+  - 日报去重标记 / `pending.json` / `error.log` 移入内部状态目录 `butler/.state/daily-report/`；报告读取接口改为遍历 butler 树（跳过 `.state` 与隐藏目录），扩展名白名单收紧为 `.md/.markdown/.txt`。
+- **用户档案（Profile）常驻身份**（新增 `src/lib/core/profile.ts`、`src/app/api/butler/profile/route.ts`；改 `src/lib/runtime/context.ts`、`src/app/api/chat/route.ts`、`src/components/butler/ButlerMemoryPanel.tsx`）：
+  - 新增 `~/BobWork/butler/profile.md`（称呼 / 性别 / 性格 / 语言风格，人类可读 Markdown，留空即不生效），`GET|PUT /api/butler/profile` 整体读写。
+  - 与偏好记忆严格分工：偏好是行为规则、按需调取；档案是身份设定、每轮全量注入（走低频通道前缀到当前轮 user 消息以保持缓存头稳定），并声明「现场指示与档案冲突时以现场指示为准」。
+  - 记忆面板新增 Profile 区块，Name / Gender / Personality / Tone of voice 四栏整体保存，保存后回显 Saved。
+- **本地离线语音识别（STT）**（新增 `src/lib/stt/sherpa.ts`、`src/app/api/stt/local/route.ts`、`src/components/canvas/LocalSttPanel.tsx`；改 `src/lib/parse/audio-parser.ts`、`src/lib/settings.ts`、`src/app/api/chat/tools/admin.ts`）：
+  - 接入 sherpa-onnx 离线 CLI（macOS shared 包）与三个候选模型（`paraformer-zh-small` 中文最快 / `sensevoice-small` 中英日韩粤带标点 / `whisper-small` 99 语言），引擎与模型按需下载（最大约 375MB）到 `BOBWORK_HOME/.stt/`，不随安装包分发。
+  - 下载统一走系统 `curl`（`-C -` 断点续传 + `--speed-limit` 防假死），中间态写 `.part` 完成后原子改名，多轮重试，进度直接读磁盘，重启可自愈。
+  - 兜底策略：显式选 `sherpa-local` 则本地为主路径；云端未配置且本地开启则本地接管；云端为主时逐段失败自动回退本地并如实标注「离线兜底」，云端成功不会误标本地。
+- **本地离线语音合成（TTS）**（新增 `src/lib/tts/local-say.ts`、`src/app/api/tts/local/route.ts`、`src/components/canvas/LocalTtsPanel.tsx`；改 `src/lib/tts/index.ts`、`src/lib/settings.ts`、`src/app/api/chat/tools/audio.ts`）：
+  - 用 macOS 内置 `/usr/bin/say` 合成，零下载、离线可用；音色下拉来自 `say -v '?'`（中文排前），仅 macOS 有效。
+  - macOS 无 mp3 编码器，`format: mp3` 请求降级为 m4a 并在返回值如实标注实际格式（不谎报）；`speed` 倍率换算为 `say -r` 词/分（基准 180，夹在 80–400）。
+  - TTS 配置改为始终输出对象（池空时仍保留 `localEnabled`/`localVoice`），引擎据此走本地兜底而非抛「未配置」；`tts/index.ts` 顺带删掉自实现 `resolveAppRoot`，改用共享 `@/lib/app-root`。
+
+### 修复与优化
+- **会议状态注入放宽到非管家身份**（改 `src/app/api/chat/route.ts`、`src/lib/runtime/context.ts`）：`buildMeetingStateInjection` 由「仅管家」放宽为全身份注入，主对话（画布 chat 节点）开会后第二轮起链路不再断；按画像 gate（dynamic 画像，或 `fixedScenes` 含 butler 的 fixed 画像），避免出现「要求调 `meeting_append`、工具却不在手里」的反向错位。场景提示词正则补充 `会议|纪要|开会|参会|会务|meeting`，会议进行中在场景合并之后追加放行 butler 场景且不写入会话 sticky，会议结束即恢复原工具面。
+- **斜杠命令入口收敛**（改 `src/lib/core/commands.ts`、`src/components/canvas/CanvasFlow.tsx`、`src/lib/agents/profiles.ts`、`src/lib/bridge/wechat-bridge.ts`、`src/lib/core/node-mode.ts`、`assets/skills/user-guide/SKILL.md`；测试 `commands.capability/steering/dropdown.test.ts`）：`/chat` 整体退役（普通文本本就直连同一管家 agent，该命令只剩同义反复的意图前缀）；`/clip` 下线合并为 `/note raw`（只囤素材不编译）。`⌘F` 面板退化为纯文件搜索，斜杠指令模式移除，指令入口统一到 Butler 抽屉与微信桥；手册与工具文案同步改写，并新增「已退役命令名不得回流到给模型的文案」的防回流用例。
+- **微信桥可打断范围扩大**（改 `src/lib/bridge/wechat-bridge.ts`）：`steerable` 从「仅 askNode 路径」改为会话层链路恒真，长任务进行中的补充消息统一走「打断旧任务 + 按原任务合并重跑」。
+- **聚合通道收口语义收敛**（改 `src/app/api/chat/route.ts`）：拒写文案从「⌘F 面板 /chat」改为「当前聚合通道」；Butler 抽屉走专用通道不受影响。
+
+### 界面细节
+- **通知卡片行内操作 + 日报报告化**（改 `src/components/butler/ButlerDrawer.tsx`）：通知行的「完成/撤销」措辞统一为「归档/撤销归档」，短回执的待办就地摊开勾选；日报在右栏直接以「今日 / 已逾期」两栏清单呈现，点一下即完成，不再显示邮件标题与正文。
+- **Butler 悬浮球改版**（改 `src/components/butler/ButlerOrb.tsx`）：球体直径 44→28px，外观改为液态玻璃（折射 + 上缘镜面弧），默认落点从视口右下角改为中栏左下角（旧位置作废），角标缩小到 12px。
+- **NodeMap 连线缩略图改为居中覆盖**（改 `src/components/canvas/NodeMap.tsx`、`CanvasFlow.tsx`）：由画布左下角悬浮改为居中覆盖在对话区之上（容器铺满但指针穿透，仅面板本体可交互）。
+- **截图 OCR 编辑器批注交互重做**（改 `src/components/screen-ocr/ScreenOcrEditor.tsx`）：由「划线后自动在下方开输入框」改为先画纯下划线、再拖线尾「+ 添加批注」按钮定位批注；批注气泡被拖离横线时自动补单向虚线引线箭头。
+- **Hippo 对话侧栏不再渲染 App 外壳元素**（改 `src/components/bobby/BobbyAuthHost.tsx`、`ButlerOrb.tsx`、`src/components/screen-ocr/ScreenOcrHost.tsx`）：`/browser-chat` 是主进程加载的零外壳页面，此前继承根 layout 导致授权浮标、悬浮球、截图面板误入，现三处均在该路由下不渲染。
+- **研究模式按钮点亮样式**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`）：开启研究时由灰底改为实心主题色底 + 主题前景图标 + 投影。
+- **Tooltip 适配浅色主题**（改 `src/components/ui/tooltip.tsx`）：由深色半透明毛玻璃改为不透明面板底 + 深色字，描边加重。
+
+
+***
+
+
+## v0.7.632 (2026-09-25)
+
+### 新增
+- **会议记录从斜杠命令升级为管家工具**（新增 `src/app/api/chat/tools/meeting.ts`、`src/lib/core/meeting-finalize.ts`；改 `src/lib/core/meeting-session.ts`、`src/lib/core/executor.ts`、`src/lib/bridge/wechat-bridge.ts`、`src/lib/runtime/context.ts`、`src/app/api/chat/route.ts`、`src/app/api/chat/tools/index.ts`、`src/app/api/chat/tools/registry.ts`）：
+  - 三个工具：`meeting_start`（标题可空，默认「会议 MM-DD HH:mm」，已在会中则报告不重开）、`meeting_append`（逐条原样累积）、`meeting_end`（`endMeeting()` + `finalizeMeeting()` 生成纪要写入 Butler 收件箱，`kind='meeting'`、`dedupeKey=meeting:<id>`）。
+  - 链路：`/meeting 标题` 归一化后由管家调 `meeting_start`；会中每条消息靠 route 新注入的 `ContextRuntime.buildMeetingStateInjection()`（仅 `identity==='butler'`）让模型知道「会议进行中」，从而静默调 `meeting_append`；`/meeting out` 或 10 分钟静默由微信桥定时器收尾，另加 `sweepExpiredMeeting` 清理静默超时的会议。
+  - 会议状态从进程内单例改为 `.inbox.db` 的 `meeting_session` 单行表（`id` 恒 1），API 全部转 async——修复微信桥独立进程与服务端状态不一致。
+- **斜杠命令改为「翻译成意图交给管家」**（改 `src/lib/core/commands.ts`、`src/lib/runtime/context.ts`、`src/app/api/chat/route.ts`、`src/lib/bridge/wechat-bridge.ts`）：
+  - `ButlerCommand` 新增 `intent` / `capability` 字段，新增 `normalizeSlashInput()`：命中则把输入变成「意图：<intent>」+ 正文，未命中原样透传；`/clip` 退役（并入 `/note raw`）。
+  - 新增 `buildButlerCommandsInjection()`，每轮按 `BUTLER_COMMANDS` 真源现算注入命令表——绕开 agent.json 物化，已装用户即时生效，不必等重新生成画像。
+- **Butler 抽屉新增 `/` 指令下拉**（改 `src/components/butler/ButlerDrawer.tsx`）：输入框内输入 `/` 向上弹出候选（绝对定位盖住消息区），复用 `buildCommandTextAtLine` / `filterCommands` / `loadCommandUsage`；候选按使用量降序、2px 左描边高亮；↑↓ / Enter / Esc 交给 `handleCommandKey` 消费，鼠标用 `onMouseDown + preventDefault` 保住输入焦点。**只注入 `/keyword` 不执行**，斜杠命令统一走会话层（`normalizeSlashInput` → SSE `/api/core/node-chat`），不再走 `/api/core/execute`。
+- **Butler 日历面板**（新增 `src/components/butler/ButlerCalendarPanel.tsx`，已接入 `ButlerDrawer`）：上为固定 42 格月历（`GRID_DAYS`）、下为当日待办；带「隐藏已完成」眼睛开关，`toggleDone` / `removeEvent` 复用 `/api/calendar/events`，并通过 `calendar-events-changed` 与 `butler-event-sync`（由 `ButlerNoticeHost` 消费）广播同步。抽屉 RailItem「日历」直接切到该面板。
+- **微信通道写类白名单**（改 `src/lib/runtime/tools.ts`）：新增 `WECHAT_ALLOWED_WRITES`，放行排程三件套 + 便签 + 笔记写类（`create_note` / `update_notebook` / `write_notebook_answer` / `restore_note` / `ingest_notes` / `review_notes` / `set_note_rules`），`delete_notebook` 除外；panel 通道保持只读。`SANDBOX_BLOCKED_TOOLS` 同时补入此前散落在名单外的笔记写类——那些工具原先在聚合链路上会被静默执行，现在工具面与声称的能力边界一致。
+- **管家恢复笔记能力**（改 `src/app/api/chat/route.ts`、`src/app/api/chat/tools/registry.ts`、`src/app/api/chat/tools/skill.ts`）：`profile.id==='butler'` 时在 fixedScenes 上运行时并集 `'notebook'`，并把 `delete_notebook` 追加进 coreExclusions；`create_note` 新增 `raw_only` 参数（等价旧 `/clip`，只囤 raw 不编译）。提示词里「切 Full tools 档」的说法改为「去画布会话」，Sidebar / Browser 档文案统一为「浏览器对话栏」。
+- **浏览器画像补 OCR**（改 `src/lib/agents/profiles.ts`、`src/app/api/chat/route.ts`）：`BROWSER_PROFILE.fixedScenes` 由 `['browser','ledger']` 变为 `['browser','ledger','ocr']`，浏览器纪律新增 `ocr_document` / `crop_image` 处理扫描件 PDF 的指引。
+- **`query_todos` 新增 `view:'sticky'`**（改 `src/app/api/chat/tools/butler.ts`）：承接 `/inspect`，动态导入 `inspectStickyTodos` / `formatInspectReply`，按 项目 → 便签 → 页 列出未完成的便签待办。
+- **工具调用可拿到宿主 `baseUrl`**（改 `src/app/api/chat/tools/index.ts`）：route 注入 `new URL(request.url).origin`，供 `meeting_end` 这类需要自调用宿主 API 的工具使用。
+- **新增测试**：`src/lib/core/chat-session.test.ts`（`source` 只决定会话 TTL）、`src/lib/core/commands.capability.test.ts`（归一化契约：每条命令必有非空 `intent`）、`src/lib/core/commands.dropdown.test.ts`（下拉纯逻辑，含「`/tmp` 路径靠候选为空兜住」），并扩展 `src/lib/runtime/sandbox-blocked.test.ts`（白名单必须是禁写集的子集、`delete_notebook` 不放行、`lint_notes` 不误拦）。
+
+### 修复与优化
+- **Node 模式彻底退役**（改 `src/lib/core/node-mode.ts`、`src/lib/core/node-chat.ts`、`src/app/api/core/node-chat/route.ts`、`src/app/api/core/execute/route.ts`、`src/lib/core/executor.ts`）：`node-mode.ts` 收敛为「活动会话线程绑定」，只留 `bindActiveThread` / `getActiveThreadBinding`（30 分钟窗口），`/chat out`、`/chat new` 子命令全线删除。聚合问答恒为完整管家身份（`identity:'butler'` + 显式 `projectId`，与流式链路同源同序），历史 system 一律剥离交由 route 注入，`source` 只决定会话 TTL——修掉此前「模型自称只读、工具面却是管家」的矛盾。`/api/core/execute` 标 `@deprecated` 并删除 `source` 参数，仅保留 ProjectBoardView 的程序化调用。
+- **聚合链路的挂起帧短路**（改 `src/app/api/chat/route.ts`、`src/lib/chat/tool-pipeline.ts`）：请求体新增 `channel?: 'wechat'|'panel'`，一路透传到工具执行上下文；新增 `denyOnAggregateChannel()`——带 channel 时 `questions_request`、`tool_confirm`、`butler_confirm` 三类挂起帧**一律不登记挂起**，改为「回话说明 + 不执行」，避免空等 10 分钟超时；`ask_user` 则把问题与选项文本回灌给模型，让它用自然语言追问。
+- **`executor.ts` 收敛为宿主服务函数**（改 `src/lib/core/executor.ts`）：删除 `askNode`、`/chat` / `/help` / `/inspect` / `/clip` 分支与 `nodeMode` 相关字段，`command` 联合类型收窄为 `'todo'|'check'|'notebook'|'meeting'|null`，仅保留 `/todo` `/note` `/meeting`；未知命令回复改用 `buildHelpText()`。
+- **日程交集判定修正**（改 `src/lib/db/index.ts`、`src/app/api/chat/tools/butler.ts`、`src/app/api/calendar/events/route.ts`）：三处把 `end_time IS NULL` 的「永不结束」语义改为 `COALESCE(NULLIF(TRIM(end_time),''), start_time + 30 分钟)` 的点事件——修复「Butler 排 18:00 会议时误报 19 条 8 月无结束时间待办为冲突」，也避免这类历史待办在 today / week 查询里被误命中，或在批量清理时被误删。
+- **`UnifiedPalette` 重构为纯搜索**（改 `src/components/canvas/UnifiedPalette.tsx`，约 −250 行）：删除指令态与会话态（`commandOpen` / `activeCommand` / `nodeMode` / `handleExecute`、指令下拉、Shift+Enter 分组批量、会话徽标与 placeholder 分支），指令入口统一并入 Butler 抽屉。
+- **浏览器对话面板去掉档位**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`）：删除 Ask / Browse / Research 下拉与解锁逻辑（`unlocked` / Lock / Unlock），身份恒为 `AGENT_IDS.browser`；Research 降级为 `researchMode` 开关（localStorage `'research'`，Telescope 图标）；自建 notice 浮层改走 `bridge.toast`；移除 `page.loading` 与 selection 注入。
+- **`NodeMap` 折叠改为受控**（改 `src/components/canvas/NodeMap.tsx`、`src/components/canvas/CanvasFlow.tsx`）：新增 `collapsed` / `onCollapsedChange`，折叠即隐藏，外部点击豁免 toggle 按钮；两者一并删除 BobMail / Mail 未读角标。
+
+### 界面细节
+- Butler 抽屉用户气泡由品牌紫底白字改为 `var(--paper-hover)` + `var(--ink)`，与助手气泡靠深浅 + 描边区分；助手气泡改用 `StreamingMarkdown` + `.butler-md`，并逐帧 `stripThinkTags`。
+- 新增 `.butler-md .html-renderer` 收紧气泡内 markdown（标题 13px、`color:inherit`）。
+- 画布底部品牌栏新增 Calendar 入口（自 ⌘F 图标栏迁入）；项目行新增 NodeMap 开关（`data-nodemap-toggle`），并监听 `butler:open-calendar`。
+
+
+***
+
+
+## v0.7.631 (2026-09-25)
+
+### 新增
+- **Butler 抽屉接住三类「挂起型」SSE 帧**（改 `src/components/butler/ButlerDrawer.tsx`）：
+  - 此前服务端登记挂起后前端漏接，用户会「说完一句就卡住」直到 600s 超时。现在逐一接管：`tool_confirm` → 复用 `useConfirm` 的 `confirmAsk` 弹框并回 `POST /api/chat/confirm`；`login_required` → `LoginDialog` 弹窗 + `POST /api/chat/login`（提交 / 取消 / 卸载三路都能回收）；`grant_required` → 转成 `bobby:grant-required` 窗口事件，再监听 `bobby:granted` 用 `sendRef` 自动补发「已授权，继续」，不必用户手动再问一遍。
+  - `send` 的依赖修正为 `[draft, sending, confirmAsk]`，新增 `sendRef` 解决窗口监听闭包拿到旧实现的问题；关闭抽屉时同步取消挂起的登录等待。
+- **Butler 抽屉支持斜杠指令**（改 `src/components/butler/ButlerDrawer.tsx`，接入 `src/lib/core/commands.ts` 的 `detectCommand`）：
+  - `/chat` 仍走 SSE 流式链路（只剥离前缀；`/chat new` 经 `threadIdRef.current=null` 强制新会话；空问题回提示），`/todo`、`/note`、`/clip`、`/meeting`、`/inspect`、`/help` 走 `POST /api/core/execute` 聚合返回。
+  - 输入框 placeholder 随 `draftCommand` 动态提示「将执行 /xxx — label」，不用先发出去才知道自己命中了哪条指令。
+- **PDF 银行流水 / 对账单勾稽校验（恢复 + 回归保护）**（新增 `src/lib/pdf/shared/money.ts`、`src/lib/pdf/statement/semantics.ts`、`src/lib/pdf/statement/control-rows.ts`、`src/lib/pdf/statement/cell-verification.ts`、`src/lib/pdf/core/ledger.ts`；新增 `src/lib/__tests__/skill-script-imports.test.ts`）：
+  - 金额定点化：`toMinorUnit` / `reconcile` / `formatMinorUnit`，用整数最小单位比较，去掉原先 IEEE754 浮点上 0.005 的容差。
+  - 账务语义推断 `inferLedgerSemantics`：判断列序、余额所在位置、金额口径与借贷方向，置信度分 `confirmed` / `inferred` / `ambiguous`。
+  - 控制行识别：`subtotal` / `total` / 期初 / 期末，并用 `crossPageReconciliation` 串起跨页勾稽链（不确定时落到 `needs_review` 而不是硬判错）。
+  - 逐格五维校验（visual / structural / normalization / reconciliation / human）给出 green / yellow / red，结果写入 `OcrPage.cellVerification`；主入口 `ledgerValidationReport` / `buildMultiPageLedgerReport`。
+  - 为什么是「恢复」：`statement/` 在上一轮被当作死代码清除，导致 `assets/skills/bob-bank-statement` 的入口 `run_statement_pipeline.ts` 直接 `ERR_MODULE_NOT_FOUND`。本次按未改动的 `shared/types.ts` 里早已声明的 `StatementLedgerRow` / `LedgerValidationReport` 类型把实现补齐，并新增 `skill-script-imports.test.ts` 作为回归保护网（防止再次被当死代码删掉）。
+  - 接入现状：目前只有 skill CLI 相对 import，应用运行时 `src/` 内尚无引用，产品路径待接。
+- **Butler 推送克制 / 免打扰时段**（新增 `src/lib/core/quiet-hours.ts`；改 `src/lib/core/daily-report.ts`、`src/lib/core/event-reminder.ts`、`src/lib/settings.ts`、`src/components/canvas/SettingsModal.tsx`；测试 `src/lib/core/quiet-hours.test.ts`）：
+  - `quiet-hours.ts` 是唯一推送裁决点：默认开启（仅显式 `false` 才关）、免打扰窗口默认 22:00–08:00 且支持跨夜、起止相同视为零长度不作为静默、单日上限默认 6 条、`reminder` 永不被免打扰静默、读设置失败按未开启放行；计数落在 `butler/notify-state.json`。
+  - 日报：`decidePush('report')` 裁决微信推送并 `recordPush` 计数；新增 `shouldHoldMorningReport()`，在免打扰窗口内按住晨报「生成」而非生成完再丢弃。提醒：`foldReminderBatch` 把一批提醒折叠成最紧急的 1 条再计数。
+  - 设置面板新增 Butler 导航分组与 `butlernotify` 面板（Bell 图标，色 `var(--success)`），`bnEnabled` / `bnQuietStart` / `bnQuietEnd` / `bnDailyLimit` 自动保存进 `settings.butlerNotify`；校验 HH:mm、起止相同提示空窗口、上限要求整数 ≥ 0；非法值不静默丢弃，而是回落默认值并写内联 `bnLimitErr`。
+- **报告类回执可分享**（新增 `src/lib/butler/report-share.ts`；改 `src/app/api/butler/report/route.ts`、`src/components/butler/ButlerDrawer.tsx`）：
+  - 分享契约单点定义 `isShareableReportKind`，放行 `web` / `daily-report` / `inspect` / `info` 四类；`buildReportShareUrl` 生成 `/api/butler/report?id=` 链接，`sanitizeReportFileName` 清理文件名。
+  - 修复旧 UI 只在 `kind==='web'` 时渲染按钮、而真实收件箱里 web 类回执为 0 条、导致分享入口从未出现过的问题；现在前后端同源判定。
+  - 抽屉详情区新增 `.md` 下载与「链接」复制按钮组（复制后变「已复制」+ Check，`copiedLinkId` 1.6s 后复位）；服务端响应同时去掉正文标题行，避免重复标题。
+- **B5「中途改」：微信桥支持打断并合并重跑**（改 `src/lib/core/commands.ts`、`src/lib/bridge/wechat-bridge.ts`、`src/lib/core/executor.ts`、`src/lib/core/node-chat.ts`、`src/app/api/core/node-chat/route.ts`；测试 `src/lib/core/commands.steering.test.ts`）：
+  - 新增 `mergeSteeringInput`：剥掉指令前缀 → 与原任务合并 → 前缀加回，并折叠成单行。
+  - 微信桥新增 `inflightTasks` 登记表（持 `AbortController`，`steerable` = node 模式或首行 `/chat`），`supersedeInflight` 负责裁决：新消息若是已知指令则只打断不合并，否则与原任务合并重跑。
+  - `executor` / `node-chat` 新增 `signal` 透传与 `ExecResult.aborted`（被 abort 的任务不回执），接口透传 `request.signal` 并回 `aborted`。
+- **语音转写失败改为挂起录音而非静默丢弃**（改 `src/components/canvas/ChatNodeKernel.tsx`）：
+  - 新增 `deferredVoiceRef` / `deferredVoiceCount` 持有转写失败的 `File`，用 `confirmAsk` 让用户选 Keep / Discard；选 Keep 就等到真正 `doSend` 时才 `uploadAttachment(..., 'attachments')` 落盘。
+  - 输入栏新增 Mic 计数 pill，点击即丢弃；改变此前「转写失败只 `console.warn` 一句、然后当附件直接发送」或静默落盘留下孤立音频的行为。
+
+### 修复与优化
+- **删掉恒为 undefined 的 `butlerAgent` 选项**（改 `src/lib/core/node-chat.ts`、`src/app/api/core/node-chat/route.ts`）：该选项 route 从来不传，导致「Butler 身份」分支永远进不去，是「画布与抽屉融合」留下的半截通路；改为由调用函数区分路径——`askTempNode` 走沙盒（`sandbox:true`）、`streamButlerChat` 走 butler。
+- **`/chat` 上下文时长 15 分钟 → 30 分钟**（改 `src/lib/core/commands.ts`，帮助文案同步）。
+- **微信欢迎语改为复用 `buildHelpText()`**（改 `src/lib/bridge/wechat-bridge.ts`）：以 `BUTLER_COMMANDS` 为单一真源，修掉旧手写文案「发消息即自动解析 / 直接问日程」与 executor「无指令分支硬性拒绝」相矛盾、导致新用户按欢迎语操作必失败的问题。
+- **`/api/core/execute` 显式接收 `source`**（改 `src/app/api/core/execute/route.ts`）：只接受 `'wechat'`，其余按默认 panel 处理，避免来源在 HTTP 边界被静默丢弃。
+
+### 界面细节
+- Butler 抽屉输入框 placeholder 改为随指令动态提示；详情区新增 `.md` / `链接` 按钮组。
+- 画布节点输入栏新增挂起录音计数 pill。
+- `src/components/canvas/CanvasFlow.tsx` 仅注释更新（`butlerAgent` → `streamButlerChat`），无行为变化。
+
+
+***
+
+
+## v0.7.630 (2026-09-25)
+
+### 新增
+- **启动期数据目录迁移 `wanted/` → `butler/`**（新增 `src/lib/core/legacy-migrate.ts`；改 `src/instrumentation.ts`）：
+  - `wanted` 命名空间并入 Butler 后，运行时数据目录随之改名。没有在源码里直接 `mv`——改名前实测到旧构建的 App 正在运行、且 `wanted/daily-report/` 仍在被写入；手动移动会让旧构建读不到 `preferences.md`（长期记忆失效），并立刻重建一个空的 `wanted/`，形成新旧目录并存的分裂状态。改由新构建首次启动时自行改名，天然保证「旧数据不丢、新旧目录不并存」。
+  - 同盘 `renameSync` 原子改名、不复制数据、不产生中间态；`butler/` 已存在即返回（幂等）。必须排在 `register()` 最前、先于日报与提醒调度器——否则调度器会先 `mkdir` 出空 `butler/`，迁移被跳过、旧数据滞留；两者并存时只告警不自动合并。
+  - 日报、提醒、收件箱、报告文档、偏好、TTS 等运行期目录全部改落 `butler/`。
+- **Sidebar 等待安抚条：等待期间给话、只报步数**（改 `src/components/canvas/chatNodeKernelParts.tsx`、`src/components/canvas/ChatNodeKernel.tsx`）：
+  - Hippo Browser 右栏（`surface==='sidebar'`）新增提示条：带秒表（每秒自跳，且自带 1s tick 只重渲染本条，不牵动整条消息列表），按等待时长分三档、每 8 秒轮换安抚话，流式刚发起（首 token 未到、尚无阶段）就出现，不再是「一片空白地等」。
+  - 侧栏只报「跑了多少步」：`traceThinkText` 置空不进食思考原文与工具明细，`TraceProcessSummary` 新增 `compact` 态（保留「已跑 N 步」折叠头但不可展开），并隐藏 prefix hash / ttft / tok/s / 降档等开发诊断元数据。画布节点 `isSidebar` 恒 false，不受影响。
+- **技能执行侧闸门，替代「加载了却做不了」**（改 `src/app/api/chat/tools/skill.ts`、`src/app/api/chat/route.ts`、`src/lib/agents/profiles.ts`、`src/lib/chat/tool-pipeline.ts`）：
+  - Sidebar(browser) 档新增 `BROWSER_SKILL_EXCLUSIONS=['deep-research']` 与 `skillExclusionsFor()`；L1 技能目录直接剔除本档「看不见」的技能，并新增 `args_transform` 接管 `__skill_gate__` 注入 `__disallowed_skills`，`load_skill` 与技能资源读取都在执行点过闸——凭名也调不动，同时给出替代路径。历史故障：侧边栏调研跑 39 轮零产物，因为末步 `write_file` 在本档并不存在，跑到最后才发现。
+  - tool-pipeline 增 `agentId` 透传，闸门信息能一路带到执行点。
+- **Sidebar 档专属规则 `BROWSER_SIDEBAR_RULES`**（改 `src/app/api/chat/route.ts`）：仅 `profile.id==='browser'` 时动态注入、不进 system——①落盘约定豁免：该档没有 `write_file` / `run_command`，不再让模型去找不存在的写文件工具；②窄栏输出风格：工具调用之间不写过程叙述，正文只留交付物。
+- **`/api/browser` 命名空间**（改 `src/components/canvas/McpStorePanel.tsx`）：浏览器扩展 ZIP 与浏览器桥 token 相关调用由 `/api/wanted/*` 迁到 `/api/browser/*`。
+
+### 修复与优化
+- **命名空间重构：`wanted` 拆为 `core`（通用引擎）+ `butler`（助理域）**（改 `src/lib/core/*`、`src/lib/butler/*`、`src/app/api/core/*`、`src/app/api/butler/*`；删 `src/lib/wanted/`、`src/app/api/wanted/`）：引擎类 `/api/core/`（execute / meeting / node-chat / schedule-parse）与用户面 `/api/butler/`（daily-report / inbox / organize-send / preferences / reminders / report / report-doc / today）分家；总线事件 `wanted.notice` / `wanted.executing` 更名为 `butler.notice` / `butler.executing`，payload 类型 `WantedNotice*` → `ButlerNotice*`，生产者（日报、日历提醒、收件箱）与消费者 `ButlerNoticeHost` 同步；全仓已无 `@/lib/wanted`、`/api/wanted` 残留。
+- **能力检索话术**（改 `src/app/api/chat/route.ts` 的 `buildCapabilityResultText`）：fixed 画像现在如实回「本档不可用」并给替代路径，不再让模型等一个永不注入的工具；非 fixed 档补一句「下一回合立刻调用刚注入的工具，别把『已激活 / 请稍候』当成答复」。
+- **Research 开关注入条件修正**（改 `src/app/api/chat/route.ts`）：`BROWSER_RESEARCH_RULES` 从档位条件里移出、改按 `researchMode` 判定，修复「Full tools + Research」时两套指引都不注入的情况。
+- **TTS 探针路径修正**（改 `src/lib/bridge/wechat-bridge.ts`）：TTS 探针临时目录由硬编码 `homedir()/BobWork/wanted/tts` 改为 `resolveAppRoot()/butler/tts`，修复 dev isolation（`BOBWORK_HOME`）下写进真实用户目录。
+- **内部目录豁免**（改 `src/lib/project/project-watcher.ts`、`src/lib/project/project-manager.ts`、`src/app/api/projects/route.ts`）：项目监听与 `/api/projects` 跳过 `butler/`，不再把 Butler 运行时数据当作项目文件；`project-manager` 负责确保全局 `butler/` 存在。
+- **死代码清理**：删 `src/lib/wanted/todo.ts`；`src/app/globals.css` 移除 `wanted-orb-*`（悬浮球光晕）与 `lcd-progress*`（Game Boy LCD）及其 `prefers-reduced-motion` 规则——两者实现均已废弃；electron 退出清理改调 `/api/core/node-chat`；日报报告文档改绝对路径 `@/lib/butler/report-doc` 动态 import。
+
+### 界面细节
+- 提交流程文案统一为 `Butler Delivery`（改 `src/components/canvas/CanvasFlow.tsx`），提示路径 `~/BobWork/wanted/` → `butler/`；沙箱 Layer 3 文档中的落盘路径说明同步改为 `butler/`（改 `src/components/canvas/SandboxPanel.tsx`）。
+- `ButlerOrb` / `ButlerDrawer` / `ButlerDocPanel` / `ButlerMemoryPanel` / `ButlerTodayPanel` / `butlerNotices` / `AICodingCreateDialog` / `ProjectBoardView` 以及便签相关路由的品牌字样与端点统一回归 `/api/butler|core/*`。
+
+
+***
+
+
+## v0.7.629 (2026-09-25)
+
+### 新增
+- **画布语音输入改为「录音 → 转写文字回填」**（新增 `src/app/api/transcribe/route.ts`；改 `src/components/canvas/ChatNodeKernel.tsx`、`src/components/canvas/composer/useComposer.ts`、`src/lib/parse/audio-parser.ts`、`src/lib/parse/types.ts`）：
+  - 新 `POST /api/transcribe`（base64 音频 + 文件名 → 纯文字）：音频只落系统临时目录、用完即删，不进 `materials/` 也不进附件列表；转写引擎与 `transcribe_audio` 工具同源（`settings.stt`）。
+  - 节点输入区录完音不再挂附件，改为转写后追加进输入框（与全局截图 OCR 注入同款口径，不自动发送）；转写期间浮层显示 `Transcribing…` 转圈并遮住输入框，故设 120s 上限，超时或失败自动退回「作为附件挂上」的旧行为，录音内容不丢。
+  - 音频解析结果新增 `plain_text`（纯正文，不含 `音频转写（…）` 抬头与 `[mm:ss]` 时间戳），供「直接当文本用」的场景取用。
+- **Butler 抽屉接住结构化提问，不再「说完一句然后卡住」**（改 `src/components/butler/ButlerDrawer.tsx`）：
+  - 模型走 `ask_user_questions` 提问时服务端会推 `questions_request` 帧并挂起等待（最长 600s），抽屉原先不认这个帧 → 什么都不弹、气泡永远 pending。现在复用画布同款 `QuestionPopup`，以 docked 形态顶掉输入框渲染（同位置、不遮挡正文），并支持最小化成悬浮胶囊继续作答。
+  - 三条兜底：显式「跳过」立即按未回答回传（不必干等 10 分钟）、倒计时归零本地清理、抽屉卸载时也按未回答回传，避免服务端空等到超时；提问卡收起后焦点自动还给输入框。
+- **带图轮次自动改选候选池视觉模型**（新增 `resolveVisionChatModel` 于 `src/lib/wanted/task-model.ts`；改 `src/app/api/chat/route.ts`、`src/lib/settings.ts`）：
+  - 节点模型选择器下线 Auto 后节点始终带具体模型，若当前模型读不了图，本轮改选候选池里第一个视觉模型（开关 `settings.chatModel.autoVisionOnImage`，默认开），让下方「直连多模态」判定成立；池内无视觉模型则保持原模型，继续走 Vision Bridge 描述兜底，不悄悄降级。
+- **研究档报告统一引用规范：GFM 脚注 + 论文式多级编号**（改 `src/app/api/chat/route.ts`、`src/app/share/[token]/route.ts`、`src/components/canvas/ChatNodeKernel.tsx`）：
+  - 报告骨架改为 `## 1 研究问题` → `## 2 检索范围` → … → `## 6 结论与下一步建议`，子问题用 `### 3.1` 逐级展开（最多四级）；正文出处一律写 GFM 脚注角标 `[^n]`，文末按顺序给 `[^n]: 来源名称 — 完整URL` 定义，正文不再出现裸 URL。
+  - 分享页补齐脚注样式（角标上标 + 文末引用表，含深色模式），并修掉 sanitize 造成的锚点 id 双重前缀（`user-content-user-content-fn-1` → 角标点了跳不到引用条目）。
+  - 研究档报告行新增一行正文摘要（从正文首个像样段落取、摘掉加粗标记与脚注角标），不展开也能看出结论讲了什么。
+
+### 修复与优化
+- **WANTED 临时问答的工具面按提示词收口**（改 `src/lib/runtime/tools.ts`、`src/lib/wanted/node-chat.ts`）：沙盒禁用名单补上 `create_scheduled_todo` / `todo_update` / `todo_delete` / `create_sticky_note`——提示词明写「不写入待办、日历」，工具面却照旧给着写接口，模型在两份矛盾指令间摇摆（实测思考块里出现 "There's tension"，最终有时拒答、有时想去写）。只读的 `query_schedule` / `query_todos` / `read_todo` 保留不动；提示词同步说明「要写请用右下角 Butler 悬浮球或在日程/便签面板操作」，不再让模型假装已写入。
+- **Butler 会话「说一套写一套」修正**（改 `src/lib/wanted/node-chat.ts`）：Butler 链路用的是占位 `nodeId`，route 定位不到项目 → 上下文注入「当前没有激活项目」，而排程工具内部写的却是当前活跃项目，于是 Butler 误判「这条日程记为全局待办」。现在显式解析并传 `projectId`，让 route 走显式分支（沙盒路径仍不传，保持纯问答 + 临时工作区语义）。
+- **待办回执三级折叠改为按需省略**（改 `src/lib/wanted/inspect.ts`）：某一层不携带信息就整层省略——单张便签且标题与项目名无差别（或为空）时不显示便签层，单页且页标题是默认的 `Pn` 时不显示页层（分页能力已废，每张便签恒为 P1），消除报告里「■ 项目名」下紧跟「◇ 同名」与 `· P1` 的噪声行，省略后子级缩进自动上提。
+- **便签上限常量收口**（改 `src/app/api/chat/tools/butler.ts`）：`MAX_TODO_NOTES` 改为从 `@/lib/sticky-todo` 导入共享常量，避免与 `/api/sticky-notes` 的校验各说各话。
+- **非 V4 推理模型的思考引导改为恒注入**（改 `src/lib/thinking/policy.ts`、`src/lib/settings.ts`、`src/components/canvas/SettingsModal.tsx`、`src/app/api/chat/route.ts`）：这些模型的思考块显示依赖 ` thinking` 标签引导，属正确性前提而非偏好，故移除 `injectThinkGuide` 开关（settings 类型与默认值、设置面板、策略函数签名同步），关掉开关只会让思考块显示不正常。
+- **模型选择器下线 Auto**（改 `src/components/canvas/ChatNodeKernel.tsx`、`src/app/api/chat/route.ts`）：节点始终持有具体模型，存量空 `modelId` 节点经迁移 effect 落成「候选池有序首选（池空则下拉首项）」；候选池为空时下拉退化为「全部已勾选模型」，不再出现只剩 Auto 的空下拉；消息标签以服务端 done 帧回传的实际模型为准（含带图改选视觉模型的结果），避免标签误导。
+- **报告固化不再把过程叙述写进正文**（改 `src/components/canvas/ChatNodeKernel.tsx`）：Research 档的「Let me open…」过程叙述与结论同处一条 assistant 消息且整段挤在报告之前，原样固化会把叙述一起写进 `materials/`（分享页照渲染）；现在按首个一级标题 `# <主题>` 切开，找不到时才保持原样，不做猜测性截断。
+
+### 界面细节
+- Butler 抽屉由右侧全高滑出改为**居中弹窗**（宽 `min(1040px, 88vw)` × 高 `min(760px, 86vh)`，圆角 16 + 四周留边、更重的投影），右栏宽度改为自适应。
+- Butler 抽屉中栏话题行改微信式「收到」气泡：靠左 + 上限 85%（短主题就短气泡），类型只留图标（hover 出全称）、主题单行截断（正文预览移交右栏），新增「待办 n / ✓ n」进度徽标，不必点开就知道这条有事可做。
+- Butler 悬浮球 52px → 44px，改「透明玻璃 + 黑线条河马」水晶球外观：球体靠径向高光 + 边缘暗化 + 内外阴影撑出体积，不再用蓝色渐变贴图与 `drop-shadow`（后者只按非透明像素描边，会变成线条自己投影），悬停放大 1.04；未读角标 18 → 16。
+- 设置面板 Models 角色分配区由「一角色一张卡片」改为单卡片行式列表：每行行首显示当前模型（多个显示 `+N`，未配置显示 Not set），展开后才增删；思考档位策略收进默认折叠的 Advanced 区，仅「纯固定档」关闭后才有语义的两条开关改为条件渲染；STT / TTS 的 Voice、Speed 标签与占位文案统一为英文。
+- 上下文占用环 `ContextMeter` 从 composer 尾部移到 AI 回复末尾动作行最右侧。
+- 画布节点输入区：技能菜单去掉独立按钮（入口只留输入框内输入 `/`），菜单宽度 300 → 196 并隐藏滚动条；麦克风按钮移到发送按钮左侧、转写中一并禁用；原先的「强制 MCP」下拉按钮整体移除（Store 中全局 enabled 的 MCP 自动可用）。
+- 浏览器对话面板分隔条热区改为整条左缘（可见部分仍是中间一枚小按钮），悬停任意高度都能唤出。
+- 侧边栏已隐藏 Chat / Team 分段控件，Trace 图标改为可来回切换，成为从 Trace 回到对话的唯一入口。
+
+
+***
+
+
+## v0.7.628 (2026-09-25)
+
+### 新增
+- **Butler 从对话框改为三栏抽屉，画布 Butler 节点退役**（新增 `src/components/butler/ButlerDrawer.tsx`；改 `src/components/butler/ButlerHost.tsx`、`ButlerOrb.tsx`、`src/components/canvas/CanvasFlow.tsx`、`src/lib/bus.ts`；删除 `src/components/butler/ButlerChatDialog.tsx`、`src/components/canvas/ButlerNode.tsx`）：
+  - 旧 `ButlerChatDialog` 是 420px 窄对话框 + Today / 记忆 / 文档三个互斥浮窗，搜索 / 类别 / 批量 / 存档全塞一条窄时间线越加越挤，三个浮窗同一时刻只能看一个。新 `ButlerDrawer` 从右侧滑出、无遮罩、固定宽 `min(1180px, 92vw)`，核心架构是**左栏功能键 / 中栏 Butler 会话 / 右栏预览区**三栏并列——切左栏功能键不再换掉聊天内容（这是最痛的那次 UX 问题），中栏恒为 Butler 会话、左右各自独立。窄窗自适应：< 820px 右栏改覆盖层、< 560px 左栏收成 48px 纯图标。
+  - 画布右键菜单里的 Butler 节点彻底移除（备份至 `.removed-20260925.bak`）：Butler 的能力**完全收敛进悬浮球抽屉**，不再在画布里再塞一个节点。
+  - `ButlerOrb` 升级为河马贴图（`public/butler-orb.png`）、位置持久化、未读角标改用 `butler:inbox-pending` 即时广播 + 兜底轮询 2 轨。
+- **日历冲突统一检测与提示**（新增 `src/lib/calendar/overlaps.ts`；改 `src/lib/sticky-calendar-sync.ts`、`src/app/api/sticky-notes/route.ts`）：
+  - 把「便签自动结算入日历 / Butler 排程确认卡 / 手动 Add to calendar」三条入日历路径的冲突检测**收敛成同一套 `findEventOverlaps` + `formatOverlapNote` + `stripOverlapNote`**。`sticky-calendar-sync.ts` 之前只做 `(project_id, title, start_time)` 防重，现在建 / 重排事件前先查重叠、把提示写进 `description` 前缀（`注意 · 与已有安排重叠：09:00–11:00 某某案开庭`），重排时先 `stripOverlapNote` 摘旧提示再写新的，**不动用户手写备注**。
+- **技能基线哈希 + 一键更新能力**（新增 `src/lib/skills/baseline-server.ts`；改 `src/components/canvas/SkillManagerModal.tsx`、`src/lib/skills/installer-server.ts`、`src/app/api/skills/route.ts`）：
+  - 物化安装时记录随包源哈希到 `<APP_ROOT>/extensions/skills-baseline.json`；之后比对源哈希 / 副本哈希 / 基线哈希的差异象限，区分**官方有更新 / 用户本地修改 / 两边都改 / 完全同步**四种状态。前端 SkillManagerModal 据此亮 UpdateBadge（蓝 / 灰 / 红三态徽章分别对应 update / edited / conflict），Market 卡片已安装项的绿色 Installed 标签在 update 状态下换成显眼的 Update 按钮（带 RefreshCw 图标），已安装卡片在 update 状态下把图标按钮换成实心品牌色按钮跳过二次确认；Conflict 状态弹窗文案改为 "Overwrite local edits with the official version?"。老用户自愈补记：首次打开管理器时对缺失基线的已安装技能自动登记，无需重装即可纳入监测。
+
+### 修复与优化
+- **浏览器对话栏档位 → Agent 身份的映射表对齐**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`、`src/lib/agents/profiles.ts`、`src/app/api/chat/tools/butler.ts`）：档位 → Agent 身份映射从散落在组件各处收进画像层，`Full tools` 档与 `AGENT_IDS.chat` 强绑定；Butler 工具（`tools/butler.ts`）与身份画像的 `console` / `ledger` 场景对齐，避免出现「某档下工具面里明明有但画像说不该有」的静默漂移。
+- **Butler 会话 API 放宽 + 收件面板 `stripThinkTags` 强制执行**（改 `src/lib/wanted/node-chat.ts`、`src/app/api/wanted/node-chat/route.ts`、`src/components/butler/ButlerHost.tsx`）：`POST /api/wanted/node-chat` 新增 `source:'drawer'` 来源标识（面板侧的 Butler 会话不再伪装成 canvas 节点，直接传 `source:'drawer'` 走面板专属链路）；后端强制剥离 `[[say]]`、`[[msg]]` 协议块与思考标签，确保 Butler 面板看到的是干净的对话，与画布侧共享同一套 `stripThinkTags` 实现。
+- **便签 → 日历同步不再漏单**（改 `src/lib/sticky-calendar-sync.ts`）：便签「自动结算入日历」链路在重排时原本会跳过「只改了时间未改 title」的条目，现在 title 做归一化比对（去空白、去全半角差），时间 / 地点 / 参与人任何一项变动都触发重排。
+
+### 界面细节
+- 设置面板 SkillManager 区域默认折叠，Butler 相关快捷键提示里 `(Butler inbox)` 描述同步更新。
+- CanvasFlow 事件总线新增 `butler:open-calendar` / `butler:open-inbox` 的跨宿主唤起通道。
+- `ChatNodeKernel` 语音录制浮层的「完成 / 取消」按钮文案改为中文，并调整波形柱宽度让 10 根柱在窄屏上不溢出。
+
+
+***
+
+
+## v0.7.627 (2026-09-25)
+
+### 新增
+- **Butler 助理体系落地，BobMail 通知中心退役**（改 `src/components/canvas/Sidebar.tsx`、`NodeMap.tsx`、`CanvasFlow.tsx`、`canvasHooks.ts`、`src/app/layout.tsx`、`src/lib/bus.ts`；新增 `src/components/butler/*`；删除 `src/components/canvas/WantedNoticeCenter.tsx`）：
+  - 新 `ButlerHost` 挂在 `layout.tsx`，与画布挂载状态解耦（不在 4000+ 行的画布 / 收件箱组件里再叠一层 UI），统一由 `butlerEvents.ts` 的 window 事件驱动（`butler:open-today` / `open-memories` / `open-inbox` / `open-doc` / `open-calendar` / `close` / `inbox-pending` / `focus-notice`），同一事件重复触发即开关，ESC 收起。
+  - 新 `ButlerOrb` 悬浮球：52px 可拖拽（`DRAG_THRESHOLD=4` 区分拖拽与点击），位置落 `localStorage['butler.orb.pos']` 并钳回视口；未读角标由 `butler:inbox-pending` 即时广播 + 120s 兜底轮询 `/api/wanted/today` 的 `snapshot.inbox.unread` 共同维护。
+  - 新 `ButlerChatDialog` 把收件箱从「邮件客户端」改成「会话时间线」：通知卡片与 user / assistant 气泡混排，打开即已读但仍以 `freshIdsRef` 保留「本次新到」红点；支持待处理 / 已归档、搜索、类别 chips、批量 Done / 删除、卡片内 Done / 撤销 / 去日历，底部输入框直连 `POST /api/wanted/node-chat`（`source:'panel'`，`stripThinkTags` 剥思考块）。
+  - 新增 `butlerNotices.ts`（模块级 store，上限 200 条）与 `ButlerNoticeHost`（常驻无骨架），承接原 `WantedNoticeCenter` 的全部非收件箱职责：唯一消费舱轮询 `daily-report` / `reminders`（各 30s，日历变更立即）、`bus wanted.notice` 去重（5s 窗口）→ toast / 落库 `/api/wanted/inbox` / 桌面通知，以及右上「执行中」胶囊与 `butler-event-sync` 日历反向联动。
+  - 原 BobMail 入口整体撤除：删除 `useMailPending` hook、`bobmail-toggle` / `bobmail-pending(-request)` 事件、展开态标题栏与折叠态 rail 的 Mail 图标及角标、`lcd-mail-*` CSS 动画；日历联动事件 `bobmail-event-sync` 改名 `butler-event-sync`。
+- **Today 首屏：只读聚合 + 至多一条建议**（新增 `src/lib/wanted/today.ts`、`src/app/api/wanted/today/route.ts`、`src/components/butler/ButlerTodayPanel.tsx`）：
+  - `buildTodaySnapshot` 用 `Promise.all` 聚合今天日程 / 逾期待办 / 未读回执，单源失败落进 `degraded` 数组而不是整体报错；`buildSuggestion` 按「逾期 > 负荷 ≥5 项 > 未读 ≥5 > 今天很空」优先级短路，最多给一条，无事返回 null。
+  - 面板纯只读；建议卡的「去处理」只把意图翻成一句提问（如逾期 →「帮我处理逾期事项，先列出最紧急的三条」）交给 Butler 会话，不在面板里直接动手。
+- **报告落成真实文档，可在面板只读预览**（新增 `src/lib/wanted/report-doc.ts`、`src/app/api/wanted/report-doc/route.ts`、`src/components/butler/ButlerDocPanel.tsx`）：
+  - `writeReportDoc` 落 `wanted/reports/YYYY-MM-DD-<kind>[-n].md`，同日同类型追加序号不覆盖；`daily-report.ts` 在写 pending 后同步调用，文档写入失败不阻断通知链路。
+  - 路由做路径越界校验（resolve 后必须落在 `REPORT_DOCS_DIR` 内）、扩展名白名单（.md / .markdown / .txt）、单档 2MB 上限；面板复用画布 `viewers/registry` 渲染器，只读不回写。
+- **记忆可见、可改、可删**（新增 `src/app/api/wanted/preferences/route.ts`、`src/components/butler/ButlerMemoryPanel.tsx`）：GET 列表 / PATCH 按 1-based `index` 改 content 与 type / DELETE 按序号删（拒绝批量清库），底层与工具侧同源（`wanted/preferences.md`），避免记忆分叉；删除走两步确认。
+- **TTS 语音合成**（新增 `src/lib/tts/index.ts`；改 `src/lib/settings.ts`、`src/app/api/chat/tools/audio.ts`、`registry.ts`、`src/components/canvas/SettingsModal.tsx`）：
+  - `synthesizeSpeech` 走 OpenAI 兼容 `POST /audio/speech`（openai `tts-1` / siliconflow fishaudio / 自定义 baseUrl），单次限 2000 字符，产物落 `wanted/tts/<时间戳>-<hash8>.<format>`；未配置时抛 `TtsNotConfiguredError`，不静默降级；apiKey / baseUrl 从 Model Pool 同名厂商继承。
+  - 新工具 `text_to_speech` 与 `transcribe_audio` 同域（scene `audio`）；设置面板新增默认折叠的 Audio TTS Model 区块（TTS 候选池 + Voice / Speed 可选字段，池空即整体清空）。
+- **输入框语音录制 + 微信式语音条**（改 `src/components/canvas/ChatNodeKernel.tsx`、`chatNodeKernelParts.tsx`）：
+  - 用 `MediaRecorder` 录音（`audio/mp4` → m4a，`audio/webm;codecs=opus` 兜底），`AnalyserNode` RMS 驱动 10 根实时波形柱（rAF 直改 DOM 高度，避开每帧 setState）；浮层覆盖输入框含计时 / ✕取消 / ✓完成，完成后进待发附件再由 `transcribe_audio` 转写。
+  - 新 `AudioVoiceBar`：微信式语音条（弧线波标 + 时长 + 未读红点，播放时弧线依次闪烁）；项目相对路径走 `/api/attachments`，绝对路径（如 TTS 产物）仍走 chip 外开。
+- **应用状态只读查询 + Butler 画像升级**（新增 `src/app/api/chat/tools/console.ts`；改 `src/app/api/chat/tools/index.ts`、`registry.ts`、`src/lib/agents/profiles.ts`、`official-packages.ts`）：
+  - 新增 `console` 场景与 5 个只读工具 `list_agents` / `list_projects` / `list_nodes` / `get_app_status` / `read_inbox`；硬约束「不得出现任何写 / 改 / 删」，`get_app_status` 只调 `getPluginStatuses`、不触发有副作用的 `syncServers`，且绝不回传 apiKey。
+  - Butler 官方包 1.0.0 → 1.1.0，`fixedScenes` 加 `console`；`BUTLER_BASE_SYSTEM_PROMPT` 由「待办与日程管家」重写为 Chief of Staff 型调度者（先派活给 team_run / Kar / Archivist / Coding、先查后答禁编造、外部动作先确认、主动但克制），待办↔日历双轨与账本只读作为子域保留。
+- **微信出站媒体协议探针**（改 `src/lib/bridge/wechat-bridge.ts`、`wechat-adapter.ts`；新增 `src/app/api/wechat/probe/route.ts`）：新增 `sendVoice` / `sendFile`（本地文件 base64 塞 `voice_item` / `file_item`，字段为推定值、注释标注待端上验证）与 `probeOutboundMedia`（向最近会话依次发「文本 → 1 秒静音 WAV → 小文本文件」三条并即时清理素材），用于验证 iLink 上行媒体协议。
+
+### 修复与优化
+- **浏览器对话栏的身份只由档位决定**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`）：档位新增 `Full tools`（直接映射 `AGENT_IDS.chat`），配套取消独立 Lock 按钮 —— 原先「档位」与「解锁」两套开关会互相压制，现在只留档位一个决定者；`readMode` 兼容旧 `bobmail/unlocked` 键（等价 full，迁移后停写）；面板提示统一改走 `bridge.toast`（删掉自建 notice 状态与 2.6s 定时器）；`buildContextText` 去掉与 `ambientContext` 重复的 URL / Title，只补可读性 note、其他标签与正文；`attachPageContent` 只保留划词浮层这一个入口。
+- **附件选择签名放宽**（改 `src/components/canvas/composer/useComposer.ts`）：`handleFileSelect` 参数由 `FileList | null` 放宽为 `FileList | File[] | null`，录音 Blob 得以以 `File[]` 传入。
+- **通知链路文案统一到 Butler 收件箱**（改 `src/lib/wanted/daily-report.ts`、`executor.ts`、`inspect.ts`、`chat-session.ts`、`node-chat.ts`、`node-mode.ts`、`meeting-session.ts`、`commands.ts`、`inbox.ts`、`src/app/api/wanted/inbox/route.ts`、`src/lib/bridge/wechat-bridge.ts`、`src/lib/bus.ts`）：把残留的「BobMail 邮件 / 通知中心」措辞全部改写为「Butler 收件箱 / 回执」（含微信推送文案与命令描述），纯文案级改动，不含逻辑变更。
+
+### 界面细节
+- 设置面板快捷键说明中的 `(BobMail)` 改为 `(Butler inbox)`；新增 TTS 区块默认折叠（`rolesCollapsed.tts`）。
+- 画布 `CanvasFlow` 新增 `butler:open-calendar` 监听，供 Butler 对话框的 Calendar 动作跨宿主唤起日历面板。
+- `ScreenOcrEditor` 浮层注释改为「高于 Butler 对话框」（zIndex 不变）。
+
+
+***
+
+
+## v0.7.626 (2026-09-24)
+
+### 新增
+- **网页材料改存「渲染后的整页 HTML 原件」，研究工作流可把结论与已读正文一并沉淀**
+  （改 `src/lib/materials/link-import.ts`、`src/lib/materials/indexer.ts`、
+  `src/app/api/materials/route.ts`、`src/components/canvas/Sidebar.tsx`；新增
+  `src/lib/materials/html-text.ts`、`src/lib/materials/source-url.ts`）：
+  - 抓取链路（Add link / Hippo 一键保存当前页）不再落一份「已成正文的 .md 副本」，改为落盘
+    **渲染后的整页 HTML 原件**：原件可离线打开、可回溯，出处写在文件头注释里（浏览器解析时直接跳过、
+    人读时一眼可见），正文由索引链路现场抽取。原件即唯一真相源，不再有「原件与正文两份、
+    版次可能漂移」的问题。抓取优先级不变（Hippo 真实浏览器优先，桥不可用回落服务端直抓静态 HTML）。
+  - 新增 `html-text.ts`：HTML → 标题 / 正文 / 出处 的纯函数（正则预剥噪声 → 取 `<article>`/`<main>` →
+    turndown 转 Markdown）。**单独成文件是为了让服务端索引也能用** —— 索引链路不该被拖进浏览器侧依赖。
+  - 来源 URL 归一化抽出共用实现 `source-url.ts`：候选来源清单的「去重」与正文里的「链接匹配」
+    共用同一份规则。两处各写一份，规则一漂移就会出现「清单里有、正文里同一链接却匹配不上」的静默失效。
+- **Research 档来源卡片升级：「研究结论」与「读过的网页」同卡、同勾选、同导入**
+  （改 `src/components/canvas/ChatNodeKernel.tsx`、`src/app/api/chat/route.ts`）：
+  - 候选行不再只来自「调用参数里的 URL」：新增从**工具返回原文**解析 URL / 标题 / 正文，
+    行内给首段摘要、可展开看本轮读到的全文；同一页面先 navigate 后 read 按 URL 合并、后到的信息补齐。
+    只认两种信封（内置工具文本信封、MCP JSON 返回体），对不上就不认 —— 宁可不认，也不猜。
+  - 卡片首行是本轮**研究结论**（模型综述，属派生材料）：落盘为 .md，文件头标注
+    `Derived: model-written synthesis, not a primary source`，并列出结论所依据的来源 URL，
+    日后回溯能看清「这条结论是从哪几页推出来的」。
+  - 网页行带「本轮已读到的正文」：导入时**直接落盘复用**，入库版本与回答里的引用必然同版
+    （NotebookLM 口径）；正文缺失或太短才回落抓取链路。此类文件头标注
+    `Captured: text read by the agent during research (not a re-fetched snapshot)`，不与真原件混淆。
+  - 正文里「本轮真读过」的页面链接标成绿色胶囊（带 ✓），悬停弹出标题 / 域名 / 首段摘要；
+    只 navigate 打开过、没读正文的页面不标注 —— 与「搜索页摘要不算读过」同一条纪律。
+  - Research 档答复改为**六节综述骨架**（研究问题 → 检索范围 → 主题综合 → 争议与不一致 →
+    缺口 → 结论与下一步建议），一级标题 `# <主题>` 作报告文件名；同时该档不再注入「报告交付物」
+    约定，避免两套指引把答复推向 `homework/` 交付物口吻。
+- **Hippo Browser：整页快照归档模式 + 指定标签读取**（改 `electron/hippo-cdp.ts`、
+  `electron/hippo-browser.ts`、`src/lib/browser-tools/specs.ts`）：
+  - `browser_get_html` 新增 `clean=true`：在页内一次洗净 —— 剥 script/noscript/iframe/template 与注释、
+    去 `on*` 内联事件与 `javascript:` 链接、把 src/href/srcset/poster/form[action]/style `url()` 绝对化、
+    `data-src*` 懒加载属性提升为真实属性。必须在页内做：只有活在文档里的 DOM 才拿得到 `<base>`
+    参与解析后的绝对地址，也只有活 DOM 上的懒加载属性还没被浏览器覆盖。
+  - `browser_get_html` / `browser_wait_network_idle` 新增 `tabId`：可读 / 等**指定标签**，
+    后台抓页不必把用户的当前标签切走（旧实现栽在这里：后台新开 + 读活动标签，永远读不到刚开的那一页）。
+  - `browser_open_tab` 传 `activate:false` 时连窗口都不再抬到前台，「不抢焦点」名副其实；
+    快照字符上限由 100000 提到 4000000（原默认 20000 会把原件截成残页）。
+
+### 修复与优化
+- **账本文稿面板：正文里的项目路径可点开原件**（改 `src/components/canvas/LedgerDocPanel.tsx`、
+  `src/components/canvas/HtmlRenderer.tsx`）：
+  - 对话正文的 `.file-mention` 路径正则纳入 `materials/` —— 账本条目的「出处」都落在原件层，
+    必须一并可点，否则档案员引用的路径点了没反应；同时排除 `[]` 与 `#`，
+    账本引用标记 `[来源: 材料:materials/x.pdf#p3]` 不再被吃掉尾巴、点成一个不存在的文件。
+  - 账本文稿面板新增 remark 插件，把正文里的 `materials/…` / `homework/…` 包成同款胶囊，
+    点击用系统默认程序打开（只动纯文本节点，代码块 / 行内代码 / 既有链接天然不受影响）。
+- **浏览器读取判重不再误伤「交互后的重读」**（改 `src/app/api/chat/route.ts`）：同一 URL 但中间发生过
+  页面交互（点击 / 切 tab / 脚本改 DOM）时，URL 指纹抓不到这种变化，上一次的读取结果其实已失效；
+  旧逻辑按 2 次封顶会回灌「请基于已有结果回答」，等于逼模型用陈旧内容。改为放宽到 6 次
+  （保留硬顶，防「读-滚-读」原地打转）；失败的操作没改变页面，不计入。
+
+### 界面细节
+- Usage 面板日粒度柱状图悬停显示当日 tokens 与估算金额（原先只有原生 title 提示）。
+- 项目图标墙底色从「按 id 哈希出色相」改为「按分类取色」（诉讼绿 / 常法蓝 / 非诉青 / 破产紫 / 研究琥珀），
+  同类项目同色便于成组识别；刻意避开红色系 —— 红留给 todo 角标与开庭临近等预警信号。
+
+
+***
+
+
+## v0.7.625 (2026-09-24)
+
+### 修复与优化
+- **机器指纹加固：Apple Silicon 上改用 IOPlatformUUID，凭据密文不再因主机名变动而失效**
+  （改 `src/lib/secrets.ts`、`src/lib/settings-server.ts`）：
+  - 旧实现 macOS 侧取 `sysctl -n hw.uuid` 作密钥指纹，但 Apple Silicon 上该命令已返回 `unknown oid`，
+    于是静默退化成「主机名 + 用户名」派生——主机名一变（DHCP 把 HostName 写成 IP、或用户改名），
+    已加密的 API Key / Token 立刻全部解不开。新增 `hardwareFingerprints()`：
+    macOS 优先 `/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice` 解析 `IOPlatformUUID`（跨重启、跨网络稳定），
+    `hw.uuid` 候选保留供 Intel 机器使用（同值去重）；Linux 仍读 `/etc/machine-id`。
+    新增 `tryExec()` 统一吞掉命令失败（该候选取不到就跳过，不影响其它候选）。
+  - 兼容与透明迁移：新增 `legacyFingerprints()` 保留历史「host + user」派生（含 macOS
+    `scutil --get LocalHostName` 的 `<name>.local` 与短名两种形态），**仅用于解密回退**；
+    `getKeys()` 首个候选为主密钥（用于加密），其余只作回退。新增 `isLegacyCiphertext()` / `hasLegacySecrets()`，
+    读取设置时若发现「主指纹解不开、历史指纹能解开」的密文，与明文老数据一样顺手回写成主指纹加密版（用户无感）。
+
+
+***
+
+## v0.7.624 (2026-09-24)
+
+### 新增
+- **Hippo 对话栏 Research 档「来源清单」卡片**（改 `src/components/canvas/ChatNodeKernel.tsx`、
+  `src/app/api/chat/route.ts`）：研究档答复下方自动列出**本轮真实读过的网页**，用户勾选后一键导入当前项目。
+  - 来源取自工具调用参数而非模型自述：`RESEARCH_URL_TOOLS` 白名单（`browser_navigate` / `browser_open_tab` /
+    `web_fetch` 及 `mcp__bob-browser-mcp__` 两个同名工具），失败调用（`success === false`）不计入；
+    `normalizeSourceUrl` 归一化（仅 http(s)、去 hash、去 `utm_*` / `fbclid` / `gclid` / `spm` / `ref` / `share_` / `from`
+    等跟踪参数、去尾斜杠），按归一化 URL 去重后**上限 30 条**；`RESEARCH_SKIP_HOSTS` 剔除搜索引擎宿主
+    （google / bing / baidu / duckduckgo / sogou / so / yandex / search.brave / startpage / search.yahoo / ecosia）。
+  - 仅当消息已完成且 `identity === 'browser-research'` 时渲染（画布节点与其他档位恒为空数组）；
+    `ResearchSource` 以「去 `www.` 域名 + 路径尾段」为行内标签，完整 URL 走 `title` 悬浮。
+  - `handleImport()` 串行逐条 `POST /api/materials {action:'add_link'}`（失败项汇总重试），已导入状态按节点存
+    `localStorage` 键 `bob-research-imported:{nodeId}`，避免重复导入。
+  - 文案：`Sources Read · N` / `Sources Imported · N` / `Importing p/t...` / `N of M saved to materials/ ·
+    indexed automatically.` / `Import N source(s)` / `Nothing selected.` /
+    `Uncheck anything you don't want in the project.`。
+  - 研究提示词同步补三条纪律：取证必须真的打开页面（搜索页摘要不算读过）、引用一律给完整可点击 URL 且与实际
+    打开地址一致、**不要在答复里另抄一份来源列表**（清单由宿主生成）。
+- **项目分类新增「研究」**（改 `src/lib/types.ts`）：`PROJECT_CATEGORIES` 由
+  `['诉讼','常法','非诉','破产','其他']` 扩为 `['诉讼','常法','非诉','破产','研究','其他']`。
+  服务端 `src/app/api/projects/route.ts` 的分类白名单与本常量同源，自动放行，无需另改。
+- **materials 预设标签改为材料属性口径**（改 `src/components/canvas/Sidebar.tsx`）：`DEFAULT_MATERIAL_TAGS`
+  由 `['原告','被告','法院']`（当事人/机关口径）改为 `['原始材料','证据材料','参考资料','参考判例','法律依据']`
+  （材料类型口径），标签筛选条与文件标签面板的候选预设同步更新。
+- **Hippo 工具栏「收藏当前页」三去向浮层**（改 `electron/hippo-browser.ts` / `electron/preload.ts`）：
+  收藏入口从渲染侧聊天面板迁到浏览器工具栏，由主进程承载。
+  - 地址框内新增收藏按钮 `#clip`（`.addrClip`，位于星标 `#bm` 左侧；新建标签页 / 空地址时 `disabled`），
+    点击经 `BAPI.saveMenu({ right })` 由主进程在按钮下方弹出无边框、`parent` 绑定、`alwaysOnTop` 的
+    独立浮层子窗口（`SAVEMENU_W = 264`、`SAVEMENU_H = 178`、`data:text/html` 内联页），失焦即关、再次点击即 toggle。
+  - 三个去向（与旧版逐字一致）：`Current project` / `Bob Notes` / `Bob Notes (compile now)`，
+    分别走 `savePageToBobWork(target)` → `POST /api/materials {action:'save_page'}`（`notes-compiled` 归一为
+    `target:'notes', compile:true`，服务端自己读当前标签，不重复抓取）。
+  - 结果经 `hippo-browser:menu-cmd` 的 `saveMsg:` 前缀回传工具栏，由新增 `showToast()`（`.toast`，2.6s 自动消失、
+    不拦截点击）提示：`Saving the current page…` / `Saved to materials: …` /
+    `Clipped to Bob Notes (not compiled): …` / `Clipped to Bob Notes, compiling in background: …` /
+    `Failed to save the page`。
+  - 新增 IPC `hippo-browser:save-menu` / `hippo-browser:save-page`，preload 侧 `HippoBrowserApi` 对应新增
+    `saveMenu(payload: { right: number })` / `savePage(target: string)`；`menu-exec` 同步 `closeSaveMenu()` 与
+    工具菜单互斥，主窗口 `closed` 时置空 `saveMenuWin` 防悬垂。
+
+### 修复与优化
+- **收藏入口从聊天面板迁出**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`，净 −133 行）：
+  删除 `SaveMenu` 组件、`SaveTarget` 类型、`BookmarkPlus` 图标、`onSavePage` / `savingPage` props 与
+  `savePageTo` 回调；三去向文案与请求体原样保留，只是执行位置改到主进程（见上）。工具栏 props 回归精简。
+- **便签不再「停手 8 秒」自动结算**（改 `src/components/canvas/StickyTodoDock.tsx`）：删掉 `settleTimerRef` /
+  `clearSettleTimer()` 及 `debounceNote` 里的 8 秒兜底定时器 —— 结算时机收敛为「离开这一行（失焦）」与
+  「关闭便签卡」两处，不再有「编辑到一半被自动入日历」。同时修两类刷新覆盖：新增 `selfRefreshAtRef` +
+  `broadcastRefresh()`，本组件自身广播后在 **1200ms** 内跳过 `sticky-notes-changed` 的整表重载（避免覆盖
+  正在编辑的行、丢焦点）；`calendar-events-changed` 改为 `reload({ anchorsOnly: true })`，只按 `pageId`
+  合入服务端行级锚点（`lineEventIds` / `lineCalendared`），不再用服务端内容整表替换本地 `pages`
+  （会抹掉未落盘的空行与字符），别处新建的便签仍会并入。
+- **项目看板筛选条重构**（改 `src/components/canvas/ProjectBoardView.tsx`）：分类与标签拆成两组 ——
+  分类保留平铺胶囊并新增小标题 `Category`（`Default tag (category)` 提示与 `名称 数量` 文本不变），
+  自定义标签收进 `<select>` 下拉（小标题 `Tags`，首项 `All tags`，选项文本改为 `名称 (数量)` 带计数），
+  解决标签多时横向堆满的问题。筛选状态 `catFilter` / `tagFilter`、`Clear` 与聚合联动逻辑均未变；
+  容器间距由单一 `gap-1` 改为 `gap-x-3 gap-y-2`。
+
+
+***
+
+
+## v0.7.623 (2026-09-24)
+
+### 新增
+- **网页链接一键入料 materials**（新增 `src/lib/materials/link-import.ts`；改 `src/app/api/materials/route.ts`、
+  `src/components/canvas/Sidebar.tsx`）：
+  - 新增 `add_link` action：`url` 为空回 400 `url is required`，抓取失败回 502，落盘后异步建索引。
+  - 抓取走两级：`fetchDirect` 直连（Chrome UA、`AbortSignal.timeout(15000)`、turndown 剥 script/style/svg/nav/footer、
+    优先 `article`/`main`）→ 失败、正文不足 `MIN_DIRECT_CHARS = 400` 字或非 HTML（如 PDF 二进制）再回落
+    `fetchViaHippo`（后台开标签 `activate:false` → `browser_wait_network_idle` → `browser_read_article`，
+    仍不足则 `browser_extract_text`，`kind === 'pdf'` 再走 `browser_read_pdf`，`finally` 按 id 关标签）。
+  - 上限 `MAX_CHARS = 60000`、文件名主干 `MAX_STEM = 80`；仅 http(s)（缺协议自动补 `https://`）；
+    落成 `.md`，正文头写 `# 标题` + `> Source: …` + `> Retrieved: YYYY-MM-DD`；同名追加 `" (1)"`；
+    `folder` 剥 `..` 并拒绝越界。**不做内容去重**，只按文件名冲突去重。
+  - 侧边栏材料菜单新增 `Add link`（含 `Fetching…` / `Cancel`，成功 Toast `Imported: "…"` 或
+    `Imported via Hippo Browser: "…"`，失败 `Failed to import the link`）。
+- **Hippo 页面一键收藏到项目或 Bob Notes**（改 `src/components/hippo-browser/BrowserChatPanel.tsx`、
+  `src/app/api/materials/route.ts`）：工具栏新增书签按钮（`BookmarkPlus`）与 `SaveMenu`
+  （`SaveTarget = 'project' | 'notes' | 'notes-compiled'`），菜单项为 `Current project` / `Bob Notes` /
+  `Bob Notes (compile now)`。走新增 `save_page` action：存项目即 `saveCurrentHippoPage()`；
+  存 Notes 走 `readCurrentHippoPage()` + `callNotes('add_raw', …)`（单条按 `RAW_NOTES_MAX_CHARS = 20000` 截断并追加
+  `> …(truncated: …)`），选 `compile` 时后台 `callNotes('ingest', …)` —— 不阻塞返回、失败仅 `console.warn`。
+  Toast：`Saved to materials: …` / `Clipped to Bob Notes (not compiled): …` /
+  `Clipped to Bob Notes, compiling in background: …`。
+- **Bob Notes 收件箱取回链接 + homework 提升为 materials**（改 `src/app/api/materials/route.ts`、
+  `src/components/canvas/Sidebar.tsx`）：
+  - `open_in_hippo` action：正则校验 http(s)（否则 400 `A http(s) URL is required`），
+    `browser_open_tab{activate:true}` 在 Hippo 打开，失败回 502 `Hippo Browser is not available` 并带 `hint`。
+    侧边栏 `Open from Bob Notes` 弹层拉 `POST /api/notebook {action:'raw_list', status:'all'}`，
+    支持按标题/来源/预览前端过滤（`Search the inbox…` / `No match.` / `The Bob Notes inbox is empty.`）；
+    无来源链接的条目显式标注 `no source link` 并禁用打开。
+  - `promote` action：把 `homework/` 产出提升为材料（`from` 必填 400、路径越界 403 `Invalid path`、
+    文件不存在 404 `Not found`；同名追加 `" (1)"`）。`copy === true` 用 `fs.cp` 保留原件，否则 `fs.rename`
+    移出工作区；移动时同步清 `removeHomeworkOwnershipPaths` 与 `removeFileTags(..., 'homework', …)`。
+    行菜单新增 `Move to materials` / `Copy to materials`，并新增 `indexPromotedMaterials()`
+    绕过「每会话只扫一次」的索引守卫，对提升后的目录递归补索引。两个弹层均以 `linkBusy` / `notesOpeningId`
+    防重复提交，Esc 与点击遮罩可关闭（忙碌时禁止）。
+- **项目账本研究取向（`concept` / `claim` / `evidence` / `timeline` / `method`）**（改 `src/lib/mcp/ledger.ts`、
+  `src/app/api/chat/tools/ledger.ts`、`src/lib/mcp/ledger-compile.ts`、`src/lib/agents/profiles.ts`）：
+  - 新增 5 个声明式条目类型 `LEDGER_RESEARCH_TYPES`，写入 SCHEMA 种子段，并由 `migrateResearchTypeLines`
+    在 `ensureLedger` 时按行补齐存量库（只增不删）。
+  - 新增 `ClaimStatus`（`open` / `supported` / `refuted` / `unclear`，缺省 `open`）与
+    `EvidencePoints`（`supports` / `refutes`）；条目落盘键为 `status` / `claim` / `points`，
+    `recordLedgerEntry` 按类型校验（`status` 仅 `claim`、`claim` / `points` 仅 `evidence`，`claim` 须 `w-…`），
+    非法即忽略并回 warning；原单条 `warning` 改为 `warnings[]` 并以 `；` 拼接。
+  - `ledger_lint` 新增三类检查：孤儿证据卡、论断仅单侧证据、论断停在 `open` 超
+    `CLAIM_OPEN_STALE_DAYS = 30` 天；索引与正文行补 `· {claimStatus}` 状态展示。
+- **账本宪章写入工具 `ledger_schema`**（改 `src/app/api/chat/tools/ledger.ts`、`src/app/api/chat/tools/index.ts`、
+  `src/app/api/chat/tools/registry.ts`、`src/lib/mcp/ledger.ts`）：
+  档案员（场景 `ledger-keeper`）新增 `ledger_schema`（`action`：`read` / `set_parties` / `add_types` / `append`）。
+  底层配套三个 SCHEMA 原子写 API（`writeSchemaAtomic`）：`writeLedgerParties`（整表替换当事人分区，
+  `side` 仅接受 `ours` / `theirs` / `neutral`，传 `[]` 即清空并关闭分侧检查）、`addLedgerTypes`、
+  `appendLedgerClause`（追加「补充条款」）。后台编译禁令同步新增 `claim`（不得写 `issue` / `analysis` / `claim`）；
+  档案员提示词补入新类型与「改宪章须用户明确要求/确认」约束。
+
+### 修复与优化
+- **Hippo 下载面板改为独立浮层子窗口**（改 `electron/hippo-browser.ts` / `electron/preload.ts`）：
+  此前下载列表挤在网页视图内，展开还要抬高工具栏让位。现改为无边框、不可缩放、`parent` 主窗口、
+  `setAlwaysOnTop(true, 'floating')` 的独立面板窗（`openDownloadsPanel` / `closeDownloadsPanel` /
+  `toggleDownloadsPanel`，新增 IPC `hippo-browser:downloads-panel` / `-close` / `-size`，preload 对应
+  `downloadsPanel()` / `downloadsPanelSize()` / `downloadsPanelClose()`）。面板按内容自然高度自适应
+  （`DL_PANEL_WIDTH = 340`、`DL_LIST_MAX_H = 320`，`reportSize()` 用 `lastNeedH` 去重上报避免高度回环）。
+  打开前先 `closeToolMenu()` 与工具菜单浮层互斥、失焦即收起；`toggle` 用 `dlBlurClosedAt` 的 400ms 窗口
+  防止「点按钮先失焦」导致的弹回。工具栏按钮收敛为角标 `renderDlBadge()`，旧的 `.dlPanel` 结构与
+  `renderDownloads()` / `setDlPanel()` 及「面板展开抬高 chrome」的让位逻辑一并删除。
+- **XHS 卡片分页逻辑抽为独立模块**（新增 `src/components/canvas/xhsPagination.ts` 与
+  `src/components/canvas/__tests__/xhs-pagination.test.ts`；改 `src/components/canvas/XhsCard.tsx`）：
+  `mdToLines` / `extractCoverItems` / `blockText` / `fitPrefix` / `parseMdTable` / `isPipeRow` /
+  `splitBodyToBlocks` / `paginateBlocks` 与类型 `XhsBodyBlock` / `XhsPageData` 抽离，测量回调由调用方注入
+  （生产用离屏 DOM 测量），纯函数部分首次可单测（6 组用例锁定契约）。**顺带修复**：`mdToLines` 中图片规则
+  提前到链接规则之前 —— 否则 `![alt](url)` 的 `[alt](url)` 部分先被链接规则替换，图片会残留一个 `!`。
+- **ChatNodeKernel 模块化拆分**（新增 `src/components/canvas/chatNodeKernelUtils.ts` /
+  `src/components/canvas/chatNodeKernelParts.tsx`；改 `src/components/canvas/ChatNodeKernel.tsx`）：
+  内核由 391KB 降到 347KB。纯函数与常量（`parseThink`、`isErrorReply`、`isNetworkLevelError`、
+  `fetchWithServerRecovery`、`buildTurnReferences`、`stripReferenceMarkers`、`deriveInstantTitle`、
+  `formatDuration`、`SYSTEM_PROMPT`、`THINKING_LEVEL_*` 等）移入 `chatNodeKernelUtils`；无状态子组件
+  （`MessagesErrorBoundary`、`AttachmentChips`、`ReferenceChips`、`StepTypeIcon`、`TraceProcessSummary`、
+  `TaskStepsPanel`）移入 `chatNodeKernelParts`。**零行为变更**，纯为后续维护与复用。
+- **清理 PDF 死代码**（删 `src/lib/pdf/` 下 14 个文件；改 `src/lib/pdf/shared/types.ts`）：移除 `index.ts`、
+  `plugin-config.ts`、`crop_regions.swift`、`ocr_vision.swift`、`pdf_to_images.py`、`shared/money.ts`、
+  `core/{key-fields,ledger,segment-scheduler,structural-postprocess}.ts` 以及整个 `statement/`
+  （`cell-verification` / `control-rows` / `index` / `semantics`）。`StatementRowKind` 由从
+  `../statement/control-rows` 导入改为在 `shared/types.ts` 就地内联（8 个值不变）。
+
+
+***
+
+
 ## v0.7.622 (2026-09-23)
 
 ### 新增

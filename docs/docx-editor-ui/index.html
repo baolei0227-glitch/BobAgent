@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>docx 编辑器 · 界面优化对比（现状 → 建议）</title>
+<style>
+  /* ============ BobWork Purple 主题 Token（取自 src/app/globals.css） ============ */
+  :root{
+    --paper:#f7f7f8; --paper-soft:#efeff2; --paper-hover:#e8e8ec;
+    --ink:#171717; --ink-muted:#52525b; --ink-faint:#71717a;
+    --line:rgba(23,23,23,.12); --line-soft:rgba(23,23,23,.08);
+    --brand:#4b3fe3; --brand-strong:#3c2eca; --brand-soft:#f2f7ff; --brand-soft-strong:#e5eaff;
+    --canvas-bg:#e8e8e8;
+    --success:#1dc981; --warn:#efaa17; --danger:#e8463a;
+    /* 建议形态新增的两级表面 */
+    --chrome:#ffffff; --chrome-hover:#f2f2f5;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 24px 64px;background:#dcdce1;
+       font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro SC","PingFang SC","Microsoft YaHei",sans-serif;
+       color:var(--ink);-webkit-font-smoothing:antialiased}
+  .page{max-width:1320px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 6px}
+  .sub{font-size:13px;color:var(--ink-muted);margin:0 0 28px}
+  .cap{display:flex;align-items:baseline;gap:10px;margin:26px 0 10px}
+  .cap b{font-size:15px}
+  .cap span{font-size:12px;color:var(--ink-muted)}
+  .tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px}
+  .tag.bad{background:rgba(232,70,58,.12);color:#b42318}
+  .tag.good{background:var(--brand-soft-strong);color:var(--brand-strong)}
+  .win{width:1280px;height:720px;border-radius:12px;overflow:hidden;
+       box-shadow:0 10px 40px rgba(0,0,0,.28),0 0 0 1px rgba(0,0,0,.10);display:flex;flex-direction:column}
+
+  /* ================================================================
+     ① 现状（严格按 DocxTiptapEditor.tsx 的内联样式复刻）
+     ================================================================ */
+  .now{background:var(--paper);color:var(--ink)}
+  .now .topbar{display:flex;align-items:center;gap:8px;padding:8px 12px;
+               border-bottom:1px solid var(--line);background:var(--paper)}
+  .now .fname{font-size:13px;font-weight:600;opacity:.85;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .now .dirty{font-size:12px;opacity:.9;margin-right:12px}
+  .now .sp{flex:1}
+  .now .zoom{display:flex;align-items:center;gap:4px;margin-right:12px}
+  .now .iconbtn{font-size:13px;width:26px;height:26px;border-radius:7px;border:1px solid transparent;
+                background:transparent;color:var(--ink-faint);cursor:pointer}
+  .now .zoompct{font-size:12px;min-width:44px;text-align:center}
+  .now .btn{font-size:13px;padding:5px 12px;border-radius:8px;border:1px solid var(--line);
+            background:var(--paper-hover);color:var(--ink);cursor:pointer}
+  .now .btn.primary{background:var(--brand);color:#fff;border-color:transparent}
+  .now .ribbon{border-bottom:1px solid var(--line);background:var(--paper)}
+  .now .tabs{display:flex;gap:2px;padding:6px 10px 0}
+  .now .tab{font-size:13px;padding:6px 14px;border-radius:8px;border:1px solid transparent;
+            background:transparent;color:var(--ink);cursor:pointer}
+  .now .tab.on{background:var(--paper-hover);color:var(--brand);font-weight:600}
+  .now .groups{display:flex;align-items:center;gap:4px;padding:4px 12px 8px;flex-wrap:wrap}
+  .now .tb{min-width:30px;height:28px;font-size:13px;border-radius:7px;border:1px solid transparent;
+           background:transparent;color:var(--ink);cursor:pointer;padding:0 5px}
+  .now .tb.on{background:var(--brand-soft-strong);color:var(--brand)}
+  .now .sep{width:1px;height:18px;background:var(--line);margin:0 4px}
+  .now select{font-size:13px;height:28px;padding:0 4px;border-radius:7px;border:1px solid var(--line);
+              background:var(--paper);color:var(--ink)}
+  .now .lbl{font-size:11px;opacity:.7;white-space:nowrap;user-select:none}
+  .now .num{width:46px;height:26px;font-size:12px;padding:0 4px;border-radius:7px;
+            border:1px solid var(--line);background:var(--paper);color:var(--ink)}
+  .now .swatch{width:26px;height:26px;border:1px solid var(--line);border-radius:7px;background:#c0341d;cursor:pointer}
+  .now .hruler{height:26px;border-bottom:1px solid var(--line);
+    background:repeating-linear-gradient(90deg,var(--line) 0,var(--line) 1px,transparent 1px,transparent 40px),var(--paper)}
+  .now .canvas{flex:1;overflow:hidden;background:#e9e9ec;padding:24px 0;display:flex;justify-content:center}
+  .now .paperwrap{display:flex;align-items:stretch}
+  .now .vruler{width:44px;background:var(--paper);border-right:1px solid var(--line);
+    background-image:repeating-linear-gradient(0deg,var(--line) 0,var(--line) 1px,transparent 1px,transparent 20px)}
+  .now .paper{width:794px;min-height:1123px;max-height:100%;background:#fff;padding:96px;
+              box-shadow:0 2px 12px rgba(0,0,0,.18)}
+  .now .status{display:flex;align-items:center;gap:10px;padding:4px 14px;font-size:12px;
+               border-top:1px solid var(--line);background:var(--paper)}
+  .now .sbtn{font-size:12px;padding:3px 10px;border-radius:7px;border:1px solid var(--line);
+             background:var(--paper-hover);color:var(--ink);cursor:pointer}
+  .now .sinput{width:48px;font-size:12px;padding:2px 6px;border-radius:7px;border:1px solid var(--line);
+               text-align:center;background:var(--paper);color:var(--ink)}
+
+  /* ================================================================
+     ② 建议形态
+     ================================================================ */
+  .next{background:var(--chrome);color:var(--ink)}
+  /* --- 标题栏 44px --- */
+  .next .titlebar{display:flex;align-items:center;gap:10px;height:44px;padding:0 10px 0 14px;
+                  background:var(--chrome);border-bottom:1px solid var(--line-soft)}
+  .next .docicon{width:20px;height:20px;border-radius:5px;background:var(--brand-soft-strong);
+                 color:var(--brand-strong);display:grid;place-items:center;font-size:10px;font-weight:700;flex:0 0 auto}
+  .next .fname{font-size:13.5px;font-weight:600;letter-spacing:.1px}
+  .next .chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;
+              padding:2px 8px 2px 6px;border-radius:999px;background:rgba(239,170,23,.13);color:#8a5a00}
+  .next .chip.ok{background:rgba(29,201,129,.14);color:#0f7a4d}
+  .next .dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+  .next .sp{flex:1}
+  .next .ibtn{width:30px;height:30px;border-radius:8px;border:0;background:transparent;color:var(--ink-muted);
+              display:grid;place-items:center;cursor:pointer}
+  .next .ibtn:hover{background:var(--chrome-hover);color:var(--ink)}
+  .next .savebtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;
+                 border:0;background:var(--brand);color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;
+                 box-shadow:0 1px 2px rgba(75,63,227,.35)}
+  .next .savebtn:hover{background:var(--brand-strong)}
+  .next .kbd{font-size:10px;opacity:.7;font-weight:500}
+  /* --- Ribbon 100px --- */
+  .next .ribbon{background:var(--chrome);border-bottom:1px solid var(--line)}
+  .next .tabs{display:flex;align-items:stretch;gap:2px;height:34px;padding:0 12px;border-bottom:1px solid var(--line-soft)}
+  .next .tab{position:relative;padding:0 12px;border:0;background:transparent;color:var(--ink-muted);
+             font-size:12.5px;cursor:pointer}
+  .next .tab:hover{color:var(--ink)}
+  .next .tab.on{color:var(--brand);font-weight:600}
+  .next .tab.on::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;
+                       background:var(--brand);border-radius:2px 2px 0 0}
+  .next .groups{display:flex;align-items:stretch;height:66px;padding:6px 12px 4px;gap:0}
+  .next .grp{display:flex;flex-direction:column;justify-content:space-between;padding:0 12px;
+             border-right:1px solid var(--line-soft)}
+  .next .grp:last-child{border-right:0}
+  .next .grow{display:flex;align-items:center;gap:3px}
+  .next .glabel{font-size:10px;color:var(--ink-faint);text-align:center;letter-spacing:.3px}
+  .next .tb{width:30px;height:28px;border-radius:7px;border:0;background:transparent;color:var(--ink);
+            display:grid;place-items:center;cursor:pointer;font-size:13px}
+  .next .tb:hover{background:var(--chrome-hover)}
+  .next .tb.on{background:var(--brand-soft-strong);color:var(--brand)}
+  .next .tb.wide{width:auto;padding:0 9px;gap:6px;display:inline-flex;align-items:center;font-size:12px;color:var(--ink-muted)}
+  .next .tb.wide:hover{color:var(--ink)}
+  .next .caret{font-size:9px;opacity:.55}
+  .next select{font-size:12.5px;height:28px;padding:0 6px;border-radius:7px;border:1px solid var(--line);
+               background:#fff;color:var(--ink);min-width:56px}
+  .next .fontsel{min-width:104px}
+  .next .sizesel{min-width:58px}
+  .next .colorbtn{width:30px;height:28px;border-radius:7px;border:0;background:transparent;
+                  display:grid;place-items:center;cursor:pointer}
+  .next .colorbtn:hover{background:var(--chrome-hover)}
+  .next .colorbar{display:block;width:18px;height:3px;border-radius:2px;background:#c0341d;margin-top:-2px}
+  .next .stylechip{height:28px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;border-radius:7px;
+                   border:1px solid var(--line);background:#fff;color:var(--ink-muted);font-size:12px;cursor:pointer}
+  .next .stylechip:hover{background:var(--chrome-hover);color:var(--ink)}
+  .next .stylechip.on{border-color:var(--brand);color:var(--brand);background:var(--brand-soft)}
+  /* --- 标尺（与页面左边缘对齐 + 刻度数字 + 页边距标记） --- */
+  .next .rulerwrap{position:relative;height:22px;background:var(--chrome);border-bottom:1px solid var(--line-soft);
+                   overflow:hidden}
+  .next .ruler{position:absolute;left:50%;transform:translateX(-50%);top:0;height:22px;width:794px;
+               background:
+                 repeating-linear-gradient(90deg,var(--line) 0,var(--line) 1px,transparent 1px,transparent 20px),
+                 linear-gradient(180deg,transparent 0,transparent 12px,var(--line-soft) 12px,var(--line-soft) 13px,transparent 13px);
+               color:var(--ink-faint);font-size:9px}
+  .next .ruler .mk{position:absolute;top:0;height:8px;width:1px;background:var(--ink-faint)}
+  .next .ruler .mk span{position:absolute;left:3px;top:-1px;font-size:9px}
+  .next .ruler .mg{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--ink-faint);opacity:.6}
+  .next .ruler .handle{position:absolute;top:12px;width:9px;height:9px;background:#fff;border:1px solid var(--brand);
+                       transform:translateX(-50%) rotate(45deg);border-radius:2px}
+  /* --- 画布 --- */
+  .next .body{flex:1;display:flex;min-height:0;background:var(--canvas-bg)}
+  .next .main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--canvas-bg)}
+  .next .canvas{flex:1;overflow:hidden;padding:28px 0;display:flex;justify-content:center}
+  .next .paper{width:794px;height:100%;background:#fff;padding:96px;
+               box-shadow:0 1px 2px rgba(0,0,0,.10),0 8px 24px rgba(0,0,0,.13);
+               border-radius:2px;overflow:hidden}
+  /* --- 侧栏（推挤式，不再遮挡正文） --- */
+  .next .side{width:300px;flex:0 0 auto;background:var(--chrome);border-left:1px solid var(--line);
+              display:flex;flex-direction:column}
+  .next .sidehead{display:flex;align-items:center;gap:0;height:40px;padding:0 8px 0 12px;
+                  border-bottom:1px solid var(--line-soft)}
+  .next .sidehead .t{font-size:13px;font-weight:600}
+  .next .sidehead .cnt{font-size:11px;color:var(--ink-faint);margin-left:6px}
+  .next .sidetabs{display:flex;gap:2px;padding:8px 12px 0}
+  .next .sidetab{font-size:11.5px;padding:4px 9px;border-radius:6px;border:0;background:transparent;
+                 color:var(--ink-muted);cursor:pointer}
+  .next .sidetab.on{background:var(--chrome-hover);color:var(--ink);font-weight:600}
+  .next .revlist{flex:1;overflow:auto;padding:10px}
+  .next .rev{border:1px solid var(--line-soft);border-radius:9px;padding:9px 10px;margin-bottom:8px;background:#fff}
+  .next .rev:hover{border-color:var(--line);box-shadow:0 1px 3px rgba(0,0,0,.05)}
+  .next .revhead{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+  .next .kind{font-size:10px;font-weight:600;padding:1px 6px;border-radius:5px}
+  .next .kind.ins{background:rgba(29,201,129,.14);color:#0f7a4d}
+  .next .kind.del{background:rgba(232,70,58,.12);color:#b42318}
+  .next .who{font-size:10.5px;color:var(--ink-faint)}
+  .next .revtext{font-size:12px;line-height:1.55;color:var(--ink)}
+  .next .revacts{display:flex;gap:5px;margin-top:7px}
+  .next .mini{font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--line);background:#fff;
+              color:var(--ink-muted);cursor:pointer}
+  .next .mini:hover{background:var(--chrome-hover);color:var(--ink)}
+  .next .minip{background:var(--brand);border-color:transparent;color:#fff;font-weight:600}
+  .next .sidefoot{padding:10px 12px;border-top:1px solid var(--line-soft);display:flex;gap:6px;flex-wrap:wrap}
+  /* --- 状态栏 26px --- */
+  .next .status{display:flex;align-items:center;gap:14px;height:26px;padding:0 12px;font-size:11.5px;
+                color:var(--ink-muted);background:var(--chrome);border-top:1px solid var(--line-soft)}
+  .next .zoomctl{display:flex;align-items:center;gap:6px;margin-left:auto}
+  .next .slider{width:88px;height:3px;border-radius:2px;background:var(--line);position:relative}
+  .next .slider i{position:absolute;left:0;top:0;bottom:0;width:62%;background:var(--brand);border-radius:2px}
+  .next .slider b{position:absolute;left:62%;top:50%;width:10px;height:10px;border-radius:50%;background:#fff;
+                  border:1px solid var(--brand);transform:translate(-50%,-50%);box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .next .ztxt{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+  .next .viewtog{display:flex;gap:2px;background:var(--chrome-hover);border-radius:7px;padding:2px}
+  .next .vbtn{width:24px;height:18px;border:0;border-radius:5px;background:transparent;color:var(--ink-muted);
+              display:grid;place-items:center;cursor:pointer}
+  .next .vbtn.on{background:#fff;color:var(--brand);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+
+  /* 文档正文（两侧共用） */
+  .doc h1{font-size:24pt;font-weight:700;margin:0 0 14px;letter-spacing:.5px}
+  .doc h2{font-size:15pt;font-weight:600;margin:22px 0 8px}
+  .doc p{font-size:12pt;line-height:1.75;margin:8px 0;text-align:justify;color:#1a1a1a}
+  .doc .li{display:flex;gap:8px;font-size:12pt;line-height:1.75;margin:4px 0}
+  .doc .li .m{min-width:16px;text-align:right}
+  .doc .ins{color:#0a7d28;background:rgba(10,125,40,.12);border-bottom:1px solid rgba(10,125,40,.55)}
+  .doc .del{color:#c0341d;background:rgba(192,52,29,.12);text-decoration:line-through}
+  .doc table{border-collapse:collapse;width:100%;margin:12px 0;font-size:11pt}
+  .doc td,.doc th{border:1px solid #b4b4b8;padding:5px 7px;text-align:left}
+  .doc th{background:#f4f4f6;font-weight:600}
+
+  .notes{max-width:1320px;margin:36px auto 0;background:#fff;border-radius:12px;padding:20px 24px;
+         box-shadow:0 2px 12px rgba(0,0,0,.10)}
+  .notes h2{font-size:14px;margin:0 0 10px}
+  .notes ul{margin:0;padding-left:20px}
+  .notes li{font-size:12.5px;line-height:1.9;color:var(--ink-muted)}
+  .notes code{background:var(--paper-soft);padding:1px 5px;border-radius:4px;font-size:11.5px;color:#b42318}
+  .notes .k{color:var(--ink);font-weight:600}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <g id="i-align-left"><path d="M4 6h16M4 11h9M4 16h16M4 21h9"/></g>
+  <g id="i-align-center"><path d="M4 6h16M7 11h10M4 16h16M7 21h10"/></g>
+  <g id="i-align-right"><path d="M4 6h16M11 11h9M4 16h16M11 21h9"/></g>
+  <g id="i-align-justify"><path d="M4 6h16M4 11h16M4 16h16M4 21h16"/></g>
+  <g id="i-bullet"><circle cx="5" cy="7" r="1.6" fill="currentColor" stroke="none"/><circle cx="5" cy="13" r="1.6" fill="currentColor" stroke="none"/><circle cx="5" cy="19" r="1.6" fill="currentColor" stroke="none"/><path d="M10 7h10M10 13h10M10 19h10"/></g>
+  <g id="i-ordered"><path d="M10 7h10M10 13h10M10 19h10"/><text x="2" y="9.5" font-size="8" fill="currentColor" stroke="none" font-family="sans-serif">1</text><text x="2" y="15.5" font-size="8" fill="currentColor" stroke="none" font-family="sans-serif">2</text><text x="2" y="21.5" font-size="8" fill="currentColor" stroke="none" font-family="sans-serif">3</text></g>
+  <g id="i-indent-inc"><path d="M4 6h16M10 11h10M10 16h10M4 21h16"/><path d="M4 10.5 8 13.5 4 16.5z" fill="currentColor" stroke="none"/></g>
+  <g id="i-indent-dec"><path d="M4 6h16M10 11h10M10 16h10M4 21h16"/><path d="M8 10.5 4 13.5 8 16.5z" fill="currentColor" stroke="none"/></g>
+  <g id="i-save"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></g>
+  <g id="i-search"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5 21 21"/></g>
+  <g id="i-reload"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></g>
+  <g id="i-external"><path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></g>
+  <g id="i-filetext"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></g>
+  <g id="i-more"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></g>
+  <g id="i-undo"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/></g>
+  <g id="i-redo"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h4"/></g>
+  <g id="i-table"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 10v10M15 10v10"/></g>
+  <g id="i-image"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m21 16-5-5-9 9"/></g>
+  <g id="i-eye"><path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></g>
+  <g id="i-message"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></g>
+  <g id="i-sidebar"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></g>
+  <g id="i-pagenarrow"><rect x="6" y="4" width="12" height="16" rx="1.5"/><path d="M9 8h6M9 12h6M9 16h4"/></g>
+  <g id="i-paper"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></g>
+  <g id="i-margins"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8v8M17 8v8M7 12h10" stroke-dasharray="2 2"/></g>
+  <g id="i-columns"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></g>
+  <g id="i-check"><path d="m5 13 4 4L19 7"/></g>
+  <g id="i-x"><path d="M6 6l12 12M18 6 6 18"/></g>
+  <g id="i-plus"><path d="M12 5v14M5 12h14"/></g>
+  <g id="i-minus"><path d="M5 12h14"/></g>
+  <g id="i-caret"><path d="m6 9 6 6 6-6"/></g>
+</defs></svg>
+
+<div class="page">
+  <h1>docx 编辑器 · 界面优化对比</h1>
+  <p class="sub">
+    左侧/上方为 <code style="font-size:12px">src/components/canvas/docx-editor/DocxTiptapEditor.tsx</code> 的内联样式 1:1 复刻；
+    下方为建议形态（同一套 Purple Token，无新增依赖）。窗口按 1280 × 720 渲染。
+  </p>
+
+  <!-- ==================== ① 现状 ==================== -->
+  <div class="cap"><span class="tag bad">现状</span><b>① 平铺文字按钮 + 同色层叠</b>
+    <span>顶栏 7 个同权重按钮、Ribbon 35 个纯文字控件自动换行、三层 chrome 同色（#f7f7f8）</span></div>
+
+  <div class="win now">
+    <div class="topbar">
+      <span class="fname">链路B真实docx编辑优化方案_20260928.docx</span>
+      <span class="dirty">未保存</span>
+      <span class="sp"></span>
+      <span class="zoom"><button class="iconbtn">－</button><span class="zoompct">100%</span><button class="iconbtn">＋</button></span>
+      <button class="btn">外部打开</button>
+      <button class="btn">转MD</button>
+      <button class="btn">查找</button>
+      <button class="btn">修订面板</button>
+      <button class="btn">重载</button>
+      <button class="btn primary">保存</button>
+    </div>
+
+    <div class="ribbon">
+      <div class="tabs">
+        <button class="tab on">开始</button><button class="tab">插入</button><button class="tab">布局</button>
+        <button class="tab">引用</button><button class="tab">审阅</button><button class="tab">视图</button>
+      </div>
+      <div class="groups">
+        <button class="tb">复制</button><button class="tb">剪切</button><button class="tb">粘贴</button>
+        <span class="sep"></span>
+        <button class="tb" style="font-weight:700">B</button>
+        <button class="tb on" style="font-style:italic">I</button>
+        <button class="tb" style="text-decoration:underline">U</button>
+        <button class="tb" style="text-decoration:line-through">S</button>
+        <span class="sep"></span>
+        <select><option>宋体</option></select><select><option>12</option></select><span class="swatch"></span>
+        <select><option>正文</option></select>
+        <span class="sep"></span>
+        <button class="tb">H1</button><button class="tb">H2</button><button class="tb">H3</button><button class="tb on">¶</button>
+        <span class="sep"></span>
+        <button class="tb">左</button><button class="tb">中</button><button class="tb">右</button><button class="tb">两端</button>
+        <span class="sep"></span>
+        <button class="tb">•</button><button class="tb">1.</button><button class="tb">⇥</button><button class="tb">⇤</button>
+        <span class="sep"></span>
+        <span class="lbl">左缩进</span><input class="num" value="0">
+        <span class="lbl">首行</span><input class="num" value="0">
+        <span class="lbl">段前</span><input class="num" value="0">
+        <span class="lbl">段后</span><input class="num" value="0">
+        <span class="lbl">行距</span><select><option>默认</option></select>
+        <span class="sep"></span>
+        <button class="tb">x²</button><button class="tb">x₂</button><button class="tb">清除</button><button class="tb">分页符</button>
+      </div>
+    </div>
+
+    <div class="hruler"></div>
+
+    <div class="canvas">
+      <div class="paperwrap">
+        <div class="vruler"></div>
+        <div class="paper doc">
+          <h1>链路 B 真实 docx 编辑优化方案</h1>
+          <p>本文档用于验证 docx 真编辑链路在保留 <span class="ins">OOXML 字节保真</span>前提下的可用性，
+             并评估 <span class="del">旧的只读预览通道</span>是否应当保留。</p>
+          <h2>一、背景</h2>
+          <p>画布节点产出的成果需要能回到 Word 生态继续加工，因此编辑器必须支持写回原稿、
+             修订标记与接受/拒绝流程。</p>
+          <div class="li"><span class="m">•</span><span>写回原稿需 mtime 哨兵防冲突</span></div>
+          <div class="li"><span class="m">•</span><span>修订稿落到 homework 兜底</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="status">
+      <span>第 1 / 1 页</span><span style="opacity:.5">·</span><span>字数 1284</span>
+      <span class="sp"></span>
+      <button class="sbtn">上一页</button><input class="sinput" value="1"><button class="sbtn">下一页</button>
+    </div>
+  </div>
+
+  <!-- ==================== ② 建议 ==================== -->
+  <div class="cap"><span class="tag good">建议</span><b>② 图标化 Ribbon + 三级表面层次 + 推挤式侧栏</b>
+    <span>44px 标题栏 / 100px 固定 Ribbon（图标 + 分组标签）/ 26px 状态栏；白色 chrome 浮在灰色画布之上</span></div>
+
+  <div class="win next">
+    <!-- 标题栏 -->
+    <div class="titlebar">
+      <span class="docicon">W</span>
+      <span class="fname">链路B真实docx编辑优化方案_20260928.docx</span>
+      <span class="chip"><i class="dot"></i>未保存</span>
+      <span class="sp"></span>
+      <button class="ibtn" title="撤销"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-undo"/></svg></button>
+      <button class="ibtn" title="重做"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-redo"/></svg></button>
+      <button class="ibtn" title="查找 / 替换  ⌘F"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-search"/></svg></button>
+      <button class="ibtn" title="外部打开"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-external"/></svg></button>
+      <button class="ibtn" title="转为 Markdown"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-filetext"/></svg></button>
+      <button class="ibtn" title="重载"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-reload"/></svg></button>
+      <button class="ibtn" title="更多"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-more"/></svg></button>
+      <button class="savebtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-save"/></svg>保存<span class="kbd">⌘S</span></button>
+    </div>
+
+    <!-- Ribbon -->
+    <div class="ribbon">
+      <div class="tabs">
+        <button class="tab on">开始</button><button class="tab">插入</button><button class="tab">布局</button>
+        <button class="tab">引用</button><button class="tab">审阅</button><button class="tab">视图</button>
+      </div>
+      <div class="groups">
+        <div class="grp">
+          <div class="grow">
+            <button class="tb" title="粘贴"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></button>
+            <button class="tb" title="剪切"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></svg></button>
+            <button class="tb" title="复制"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          </div>
+          <div class="glabel">剪贴板</div>
+        </div>
+        <div class="grp">
+          <div class="grow">
+            <select class="fontsel"><option>宋体</option></select>
+            <select class="sizesel"><option>12</option></select>
+            <button class="tb" style="font-weight:700" title="加粗">B</button>
+            <button class="tb on" style="font-style:italic" title="斜体">I</button>
+            <button class="tb" style="text-decoration:underline" title="下划线">U</button>
+            <button class="tb" style="text-decoration:line-through" title="删除线">S</button>
+            <button class="colorbtn" title="字体颜色"><span style="font-size:12px;font-weight:600;line-height:1">A</span><span class="colorbar"></span></button>
+            <button class="colorbtn" title="突出显示"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l-4 4v4h4l4-4M14 6l4 4-6.5 6.5-4-4z"/></svg><span class="colorbar" style="background:#efaa17"></span></button>
+          </div>
+          <div class="glabel">字体</div>
+        </div>
+        <div class="grp">
+          <div class="grow">
+            <button class="tb on" title="左对齐"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-align-left"/></svg></button>
+            <button class="tb" title="居中"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-align-center"/></svg></button>
+            <button class="tb" title="右对齐"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-align-right"/></svg></button>
+            <button class="tb" title="两端对齐"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-align-justify"/></svg></button>
+            <button class="tb" title="项目符号"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-bullet"/></svg></button>
+            <button class="tb" title="编号列表"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-ordered"/></svg></button>
+            <button class="tb" title="增加缩进"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-indent-inc"/></svg></button>
+            <button class="tb" title="减少缩进"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-indent-dec"/></svg></button>
+            <button class="tb wide" title="行距与段间距">行距<span class="caret">▾</span></button>
+          </div>
+          <div class="glabel">段落</div>
+        </div>
+        <div class="grp">
+          <div class="grow">
+            <button class="stylechip">正文</button>
+            <button class="stylechip on">标题 1</button>
+            <button class="stylechip">标题 2</button>
+            <button class="stylechip">标题 3</button>
+          </div>
+          <div class="glabel">样式</div>
+        </div>
+        <div class="grp">
+          <div class="grow">
+            <button class="tb wide" title="修订与批注">修订<span class="caret">▾</span></button>
+            <button class="tb" title="批注"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-message"/></svg></button>
+          </div>
+          <div class="glabel">审阅</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="body">
+      <div class="main">
+        <!-- 标尺：与白纸左右边缘严格对齐（同为 794px 居中），刻度按 96px/英寸 -->
+        <div class="rulerwrap">
+          <div class="ruler">
+            <span class="mg" style="left:0"></span><span class="mg" style="left:96px"></span>
+            <span class="mg" style="left:698px"></span><span class="mg" style="left:793px"></span>
+        <span class="mk" style="left:96px"><span>0</span></span>
+        <span class="mk" style="left:192px"><span>1</span></span>
+        <span class="mk" style="left:288px"><span>2</span></span>
+        <span class="mk" style="left:384px"><span>3</span></span>
+        <span class="mk" style="left:480px"><span>4</span></span>
+        <span class="mk" style="left:576px"><span>5</span></span>
+        <span class="mk" style="left:672px"><span>6</span></span>
+        <span class="handle" style="left:96px"></span>
+      </div>
+    </div>
+
+        <div class="canvas">
+          <div class="paper doc">
+          <h1>链路 B 真实 docx 编辑优化方案</h1>
+          <p>本文档用于验证 docx 真编辑链路在保留 <span class="ins">OOXML 字节保真</span>前提下的可用性，
+             并评估 <span class="del">旧的只读预览通道</span>是否应当保留。</p>
+          <h2>一、背景</h2>
+          <p>画布节点产出的成果需要能回到 Word 生态继续加工，因此编辑器必须支持写回原稿、
+             修订标记与接受/拒绝流程。</p>
+          <div class="li"><span class="m">•</span><span>写回原稿需 mtime 哨兵防冲突</span></div>
+          <div class="li"><span class="m">•</span><span>修订稿落到 homework 兜底</span></div>
+          <table>
+            <tr><th>能力</th><th>状态</th></tr>
+            <tr><td>写回原稿</td><td>已支持</td></tr>
+            <tr><td>修订接受 / 拒绝</td><td>已支持</td></tr>
+          </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 侧栏：推挤式，不再遮盖正文 -->
+      <div class="side">
+        <div class="sidehead">
+          <span class="t">修订</span><span class="cnt">3</span>
+          <span class="sp" style="flex:1"></span>
+          <button class="ibtn" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="sidetabs">
+          <button class="sidetab on">修订</button><button class="sidetab">批注</button>
+          <button class="sidetab">显示标记</button>
+        </div>
+        <div class="revlist">
+          <div class="rev">
+            <div class="revhead"><span class="kind ins">插入</span><span class="who">AI 整文档修订 · 14:20</span></div>
+            <div class="revtext">OOXML 字节保真</div>
+            <div class="revacts"><button class="mini minip">接受</button><button class="mini">拒绝</button></div>
+          </div>
+          <div class="rev">
+            <div class="revhead"><span class="kind del">删除</span><span class="who">AI 整文档修订 · 14:20</span></div>
+            <div class="revtext">旧的只读预览通道</div>
+            <div class="revacts"><button class="mini minip">接受</button><button class="mini">拒绝</button></div>
+          </div>
+          <div class="rev">
+            <div class="revhead"><span class="kind ins">插入</span><span class="who">审核报告 · 15:02</span></div>
+            <div class="revtext">并在写回前做一次会话级备份</div>
+            <div class="revacts"><button class="mini minip">接受</button><button class="mini">拒绝</button></div>
+          </div>
+        </div>
+        <div class="sidefoot">
+          <button class="mini">全部接受</button><button class="mini">全部拒绝</button>
+          <button class="mini minip">接受并写回原稿</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div class="status">
+      <span>第 1 / 1 页</span>
+      <span>字数 1,284</span>
+      <span>中文 1,090</span>
+      <span class="zoomctl">
+        <button class="ibtn" style="width:22px;height:22px" title="缩小"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-minus"/></svg></button>
+        <span class="slider"><i></i><b></b></span>
+        <button class="ibtn" style="width:22px;height:22px" title="放大"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-plus"/></svg></button>
+        <span class="ztxt">100%</span>
+      </span>
+      <span class="viewtog">
+        <button class="vbtn on" title="页面视图"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-paper"/></svg></button>
+        <button class="vbtn" title="页宽"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-pagenarrow"/></svg></button>
+        <button class="vbtn" title="全部标记"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-eye"/></svg></button>
+      </span>
+    </div>
+  </div>
+
+  <!-- ==================== 说明 ==================== -->
+  <div class="notes">
+    <h2>这张对比稿改了什么（都能落在现有 Token 体系内，不新增依赖）</h2>
+    <ul>
+      <li><span class="k">加表面层次</span>：chrome 由 <code>var(--paper)</code>（#f7f7f8）改为 <code>#fff</code> + <code>--line-soft</code> 描边，画布用 <code>var(--canvas-bg)</code>（#e8e8e8），白纸落在最上层 —— 三级亮度差取代现在的「一片灰」。</li>
+      <li><span class="k">文字换图标</span>：项目已装 <code>lucide-react</code> 但完全没用；「左/中/右/两端/增行/删行」等中文词按钮换成 16px 线性图标 + <code>title</code>，B/I/U/S 保留字形（与 Word 一致）。</li>
+      <li><span class="k">Ribbon 固定高 + 分组</span>：去掉 <code>flexWrap:'wrap'</code>，改 66px 固定组行 + 10px 分组标签（剪贴板/字体/段落/样式/审阅），组间 1px 竖线，溢出收进「更多」。避免 35 个控件挤成两三行、高度抖动。</li>
+      <li><span class="k">Tab 用下划线指示</span>：选中态由「灰底药丸 + 变紫」改为「品牌色文字 + 2px 下划线」，更像编辑器而非导航栏。</li>
+      <li><span class="k">顶栏只留全局动作</span>：撤销/重做/查找/外部打开/转 MD/重载/更多 → 30×30 图标按钮；「保存」做成品牌色实心主按钮并带 ⌘S。缩放器移到状态栏（Word 就在那里）。</li>
+      <li><span class="k">修订面板改推挤式</span>：从 <code>position:absolute</code> 覆盖正文改为占位 300px 侧栏 —— 现在面板会盖住右半边内容，且用 <code>bottom:28</code> 硬编码对齐状态栏，状态栏一改高度就错位。</li>
+      <li><span class="k">标尺校准</span>：现在水平标尺是 <code>repeating-linear-gradient</code> 每 40px 一条线、无刻度数字、从窗口 x=0 起算，而页面正文从画布中心 + 44px 处分栏 —— 完全对不上，且不随缩放变化；竖标尺却是 20px 间隔且随 <code>scale()</code> 缩放。建议统一为「与页面左边缘对齐 + 英寸刻度数字 + 页边距虚线 + 首行缩进手柄」，并随 zoom 联动。</li>
+      <li><span class="k">补齐交互态</span>：内联样式写不了伪类，所以现状所有按钮没有 hover / active / focus-visible，disabled 只剩浏览器默认。建议这些 chrome 样式改用 Tailwind class（项目是 Tailwind 4），顺带拿到键盘焦点环。</li>
+      <li><span class="k">去硬编码</span>：<code>#e9e9ec</code> / <code>#fff</code> / <code>#b4b4b8</code> / <code>#0a7d28</code> / <code>#c0341d</code> / <code>#1a7f37</code> / <code>#3b6cff</code>（品牌 fallback 与真实 <code>--brand #4b3fe3</code> 不一致）应全部换 Token（<code>--canvas-bg</code> / <code>--success</code> / <code>--danger</code> / <code>--brand</code>）。</li>
+      <li><span class="k">消除重复真值</span>：<code>pageStyle</code> 里硬写 794 / 1123 / 96，与 <code>docx-pagination.ts</code> 的 <code>PAGE_W/PAGE_H/PAGE_MARGIN_Y</code> 是两份定义；页眉页脚面板也是 794 固定宽、不随 zoom 缩放。</li>
+      <li><span class="k">原生控件</span>：<code>&lt;select&gt;</code> / <code>&lt;input type=number&gt;</code> / <code>&lt;input type=color&gt;</code> 与自绘按钮混搭，风格割裂。建议换成 shadcn 的 Select / Popover + 数值步进器，颜色选择器做成「A + 色条」并弹出调色板。</li>
+      <li><span class="k">死 Tab</span>：「引用」整栏 4 个按钮全 disabled「即将支持」；「布局」里放的是表格增删行列（Word 语义下属于表格工具），而真正的页边距 / 纸张方向 / 分栏无处可去。建议要么补上页面设置，要么先把空 Tab 隐藏。</li>
+      <li><span class="k">视图一致性</span>：现状「水平标尺不缩放、竖标尺随 <code>scale()</code> 缩放」自相矛盾；建议标尺统一放进画布列（与白纸同为 794px 居中）并随 zoom 重算刻度，竖标尺按 Word 默认收起、在「视图」页提供开关。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
