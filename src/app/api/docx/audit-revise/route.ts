@@ -7,7 +7,7 @@
  *   - reportText: 审核报告全文（含修改建议）
  *   - trackChanges: 是否生成带修订标记的 ops 类型（true→replace_text 等；false→*_plain）
  * 响应: { ok, ops, error? }
- *   - ops: [{ type, locate: {anchor, old?}, new, label }]，与 DocxViewer PlanFile.ops 对齐
+ *   - ops: [{ type, locate: {anchor, old?}, new, label }]，与 DocxTiptapEditor PlanFile.ops 对齐
  *
  * 前端拿到 ops 后构造 PlanFile 调 runPlan 逐条应用（复用现有 /api/docx/revise 通道）。
  */
