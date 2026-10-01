@@ -285,6 +285,7 @@ export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       properties: {
         idleMs: { type: 'number', description: 'Required quiet window (default 500ms)' },
         timeoutMs: { type: 'number', description: 'Max wait (default 15000, max 60000)' },
+        tabId: { type: 'number', description: 'Watch this tab instead of the active one' },
       },
     },
     maxOutput: 500,
@@ -452,13 +453,20 @@ export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   // ---- 内容提取 ----
   {
     name: 'browser_get_html',
-    description: 'Read raw HTML of the page (full document by default, or body inner HTML). Truncated to maxChars.',
+    description:
+      'Read raw HTML of the page (full document by default, or body inner HTML). Truncated to maxChars. ' +
+      'clean=true returns an archive-ready snapshot instead of the raw markup: scripts/noscript/iframe/template ' +
+      'and comments stripped, on* handlers and javascript: links removed, src/href/srcset/poster/form action and ' +
+      'style url(...) turned into absolute URLs, and lazy-load data-src* promoted to the real attributes. ' +
+      'Pass tabId to read that tab instead of the active one (e.g. a background tab opened for archiving).',
     returns: '{ html, truncated, bytes }',
     parameters: {
       type: 'object',
       properties: {
         outer: { type: 'boolean', description: 'true = documentElement.outerHTML, false = body.innerHTML (default false)' },
-        maxChars: { type: 'number', description: 'Character cap (default 20000, max 100000)' },
+        maxChars: { type: 'number', description: 'Character cap (default 20000, max 4000000)' },
+        clean: { type: 'boolean', description: 'Return an archive-ready snapshot (strip noise, absolutize URLs) (default false)' },
+        tabId: { type: 'number', description: 'Read this tab instead of the active one' },
       },
     },
     maxOutput: 20000,

@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveTaskModel } from '@/lib/wanted/task-model';
+import { resolveTaskModel } from '@/lib/core/task-model';
 
 /**
- * /api/wanted/schedule-parse — 用 LLM 把自然语言查询解析成查询时间范围。
+ * /api/core/schedule-parse — 用 LLM 把自然语言查询解析成查询时间范围。
  *
  * 调用方：/todo check 子命令（query_text）与日程查询统一管线
- * （lib/wanted/schedule.ts resolveReadCalendarQuery）。
- * 正则快路径（lib/wanted/schedule.ts parseScheduleInput）解析失败时回退到本接口，
+ * （lib/core/schedule.ts resolveReadCalendarQuery）。
+ * 正则快路径（lib/core/schedule.ts parseScheduleInput）解析失败时回退到本接口，
  * 让用户可以用自己的语言描述查询目标（如 "最近三天"、"下周五之前"、"这个月的会"），
  * 不再受固定用语限制。
  *
@@ -195,7 +195,7 @@ export async function POST(req: NextRequest) {
     }
     return NextResponse.json(result);
   } catch (e) {
-    console.error('wanted/schedule-parse error:', e);
+    console.error('core/schedule-parse error:', e);
     return NextResponse.json({ success: false, error: e instanceof Error && e.message ? e.message : 'Time parse failed' }, { status: 500 });
   }
 }

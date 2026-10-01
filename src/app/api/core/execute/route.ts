@@ -1,17 +1,21 @@
 /**
- * POST /api/wanted/execute
+ * POST /api/core/execute
  *
- * WANTED 指令统一执行入口（服务端）：
- * 面板端提交也走这里，保证 Node 模式等进程内状态与微信桥共享同一份，
- * 避免浏览器端/服务端双份状态导致的跨端不一致。
+ * @deprecated P2 收敛：斜杠命令的统一落点已是会话层（`/api/chat`，identity='butler'，
+ * 入口只做 normalizeSlashInput 翻译）。本路由仅保留兼容，**不再是对话入口**。
+ * 仓内唯一调用方是 ProjectBoardView（便签行「加入日历」→ `/todo <text>`），
+ * 它只用 `/todo` 与返回的 eventIds，属程序化调用而非对话。新代码请勿依赖本路由。
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { executeWantedCommand } from '@/lib/wanted/executor';
+import { executeButlerCommand } from '@/lib/core/executor';
 import { getProjectById } from '@/lib/project/project-manager';
 
 export async function POST(request: NextRequest) {
   try {
-    const { text, project_id } = (await request.json()) as { text?: string; project_id?: string };
+    const { text, project_id } = (await request.json()) as {
+      text?: string;
+      project_id?: string;
+    };
     if (!text || !text.trim()) {
       return NextResponse.json({ success: false, error: 'Please enter task content' });
     }
@@ -29,7 +33,7 @@ export async function POST(request: NextRequest) {
 
     // 服务端调用必须带绝对 baseUrl（Node fetch 不支持相对路径）
     const base = new URL(request.url).origin;
-    const result = await executeWantedCommand(text, { baseUrl: base, projectName });
+    const result = await executeButlerCommand(text, { baseUrl: base, projectName });
 
     if (!result.ok) {
       return NextResponse.json({ success: false, error: result.reply, command: result.command });
@@ -37,7 +41,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, ...result });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error('[wanted/execute] 执行失败:', msg);
+    console.error('[core/execute] 执行失败:', msg);
     return NextResponse.json({ success: false, error: msg });
   }
 }
