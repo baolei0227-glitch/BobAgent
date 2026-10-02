@@ -15,6 +15,122 @@
 ***
 
 
+## v0.7.671 (2026-10-02)
+
+> 本版是 **v0.7.670 之后的增量**：把 Butler 的「定制总览页 Customize」正式改名并扩为**记忆台 Memory**（四段 → 六段），为此新增一个只读聚合端点把此前**分散在四类落点、且没有任何读口**的记忆证据收进视图。共 14 个源文件改动，含 2 个新增实现/测试文件与 1 处文件改名。
+
+### 修复与优化
+
+* **「定制总览页」改名并扩为记忆台**（`ButlerRulesPanel.tsx` → `ButlerMemoryConsole.tsx`）：这个面管的是**「Butler 记得什么、学到什么、凭什么」**，不是外观定制，故名字统一为 Memory —— 左栏 RailItem、顶栏标题、`aria-label` 三处同字（图标沿用原 Memories 的 `Brain`）。**只改 UI 文案，事件名与函数名一概不动**（`openButlerMemories()` / `BUTLER_MEMORIES_EVENT` 保持原样，落到 `section='memories'`），避免打断既有调用方。面板由**四段扩为六段**：Memories（内嵌 `ButlerMemoryPanel`，增改删全功能）、Rules、Skills 三个实体段，外加 **Threads**（会话上下文，只读锚点）与 **Knowledge**（项目账本 `.ledger/`，只读锚点）两类此前缺位的实体，SIGNALS 则从「与实体并列的入口」降级为 **Evidence 视图**。
+
+* **新增只读聚合端点 `/api/butler/memory-audit`**（新增 `app/api/butler/memory-audit/route.ts`）：记忆台的 Evidence 段要回答「Butler 凭什么这么记、这么学」，而这些数据此前**分散在四类落点且没有任何读口** —— 被拉黑模式（`butler/.rules/.logs/negative-sample/<objectType>.jsonl`）、near-miss 询问额度（`.state/rule-nearmiss.json`）、每会话主动冒头预算（`.state/rule-budget/<threadId>.json`）、规则产出引用（`hits/<ruleId>.jsonl` 的 `producedRef`）。新端点把这四类**纯聚合**读出（**只读，不写任何文件、不新增存储、不新增真源**），外加「最近记忆活动」时间线（记忆 / 规则 / 技能按创建时间合并倒序）与**真源绝对路径**（给用户自行备份用）。**各段独立容错**：某一类读失败只让该段为空，不让整个视图 500（脏数据不阻断）；负样本的**解封**仍走既有 `DELETE /api/butler/rules/negative-samples`，本端点只负责看。新增 `route.test.ts` 锁三条不变量：空态是安全输入（各段空数组、不 500）、各段聚合正确（负样本两类 / 额度 / 预算 / 产出引用 / 最近活动）、坏 JSON 只让该段为空。
+
+* **脑图落点由四节点扩为六节点**（`ButlerMemoryConsole.tsx`）：进入 Memory 先落在脑图，点节点才进对应分区页，分区页不再保留横向标签，只留左上角 `← All` 返回。六节点的语义分组是**左列 = Butler 自己的记忆（三实体）**、**右列 = 上下文 / 证据 / 外部锚点**。几何是**算出来的、不是估的**：平面坐标系固定 720×400，脑与卡片位置全用百分比；突触终点取脑轮廓三次贝塞尔上的实点（**反解坐标**），因此连线端点必然贴在皮层上；脑、连线、卡片必须同处**一个 z 平面**（加一层 `translateZ` 就会因透视额外放大位移、端点脱离皮层 —— 这里踩过一次坑）。脑图下方另置两条常驻信息：**最近记忆活动**（记忆是自动抽取的，用户没说「记住」也会被记，故必须有个就近出口）与 **Where is this stored?**（四个落点都是明文文件，把绝对路径说出来，用户才有「我的记忆在哪、能不能搬走」的兜底）。
+
+* **服务端补三个只读辅助 + 一处真源上移**：`rule-nearmiss.ts` 新增 `readAskCounts()`（与 `consumeAsk` 读同一份文件、只读路径不含锁）；`rule-exec.ts` 新增 `listRuleBudgets()` 并把预算目录抽成 `budgetDir()`（供证据视图展示「这个会话还能主动问几次」，**不改行为**）；`rule-signals.ts` 新增 `NEGATIVE_OBJECT_TYPES` 常量作**唯一真源**（原先内联在 negative-samples 路由里），由可见 / 解封路由与 memory-audit 聚合共用，避免两处漂移。
+
+* **线程摘要带出常驻工作区**（`threads-shared.ts`）：`ButlerThreadSummary` 补 `workspaceFolder` 字段（真源是线程文件的 `workspaceFolder`，非绝对路径一律归一为 `null`），`summarizeThread` 同步补映射 —— Memory 台 Threads 段要显示每个会话的常驻工作区；与联系人列一样**只带路径与展示名，不复制内容**。`threads.test.ts` 增一条用例锁「随摘要带出 / 无则 null」。
+
+* **记忆面板补两条知情信息**（`ButlerMemoryPanel.tsx`）：记忆条目显示**来源** `via <source>`（记忆是自动抽取的，用户有权知道「这条是怎么来的」，`source` 目前是通道标记）；删除档显示**后果明示**（删除是真删 —— 整块从 `preferences.md` 移除，且影响**所有**联系人、不可撤销），把「档 2（不可逆）」说在按下之前。
+
+
+## v0.7.670 (2026-10-02)
+
+> 本版是 **v0.7.669 之后的增量**：落地 2026-10-02 Butler 架构评审的一轮加固（并发写原语收敛、打扰闸接线、漏触发告知、孤儿角色回收）。共 30 个源文件改动，含 3 个新增实现文件与 5 个测试文件。
+
+### 修复与优化
+
+* **并发写原语收敛为唯一真源**（新增 `lib/butler/fs-atomic.ts`）：同一套并发控制此前有 **5 份副本**（`rules.ts` / `skills.ts` / `rule-logs.ts` / `storage.ts` 各一份模块级串行锁，`threads.ts` 一份分键锁），另有 **8 处** `${pid}.${Date.now()}.tmp` 临时文件名 —— 同毫秒并发会互相覆盖，先完成的 rename 把 tmp 移走后，另一个 rename 直接 ENOENT。现统一为 `createLock()` / `createKeyedLock()` / `atomicWriteFile()`（随机后缀 + rename 重试 3 次 + 失败清 tmp），并迁移 rules / skills / rule-logs / storage / threads / sticky-write / daily-report / rule-nearmiss 的全部落盘点。
+  * **修掉两个真实失效**：`consumeBudget`（会话预算）与 `noteBehavior` / `consumeAsk`（近失询问额度、行为计数）此前是**无锁**读-改-写，同毫秒并发会互相覆盖 → 预算与额度都能被绕过。预算文件按 threadId 分片，故改用**分键锁**（不同会话互不阻塞，同一会话串行）。
+
+* **B5 打扰闸正式接线**（新增 `app/api/butler/push-gate/route.ts`）：`lib/core/quiet-hours.ts` 里的免打扰窗口 / 单日上限策略早已实现，但 `decidePush` / `recordPush` **全仓零调用方**（策略从未生效），而设置界面已把它呈现为「Butler Notify / Stay quiet」。新路由把通知 kind 映射为策略类别并裁决（**失败即放行**，宁可多打扰一次也不静默掉通知）；日报出口 `GET /api/butler/daily-report` 就地过闸 —— 窗口内**不取走 pending**（报告留在队列、窗口结束由下一轮轮询续发，**不丢数据**），放行时逐条计数，让「单日上限」成为真上限。客户端 `ButlerNoticeHost` 弹 toast / 系统通知前问一次；`bus.ts` 的 `ButlerNoticePayload` 新增 `interrupt: 'gate' | 'always'`，义务性通知（规则执行回执、错过的定时执行、用户自订日历提醒）与**服务端已裁决过**的日报都标 `always`，避免双重计数。
+
+* **漏触发「明说一句」**（评审 §2.2-7）：定时心跳寄生在渲染进程，只有 24h 补偿窗口 —— 应用关得久一点，期间到期的实例就**永久不会补跑且无人知道**。`rule-timer.ts` 新增 `missedTimerRules()`（扫描窗口 30 天；逐实例判定、每条规则只取最新一个漏掉的实例、**每条规则只告知一次**、一次最多 3 条，标记落 `.state/rule-missed-reported.json`），`butlerTick` 返回 `missed` 并经 tick 路由透传，客户端弹一条「有定时规则错过的执行」。**只告知不补跑**（补跑会一次炸出一串历史实例）。
+
+* **孤儿角色条目回收 + tmp 残骸清扫**（评审 P2-⑯/⑮）：`roles.json` 是只增不删的注册表，线程被删（过期清扫 / 删除联系人）后条目仍留着（实测 10 条角色 vs 3 个活线程）。`storage.ts` 新增 `pruneOrphanRoles()`，`sweepThreads()` 顺带调用，并清理 1 小时前的 `.tmp` 残骸（实测残留 4 个、两个各约 150KB）。**只清指针，绝不动角色目录**（附件与文档仍在）。
+
+* **定时链路补上预算锚点**（评审 P2-⑱）：`consumeBudget` 依赖 threadId，缺省时直接视为有额度，而 60s 心跳此前不带 threadId → 定时链路永不扣预算。`butler-active-thread` 的 localStorage 读写从 `ButlerDrawer` 外移到新增的 `components/butler/butlerSession.ts`，供心跳读取并随 tick 上报。
+
+* **排期纪律注入幂等**（`lib/runtime/context.ts`）：`buildScheduleDisciplineInjection(basePrompt?)` 在 system 已逐字包含同一常量时返回空串 —— 新装用户的 `agent.json` 本就由当前源码物化、已含最新口径，再注入一遍是每轮约 950 字符的逐字重复，还会给模型制造「新旧两版挑一个」的伪冲突；已装老用户的 `agent.json` 是旧文本，仍照常注入覆盖。传 `undefined`（老调用点）行为不变。
+
+* **杂项收敛**：`PREVIEW_MAX` 真源收进 `threads-shared.ts`（此前 `butler-search` 60 / `butler-recorder` 64 两份副本）；`report-doc.ts` 的 `NOTIFY_THREAD_ID` 改从 `./storage` 取，去掉对 `butler-notify` 的引用；docx 编辑器给纸面容器补上 `ref`，并把分页守卫改为 `paperRef → scalerRef → canvasRef` 回落链 —— 守卫挂在**从未挂载**的 ref 上会「永远从这里返回 ⇒ 分页一次都没算过」，而 `pageCount` / `paperHeightPx` 恰好停在 `useState` 初值（1 / PAGE_H），界面上完全看不出失效。
+
+
+## v0.7.669 (2026-10-02)
+
+> 本版是 **v0.7.668 之后的增量**，只改了 1 个文件（DocxTiptapEditor.tsx）。
+
+### 修复与优化
+
+* **修复 docx 多页文档被渲染成「一页白纸 + 满屏灰底」**（`components/canvas/docx-editor/DocxTiptapEditor.tsx`）：分页测量的状态量默认停在 `pageCount=1` / `paperHeightPx=PAGE_H`，当测量早于布局完成（块高全读成 0）时 `breaks` 为空却照写状态，页数被钉死在 1 —— 界面表现为只有第一页是白的、正文溢出到画布灰上，且**看不出测量失败**。本版把测量改为「未就绪就不写状态」：视图 / 布局未就绪，或有内容却一个块高都读不到时，延时重测（120ms × 最多 8 次，有上限不空转）；并在装入文档后立即重测 + 多趟补测（80 / 260 / 700ms），覆盖字体与图片的异步布局。
+  * 块高测量增加回落：`view.nodeDOM(offset)` 拿不到元素时，改用 `.ProseMirror` 的直接子元素，且**仅在两处数量一致时**启用（尾随 hack 节点会导致错位）。
+  * 组件卸载时清理「重试」与「多趟补测」定时器，避免卸载后继续测量。
+
+
+## v0.7.668 (2026-10-02)
+
+> 本版是 **v0.7.667 之后的增量**，仅含一项修复，无其它源文件改动。
+
+### 修复与优化
+
+* **修复打包版自定义 server 无法加载 `better-sqlite3`**：`src/server.ts` 经 tsup 打包为独立的鉴权网关 `server.js`，其中以裸名 `import("better-sqlite3")` 动态加载原生模块；而 Next standalone 只在 `.next/node_modules/` 下以**哈希别名**（如 `better-sqlite3-<16hex>`）暴露 `serverExternalPackages`，根 `node_modules/` 缺少裸名入口，导致日历后台同步在运行时抛 `Cannot find package 'better-sqlite3'`。打包脚本现将已有的哈希别名镜像为根 `node_modules/<pkg>` 裸名符号链接，日历 DB 同步恢复。
+
+
+## v0.7.667 (2026-10-02)
+
+> 本版是 **v0.7.666 之后的增量**。666 于 10-01 20:10 构建并已发布；本批 **23 个文件**的改动全部发生在 666 构建之后（微信检索口径、系统提示注入、运行时前缀缓存、docx 编辑），不在 666 包内。
+
+### 新增
+
+* **检索质量离线评测体系**（`lib/butler/search-eval.ts`、`lib/ai/rerank.ts`）：公众号检索链路此前**没有任何量化指标**，只能靠肉眼翻账本；本版补上召回 / 精选 / 误杀 / nDCG 四类指标 + golden 标注与报告渲染，把「这轮搜得准不准」变成可复算的数字。
+  * 配套的 `rerank` 模块落的是**探测结论而非功能**：智谱 preset 里的 `rerank-3` 实际不存在（调用直接 HTTP 400），且 `rerank` 模型分数几乎无区分度（实测 51 篇**全为 1.0**）。故提供 `isDegenerateScores()`，让调用方把这种「无重排能力」当降级处理，而不是拿一堆 1.0 当真排序。
+
+* **运行时缓存遥测**（`lib/runtime/cache-telemetry.ts`）：新增 `cache-telemetry.jsonl`，按**调用级**记录三段（system / tools / messages）指纹与漂移标记，把此前要靠人工 join 两套日志才能归因的「到底哪个前缀段变了」，做成一条自解释记录。
+
+* **微信检索「去重 + 追踪」抽出独立模块**（`lib/butler/wechat-dedupe.ts`、`lib/butler/wechat-trace.ts`）：去重口径与账本组装从路由里抽成可测模块，各自带单测；账本新增 `rank`（仅在模型**真的排过序**时才写，防止 nDCG 虚高）与 `queries` / `intent`，可直接归因「是规划差还是搜狗排序差」。
+
+### 修复与优化
+
+* **DeepSeek V4 系统提示（base system prompt）未下发**（`api/chat/route.ts`）：base 提示与「思考引导」原先耦合在同一个三元守卫里，而 V4 的 `shouldInjectThinkPrompt` 恒为 `false`——于是 `BASE_SYSTEM_PROMPT` 及各画像专属 base **整段没有下发**，system 里只剩前端那截短提示。现拆成 `ensureBaseSystemPrompt`（无条件注入）与 `injectThinkingGuidance`（受守卫控制），V4 恢复完整系统提示。
+
+* **微信检索按 url 去重失效**（`api/butler/wechat-search/route.ts`、`api/butler/wechat-search/enrich/route.ts`、`lib/bus.ts`、`lib/core/butler-search.ts`）：搜狗的 `/link?url=` 是加密跳转链，**每次 token 都不同**，按 url 判定等于没去重；改为**标题归一化去重** + 跨方向轮转 + 上限卡唯一条数（实测同一轮 62 条收敛为 51 篇唯一）。规划 prompt 同时新增「至少一个方向按法律文书正式名称搜」并优先一手来源（法院 / 政府原文）。
+
+* **前缀缓存跨重启 / 跨状态漂移**（`lib/runtime/session.ts`、`api/chat/tools/index.ts`、`lib/runtime/tools.ts`）：sticky 场景表由纯内存改为**落盘** `.runtime/sticky-scenes.json`（LRU 上限 500、仅变化时写盘），修复应用重启后工具集从「常驻全集」塌回子集、导致首个请求缓存全废（CacheGuard 一月记 63 次 cross-restart-drift）；MCP 工具快照兜底从「仅 browser」推广到**全部 server**，并加 `expectedServerIds` 白名单护栏——用户禁用 / 删除服务立即生效，桥抖动不再整段作废前缀。
+
+* **docx 编辑器：分页视觉保真 + 命令单一真源**（`components/canvas/docx-editor/docx-pagination.ts`、新增 `docx-commands.tsx`、`DocxTiptapEditor.tsx`）：
+  * 修复「只有第 1 页像纸」——换页间隙改为**白 → 灰缝 → 白**三段构造，每页都是等高完整 A4；并修正页起点累加漏算 spacer 导致的滚动 / 页码偏移。
+  * 工具栏与 ⋯ 菜单的命令合并到 `docx-commands.tsx` **单一真源**，按 `tier` / 宽度条件渲染，消除同屏副本与「改一处漏一处」；对齐 / 列表压缩为下拉。
+
+* **检索实况入口去重**（`components/butler/ButlerDrawer.tsx`）：有账本时只保留「打开右侧检索实况」单入口，去掉卡片里的重复副本。
+
+
+## v0.7.666 (2026-10-01)
+
+> 本版是 **v0.7.665 之后的增量**。665 的构建标记为 09:00:58 并已发布；本批改动全部发生在 **16:11–16:53**（11 个文件：会话工作区、注入块剥离、检索实况落库），不在 665 包内。
+
+### 新增
+
+* **Butler 会话级「工作区」（锁定操作范围）**（`lib/butler/threads-shared.ts`、`lib/butler/threads.ts`、`api/butler/threads/session/route.ts`、`components/butler/ButlerDrawer.tsx`）：一个目录 = 一条会话的操作范围，**常驻**而非一次性的「发送目录」——选定后每轮对话都随消息注入「锁定操作范围」，发送后不清、切联系人各自保留（与画布「操作目录」同一语义，区别只在这份会记住）。
+  * **存储挂在会话上**：`ButlerThread.workspaceFolder`（`{ path, name }`）随线程文件存活 / 删除；**唯一写入口是 `setThreadWorkspace`**，消息链路（`upsertThread`）只沿用文件里的旧值、不参与它的变更——工作区是「读者行为」，不该被发消息顺带改写。与 `setThreadModelSettings` 同口径：**不动 `updatedAt`**，换个工作区不该把会话顶到联系人列最前。
+  * **入口是 PATCH，即选即存**：`PATCH /api/butler/threads/session` 新增 `{ workspace: { path, name } | null }`（`null` = 清除），不等下一条消息；任何线程都可改（含 Recorder / 通知助理），与选型同属读者行为。线程查询回填 `workspaceFolder`，切联系人时还原 pill。
+  * **清洗口径**：`parseWorkspaceFolder` 只认**绝对路径**（非绝对、或超 `WORKSPACE_PATH_MAX` = 1024 字符，一律视为「未指定」→ `null`）；`name` 缺省取路径末节兜底——pill 要显示名字，缺了不该整个工作区失效。新建会话默认不带工作区。
+  * **展示**：pill 超长前端截断，悬停给全名 + 路径。
+
+* **检索实况「落库」——账本随综述消息一起存活**（`lib/bus.ts`、`lib/core/butler-search.ts`、`api/butler/wechat-search/enrich/route.ts`、`components/butler/ButlerDrawer.tsx`）：v0.7.665 的右栏实况只管**这一次**（关掉就没了）；本版把账本写进综述消息——**消息在则账本在，删掉消息账本一并消失**。
+  * **新增 `WechatSearchTrace` / `WechatSearchTraceItem`**，挂到 `ChatMessage.searchTrace`；服务端线程存储逐字段透传（`parseThread`），与「卡片」同源。
+  * **为什么由服务端组装（`buildTrace`）**：落库那一刻信息全在服务端手里（候选全量、入选与理由、正文读取结果、逐篇摘要），前端只从 SSE 拿过一部分帧——**尤其是被判定掉的那十几篇，只有服务端是完整的**。顺序按召回的原始下标，前端分组后仍与原顺序对得上号。
+  * **失败也有账**：精编不可用 / 中途抛错时走 `fallbackTrace`（前 `MAX_PICK` 篇标为入选），右栏不留空。
+  * **入口随时可重开**：气泡下方的「查看检索实况」据此重开右栏——抽屉关过、应用重启过都还能点开，不再是一条时灵时不灵的死链。
+
+### 修复与优化
+
+* **剥离正文尾部的「注入块」**（`lib/butler/threads-shared.ts`、`lib/butler/transcript.ts`）：附件列表与会话工作区是**发给模型的上下文**，随正文一起上送并原样落库；重新打开会话会连块一起读回，于是用户气泡与 `butler/<角色>/<日期>/chat/*.md` 里冒出 `--- Attachments ---` / `--- 工作区（用户指定 · 锁定操作范围） ---` 这类机器文案，而刚发出那条气泡用的是干净原文——两条路径显示不一致。
+  * **标记集中定义**（`ATTACHMENTS_BLOCK_HEAD` / `WORKSPACE_BLOCK_HEAD` / `INJECTED_BLOCK_HEADS`），让「拼接」与「剥离」同源，改标记时不会漏改另一处。
+  * `stripInjectedBlocks` 按**首个**命中标记截断（块恒追加在尾部）；调用方只在 user 消息上用——转录记录（给人看的那份）与气泡同口径。
+  * **不在发给模型的正文上调用**：块由客户端每轮重新注入，历史里有没有都不缺上下文。
+
+
+
 ## v0.7.665 (2026-10-01)
 
 > 本版是 **v0.7.664 之后的增量**。664 构建于 08:12–08:13，因上传脚本踩到 Xcode 许可问题漏发，已于 08:56 用修复后的脚本补传并校验（远端 `latest` 已指向 664）；本批改动是 **08:13 之后**对 `components/butler/ButlerDrawer.tsx` 的重写，不在 664 包内。
