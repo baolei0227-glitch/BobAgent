@@ -28,53 +28,37 @@ import { buildSaveBlocks } from '@/lib/docx-editor/save-blocks'
 import { docxRenderDirty } from '@/lib/docx-editor/render-dirty';
 import { redoDepth, undoDepth } from '@tiptap/pm/history';
 import { docxExtensions } from './docx-tiptap-extensions';
-import { DocxPagination, docxPaginationKey, paginationBreaksRef, setPaginationBreaks, PAGE_W, PAGE_H, PAGE_MARGIN_X, PAGE_MARGIN_Y, PAGE_SPACER, type PaginationBreak } from './docx-pagination';
+import { DocxPagination, docxPaginationKey, paginationBreaksRef, setPaginationBreaks, PAGE_W, PAGE_H, PAGE_GAP, PAGE_MARGIN_X, PAGE_MARGIN_Y, PAGE_USABLE_H, PAGE_STRIDE, type PaginationBreak } from './docx-pagination';
 import { DocxSearch, searchKey, DOCX_SEARCH_NAV_META } from './docx-search';
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { bus, BusEvents } from '@/lib/bus';
 import { convertDocxToMarkdown } from '@/lib/docx-to-md';
 import {
-  AlignCenter,
-  AlignJustify,
-  AlignLeft,
-  AlignRight,
   ChevronDown,
   ChevronUp,
-  ClipboardPaste,
-  Columns3,
-  Copy,
-  Eraser,
-  ExternalLink,
-  FileDown,
-  FileImage,
-  IndentDecrease,
-  IndentIncrease,
   Info,
-  List,
-  ListOrdered,
-  MessageSquare,
   Maximize2,
+  MessageSquare,
   Minus,
   MoreHorizontal,
-  PanelRight,
-  Pilcrow,
   Plus,
-  RotateCcw,
-  Rows3,
   Ruler,
   Redo2,
   Save,
-  Scissors,
   Search,
-  SeparatorHorizontal,
-  Subscript,
-  Superscript,
-  Table,
   Undo2,
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import {
+  commandsOfGroup,
+  commandsOfTier,
+  liKindOf,
+  type DocxCmdApi,
+  type DocxCommand,
+  type DocxGroup,
+} from './docx-commands';
 
 /** Uint8Array → base64（写回原稿用，content 为不含 data: 前缀的 base64） */
 function uint8ToBase64(bytes: Uint8Array): string {
@@ -220,8 +204,19 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   const paperRef = useRef<HTMLDivElement | null>(null);
   const scalerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const pageTopsRef = useRef<number[]>([0]);
+  const pageTopsRef = useRef<number[]>([PAGE_MARGIN_Y]);
   const measureRafRef = useRef<number | null>(null);
+  // 「布局未就绪 → 延时重测」的重试定时器与计数：
+  // 测量若早于布局完成，块高会全部读成 0 ⇒ breaks 为空 ⇒ 页数被钉死在 1，
+  // 而状态量默认就是 pageCount=1 / paperHeightPx=PAGE_H，界面上完全看不出测量失败。
+  const measureRetryRef = useRef<number | null>(null);
+  const measureTriesRef = useRef(0);
+  // 自递归入口（measurePagination 内部重试时不能直接引用自身，否则触发 exhaustive-deps 告警）
+  const measurePaginationRef = useRef<() => boolean>(() => true);
+  // applyParsed（定义在 scheduleMeasure 之前）需要「装入后立即重测」，用 ref 打通
+  const scheduleMeasureRef = useRef<() => void>(() => {});
+  // 装入后的多趟重测定时器（下次装入 / 卸载时清理）
+  const loadMeasureTimersRef = useRef<number[]>([]);
 
   // ---- 查找 / 替换（⌘F） ----
   const [findOpen, setFindOpen] = useState(false);
@@ -359,43 +354,83 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     // 装载文档不进撤销栈（否则 ⌘Z 会把文档退回装载前的空文档）
     editor?.chain().setContent(json).setMeta('addToHistory', false).run();
     loadingRef.current = false;
+    // 装入后**必须**重测分页：分页状态量（pageCount / paperHeightPx）默认停在 1 / PAGE_H，
+    // 一旦漏测，多页文档就被渲染成一页高的白纸，正文直接溢出到画布灰上。
+    // 多趟重测以覆盖字体 / 图片异步布局（首次测量可能早于最终布局）。
+    for (const t of loadMeasureTimersRef.current) window.clearTimeout(t);
+    scheduleMeasureRef.current();
+    loadMeasureTimersRef.current = [80, 260, 700].map((delay) =>
+      window.setTimeout(() => scheduleMeasureRef.current(), delay),
+    );
     const bytes = loadedBytesRef.current;
     if (bytes) await inspectFromBytes(bytes);
   }, [editor]);
 
   // ---- 视觉分页测量（S1 · 离散 A4 页面，启发式换页） ----
-  // 遍历顶层块 DOM 累加高度；当累计超过单页可用区（PAGE_H - 2*PAGE_MARGIN_Y）时，
-  // 记该块为「新页首块」，写入 paginationBreaksRef 并经 meta 事务触发装饰重算。
-  const measurePagination = useCallback(() => {
+  // 遍历顶层块 DOM 累加高度；当累计超过单页可用区（PAGE_USABLE_H）时，记该块为「新页首块」，
+  // 并记录把上一页补足到满页所需的 padTop —— 装饰层据此把间隙拆成「白 → 灰缝 → 白」，
+  // 使每一页都是等高的完整 A4（内容不足则页底留白），而不是只有第 1 页像纸。
+  const measurePagination = useCallback((): boolean => {
+    // 视图 / 布局尚未就绪：**不写状态**，延时重测（有上限，不会无限重试）
+    const notReady = (): boolean => {
+      if (measureTriesRef.current < 8 && measureRetryRef.current == null) {
+        measureTriesRef.current += 1;
+        measureRetryRef.current = window.setTimeout(() => {
+          measureRetryRef.current = null;
+          measurePaginationRef.current();
+        }, 120);
+      }
+      return false;
+    };
     const ed = editor;
-    const paper = paperRef.current;
-    if (!ed || !paper) return;
-    const pm = paper.querySelector('.ProseMirror') as HTMLElement | null;
-    if (!pm) return;
-    const usableH = PAGE_H - 2 * PAGE_MARGIN_Y;
+    // 纸面容器：`paperRef` 语义上指白纸卡片。⚠️ 守卫若挂在**从未 ref 挂载**的 ref 上，
+    // 会「永远从这里返回 ⇒ 分页一次都没算过」，而 pageCount/paperHeightPx 又恰好停在
+    // useState 初值（1 / PAGE_H），界面上完全看不出失效。故回落链兜住这种静默故障。
+    const root = paperRef.current ?? scalerRef.current ?? canvasRef.current;
+    if (!ed || !root) return notReady();
+    const pm = root.querySelector('.ProseMirror') as HTMLElement | null;
+    if (!pm) return notReady();
     const doc = ed.state.doc;
+    // 顶层块取高：优先 `view.nodeDOM(offset)`（索引与 doc 天然对齐）；拿不到元素时回落到
+    // `.ProseMirror` 的直接子元素，且**仅在数量一致时**启用（尾随 hack 节点会导致错位）。
+    const domKids = Array.from(pm.children) as HTMLElement[];
+    const alignable = domKids.length === doc.childCount;
     let acc = 0;
+    let measuredTotal = 0;
     const breaks: PaginationBreak[] = [];
-    const tops: number[] = [0];
     let di = 0;
     doc.forEach((node, offset) => {
-      const dom = ed.view.nodeDOM(offset) as HTMLElement | null;
-      const h = dom ? dom.offsetHeight || 0 : 0;
+      const fromView = ed.view.nodeDOM(offset) as HTMLElement | null;
+      const fallback: HTMLElement | null = alignable ? (domKids[di] ?? null) : null;
+      const el: HTMLElement | null = fromView && fromView.nodeType === 1 ? fromView : fallback;
+      const h = el ? el.offsetHeight || 0 : 0;
+      measuredTotal += h;
       const manualBreak = node.attrs.pageBreakBefore === true;
       // 手动分页符（段落级 w:pageBreakBefore）或累计高度超单页可用区 → 该块作为新页首块
-      if (di > 0 && (manualBreak || acc + h > usableH)) {
-        breaks.push({ index: di, manual: manualBreak });
-        tops.push(PAGE_MARGIN_Y + acc);
+      if (di > 0 && (manualBreak || acc + h > PAGE_USABLE_H)) {
+        breaks.push({ index: di, manual: manualBreak, padTop: Math.max(0, PAGE_USABLE_H - acc) });
         acc = 0;
       }
       acc += h;
       di++;
     });
-    const total = PAGE_MARGIN_Y + acc + PAGE_MARGIN_Y + breaks.length * PAGE_SPACER;
+    // 有内容却一个块高都没读到 ⇒ 布局未就绪。此时**绝不能**写入状态：breaks=[] 会让
+    // pageCount 停在 1、paperHeightPx 停在 PAGE_H，多页文档就渲染成一页高的白纸，
+    // 正文直接溢出到画布灰上（表现为「只有第一页是白的，其他页全是灰底」）。
+    if (measuredTotal <= 0 && doc.childCount > 0) return notReady();
+    const pages = breaks.length + 1;
+    // 页起点只与页码有关：第 i 页（0-based）起点 = PAGE_MARGIN_Y + i * PAGE_STRIDE。
+    // 因为每页内容已被 padTop 补足成等高 A4，不再需要用实际内容高度累加（旧算法漏加 spacer
+    // 占位，导致第 n 页的滚动定位/页码判定整整偏上 (n-1)*PAGE_SPACER）。
+    const tops = Array.from({ length: pages }, (_, i) => PAGE_MARGIN_Y + i * PAGE_STRIDE);
+    const total = pages * PAGE_H + (pages - 1) * PAGE_GAP;
     const prev = paginationBreaksRef.current;
     const changed =
       prev.length !== breaks.length ||
-      breaks.some((b, i) => prev[i]?.index !== b.index || prev[i]?.manual !== b.manual);
+      breaks.some(
+        (b, i) =>
+          prev[i]?.index !== b.index || prev[i]?.manual !== b.manual || prev[i]?.padTop !== b.padTop,
+      );
     if (changed) {
       setPaginationBreaks(breaks);
       // 触发 ProseMirror 装饰重算（decorations 读取 paginationBreaksRef.current）
@@ -403,16 +438,24 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     }
     pageTopsRef.current = tops;
     setPaperHeightPx(Math.max(PAGE_H, Math.round(total)));
-    setPageCount(breaks.length + 1);
+    setPageCount(pages);
+    measureTriesRef.current = 0;
+    return true;
   }, [editor]);
+
+  measurePaginationRef.current = measurePagination;
 
   const scheduleMeasure = useCallback(() => {
     if (measureRafRef.current != null) return;
+    // 每次显式请求都重新给足重试预算（否则上一轮的失败计数会「烧掉」后续重试机会）
+    measureTriesRef.current = 0;
     measureRafRef.current = requestAnimationFrame(() => {
       measureRafRef.current = null;
       measurePagination();
     });
   }, [measurePagination]);
+
+  scheduleMeasureRef.current = scheduleMeasure;
 
   // 编辑内容变化 → 重新测量换页
   useEffect(() => {
@@ -443,6 +486,16 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [scheduleMeasure]);
+
+  // 卸载时清理「布局未就绪重试」与「装入后多趟重测」的定时器
+  useEffect(
+    () => () => {
+      if (measureRetryRef.current != null) window.clearTimeout(measureRetryRef.current);
+      for (const t of loadMeasureTimersRef.current) window.clearTimeout(t);
+      loadMeasureTimersRef.current = [];
+    },
+    [],
+  );
 
   // 自动适配：面板宽度 / 标尺显隐变化时重算缩放；用户手改缩放或点放大缩小后停止自动适配
   useEffect(() => {
@@ -567,8 +620,8 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
 
   // 当前选区对齐 / 列表态（驱动 ribbon 高亮）
   const isAlign = (a: string) => Boolean(editor?.isActive('paragraph', { align: a }) || editor?.isActive('heading', { align: a }));
-  const liAttrs = editor?.getAttributes('docxListItem');
-  const liKind = liAttrs && liAttrs.listKind ? String(liAttrs.listKind) : null;
+  // 列表类型与命令表同源（docx-commands.tsx liKindOf），避免两处判据漂移
+  const liKind = liKindOf(editor);
   const rfAttrs = editor?.getAttributes('runFormat');
   const rfFont = (rfAttrs?.font as string) || '';
   const rfSize = rfAttrs?.sizeHalfPoints as number | undefined;
@@ -590,7 +643,6 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   const curSpaceAfterPt = twToPt(curParaAttrs.spaceAfter);
   const curPageBreak = Boolean(curParaAttrs.pageBreakBefore);
   const curLineSpacing = curParaAttrs.lineSpacing != null ? Number(curParaAttrs.lineSpacing) : null;
-  const curVertAlign = (rfAttrs?.vertAlign as string) || '';
 
   /**
    * 标尺手柄拖拽提交：pt → twips（×20）写回段落属性。
@@ -1253,6 +1305,291 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   /** 当前段落样式（正文 / 标题 1-3） */
   const styleValue = editor?.isActive('heading') ? `h${editor?.getAttributes('heading').level ?? 1}` : 'p';
 
+  /* ================================================================
+   * 工具条 / ⋯ 菜单渲染器（2026-10-01 去重整改）
+   *
+   * 单一真源：按钮命令一律取自 docx-commands.tsx 的 DOCX_COMMANDS，由 renderCmd 按
+   *   tier 渲染成「工具条外观」或「菜单外观」——同一功能不再在两处各写一份 JSX。
+   * 下拉类控件（字体 / 字号 / 样式 / 对齐 / 列表）各自只有一份实现，
+   *   宽档 / 窄档通过条件渲染决定落点，保证同屏不重复、窄档不丢失。
+   * ================================================================ */
+
+  /** 命令执行所需的外部能力（宿主闭包），供 docx-commands.tsx 的 run / disabled 使用 */
+  const cmdApi: DocxCmdApi = {
+    loading,
+    converting,
+    hasPath: Boolean(fileInfo.full_path),
+    hfEdit,
+    pageBreakBefore: curPageBreak,
+    insertTable: handleInsertTable,
+    insertImage: handleInsertImageClick,
+    clearFormat: () =>
+      editor
+        ?.chain()
+        .focus()
+        .unsetAllMarks()
+        .setParaFormat({
+          align: null,
+          spaceBefore: null,
+          spaceAfter: null,
+          indentLeft: null,
+          indentFirstLine: null,
+          lineSpacing: null,
+          pageBreakBefore: null,
+        })
+        .run(),
+    toggleHfEdit: () => setHfEdit((v) => !v),
+    openExternal: () => void handleOpenExternal(),
+    convertMd: () => void handleConvertToMd(),
+    reload: handleReload,
+  };
+
+  /**
+   * 唯一的命令按钮渲染器。
+   * as='tool' → 工具条图标按钮（无文字）；as='menu' → ⋯ 菜单「图标 + 文字」按钮，点击后收起菜单。
+   */
+  const renderCmd = (cmd: DocxCommand, as: 'tool' | 'menu') => {
+    const active = cmd.isActive?.(editor, cmdApi) ?? false;
+    const disabled = cmd.disabled?.(cmdApi) ?? false;
+    const fire = () => {
+      cmd.run(editor, cmdApi);
+      if (as === 'menu') setMenuOpen(false);
+    };
+    const inner = cmd.glyph ? (
+      <span className={cn('text-12 leading-none', cmd.glyphClass)}>{cmd.glyph}</span>
+    ) : (
+      cmd.icon
+    );
+    if (as === 'tool') {
+      return (
+        <ToolBtn key={cmd.id} title={cmd.title} active={active} disabled={disabled} onClick={fire}>
+          {inner}
+        </ToolBtn>
+      );
+    }
+    return (
+      <MenuBtn key={cmd.id} wide title={cmd.title} active={active} disabled={disabled} onClick={fire}>
+        {inner}
+        {cmd.label ? <span>{cmd.label}</span> : null}
+      </MenuBtn>
+    );
+  };
+
+  /** 字体下拉（唯一实现：宽档进工具条，窄档下沉 ⋯ 菜单） */
+  const renderFontSelect = (width = '104px') => (
+    <PanelSelect
+      key="sel-font"
+      width={width}
+      title="字体"
+      value={FONT_OPTIONS.includes(rfFont) ? rfFont : FONT_OPTIONS[0]}
+      onChange={(e) => editor?.chain().focus().setRunFormat({ font: e.target.value }).run()}
+    >
+      {FONT_OPTIONS.map((f) => (
+        <option key={f} value={f}>
+          {f}
+        </option>
+      ))}
+    </PanelSelect>
+  );
+
+  /** 字号下拉（唯一实现：宽档进工具条，窄档下沉 ⋯ 菜单） */
+  const renderSizeSelect = (width = '58px') => (
+    <PanelSelect
+      key="sel-size"
+      width={width}
+      title="字号"
+      value={rfSize ? Number(rfSize) / 2 : 12}
+      onChange={(e) => editor?.chain().focus().setRunFormat({ sizeHalfPoints: Number(e.target.value) * 2 }).run()}
+    >
+      {FONT_SIZES.map((s) => (
+        <option key={s} value={s}>
+          {s}
+        </option>
+      ))}
+    </PanelSelect>
+  );
+
+  /** 段落样式下拉（唯一实现：宽档进工具条，窄档下沉 ⋯ 菜单） */
+  const renderStyleSelect = (width = '78px') => (
+    <PanelSelect
+      key="sel-style"
+      width={width}
+      title="段落样式"
+      value={styleValue}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v === 'p') editor?.chain().focus().setParagraph().run();
+        else editor?.chain().focus().toggleHeading({ level: Number(v.slice(1)) }).run();
+      }}
+    >
+      <option value="p">正文</option>
+      <option value="h1">标题 1</option>
+      <option value="h2">标题 2</option>
+      <option value="h3">标题 3</option>
+    </PanelSelect>
+  );
+
+  /** 对齐方式：四种对齐收成 1 个下拉（常驻工具条，任何宽度都有） */
+  const renderAlignSelect = () => (
+    <PanelSelect
+      key="sel-align"
+      width="82px"
+      title="对齐方式"
+      value={ALIGN_OPTIONS.find((a) => isAlign(a.v))?.v ?? 'left'}
+      onChange={(e) => editor?.chain().focus().setTextAlign(e.target.value as AlignValue).run()}
+    >
+      {ALIGN_OPTIONS.map((a) => (
+        <option key={a.v} value={a.v}>
+          {a.label}
+        </option>
+      ))}
+    </PanelSelect>
+  );
+
+  /** 列表类型：项目符号 / 编号 收成 1 个下拉（常驻工具条，任何宽度都有） */
+  const renderListSelect = () => (
+    <PanelSelect
+      key="sel-list"
+      width="78px"
+      title="列表类型"
+      value={liKind ?? ''}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v === 'bullet') editor?.chain().focus().toggleBulletList().run();
+        else if (v === 'ordered') editor?.chain().focus().toggleNumberedList().run();
+        else if (liKind === 'bullet') editor?.chain().focus().toggleBulletList().run();
+        else if (liKind === 'ordered') editor?.chain().focus().toggleNumberedList().run();
+      }}
+    >
+      <option value="">无列表</option>
+      <option value="bullet">• 项目符号</option>
+      <option value="ordered">1. 编号</option>
+    </PanelSelect>
+  );
+
+  /** 字体颜色（唯一实现，落在 ⋯ 菜单字体区；低频不上工具条） */
+  const renderColorInput = () => (
+    <label
+      key="color"
+      className="relative inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
+      title="字体颜色"
+    >
+      <span
+        className="text-12 font-semibold leading-none"
+        style={{
+          color: rfColor ? `#${rfColor}` : 'var(--ink)',
+          boxShadow: `inset 0 -2px 0 0 ${rfColor ? `#${rfColor}` : 'var(--ink)'}`,
+        }}
+      >
+        A
+      </span>
+      <input
+        type="color"
+        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        value={rfColor ? `#${rfColor}` : '#000000'}
+        onChange={(e) =>
+          editor?.chain().focus().setRunFormat({ color: e.target.value.replace('#', '').toUpperCase() }).run()
+        }
+      />
+    </label>
+  );
+
+  /** 段落度量字段（缩进 / 段间距 / 行距）—— 低频，只住 ⋯ 菜单 */
+  const renderParaFields = () => (
+    <>
+      <div className="mt-1 grid grid-cols-2 gap-2">
+        <ParaField label="左缩进 (pt)">
+          <input
+            className={NUM_INPUT_CLS}
+            type="number"
+            min={0}
+            step={1}
+            value={curIndentLeftPt || ''}
+            onChange={(e) =>
+              editor?.chain().focus().setParaFormat({ indentLeft: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
+            }
+          />
+        </ParaField>
+        <ParaField label="首行 (pt，负值悬挂)">
+          <input
+            className={NUM_INPUT_CLS}
+            type="number"
+            step={1}
+            value={curFirstLinePt || ''}
+            onChange={(e) =>
+              editor?.chain().focus().setParaFormat({ indentFirstLine: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
+            }
+          />
+        </ParaField>
+        <ParaField label="段前 (pt)">
+          <input
+            className={NUM_INPUT_CLS}
+            type="number"
+            min={0}
+            step={1}
+            value={curSpaceBeforePt || ''}
+            onChange={(e) =>
+              editor?.chain().focus().setParaFormat({ spaceBefore: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
+            }
+          />
+        </ParaField>
+        <ParaField label="段后 (pt)">
+          <input
+            className={NUM_INPUT_CLS}
+            type="number"
+            min={0}
+            step={1}
+            value={curSpaceAfterPt || ''}
+            onChange={(e) =>
+              editor?.chain().focus().setParaFormat({ spaceAfter: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
+            }
+          />
+        </ParaField>
+      </div>
+      <div className="mt-2">
+        <ParaField label="行距">
+          <PanelSelect
+            full
+            title="行距"
+            value={curLineSpacing != null ? String(curLineSpacing) : ''}
+            onChange={(e) =>
+              editor?.chain().focus().setParaFormat({ lineSpacing: e.target.value === '' ? null : Number(e.target.value) }).run()
+            }
+          >
+            <option value="">默认</option>
+            <option value="1">单倍</option>
+            <option value="1.15">1.15</option>
+            <option value="1.5">1.5 倍</option>
+            <option value="2">2 倍</option>
+            <option value="2.5">2.5 倍</option>
+            <option value="3">3 倍</option>
+          </PanelSelect>
+        </ParaField>
+      </div>
+    </>
+  );
+
+  /** ⋯ 菜单：按分区 + 行号渲染命令（工具条不消费 menu 级命令，故两者永不重复） */
+  const renderMenuRow = (group: DocxGroup, row = 1) => (
+    <MenuRow>
+      {commandsOfGroup(group)
+        .filter((c) => (c.row ?? 1) === row)
+        .map((c) => renderCmd(c, 'menu'))}
+    </MenuRow>
+  );
+
+  /** 一个分区内的命令按 row 拆成多行渲染 */
+  const renderMenuRows = (group: DocxGroup) => {
+    const rows = Array.from(new Set(commandsOfGroup(group).map((c) => c.row ?? 1))).sort((a, b) => a - b);
+    return rows.map((r) => (
+      <MenuRow key={`${group}-${r}`}>
+        {commandsOfGroup(group)
+          .filter((c) => (c.row ?? 1) === r)
+          .map((c) => renderCmd(c, 'menu'))}
+      </MenuRow>
+    ));
+  };
+
   return (
     <div ref={attachRoot} style={rootStyle} className={hideRev ? 'docx-hide-rev' : undefined}>
       {/* ============ 面板标题栏（32px）：身份 + 保存态 + 全局动作 ============ */}
@@ -1349,305 +1686,37 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
               className="docx-pop absolute right-0 top-[26px] z-50 w-[268px] overflow-auto rounded-xl border border-[var(--line)] bg-white p-2"
               style={{ maxHeight: '68vh', boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.16))' }}
             >
-              <MenuSection label="插入">
-                <MenuRow>
-                  <MenuBtn title="插入表格" wide onClick={() => { handleInsertTable(); setMenuOpen(false); }}>
-                    <Table className="h-3.5 w-3.5" />表格
-                  </MenuBtn>
-                  <MenuBtn title="插入图片" wide onClick={() => { handleInsertImageClick(); setMenuOpen(false); }}>
-                    <FileImage className="h-3.5 w-3.5" />图片
-                  </MenuBtn>
-                </MenuRow>
-              </MenuSection>
+              <MenuSection label="插入">{renderMenuRows('insert')}</MenuSection>
 
               <MenuSection label="字体">
+                {/* 宽档下字体 / 字号已在工具条常驻，此处不再渲染（去重） */}
+                {wide ? null : (
+                  <MenuRow>
+                    {renderFontSelect()}
+                    {renderSizeSelect('58px')}
+                  </MenuRow>
+                )}
                 <MenuRow>
-                  <PanelSelect
-                    width="104px"
-                    title="字体"
-                    value={FONT_OPTIONS.includes(rfFont) ? rfFont : FONT_OPTIONS[0]}
-                    onChange={(e) => editor?.chain().focus().setRunFormat({ font: e.target.value }).run()}
-                  >
-                    {FONT_OPTIONS.map((f) => (
-                      <option key={f} value={f}>{f}</option>
-                    ))}
-                  </PanelSelect>
-                  <PanelSelect
-                    width="58px"
-                    title="字号"
-                    value={rfSize ? Number(rfSize) / 2 : 12}
-                    onChange={(e) =>
-                      editor?.chain().focus().setRunFormat({ sizeHalfPoints: Number(e.target.value) * 2 }).run()
-                    }
-                  >
-                    {FONT_SIZES.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </PanelSelect>
-                </MenuRow>
-                <MenuRow>
-                  <MenuBtn title="加粗（⌘B）" active={editor?.isActive('strong')} onClick={() => editor?.chain().focus().toggleMark('strong').run()}>
-                    <span className="text-12 font-bold leading-none">B</span>
-                  </MenuBtn>
-                  <MenuBtn title="斜体（⌘I）" active={editor?.isActive('em')} onClick={() => editor?.chain().focus().toggleMark('em').run()}>
-                    <span className="text-12 italic leading-none">I</span>
-                  </MenuBtn>
-                  <MenuBtn title="下划线（⌘U）" active={editor?.isActive('underline')} onClick={() => editor?.chain().focus().toggleMark('underline').run()}>
-                    <span className="text-12 underline leading-none">U</span>
-                  </MenuBtn>
-                  <MenuBtn title="删除线" active={editor?.isActive('strike')} onClick={() => editor?.chain().focus().toggleMark('strike').run()}>
-                    <span className="text-12 line-through leading-none">S</span>
-                  </MenuBtn>
-                  <MenuBtn title="上标" active={curVertAlign === 'superscript'} onClick={() => editor?.chain().focus().setVertAlign('superscript').run()}>
-                    <Superscript className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="下标" active={curVertAlign === 'subscript'} onClick={() => editor?.chain().focus().setVertAlign('subscript').run()}>
-                    <Subscript className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <label
-                    className="relative inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-[var(--paper-hover)]"
-                    title="字体颜色"
-                  >
-                    <span
-                      className="text-12 font-semibold leading-none"
-                      style={{
-                        color: rfColor ? `#${rfColor}` : 'var(--ink)',
-                        boxShadow: `inset 0 -2px 0 0 ${rfColor ? `#${rfColor}` : 'var(--ink)'}`,
-                      }}
-                    >
-                      A
-                    </span>
-                    <input
-                      type="color"
-                      className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                      value={rfColor ? `#${rfColor}` : '#000000'}
-                      onChange={(e) =>
-                        editor?.chain().focus().setRunFormat({ color: e.target.value.replace('#', '').toUpperCase() }).run()
-                      }
-                    />
-                  </label>
+                  {commandsOfGroup('font').map((c) => renderCmd(c, 'menu'))}
+                  {renderColorInput()}
                 </MenuRow>
               </MenuSection>
 
               <MenuSection label="段落">
-                <MenuRow>
-                  <MenuBtn title="左对齐" active={isAlign('left')} onClick={() => editor?.chain().focus().setTextAlign('left').run()}>
-                    <AlignLeft className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="居中" active={isAlign('center')} onClick={() => editor?.chain().focus().setTextAlign('center').run()}>
-                    <AlignCenter className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="右对齐" active={isAlign('right')} onClick={() => editor?.chain().focus().setTextAlign('right').run()}>
-                    <AlignRight className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="两端对齐" active={isAlign('justify')} onClick={() => editor?.chain().focus().setTextAlign('justify').run()}>
-                    <AlignJustify className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <ToolSep />
-                  <MenuBtn title="项目符号列表" active={liKind === 'bullet'} onClick={() => editor?.chain().focus().toggleBulletList().run()}>
-                    <List className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="编号列表" active={liKind === 'ordered'} onClick={() => editor?.chain().focus().toggleNumberedList().run()}>
-                    <ListOrdered className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="增加列表缩进" onClick={() => editor?.chain().focus().increaseListLevel().run()}>
-                    <IndentIncrease className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                  <MenuBtn title="减少列表缩进" onClick={() => editor?.chain().focus().decreaseListLevel().run()}>
-                    <IndentDecrease className="h-3.5 w-3.5" />
-                  </MenuBtn>
-                </MenuRow>
-                <div className="mt-1 grid grid-cols-2 gap-2">
-                  <ParaField label="左缩进 (pt)">
-                    <input
-                      className={NUM_INPUT_CLS}
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={curIndentLeftPt || ''}
-                      onChange={(e) =>
-                        editor?.chain().focus().setParaFormat({ indentLeft: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
-                      }
-                    />
-                  </ParaField>
-                  <ParaField label="首行 (pt，负值悬挂)">
-                    <input
-                      className={NUM_INPUT_CLS}
-                      type="number"
-                      step={1}
-                      value={curFirstLinePt || ''}
-                      onChange={(e) =>
-                        editor?.chain().focus().setParaFormat({ indentFirstLine: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
-                      }
-                    />
-                  </ParaField>
-                  <ParaField label="段前 (pt)">
-                    <input
-                      className={NUM_INPUT_CLS}
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={curSpaceBeforePt || ''}
-                      onChange={(e) =>
-                        editor?.chain().focus().setParaFormat({ spaceBefore: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
-                      }
-                    />
-                  </ParaField>
-                  <ParaField label="段后 (pt)">
-                    <input
-                      className={NUM_INPUT_CLS}
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={curSpaceAfterPt || ''}
-                      onChange={(e) =>
-                        editor?.chain().focus().setParaFormat({ spaceAfter: e.target.value === '' ? null : Number(e.target.value) * 20 }).run()
-                      }
-                    />
-                  </ParaField>
-                </div>
-                <div className="mt-2">
-                  <ParaField label="行距">
-                    <PanelSelect
-                      full
-                      title="行距"
-                      value={curLineSpacing != null ? String(curLineSpacing) : ''}
-                      onChange={(e) =>
-                        editor?.chain().focus().setParaFormat({ lineSpacing: e.target.value === '' ? null : Number(e.target.value) }).run()
-                      }
-                    >
-                      <option value="">默认</option>
-                      <option value="1">单倍</option>
-                      <option value="1.15">1.15</option>
-                      <option value="1.5">1.5 倍</option>
-                      <option value="2">2 倍</option>
-                      <option value="2.5">2.5 倍</option>
-                      <option value="3">3 倍</option>
-                    </PanelSelect>
-                  </ParaField>
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-1">
-                  <MenuBtn title="在当前段前插入 / 取消分页符" active={curPageBreak} wide onClick={() => editor?.chain().focus().setPageBreak().run()}>
-                    <SeparatorHorizontal className="h-3.5 w-3.5" />分页符
-                  </MenuBtn>
-                  <MenuBtn
-                    wide
-                    title="清除格式"
-                    onClick={() =>
-                      editor
-                        ?.chain()
-                        .focus()
-                        .unsetAllMarks()
-                        .setParaFormat({
-                          align: null,
-                          spaceBefore: null,
-                          spaceAfter: null,
-                          indentLeft: null,
-                          indentFirstLine: null,
-                          lineSpacing: null,
-                          pageBreakBefore: null,
-                        })
-                        .run()
-                    }
-                  >
-                    <Eraser className="h-3.5 w-3.5" />清除格式
-                  </MenuBtn>
-                </div>
+                {/* 窄档下样式下拉下沉到这里（宽档在工具条） */}
+                {wide ? null : <MenuRow>{renderStyleSelect()}</MenuRow>}
+                {renderMenuRow('paragraph', 1)}
+                {renderParaFields()}
+                {renderMenuRow('paragraph', 2)}
               </MenuSection>
 
-              {inTable ? (
-                <MenuSection label="表格">
-                  <MenuRow>
-                    <MenuBtn wide title="在下方插入行" onClick={() => editor?.chain().focus().addRowAfter().run()}>
-                      <Rows3 className="h-3.5 w-3.5" />增行
-                    </MenuBtn>
-                    <MenuBtn wide title="删除当前行" onClick={() => editor?.chain().focus().deleteRow().run()}>
-                      <Rows3 className="h-3.5 w-3.5" />删行
-                    </MenuBtn>
-                  </MenuRow>
-                  <MenuRow>
-                    <MenuBtn wide title="在右侧插入列" onClick={() => editor?.chain().focus().addColumnAfter().run()}>
-                      <Columns3 className="h-3.5 w-3.5" />增列
-                    </MenuBtn>
-                    <MenuBtn wide title="删除当前列" onClick={() => editor?.chain().focus().deleteColumn().run()}>
-                      <Columns3 className="h-3.5 w-3.5" />删列
-                    </MenuBtn>
-                  </MenuRow>
-                </MenuSection>
-              ) : null}
+              {inTable ? <MenuSection label="表格">{renderMenuRows('table')}</MenuSection> : null}
 
-              <MenuSection label="剪贴板">
-                <MenuRow>
-                  <MenuBtn
-                    wide
-                    title="粘贴（也可直接用 ⌘V）"
-                    onClick={() => {
-                      editor?.commands.focus();
-                      try {
-                        document.execCommand('paste');
-                      } catch {
-                        /* 浏览器可能限制脚本粘贴，用户可用快捷键 */
-                      }
-                    }}
-                  >
-                    <ClipboardPaste className="h-3.5 w-3.5" />粘贴
-                  </MenuBtn>
-                  <MenuBtn
-                    wide
-                    title="剪切"
-                    onClick={() => {
-                      editor?.commands.focus();
-                      document.execCommand('cut');
-                    }}
-                  >
-                    <Scissors className="h-3.5 w-3.5" />剪切
-                  </MenuBtn>
-                  <MenuBtn
-                    wide
-                    title="复制"
-                    onClick={() => {
-                      editor?.commands.focus();
-                      document.execCommand('copy');
-                    }}
-                  >
-                    <Copy className="h-3.5 w-3.5" />复制
-                  </MenuBtn>
-                </MenuRow>
-              </MenuSection>
+              <MenuSection label="剪贴板">{renderMenuRows('clipboard')}</MenuSection>
 
-              <MenuSection label="视图">
-                <MenuRow>
-                  <MenuBtn wide title="显示 / 隐藏标尺" active={showRuler} onClick={() => setShowRuler((v) => !v)}>
-                    <Ruler className="h-3.5 w-3.5" />标尺
-                  </MenuBtn>
-                  <MenuBtn wide title="编辑页眉页脚" active={hfEdit} onClick={() => setHfEdit((v) => !v)}>
-                    <Pilcrow className="h-3.5 w-3.5" />
-                    {hfEdit ? '完成页眉页脚' : '编辑页眉页脚'}
-                  </MenuBtn>
-                </MenuRow>
-                <MenuRow>
-                  <MenuBtn wide title="导航窗格：即将支持" disabled>
-                    <PanelRight className="h-3.5 w-3.5" />导航窗格
-                  </MenuBtn>
-                  <MenuBtn wide title="批注：即将支持" disabled>
-                    <MessageSquare className="h-3.5 w-3.5" />批注
-                  </MenuBtn>
-                </MenuRow>
-              </MenuSection>
+              <MenuSection label="视图">{renderMenuRows('view')}</MenuSection>
 
-              <MenuSection label="文件">
-                <MenuRow>
-                  <MenuBtn wide title="用系统默认程序打开" disabled={loading || !fileInfo.full_path} onClick={() => { void handleOpenExternal(); setMenuOpen(false); }}>
-                    <ExternalLink className="h-3.5 w-3.5" />外部打开
-                  </MenuBtn>
-                  <MenuBtn wide title="转为 Markdown 存入 homework" disabled={loading || converting} onClick={() => { void handleConvertToMd(); setMenuOpen(false); }}>
-                    <FileDown className="h-3.5 w-3.5" />转 MD
-                  </MenuBtn>
-                  <MenuBtn wide title="重新载入原文件（放弃未保存改动）" disabled={loading} onClick={() => { handleReload(); setMenuOpen(false); }}>
-                    <RotateCcw className="h-3.5 w-3.5" />重载
-                  </MenuBtn>
-                </MenuRow>
-              </MenuSection>
+              <MenuSection label="文件">{renderMenuRows('file')}</MenuSection>
 
               <div className="mt-1 flex items-start gap-1.5 rounded-md px-1.5 py-1 text-10" style={{ color: 'var(--ink-faint)' }}>
                 <Info className="mt-px h-3 w-3 shrink-0" />
@@ -1658,95 +1727,32 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
         </div>
       </div>
 
-      {/* ============ 单行工具条（36px）：高频命令常驻，其余全在 ⋯ 里 ============ */}
+      {/* ============ 单行工具条（36px）：宽档 9 控件 / 窄档 6 控件，其余全在 ⋯ 里 ============ */}
       <div
         className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--line-soft)] bg-white px-2"
         style={toolbarStyle}
       >
         {wide ? (
           <>
-            <PanelSelect
-              width="104px"
-              title="字体"
-              value={FONT_OPTIONS.includes(rfFont) ? rfFont : FONT_OPTIONS[0]}
-              onChange={(e) => editor?.chain().focus().setRunFormat({ font: e.target.value }).run()}
-            >
-              {FONT_OPTIONS.map((f) => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-            </PanelSelect>
-            <PanelSelect
-              width="56px"
-              title="字号"
-              value={rfSize ? Number(rfSize) / 2 : 12}
-              onChange={(e) => editor?.chain().focus().setRunFormat({ sizeHalfPoints: Number(e.target.value) * 2 }).run()}
-            >
-              {FONT_SIZES.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </PanelSelect>
+            {renderFontSelect('104px')}
+            {renderSizeSelect('56px')}
+            <ToolSep />
           </>
         ) : null}
 
-        <ToolBtn title="加粗（⌘B）" active={editor?.isActive('strong')} onClick={() => editor?.chain().focus().toggleMark('strong').run()}>
-          <span className="text-12 font-bold leading-none">B</span>
-        </ToolBtn>
-        <ToolBtn title="斜体（⌘I）" active={editor?.isActive('em')} onClick={() => editor?.chain().focus().toggleMark('em').run()}>
-          <span className="text-12 italic leading-none">I</span>
-        </ToolBtn>
-        <ToolBtn title="下划线（⌘U）" active={editor?.isActive('underline')} onClick={() => editor?.chain().focus().toggleMark('underline').run()}>
-          <span className="text-12 underline leading-none">U</span>
-        </ToolBtn>
-        <ToolBtn title="删除线" active={editor?.isActive('strike')} onClick={() => editor?.chain().focus().toggleMark('strike').run()}>
-          <span className="text-12 line-through leading-none">S</span>
-        </ToolBtn>
+        {/* 行内格式：primary 命令（任何宽度常驻，不再出现在 ⋯ 菜单里） */}
+        {commandsOfTier('primary').map((c) => renderCmd(c, 'tool'))}
 
         <ToolSep />
 
-        <ToolBtn title="左对齐" active={isAlign('left')} onClick={() => editor?.chain().focus().setTextAlign('left').run()}>
-          <AlignLeft className="h-3.5 w-3.5" />
-        </ToolBtn>
-        <ToolBtn title="居中对齐" active={isAlign('center')} onClick={() => editor?.chain().focus().setTextAlign('center').run()}>
-          <AlignCenter className="h-3.5 w-3.5" />
-        </ToolBtn>
-        <ToolBtn title="右对齐" active={isAlign('right')} onClick={() => editor?.chain().focus().setTextAlign('right').run()}>
-          <AlignRight className="h-3.5 w-3.5" />
-        </ToolBtn>
-        <ToolBtn title="两端对齐" active={isAlign('justify')} onClick={() => editor?.chain().focus().setTextAlign('justify').run()}>
-          <AlignJustify className="h-3.5 w-3.5" />
-        </ToolBtn>
+        {/* 对齐 / 列表：四种对齐与两种列表各收成 1 个下拉 */}
+        {renderAlignSelect()}
+        {renderListSelect()}
 
         {wide ? (
           <>
             <ToolSep />
-            <ToolBtn title="项目符号列表" active={liKind === 'bullet'} onClick={() => editor?.chain().focus().toggleBulletList().run()}>
-              <List className="h-3.5 w-3.5" />
-            </ToolBtn>
-            <ToolBtn title="编号列表" active={liKind === 'ordered'} onClick={() => editor?.chain().focus().toggleNumberedList().run()}>
-              <ListOrdered className="h-3.5 w-3.5" />
-            </ToolBtn>
-            <ToolBtn title="增加列表缩进（多级列表）" onClick={() => editor?.chain().focus().increaseListLevel().run()}>
-              <IndentIncrease className="h-3.5 w-3.5" />
-            </ToolBtn>
-            <ToolBtn title="减少列表缩进" onClick={() => editor?.chain().focus().decreaseListLevel().run()}>
-              <IndentDecrease className="h-3.5 w-3.5" />
-            </ToolBtn>
-            <ToolSep />
-            <PanelSelect
-              width="78px"
-              title="样式"
-              value={styleValue}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === 'p') editor?.chain().focus().setParagraph().run();
-                else editor?.chain().focus().toggleHeading({ level: Number(v.slice(1)) }).run();
-              }}
-            >
-              <option value="p">正文</option>
-              <option value="h1">标题 1</option>
-              <option value="h2">标题 2</option>
-              <option value="h3">标题 3</option>
-            </PanelSelect>
+            {renderStyleSelect()}
           </>
         ) : null}
       </div>
@@ -1856,8 +1862,13 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
                   height: paperHeightPx,
                 }}
               >
-                {showRuler ? <div className="docx-vruler" style={{ width: V_RULER_W, flex: '0 0 auto' }} /> : null}
-                <div style={pageStyle} onMouseUp={onEditorMouseUp} onMouseDown={onEditorMouseDown}>
+                {showRuler ? <DocxVRuler height={paperHeightPx} /> : null}
+                <div
+                  ref={paperRef}
+                  style={{ ...pageStyle, minHeight: paperHeightPx }}
+                  onMouseUp={onEditorMouseUp}
+                  onMouseDown={onEditorMouseDown}
+                >
                   <EditorContent editor={editor} style={{ height: '100%' }} />
                 </div>
               </div>
@@ -2135,10 +2146,20 @@ const WIDE_TOOLBAR_MIN = 700;
 const REV_DOCK_MIN = 1100;
 
 const CANVAS_PAD = PANEL_CANVAS_PAD;
-const V_RULER_W = 44;
+/** 竖标尺宽度：对齐 Word 的窄标尺（原 44px 过宽，整条白长带翼得笨重） */
+const V_RULER_W = 20;
 
 const FONT_OPTIONS = ['宋体', '黑体', '微软雅黑', 'Calibri', 'Arial', 'Times New Roman', 'Cambria', '仿宋', '楷体', 'Consolas'];
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 48, 72];
+/** 对齐方式（四种对齐压缩为 1 个下拉，减少常驻控件数） */
+const ALIGN_OPTIONS = [
+  { v: 'left', label: '左对齐' },
+  { v: 'center', label: '居中' },
+  { v: 'right', label: '右对齐' },
+  { v: 'justify', label: '两端对齐' },
+] as const;
+/** 对齐取值类型（与 Tiptap setTextAlign 的入参联合严格对齐） */
+type AlignValue = (typeof ALIGN_OPTIONS)[number]['v'];
 
 /** 下拉框统一样式（与 Button xs 同高同圆角） */
 const SELECT_CLS =
@@ -2149,7 +2170,7 @@ const NUM_INPUT_CLS =
 
 /* ---------------- 标尺（水平）几何常量 ---------------- */
 
-const RULER_H = 22;
+const RULER_H = 20;
 /** 1 英寸 @96dpi（与 PAGE_W/PAGE_H 同一坐标系） */
 const INCH = 96;
 /** 拖拽吸附粒度（pt） */
@@ -2166,39 +2187,39 @@ const rulerStickyStyle: React.CSSProperties = {
   top: 0,
   zIndex: 10,
   height: RULER_H,
-  background: '#fff',
+  /** 页边距区灰（--paper #f7f7f8 与白只差 3%，分段会糊底，故用对比约 9% 的 --paper-hover） */
+  background: 'var(--paper-hover)',
   borderBottom: '1px solid var(--line-soft)',
   overflow: 'hidden',
 };
+/** 标尺上的「文本区」（白）—— 页边距区保留标尺底色灰，形成 Word 那种「灰-白-灰」分段 */
+const rulerTextZoneStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: 0,
+  bottom: 0,
+  background: '#fff',
+};
 const rulerMinorStyle: React.CSSProperties = {
   position: 'absolute',
-  top: RULER_H - 5,
+  top: RULER_H - 4,
   width: 1,
-  height: 5,
+  height: 4,
   background: 'var(--line)',
 };
 const rulerMajorStyle: React.CSSProperties = {
   position: 'absolute',
-  top: RULER_H - 9,
+  top: RULER_H - 8,
   width: 1,
-  height: 9,
+  height: 8,
   background: 'var(--ink-faint)',
 };
 const rulerLabelStyle: React.CSSProperties = {
   position: 'absolute',
   left: 3,
-  top: -1,
+  top: -11,
   fontSize: 9,
   fontWeight: 500,
   color: 'var(--ink-muted)',
-};
-const rulerMarginStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: 0,
-  bottom: 0,
-  width: 0,
-  borderLeft: '1px dashed var(--ink-faint)',
-  opacity: 0.55,
 };
 const rulerPageEdgeStyle: React.CSSProperties = {
   position: 'absolute',
@@ -2397,17 +2418,22 @@ const editorCss = `
 /* 隐藏修订标记：显示最终文本（接受态预览） */
 .docx-hide-rev .docx-rev-ins { color: inherit; background: none; border-bottom: none; }
 .docx-hide-rev .docx-rev-del { color: inherit; background: none; text-decoration: none; }
-/* 视觉分页：页间灰隙（扮演上页下边距 + 页Gap + 下页上边距） */
-.docx-page-spacer { contenteditable: false; position: relative; background: var(--canvas-bg); box-shadow: inset 0 7px 6px -7px rgba(0,0,0,0.22), inset 0 -7px 6px -7px rgba(0,0,0,0.22); }
+/* 视觉分页：间隙外层是白（页底留白 + 上页下边距 + 下页上边距），只在中间挖一条灰缝
+   —— 这样每一页都是完整的 A4 白纸，而不是「一整块画布灰把纸切断」 */
+.docx-page-spacer { contenteditable: false; position: relative; background: #fff; }
+.docx-page-gap { position: absolute; left: 0; right: 0; background: var(--canvas-bg); box-shadow: inset 0 7px 6px -7px rgba(0,0,0,0.22), inset 0 -7px 6px -7px rgba(0,0,0,0.22); }
 /* 每页页码角标（居中于页间灰隙，拟 Word 页脚页码） */
 .docx-page-num { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 11px; color: var(--ink-faint, #71717a); user-select: none; }
-/* 左侧竖标尺 */
+/* 左侧竖标尺：窄条（20px），底色与横标尺同为浅灰，刻度线只贴右边缘向左伸 5px（不遮数字） */
 .docx-vruler {
-  background: #fff;
+  background-color: var(--paper-hover);
   border-right: 1px solid var(--line-soft);
   background-image:
-    repeating-linear-gradient(0deg, var(--line-soft) 0, var(--line-soft) 1px, transparent 1px, transparent 24px),
-    repeating-linear-gradient(0deg, var(--line) 0, var(--line) 1px, transparent 1px, transparent 96px);
+    repeating-linear-gradient(0deg, var(--line) 0, var(--line) 1px, transparent 1px, transparent 24px),
+    repeating-linear-gradient(0deg, var(--ink-faint) 0, var(--ink-faint) 1px, transparent 1px, transparent 96px);
+  background-size: 5px 100%, 9px 100%;
+  background-position: right top, right top;
+  background-repeat: no-repeat, no-repeat;
 }
 /* 查找高亮：普通命中（黄）/ 当前命中（橙） */
 .docx-search-hit { background: rgba(255, 214, 10, 0.42); border-radius: 2px; }
@@ -2768,11 +2794,17 @@ function DocxRuler({
 
   return (
     <div className="docx-ruler" style={{ position: 'relative', height: RULER_H }} aria-hidden>
+      {/* 文本区白底（页边距区保留标尺底色灰）—— 置于刻度之下 */}
+      <span
+        style={{
+          ...rulerTextZoneStyle,
+          left: textLeft,
+          width: (PAGE_W - 2 * PAGE_MARGIN_X) * zoom,
+        }}
+      />
       {ticks}
       <span style={{ ...rulerPageEdgeStyle, left: pageLeft }} />
       <span style={{ ...rulerPageEdgeStyle, left: pageLeft + PAGE_W * zoom }} />
-      <span style={{ ...rulerMarginStyle, left: textLeft }} />
-      <span style={{ ...rulerMarginStyle, left: textRight }} />
       <div
         style={{ ...rulerHandleStyle, top: 0, left: textLeft + firstLinePt * pxPerPt }}
         title="首行缩进（拖拽调整）"
@@ -2789,6 +2821,46 @@ function DocxRuler({
       >
         <span style={rulerTriUp} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * 左侧竖标尺：与水平标尺同一套几何（正文顶 = PAGE_MARGIN_Y），每英寸一个数字。
+ *
+ * 高度由父级 flex（`paperWrapperStyle` 的 `alignItems: stretch`）决定，即 `paperHeightPx`
+ * 的**未缩放**值；因此这里只需按高度生成数字即可。刻度线由 `.docx-vruler` 的
+ * background 贴右边缘向左伸 5px 绘制，数字故右对齐并留 6px 空档，两者不重叠。
+ */
+function DocxVRuler({ height }: { height: number }) {
+  const labels: React.ReactNode[] = [];
+  for (let i = 0; PAGE_MARGIN_Y + i * INCH <= height - 10; i++) {
+    labels.push(
+      <span
+        key={i}
+        style={{
+          position: 'absolute',
+          top: PAGE_MARGIN_Y + i * INCH - 5,
+          left: 0,
+          right: 6,
+          textAlign: 'right',
+          fontSize: 9,
+          lineHeight: '10px',
+          color: 'var(--ink-muted)',
+          userSelect: 'none',
+        }}
+      >
+        {i}
+      </span>,
+    );
+  }
+  return (
+    <div
+      className="docx-vruler"
+      style={{ width: V_RULER_W, flex: '0 0 auto', position: 'relative' }}
+      aria-hidden
+    >
+      {labels}
     </div>
   );
 }
