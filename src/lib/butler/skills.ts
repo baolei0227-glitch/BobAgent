@@ -16,6 +16,7 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 import matter from 'gray-matter';
 import { butlerRoot, ensureDir, dateStamp } from './storage';
+import { atomicWriteFile, createLock } from './fs-atomic';
 import {
   normalizeGrants,
   type CreateSkillInput,
@@ -222,31 +223,14 @@ export function parseSkill(raw: string): SkillRecord | null {
 
 // ==================== 读写原语 ====================
 
-/** skills 读-改-写串行化（多请求并发改同一技能时避免互相覆盖） */
-let _skillsLock: Promise<void> = Promise.resolve();
-
-/** 以串行锁包裹一段「读-改-写」临界区 */
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = _skillsLock;
-  let release: () => void = () => {};
-  _skillsLock = (async () => {
-    if (prev) await prev;
-    await new Promise<void>((res) => { release = res; });
-  })();
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
+/** skills 读-改-写串行化（多请求并发改同一技能时避免互相覆盖）。
+ *  锁与原子写原语统一取自 `./fs-atomic`（2026-10-02 评审：此前 5 份副本各自演化）。 */
+const withLock = createLock();
 
 /** 原子写一个技能文件（先写 tmp 再 rename，避免并发读-改-写写出半截文件） */
 async function writeSkillFile(skill: SkillRecord): Promise<void> {
   await ensureDir(skillsRoot());
-  const target = skillFilePath(skill.id);
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, serializeSkill(skill), 'utf-8');
-  await fs.rename(tmp, target);
+  await atomicWriteFile(skillFilePath(skill.id), serializeSkill(skill));
 }
 
 /** 读一条技能；不存在 / id 非法 / 解析失败 → null */

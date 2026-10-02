@@ -10,6 +10,7 @@
  */
 import { promises as fs } from 'fs';
 import { join } from 'path';
+import { atomicWriteFile } from './fs-atomic';
 
 /** 追加便签入参 */
 export interface AppendStickyTodoInput {
@@ -114,11 +115,9 @@ export async function appendStickyTodoNote(input: AppendStickyTodoInput): Promis
   // AI 静默创建的便签行不带事件锚点；行会在用户「结算」便签时自动入日历（2026-09-21 起语义）
   const arrToWrite = notes.map((nn) => normalizeStickyNote(nn as unknown as Record<string, unknown>));
 
-  // 原子写入：先写临时文件再 rename，避免半写状态。临时名唯一：并发写时不共用固定 tmp 名。
+  // 原子写入：先写临时文件再 rename，避免半写状态（统一走 fs-atomic：随机后缀 + 失败重试 + tmp 清理）
   await fs.mkdir(stickyDir, { recursive: true });
-  const tmp = join(stickyDir, `.sticky-notes.json.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
-  await fs.writeFile(tmp, JSON.stringify({ notes: arrToWrite }, null, 2), 'utf-8');
-  await fs.rename(tmp, stickyFile);
+  await atomicWriteFile(stickyFile, JSON.stringify({ notes: arrToWrite }, null, 2));
 
   // 同步未完成待办索引（todo-index.json）；失败仅影响索引命中，回退全量扫描可自愈
   try {

@@ -29,7 +29,9 @@ export function openButlerToday(): void {
   window.dispatchEvent(new Event(BUTLER_TODAY_EVENT));
 }
 
-/** 唤起记忆面板 */
+/** 唤起记忆台（Memory；原名「记忆面板」/ Customize）。
+ *  2026-10-02 改名只动了 UI 文案，**事件名与函数名保持不变**，避免打断既有调用方
+ *  （落到 section='memories'，由面板带 initialSection='memories' 打开）。 */
 export function openButlerMemories(): void {
   window.dispatchEvent(new Event(BUTLER_MEMORIES_EVENT));
 }

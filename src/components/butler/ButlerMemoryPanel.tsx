@@ -349,6 +349,11 @@ export function ButlerMemoryPanel({ onClose, embedded }: ButlerMemoryPanelProps)
                         {p.createdAt && (
                           <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>{p.createdAt}</span>
                         )}
+                        {/* 来源（2026-10-02 补）：记忆是**自动抽取**的，用户有权知道「这条是怎么来的」
+                            —— source 目前是通道标记（chat / 其它写入方），真源见 UserPreference.source。 */}
+                        {p.source && (
+                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>via {p.source}</span>
+                        )}
                         <span style={{ flex: 1 }} />
                         <button type="button" onClick={() => startEdit(p)} style={smallBtn}>
                           Edit
@@ -368,6 +373,13 @@ export function ButlerMemoryPanel({ onClose, embedded }: ButlerMemoryPanelProps)
                           </button>
                         )}
                       </div>
+                      {/* 档 2（不可逆）的**后果明示**（《Butler-Memory设计》§0.3）：
+                          删除是真删（整块从 preferences.md 移除），且会影响**所有**联系人。 */}
+                      {pendingDelete === p.index && (
+                        <div style={{ fontSize: 12, color: 'var(--danger)', marginTop: 4 }}>
+                          Permanently removed from the memory file — every contact forgets it. Not undoable.
+                        </div>
+                      )}
                     </>
                   )}
                 </div>

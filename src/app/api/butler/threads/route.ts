@@ -133,6 +133,8 @@ export async function GET(request: NextRequest) {
         // 会话级选型：抽屉切换联系人时用它回填模型下拉 / 档位（null = 未选 → 自动 / 默认档）
         modelId: thread.modelId ?? null,
         thinkingLevel: thread.thinkingLevel ?? null,
+        // 会话级工作区：切联系人时回填「锁定操作范围」pill（null = 未指定）
+        workspaceFolder: thread.workspaceFolder ?? null,
         messages: rows.map((r) => r.m),
         times: rows.map((r) => r.t),
         // 逐条消息在**服务端 messages 数组**里的下标（与 messages 同序同长），前端拿它拼气泡 id。

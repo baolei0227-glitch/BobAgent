@@ -19,6 +19,7 @@ import { bus, BusEvents, type ButlerExecutingPayload, type ButlerNoticeItem, typ
 import { desktop } from '@/lib/desktop-adapter';
 import { getCurrentProjectId } from '@/lib/current-project';
 import { BUTLER_INBOX_EVENT, BUTLER_FOCUS_NOTICE_EVENT, notifyButlerUnreadChanged } from './butlerEvents';
+import { readActiveThreadId } from './butlerSession';
 import {
   getButlerNotices,
   patchButlerNotice,
@@ -64,6 +65,27 @@ export function kindMeta(kind: string): { Icon: typeof Zap; color: string; label
 function openNoticeFromDesktop(noticeId: string): void {
   window.dispatchEvent(new CustomEvent(BUTLER_INBOX_EVENT, { detail: { anchor: null } }));
   window.dispatchEvent(new CustomEvent(BUTLER_FOCUS_NOTICE_EVENT, { detail: { noticeId } }));
+}
+
+/**
+ * B5 打扰闸（2026-10-02 接线）：弹 toast / 系统通知前问一句服务端「现在能不能打扰」。
+ *
+ * 为什么必须服务端裁决：免打扰窗口与单日计数是**同一份状态**（`butler/notify-state.json`），
+ * 客户端自己算会各算一份。策略层故障**失败即放行**（fail-open）——静默掉通知比多打扰一次严重。
+ * 与落库完全解耦：被拒时条目照常进抽屉收件箱，只是不打扰（报告不会丢）。
+ */
+async function allowInterrupt(kind: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/butler/push-gate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind }),
+    });
+    const d = (await res.json()) as { allow?: boolean };
+    return d?.allow !== false;
+  } catch {
+    return true;
+  }
 }
 
 function sendDesktopNotification(title: string, body: string, opts?: { noticeId?: string }): void {
@@ -162,10 +184,15 @@ export function ButlerNoticeHost() {
       // （2s 内才算新发布），否则重启后把 pending.json 里的历史重放一遍会连弹一屏。
       // desktop=false 只约束**系统**通知，不拦应用内浮层（日报这类本就不发系统通知，但仍该在应用内提示）。
       const fresh = payload.time == null || Date.now() - unifiedTime < 2000;
-      if (fresh) pushToast(payload);
-      if (payload.desktop !== false && fresh) {
-        sendDesktopNotification(payload.title, payload.body, { noticeId: localId });
-      }
+      // 打扰闸与落库解耦：先同步落库（fire-and-forget），打扰另起一条异步链，避免一次鉴权往返拖慢落库。
+      void (async () => {
+        const mayInterrupt = payload.interrupt === 'always' ? true : await allowInterrupt(payload.kind);
+        if (!mayInterrupt) return;
+        if (fresh) pushToast(payload);
+        if (payload.desktop !== false && fresh) {
+          sendDesktopNotification(payload.title, payload.body, { noticeId: localId });
+        }
+      })();
 
       // 落库（fire-and-forget）；成功后把内存 id 换成服务端 in- 主键，
       // 否则删除的 DELETE 用 wn- id 会静默 no-op。
@@ -235,6 +262,9 @@ export function ButlerNoticeHost() {
               items: r.items,
               source: 'scheduled',
               dedupeKey: r.dedupeKey,
+              // 服务端（GET /api/butler/daily-report）已按同一策略裁决并计数：
+              // 免打扰窗口内报告**留在队列**、窗口结束后续发。客户端不再二次过闸，否则双重计数。
+              interrupt: 'always',
             });
           }
         }
@@ -276,6 +306,8 @@ export function ButlerNoticeHost() {
               items: r.items,
               action: { type: 'open-calendar' },
               source: 'scheduled',
+              // 用户自订日历提醒：过闸但**免打扰窗口不静默它**（策略层 kind='reminder' 只受单日上限）
+              interrupt: 'gate',
               dedupeKey: r.dedupeKey,
             });
           }
@@ -311,9 +343,32 @@ export function ButlerNoticeHost() {
         const res = await fetch('/api/butler/tick', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId: getCurrentProjectId() || undefined }),
+          // threadId = 当前抽屉会话（评审 P2-⑱）：预算计数依赖它，不带则定时链路永不扣预算。
+          body: JSON.stringify({
+            projectId: getCurrentProjectId() || undefined,
+            threadId: readActiveThreadId() || undefined,
+          }),
         });
-        const d = (await res.json()) as { success?: boolean; notice?: string | null };
+        const d = (await res.json()) as {
+          success?: boolean;
+          notice?: string | null;
+          /** 应用未运行期间错过、且不会补跑的定时实例（评审 §2.2-7：此前是**静默丢失**） */
+          missed?: { ruleName: string; occurrence: number }[] | null;
+        };
+        if (alive && d?.success && Array.isArray(d.missed) && d.missed.length > 0) {
+          // 「漏触发告知」：定时规则到期时应用没开、且超出 24h 补偿窗口 → 明说一句，不假装没发生
+          const names = d.missed.map((m) => m.ruleName).join('、');
+          bus.publish(BusEvents.butlerNotice, {
+            kind: 'info',
+            title: '有定时规则错过的执行',
+            body: `应用未运行期间，「${names}」的触发时刻已过、超出补偿窗口，本次未补跑。需要的话现在可以手动执行一次。`,
+            time: Date.now(),
+            desktop: false,
+            source: 'scheduled',
+            // 与规则执行回执同属**义务性告知**（状态性痕迹，不占预算、不被静默）
+            interrupt: 'always',
+          });
+        }
         if (alive && d?.success && d.notice) {
           bus.publish(BusEvents.butlerNotice, {
             kind: 'task',
@@ -322,6 +377,8 @@ export function ButlerNoticeHost() {
             time: Date.now(),
             desktop: true,
             source: 'scheduled',
+            // 规则执行回执 = **义务性通知**（v6 §3.2：「义务不是打扰」，不占预算、不被静默）→ 不过闸
+            interrupt: 'always',
           });
         }
       } catch {

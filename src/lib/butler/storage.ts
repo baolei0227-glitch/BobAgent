@@ -26,6 +26,7 @@
  */
 import { promises as fs } from 'fs';
 import { existsSync } from 'fs';
+import { atomicWriteFile, createLock } from './fs-atomic';
 import { join } from 'path';
 import { INBOX_DB_FILENAME, resolveAppRoot } from '@/lib/app-root';
 
@@ -109,6 +110,41 @@ export async function ensureDir(p: string): Promise<string> {
   return p;
 }
 
+/**
+ * 回收 `roles.json` 里的**孤儿角色条目**（2026-10-02 评审 P2-⑯）。
+ *
+ * 背景：`roles.json` 是只增不删的注册表（只有 readRoles / writeRoles / 增改），
+ * 而条目与线程文件是「指针 ↔ 实体」关系——线程被删（过期清扫 / `purgeRetiredWechatThread` /
+ * 用户在联系人列删除）后条目仍留着。实测运行实例：10 条角色 vs 3 个活线程，
+ * 含已退役的 `butler-wechat`（Xiao Wei）。
+ *
+ * 清理判据：**线程文件不存在** ⇒ 该条目已无实体可指（联系人列也渲染不出它）。
+ * 三条豁免（不清理）：
+ *   - 三个常驻 id（Bobby / Recorder / 小微）：线程可能只是还没被首次创建（`ensure*Session` 才落盘）；
+ *   - 有线程文件的条目；
+ *   - 非法 id（不是本模块能判定的形态）。
+ * **绝不删除角色目录**：那里面有用户的附件与文档，清条目只是清指针。
+ *
+ * 幂等、可重复调用；返回被清掉的 threadId 列表（供日志/测试）。
+ */
+export async function pruneOrphanRoles(): Promise<string[]> {
+  const RESIDENT = new Set<string>([NOTIFY_THREAD_ID, RECORDER_THREAD_ID, SEARCH_THREAD_ID]);
+  const roles = await readRoles();
+  const ids = Object.keys(roles.threads);
+  if (ids.length === 0) return [];
+
+  const removed: string[] = [];
+  for (const id of ids) {
+    if (RESIDENT.has(id)) continue;
+    if (existsSync(join(threadsDirPath(), `${id}.json`))) continue;
+    delete roles.threads[id];
+    removed.push(id);
+  }
+  if (removed.length === 0) return [];
+  await writeRoles(roles);
+  return removed;
+}
+
 /** 读角色注册表；无文件 / 损坏 → 空表（不让脏数据阻断落盘） */
 export async function readRoles(): Promise<RolesFile> {
   try {
@@ -134,13 +170,12 @@ export async function readRoles(): Promise<RolesFile> {
 /** 写角色注册表（先写 tmp 再 rename，避免并发读-改-写写出半截 JSON） */
 export async function writeRoles(roles: RolesFile): Promise<void> {
   await ensureDir(butlerRoot());
-  const tmp = `${ROLES_FILE}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(roles, null, 2), 'utf-8');
-  await fs.rename(tmp, ROLES_FILE);
+  await atomicWriteFile(ROLES_FILE, JSON.stringify(roles, null, 2));
 }
 
-/** roles.json 读-改-写串行化（多请求并发解析同一 mapping 时避免互相覆盖） */
-let _rolesLock: Promise<void> = Promise.resolve();
+/** roles.json 读-改-写串行化（多请求并发解析同一 mapping 时避免互相覆盖）。
+ *  锁与原子写原语统一取自 `./fs-atomic`（2026-10-02 评审：此前 5 份副本各自演化）。 */
+const withRolesLock = createLock();
 
 /** 只读连接（进程内复用；角色解析是高频轻量操作，不值得每次开库） */
 let _personaDb: import('better-sqlite3').Database | null = null;
@@ -245,14 +280,7 @@ export async function resolveRole(threadId: string | null | undefined): Promise<
     dir = sanitizeRoleName(name);
   }
 
-  const prev = _rolesLock;
-  let release: () => void = () => {};
-  _rolesLock = (async () => {
-    if (prev) await prev;
-    await new Promise<void>((res) => { release = res; });
-  })();
-
-  try {
+  await withRolesLock(async () => {
     const roles = await readRoles();
     const old = roles.threads[id];
     /** 该目录名是否已被**其他** threadId 占用（同名联系人会算出同一个 dir） */
@@ -286,9 +314,7 @@ export async function resolveRole(threadId: string | null | undefined): Promise<
       roles.threads[id] = { name, dir };
       await writeRoles(roles);
     }
-  } finally {
-    release();
-  }
+  });
 
   return { name, dir };
 }

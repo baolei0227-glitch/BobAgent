@@ -20,6 +20,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { listRules } from './rules';
 import { STATE_DIR, ensureDir } from './storage';
+import { atomicWriteFile, createKeyedLock } from './fs-atomic';
 import { ruleObjectType, type RuleRecord } from './rules-shared';
 import {
   generateCandidates,
@@ -196,23 +197,58 @@ async function readResolutions(): Promise<ConflictResolution[]> {
   return out;
 }
 
+/** 预算文件按 threadId 分片，故用**分键锁**：不同会话互不阻塞，同一会话串行。
+ *  （2026-10-02 评审 P2-⑭：此前是**无锁**读-改-写，同毫秒并发会互相覆盖 → 预算可被绕过。） */
+const withBudgetLock = createKeyedLock<string>();
+
+/** 预算目录：`<butler>/.state/rule-budget`（每个会话一个文件） */
+function budgetDir(): string {
+  return join(STATE_DIR, 'rule-budget');
+}
+
+/**
+ * 只读：列出各会话已消耗的「主动冒头预算」（落 `.state/rule-budget/<threadId>.json`）。
+ * 供记忆台的证据视图展示「这个会话还能主动问几次」——**不改行为**。
+ */
+export async function listRuleBudgets(): Promise<{ threadId: string; asks: number }[]> {
+  let names: string[];
+  try {
+    names = await fs.readdir(budgetDir());
+  } catch {
+    return [];
+  }
+  const out: { threadId: string; asks: number }[] = [];
+  for (const n of names) {
+    if (!n.endsWith('.json')) continue;
+    try {
+      const raw = await fs.readFile(join(budgetDir(), n), 'utf-8');
+      const v = JSON.parse(raw) as { asks?: unknown };
+      const asks = typeof v?.asks === 'number' && Number.isFinite(v.asks) ? v.asks : 0;
+      out.push({ threadId: n.slice(0, -'.json'.length), asks });
+    } catch { /* 坏文件跳过（脏数据不阻断视图） */ }
+  }
+  return out.sort((a, b) => b.asks - a.asks);
+}
+
 /** 会话预算：消耗一次（threadId 缺省 → 不落盘、视为有额度） */
 async function consumeBudget(threadId: string | undefined): Promise<boolean> {
   if (!threadId) return true;
-  const dir = join(STATE_DIR, 'rule-budget');
-  const file = join(dir, `${sanitize(threadId)}.json`);
-  let asks = 0;
-  try {
-    const raw = await fs.readFile(file, 'utf-8');
-    const v = JSON.parse(raw) as { asks?: unknown };
-    if (typeof v?.asks === 'number' && Number.isFinite(v.asks)) asks = v.asks;
-  } catch { /* 无文件 → 从 0 计 */ }
-  if (asks >= RULE_ASK_BUDGET) return false;
-  await ensureDir(dir);
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify({ asks: asks + 1 }), 'utf-8');
-  await fs.rename(tmp, file);
-  return true;
+  const dir = budgetDir();
+  // 锁键取 sanitize 后的文件名主干：两个不同 threadId 若 sanitize 成同名文件，也必须串行
+  const key = sanitize(threadId);
+  const file = join(dir, `${key}.json`);
+  return withBudgetLock(key, async () => {
+    let asks = 0;
+    try {
+      const raw = await fs.readFile(file, 'utf-8');
+      const v = JSON.parse(raw) as { asks?: unknown };
+      if (typeof v?.asks === 'number' && Number.isFinite(v.asks)) asks = v.asks;
+    } catch { /* 无文件 → 从 0 计 */ }
+    if (asks >= RULE_ASK_BUDGET) return false;
+    await ensureDir(dir);
+    await atomicWriteFile(file, JSON.stringify({ asks: asks + 1 }));
+    return true;
+  });
 }
 
 function sanitize(key: string): string {

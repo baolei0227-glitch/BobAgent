@@ -12,15 +12,12 @@
  * 本模块 server-only（经 threads 触达文件存储），仅供服务端路由引用。
  */
 import { stripThinkTags } from '@/lib/bus';
-import { countUnreadAssistant } from '@/lib/butler/threads-shared';
+import { countUnreadAssistant, PREVIEW_MAX } from '@/lib/butler/threads-shared';
 import { readThread, upsertThread, type ButlerThreadSummary } from '@/lib/butler/threads';
 import { RECORDER_THREAD_ID, RECORDER_TITLE } from '@/lib/butler/storage';
 
 /** 常驻线程 ID / 显示名真源为 lib/butler/storage.ts，此处再导出保持既有引用可用 */
 export { RECORDER_THREAD_ID, RECORDER_TITLE };
-
-/** 副标题截断上限（与 threads 列表口径一致的单行截断） */
-const PREVIEW_MAX = 64;
 
 /**
  * 常驻会话不存在时建一条空行（幂等）。列表接口先调它——否则「Recorder」在联系人列会时有时无。

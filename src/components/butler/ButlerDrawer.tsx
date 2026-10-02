@@ -8,7 +8,7 @@
  * 现在每个联系人 = 一条会话 = 一个助理，中栏只显示**当前这一个联系人**的消息流。
  *
  * 四栏分工：
- *   - 左栏 48px：**纯图标功能键**（Buddy · Today · Customize · Calendar · Meeting），名字由悬停弹窗给出
+ *   - 左栏 48px：**纯图标功能键**（Buddy · Today · Memory · Calendar · Meeting），名字由悬停弹窗给出
  *   - 联系人列 168px（窄窗收成覆盖层）：**常驻**。置顶行 = 两个常驻联系人：**Bobby**
  *           （通知助理，系统推送类通知的归属）与**Recorder**（会议记录员）；两者都不可删除、
  *           无「人设」入口。其余 = 各会话（头像 / 标题 / 预览 / 时间 / 删除）。点击即切换中栏。
@@ -105,6 +105,7 @@ import {
   Pause,
   Play,
   Repeat,
+  ScanSearch,
   Search,
   Sparkles,
   Square,
@@ -118,15 +119,33 @@ import {
   Volume2,
   X,
 } from 'lucide-react';
-import { stripThinkTags, type ChatMessage, type ButlerNoticeItem, type WechatArticleCard } from '@/lib/bus';
+import {
+  stripThinkTags,
+  type ChatMessage,
+  type ButlerNoticeItem,
+  type WechatArticleCard,
+  type WechatSearchTrace,
+  type WechatSearchTraceItem,
+} from '@/lib/bus';
 /** 周期规则短标签（纯函数，通知详情日程块复用日历面板的文案口径） */
 import { recurrenceLabel, type RecurrenceRule } from '@/lib/calendar/recurrence';
 /** 头像：人物素材 id + 底色都由名字/性格稳定派生（纯函数，见文件注释） */
 import { avatarTint, defaultAvatarId } from '@/lib/butler/avatar';
 import PersonaAvatar from '@/components/butler/PersonaAvatar';
 /** 会话列表项 / 人设 / 思考档位清洗（threads-shared 是纯类型 + 纯函数模块，无 fs，可进客户端包） */
-import { parseThinkingLevel } from '@/lib/butler/threads-shared';
-import type { ButlerPersona, ButlerThreadSummary, ThreadMessageHit } from '@/lib/butler/threads-shared';
+import {
+  ATTACHMENTS_BLOCK_HEAD,
+  WORKSPACE_BLOCK_HEAD,
+  parseThinkingLevel,
+  parseWorkspaceFolder,
+  stripInjectedBlocks,
+} from '@/lib/butler/threads-shared';
+import type {
+  ButlerPersona,
+  ButlerThreadSummary,
+  ButlerWorkspaceFolder,
+  ThreadMessageHit,
+} from '@/lib/butler/threads-shared';
 import {
   buildCommandTextAtLine,
   detectCommand,
@@ -154,6 +173,7 @@ import { VoiceRecordBar, useVoiceInput, appendVoiceText } from '@/components/ui/
 import { ModelBrandLogo, MoonPhaseIcon } from '@/components/canvas/chatNodeKernelParts';
 /** 朗读回复：与上面的语音输入对称的出口（引擎 = 设置里已选中的那一款 TTS） */
 import { stopReadAloud, useReadAloud } from './useReadAloud';
+import { clearActiveThreadId, readActiveThreadId, writeActiveThreadId } from './butlerSession';
 import {
   DEFAULT_THINKING_LEVEL,
   THINKING_LEVELS,
@@ -180,7 +200,7 @@ import { copyText } from '@/components/canvas/chatNodeKernelUtils';
 import LoginDialog from '@/components/canvas/LoginDialog';
 import { kindMeta, loadInboxHistory, watchForUnreadGrowth } from './ButlerNoticeHost';
 import { ButlerTodayPanel } from './ButlerTodayPanel';
-import { ButlerRulesPanel } from './ButlerRulesPanel';
+import { ButlerMemoryConsole } from './ButlerMemoryConsole';
 import { ButlerDocPanel } from './ButlerDocPanel';
 import { ButlerCalendarPanel } from './ButlerCalendarPanel';
 /** 会议模式控制台：会议进行中顶替中栏（顶部条 + 实时字幕流），见该文件注释 */
@@ -223,6 +243,8 @@ interface SessionState {
   modelId: string | null;
   /** null = 未选（回默认档） */
   thinkingLevel: ThinkingLevel | null;
+  /** 会话级工作区（用户指定 · 锁定操作范围）；null = 未指定（见 lib/butler/threads-shared） */
+  workspaceFolder: ButlerWorkspaceFolder | null;
 }
 
 /** 抽屉模型下拉的一项（标签即 `provider:modelId`，与 /api/butler/threads 的 modelId 同构） */
@@ -241,6 +263,8 @@ interface DialogMessage {
   pending?: boolean;
   /** 检索到的文章卡片（仅「小微」搜索综述消息携带；随线程落库，刷新后仍在） */
   cards?: WechatArticleCard[];
+  /** 本轮检索的实况账本（同上随消息落库）；有它 → 气泡下方出现「查看检索实况」入口 */
+  searchTrace?: WechatSearchTrace;
 }
 
 /**
@@ -267,7 +291,7 @@ function timeOfItem(it: TimelineItem): number {
  * 下标只在两条正文逐字相同时帮着认准是哪一条（见 deleteMessages）。
  * 逐条时间由服务端随会话下发（tail_times，见 threads-shared.messageTimeAt）；缺失时退化用 updatedAt。
  */
-/** 取一条会话的**消息 + 会话级选型**（模型 / 思考档位），供切联系人时一并回填。 */
+/** 取一条会话的**消息 + 会话级设置**（模型 / 思考档位 / 工作区），供切联系人时一并回填。 */
 async function fetchSessionState(threadId: string): Promise<SessionState | null> {
   const res = await fetch(`/api/butler/threads?threadId=${encodeURIComponent(threadId)}`);
   if (!res.ok) return null;
@@ -278,22 +302,29 @@ async function fetchSessionState(threadId: string): Promise<SessionState | null>
     indexes?: number[];
     modelId?: string | null;
     thinkingLevel?: string | null;
+    workspaceFolder?: unknown;
   };
   const fallback = data.updatedAt ?? Date.now();
   return {
     messages: (data.messages ?? []).map((m, i) => {
+      const isUser = m.role === 'user';
       const msg: DialogMessage = {
         id: `h-${data.indexes?.[i] ?? i}`,
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: stripThinkTags(m.content),
+        role: isUser ? 'user' : 'assistant',
+        // user 侧再剥一层「注入块」：块随正文落库，重开会话会读回，不剥就会在气泡里
+        // 冒出「--- 工作区 … ---」机器文案（刚发出去那条用的是干净原文，两条路径要一致）。
+        content: isUser ? stripInjectedBlocks(stripThinkTags(m.content)) : stripThinkTags(m.content),
         time: data.times?.[i] ?? fallback,
       };
       // 小微搜索综述自带文章卡片（落库字段）→ 透传到时间线渲染
       if (m.cards?.length) msg.cards = m.cards;
+      // 检索实况账本（落库字段）→ 气泡下方「查看检索实况」入口据此渲染；账本随消息生死
+      if (m.searchTrace?.items?.length) msg.searchTrace = m.searchTrace;
       return msg;
     }),
     modelId: typeof data.modelId === 'string' ? data.modelId : null,
     thinkingLevel: parseThinkingLevel(data.thinkingLevel),
+    workspaceFolder: parseWorkspaceFolder(data.workspaceFolder),
   };
 }
 
@@ -335,32 +366,36 @@ async function uploadButlerAttachment(threadId: string | null, file: File): Prom
  * 路径用附件自身的 `path`（Butler 侧是绝对路径），并显式提示模型用 read_attachment 读取、
  * 勿向用户索要；否则模型看到陌生绝对路径会倾向先反问「请把文件发我」。
  *
- * 目录类附件（`type:'folder'`）是**例外**：它只有路径、没有正文，read_attachment 直读会
- * EISDIR。分两种提示——含目录时先 list_directory 看内容再 read_file 取正文，纯文件时维持
- * 原提示。混发（文件 + 目录）时只出目录版：它同时覆盖了文件的取法，不至于让模型漏读目录。
+ * ⚠️ 目录**不走这里**：目录是**会话级工作区**（常驻、每轮注入，见 workspaceBlock），
+ * 不混进本轮附件列表——否则模型会把「本会话的操作范围」误当成「这条消息带的一份资料」。
  */
 function attachmentBlock(atts: MessageAttachment[]): string {
   if (atts.length === 0) return '';
-  const hasFolder = atts.some((a) => a.type === 'folder');
   const lines = atts
     .map((a, i) => {
-      const kind =
-        a.type === 'text'
-          ? 'Text'
-          : a.type === 'image'
-            ? 'Image'
-            : a.type === 'folder'
-              ? 'Folder'
-              : 'File';
-      // 目录不计体积（size 恒 0），写「directory」避免模型把它当成空文件
-      const size = a.type === 'folder' ? 'directory' : formatFileSize(a.size);
-      return `  ${i + 1}. ${a.name} (${kind}, ${size})\n     Path: ${a.path}`;
+      const kind = a.type === 'text' ? 'Text' : a.type === 'image' ? 'Image' : 'File';
+      return `  ${i + 1}. ${a.name} (${kind}, ${formatFileSize(a.size)})\n     Path: ${a.path}`;
     })
     .join('\n');
-  const hint = hasFolder
-    ? 'Entries marked "Folder" are directories on the user’s disk, not files: use list_directory on the path to see what is inside, then read_file on the individual files you need. Do not call read_attachment on a folder path, and do not ask the user for these paths.'
-    : 'To learn what the attachments contain, read them with the read_attachment tool (their paths are listed above — do not ask the user for them).';
-  return `\n\n--- Attachments ---\n${lines}\n--- End of attachments ---\n\n${hint}`;
+  return `${ATTACHMENTS_BLOCK_HEAD}\n${lines}\n--- End of attachments ---\n\nTo learn what the attachments contain, read them with the read_attachment tool (their paths are listed above — do not ask the user for them).`;
+}
+
+/**
+ * 会话级**工作区** → 「--- 工作区 ---」文本块（**每轮都注入**，与一次性附件分开）。
+ * 语义对齐画布「操作目录」的锁定版（composer/useComposer.buildFolderBlock 的 sent-folder）：
+ * 明确「用户指定 · 锁定操作范围」，让模型把文件读写严格收在这个目录内、不得越出。
+ *
+ * 为什么每轮都带：工作区是**常驻状态**而不是某条消息的附件，模型每轮上下文里都得看到它，
+ * 否则中途几轮它就会「忘记」范围。注入成本很低（几行文本），换来的是行为稳定。
+ */
+function workspaceBlock(folder: ButlerWorkspaceFolder | null): string {
+  if (!folder) return '';
+  return (
+    `${WORKSPACE_BLOCK_HEAD}\n- ${folder.name}\n  路径: ${folder.path}\n` +
+    '这是用户为本会话指定的工作区：文件读写请严格集中在该目录内（使用完整绝对路径），不得越出该目录。' +
+    '先用 list_directory 看清目录里有什么，再用 read_file / write_file 等文件工具操作。\n' +
+    '--- 工作区结束 ---\n'
+  );
 }
 
 /** kind → 分区（与原通知中心同一分类口径，保证历史回执落入正确的筛选 chip） */
@@ -858,8 +893,9 @@ function writeDrawerGeom(g: DrawerGeom | null): void {
  * 关一次即卸载，组件内 ref（threadIdRef）随之归零 —— 原先因此每次打开都是「全新会话」，
  * 盘上堆了一堆无人认领的孤儿会话。指针持久化后，重开抽屉会接回上次聊的那条。
  * 'panel' 会话无 TTL，指针指向的行不会自行消失；指向已删行时前端会退到列表最新一条。
+ *
+ * 键与读写实现已于 2026-10-02 外移到 `./butlerSession`：心跳（ButlerNoticeHost）也需要读它。
  */
-const ACTIVE_THREAD_KEY = 'butler-active-thread';
 
 /**
  * Today 键红点的「已读」标记（localStorage，值是看过的摘要日期键 YYYY-MM-DD）。
@@ -873,28 +909,6 @@ const TODAY_SEEN_KEY = 'butler.today-digest.seen.v1';
 
 /** 红点探针轮询周期：摘要是每天 9:00 的定点产物，30s 一次足够及时发现（探针只 stat 一个文件） */
 const TODAY_BADGE_POLL_MS = 30_000;
-
-function readActiveThreadId(): string | null {
-  try {
-    return localStorage.getItem(ACTIVE_THREAD_KEY);
-  } catch {
-    return null; // 隐私模式 / 存储被禁：退化为「每次打开都新会话」
-  }
-}
-function writeActiveThreadId(threadId: string): void {
-  try {
-    localStorage.setItem(ACTIVE_THREAD_KEY, threadId);
-  } catch {
-    /* 同上：存不下不影响本次会话可用 */
-  }
-}
-function clearActiveThreadId(): void {
-  try {
-    localStorage.removeItem(ACTIVE_THREAD_KEY);
-  } catch {
-    /* 同上 */
-  }
-}
 
 /**
  * 联系人头像：人物卡通头像（PersonaAvatar）+ 名字派生的底色（见 lib/butler/avatar.ts）。
@@ -1119,6 +1133,7 @@ function AssistantBubble({
   onDelete,
   onEnterSelect,
   onOpenCard,
+  onOpenTrace,
 }: {
   message: DialogMessage;
   title: string;
@@ -1131,6 +1146,8 @@ function AssistantBubble({
   onEnterSelect: (id: string) => void;
   /** 摘要消息携带的文章卡片：点击在 Hippo Browser 打开原文 */
   onOpenCard?: (url: string) => void;
+  /** 摘要消息携带的检索实况账本：点开右栏回看这一轮「留了哪几篇、判掉了哪几篇」 */
+  onOpenTrace?: () => void;
 }) {
   const read = useReadAloud(message.id, () => message.content);
   const busy = read.phase === 'loading';
@@ -1138,7 +1155,20 @@ function AssistantBubble({
   /** 有正文 = 可以朗读；只有卡片（综述写失败的兜底）时朗读无意义，故两者分开判 */
   const hasText = !!message.content;
   const hasCards = !!message.cards?.length;
-  const showControls = !message.pending && (hasText || hasCards);
+  /** 实况入口的计数（「留下 3 / 去除 14」是这一栏最有用的一句结论） */
+  const traceKept = message.searchTrace?.items.filter((t) => t.verdict === 'kept').length ?? 0;
+  const traceDropped = message.searchTrace?.items.filter((t) => t.verdict === 'dropped').length ?? 0;
+  const hasTrace = traceKept + traceDropped > 0;
+  /**
+   * 文章卡片列表是否显示（2026-10-01 用户口径）。
+   *
+   * **有账本就只留「查看检索实况」一个入口**：右栏把每一篇（含被判掉的）都列全了，
+   * 中栏再摆一遍卡片是同一份内容的第二个副本 —— 两处都要维护、还占掉对话框大半高度。
+   * 只有**没有账本**的消息才退回卡片列表：那是今天之前落库的存量消息
+   * （落库时还没有 `searchTrace` 字段），不兜底就会变成一条什么都看不到的空消息。
+   */
+  const showCards = hasCards && !hasTrace;
+  const showControls = !message.pending && (hasText || hasCards || hasTrace);
   /** 复制 / 多选的操作对象：无正文时退化为卡片标题列表，免得「复制」复制出一段空串 */
   const actionText = message.content || (message.cards ?? []).map((c) => c.title).join('\n');
 
@@ -1155,8 +1185,13 @@ function AssistantBubble({
         <div className="butler-md relative px-3 py-1.5 text-xs" style={bubbleOtherStyle}>
           {message.content ? (
             <StreamingMarkdown content={message.content} streaming={!!message.pending} />
+          ) : hasTrace ? (
+            // 综述写失败但有账本：给一句落点并指向右栏，别留一排假 loading 点
+            <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
+              检索到 {traceKept} 篇文章 · 见右侧实况
+            </span>
           ) : message.cards?.length ? (
-            // 只有卡片、没有综述正文（模型写综述失败但已召回文章）：给一句落点，别留一排假 loading 点
+            // 存量消息（无账本）：只有卡片、没有综述正文，同样给一句落点
             <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
               检索到 {message.cards.length} 篇文章
             </span>
@@ -1179,9 +1214,11 @@ function AssistantBubble({
           <BubbleTail side="left" color={WECHAT_OTHER_BUBBLE} />
         </div>
 
-        {/* 检索到的文章卡片：随综述消息一起落库（见 lib/bus.ts ChatMessage.cards），
-            整卡点击在 Hippo Browser 打开原文 —— 「检索了哪些文章」是会话历史的一部分，刷新后仍在 */}
-        {message.cards && message.cards.length > 0 && (
+        {/* 检索到的文章卡片：**只在没有实况账本时才显示**（存量消息的兜底，见 showCards）。
+            有账本时这一整块让位给下方的单一入口 —— 右栏已经逐篇列全（含被判掉的），
+            中栏再摆一份卡片就是同一内容两个副本。卡片本身仍随消息落库（lib/bus.ts ChatMessage.cards），
+            只是不再在对话里渲染，故保留这段渲染分支给旧消息。 */}
+        {showCards && message.cards && message.cards.length > 0 && (
           <div className="mt-1.5 flex flex-col gap-1.5">
             {message.cards.map((c, i) => (
               <button
@@ -1235,6 +1272,23 @@ function AssistantBubble({
               </button>
             ))}
           </div>
+        )}
+
+        {/* 唯一入口（2026-10-01 用户口径）：打开右侧边栏看检索实况。
+            文章链接**不再在这里重复一遍** —— 右栏已逐篇列全（含被判掉的），两处并列只是同一份内容两个副本。
+            账本随这条消息落库（`ChatMessage.searchTrace`）→ 什么时候点开都能把右栏重新打开；
+            消息被删 → 服务端整条删掉、前端同步清右栏，入口与账本一起消失。 */}
+        {!selectMode && hasTrace && (
+          <button
+            type="button"
+            onClick={() => onOpenTrace?.()}
+            className="mt-1.5 inline-flex items-center gap-1 rounded px-1 py-0.5 text-10 transition-colors hover:bg-[var(--primary-soft)]"
+            style={{ color: 'var(--primary)' }}
+            title="打开右侧边栏，查看本轮召回的每一篇与精选判定（含被判定掉的）"
+          >
+            <ScanSearch className="h-3 w-3" />
+            打开右侧检索实况 · 留下 {traceKept} / 去除 {traceDropped}
+          </button>
         )}
 
         {showControls && (
@@ -1355,42 +1409,27 @@ function WechatSearchLive({
 }
 
 /**
- * 检索实况的一行：**召回到的某一篇** + 精选对它的判定。
+ * 实况一行 / 一轮账本的类型**定义在 lib/bus.ts**（`WechatSearchTraceItem` / `WechatSearchTrace`）——
+ * 因为它要随综述消息落库（`ChatMessage.searchTrace`），前后端（服务端组装、抽屉渲染）
+ * 必须共用同一份定义，否则字段一漂移就是「落库有、渲染无」的静默空面板。
  *
- * 为什么把「去除的」也留着：AI 一次只精读 3 篇，剩下十几篇是**被判掉而不是没搜到**——
+ * 为什么账本里把「去除的」也留着：AI 一次只精读 3 篇，剩下十几篇是**被判掉而不是没搜到**——
  * 用户被蒙在鼓里就无从判断这轮检索靠不靠谱。判掉的那几篇照样能点开，
  * 只是标一枚拇指向下，说明「模型看过它、没选它」。
  */
-interface WechatTraceItem {
-  /** 候选在 hits 里的下标（= 服务端 curated 帧的 id，用于按位回填判定） */
-  id: number;
-  title: string;
-  url: string;
-  account?: string;
-  snippet?: string;
-  /** pending = 还没判；kept = 入选精读；dropped = 被判掉 */
-  verdict: 'pending' | 'kept' | 'dropped';
-  /** 入选理由（kept） */
-  reason?: string;
-  /** 逐篇一句摘要 / 要点（kept 且模型已产出） */
-  summary?: string;
-  keypoint?: string;
-  /** 正文是否读到（kept 才有意义；false = 只有搜索摘要可用） */
-  readOk?: boolean;
-}
 
 /**
  * 检索实况里一行的**副文案**：按判定给不同的信息——
  * 留下 = 入选理由（优先）→ 一句摘要；去除 = 搜索摘要（它能说明「为什么这篇没用」）；待判定 = 阶段提示。
  */
-function traceSubtitle(it: WechatTraceItem): string {
+function traceSubtitle(it: WechatSearchTraceItem): string {
   if (it.verdict === 'kept') return (it.reason || it.summary || it.snippet || '').trim();
   if (it.verdict === 'dropped') return (it.snippet || '未给出入选理由').trim();
   return '等待精选判定…';
 }
 
 /** 判定 → 图标 + 配色（拇指是唯一的状态语言：向上 = 留下看，向下 = 判掉） */
-function traceVerdictIcon(it: WechatTraceItem) {
+function traceVerdictIcon(it: WechatSearchTraceItem) {
   if (it.verdict === 'kept') {
     return { Icon: ThumbsUp as LucideIcon, color: 'var(--primary)', title: '精选留下（已精读）' };
   }
@@ -1401,7 +1440,7 @@ function traceVerdictIcon(it: WechatTraceItem) {
 }
 
 /** 实况一行（提到组件外：在 render 里现造组件会让它每次渲染都重新挂载） */
-function TraceRow({ it, onOpen }: { it: WechatTraceItem; onOpen: (url: string) => void }) {
+function TraceRow({ it, onOpen }: { it: WechatSearchTraceItem; onOpen: (url: string) => void }) {
   const { Icon, color, title } = traceVerdictIcon(it);
   const sub = traceSubtitle(it);
   return (
@@ -1459,7 +1498,7 @@ function TraceSection({
   onOpen,
 }: {
   label: string;
-  rows: WechatTraceItem[];
+  rows: WechatSearchTraceItem[];
   tone: string;
   onOpen: (url: string) => void;
 }) {
@@ -1500,7 +1539,7 @@ function WechatSearchTrace({
   query: string;
   /** 检索前规划：问题被拆成哪几个检索方向（2026-10-01 自中栏过程块移交至此） */
   plan: { intent?: string; queries?: string[] } | null;
-  items: WechatTraceItem[];
+  items: WechatSearchTraceItem[];
   /** 检索是否还在跑（跑完就不再显示「判定中」段） */
   busy: boolean;
   status: string;
@@ -2095,6 +2134,12 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   // （PATCH /api/butler/threads/session）；发送时随消息带上，服务端 entry.ts 用它调模型。
   /** 当前模型标签（`provider:modelId`）。**Auto 已下线**（见下方迁移 effect）：抽屉恒持具体模型，
    *  空串只出现在「模型池还没读回来 / 一个对话模型都没配」的瞬时态，此时发送留 null 由服务端兜底。 */
+  /**
+   * 会话级**工作区**（用户指定 · 锁定操作范围）：与选型同为「一个联系人一套」，
+   * 真源在线程文件（见 lib/butler/threads.ts setThreadWorkspace），此处只是镜像。
+   * ⚠️ 与 pendingAtts（一次性附件）**不是一回事**：发送后不清、切联系人按线程回填。
+   */
+  const [workspaceFolder, setWorkspaceFolder] = useState<ButlerWorkspaceFolder | null>(null);
   const [modelTag, setModelTag] = useState('');
   const [thinking, setThinking] = useState<ThinkingLevel>(DEFAULT_THINKING_LEVEL);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -2201,9 +2246,17 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
    * **过程态临时、不落库** —— 落库的是结果（综述 + 精选卡片）。这里刻意保留「被判掉的那几篇」：
    * AI 一次只精读 3 篇，剩下的是**被判掉而不是没搜到**，用户有权看到并照旧点开。
    */
-  const [wechatTrace, setWechatTrace] = useState<WechatTraceItem[]>([]);
+  const [wechatTrace, setWechatTrace] = useState<WechatSearchTraceItem[]>([]);
   /** 本轮检索词（实况面板的标题；起搜时与 searchQ 同步，避免之后改搜索词把标题改掉） */
   const [wechatTraceQuery, setWechatTraceQuery] = useState('');
+  /**
+   * 从**历史消息**重开的账本（点综述气泡下方「查看检索实况」）。
+   *
+   * 与 `wechatTrace` 的分工：那个是**本轮进行中**的实时账本；这个是**落库后回看**某一轮的账本。
+   * 二者互斥显示（历史优先），因为一份面板同时只能摆一份账本。
+   * `messageId` 是它与消息的绑定键 —— 消息被删时据此把右栏一并清空（见 deleteMessages）。
+   */
+  const [openedTrace, setOpenedTrace] = useState<{ messageId: string; trace: WechatSearchTrace } | null>(null);
   /** 在途的公众号检索/精编请求（再次点击或抽屉卸载时中断） */
   const wechatAbortRef = useRef<AbortController | null>(null);
   /** 中断在途检索并收掉过程块 */
@@ -2252,9 +2305,11 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     setWechatPhase(null);
     setWechatFailed(false);
     setWechatPlan(null);
-    // 实况从头开始：本轮召回还没到手，先把上一轮的账本清掉（过程态不跨轮保留）
+    // 实况从头开始：本轮召回还没到手，先把上一轮的账本清掉（过程态不跨轮保留），
+    // 并退出「回看历史某一轮」的状态 —— 新任务接管右栏，不能还停在旧账本上。
     setWechatTrace([]);
     setWechatTraceQuery(q);
+    setOpenedTrace(null);
     // 实时预览从**点下去那一刻**就开始：先切到实况（此时还没有候选，面板写「正在检索…」），
     // 候选一到就逐篇入账。若等几秒候选回来后才跳过去，前半程就是黑的——那不叫实时。
     // 文档预览会**优先占住右栏**（见右栏渲染的 docPath 分支），不先收掉它，实况就被挡在下面。
@@ -2497,6 +2552,23 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   const openWechatHit = useCallback((url: string) => {
     void desktop.hippoBrowser.navigate(url);
   }, []);
+  /**
+   * 点综述气泡下方的「查看检索实况」→ 右栏切到实况，并显示**这一轮**的账本（落库那份）。
+   *
+   * 与实时预览的区别只在于账本从哪来：这里来自消息（可跨会话/重启回看），
+   * 那里来自本轮 SSE 帧。两者的显示口径完全一致（同一个 WechatSearchTrace 组件）。
+   * 若正开着文档预览，先收掉（docPath 优先占右栏，不收就被挡在下面）。
+   */
+  const openTraceFromMessage = useCallback(
+    (msg: DialogMessage) => {
+      if (!msg.searchTrace?.items.length) return;
+      setOpenedTrace({ messageId: msg.id, trace: msg.searchTrace });
+      if (docPath) onCloseDoc();
+      setRightOpen(true);
+      onSectionChange('search');
+    },
+    [docPath, onCloseDoc, onSectionChange],
+  );
   /** Butler 结构化确认卡（排程创建/改/删）：由服务端 butler_confirm 帧触发，用户确认后才真正执行 */
   const [butlerConfirm, setButlerConfirm] = useState<ButlerConfirmState | null>(null);
   /** 刚复制过链接的报告 id（1.6s 内显示 ✓ 反馈） */
@@ -3264,6 +3336,16 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         index: m.id.startsWith('h-') ? Number(m.id.slice(2)) : undefined,
       }));
       setMessages((prev) => prev.filter((m) => !want.has(m.id)));
+      // 删掉的若是「正被右栏回看的那一轮检索」→ 右栏一并清空。
+      // 账本本来就挂在消息上（落库同生共死），这里是**当前这一屏**的同步：
+      // 否则右栏会继续摆着一份已经没有出处的账本。
+      // 连**实时那份**（wechatTrace）一起清：本轮刚从实时账本切到历史回看时，两份是同一轮的两份副本，
+      // 只清 openedTrace 会让右栏「看起来没清」（退回显示实时那份、内容一模一样）。
+      if (openedTrace && want.has(openedTrace.messageId)) {
+        setOpenedTrace(null);
+        setWechatTrace([]);
+        setWechatTraceQuery('');
+      }
       leaveSelectMode();
       const tid = threadIdRef.current;
       if (!tid) return;
@@ -3278,7 +3360,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       }
       void refreshChatSessions();
     },
-    [messages, leaveSelectMode, refreshChatSessions],
+    [messages, openedTrace, leaveSelectMode, refreshChatSessions],
   );
 
   /**
@@ -3366,19 +3448,28 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   }, []);
 
   /**
-   * 选择一个**本地文件夹**挂到当前会话（与回形针的文件附件并列）。
+   * 选择一个**本地文件夹作为本会话的工作区**（用户指定 · 锁定操作范围）。
    *
-   * 与文件附件的关键差别：**不上传、不复制**。只带绝对路径引用，发送时进「资料列表」块；
-   * 一个目录可能有成千上万个文件，复制进 Butler 存储空间既不划算、也会在用户不知情时吃掉
-   * 磁盘。模型侧靠 list_directory + read_file 取用（见 attachmentBlock 的目录版提示）。
+   * 与回形针的文件附件**不是一回事**：附件只作用于发出去的那一条消息；工作区是**常驻**的
+   * ——选定后每轮对话都随消息注入「锁定操作范围」，发送后不清、切联系人各自保留。真源在线程
+   * 文件（唯一写入口 = `lib/butler/threads.ts setThreadWorkspace`），本组件只是镜像。
    *
-   * 选完还要 `add_root` 登记一次：文件工具默认**只放行当前项目目录**、禁读个人目录
+   * 为什么不上传、不复制：一个目录可能有成千上万个文件，复制进 Butler 存储空间既不划算、
+   * 也会在用户不知情时吃掉磁盘。只带**绝对路径**，模型侧靠 list_directory + read_file 取用。
+   *
+   * 选定后还要 `add_root` 登记一次：文件工具默认**只放行当前项目目录**、禁读个人目录
    * （profiles.ts:157），不登记 Butler 就会读不到用户刚亲手选的目录。这里刻意复用画布
    * LocalFileExplorer 的同一端点、同一份 browseRoots——两处口径不同会出现「Butler 侧选了
-   * 目录、画布侧却不认」；端点幂等，重复选同一目录不会重复入列。
+   * 目录、画布侧却不认」；端点幂等。
    */
   const attachFolder = useCallback(async () => {
     setAttachError(null);
+    const threadId = threadIdRef.current;
+    // 没有绑定会话就没有可挂工作区的对象（空白态下按钮本就该被拦住）
+    if (!threadId) {
+      setAttachError('Start a conversation before choosing a workspace folder');
+      return;
+    }
     // 浏览器 dev 下没有 Electron 的目录选择器：早退并给可见提示，别让用户点了没反应
     if (!isDesktop()) {
       setAttachError('Folder selection requires the desktop app');
@@ -3393,32 +3484,53 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         return;
       }
       const dirPath = r.path;
-      const resp = await fetch(`/api/local-files?action=add_root&path=${encodeURIComponent(dirPath)}`);
-      const data = (await resp.json()) as { success?: boolean; error?: string };
-      if (!resp.ok || !data.success) {
-        setAttachError(data.error || `Could not authorize folder (HTTP ${resp.status})`);
+      // 授权登记（幂等）：不登记则文件工具读不到项目目录之外的这个目录
+      const authResp = await fetch(`/api/local-files?action=add_root&path=${encodeURIComponent(dirPath)}`);
+      const auth = (await authResp.json()) as { success?: boolean; error?: string };
+      if (!authResp.ok || !auth.success) {
+        setAttachError(auth.error || `Could not authorize folder (HTTP ${authResp.status})`);
         return;
       }
       const name = dirPath.split('/').filter(Boolean).pop() || dirPath;
-      setPendingAtts((prev) => {
-        // 同一目录重复选不叠加：路径相同即视为同一个引用
-        if (prev.some((a) => a.type === 'folder' && a.path === dirPath)) return prev;
-        return [
-          ...prev,
-          {
-            id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            name,
-            type: 'folder',
-            mimeType: 'inode/directory',
-            size: 0,
-            path: dirPath,
-          },
-        ];
+      // 落盘：走 PATCH /session 的 workspace 分支（不进消息链路、不动 updatedAt）
+      const resp = await fetch(`/api/butler/threads/session?threadId=${encodeURIComponent(threadId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: { path: dirPath, name } }),
       });
+      const saved = (await resp.json()) as { success?: boolean; error?: string };
+      if (!resp.ok || !saved.success) {
+        setAttachError(saved.error || `Could not set workspace (HTTP ${resp.status})`);
+        return;
+      }
+      // **写盘成功才翻转本地**：与选型器、置已读同一取舍——宁可不显示，也不显示一个假的
+      setWorkspaceFolder({ path: dirPath, name });
     } catch (e) {
       setAttachError(e instanceof Error ? e.message : String(e));
     } finally {
       setAttaching(false);
+    }
+  }, []);
+
+  /** 清除会话级工作区（pill 上的 ×）：先落盘、成功才翻转本地，与 attachFolder 同一取舍 */
+  const clearWorkspace = useCallback(async () => {
+    const threadId = threadIdRef.current;
+    if (!threadId) return;
+    setAttachError(null);
+    try {
+      const resp = await fetch(`/api/butler/threads/session?threadId=${encodeURIComponent(threadId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: null }),
+      });
+      const saved = (await resp.json()) as { success?: boolean; error?: string };
+      if (!resp.ok || !saved.success) {
+        setAttachError(saved.error || `Could not clear workspace (HTTP ${resp.status})`);
+        return;
+      }
+      setWorkspaceFolder(null);
+    } catch (e) {
+      setAttachError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
@@ -3473,6 +3585,9 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       // 附件「资料列表」块追加在正文之后（与画布 `text + blocks` 同序）；
       // 路径是 Butler 存储空间的**绝对路径**，模型据此用 read_attachment 直读。
       outgoing += attachmentBlock(pendingAtts);
+      // 工作区块**每轮都带**（常驻的操作范围，不是本轮附件）——放在附件之后，
+      // 让「本轮资料」与「本会话操作范围」在正文里界限分明。
+      outgoing += workspaceBlock(workspaceFolder);
 
       const uid = `u-${Date.now()}`;
       const aid = `a-${Date.now()}`;
@@ -3698,7 +3813,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         void refreshChatSessions();
       }
     },
-    [draft, sending, attaching, pendingAtts, confirmAsk, refreshChatSessions, markThreadRead, modelTag, thinking],
+    [draft, sending, attaching, pendingAtts, workspaceFolder, confirmAsk, refreshChatSessions, markThreadRead, modelTag, thinking],
   );
 
   // ===== `/` 指令下拉（纯逻辑在 lib/core/commands.ts，本抽屉是唯一渲染方） =====
@@ -3971,6 +4086,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         // 会话级选型跟着联系人一起回填（存过就是具体模型；Auto 时代的 null 由迁移 effect 落成默认模型）
         setModelTag(state.modelId ?? '');
         setThinking(state.thinkingLevel ?? DEFAULT_THINKING_LEVEL);
+        // 工作区随联系人回填：各会话各自保留，互不串（这就是「常驻」的落点）
+        setWorkspaceFolder(state.workspaceFolder);
         setModelMenuOpen(false);
         setThinkingMenuOpen(false);
         // 打开即已读（微信语义）：本地清零 + 落库，悬浮球与头像角标同步回落
@@ -3997,6 +4114,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     setActiveThreadId(null);
     clearActiveThreadId();
     setMessages([]);
+    // 空白态 = 未绑定任何会话 → 工作区一并清空，别把它留在下一个会话上
+    setWorkspaceFolder(null);
   }, [releasePendingInteractions]);
 
   /**
@@ -4284,14 +4403,15 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         }
       : null;
   /** 右栏顶部条的标题（文档预览态不叠此条——ButlerDocPanel 自带 header）。
-   *  文案与左栏 RailItem 保持一致（Customize / Calendar）：同一栏目在两处的名字必须同字，
-   *  否则顶部条写「记忆」、左栏写 Memories，读起来像两个不同的地方。
-   *  memories 与 rules 是**同一个 Customize 面板**的两个段，顶栏统一写 Customize。 */
+   *  文案与左栏 RailItem 保持一致（Memory / Calendar）：同一栏目在两处的名字必须同字，
+   *  否则顶部条写「Memory」、左栏写 Memories，读起来像两个不同的地方。
+   *  memories 与 rules 是**同一个 Memory 面板**的两个段，顶栏统一写 Memory
+   *  （2026-10-02 由 Customize 改名：这个面管的是「我记得你什么」，不是外观定制）。 */
   const rightTitle =
     section === 'today'
       ? 'Today'
       : section === 'rules' || section === 'memories'
-        ? 'Customize'
+        ? 'Memory'
         : section === 'calendar'
           ? 'Calendar'
           : section === 'meeting'
@@ -4395,16 +4515,17 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         {/* 原「详情」键已删（2026-09-26）：它与联系人列置顶的常驻「通知助理」行重复，
             而右栏详情分区本身仍可由悬浮球 / 桌面通知 / 点通知卡片头部打开，能力没有丢。 */}
         <RailItem icon={Sun} label="Today" active={rightOpen && section === 'today'} dot={todayHasNew} onClick={() => pickSection('today')} />
-        {/* Memories 键已删（2026-09-29）：记忆并入 Customize 的第四段，不再单占一个左栏键。
+        {/* Memories 键已删（2026-09-29）：记忆并入 Memory 台的第四段，不再单占一个左栏键。
             外部的 `openButlerMemories()` 事件仍可用——它落到 section='memories'，由同一个
-            Customize 面板带 `initialSection='memories'` 打开（见右栏渲染与 rightTitle）。 */}
-        {/* Customize：我的定制总览页（Rules / Signals / Skills / Memories 四段；
-            "don't …" 类否定式写入落这里，不落 Memories）。
+            Memory 面板带 `initialSection='memories'` 打开（见右栏渲染与 rightTitle）。 */}
+        {/* Memory（2026-10-02 由 Customize 改名）：Butler 的记忆台，六段
+            —— Memories / Rules / Skills / Threads / Evidence / Knowledge（见 ButlerMemoryConsole 头注释；
+            "don't …" 类否定式写入落 Rules 段，不落 Memories）。
             图标沿用原 Memories 的 Brain（2026-09-29）：记忆已并入本页，
             「大脑 = 关于我的认知」这层含义跟着搬过来，比通用清单图标更贴。 */}
         <RailItem
           icon={Brain}
-          label="Customize"
+          label="Memory"
           active={rightOpen && (section === 'rules' || section === 'memories')}
           onClick={() => pickSection('rules')}
         />
@@ -4761,6 +4882,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                             onDelete={(id) => void deleteMessages([id])}
                             onEnterSelect={enterSelectMode}
                             onOpenCard={openWechatHit}
+                            onOpenTrace={() => openTraceFromMessage(m)}
                           />
                         )}
                       </Fragment>
@@ -4946,15 +5068,11 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                             color: 'var(--ink-strong)',
                           }}
                         >
-                          {/* 目录：图标 + 悬停给完整路径（名字只是末段，看不出在哪个盘哪个层） */}
-                          {a.type === 'folder' && (
-                            <FolderOpen className="h-2.5 w-2.5 shrink-0" style={{ color: 'var(--primary)' }} />
-                          )}
-                          <span className="min-w-0 truncate" title={a.type === 'folder' ? a.path : a.name}>
+                          <span className="min-w-0 truncate" title={a.name}>
                             {a.name}
                           </span>
                           <span className="shrink-0 tabular-nums" style={{ color: 'var(--ink-faint)' }}>
-                            {a.type === 'folder' ? 'folder' : formatFileSize(a.size)}
+                            {formatFileSize(a.size)}
                           </span>
                           <button
                             type="button"
@@ -4977,7 +5095,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                     </div>
                   )}
                   {/* 输入框底部按钮带（textarea 的 pb-9 = 36px 让出来）：**左** = 回形针（left-1.5）
-                      + 本地文件夹（left-10）；
+                      + 工作区（left-10：未指定 = 文件夹图标按钮，已指定 = 常驻名称 pill，宽至 150px）；
                       **右**一簇 = 思考档位 + 模型（right-16 = 麦克风的 right-9 + 自身宽 w-7，正好贴在
                       麦克风左边）、麦克风（right-9）、发送（right-1.5）。各 26px 高，全在这条带内。
                       正文与 placeholder 因此**左右都顶格**（pl-3 / pr-3）——右侧原先留的 pr-[70px] 已删：
@@ -5056,26 +5174,54 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                     >
                       <Paperclip className="h-3.5 w-3.5" />
                     </button>
-                    {/* 本地文件夹：紧挨回形针右侧（left-10 = 回形针 left-1.5 + 自身 w-7 + 6px 间距），
-                        与回形针同款尺寸/配色，进行中同样转 --primary。
-                        选中目录后以「目录类附件」进待发列表（不复制文件，见 attachFolder）；
-                        仅桌面端可用——浏览器 dev 下 attachFolder 会给可见提示而不是静默无反应。 */}
-                    <button
-                      type="button"
-                      onClick={() => void attachFolder()}
-                      disabled={attaching}
-                      className="absolute bottom-1.5 left-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
-                      style={{
-                        backgroundColor: 'transparent',
-                        color: attaching
-                          ? 'var(--primary)'
-                          : 'color-mix(in oklab, var(--ink-muted) 80%, transparent)',
-                      }}
-                      title={attaching ? 'Working…' : 'Add local folder'}
-                      aria-label="Add local folder"
-                    >
-                      <FolderOpen className="h-3.5 w-3.5" />
-                    </button>
+                    {/* 本地文件夹 / 会话级**工作区**：紧挨回形针右侧（left-10 = 回形针 left-1.5 + 自身 w-7 + 6px 间距）。
+                        两种形态：
+                          - 未指定 → 文件夹图标按钮，点开系统目录选择器（仅桌面端；浏览器 dev 给可见提示）
+                          - 已指定 → **常驻名称 pill**：显示文件夹名（超长截断 max-w-[150px]，悬停给全名 + 路径）
+                                     + × 清除。
+                        为什么用 pill 而非一次性 chip：工作区是**会话级常驻状态**（见 attachFolder /
+                        workspaceBlock），发送后不该消失；显示在按钮位是为了「当前工作区」一眼可见。 */}
+                    {workspaceFolder ? (
+                      <span
+                        className="absolute bottom-1.5 left-10 flex h-7 max-w-[150px] items-center gap-1 rounded-md px-1.5"
+                        style={{
+                          backgroundColor: 'color-mix(in oklab, var(--primary) 10%, var(--panel-bg))',
+                          border: '1px solid color-mix(in oklab, var(--primary) 28%, var(--line))',
+                          color: 'var(--ink-strong)',
+                        }}
+                        title={`${workspaceFolder.name}\n${workspaceFolder.path}`}
+                      >
+                        <FolderOpen className="h-3 w-3 shrink-0" style={{ color: 'var(--primary)' }} />
+                        <span className="min-w-0 truncate text-11 font-medium">{workspaceFolder.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => void clearWorkspace()}
+                          className="flex shrink-0 items-center"
+                          style={{ color: 'var(--ink-muted)' }}
+                          title="Clear workspace"
+                          aria-label="Clear workspace"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void attachFolder()}
+                        disabled={attaching || !activeThreadId}
+                        className="absolute bottom-1.5 left-10 flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                        style={{
+                          backgroundColor: 'transparent',
+                          color: attaching
+                            ? 'var(--primary)'
+                            : 'color-mix(in oklab, var(--ink-muted) 80%, transparent)',
+                        }}
+                        title={attaching ? 'Working…' : 'Set workspace folder'}
+                        aria-label="Set workspace folder"
+                      >
+                        <FolderOpen className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                     {/* 会话级选型：思考档位 + 模型 —— 放在**右侧、紧邻麦克风左边**（右侧按钮簇为
                         [思考][模型][麦克风][发送]，回形针独占左下角）。
                         选哪个 = 这条会话的选型，改动即写回线程文件（PATCH /session），
@@ -5345,11 +5491,11 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
           ) : section === 'today' ? (
             <ButlerTodayPanel embedded />
           ) : section === 'rules' || section === 'memories' ? (
-            /* rules 与 memories 同一面板，区别只在「一进来落在哪」：
+            /* rules 与 memories 同一面板（Memory 台），区别只在「一进来落在哪」：
                - rules    → 不给 initialSection，面板默认停在脑图落点
                - memories → 直接落到 Memories 段（openButlerMemories 走的也是这里）
                key 让两段之间切换时重挂载，initialSection 才会生效。 */
-            <ButlerRulesPanel
+            <ButlerMemoryConsole
               key={section}
               embedded
               {...(section === 'memories' ? { initialSection: 'memories' as const } : {})}
@@ -5357,15 +5503,23 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
           ) : section === 'calendar' ? (
             <ButlerCalendarPanel />
           ) : section === 'search' ? (
-            /* 检索实况：本轮召回的逐篇账本（留下 / 判定中 / 去除）。过程是临时的，
-               但**被判掉的那几篇照样能点开** —— 判定只是「模型没选它」。 */
+            /* 检索实况：召回的逐篇账本（留下 / 判定中 / 去除）。两个来源、同一套渲染：
+                 - openedTrace（点气泡下方入口回看的历史某一轮，落库那份；2026-10-01 起
+                   账本自己也带 queries / intent，所以回看同样能显示检索方向 —— 老轮次没有这两个字段，
+                   此时自然不显示，不必特殊处理）
+                 - 否则 = 本轮实时预览（SSE 帧攒的，带检索方向拆解）
+               **被判掉的那几篇照样能点开** —— 判定只是「模型没选它」。 */
             <WechatSearchTrace
-              query={wechatTraceQuery}
-              plan={wechatPlan}
-              items={wechatTrace}
-              busy={wechatBusy}
+              query={openedTrace ? openedTrace.trace.query : wechatTraceQuery}
+              plan={
+                openedTrace
+                  ? { queries: openedTrace.trace.queries, intent: openedTrace.trace.intent }
+                  : wechatPlan
+              }
+              items={openedTrace ? openedTrace.trace.items : wechatTrace}
+              busy={openedTrace ? false : wechatBusy}
               status={wechatSummaryStatus}
-              notice={wechatNotice}
+              notice={openedTrace ? '' : wechatNotice}
               onOpen={openWechatHit}
             />
           ) : (

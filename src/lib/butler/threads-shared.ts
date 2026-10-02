@@ -50,6 +50,18 @@ export interface ButlerPersona {
   template?: string;
 }
 
+/**
+ * 会话级**工作区**（用户显式指定的操作范围）：一个目录 = 一条会话的工作区。
+ * 与画布「操作目录」的锁定版同义（useComposer.buildFolderBlock 的 sent-folder 语义），
+ * 但**常驻**：选定后每轮对话都随消息注入「锁定操作范围」，发送后不清、切联系人各自保留。
+ */
+export interface ButlerWorkspaceFolder {
+  /** 绝对路径（读写都基于它；非绝对路径一律视为无效 → 清空） */
+  path: string;
+  /** 展示名（默认取路径最后一节）。pill 超长时前端截断，悬停给全名 + 路径 */
+  name: string;
+}
+
 /** 一条 Butler 线程（= 一个文件；结构对应 `.state/threads/<threadId>.json`） */
 export interface ButlerThread {
   threadId: string;
@@ -71,6 +83,11 @@ export interface ButlerThread {
    * 与模型同属**会话级选型**（一个联系人一套），随线程文件一起存活 / 删除。
    */
   thinkingLevel?: ThinkingLevel | null;
+  /**
+   * 本会话的**工作区**（用户指定 · 锁定操作范围）。null / 缺省 = 未指定。
+   * 与选型同为**会话级**（一个联系人一套），随线程文件存活 / 删除；发送消息**不清除**。
+   */
+  workspaceFolder?: ButlerWorkspaceFolder | null;
   source: ButlerThreadSource;
   lifecycle: ButlerThreadLifecycle;
   /** 最近已读时刻（ms）；0 / 缺字段 = 从未读过 → 未读数按全部 assistant 消息算 */
@@ -105,6 +122,12 @@ export interface ButlerThreadSummary {
   unread: number;
   /** 常驻身份标记：'notify' = Bobby（通知助理）；'recorder' = Recorder（会议记录员）；'search' = 小微（搜索助手）。普通线程无此字段 */
   systemRole?: 'notify' | 'recorder' | 'search';
+  /**
+   * 该会话的**常驻工作区**（2026-10-02 补：Memory 台的 Threads 段要显示它）。
+   * 真源是线程文件的 `workspaceFolder`（见 `parseWorkspaceFolder`：非绝对路径一律归一为 null）；
+   * 与联系人列一样**只带路径与展示名**，不复制内容。
+   */
+  workspaceFolder?: ButlerWorkspaceFolder | null;
 }
 
 /**
@@ -176,6 +199,50 @@ export function parseModelTag(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const s = raw.trim();
   return s && s.length <= MODEL_TAG_MAX ? s : null;
+}
+
+/** 工作区路径长度上限：超长视为脏数据（正常路径远短于此），按「未指定」处理 */
+export const WORKSPACE_PATH_MAX = 1024;
+
+/**
+ * 清洗会话级工作区：必须是 `{ path: 绝对路径 }`，否则 → null（= 未指定）。
+ * name 缺省由 path 末节兜底 —— pill 要显示名字，缺了不该整个工作区失效。
+ */
+export function parseWorkspaceFolder(raw: unknown): ButlerWorkspaceFolder | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const path = typeof o.path === 'string' ? o.path.trim() : '';
+  if (!path || !path.startsWith('/') || path.length > WORKSPACE_PATH_MAX) return null;
+  const rawName = typeof o.name === 'string' ? o.name.trim() : '';
+  const name = (rawName || path.split('/').filter(Boolean).pop() || path).slice(0, 120);
+  return { path, name };
+}
+
+/**
+ * 注入块起始标记：客户端拼在**用户正文尾部**、只给模型看的上下文（附件列表 / 会话级工作区）。
+ * 集中定义是为了让「拼接」与「剥离」同源——两边各写字面量，改标记时必然漏改另一处。
+ */
+export const ATTACHMENTS_BLOCK_HEAD = '\n\n--- Attachments ---';
+export const WORKSPACE_BLOCK_HEAD = '\n\n--- 工作区（用户指定 · 锁定操作范围） ---';
+export const INJECTED_BLOCK_HEADS: readonly string[] = [ATTACHMENTS_BLOCK_HEAD, WORKSPACE_BLOCK_HEAD];
+
+/**
+ * 剥掉正文尾部的注入块（**只用于展示 / 可读记录**，不要在发给模型的正文上调用）。
+ *
+ * 为什么需要：块随正文一起发给服务端，服务端存的就是整段原文 —— 重新打开会话会连块一起读回，
+ * 用户气泡与 `butler/<角色>/<日期>/chat/*.md` 里就会冒出「--- 工作区 … ---」这种机器文案；
+ * 而刚发出去那条气泡用的是**干净原文**，两条路径显示不一致。
+ * 模型侧不受影响：块由客户端**每轮重新注入**，历史里有没有都不缺上下文。
+ *
+ * 按**首个**命中标记截断（块恒追加在尾部）；调用方只在 user 消息上用它。
+ */
+export function stripInjectedBlocks(content: string): string {
+  let cut = -1;
+  for (const head of INJECTED_BLOCK_HEADS) {
+    const i = content.indexOf(head);
+    if (i >= 0 && (cut < 0 || i < cut)) cut = i;
+  }
+  return cut >= 0 ? content.slice(0, cut).trimEnd() : content;
 }
 
 /**
@@ -290,5 +357,7 @@ export function summarizeThread(thread: ButlerThread): ButlerThreadSummary {
     persona: thread.persona,
     // readAt 为 0 按「一律未读」：若退化成 updatedAt，那条「读过之后才落的回复」会被随 updatedAt 一起前移，永远判不出未读
     unread: countUnreadAssistant(messages, thread.tailTimes, thread.readAt ?? 0, thread.updatedAt),
+    // 常驻工作区（Memory 台 Threads 段要显示；只带路径，不复制内容）
+    workspaceFolder: thread.workspaceFolder ?? null,
   };
 }

@@ -1,6 +1,6 @@
 /**
  * 技能的**纯常量与类型**（无任何 Node 依赖）——与 `rules-shared.ts` 同因：
- * 治理面 `components/butler/ButlerRulesPanel.tsx` 是客户端组件，需要词表与派生逻辑做展示；
+ * 治理面 `components/butler/ButlerMemoryConsole.tsx` 是客户端组件，需要词表与派生逻辑做展示；
  * 而 `skills.ts` 含 fs 读写，客户端链路无法 bundle。故把纯数据 / 纯函数抽到这里，
  * 服务端（skills.ts 转出）与客户端共用同一份定义，避免两处漂移。
  *

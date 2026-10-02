@@ -20,12 +20,10 @@ import {
   listBlockedPatterns,
   recordNegativeSample,
   normalizeNegativeClass,
+  NEGATIVE_OBJECT_TYPES,
   type NegativeSampleClass,
 } from '@/lib/butler/rule-signals';
 import type { NegativeSampleEntry } from '@/lib/butler/rule-logs';
-
-/** 扫描的负样本分片：对象类型（§3.4 Q13）+ Phase 1 遗留的 'rule' 分片（只读兼容，不迁移） */
-const NEGATIVE_OBJECT_TYPES = ['todo', 'schedule', 'note', 'meeting', 'project', 'rule'] as const;
 
 const CLASSES: NegativeSampleClass[] = ['signal_mismatch', 'not_a_habit'];
 

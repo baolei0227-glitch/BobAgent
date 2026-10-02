@@ -32,6 +32,13 @@ import { evaluateRevision, REVISION_WINDOW } from './rules-shared';
 export type HitScene = string;
 
 /**
+ * 负样本的分片键集合（真源，2026-10-02 从 `/api/butler/rules/negative-samples` 上移到这里）：
+ * 对象类型（§3.4 Q13）+ Phase 1 遗留的 `'rule'` 分片（只读兼容，不迁移）。
+ * 消费方：negative-samples 路由（可见 / 解封）与 memory-audit 聚合（证据视图）。
+ */
+export const NEGATIVE_OBJECT_TYPES = ['todo', 'schedule', 'note', 'meeting', 'project', 'rule'] as const;
+
+/**
  * 落一条命中（producedRef = 产出对象引用，供 output_edited 归因）。
  * `occurrence` 仅定时候选命中时传（实例时刻 ms），供 rule-timer 幂等去重；语面命中不传。
  */

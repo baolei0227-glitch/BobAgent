@@ -16,6 +16,7 @@
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { butlerRoot, ensureDir } from './storage';
+import { atomicWriteFile, createLock } from './fs-atomic';
 
 /** 规则集目录名（与 rules.ts 同口径的点前缀；此处不 import 以免成环） */
 const RULES_DIR_NAME = '.rules';
@@ -122,22 +123,9 @@ function shardPath(type: RuleLogType, key: string): string | null {
   return join(logTypeDir(type), `${k}.jsonl`);
 }
 
-/** 日志写串行化：append + 超限截断构成读-改-写临界区，串行避免互相覆盖（照抄 storage.ts 的锁法） */
-let _logLock: Promise<void> = Promise.resolve();
-
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = _logLock;
-  let release: () => void = () => {};
-  _logLock = (async () => {
-    if (prev) await prev;
-    await new Promise<void>((res) => { release = res; });
-  })();
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
+/** 日志写串行化：append + 超限截断构成读-改-写临界区，串行避免互相覆盖。
+ *  锁与原子写原语统一取自 `./fs-atomic`（2026-10-02 评审：此前 5 份副本各自演化）。 */
+const withLock = createLock();
 
 /** 解析 JSONL：坏行跳过（脏数据不阻断，同 parseRule 原则） */
 function parseLines<T>(raw: string): T[] {
@@ -177,9 +165,7 @@ async function truncateIfNeeded(file: string): Promise<void> {
   const lines = raw.split('\n').filter((l) => l.trim().length > 0);
   if (lines.length <= MAX_LINES_PER_SHARD) return;
   const kept = lines.slice(-MAX_LINES_PER_SHARD).join('\n') + '\n';
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, kept, 'utf-8');
-  await fs.rename(tmp, file);
+  await atomicWriteFile(file, kept);
 }
 
 /**

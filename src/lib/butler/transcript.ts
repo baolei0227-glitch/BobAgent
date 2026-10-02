@@ -14,6 +14,7 @@
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { stripThinkTags, type ChatMessage } from '@/lib/bus';
+import { stripInjectedBlocks } from './threads-shared';
 import { butlerRoot, dateStamp, ensureDir, resolveRole } from './storage';
 
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -48,7 +49,14 @@ export async function writeSessionTranscript(
     const time = typeof t === 'number' ? t : Date.now();
     const day = dateStamp(new Date(time));
     const list = byDay.get(day) ?? [];
-    list.push({ who: m.role === 'user' ? '用户' : role.name, time, content: stripThinkTags(m.content) });
+    // user 侧再剥掉「注入块」（附件列表 / 工作区）：那是发给模型的上下文、不是用户说的话，
+    // 原样写进这份**给人看**的记录会变成一屏机器文案（与气泡同一口径，见 stripInjectedBlocks）。
+    const text = stripThinkTags(m.content);
+    list.push({
+      who: m.role === 'user' ? '用户' : role.name,
+      time,
+      content: m.role === 'user' ? stripInjectedBlocks(text) : text,
+    });
     byDay.set(day, list);
   }
 

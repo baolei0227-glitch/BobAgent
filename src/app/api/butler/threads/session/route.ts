@@ -6,6 +6,7 @@
  *                         `{ model: { modelId, thinkingLevel } }` = 连抽屉当前的会话级选型一并落盘
  *   PATCH ?threadId=xxx   覆盖该线程的人设（人设弹窗编辑态保存；传 persona:null = 清除）
  *                         `{ model: { modelId, thinkingLevel } }` = 只改模型 / 思考档位（选型器即改即存）
+ *                         `{ workspace: { path, name } | null }` = 改 / 清**会话级工作区**（锁定操作范围）
  *                         `{ read: true }` = 置为已读（未读角标的清零出口，见 markThreadRead）
  *
  * 人设与线程**同行**存储（`.state/threads/<id>.json`）→ 删除线程（DELETE /api/butler/threads?threadId=）
@@ -22,9 +23,10 @@ import {
   readThread,
   setThreadModelSettings,
   setThreadPersona,
+  setThreadWorkspace,
   type ButlerPersona,
 } from '@/lib/butler/threads';
-import { parseModelTag, parseThinkingLevel } from '@/lib/butler/threads-shared';
+import { parseModelTag, parseThinkingLevel, parseWorkspaceFolder } from '@/lib/butler/threads-shared';
 import type { ThinkingLevel } from '@/lib/types';
 import { RECORDER_THREAD_ID } from '@/lib/core/butler-recorder';
 
@@ -82,6 +84,7 @@ export async function PATCH(request: NextRequest) {
       persona?: unknown;
       read?: unknown;
       model?: unknown;
+      workspace?: unknown;
     };
 
     // 置已读：任何线程都可以（含常驻通知助理 / Recorder）——「我看过了」不改它的身份与人设
@@ -101,6 +104,17 @@ export async function PATCH(request: NextRequest) {
       }
       const m = sanitizeModelSettings(body.model);
       await setThreadModelSettings(threadId, m.modelId, m.thinkingLevel);
+      return NextResponse.json({ success: true, threadId });
+    }
+
+    // 只改会话级**工作区**（用户指定 · 锁定操作范围）：选/清目录即存，不等下一条消息。
+    // 与选型同属「读者行为」→ 任何线程都可改（含 Recorder / 通知助理）。
+    // 传 workspace:null = 清除；非法对象（非绝对路径等）由 parseWorkspaceFolder 归一成 null。
+    if (body.workspace !== undefined) {
+      if (!(await readThread(threadId))) {
+        return NextResponse.json({ success: false, error: 'thread not found' }, { status: 404 });
+      }
+      await setThreadWorkspace(threadId, parseWorkspaceFolder(body.workspace));
       return NextResponse.json({ success: true, threadId });
     }
 

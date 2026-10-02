@@ -20,7 +20,7 @@
  * 定时候选（rule-timer.dueTimerRules）与语面/场景候选同源，沿用既有幂等反查（读 hits），不新增计数器。
  */
 import { listRules } from './rules';
-import { dueTimerRules } from './rule-timer';
+import { dueTimerRules, missedTimerRules, type MissedTimerHit } from './rule-timer';
 import {
   adjudicateAndExecute,
   type AdjudicateResult,
@@ -55,6 +55,9 @@ function triggerText(trigger: ButlerTrigger): string {
   return '';
 }
 
+/** 心跳结果：裁决结果 + 「错过且不会补跑」的定时实例（只用于告知，见 `missedTimerRules`） */
+export type ButlerTickResult = AdjudicateResult & { missed: MissedTimerHit[] };
+
 /**
  * Butler 心跳：能力匹配 → 裁决 → 执行 → 信号回写。
  *
@@ -62,14 +65,20 @@ function triggerText(trigger: ButlerTrigger): string {
  * 先查「已到期且未执行过」的周期规则（幂等去重由 rule-timer 读 hits 完成，不新增计数器），
  * 再把语面 + 定时候选一起交 adjudicateAndExecute 裁决；返回一行状态陈述（notice）供调用方注入上下文。
  * 执行与写 hits 由 rule-exec 统一负责（不变量 7：运行层不写盘状态，只产决策与陈述）。
+ *
+ * `missed`（2026-10-02 新增）：应用未运行期间错过、且超出 24h 补偿窗口的实例。
+ * 只挂在**定时**触发上——语面触发时用户就在跟前，此时报告「你不在时错过了」既是噪音也无意义。
  */
-export async function butlerTick(input: ButlerTickInput): Promise<AdjudicateResult> {
+export async function butlerTick(input: ButlerTickInput): Promise<ButlerTickResult> {
   const { trigger, anchor } = input;
+  const now = new Date();
   const activeRules = (await listRules()).filter((r) => r.status === 'active');
-  const timerHits = await dueTimerRules(activeRules, new Date());
-  return adjudicateAndExecute({
+  const timerHits = await dueTimerRules(activeRules, now);
+  const result = await adjudicateAndExecute({
     text: triggerText(trigger),
     anchor,
     timerHits,
   });
+  const missed = trigger.kind === 'timer' ? await missedTimerRules(activeRules, now) : [];
+  return { ...result, missed };
 }

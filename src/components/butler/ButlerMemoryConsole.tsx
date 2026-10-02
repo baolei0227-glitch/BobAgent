@@ -1,30 +1,36 @@
 'use client';
 
 /**
- * ButlerRulesPanel —— 「我的定制」总览页（Customize）
+ * ButlerMemoryConsole —— **Butler 的记忆台（Memory）**
  *
- * 依据 Butler Phase 1 §3.9 / Phase 3 §3.9：把既有规则面板扩为**四段总览页**，
- * 解决「规则从第二条起就熵增」——规则、命中/信号、技能、记忆收进一个可管理面。
+ * 2026-10-02 由 `ButlerRulesPanel`（原名「我的定制总览页 / Customize」）改名与扩段：
+ * 这个面管的是**「Butler 记得什么、学到什么、凭什么」**，不是外观定制，故：
+ *   - 名字统一为 **Memory**（rail 键 / 顶栏 / aria-label 三处同字，事件名保持不变）；
+ *   - 从「四段」扩为**六段**，把原先缺位的两类记忆实体与一类外部锚点收进来；
+ *   - SIGNALS 从「与实体并列的入口」降级为**证据视图 EVIDENCE**（视图不是实体）。
  *
+ * 六段（三实体 + 上下文 + 证据 + 锚点）：
+ *   Memories     用户长期记忆（内嵌 ButlerMemoryPanel，增 / 改 / 删全功能）
  *   Rules        规则列表（commitment / kind / status）+ 一键停用 + 悬挂提示 + 修订建议标记
- *                + 被拉黑模式（负样本）的可见与解封——它属规则学习闭环，不跟记忆放一段
- *   Signals      单规则的命中时间线 + 三类信号 + 冲突消解记录（按需拉取）
- *   Skills       技能列表（适用条件 / 版本 / 来源 / 成败 / 生命周期）+ 详情（步骤 / 副作用 / 修订历史）
- *                + 治理动作（Retire 停用 / Unquarantine 解封）——Phase 3 §3.9
- *   Memories     直接嵌入 ButlerMemoryPanel（增 / 改 / 删全功能）。
- *                2026-09-29 并入：原先的只读「偏好聚合」段取消——同一份 butler/preferences.md
- *                不再在 Memories 入口与 Customize 各画一遍，左栏也少一个键。
+ *   Skills       技能列表（适用条件 / 版本 / 来源 / 成败）+ 详情 + Retire / Unquarantine
+ *   Threads      会话上下文（**只读锚点**）：常驻三行 + 普通联系人、人设、条数、未读、常驻工作区
+ *   Evidence     学习闭环（**视图**）：按规则聚合的 5 类信号 + 被拉黑模式 + 冲突消解
+ *                + near-miss 询问额度 + 主动冒头预算 + 产出引用（数据来自只读 /api/butler/memory-audit）
+ *   Knowledge    项目账本 `.ledger/`（**只读锚点**）：条目数 / 待编译数 + 「写权归 Archivist」边界
  *
- * 首屏为**脑图落点**（BrainMap）：一张简笔画大脑接四个入口节点，点节点才进对应分区页；
+ * 首屏为**脑图落点**（BrainMap）：一张简笔画大脑接**六个**入口节点，点节点才进对应分区页；
  * 分区页不再保留横向标签，只留左上角 `← All` 回到脑图。
  * 例外：外部传 initialSection（如 openButlerMemories）时跳过脑图，直接落在指定分区。
  *
- * 数据源与既有实现同源，不新造存储：
- *   /api/butler/rules                          规则读写（底层 butler/.rules/<id>.md）
- *   /api/butler/rules/signals?id=             规则信号详情（新增子路径，纯增量）
- *   /api/butler/skills                         技能列表 + 成败信号 + 生命周期治理（底层 butler/.skills/<id>.md）
- *   /api/butler/preferences                    记忆读写（底层 butler/preferences.md，Memories 段由内嵌面板自行调用）
- *   /api/butler/rules/negative-samples         被拉黑模式的可见与解封（新增子路径）
+ * 数据源与既有实现同源，不新造存储（真源路径随脑图落点展示，方便用户自行备份）：
+ *   /api/butler/preferences                    用户记忆（butler/preferences.md）
+ *   /api/butler/rules                          规则读写（butler/.rules/<id>.md）
+ *   /api/butler/rules/signals?id=              规则信号详情
+ *   /api/butler/rules/negative-samples         被拉黑模式的可见与解封
+ *   /api/butler/skills                         技能列表 + 成败信号 + 生命周期治理（butler/.skills/<id>.md）
+ *   /api/butler/threads                        会话摘要（butler/.state/threads/<id>.json；只读锚点）
+ *   /api/butler/memory-audit                   只读聚合（额度 / 预算 / 产出 / 最近活动 / 真源路径）
+ *   /api/ledger/document                       项目账本索引（只读锚点，复用既有端点）
  *
  * 悬挂惰性检查（v6 §3.2 / 计划 D9）：打开总览页时读规则 → 比对当前项目列表 →
  * `scope_target` 已不存在的**生效中**规则转 `paused` 并标记。不接调度器。
@@ -49,15 +55,15 @@ import {
 } from '@/lib/butler/skills-shared';
 import { ButlerMemoryPanel } from './ButlerMemoryPanel';
 
-/** 四个分区 */
-export type Section = 'rules' | 'signals' | 'skills' | 'memories';
+/** 六个分区（三实体 + 上下文 + 证据 + 锚点；2026-10-02 由四段扩为六段） */
+export type Section = 'rules' | 'memories' | 'skills' | 'threads' | 'evidence' | 'knowledge';
 
-export interface ButlerRulesPanelProps {
+export interface ButlerMemoryConsoleProps {
   /** 独立浮窗模式的关闭回调；嵌入抽屉栏时省略（关闭由抽屉统一提供） */
   onClose?: () => void;
   /** 嵌入抽屉栏：去掉 fixed/锚定/阴影/圆角，填满父容器 */
   embedded?: boolean;
-  /** 初始分区：左栏 Customize 默认 Rules；外部 `openButlerMemories()` 直接落到 Memories */
+  /** 初始分区：左栏 Memory 默认 Rules；外部 `openButlerMemories()` 直接落到 Memories */
   initialSection?: Section;
 }
 
@@ -122,6 +128,47 @@ interface NegativeSample {
   action: string;
   class?: 'signal_mismatch' | 'not_a_habit';
   objectType?: string;
+}
+
+/** 会话摘要（Threads 段只读锚点；字段取服务端 ButlerThreadSummary 的子集） */
+interface ThreadSummaryLite {
+  threadId: string;
+  source: string;
+  lifecycle: string;
+  messageCount: number;
+  unread: number;
+  title: string;
+  updatedAt: number;
+  pinned?: boolean;
+  systemRole?: 'notify' | 'recorder' | 'search';
+  /** 会话级常驻工作区（真源类型 ButlerWorkspaceFolder：path 必填、name 为展示名） */
+  workspaceFolder?: { path: string; name?: string } | null;
+}
+
+/** 项目账本索引（Knowledge 段只读锚点；复用既有 /api/ledger/document） */
+interface KnowledgeData {
+  total?: number;
+  pending?: unknown;
+  wiki?: unknown;
+  projects?: unknown;
+}
+
+/** memory-audit 只读聚合（Evidence 段 + 脑图落点的时间线/路径） */
+interface AuditData {
+  paths?: {
+    root: string;
+    preferences: string;
+    rules: string;
+    ruleLogs: string;
+    skills: string;
+    threads: string;
+    state: string;
+  };
+  recent?: { kind: 'memory' | 'rule' | 'skill'; title: string; at: string }[];
+  negative?: { blocked?: NegativeSample[] };
+  askQuota?: { objectType: string; used: number; limit: number }[];
+  budget?: { threadId: string; asks: number; limit: number }[];
+  productions?: { ruleId: string; ruleName: string; producedRef: string; at: string }[];
 }
 
 /** 规则 → 表单草稿 */
@@ -268,6 +315,56 @@ const sectionHeading: React.CSSProperties = {
 
 const mutedText: React.CSSProperties = { fontSize: 12, color: 'var(--muted-foreground)' };
 
+/**
+ * 脑图落点下方的两条常驻信息（M4）：
+ *  ① **最近记忆活动**——记忆是自动抽取的（用户没说「记住」也会被记），所以必须有个「刚刚被记住了什么」
+ *     的就近出口；三类实体（记忆 / 规则 / 技能）按创建时间合并倒序，数据来自只读 `/api/butler/memory-audit`。
+ *  ② **真源路径**——四个落点都是明文文件，把绝对路径说出来，用户才有「我的记忆在哪、能不能搬走」的兜底。
+ */
+function MemoryFooter({ audit, loading }: { audit: AuditData | null; loading: boolean }) {
+  const [showPaths, setShowPaths] = useState(false);
+  const recent = audit?.recent ?? [];
+  const KIND_LABEL: Record<string, string> = { memory: 'memory', rule: 'rule', skill: 'skill' };
+  return (
+    <div style={{ padding: '0 12px 12px', flexShrink: 0 }}>
+      <div style={sectionHeading}>Recent memory activity</div>
+      {loading && <p style={mutedText}>Loading…</p>}
+      {!loading && recent.length === 0 && <p style={mutedText}>Nothing remembered yet.</p>}
+      {recent.slice(0, 5).map((r, i) => (
+        <div key={`${r.kind}-${i}`} style={{ ...mutedText, lineHeight: 1.7, display: 'flex', gap: 6 }}>
+          <span style={{ flexShrink: 0 }}>{KIND_LABEL[r.kind] ?? r.kind}</span>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</span>
+          <span style={{ flexShrink: 0, marginLeft: 'auto' }}>{fmtTime(r.at)}</span>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => setShowPaths((v) => !v)}
+        style={{ ...smallBtn, marginTop: 8 }}
+        aria-expanded={showPaths}
+      >
+        {showPaths ? 'Hide source paths' : 'Where is this stored?'}
+      </button>
+      {showPaths && audit?.paths && (
+        <div style={{ marginTop: 8 }}>
+          {([
+            ['memory', audit.paths.preferences],
+            ['rules', audit.paths.rules],
+            ['rule logs', audit.paths.ruleLogs],
+            ['skills', audit.paths.skills],
+            ['threads', audit.paths.threads],
+          ] as const).map(([label, p]) => (
+            <div key={label} style={{ ...mutedText, lineHeight: 1.7, wordBreak: 'break-all' }}>
+              {label} · <code>{p}</code>
+            </div>
+          ))}
+          <p style={{ ...mutedText, marginTop: 6 }}>Plain Markdown / JSON — copy the folder to back it up.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 药丸按钮样式（Signals 段的规则选择器仍在用；总览层已改成脑图，不再有横向标签） */
 function tabBtn(active: boolean): React.CSSProperties {
   return {
@@ -282,10 +379,14 @@ function tabBtn(active: boolean): React.CSSProperties {
 }
 
 /**
- * 脑图落点（Customize 首屏）——「大脑 + 突触」四节点总览。
+ * 脑图落点（Memory 首屏）——「大脑 + 突触」**六节点**总览（2026-10-02 由四节点扩为六节点）。
  *
- * 进入 Customize 先落在脑图，点某个节点才进对应分区页；分区页不再保留横向标签，
+ * 进入 Memory 先落在脑图，点某个节点才进对应分区页；分区页不再保留横向标签，
  * 只留左上角 `← All` 回到脑图。
+ *
+ * 为什么是六个：四节点只覆盖了「用户记忆 / 规则 / 技能 / 证据」，缺了**会话上下文**与
+ * **项目账本锚点**两类实体（设计文档 §1.2 / §2）。六节点的语义分组是
+ * **左列 = Butler 自己的记忆（三实体）**、**右列 = 上下文 / 证据 / 外部锚点**。
  *
  * 几何是**算出来的、不是估的**，改坐标前先读懂这套映射：
  *   - 平面坐标系固定为 720 × 400（与容器 aspect-ratio 同比例），脑与节点的位置全用百分比，
@@ -294,9 +395,13 @@ function tabBtn(active: boolean): React.CSSProperties {
  *     即 x ∈ [266.4, 453.6]、y ∈ [106.4, 293.6]；脑 SVG 用 viewBox 0 0 120 120，
  *     故 平面坐标 = (266.4 + 1.56·vx, 106.4 + 1.56·vy)。
  *   - 突触终点取脑轮廓曲线上的实点（反解三次贝塞尔得到），所以连线端点必然贴在皮层上；
- *     起点取卡片左右边的垂直中点（卡片宽 22%、居中定位 → 左卡右边 = 0.208×720 + 0.11×720）。
+ *     起点取卡片左右边的垂直中点（卡片宽 22%、居中定位 → 左卡右边 = 0.208×720 + 0.11×720 = 229）。
  *   - 脑、连线、卡片必须同处一个 z 平面（不设 translateZ）：一旦给其中一层加 z，
  *     透视会把它额外放大并位移，端点就会脱离皮层——这里踩过一次坑。
+ *
+ * 六节点的焊点（vx 由左半球分段贝塞尔反解，右半球取镜像）：
+ *   y=165 → v(17.0, 37.6) → 292.9 ｜ y=205 → v(17.4, 63.2) → 293.6 ｜ y=235 → v(18.9, 82.4) → 295.9
+ *   右侧为 720 − 左值。
  */
 const BRAIN_MAP_CSS = `
 .czb-flow { animation: czb-run 1.5s linear infinite; }
@@ -318,20 +423,25 @@ const BRAIN_MAP_CSS = `
 }
 `;
 
-/** 突触：起点在卡片边缘中点，终点在皮层实点；pathLength=100 把虚线周期归一化，四条长短不一的线才不会跳帧 */
+/** 突触：起点在卡片边缘中点，终点在皮层实点；pathLength=100 把虚线周期归一化，六条长短不一的线才不会跳帧。
+ *  行序 = 卡片行序（上/中/下），每行「左卡 → 左焊点」「右卡 → 右焊点」。 */
 const SYNAPSES = [
-  'M229 92 C 261 92 261 165 292.9 165',
-  'M490.6 92 C 458.9 92 458.9 165 427.1 165',
-  'M229 308 C 260.3 308 260.3 216.8 291.5 216.8',
-  'M490.6 308 C 459.6 308 459.6 216.8 428.5 216.8',
+  'M229 60 C 261 60 261 165 292.9 165',
+  'M490.6 60 C 458.9 60 458.9 165 427.1 165',
+  'M229 200 C 261 200 261 205 293.6 205',
+  'M490.6 200 C 458.9 200 458.9 205 426.4 205',
+  'M229 340 C 261 340 261 235 295.9 235',
+  'M490.6 340 C 458.9 340 458.9 235 424.1 235',
 ];
 
-/** 皮层上的四个接入焊点（与 SYNAPSES 的终点一一对应） */
+/** 皮层上的六个接入焊点（与 SYNAPSES 的终点一一对应，顺序同上：左1 右1 左2 右2 左3 右3） */
 const CORTEX_PORTS = [
   [292.9, 165],
   [427.1, 165],
-  [291.5, 216.8],
-  [428.5, 216.8],
+  [293.6, 205],
+  [426.4, 205],
+  [295.9, 235],
+  [424.1, 235],
 ];
 
 /** 简笔画大脑：单线双半球，Z 收口自然形成中线 */
@@ -347,12 +457,15 @@ const BRAIN_GYRI = [
   'M77 77 C 72 75 67 78 66 84',
 ];
 
-/** 四个入口节点：标签 + 一行说明（说明文案与各分区页的实际内容对应） */
+/** 六个入口节点：标签 + 一行说明（说明文案与各分区页的实际内容对应）。
+ *  `sub` 前缀即**语义分组**（entity / context / evidence / anchor），避免读者以为六者同类。 */
 const BRAIN_NODES: { key: Section; label: string; sub: string; left: string; top: string }[] = [
-  { key: 'rules', label: 'RULES', sub: 'commitments', left: '20.8%', top: '23%' },
-  { key: 'skills', label: 'SKILLS', sub: 'learned', left: '79.2%', top: '23%' },
-  { key: 'signals', label: 'SIGNALS', sub: 'hit timeline', left: '20.8%', top: '77%' },
-  { key: 'memories', label: 'MEMORIES', sub: 'about you', left: '79.2%', top: '77%' },
+  { key: 'memories', label: 'MEMORIES', sub: 'entity · about you', left: '20.8%', top: '15%' },
+  { key: 'rules', label: 'RULES', sub: 'entity · commitments', left: '20.8%', top: '50%' },
+  { key: 'skills', label: 'SKILLS', sub: 'entity · learned', left: '20.8%', top: '85%' },
+  { key: 'threads', label: 'THREADS', sub: 'context · conversations', left: '79.2%', top: '15%' },
+  { key: 'evidence', label: 'EVIDENCE', sub: 'why it learned', left: '79.2%', top: '50%' },
+  { key: 'knowledge', label: 'KNOWLEDGE', sub: 'anchor · project ledger', left: '79.2%', top: '85%' },
 ];
 
 const CURRENT = '#10B981';
@@ -524,7 +637,7 @@ function BrainMap({ onPick }: { onPick: (s: Section) => void }) {
   );
 }
 
-export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRulesPanelProps) {
+export function ButlerMemoryConsole({ onClose, embedded, initialSection }: ButlerMemoryConsoleProps) {
   const [section, setSection] = useState<Section>(initialSection ?? 'rules');
   /** 是否停在脑图落点：默认是；被外部指定分区（如 openButlerMemories）时直接进页 */
   const [landing, setLanding] = useState(!initialSection);
@@ -564,6 +677,21 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [skillDetailId, setSkillDetailId] = useState<string | null>(null);
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
+
+  /** Threads 段（只读锚点）：会话摘要来自既有 /api/butler/threads */
+  const [threads, setThreads] = useState<ThreadSummaryLite[]>([]);
+  const [threadsLoading, setThreadsLoading] = useState(false);
+  const [threadsError, setThreadsError] = useState<string | null>(null);
+
+  /** Knowledge 段（只读锚点）：项目账本索引复用既有 /api/ledger/document */
+  const [knowledge, setKnowledge] = useState<KnowledgeData | null>(null);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+
+  /** memory-audit 聚合：Evidence 段 + 脑图落点的时间线与真源路径 */
+  const [audit, setAudit] = useState<AuditData | null>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
 
   /** 拉取规则列表（纯读，供多处复用） */
   const fetchRules = useCallback(async (): Promise<RuleRecord[]> => {
@@ -821,10 +949,64 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
     }
   }, []);
 
-  // 负样本块住在 Rules 段，进面板即拉取（不再依赖切到某个分区才加载）
+  // 负样本块住在 Evidence 段（2026-10-02 由 Rules 段迁入：它属学习闭环证据，不是承诺本体），
+  // 但进面板即拉取——脑图落点也要用它的条数做分组徽标（同理 audit 也提前拉）。
   useEffect(() => {
     void loadNegatives();
   }, [loadNegatives]);
+
+  /** 拉取会话摘要（Threads 段只读锚点） */
+  const loadThreads = useCallback(async () => {
+    setThreadsLoading(true);
+    setThreadsError(null);
+    try {
+      const res = await fetch('/api/butler/threads');
+      const data = await res.json();
+      if (data?.success) setThreads((data.threads ?? []) as ThreadSummaryLite[]);
+      else setThreadsError(data?.error ?? 'Failed to load conversations');
+    } catch (e) {
+      setThreadsError(e instanceof Error ? e.message : 'Failed to load conversations');
+    } finally {
+      setThreadsLoading(false);
+    }
+  }, []);
+
+  /** 拉取项目账本索引（Knowledge 段只读锚点；未启用 / 无激活项目时按空态展示） */
+  const loadKnowledge = useCallback(async () => {
+    setKnowledgeLoading(true);
+    setKnowledgeError(null);
+    try {
+      const res = await fetch('/api/ledger/document');
+      const data = await res.json();
+      if (data?.success) setKnowledge(data as KnowledgeData);
+      else setKnowledgeError(data?.error ?? 'Ledger not available');
+    } catch (e) {
+      setKnowledgeError(e instanceof Error ? e.message : 'Ledger not available');
+    } finally {
+      setKnowledgeLoading(false);
+    }
+  }, []);
+
+  /** 拉取 memory-audit 聚合（只读；Evidence 段 + 脑图时间线/路径） */
+  const loadAudit = useCallback(async () => {
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const res = await fetch('/api/butler/memory-audit');
+      const data = await res.json();
+      if (data?.success) setAudit(data as AuditData);
+      else setAuditError(data?.error ?? 'Failed to load audit');
+    } catch (e) {
+      setAuditError(e instanceof Error ? e.message : 'Failed to load audit');
+    } finally {
+      setAuditLoading(false);
+    }
+  }, []);
+
+  // 脑图落点要显示「最近记忆活动」与真源路径（M4）→ 进面板即拉一次只读聚合
+  useEffect(() => {
+    void loadAudit();
+  }, [loadAudit]);
 
   /** 拉取技能列表 + 成败信号（按需，切到 Skills 段时） */
   const loadSkills = useCallback(async () => {
@@ -869,11 +1051,24 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
     }
   };
 
-  /** 从脑图进入某分区；Skills 按需拉取（Memories 段由内嵌面板自行加载） */
+  /** 分段数据按需加载：切到哪段就拉哪段的数据（Memories 由内嵌面板自管；Rules 已随首屏拉）。
+   *  放在各 loader 定义**之后**：依赖数组在 render 期求值，引用后面才定义的 useCallback 会 TDZ。 */
+  useEffect(() => {
+    if (landing) return;
+    if (section === 'skills') void loadSkills();
+    else if (section === 'threads') void loadThreads();
+    else if (section === 'knowledge') void loadKnowledge();
+    else if (section === 'evidence') {
+      // 证据视图要聚合两类：规则信号（内存里已有）+ 技能成败（需拉 skills）
+      void loadNegatives();
+      void loadSkills();
+    }
+  }, [section, landing, loadSkills, loadThreads, loadKnowledge, loadNegatives]);
+
+  /** 从脑图进入某分区（数据由上面的分段加载 effect 负责） */
   const openSection = (s: Section) => {
     setSection(s);
     setLanding(false);
-    if (s === 'skills') void loadSkills();
   };
 
   /** 解封某模式（追加 unblocked 记录，读侧 latest-wins 立即恢复候选；按 类 + 对象类型 精确定位） */
@@ -930,7 +1125,7 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
   );
 
   return (
-    <aside style={panelStyle(embedded)} role="dialog" aria-label="Customize panel">
+    <aside style={panelStyle(embedded)} role="dialog" aria-label="Memory panel">
       <header style={{ padding: 14, borderBottom: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -944,7 +1139,7 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
                 ← All
               </button>
             )}
-            <div style={{ fontSize: 14, fontWeight: 500 }}>Customize</div>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>Memory</div>
           </div>
           {onClose && (
             <button type="button" onClick={onClose} style={{ ...smallBtn, border: 'none', background: 'transparent' }} aria-label="Close">
@@ -954,9 +1149,13 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
         </div>
       </header>
 
-      {/* 首屏：脑图落点；点节点才进分区页（页面内不再有横向标签，靠左上角 ← All 返回） */}
+      {/* 首屏：脑图落点（下方常驻「最近记忆活动 + 真源路径」）；点节点才进分区页
+          （页面内不再有横向标签，靠左上角 ← All 返回） */}
       {landing ? (
-        <BrainMap onPick={openSection} />
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <BrainMap onPick={openSection} />
+          <MemoryFooter audit={audit} loading={auditLoading} />
+        </div>
       ) : section === 'memories' ? (
         /* Memories 段直接嵌整个面板（它自带栏头与滚动区），不再套这层带内边距的滚动容器。
            外面这层 flex-1/min-h-0 是必需的：内嵌面板是 height:100% 的 column，
@@ -1146,8 +1345,18 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
                       {rule.steps.length} step{rule.steps.length === 1 ? '' : 's'} · {rule.scope}
                     </span>
                     <span style={{ flex: 1 }} />
-                    <button type="button" onClick={() => void openSignals(rule)} style={smallBtn}>
-                      Signals
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // 「这条规则的证据」= 切到 EVIDENCE 段并选中它（2026-10-02：按钮由 Signals 更名，
+                        // 证据不再是独立节点，而是**每个实体都能进去看的视图**，见设计文档 §2）
+                        setSection('evidence');
+                        setLanding(false);
+                        void openSignals(rule);
+                      }}
+                      style={smallBtn}
+                    >
+                      Evidence →
                     </button>
                     <button type="button" onClick={() => startEdit(rule)} style={smallBtn}>
                       Edit
@@ -1184,12 +1393,19 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
                 </div>
               );
             })}
+          </>
+        )}
 
-            {/* 被拉黑模式（负样本）：从 Preferences 段迁来——它的写口是
-                /api/butler/rules/negative-samples，属规则学习闭环，与记忆不是一件事 */}
-            <div style={{ ...sectionHeading, marginTop: 14 }}>Blocked patterns</div>
+        {/* ==================== Evidence（学习闭环：视图，不是实体） ==================== */}
+        {section === 'evidence' && (
+          <>
+            {/* 被拉黑模式（负样本）：2026-10-02 由 Rules 段迁来——它的写口是
+                /api/butler/rules/negative-samples，属**学习闭环的证据**，与承诺本体不是一件事。
+                放在 Evidence 段首位：它是用户最常来「解封」的入口。 */}
+            <div style={sectionHeading}>Blocked patterns</div>
             <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
-              Patterns you said no to. Unblock to re-enable.
+              Patterns you said no to. Unblock to re-enable (the log is append-only — unblocking adds a record,
+              it does not erase history).
             </p>
             {negativesLoading && <p style={mutedText}>Loading…</p>}
             {negativesError && <p style={{ color: 'var(--danger)' }}>{negativesError}</p>}
@@ -1236,12 +1452,63 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
                 );
               })}
             </div>
-          </>
-        )}
 
-        {/* ==================== Signals ==================== */}
-        {section === 'signals' && (
-          <>
+            {/* 额度与预算：策略是否在起作用、还能问几次（数据来自只读 /api/butler/memory-audit） */}
+            <div style={{ ...sectionHeading, marginTop: 16 }}>Proactive budget</div>
+            <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
+              How much Butler is still allowed to interrupt about. Ask quota is per object type (near-miss);
+              session budget is per conversation.
+            </p>
+            {auditLoading && <p style={mutedText}>Loading…</p>}
+            {auditError && <p style={{ color: 'var(--danger)' }}>{auditError}</p>}
+            {!auditLoading && (audit?.askQuota?.length ?? 0) === 0 && (audit?.budget?.length ?? 0) === 0 && (
+              <p style={mutedText}>Nothing consumed yet.</p>
+            )}
+            {(audit?.askQuota ?? []).map((q) => (
+              <div key={`ask-${q.objectType}`} style={{ ...mutedText, lineHeight: 1.7 }}>
+                ask · <strong>{q.objectType}</strong> — {q.used}/{q.limit} used
+              </div>
+            ))}
+            {(audit?.budget ?? []).map((b) => (
+              <div key={`bud-${b.threadId}`} style={{ ...mutedText, lineHeight: 1.7 }}>
+                session · <strong>{b.threadId}</strong> — {b.asks}/{b.limit} used
+              </div>
+            ))}
+
+            {/* 产出引用：这条规则最近一次到底做了什么（可回溯到具体待办 / 日程 id） */}
+            {(audit?.productions?.length ?? 0) > 0 && (
+              <>
+                <div style={{ ...sectionHeading, marginTop: 16 }}>Latest output</div>
+                <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
+                  What each rule actually produced (reference id from its last hit).
+                </p>
+                {(audit?.productions ?? []).map((p) => (
+                  <div key={`prod-${p.ruleId}`} style={{ ...mutedText, lineHeight: 1.7 }}>
+                    <strong>{p.ruleName}</strong> → <code>{p.producedRef}</code> · {fmtTime(p.at)}
+                  </div>
+                ))}
+              </>
+            )}
+
+            {/* 技能成败：与规则信号同属「学习闭环证据」。**技能本体**仍在 Skills 段管（那里是实体页），
+                此处只做**跨实体聚合视图**——2026-10-02 之前它的成败信号只出现在 Skills 段，
+                同一类证据被拆在两处（设计文档 §1.3 G1）。 */}
+            <div style={{ ...sectionHeading, marginTop: 16 }}>Skill health</div>
+            {skillsLoading && <p style={mutedText}>Loading…</p>}
+            {!skillsLoading && skills.length === 0 && <p style={mutedText}>No skills yet.</p>}
+            {skills.map((s) => {
+              const sig = skillSignals[s.id];
+              return (
+                <div key={`skill-health-${s.id}`} style={{ ...mutedText, lineHeight: 1.7 }}>
+                  <strong>{s.name}</strong> · {s.lifecycle}
+                  {sig ? ` · ok ${sig.runs.ok} / failed ${sig.runs.failed} / dismissed ${sig.runs.dismissed}` : ''}
+                  {sig && sig.runs.consecutiveFailures > 0 ? ` · ${sig.runs.consecutiveFailures} in a row failed` : ''}
+                </div>
+              );
+            })}
+
+            {/* 单规则信号（原 Signals 段）：命中时间线 + 三类偏离 + 冲突消解 */}
+            <div style={{ ...sectionHeading, marginTop: 16 }}>Per-rule signals</div>
             {items.length === 0 ? (
               <p style={mutedText}>No rules yet.</p>
             ) : (
@@ -1429,6 +1696,22 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
                         ))}
                       </ul>
 
+                      <div style={sectionHeading}>Used by rules</div>
+                      {/* 反向引用（设计文档 §3）：技能是**规则动作枚举的动态扩展**，不是平行第二条路径
+                          （rules-shared §3.1）。把它「被哪些规则调用」显式列出来，读者才不会以为
+                          技能与规则是两套互不相干的机制。数据来自已加载的规则列表，零额外请求。 */}
+                      {(() => {
+                        const callers = items.filter((r) =>
+                          r.steps.some((st) => st.action === 'skill' && st.actionParams?.skillId === skill.id),
+                        );
+                        if (callers.length === 0) return <div style={mutedText}>Not called by any rule yet.</div>;
+                        return callers.map((r) => (
+                          <div key={`caller-${r.id}`} style={{ ...mutedText, lineHeight: 1.7 }}>
+                            {r.name}
+                          </div>
+                        ));
+                      })()}
+
                       <div style={sectionHeading}>Revisions</div>
                       {skill.revisions.length === 0 ? (
                         <div style={mutedText}>No revisions yet.</div>
@@ -1450,6 +1733,72 @@ export function ButlerRulesPanel({ onClose, embedded, initialSection }: ButlerRu
                 </div>
               );
             })}
+          </>
+        )}
+
+        {/* ==================== Threads（只读锚点：会话上下文） ==================== */}
+        {section === 'threads' && (
+          <>
+            <div style={sectionHeading}>Conversations</div>
+            <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
+              Where Butler remembers <em>with</em> you: memory itself is shared by every contact; only the persona
+              (voice, style) is per conversation. Read-only here — open a contact in the list to read the thread.
+            </p>
+            {threadsLoading && <p style={mutedText}>Loading…</p>}
+            {threadsError && <p style={{ color: 'var(--danger)' }}>{threadsError}</p>}
+            {!threadsLoading && !threadsError && threads.length === 0 && (
+              <p style={mutedText}>No conversations yet.</p>
+            )}
+            {threads.map((t) => (
+              <div
+                key={t.threadId}
+                style={{ padding: 10, borderRadius: 10, background: 'var(--surface-muted)', marginBottom: 8 }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, lineHeight: 1.5 }}>
+                  <span style={{ fontWeight: 500 }}>{t.title}</span>
+                  {t.pinned && <span style={badge}>pinned</span>}
+                  {t.systemRole && <span style={badge}>{t.systemRole}</span>}
+                  {t.unread > 0 && <span style={badge}>{t.unread} unread</span>}
+                </div>
+                <div style={mutedText}>
+                  {t.source} · {t.lifecycle} · {t.messageCount} messages · updated{' '}
+                  {fmtTime(new Date(t.updatedAt).toISOString())}
+                </div>
+                {t.workspaceFolder && (
+                  <div style={{ ...mutedText, marginTop: 2, wordBreak: 'break-all' }}>
+                    workspace · {t.workspaceFolder.name ? `${t.workspaceFolder.name} — ` : ''}
+                    {t.workspaceFolder.path}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+
+        {/* ==================== Knowledge（只读锚点：项目账本） ==================== */}
+        {section === 'knowledge' && (
+          <>
+            <div style={sectionHeading}>Project ledger</div>
+            <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
+              The project ledger (<code>.ledger/</code>) is maintained by <strong>Archivist</strong> — Butler only
+              reads it and never writes it. This node exists so you know the boundary and where it lives.
+            </p>
+            {knowledgeLoading && <p style={mutedText}>Loading…</p>}
+            {knowledgeError && <p style={mutedText}>Not available: {knowledgeError}</p>}
+            {!knowledgeLoading && knowledge && (
+              <>
+                <div style={{ ...mutedText, lineHeight: 1.9 }}>
+                  entries · <strong>{knowledge.total ?? 0}</strong>
+                </div>
+                <div style={{ ...mutedText, lineHeight: 1.9 }}>
+                  pending compilation ·{' '}
+                  <strong>{Array.isArray(knowledge.pending) ? knowledge.pending.length : 0}</strong>
+                </div>
+                <div style={{ ...mutedText, lineHeight: 1.9 }}>
+                  wiki pages · <strong>{Array.isArray(knowledge.wiki) ? knowledge.wiki.length : 0}</strong>
+                </div>
+              </>
+            )}
           </>
         )}
 

@@ -13,9 +13,13 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  ATTACHMENTS_BLOCK_HEAD,
   WECHAT_THREAD_TTL_MS,
+  WORKSPACE_BLOCK_HEAD,
   countUnreadAssistant,
   overlapLen,
+  parseWorkspaceFolder,
+  stripInjectedBlocks,
   summarizeThread,
   threadExpiresAt,
   trimThreadMessages,
@@ -149,6 +153,47 @@ describe('摘要派生（summarizeThread）', () => {
     expect(s.title).toBe('小法');
     expect(s.preview).toBe('傲娇但心软');
     expect(s.unread).toBe(0);
+  });
+
+  it('常驻工作区随摘要带出（Memory 台 Threads 段用）；无则 null', () => {
+    expect(summarizeThread(base).workspaceFolder).toBeNull();
+    expect(
+      summarizeThread({ ...base, workspaceFolder: { path: '/Users/me/案卷/刘鑫鑫案', name: '刘鑫鑫案' } })
+        .workspaceFolder?.path,
+    ).toBe('/Users/me/案卷/刘鑫鑫案');
+  });
+});
+
+describe('注入块剥离（stripInjectedBlocks）', () => {
+  const t = '帮我看看这个目录';
+
+  it('从首个标记处截断：附件块 / 工作区块 / 两者并存都能剥干净', () => {
+    expect(stripInjectedBlocks(`${t}${ATTACHMENTS_BLOCK_HEAD}\n1. a.pdf (File, 1 KB)`)).toBe(t);
+    expect(stripInjectedBlocks(`${t}${WORKSPACE_BLOCK_HEAD}\n- out\n  路径: /x`)).toBe(t);
+    // 附件在前、工作区在后（拼接顺序）→ 按首个命中截断即一并剥掉
+    expect(stripInjectedBlocks(`${t}${ATTACHMENTS_BLOCK_HEAD}\n1. a${WORKSPACE_BLOCK_HEAD}\n- out`)).toBe(t);
+  });
+
+  it('无块原样返回；空正文 + 块 → 空串（不给气泡留空白行）', () => {
+    expect(stripInjectedBlocks('普通一句话')).toBe('普通一句话');
+    expect(stripInjectedBlocks(`${WORKSPACE_BLOCK_HEAD}\n- out`)).toBe('');
+  });
+});
+
+describe('会话级工作区清洗（parseWorkspaceFolder）', () => {
+  it('只收绝对路径；非法一律归一为 null（= 未指定）', () => {
+    expect(parseWorkspaceFolder({ path: '/Users/x/out', name: 'out' })).toEqual({
+      path: '/Users/x/out',
+      name: 'out',
+    });
+    // name 缺失 → 由路径末节兜底（pill 要显示名字，缺了不该整个工作区失效）
+    expect(parseWorkspaceFolder({ path: '/Users/x/out' })).toEqual({ path: '/Users/x/out', name: 'out' });
+    // 相对路径 / 空 / 非对象：一律 null —— 绝不落一个用不了的相对路径进线程文件
+    expect(parseWorkspaceFolder({ path: 'out' })).toBeNull();
+    expect(parseWorkspaceFolder({ path: '' })).toBeNull();
+    expect(parseWorkspaceFolder({})).toBeNull();
+    expect(parseWorkspaceFolder(null)).toBeNull();
+    expect(parseWorkspaceFolder('x')).toBeNull();
   });
 });
 
@@ -297,6 +342,30 @@ describe('线程存储读写与生命周期', () => {
     expect(await threads.readThread('../etc/passwd')).toBeNull();
     await threads.deleteThread('../etc/passwd');
     expect(await threads.readThread('a/b')).toBeNull();
+  });
+
+  it('setThreadWorkspace 落盘可读回、不动 updatedAt；消息链路不覆盖它', async () => {
+    await threads.createThread('b-110-c1', null, 'panel');
+    const before = await threads.readThread('b-110-c1');
+    expect(before?.workspaceFolder ?? null).toBeNull();
+
+    await threads.setThreadWorkspace('b-110-c1', { path: '/tmp/ws', name: 'ws' });
+    const after = await threads.readThread('b-110-c1');
+    expect(after?.workspaceFolder).toEqual({ path: '/tmp/ws', name: 'ws' });
+    // 与 setThreadPersona / setThreadModelSettings 同口径：换工作区不该把会话顶到列表最前
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+
+    // 关键：工作区是**会话级常驻**状态，不能被「发一条消息」冲掉（upsertThread 只沿用旧值）
+    await threads.upsertThread('b-110-c1', [{ role: 'user', content: 'hi' }], 'panel');
+    expect((await threads.readThread('b-110-c1'))?.workspaceFolder).toEqual({ path: '/tmp/ws', name: 'ws' });
+  });
+
+  it('setThreadWorkspace(null) 清除；新建会话不带工作区', async () => {
+    await threads.createThread('b-111-c2', null, 'panel');
+    expect((await threads.readThread('b-111-c2'))?.workspaceFolder ?? null).toBeNull();
+    await threads.setThreadWorkspace('b-111-c2', { path: '/tmp/x', name: 'x' });
+    await threads.setThreadWorkspace('b-111-c2', null);
+    expect((await threads.readThread('b-111-c2'))?.workspaceFolder ?? null).toBeNull();
   });
 
   it('countUnreadThreads 汇总全部线程的未读 assistant 条数', async () => {

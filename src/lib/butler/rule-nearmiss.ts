@@ -14,6 +14,7 @@
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { STATE_DIR, ensureDir } from './storage';
+import { atomicWriteFile, createLock } from './fs-atomic';
 import {
   NEAR_MISS_ASK_LIMIT,
   NEAR_MISS_BEHAVIOR_N,
@@ -54,12 +55,15 @@ async function readCounts(file: string): Promise<Record<string, number>> {
   return {};
 }
 
+/** 计数写回：原子写 + **串行锁**。
+ *  （2026-10-02 评审 P2-⑭：此前 `noteBehavior` / `consumeAsk` 是**无锁**读-改-写，
+ *   且 tmp 名只有 `pid+Date.now()`，同毫秒并发会互相覆盖 → 询问额度与行为计数都会失真。） */
+const withCountsLock = createLock();
+
 /** 原子写回计数文件（tmp + rename，避免半截文件） */
 async function writeCounts(file: string, map: Record<string, number>): Promise<void> {
   await ensureDir(STATE_DIR);
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(map), 'utf-8');
-  await fs.rename(tmp, file);
+  await atomicWriteFile(file, JSON.stringify(map));
 }
 
 function behaviorFile(): string {
@@ -76,12 +80,23 @@ function askFile(): string {
  */
 export async function noteBehavior(objectType: ObjectType): Promise<{ count: number; exceeded: boolean }> {
   const file = behaviorFile();
-  const map = await readCounts(file);
-  const prev = typeof map[objectType] === 'number' && Number.isFinite(map[objectType]) ? map[objectType] : 0;
-  const count = prev + 1;
-  map[objectType] = count;
-  await writeCounts(file, map);
-  return { count, exceeded: count >= NEAR_MISS_BEHAVIOR_N };
+  return withCountsLock(async () => {
+    const map = await readCounts(file);
+    const prev = typeof map[objectType] === 'number' && Number.isFinite(map[objectType]) ? map[objectType] : 0;
+    const count = prev + 1;
+    map[objectType] = count;
+    await writeCounts(file, map);
+    return { count, exceeded: count >= NEAR_MISS_BEHAVIOR_N };
+  });
+}
+
+/**
+ * 只读：导出「询问额度」消耗表（落 `.state/rule-nearmiss.json`）。
+ * 供记忆台的证据视图（`/api/butler/memory-audit`）展示「这个模式还能问几次」——
+ * **不改行为**，与 `consumeAsk` 读同一份文件、同一把锁外的只读路径。
+ */
+export async function readAskCounts(): Promise<Record<string, number>> {
+  return readCounts(askFile());
 }
 
 /**
@@ -91,12 +106,14 @@ export async function noteBehavior(objectType: ObjectType): Promise<{ count: num
  */
 export async function consumeAsk(objectType: ObjectType): Promise<boolean> {
   const file = askFile();
-  const map = await readCounts(file);
-  const used = typeof map[objectType] === 'number' && Number.isFinite(map[objectType]) ? map[objectType] : 0;
-  if (used >= NEAR_MISS_ASK_LIMIT) return false;
-  map[objectType] = used + 1;
-  await writeCounts(file, map);
-  return true;
+  return withCountsLock(async () => {
+    const map = await readCounts(file);
+    const used = typeof map[objectType] === 'number' && Number.isFinite(map[objectType]) ? map[objectType] : 0;
+    if (used >= NEAR_MISS_ASK_LIMIT) return false;
+    map[objectType] = used + 1;
+    await writeCounts(file, map);
+    return true;
+  });
 }
 
 /** 拉黑判定（两类各自独立，互不误伤）：某对象类型下该类负样本是否处于拉黑态 */

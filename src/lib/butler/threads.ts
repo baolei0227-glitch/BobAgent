@@ -22,7 +22,8 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { stripThinkTags } from '@/lib/bus';
 import type { ThinkingLevel } from '@/lib/types';
-import { butlerRoot, ensureDir } from './storage';
+import { butlerRoot, ensureDir, pruneOrphanRoles } from './storage';
+import { atomicWriteFile, createKeyedLock } from './fs-atomic';
 import {
   BUTLER_THREAD_ID_PREFIX,
   messageTimeAt,
@@ -31,6 +32,7 @@ import {
   parseModelTag,
   parsePersona,
   parseThinkingLevel,
+  parseWorkspaceFolder,
   summarizeThread,
   threadExpiresAt,
   trimThreadMessages,
@@ -39,6 +41,7 @@ import {
   type ButlerThreadLifecycle,
   type ButlerThreadSource,
   type ButlerThreadSummary,
+  type ButlerWorkspaceFolder,
   type ChatMessage,
   type ThreadMessageHit,
 } from './threads-shared';
@@ -49,6 +52,7 @@ export type {
   ButlerThreadSource,
   ButlerThreadLifecycle,
   ButlerThreadSummary,
+  ButlerWorkspaceFolder,
   ChatMessage,
   ThreadMessageHit,
 } from './threads-shared';
@@ -131,6 +135,8 @@ export function parseThread(raw: string, fallbackId: string): ButlerThread | nul
     // 会话级选型（旧文件无此二字段 → null = 未选，由 entry 回退默认，行为与改造前一致）
     modelId: parseModelTag(o.modelId),
     thinkingLevel: parseThinkingLevel(o.thinkingLevel),
+    // 会话级工作区（旧文件无此字段 → null = 未指定）
+    workspaceFolder: parseWorkspaceFolder(o.workspaceFolder),
     source,
     lifecycle,
     readAt: num(o.readAt),
@@ -142,34 +148,14 @@ export function parseThread(raw: string, fallbackId: string): ButlerThread | nul
 
 // ==================== 读写原语 ====================
 
-/** 每 threadId 一把串行锁：多请求并发改同一线程时避免互相覆盖 */
-const _locks = new Map<string, Promise<void>>();
-
-/** 以该 threadId 的串行锁包裹一段「读-改-写」临界区 */
-async function withLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = _locks.get(threadId) ?? Promise.resolve();
-  let release: () => void = () => {};
-  const next = (async () => {
-    if (prev) await prev;
-    await new Promise<void>((res) => { release = res; });
-  })();
-  _locks.set(threadId, next);
-  try {
-    return await fn();
-  } finally {
-    release();
-    // 队尾归还：只有自己仍是最新排队者时才摘除，避免把后来者的锁误删
-    if (_locks.get(threadId) === next) _locks.delete(threadId);
-  }
-}
+/** 每 threadId 一把串行锁：多请求并发改同一线程时避免互相覆盖。
+ *  锁与原子写原语统一取自 `./fs-atomic`（2026-10-02 评审：此前 5 份副本各自演化）。 */
+const withLock = createKeyedLock();
 
 /** 原子写一个线程文件（先写 tmp 再 rename，避免并发读-改-写写出半截文件） */
 export async function writeThreadFile(thread: ButlerThread): Promise<void> {
   await ensureDir(threadsDir());
-  const target = threadFilePath(thread.threadId);
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(thread, null, 2), 'utf-8');
-  await fs.rename(tmp, target);
+  await atomicWriteFile(threadFilePath(thread.threadId), JSON.stringify(thread, null, 2));
 }
 
 /**
@@ -244,6 +230,8 @@ export async function upsertThread(
       persona: prev?.persona ?? null,
       modelId: settings ? parseModelTag(settings.modelId) : (prev?.modelId ?? null),
       thinkingLevel: settings ? parseThinkingLevel(settings.thinkingLevel) : (prev?.thinkingLevel ?? null),
+      // 工作区**不由消息链路改动**（唯一写入口是 setThreadWorkspace）→ 一律沿用文件里的旧值
+      workspaceFolder: prev?.workspaceFolder ?? null,
       source: effectiveSource,
       lifecycle: prev?.lifecycle ?? 'active',
       readAt: prev?.readAt ?? 0,
@@ -352,6 +340,8 @@ export async function createThread(
       persona,
       modelId: parseModelTag(settings?.modelId),
       thinkingLevel: parseThinkingLevel(settings?.thinkingLevel),
+      // 新建会话不带工作区（用户选定后才由 setThreadWorkspace 落盘）
+      workspaceFolder: null,
       source,
       lifecycle: 'active',
       // 刚建出来的空线程 = 已读过（没有任何消息），否则它一出现就自带未读
@@ -395,6 +385,23 @@ export async function setThreadModelSettings(
       modelId: parseModelTag(modelId),
       thinkingLevel: parseThinkingLevel(thinkingLevel),
     });
+  });
+}
+
+/**
+ * 覆盖某会话的**工作区**（用户指定 · 锁定操作范围）；传 null = 清除。
+ * 与 setThreadModelSettings 同口径：**不动 updatedAt** —— 换个工作区不该把会话顶到联系人列最前。
+ * 这是工作区**唯一**的写入口：消息链路（upsertThread）只沿用旧值，不参与它的变更。
+ */
+export async function setThreadWorkspace(
+  threadId: string,
+  folder: ButlerWorkspaceFolder | null,
+): Promise<void> {
+  if (!THREAD_ID_RE.test(threadId)) return;
+  await withLock(threadId, async () => {
+    const thread = await readThreadRaw(threadId);
+    if (!thread) return;
+    await writeThreadFile({ ...thread, workspaceFolder: folder });
   });
 }
 
@@ -578,7 +585,12 @@ export async function deleteThreadMessages(threadId: string, targets: DeleteMess
   });
 }
 
-/** 清理全部已过期线程（wechat 24h），返回删除条数 */
+/** 清理全部已过期线程（wechat 24h），返回删除条数。
+ *  顺带两件事：
+ *   - 回收 `roles.json` 的孤儿条目（评审 P2-⑯）：线程被删后注册表只增不删，
+ *     实测 10 条角色 vs 3 个活线程。清条目**不动角色目录**（附件/文档仍在）。
+ *   - 清掉原子写的 tmp 残骸（评审 P2-⑮）：旧实现失败后会把 `${file}.<pid>.<ts>.tmp` 留在数据目录
+ *     （实测 4 个、两个各约 150KB）。只删 1 小时前的，避免误删进行中的写入。 */
 export async function sweepThreads(): Promise<{ deleted: number }> {
   let names: string[];
   try {
@@ -597,6 +609,22 @@ export async function sweepThreads(): Promise<{ deleted: number }> {
       await deleteThread(id);
       deleted++;
     }
+  }
+  // tmp 残骸清扫（1 小时前的才算残骸）
+  const staleBefore = now - 60 * 60 * 1000;
+  for (const n of names) {
+    if (!n.endsWith('.tmp')) continue;
+    const p = join(threadsDir(), n);
+    try {
+      const st = await fs.stat(p);
+      if (st.mtimeMs < staleBefore) await fs.unlink(p);
+    } catch { /* 已被并发清掉 / 权限问题：跳过 */ }
+  }
+  try {
+    const pruned = await pruneOrphanRoles();
+    if (pruned.length > 0) console.log(`[butler/threads] 已回收角色注册表孤儿条目 ${pruned.length} 条`);
+  } catch (e) {
+    console.warn('[butler/threads] 角色注册表回收失败:', e instanceof Error ? e.message : String(e));
   }
   return { deleted };
 }

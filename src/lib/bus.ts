@@ -59,6 +59,63 @@ export interface WechatArticleCard {
   keypoint?: string;
 }
 
+/**
+ * 检索实况的一行：召回到的某一篇 + 精选对它的判定（2026-10-01）。
+ *
+ * 与 `WechatArticleCard` 的分工：卡片是**结果**（精编后留下的那几篇，给人读）；
+ * 这一行是**判定过程**（连被判掉的也在），给人核对「AI 有没有漏掉好东西」。
+ * 它随综述消息落库（`ChatMessage.searchTrace`）—— 消息在则账本在，**消息删则账本消失**。
+ */
+export interface WechatSearchTraceItem {
+  /** 候选在召回列表里的下标（= 服务端 curated 帧的 id，按位回填判定） */
+  id: number;
+  title: string;
+  url: string;
+  account?: string;
+  /** 召回时的搜索摘要（被判定掉的那些靠它说明「为什么这篇没用」） */
+  snippet?: string;
+  /** pending = 未判定（仅实时预览期存在，落库时不会出现）；kept = 入选精读；dropped = 被判掉 */
+  verdict: 'pending' | 'kept' | 'dropped';
+  /** 入选理由（kept） */
+  reason?: string;
+  /**
+   * 模型给出的**相关度名次**（kept 才有；0 = 最相关）—— 2026-10-01 新增。
+   *
+   * 为什么必须存下来：账本数组是按**召回下标**排的，模型的相关度顺序原本在这一步被丢掉，
+   * 于是"排序质量"（nDCG）离线完全算不了 —— 评测 CLI 只能报 `nDCG N/A`。
+   *
+   * 只有**模型真的排过序**时才写：兜底路径（模型不可用 → 取召回前 3 篇）不写，
+   * 那几篇的顺序是召回顺序，给它标名次等于凭空造一份排序。
+   * 因此 `rank` 存在 ⟺ 这一轮有真实的模型排序，评测据此判定 `ranked`。
+   */
+  rank?: number;
+  /** 逐篇一句摘要（kept 且模型已产出） */
+  summary?: string;
+  /** 文章关键要点短语（kept 且模型已产出） */
+  keypoint?: string;
+  /** 正文是否读到（kept；false = 只有搜索摘要可用） */
+  readOk?: boolean;
+}
+
+/** 一轮检索的实况账本：检索问题 + 逐篇判定。挂在综述消息上随消息落库。 */
+export interface WechatSearchTrace {
+  /** 该轮检索词（右栏面板的标题；不必再去猜是哪一条 user 消息） */
+  query: string;
+  /**
+   * 规划器**实际拿去检索的关键词串**（1–3 个）—— 2026-10-01 新增。
+   *
+   * 为什么必须记下来：召回出问题时，"规划器给的方向不好"与"搜狗在该方向上的排序不好"
+   * 是两种完全不同的病；在此之前账本里只有最终候选、没有方向，**无法归因**。
+   *
+   * ⚠ 降级路径可由此推断：若 `queries` 只有一个元素且等于 `query`，
+   * 说明规划器没跑成（模型不可用 → 原句直搜），这一轮的召回不能算在规划头上。
+   */
+  queries?: string[];
+  /** 规划器对用户意图的一句话概括（与 queries 同批落库，回看时能对齐"当时按什么搜的"） */
+  intent?: string;
+  items: WechatSearchTraceItem[];
+}
+
 /** 聊天消息（仅 kind === 'chat' 时携带，用于邮件式线程回复） */
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -68,6 +125,15 @@ export interface ChatMessage {
    * 可选：其余消息不写此字段；服务端线程存储原样透传（见 lib/butler/threads.ts parseThread）。
    */
   cards?: WechatArticleCard[];
+  /**
+   * 本轮检索的**实况账本**（仅「小微」搜索综述消息携带，2026-10-01 新增）。
+   *
+   * 为什么跟着消息落库（而不是只活在右栏内存里）：账本要能从消息下方的入口**随时重开**——
+   * 抽屉关过、应用重启过都得还能点开，否则那个入口就是一条时灵时不灵的死链。
+   * 随之而来的删除语义也自然成立：删掉这条消息，账本不复存在（右栏对应清空）。
+   * 服务端线程存储原样透传（parseThread 逐字段保留，见 lib/butler/threads.ts）。
+   */
+  searchTrace?: WechatSearchTrace;
 }
 
 /** 轨迹事件检查负载（TraceTimeline 选中事件 → UnifiedViewer 右侧检查器） */
@@ -109,6 +175,15 @@ export interface ButlerNoticePayload {
   starred?: boolean;
   /** true = 只弹即时 toast，不落 INBOX/ARCHIVE（对 task/note/info 这类"用户主动操作回执"使用） */
   toast?: boolean;
+  /**
+   * 打扰闸（B5 克制策略，2026-10-02 接线）：消费端在弹 toast / 系统通知前是否要问一次推送裁决。
+   *  - `'gate'`（缺省）：先问 `POST /api/butler/push-gate`，免打扰窗口内/**超单日上限**时不打扰；
+   *    落库不受影响（条目照常进抽屉收件箱），故**不丢数据**。
+   *  - `'always'`：不过闸。用于两类——① **义务性通知**（规则执行回执等，v6 §3.2「义务不是打扰」）；
+   *    ② **服务端已裁决过的**推送（如日报：服务端在 `GET /api/butler/daily-report` 已按同一策略
+   *    决定放行或留在队列，客户端再过闸会双重计数）。
+   */
+  interrupt?: 'gate' | 'always';
 }
 
 /** Butler 命令执行状态负载（⌘F 面板执行 / 命令期间发布，ButlerNoticeHost 消费渲染"执行中"浮层） */

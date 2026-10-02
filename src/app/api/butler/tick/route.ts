@@ -8,7 +8,8 @@
  * 不做常驻调度器（与 Phase 2「不新增后台调度器」一致），由桌面端按需调用。
  *
  * POST body（可选）：{ projectId?, threadId? } —— 运行锚点（作用域具体度判定 / 预算计数）。
- * 返回：{ success, decision, notice, producedRef }。
+ * 返回：{ success, decision, notice, producedRef, missed }。
+ *   `missed` = 应用未运行期间错过、超出 24h 补偿窗口、**不会补跑**的定时实例（2026-10-02 评审 §2.2-7）。
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { butlerTick } from '@/lib/butler/runtime';
@@ -34,6 +35,8 @@ export async function POST(request: NextRequest) {
       decision: adj.decision,
       notice: adj.notice ?? null,
       producedRef: adj.producedRef ?? null,
+      // 应用未运行期间错过、且超出 24h 补偿窗口的定时实例（每条规则只告知一次）——此前是静默丢失
+      missed: adj.missed.length > 0 ? adj.missed : null,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

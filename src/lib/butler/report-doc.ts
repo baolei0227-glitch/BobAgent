@@ -11,8 +11,7 @@
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import { NOTIFY_THREAD_ID } from '@/lib/core/butler-notify';
-import { dateStamp, ensureDir, resolveRoleDir } from './storage';
+import { NOTIFY_THREAD_ID, dateStamp, ensureDir, resolveRoleDir } from './storage';
 
 /**
  * 写一份报告文档。

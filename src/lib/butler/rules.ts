@@ -21,6 +21,7 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 import matter from 'gray-matter';
 import { butlerRoot, ensureDir, dateStamp } from './storage';
+import { atomicWriteFile, createLock } from './fs-atomic';
 import {
   deriveCommitment,
   deriveKind,
@@ -242,31 +243,14 @@ export function parseRule(raw: string): RuleRecord | null {
 
 // ==================== 读写原语 ====================
 
-/** rules 读-改-写串行化（多请求并发改同一规则时避免互相覆盖） */
-let _rulesLock: Promise<void> = Promise.resolve();
-
-/** 以串行锁包裹一段「读-改-写」临界区 */
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = _rulesLock;
-  let release: () => void = () => {};
-  _rulesLock = (async () => {
-    if (prev) await prev;
-    await new Promise<void>((res) => { release = res; });
-  })();
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
+/** rules 读-改-写串行化（多请求并发改同一规则时避免互相覆盖）。
+ *  锁与原子写原语统一取自 `./fs-atomic`（2026-10-02 评审：此前 5 份副本各自演化）。 */
+const withLock = createLock();
 
 /** 原子写一个规则文件（先写 tmp 再 rename，避免并发读-改-写写出半截文件） */
 async function writeRuleFile(rule: RuleRecord): Promise<void> {
   await ensureDir(rulesRoot());
-  const target = ruleFilePath(rule.id);
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, serialize(rule), 'utf-8');
-  await fs.rename(tmp, target);
+  await atomicWriteFile(ruleFilePath(rule.id), serialize(rule));
 }
 
 /** 读一条规则；不存在 / id 非法 / 解析失败 → null */

@@ -1,7 +1,7 @@
 /**
  * 规则的**纯常量与类型**（无任何 Node 依赖）。
  *
- * 与 `lib/core/preferences-shared.ts` 同因：规则面板 `components/butler/ButlerRulesPanel.tsx`
+ * 与 `lib/core/preferences-shared.ts` 同因：记忆台 `components/butler/ButlerMemoryConsole.tsx`
  * 是客户端组件，需要词表与派生逻辑做展示；而 `rules.ts` 含 fs 读写，客户端链路无法 bundle。
  * 故把纯数据 / 纯函数抽到这里，服务端（rules.ts 转出）与客户端共用同一份定义，避免两处漂移。
  *

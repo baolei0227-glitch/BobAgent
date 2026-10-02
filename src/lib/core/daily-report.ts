@@ -18,6 +18,7 @@ import { readFile, writeFile, mkdir, access } from 'fs/promises';
 import { randomBytes } from 'crypto';
 import { join } from 'path';
 import { STATE_DIR } from '@/lib/butler/storage';
+import { atomicWriteFile } from '@/lib/butler/fs-atomic';
 import type { TodaySnapshot, TodayEvent } from '@/lib/butler/today';
 import type { ButlerNoticeItem } from '@/lib/bus';
 
@@ -578,10 +579,7 @@ export async function takePendingReports(): Promise<
     const raw = await readFile(PENDING_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
     // 先原子写空文件（先写 tmp 再 rename），确保消费方只消费一次
-    const tmp = `${PENDING_FILE}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tmp, '[]', 'utf-8');
-    const { rename } = await import('fs/promises');
-    await rename(tmp, PENDING_FILE);
+    await atomicWriteFile(PENDING_FILE, '[]');
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
