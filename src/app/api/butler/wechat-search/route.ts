@@ -16,6 +16,7 @@ import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { resolveAppRoot } from '@/lib/app-root';
 import { resolveModelConfig, type ResolvedModelConfig } from '@/lib/ai/resolve-model-config';
+import { mergeUniqueByTitle } from '@/lib/butler/wechat-dedupe';
 
 export const runtime = 'nodejs';
 
@@ -104,6 +105,13 @@ const PLAN_SYSTEM = `你是检索词规划助手，服务于「搜狗微信」�
 - 若输入已是较好的关键词：微调或保持，不必硬拆；
 - 关键词串要像真人会搜的那样简短自然，不要整句，不要堆砌标点；
 - 不同检索串之间尽量互补而非重复。
+- **至少留一个方向按「核心法律文书的正式名称」来搜**（2026-10-01 实测新增）：写出与该问题直接相关的
+  司法解释 / 部门规章 / 地方高院解答的**正式名称**（名称主干即可，如
+  「最高人民法院 关于审理涉及夫妻债务纠纷案件适用法律有关问题的解释」）。
+  为什么必须这样：按主题词搜只能搜到律师/公众号的解读，**权威原文只有按文书名称才捞得到**；
+  实测同一问题「主题词方向」12 篇里 0 篇一手来源，「文书名方向」能直接带回 2–3 篇。
+  注意：不要用「XX 司法解释」这类泛称（泛称搜回来仍是解读），也**不要编造不存在的文书名** ——
+  若确实想不起具体名称，就把这个方向退回主题词，宁可少一个方向也不要瞎编。
 只返回严格 JSON，不要 markdown：
 {"isQuestion":true,"intent":"一句话概括用户真实意图","queries":["关键词串1","关键词串2"]}`;
 
@@ -168,24 +176,35 @@ export async function GET(req: NextRequest) {
     }
 
     // ---- 2) 扇出检索（顺序，避免并发共用后台标签冲突）+ 合并去重 ----
-    const merged: Hit[] = [];
-    const seenUrls = new Set<string>();
+    //
+    // 2026-10-01 修：原来用 `seenUrls` 按 url 去重 —— **那是无效的**。搜狗返回的是
+    // `/link?url=dn9a_-…` 加密跳转链，同一篇文章每次检索（哪怕同一会话、相隔几分钟）
+    // token 都不同：实测 5 个方向 62 条候选只有 51 篇唯一文章，4 组"同文不同 token"
+    // 的 url 全不相同。后果是重复副本白占 MERGE_CAP 名额、模型把同一篇当两篇比较。
+    //
+    // 同时修掉两个配套问题（只改去重键则收益为零）：
+    //   ① 上限改为卡**唯一**条数 —— 旧实现数的是原始条数，3 方向 × 4 条 = 12 原始，
+    //      去重后只剩 9 篇，3 个名额被副本吃掉；
+    //   ② 每方向多取几条（同一张结果页，**零额外网络成本** —— 桥只是不再提前截断），
+    //      并跨方向**轮转**取用，否则第一个方向会独吞大部分名额、把其它侧面挤掉。
+    const groups: Hit[][] = [];
     let captcha = false;
-    const perQuery = queries.length > 1 ? Math.max(4, Math.ceil(MERGE_CAP / queries.length)) : 6;
+    const perQuery = Math.min(10, Math.max(6, Math.ceil(MERGE_CAP / Math.max(1, queries.length)) + 2));
     for (const qq of queries) {
       const data = await callBridge(qq, perQuery);
       if (data.captcha) {
         captcha = true;
         break;
       }
-      for (const r of data.results || []) {
-        if (!r.url) continue;
-        if (seenUrls.has(r.url)) continue;
-        seenUrls.add(r.url);
-        merged.push(r);
-        if (merged.length >= MERGE_CAP) break;
-      }
-      if (merged.length >= MERGE_CAP) break;
+      groups.push((data.results || []).filter((r) => r.url && r.title));
+    }
+    const merge = mergeUniqueByTitle(groups, MERGE_CAP);
+    const merged = merge.merged;
+    if (merge.duplicatesDropped > 0 || merge.skipped > 0) {
+      console.log(
+        `[butler/wechat-search] 合并去重：${merge.rawCount} 条原始 → ${merged.length} 篇唯一` +
+          `（丢弃重复 ${merge.duplicatesDropped}${merge.skipped ? ` / 无标题 ${merge.skipped}` : ''}）`,
+      );
     }
 
     return NextResponse.json({

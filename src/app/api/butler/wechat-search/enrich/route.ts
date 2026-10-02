@@ -9,6 +9,13 @@
  * 只在 3 篇精选上读正文与做摘要，成本可控；模型不可用时不再静默丢弃候选 ——
  * 直接把候选落库成卡片（见 fallbackCards），保证「检索了哪些文章」始终有账可查。
  *
+ * 2026-10-01 起，落库时还带上一份**实况账本**（`buildTrace`：全部候选 + 逐篇判定 kept/dropped），
+ * 挂在综述消息的 `searchTrace` 字段上 —— 气泡下方的「查看检索实况」据此重开右栏，
+ * 并且**消息被删则账本消失**（用户口径：删了消息，对应账本也该清空）。
+ * 账本组装本身已抽到 `lib/butler/wechat-trace.ts`（它是 schema 的唯一边界，值得单测钉住）；
+ * 其中 `rank`（模型相关度名次）只在**模型真排过序**时才写，兜底路径不写 ——
+ * 否则评测会把"召回顺序"当成"相关度顺序"，nDCG 虚高。
+ *
  * SSE 事件均为单通道 message，data 为 `{ type, ... }`：
  *   phase / curated / article / summary / digest / captcha / error / done
  */
@@ -18,6 +25,8 @@ import { join } from 'path';
 import { resolveAppRoot } from '@/lib/app-root';
 import { resolveModelConfig, type ResolvedModelConfig } from '@/lib/ai/resolve-model-config';
 import { recordSearchExchange } from '@/lib/core/butler-search';
+import { mergeUniqueByTitle } from '@/lib/butler/wechat-dedupe';
+import { buildTrace, fallbackTrace } from '@/lib/butler/wechat-trace';
 import type { WechatArticleCard } from '@/lib/bus';
 
 export const runtime = 'nodejs';
@@ -49,6 +58,9 @@ function fallbackCards(hits: Hit[]): WechatArticleCard[] {
     return card;
   });
 }
+
+// 账本组装（buildTrace / fallbackTrace）已搬到 lib/butler/wechat-trace.ts：
+// 那是账本 schema 的唯一边界，值得单测钉住（尤其新增的 rank 字段）。
 
 async function readHippoBridge(): Promise<{ url: string; token: string }> {
   const raw = await readFile(join(resolveAppRoot(), HIPPO_BRIDGE_REL), 'utf-8');
@@ -138,6 +150,12 @@ async function chatJson<T>(cfg: ResolvedModelConfig, system: string, user: strin
 const CURATE_SYSTEM = `你是微信公众号文章的检索精选助手。用户给出一个检索关键词和一组候选文章（含序号、标题、摘要、公众号）。
 请从中精选最多 ${MAX_PICK} 篇：优先「与关键词高度相关」「信息量或权威性高（知名公众号、原创、深度分析）」「时效较新」的文章。
 明显无关、软文广告、标题党、纯营销导流一律不选；宁可少选，也不要凑数。
+
+补充要求（一手优先）：在这 ${MAX_PICK} 篇里，**只要候选里存在**「法院/政府部门发布的原文或规范性文件（通知、办法、纪要）」
+「最高人民法院或人民法院报等权威解读」「对法条本身的梳理」，就必须优先选它们，
+而不是选律师/公众号的实务随笔或二手解读；同一主题有一手与二手时，选一手。
+入选理由里请点明它属于哪一类（一手文件 / 权威解读 / 法条梳理 / 实务经验）。
+
 只返回严格 JSON，不要 markdown：
 {"picks":[{"index":0,"reason":"一句话说明入选理由"}]}
 index 为候选文章序号（从 0 开始）。按相关度从高到低排序。`;
@@ -187,6 +205,8 @@ export async function POST(req: NextRequest) {
       /** 提问词与候选（在 try 外声明：catch 兜底落库也要用） */
       let query = '';
       let hits: Hit[] = [];
+      /** 规划器给的方向与意图（在 try 外声明：catch 的兜底落库也要带上它） */
+      let plan: { queries: string[]; intent: string } = { queries: [], intent: '' };
       /** 本轮是否已落库；catch 据此判断要不要补兜底，避免重复写同一条 */
       let persisted = false;
       try {
@@ -194,12 +214,20 @@ export async function POST(req: NextRequest) {
         query = (body.q || '').trim();
         // 检索前规划出的用户意图与拆解方向（来自 wechat-search GET），让综述对齐问题
         const intent = (body.intent || '').trim();
+        // 规划器给的方向（GET 侧产出、抽屉原样带回）。**一并落库**：没有它，
+        // "这一轮召回为什么差"事后无法归因（规划的问题 vs 搜狗排序的问题）。
+        plan = {
+          queries: (body.queries || []).map((s) => (s || '').trim()).filter(Boolean),
+          intent,
+        };
         const planCtx = intent
-          ? `用户意图：${intent}\n检索方向：${(body.queries || []).filter((s) => (s || '').trim()).join('、')}\n`
+          ? `用户意图：${intent}\n检索方向：${plan.queries.join('、')}\n`
           : '';
-        hits = (Array.isArray(body.hits) ? body.hits : [])
-          .filter((h) => h && typeof h.url === 'string' && typeof h.title === 'string')
-          .slice(0, 20);
+        // 兜底再去重一次（与 GET 侧同一份口径）：即便调用方送进重复副本，
+        // 也不会出现"同一篇文章占两个候选下标、最后出两张一样的卡片"。
+        const incoming = (Array.isArray(body.hits) ? body.hits : [])
+          .filter((h) => h && typeof h.url === 'string' && typeof h.title === 'string');
+        hits = mergeUniqueByTitle([incoming], 20).merged;
         if (!query || hits.length === 0) {
           send({ type: 'error', error: 'q and hits are required' });
           finish();
@@ -209,7 +237,13 @@ export async function POST(req: NextRequest) {
         const cfg = await resolveModelConfig({});
         if (!cfg) {
           // 模型不可用：精编全部做不了，但候选已经到手 —— 落库成卡片，不让这一轮静默消失。
-          await recordSearchExchange(query, '（AI 精编不可用，以下是召回的候选文章）', fallbackCards(hits));
+          await recordSearchExchange(
+            query,
+            '（AI 精编不可用，以下是召回的候选文章）',
+            fallbackCards(hits),
+            fallbackTrace(hits, MAX_PICK),
+            plan,
+          );
           persisted = true;
           send({ type: 'error', error: 'model-unavailable' });
           finish();
@@ -230,7 +264,7 @@ export async function POST(req: NextRequest) {
           CURATE_SYSTEM,
           `检索关键词：${query}\n\n候选文章：\n${candidateList}`,
         );
-        // 精选失败 → 兜底取前 MAX_PICK 篇
+        // 精选失败 → 兜底取前 MAX_PICK 篇（**这段顺序不是模型排的**，账本据此决定要不要写 rank）
         let picks: Array<{ index: number; reason: string }> = [];
         const seen = new Set<number>();
         for (const p of curateRaw?.picks || []) {
@@ -241,7 +275,8 @@ export async function POST(req: NextRequest) {
           }
           if (picks.length >= MAX_PICK) break;
         }
-        if (picks.length === 0) {
+        const picksFromModel = picks.length > 0;
+        if (!picksFromModel) {
           picks = hits.slice(0, MAX_PICK).map((_, i) => ({ index: i, reason: '' }));
         }
         const curated = picks.map((p) => ({
@@ -384,7 +419,16 @@ export async function POST(req: NextRequest) {
             if (s?.keypoint) card.keypoint = s.keypoint;
             return card;
           });
-          await recordSearchExchange(query, md, cards);
+          // 账本与卡片同批落库：卡片是「留下什么」，账本是「连判掉的也在」——
+          // 消息下方的入口据此重开右栏（见 ButlerDrawer 的「查看检索实况」）。
+          // `ranked` 决定写不写 rank：只有模型真排过序，nDCG 才有意义（见 lib/bus.ts 的 rank 注释）。
+          await recordSearchExchange(
+            query,
+            md,
+            cards,
+            buildTrace(hits, picks, readResults, summaries, { ranked: picksFromModel }),
+            plan,
+          );
           persisted = true;
         }
 
@@ -394,7 +438,13 @@ export async function POST(req: NextRequest) {
         // 精编中途抛错（模型 HTTP 失败等）：综述没了，但候选到手过 —— 兜底落库，
         // 保证用户至少能看到「检索了哪些文章」，而不是整轮静默消失。
         if (!persisted && query && hits.length) {
-          await recordSearchExchange(query, '（AI 精编中断，以下是召回的候选文章）', fallbackCards(hits)).catch(() => { /* 兜底失败不再外抛 */ });
+          await recordSearchExchange(
+            query,
+            '（AI 精编中断，以下是召回的候选文章）',
+            fallbackCards(hits),
+            fallbackTrace(hits, MAX_PICK),
+            plan,
+          ).catch(() => { /* 兜底失败不再外抛 */ });
         }
         send({ type: 'error', error: e instanceof Error ? e.message : String(e) });
         finish();

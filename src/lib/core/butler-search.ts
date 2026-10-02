@@ -10,12 +10,10 @@
  *
  * 本模块 server-only（经 threads 触达文件存储），仅供服务端路由引用。
  */
-import { stripThinkTags, type WechatArticleCard } from '@/lib/bus';
+import { stripThinkTags, type WechatArticleCard, type WechatSearchTrace, type WechatSearchTraceItem } from '@/lib/bus';
 import { readThread, upsertThread, appendThreadMessages, type ButlerThreadSummary, type ButlerPersona, type ChatMessage } from '@/lib/butler/threads';
 import { SEARCH_THREAD_ID, SEARCH_TITLE } from '@/lib/butler/storage';
-
-/** 副标题截断上限（与 butler-recorder 同口径） */
-const PREVIEW_MAX = 60;
+import { PREVIEW_MAX } from '@/lib/butler/threads-shared';
 
 /** 常驻线程 ID / 显示名真源在 lib/butler/storage.ts（那里同时用它解析角色目录），此处再导出保持既有引用可用 */
 export { SEARCH_THREAD_ID, SEARCH_TITLE };
@@ -77,18 +75,38 @@ export async function buildSearchSummary(): Promise<ButlerThreadSummary & { pinn
  * （挂在 assistant 消息的 `cards` 字段上，见 lib/bus.ts ChatMessage.cards）——
  * 这样「检索了哪些文章」是会话历史的一部分：刷新后仍在、可直接点开原文，
  * 不再依赖前端临时浮层（旧实现卡片不进库，面板一关就没了）。
+ *
+ * `trace`（实况账本，2026-10-01 新增）同样挂在这条 assistant 消息上（`ChatMessage.searchTrace`）：
+ * 卡片只记「留下了什么」，账本还记「哪些被判定掉了、为什么」——气泡下方的入口据此重开右栏。
+ * 两条生命周期刻意**绑在消息上**：消息在则都能回看，消息删则一起消失（用户口径）。
+ *
+ * `plan`（规划器给的方向与意图）也一并落库：没有它就**无法归因**——
+ * "12 篇里只有 2 篇相关"到底是规划器方向不好，还是搜狗在这个方向上的排序不好，事后查不出来。
  */
 export async function recordSearchExchange(
   query: string,
   summaryMarkdown: string,
   cards: WechatArticleCard[] = [],
+  trace: WechatSearchTraceItem[] = [],
+  plan?: { queries?: string[]; intent?: string },
 ): Promise<void> {
   if (!query.trim() && !summaryMarkdown.trim()) return;
   const msgs: ChatMessage[] = [];
   if (query.trim()) msgs.push({ role: 'user', content: query.trim() });
-  if (summaryMarkdown.trim() || cards.length) {
+  if (summaryMarkdown.trim() || cards.length || trace.length) {
     const assistant: ChatMessage = { role: 'assistant', content: summaryMarkdown.trim() };
     if (cards.length) assistant.cards = cards;
+    // 实况账本随消息落库（2026-10-01）：消息下方的「查看检索实况」入口要能随时重开，
+    // 靠的就是这份字段；消息被删，账本一并消失（deleteThreadMessages 整条删）。
+    if (trace.length && query.trim()) {
+      const st: WechatSearchTrace = { query: query.trim(), items: trace };
+      // 检索方向 / 意图：空值不写字段（老轮次没有它们，回看时的 UI 要能区分"没有"与"空数组"）
+      const qs = (plan?.queries ?? []).map((s) => (s || '').trim()).filter(Boolean);
+      if (qs.length) st.queries = qs;
+      const intent = (plan?.intent ?? '').trim();
+      if (intent) st.intent = intent;
+      assistant.searchTrace = st;
+    }
     msgs.push(assistant);
   }
   try {

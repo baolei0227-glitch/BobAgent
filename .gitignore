@@ -173,3 +173,7 @@ test-results/
 # Finder 副本 / 历史构建备份
 *.bak-*
 .next.bak-*
+
+# 公众号检索评测的产物（报告 / capture 出来的 run）
+# golden set 本身在 scripts/eval/ 下，**要提交**：人工标注是最贵的资产
+.eval/
