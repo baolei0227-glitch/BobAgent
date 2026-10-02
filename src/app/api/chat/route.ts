@@ -21,6 +21,8 @@ import { ToolRuntime, SANDBOX_BLOCKED_TOOLS, isBridgeWriteAllowed } from '@/lib/
 import { sessionRuntime } from '@/lib/runtime/session';
 // K2-S3 动态上下文链 runtime service 抽取，行为不变：路径/授权/偏好/OCR 文本生成收敛进 ContextRuntime
 import { contextRuntime } from '@/lib/runtime/context';
+// 前缀缓存 per-call 遥测（2026-10-02）：三段指纹 + 漂移标记，与每次调用的 hit/miss 一起落盘
+import { getSessionTracker, recordCacheCall } from '@/lib/runtime/cache-telemetry';
 // 项目级后台调度：用户对话 > 成果块提炼 > 账本编译（本轮请求是最高优先级，持有期间后台让位）
 import { enterUserTurn } from '@/lib/runtime/project-scheduler';
 import type { AgentId } from '@/lib/agents/profiles';
@@ -2127,14 +2129,40 @@ function injectSkillContext(
   return { messages: result, matchedSkillNames: matchedNames, skillDetails };
 }
 
-/** 根据思考深度构建系统提示并注入到消息列表。
- *  basePrompt：当前 Agent 的基础系统提示（缓存头）——通用 Agent 用 BASE_SYSTEM_PROMPT，
- *  专项 Agent（如 coding）用自己的专属 base（见 AGENT_PROFILES.baseSystemPrompt）。 */
-function injectThinkingPrompt(
+/** 基础系统提示（缓存头）注入：保证 system 消息以 basePrompt 开头。
+ *  basePrompt：当前 Agent 的基础系统提示——通用 Agent 用 BASE_SYSTEM_PROMPT，
+ *  专项 Agent（如 coding）用自己的专属 base（见 AGENT_PROFILES.baseSystemPrompt）。
+ *
+ *  与「思考引导注入」解耦（2026-10-02 修）：原先两者耦合在同一个函数里、且调用侧用
+ *  `shouldInjectThink ? injectThinkingPrompt(...) : messages` 三元守卫——DeepSeek V4 家族
+ *  `shouldInjectThinkPrompt` 恒返回 false，导致 basePrompt 一并被跳过，V4 请求的 system 里
+ *  只剩下前端那句短英文提示，BASE_SYSTEM_PROMPT / 各画像专属 base 全部没有下发。
+ *  拆开后：**base 无条件注入**，只有思考引导受 shouldInjectThink 控制。
+ *
+ *  幂等：system 已存在且已以 basePrompt 开头时逐字节原样返回（缓存头稳定，不产生空转 diff）。 */
+function ensureBaseSystemPrompt(
+  messages: ChatMessage[],
+  basePrompt: string = BASE_SYSTEM_PROMPT,
+): ChatMessage[] {
+  const sysIdx = messages.findIndex((m) => m.role === 'system');
+  if (sysIdx < 0) {
+    return [{ role: 'system', content: basePrompt }, ...messages];
+  }
+  const existingContent = messages[sysIdx].content || '';
+  if (existingContent.startsWith(basePrompt.slice(0, 20))) return messages;
+  const result = [...messages];
+  result[sysIdx] = { ...result[sysIdx], content: basePrompt + '\n\n' + existingContent };
+  return result;
+}
+
+/** 思考深度引导注入（不碰 system）。
+ *  缓存前缀稳定化：思考指令随 level 变化，若注入 system（缓存头），用户在同一对话中切换
+ *  思考深度 → system 字节变化 → 前缀整段失效，历史缓存全部作废。故一律 prepend 到当前轮
+ *  最后一条 user 消息（level 变化只影响当前轮 user 消息）。 */
+function injectThinkingGuidance(
   messages: ChatMessage[],
   level: ThinkingLevel,
   modelSupportsThinking = true,
-  basePrompt: string = BASE_SYSTEM_PROMPT,
 ): ChatMessage[] {
   let injection = SYSTEM_PROMPT_INJECTIONS[level];
 
@@ -2148,38 +2176,17 @@ function injectThinkingPrompt(
       .replace(/\n{3,}/g, '\n\n');
   }
 
+  if (!injection) return messages;
+
   const result = [...messages];
-
-  // 缓存前缀稳定化：思考指令随 level 变化，若注入 system（缓存头），
-  // 用户在同一对话中切换思考深度 → system 字节变化 → 前缀整段失效，历史缓存全部作废。
-  // 改为 prepend 到当前轮最后一条 user 消息：system 只含字节稳定的 BASE_SYSTEM_PROMPT，
-  // 思考深度自由切换不再破坏历史缓存（level 变化只影响当前轮 user 消息）。
-  const sysIdx = result.findIndex((m) => m.role === 'system');
-  if (sysIdx >= 0) {
-    // 已有系统消息：保证 basePrompt 在开头（思考指令不再进 system）
-    const existingContent = result[sysIdx].content || '';
-    result[sysIdx] = {
-      ...result[sysIdx],
-      content: existingContent.startsWith(basePrompt.slice(0, 20))
-        ? existingContent
-        : basePrompt + '\n\n' + existingContent,
-    };
+  const last = result[result.length - 1];
+  if (last && last.role === 'user') {
+    const prev = last.content || '';
+    result[result.length - 1] = { ...last, content: prev ? injection + '\n\n' + prev : injection };
   } else {
-    result.unshift({ role: 'system', content: basePrompt });
+    // 兜底：最后一条不是 user 消息（历史重放等边界）→ 追加一条 user 消息，仍不进 system
+    result.push({ role: 'user', content: injection });
   }
-
-  // 思考指令 prepend 到当前轮 user 消息（与技能上下文/偏好注入同策略）
-  if (injection) {
-    const last = result[result.length - 1];
-    if (last && last.role === 'user') {
-      const prev = last.content || '';
-      result[result.length - 1] = { ...last, content: prev ? injection + '\n\n' + prev : injection };
-    } else {
-      // 兜底：最后一条不是 user 消息（历史重放等边界）→ 追加一条 user 消息，仍不进 system
-      result.push({ role: 'user', content: injection });
-    }
-  }
-
   return result;
 }
 
@@ -4050,9 +4057,13 @@ export async function POST(request: NextRequest) {
     // Phase 2b（全面 DSH 化）：DeepSeek V4 不注入思考引导（原生 reasoning_content，纯 API reasoning_effort 驱动），
     // 非 V4 推理模型恒注入  thinking 标签引导（其思考块显示依赖该格式，属正确性前提，不设开关）
     const shouldInjectThink = shouldInjectThinkPrompt(isDeepseekV4, modelSupportsThinking);
-    let finalMessages = shouldInjectThink
-      ? injectThinkingPrompt(messagesWithSkill, effectiveLevel, modelSupportsThinking, agentBasePrompt)
-      : messagesWithSkill;
+    // 缓存头注入与思考引导注入解耦（2026-10-02 修）：base 无条件进 system，
+    // 只有思考引导受 shouldInjectThink 控制。此前两者耦合在一个三元里，
+    // V4 家族（shouldInjectThink 恒 false）连带把 base 一起丢掉 → system 只剩前端短提示。
+    let finalMessages = ensureBaseSystemPrompt(messagesWithSkill, agentBasePrompt);
+    if (shouldInjectThink) {
+      finalMessages = injectThinkingGuidance(finalMessages, effectiveLevel, modelSupportsThinking);
+    }
 
     // 将项目路径 + 授权目录注入 prepend 到当前轮 user 消息（缓存前缀稳定化 C8）：
     // 属「低频变化」动态内容，不进 system（缓存头），system 只含字节稳定的 BASE_SYSTEM_PROMPT
@@ -4120,7 +4131,8 @@ export async function POST(request: NextRequest) {
       }
       // 排期纪律（2026-09-27）：与命令表同因——管家提示词被物化为 agent.json，改常量对已装用户
       // 不生效；「无冲突直接落地 + 一句话、有潜在冲突先确认」这条口径必须立刻对所有人生效。
-      const scheduleInjection = contextRuntime.buildScheduleDisciplineInjection();
+      // 传 agentBasePrompt 做幂等去重（2026-10-02）：system 里已含同一常量时不再重复注入。
+      const scheduleInjection = contextRuntime.buildScheduleDisciplineInjection(agentBasePrompt);
       if (scheduleInjection) {
         finalMessages = prependDynamicContext(finalMessages, scheduleInjection);
       }
@@ -4728,6 +4740,13 @@ export async function POST(request: NextRequest) {
               },
             };
 
+            // 前缀缓存 per-call 遥测跟踪器：**按会话（nodeId）取、跨任务复用**，
+            // 这样"上一任务最后一次发送的前缀"能作为本任务首调的比对基准——跨任务边界正是
+            // 「重放历史与上次实际发送不一致」唯一可观测的地方（@资料块丢失 / 压缩游标跳过 / R-14 裁剪）。
+            // 无 nodeId 的调用方（外部 HTTP 客户端）用一次性 key，退化为任务内逐轮比对。
+            // 与任务级 prefixSegments 并存：后者是"循环前算一次"的展示用指纹，本跟踪器按每次调用采样。
+            const callPrefixTracker = getSessionTracker(nodeId || `task:${taskId}`);
+
             for (let round = 0; ; round++) {
               // 客户端已断开（前端看门狗 abort / 用户点停止）→ 不再发起新一轮模型调用
               if (request.signal.aborted) throw new Error('客户端已断开连接，本轮已中止。');
@@ -4769,6 +4788,14 @@ export async function POST(request: NextRequest) {
               const roundPayloadMessages = directVisionPlan && directVisionPlan.length > 0
                 ? materializeDirectVisionMessages(baseRoundMessages, directVisionPlan)
                 : baseRoundMessages;
+              // ---- 前缀缓存 per-call 遥测（2026-10-02）----
+              // 任务级 prefixSegments 只在循环前算一次，看不出"第几次调用漂的、漂了多少钱"。
+              // 这里按**每次调用**采集三段指纹与漂移标记，待 usage 块到达时随 hit/miss 一起落盘
+              // （.logs/cache-telemetry.jsonl），让下次复盘能直接把 miss 归因到「工具段漂移 /
+              // 历史被改写 / 新内容首次读入」三类，不必再按时间窗口 join 两套日志。
+              // 口径：history 链走 baseRoundMessages（纯文本、任务内只追加），直连多模态的
+              // materialize 是确定性变换，不参与指纹（否则视觉会话每轮都会误报"历史被改写"）。
+              const callPrefix = callPrefixTracker.describe(baseRoundMessages, lite ? [] : loopToolDefs);
               const requestBody: Record<string, unknown> = {
                 model: providerModelId,
                 messages: roundPayloadMessages,
@@ -4944,6 +4971,31 @@ export async function POST(request: NextRequest) {
                   if (hit > 0) kctx.taskUsage.cacheHitTokens += hit;
                   if (typeof chunk.usage.prompt_cache_miss_tokens === 'number') kctx.taskUsage.cacheMissTokens += chunk.usage.prompt_cache_miss_tokens;
                   kctx.taskUsage.calls += 1;
+                  // per-call 落盘（旁路，失败不影响主链路）：把本次 hit/miss 与发送前缀的三段指纹对齐，
+                  // 供离线区分「漂移导致的重复全价读」与「新内容必然的首次读入」。
+                  recordCacheCall({
+                    ...callPrefix,
+                    taskId,
+                    nodeId,
+                    agent: profile.id,
+                    model: providerModelId || modelId,
+                    callIdx: kctx.taskUsage.calls,
+                    promptTokens: chunk.usage.prompt_tokens ?? 0,
+                    completionTokens: chunk.usage.completion_tokens ?? 0,
+                    cacheHitTokens: hit,
+                    cacheMissTokens:
+                      typeof chunk.usage.prompt_cache_miss_tokens === 'number'
+                        ? chunk.usage.prompt_cache_miss_tokens
+                        : Math.max(0, (chunk.usage.prompt_tokens ?? 0) - hit),
+                    cumPromptTokens: kctx.taskUsage.promptTokens,
+                    cumCacheHitTokens: kctx.taskUsage.cacheHitTokens,
+                    cumCacheMissTokens: kctx.taskUsage.cacheMissTokens,
+                    payloadChars: (roundPayloadMessages as Array<{ content?: unknown }>).reduce<number>(
+                      (s, m) => s + (typeof m.content === 'string' ? m.content.length : 0),
+                      0,
+                    ),
+                    messageCount: roundPayloadMessages.length,
+                  });
                 }
                 const delta = chunk.choices?.[0]?.delta;
                 if (!delta) continue;

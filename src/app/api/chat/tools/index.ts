@@ -1750,15 +1750,15 @@ export function registerCustomTools(customTools: CustomToolDef[]): void {
 /** 已注册的 MCP 工具名称集合 */
 let registeredMcpNames = new Set<string>();
 
-/** bob-browser-mcp 工具定义快照（缓存稳定性加固）：
- *  首次成功发现 browser.* 工具后锁存；此后无论桥在线/离线，都从快照注册同一套工具定义，
- *  保证工具集字节稳定 → 前缀缓存不因桥连接状态漂移。
- *  桥升级新增工具/进程重启时，下次成功发现自动更新快照（低频事件，可接受一次缓存失效）。
- *  offlineStreak：连续 N 次请求发现不到 browser 工具 → 清空快照（桥长期离线 / 用户显式禁用），
- *  避免禁用后工具永久残留。 */
-let browserMcpSnapshot: McpToolInfo[] | null = null;
-let browserOfflineStreak = 0;
-const BROWSER_SNAPSHOT_MAX_STREAK = 10;
+/** MCP 工具定义快照（缓存稳定性加固）：
+ *  每个 server 首次成功发现工具后锁存（serverId → 该 server 的工具定义）；
+ *  此后无论桥在线/离线，都从快照注册同一套工具定义，保证工具集字节稳定 → 前缀缓存不因连接状态漂移。
+ *  server 升级新增工具 / 进程重启后首次成功发现自动更新快照（低频事件，可接受一次缓存失效）。
+ *  offlineStreak：某 server 连续 N 次请求发现不到工具 → 清空其快照（桥长期离线 / 用户显式禁用），
+ *  避免禁用后工具永久残留（沿用原先 browser 快照的阈值语义，2026-10-02 推广到全部 server）。 */
+const mcpToolSnapshots = new Map<string, McpToolInfo[]>();
+const mcpSnapshotOfflineStreak = new Map<string, number>();
+const MCP_SNAPSHOT_MAX_STREAK = 10;
 
 /**
  * 方案3：把 browser.screenshot(describe:true) 的返回翻译成文字描述。
@@ -1939,8 +1939,15 @@ function trimMcpSchema(node: unknown): unknown {
  *   仅限专属节点经专用路由调用；连接不受影响，只是普通 chat 节点看不到这些工具）。
  * @param opts.excludeToolNames 不注入的工具名集合（按 MCP 工具原始名精确匹配，如授权管理类工具，
  *   仅专属节点经专用路由调用，防止模型自我授权绕过用户确认）。
+ * @param opts.expectedServerIds 当前**仍应在线**的 server id 集合（来自 settings 的 enabled 列表，
+ *   已剔除 excludeServerIds）。不在该集合内的 server 立即清空快照、不参与回退——用户禁用/删除
+ *   服务必须立即生效，不能被快照宽限期拖住。未传（老调用点）时不做主动清理，只按离线计数收敛。
  */
-export async function registerMcpTools(opts?: { excludeServerIds?: Set<string>; excludeToolNames?: Set<string> }): Promise<number> {
+export async function registerMcpTools(opts?: {
+  excludeServerIds?: Set<string>;
+  excludeToolNames?: Set<string>;
+  expectedServerIds?: Set<string>;
+}): Promise<number> {
   // 清除上一次的 MCP 工具
   for (const name of registeredMcpNames) {
     registry.unregister(name);
@@ -1950,28 +1957,44 @@ export async function registerMcpTools(opts?: { excludeServerIds?: Set<string>; 
   // 实时发现已连接 MCP 的工具；无连接时为空数组
   const liveTools = mcpManager.hasConnections() ? await mcpManager.discoverTools() : [];
 
-  // 快照锁存：browser.* 工具一旦成功发现即更新快照并清零离线计数；
-  // 发现不到时（桥离线/被禁用）继续用快照注册（字节稳定），连续超阈值才清空快照收敛。
-  const isBrowserTool = (t: McpToolInfo): boolean =>
-    /browser/i.test(t.serverId) || /browser/i.test(t.serverName);
-  const liveBrowser = liveTools.filter(isBrowserTool);
-  if (liveBrowser.length > 0) {
-    browserMcpSnapshot = liveBrowser;
-    browserOfflineStreak = 0;
-  } else if (browserMcpSnapshot) {
-    browserOfflineStreak++;
-    if (browserOfflineStreak >= BROWSER_SNAPSHOT_MAX_STREAK) {
-      browserMcpSnapshot = null;
-      browserOfflineStreak = 0;
-    }
+  // 快照锁存（2026-10-02 由「仅 browser」推广到全部 server）：某 server 一旦成功发现工具即更新
+  // 其快照并清零离线计数；此后发现不到时（桥离线 / 重连中 / 瞬时故障）继续用快照注册（字节稳定），
+  // 连续超阈值才清空该 server 的快照收敛。触发该改动的实据：cacheguard.jsonl 一个月 185 次工具段
+  // 漂移里，pkulaw / tianyancha / bob-ocr-mcp 等整组工具随连接状态进出（pkulaw 变更 1051 条），
+  // 而此前只有 browser 类有快照 → 这些 server 一抖动就整段作废前缀缓存。
+  const liveByServer = new Map<string, McpToolInfo[]>();
+  for (const t of liveTools) {
+    const list = liveByServer.get(t.serverId);
+    if (list) list.push(t);
+    else liveByServer.set(t.serverId, [t]);
+  }
+  for (const [serverId, list] of liveByServer) {
+    mcpToolSnapshots.set(serverId, list);
+    mcpSnapshotOfflineStreak.set(serverId, 0);
   }
 
-  // 工具集 = 实时非 browser 工具 + browser 快照（若有）。
-  // 桥离线时 liveBrowser 为空但快照仍在 → browser.* 继续以相同字节注册（缓存不漂移）；
-  // 从未连上过（快照空）→ 不注册 browser 工具（保持现状）。
-  const mcpTools = browserMcpSnapshot
-    ? [...liveTools.filter((t) => !isBrowserTool(t)), ...browserMcpSnapshot]
-    : liveTools;
+  // 本次未发现到的 server：仍应在线 → 用快照兜底；已不该在线 / 连续离线超阈值 → 丢弃快照
+  const staleTools: McpToolInfo[] = [];
+  for (const serverId of [...mcpToolSnapshots.keys()]) {
+    if (liveByServer.has(serverId)) continue;
+    if (opts?.expectedServerIds && !opts.expectedServerIds.has(serverId)) {
+      mcpToolSnapshots.delete(serverId);
+      mcpSnapshotOfflineStreak.delete(serverId);
+      continue;
+    }
+    const streak = (mcpSnapshotOfflineStreak.get(serverId) ?? 0) + 1;
+    if (streak >= MCP_SNAPSHOT_MAX_STREAK) {
+      mcpToolSnapshots.delete(serverId);
+      mcpSnapshotOfflineStreak.delete(serverId);
+      continue;
+    }
+    mcpSnapshotOfflineStreak.set(serverId, streak);
+    staleTools.push(...(mcpToolSnapshots.get(serverId) ?? []));
+  }
+
+  // 工具集 = 实时工具 + 快照兜底工具（两者不会重复：兜底只覆盖本次未发现到的 server）。
+  // 顺序不影响发送字节：最终由 buildAndSortToolDefs 做确定性分组排序。
+  const mcpTools = staleTools.length > 0 ? [...liveTools, ...staleTools] : liveTools;
 
   for (const mcpTool of mcpTools) {
     // 专属服务不注入：exposeToChatNodes=false 的 MCP 工具仅限专用路由调用

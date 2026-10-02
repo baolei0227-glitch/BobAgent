@@ -421,12 +421,24 @@ export class ToolRuntime {
     const excludedMcpToolNames = new Set(
       (this.settings.mcpServers || []).flatMap((s) => s.excludeToolsFromModel ?? []),
     );
+    // 仍应在线（enabled）且对 chat 可见的 server：MCP 工具快照兜底的「白名单」——
+    // 不在名单里的 server 一律清空快照并跳过回退，保证用户禁用/删除服务立刻生效
+    // （2026-10-02：快照兜底由「仅 browser」推广到全部 server 后新增的护栏）。
+    const expectedMcpIds = new Set(
+      (this.settings.mcpServers || [])
+        .filter((s) => s.enabled !== false && !excludedMcpIds.has(s.id))
+        .map((s) => s.id),
+    );
 
     // 同步 MCP 服务器配置并注册 MCP 工具（始终跟随全局 enabled，不再做节点级启停覆盖）：
     // 与 skill 对齐——Store 中 enabled 的 MCP 自动注入候选，节点复选框不再决定"是否可用"。
     const { mcpManager } = await import('@/lib/mcp/manager');
     await mcpManager.syncServers(this.settings.mcpServers || []);
-    await registerMcpTools({ excludeServerIds: excludedMcpIds, excludeToolNames: excludedMcpToolNames }).catch((e) => console.error('[MCP] 工具注册失败:', e));
+    await registerMcpTools({
+      excludeServerIds: excludedMcpIds,
+      excludeToolNames: excludedMcpToolNames,
+      expectedServerIds: expectedMcpIds,
+    }).catch((e) => console.error('[MCP] 工具注册失败:', e));
   }
 
   /** 按当前 activeScenes 计算最终工具定义并做确定性排序 + CacheGuard 守卫。

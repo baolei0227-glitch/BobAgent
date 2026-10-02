@@ -195,9 +195,19 @@ export class ContextRuntime {
    * 而「建日程回复太长」这条纪律必须立刻对所有人生效。故把
    * BUTLER_SCHEDULE_DISCIPLINE（与 BUTLER_BASE_SYSTEM_PROMPT 内插值同一常量）经本通道注入。
    *
+   * 幂等去重（2026-10-02）：BUTLER_BASE_SYSTEM_PROMPT 内已插值同一常量，故**新装用户**（agent.json
+   * 由当前源码物化）的 system 里本来就有最新口径——再注入一遍是逐字重复（约 950 字符/轮，且给模型
+   * 制造"新旧两版要挑一个"的伪冲突）；而**已装老用户**的 agent.json 是安装时物化的旧文本，
+   * 不含本段，必须照常注入覆盖（原设计意图）。故按 basePrompt 实测包含与否决定注不注：
+   *   - 含 → 返回空串（真源已在 system，零重复、零冲突）；
+   *   - 不含 → 照常注入（覆盖旧版，附「以本段为准」）。
+   * 传 undefined（老调用点）时行为与改动前完全一致（恒注入）。
+   *
    * 缓存影响：注入落在所有历史之后（当前轮 user 消息内），system + 工具 + 历史前缀字节不变。
    */
-  buildScheduleDisciplineInjection(): string {
+  buildScheduleDisciplineInjection(basePrompt?: string): string {
+    // 真源已在 system 里逐字存在 → 不重复注入（新装用户 / agent.json 已刷新的用户走这一支）
+    if (basePrompt && basePrompt.includes(BUTLER_SCHEDULE_DISCIPLINE)) return '';
     // 已装用户的 agent.json 里是旧版排期纪律，故显式声明「以本段为准」避免两条规则打架
     return `\n\n以下是宿主层下发的最新排期口径（与提示词里的旧版不一致时，一律以本段为准）：\n${BUTLER_SCHEDULE_DISCIPLINE}`;
   }
