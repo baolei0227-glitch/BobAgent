@@ -265,6 +265,35 @@ if [ ! -f "$STAGING/next-standalone/server.js" ] && [ -f "$STAGING/next-standalo
     done < <(find "$_symlink_dir" -type l -print0)
   fi
 fi
+
+# 补齐「裸名」顶层符号链接（修复自定义 server 入口的 serverExternalPackages 解析）
+# 为什么要补：自定义 server 入口由 tsup 打包（见步骤 5e），tsup 会把 package.json 依赖
+# 保留为**裸名**外部引用（产物里是 `import("better-sqlite3")` 这种原样 specifier）；
+# 而 Next standalone 只在 .next/node_modules 下以 `<pkg>-<hash>` 的哈希别名暴露这些
+# serverExternalPackages，根 node_modules 里**没有裸名入口** —— 于是 server.js 运行时解析
+# 失败：`Cannot find package 'better-sqlite3'`（日历后台同步 worker 直接失效，日志
+# `[calendar-sync] background sync error`）。Next 自己编译的路由走哈希别名不受影响，
+# 只有这个自建入口会踩到。此处把每个哈希别名镜像成根 node_modules 下的裸名符号链接
+# （包本体与原生二进制都已在包内，只是缺一个入口）。
+_sa_alias_dir="$STAGING/next-standalone/.next/node_modules"
+_sa_nm_dir="$STAGING/next-standalone/node_modules"
+if [ -d "$_sa_alias_dir" ]; then
+  while IFS= read -r -d '' _alias; do
+    _alias_rel="${_alias#$_sa_alias_dir/}"
+    _pkg_name="$(printf '%s' "$_alias_rel" | sed -E 's#-[0-9a-f]{16}$##')"
+    _alias_target="$(readlink "$_alias")"
+    # 必须真的去掉了一段哈希后缀（否则包名本身就形如 foo-<16hex>，属误判）
+    [ "$_pkg_name" != "$_alias_rel" ] || continue
+    # 目标末节须与包名末节一致（防止改写错包）
+    [ "$(basename "$_alias_target")" = "$(basename "$_pkg_name")" ] || continue
+    if [ -e "$_sa_nm_dir/$_pkg_name" ]; then continue; fi
+    # 别名在 .next/node_modules 下，裸名链接上移一层 → 相对目标去掉一个前导 ../
+    mkdir -p "$(dirname "$_sa_nm_dir/$_pkg_name")"
+    ln -s "$(printf '%s' "$_alias_target" | sed 's#^\.\./##')" "$_sa_nm_dir/$_pkg_name"
+    log "  补齐裸名依赖 $_pkg_name"
+  done < <(find "$_sa_alias_dir" -type l -print0)
+fi
+
 rm -rf "$STAGING/next-standalone/release" 2>/dev/null || true
 rm -rf "$STAGING/next-standalone/.next/standalone" 2>/dev/null || true
 # 清理 release-dist 构建产物目录及其并发冲突副本（防止被循环打包）
