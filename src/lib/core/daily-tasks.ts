@@ -620,12 +620,19 @@ const SCHEDULER_KEY = '__dailyTaskSchedulerStarted__';
 
 /**
  * 启动每日任务调度（instrumentation 调用，幂等）：
- *   - 立即检查一次：已过当天 9:00 且当天未做 → 补做（Report 摘要 + Notes 维护，"每天第一次打开软件"兜底）
+ *   - 立即检查一次：已过当天 9:00 且当天未做 → 补做（Report 摘要 + Notes 维护 + News，"每天第一次打开软件"兜底）
  *   - 之后每 5 分钟检查续期：已过 9:00 且未做 → 补做；重复调用由原子抢占（标记文件）去重
  *
  * 日报三页签已改为 Today 面板**按需产出**（见 buildScheduleSection / buildStickySection），
  * 不再有「到点推送」这一步 —— 原 B5 免打扰顺延闸门（shouldHoldMorningReport）随之取消：
- * 现在没有任何东西会打扰用户，深夜补做一次 progress 摘要也无妨。
+ * 本调度器**不推任何外部通道**，深夜补做一次 progress 摘要也无妨。
+ *
+ * ⚠️ 会推手机的「晚间回顾」**不在本调度器内**，它自带调度器
+ * （`lib/butler/evening-report.ts` 的 `startEveningReportScheduler`）。
+ * 分家的原因是**模块方向**：本文件被 `lib/butler/today-advice.ts` 静态依赖，
+ * 而晚间回顾要用 today-advice 组装内容；由本文件反向引用它就会形成 core ↔ butler 的
+ * import 环（`eslint import/no-cycle` 连动态 `import()` 也算，动态引入绕不过去）。
+ * 形态与既有 `event-reminder` 自带调度器一致。
  */
 
 export async function startDailyTaskScheduler(): Promise<void> {

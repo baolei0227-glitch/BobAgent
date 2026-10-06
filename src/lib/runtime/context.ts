@@ -50,6 +50,19 @@ export interface ContextInjectionChain {
   ocrEngineFactInjection: string;
 }
 
+/**
+ * 「新建会话」意图正则（2026-10-06）—— 只认**消息开头**的派单式说法：
+ *   新建会话 / 新建一个会话 / 新开一个会话 / 开个会话 / 开个新会话 / 建个新会话 / 创建会话 …
+ * 可带「帮我 / 请 / 麻烦」前缀；句中提到"会话"（如"刚才那个会话里说的"）不匹配 → 不注入。
+ */
+export const NEW_SESSION_INTENT_RE =
+  /^\s*(?:帮我|请|麻烦)?\s*(?:新建|新开|新增|创建|开|建)(?:一个|个)?\s*新?\s*会话/;
+
+/** 「会话」后紧跟这些词 = 说的是**已存在**的会话（追问 / 指代），不是派单：
+ *  「新建会话那边怎么样了」「新建会话的任务做完了吗」都不该被当成"再去建一个"。
+ *  仅在**没有分隔符**（「，」「：」「空格」）时用于否决——"新建会话，X"永远算派单。 */
+const NEW_SESSION_FOLLOWUP_RE = /^(?:那边|那里|这个|那个|刚才|之前|上面|的任务|里|中|的)/;
+
 /** ContextRuntime：动态上下文链内容生成 provider（无实例状态，单例安全）。
  * 方法签名按 route 实读所需的最小入参设计：路径段传入已 ~ 化展示路径 + 产物目录名，
  * 偏好/OCR 段各自内部读取（与原 route 内联读取时机一致：均为"每轮生成时读一次"）。 */
@@ -231,6 +244,46 @@ export class ContextRuntime {
   buildMemoryRoutingInjection(basePrompt?: string): string {
     if (basePrompt && basePrompt.includes(BUTLER_MEMORY_ROUTING)) return '';
     return `\n\n以下是宿主层下发的最新信息分层口径（与提示词里的旧版不一致时，一律以本段为准）：\n${BUTLER_MEMORY_ROUTING}`;
+  }
+
+  /**
+   * 「新建会话」意图注入（2026-10-06）—— **宿主判定，只在命中时注入**（不命中零成本）。
+   *
+   * 为什么需要它（实测事故，2026-10-06 16:31）：用户对管家说
+   * 「新建会话，涉及一份合作模式，甲方是十三幺公司…」，管家把这句话读成了「本次会话的背景说明」，
+   * **0 次调用 create_session**，自己在管家线程里把协议写完了 —— 既没建成会话，也违背了
+   * 「你是调度者，不是执行者」。工具的可用性没问题（cacheguard 证明 create_session 当时在册），
+   * 卡点是「一句话两种读法」的判定。
+   *
+   * 为什么走动态注入：管家提示词被物化为 `<APP_ROOT>/agents/butler/agent.json`
+   * （本机实况：2026-09-28 物化，源码里后补的 switch_project / create_session 说明一个字都没进去）
+   * —— 改 profiles.ts 对已装用户不生效。而「以『新建会话』开头 = 派单」这条判定必须立刻对所有人生效，
+   * 故由宿主按用户原文判定，命中才注入当前轮 user 消息（C8 低频通道，system / 工具 / 历史前缀字节不变）。
+   *
+   * 边界：只在**开头**匹配（可带「帮我 / 请 / 麻烦」前缀）——句中提到"会话"是普通对话内容，不注入；
+   *      紧跟其后无分隔符且是「那边 / 的 / 里…」这类指代时也不算派单（追问已建的会话）。
+   */
+  buildButlerNewSessionInjection(userText?: string): string {
+    const text = (userText || '').trim();
+    const m = text ? NEW_SESSION_INTENT_RE.exec(text) : null;
+    if (!m) return '';
+    const after = text.slice(m[0].length);
+    // 「新建会话，X」= 派单；「新建会话那边怎么样」= 追问已建的会话 → 不注入
+    if (!/^[，,。.：:；;、\s]/.test(after) && NEW_SESSION_FOLLOWUP_RE.test(after)) return '';
+    const rest = after.replace(/^[，,。.：:；;、\s]+/, '').trim();
+    return (
+      `\n\n【宿主判定 · 本轮意图：新建会话】\n` +
+      `用户这句话以「新建会话」开头 → 这是**要求你新建一个画布会话、并把后面的任务交给新会话执行**，` +
+      `不是本次对话的背景说明。请立刻调用 create_session：\n` +
+      `- project：不传（用当前项目）；只有用户点名了别的项目才传；\n` +
+      `- task：把用户消息里「新建会话」之后的任务描述**原样**带过去（自包含：当事人 / 交付物 / 约束 / 参考材料都要在）` +
+      (rest ? '；\n' : '；用户没给任务内容时就不传 task（只建空会话）；\n') +
+      `- agent：按任务性质选已装身份（法律文书 / 合同起草 → legal-intern，知识库 / 笔记 → note，代码 → coding，项目账本 → archivist）；\n` +
+      `- title：用几个字概括这件事。\n` +
+      `**不要自己在管家线程里把这项工作做完**（写合同、改代码、做调研都不是管家的活），也不要只回一句「好的」——` +
+      `建完用一句话回报「已新建 <agent> 会话「<title>」，任务已在后台执行」。` +
+      `若工具返回 ui_not_open，如实告诉用户先打开 BobWork 再重试，不要谎称已建。`
+    );
   }
 
   /**

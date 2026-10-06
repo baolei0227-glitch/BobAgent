@@ -38,6 +38,15 @@ export const NOTIFY_THREAD_ID = 'butler-notify';
  * ⚠️ 形象沿革：2026-09-30 与「小微」**互换**（微信绿专用件归小微），2026-10-01 起改用
  * Bobby 自己的专用件 `bell` + 蓝底 210°（见 lib/butler/avatar.ts 的 SYSTEM_IDENTITIES）。
  * 「通知助理」仍是它在这个代码库里的**角色定位**说法，所以各处注释里的「通知助理」指的是角色，不是界面上的字符串。
+ *
+ * ⚠️ **命名歧义（2026-10-06 显式记录）：本仓有两个「Bobby」，同名不同物。**
+ *   - **本常量** = 管家（identity `butler`）**通知助理会话的显示名**：就是 Butler 抽屉里跟你对话的那个联系人，
+ *     会话线程 `butler-notify`、落盘目录 `butler/Bobby/`、头像 `bell`。姓名由本常量钉死
+ *     （人设弹窗「据此锁定姓名」，只能改性格/风格/称呼），persona 真源在 `.state/threads/<id>.json`。
+ *   - **另一个 Bobby** = **本地软件操控插件**：`src/app/api/bobby/route.ts`、画布 `BobbyNode`、
+ *     全局授权宿主 `components/bobby/BobbyAuthHost.tsx`、MCP server id `bobby`（工具场景 `local`）。
+ *     那是「让 AI 操控本机软件」的能力，与管家会话没有任何关系。
+ *   搜索 "Bobby" 时先辨别是哪一个；两边都写了这条互指注释。
  */
 export const NOTIFY_TITLE = 'Bobby';
 

@@ -75,3 +75,17 @@
 
 - 模板默认预装核心组件库 `shadcn/ui`，位于`src/components/ui/`目录下
 - Next.js 项目**必须默认**采用 shadcn/ui 组件、风格和规范，**除非用户指定用其他的组件和规范。**
+
+## 术语与命名（易混项）
+
+- **两个「Bobby」同名不同物**（2026-10-06 起因：一次排障把两者混为一谈）：
+  - **管家通知助理的显示名**：`NOTIFY_TITLE`（`src/lib/butler/storage.ts`），会话线程 `butler-notify`，
+    落盘目录 `butler/Bobby/`，头像 `bell`；就是 Butler 抽屉里跟你对话的那个联系人。姓名被钉死
+    （人设弹窗只让改性格/风格/称呼）。系统提示词里的「你是 Bobby」是同一件事。
+  - **本地软件操控插件**：`src/app/api/bobby/route.ts`（观察 + 授权控制台）、画布 `BobbyNode`、
+    `src/components/bobby/BobbyAuthHost.tsx`（授权弹窗 / 系统权限 / 急停）、MCP server id `bobby`
+    （工具场景 `local`，见 `src/app/api/chat/tools/index.ts`）。
+  - 只共享一个词：改任一处都不要顺手动另一处；grep `Bobby` 时先辨身份。
+- **管家「身份」与「会话」是两层**：身份恒为 `identity='butler'`（市场包名 Butler）；一个身份下有多条
+  会话（联系人），各自有 `persona`（`.state/threads/<threadId>.json`）：`butler-notify` / `butler-search`
+  （小微）/ `butler-recorder`（Recorder）。说"管家"时先明确是哪条会话。

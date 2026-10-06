@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_DAILY_PUSH_LIMIT,
   compareUrgency,
+  countsTowardDailyLimit,
   disabledNotifyPolicy,
   evaluatePush,
   foldNoticeItems,
@@ -19,8 +20,9 @@ import type { ButlerNoticeItem } from '@/lib/bus';
  * B5 克制策略（免打扰 / 单日上限 / 折叠）—— 纯逻辑不变量。
  *
  * 背景：改造前全应用「有推必推」，没有任何免打扰或负荷策略。本用例锁住三条口径：
- *   1. 用户**自己订的**时间点提醒（kind='reminder'）永不被免打扰静默 —— 静默别人替你定的
- *      闹钟是失信行为，这是本模块最容易被后人改错的一条；
+ *   1. 用户**自己订的**时间点提醒（kind='reminder'）永不被静默 —— 免打扰窗口与单日上限
+ *      **双豁免**、也不计入当日配额（2026-10-06 决定：上限是防「助理刷屏」，不是防「闹钟」）。
+ *      静默别人替你定的闹钟是失信行为，这是本模块最容易被后人改错的一条；
  *   2. 策略**缺省即开启**（开箱即克制），只有显式 `enabled:false` 才回滚到「有推必推」；
  *      **例外**：设置读取失败时必须回落 `disabledNotifyPolicy()`（放行）——策略层故障不得吞推送；
  *   3. 折叠只收敛**条数**，且最紧急者必须是「高优先级 > 已逾期 > 更早」。
@@ -147,7 +149,7 @@ describe('evaluatePush —— 裁决口径', () => {
     expect(localMinutes(new Date(d.resumeAt!))).toBe(POLICY_ON.quietEndMin);
   });
 
-  it('🔴 用户自订的时间点提醒不被免打扰静默（只受单日上限约束）', () => {
+  it('🔴 用户自订的时间点提醒：免打扰窗口内不被静默', () => {
     const d = evaluatePush(POLICY_ON, 0, 'reminder', at(23, 30));
     expect(d.allow).toBe(true);
     expect(d.reason).toBe('ok');
@@ -159,11 +161,23 @@ describe('evaluatePush —— 裁决口径', () => {
     expect(d.reason).toBe('ok');
   });
 
-  it('达单日上限后一律静默（含用户自订提醒），避免刷屏式关心', () => {
-    for (const kind of ['report', 'reminder'] as const) {
+  it('达单日上限后静默「助理主动汇报」，但用户自订提醒双豁免（闹钟必达）', () => {
+    // 主动汇报到顶 → 拦
+    for (const kind of ['report', 'meeting', 'other'] as const) {
       const d = evaluatePush(POLICY_ON, 6, kind, at(10, 0));
       expect(d.allow, kind).toBe(false);
-      expect(d.reason).toBe('daily-limit');
+      expect(d.reason, kind).toBe('daily-limit');
+    }
+    // 用户自订的日历提醒：配额早已用尽也照推（窗口 + 上限双豁免）
+    const cal = evaluatePush(POLICY_ON, 999, 'reminder', at(10, 0));
+    expect(cal.allow).toBe(true);
+    expect(cal.reason).toBe('ok');
+  });
+
+  it('countsTowardDailyLimit：只有 reminder 不计入配额（与上限豁免同源）', () => {
+    expect(countsTowardDailyLimit('reminder')).toBe(false);
+    for (const kind of ['report', 'meeting', 'other'] as const) {
+      expect(countsTowardDailyLimit(kind), kind).toBe(true);
     }
   });
 

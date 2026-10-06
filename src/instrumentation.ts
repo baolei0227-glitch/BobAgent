@@ -78,6 +78,17 @@ export async function register() {
     console.error('[event-reminder] 调度加载失败:', e);
   }
   try {
+    // 晚间回顾调度（20:00 起）：Butler 目前唯一会推外部通道（微信/飞书）的助理主动汇报。
+    // 自带调度器而没挂进 daily-tasks —— 后者被 today-advice 静态依赖，反向引用会成 import 环。
+    // 打扰裁决不在调度器里，统一交给 lib/core/push-out.ts（免打扰窗口 / 单日上限）。
+    const { startEveningReportScheduler } = await import('@/lib/butler/evening-report');
+    setTimeout(() => {
+      startEveningReportScheduler();
+    }, 4000);
+  } catch (e) {
+    console.error('[evening-report] 调度加载失败:', e);
+  }
+  try {
     // OCR 归档缓存清理调度：归档超 30 天的项目定时删除其 .cache/parse/ 释放磁盘
     const { startCacheCleanupScheduler } = await import('@/lib/parse/cache');
     setTimeout(() => {

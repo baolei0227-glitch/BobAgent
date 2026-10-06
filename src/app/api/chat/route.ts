@@ -4155,6 +4155,14 @@ export async function POST(request: NextRequest) {
       if (routingInjection) {
         finalMessages = prependDynamicContext(finalMessages, routingInjection);
       }
+      // 「新建会话」意图（2026-10-06）：用户以「新建会话…」开头 = 派单，不是本次对话的背景说明。
+      // 实测事故：这句被读成背景说明 → 0 次调用 create_session，管家自己在管家线程里把活干了
+      // （2026-10-06 16:31 起草协议实例）。同一理由走动态通道：画像提示词对已装用户不生效，
+      // 而这条判定必须立刻对所有人生效。只在命中时注入（未命中返回空串，零成本、零缓存扰动）。
+      const newSessionInjection = contextRuntime.buildButlerNewSessionInjection(initialUserInput);
+      if (newSessionInjection) {
+        finalMessages = prependDynamicContext(finalMessages, newSessionInjection);
+      }
       // 会议进行中：注入当前会议状态（P1-b /meeting 工具化）——详见上方「全身份注入」段；
       // 此处为管家保留原有注入位置（命令表 → 会议 → 人设，字节序不变），仅补记 meetingActive 供场景过滤。
       const meetingInjection = await contextRuntime.buildMeetingStateInjection();
@@ -5273,8 +5281,17 @@ export async function POST(request: NextRequest) {
                 // 方案 B：本步「在做什么」中文动作描述（随 tool_call 下发供 UI 展示，不进模型上下文、不耗 token）
                 const callPurpose = describeToolCall(toolName, parsedArgs ?? {});
                 if (parsedArgs === null) {
-                  // 参数既无法解析也无法修复 → 跳过执行（避免空参误执行），注入修复指令让模型重试
-                  const errMsg = `工具调用参数 JSON 解析失败（可能被输出截断），已跳过执行。原始参数: ${tc.function.arguments.slice(0, 200)}。请重新调用该工具，确保 arguments 为完整合法的 JSON。`;
+                  // 参数既无法解析也无法修复 → 跳过执行（避免空参误执行），注入修复指令让模型重试。
+                  // 长文写入（2026-10-06 实测事故：管家把整份协议塞进 write_file 的 content，22604 字输出
+                  // 被长度上限截断 → 解析失败 → 自动修复也没救回）：光说「重新调用、确保 JSON 完整」等于
+                  // 让模型再撞一次同一面墙，故对写文件类工具直接给出**可执行的替代路径**（分段写）。
+                  const longWriteHint =
+                    toolName === 'write_file' || toolName === 'edit_code'
+                      ? ' 内容太长会被输出长度上限截断——不要把长文一次性放进一个工具的 arguments：'
+                        + '先 write_file 只写第一段，并在末尾留一行占位标记（例如 <!-- MORE -->），'
+                        + '再用 edit_code 把该标记分段替换成后续内容（可多次），最后把标记行删掉。'
+                      : '';
+                  const errMsg = `工具调用参数 JSON 解析失败（可能被输出截断），已跳过执行。原始参数: ${tc.function.arguments.slice(0, 200)}。请重新调用该工具，确保 arguments 为完整合法的 JSON。${longWriteHint}`;
                   kctx.conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
                   eventLog.mark(CORE_EVENT.TOOL_RESULT, `${taskId}:r${round}`, { round, role: 'tool', tool_call_id: tc.id, content: errMsg, name: toolName });
                   send({ tool_call: { name: toolName, arguments: {}, phase: 'error', spanId: toolSpanId, startAt: toolStartAt, purpose: callPurpose }, nodeId });

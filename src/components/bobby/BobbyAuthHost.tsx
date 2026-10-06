@@ -3,6 +3,11 @@
 /**
  * BobbyAuthHost — Bobby 全局授权宿主（挂在 app/layout.tsx，与画布/节点彻底解耦）
  *
+ * ⚠️ 这里的 Bobby = **本地软件操控插件**（MCP server id `bobby`，工具场景 `local`）。
+ * 本仓另有一个同名不同物的「Bobby」——管家（identity `butler`）通知助理会话的显示名
+ * （真源 lib/butler/storage.ts 的 NOTIFY_TITLE，线程 `butler-notify`，目录 `butler/Bobby/`）。
+ * 两者只共享一个词，改任一处都不要顺手动另一处。
+ *
  * 背景（2026-09-18 重构）：
  *   Bobby 的授权弹窗与权限引导原先写在画布节点 `BobbyNode` 内，靠「主 Agent 调 Bobby 工具 →
  *   画布自动创建/聚焦 BobbyNode → 节点内弹窗」这条链路触达用户。CanvasFlow 改为「自绘 pane +

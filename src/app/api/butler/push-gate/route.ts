@@ -9,15 +9,17 @@
  *   - 免打扰窗口内的**主动推送**被**暂缓**，窗口结束再发 → 这里只回答「现在能不能打扰」，
  *     调用方据此**跳过本次打扰**；条目本身仍会落进抽屉收件箱（**报告不会丢**）。
  *   - 「用户自订日历提醒永不被静默」（`evaluatePush` 内 `kind !== 'reminder'` 才判窗口），
- *     它只受单日上限约束。
- *   - 放行时**就地计数**（`recordPush`），保证「单日上限」是真上限而不是摆设。
+ *     2026-10-06 起**上限侧同样豁免**（`countsTowardDailyLimit`）—— 上限是防「助理刷屏」，
+ *     不是防「闹钟」，否则白天几条闹钟会把晚间汇报的配额吃光。
+ *   - 放行时**就地计数**（`recordPush`），保证「单日上限」是真上限而不是摆设；
+ *     只有计入配额的档位才 +1（`reminder` 不计数）。
  *   - **失败即放行**（fail-open）：策略层故障绝不能吞掉通知，宁可多打扰一次。
  *
  * 入参 `{ kind }`：通知 kind 字符串（见 `lib/bus.ts ButlerNoticePayload.kind`），
  * 由本路由映射到策略类别 `PushKind`，避免客户端也持有一份映射表。
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { decidePush, recordPush, type PushKind } from '@/lib/core/quiet-hours';
+import { countsTowardDailyLimit, decidePush, recordPush, type PushKind } from '@/lib/core/quiet-hours';
 
 /** 通知 kind → 策略类别（'reminder' 是唯一免静默的类别，映射错会导致夜间闹钟被吞，务必保守） */
 function toPushKind(kind: string): PushKind {
@@ -35,9 +37,11 @@ export async function POST(request: NextRequest) {
   } catch {
     /* 空体 / 非 JSON → 按 other 处理（可静默类别） */
   }
+  const pushKind = toPushKind(kind);
   try {
-    const decision = await decidePush(toPushKind(kind));
-    if (decision.allow) {
+    const decision = await decidePush(pushKind);
+    // 只有计入配额的档位才 +1：reminder（用户自订闹钟）既不受上限、也不吃配额
+    if (decision.allow && countsTowardDailyLimit(pushKind)) {
       await recordPush();
     }
     return NextResponse.json({

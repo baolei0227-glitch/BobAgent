@@ -1271,6 +1271,13 @@ body {
      （用量面板、页码、行号、时间戳等）；Times New Roman 数字为 lining 且等宽，可正常对齐。 */
   --font-sans: "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif;
   --font-display: "Times New Roman", Times, "Songti SC", "Source Han Serif SC", "Noto Serif SC", "SimSun", "Liberation Serif", serif;
+
+  /* 长文阅读字体（MD 编辑器/阅读器正文专用）：与 UI 的 --font-sans 衬线栈分离。
+     --font-sans 是「纸张/文书」基调的衬线（Times New Roman → 宋体），适合标题与短 UI 文案；
+     但整段正文用衬线时，屏幕上小字号宋体笔画细、字面小、灰度低，长段落发暗发灰、回行吃力。
+     正文改用无衬线（macOS 系统字体 → 苹方），字面大、笔画匀，长文可读性明显更好。
+     仅 .doc-editor-content 使用；全局 UI 基调与标题字体不受影响。 */
+  --font-reading: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
   --font-mono: "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --font-pixel: "Press Start 2P", "Courier New", ui-monospace, monospace;
 }

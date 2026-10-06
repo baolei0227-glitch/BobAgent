@@ -430,6 +430,8 @@ const MCP_SERVER_SCENES: Record<string, ToolScene[]> = {
   'feishu': ['butler'],
   'lark': ['butler'],
   // ---- Bobby（本地软件操控 + AI 助手派发）：本地操控意图才注入（"操控/打开应用/本地软件"），不再常驻 ----
+  // ⚠️ 此处的 `bobby` = **本地软件操控插件**（MCP server id），与「管家通知助理的显示名 Bobby」
+  //（lib/butler/storage.ts 的 NOTIFY_TITLE / 线程 butler-notify）同名不同物，见两边互指注释。
   'bobby': ['local'],
   // ---- Agent Teams（多成员团队编排）：**刻意不登记** ----
   // 裸 mcp__team__* 工具不注入模型：多智能体的唯一入口是内置工具 team_run（scenes: ['team']），
@@ -1318,7 +1320,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'write_file',
-    description: 'Write or create a file (parent dirs auto-created) for code/config/docs. Deliverables MUST use a path starting with "homework/" (e.g. "homework/报告.html") to land in the project homework/ folder and show as an output card; paths not starting with "homework/", "materials/" or "attachments/" are scratch files in the temporary workspace.',
+    description: 'Write or create a file (parent dirs auto-created) for code/config/docs. Deliverables MUST use a path starting with "homework/" (e.g. "homework/报告.html") to land in the project homework/ folder and show as an output card; paths not starting with "homework/", "materials/" or "attachments/" are scratch files in the temporary workspace. LONG DOCUMENTS: your whole reply has an output-length limit, and an over-long argument is cut off mid-JSON — the call then FAILS and nothing is written. So never put a document longer than roughly 3000 characters into one call: write the FIRST section only, end it with a placeholder line such as <!-- MORE -->, then extend it section by section with edit_code (replace the placeholder with the next section plus a fresh placeholder), and delete the placeholder line when done.',
     parameters: {
       type: 'object',
       properties: {
@@ -1339,7 +1341,7 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'edit_code',
-    description: 'Replace the FIRST exact occurrence of "search" with "replace" (must match verbatim, incl. indentation/newlines; on not-found the error shows the file head to help craft the search). Prefer over write_file for small iterative edits on existing files — avoids rewriting the whole file and burning tokens. Mini-app files are written atomically with an automatic .history snapshot (recoverable via sandbox_rollback).',
+    description: 'Replace the FIRST exact occurrence of "search" with "replace" (must match verbatim, incl. indentation/newlines; on not-found the error shows the file head to help craft the search). Prefer over write_file for small iterative edits on existing files — avoids rewriting the whole file and burning tokens. This is ALSO how you extend a document that is too long for one call: see write_file ("LONG DOCUMENTS") — keep a placeholder line and replace it section by section, then delete it. Mini-app files are written atomically with an automatic .history snapshot (recoverable via sandbox_rollback).',
     parameters: {
       type: 'object',
       properties: {

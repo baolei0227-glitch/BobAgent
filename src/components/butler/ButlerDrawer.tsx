@@ -132,6 +132,10 @@ import { fmtEventWhen, fmtReminderMinutes, formatTime, type ScheduleDetail } fro
 /** 头像：人物素材 id + 底色都由名字/性格稳定派生（纯函数，见文件注释） */
 import { avatarTint, defaultAvatarId } from '@/lib/butler/avatar';
 import PersonaAvatar from '@/components/butler/PersonaAvatar';
+/** 等待口语（话风 + 静默分档 + 取句）：纯函数模块，文案三条规矩由 wait-lines.test.ts 守着 */
+import { WAIT_STRIP_MIN_SILENCE_SEC, waitLineFor, waitVoiceOf } from '@/lib/butler/wait-lines';
+/** 看门狗：判定「流是不是真的断了」（阈值与语义见 lib/butler/sse-liveness） */
+import { SSE_STALL_SEC, stalledSeconds } from '@/lib/butler/sse-liveness';
 /** 会话列表项 / 人设 / 思考档位清洗（threads-shared 是纯类型 + 纯函数模块，无 fs，可进客户端包） */
 import {
   ATTACHMENTS_BLOCK_HEAD,
@@ -466,49 +470,26 @@ function hitExcerpt(content: string, q: string): { text: string; at: number } {
 }
 
 /**
- * 等待话风：温和（默认）/ 高冷（傲娇·毒舌·冷静…）/ 简洁（少话·利落）。
- * 从**用户填的人设**里读性格与说话风格，关键词命中即取；未命中走温和，
- * 于是「换个人设，等待时的口吻也跟着换」，不需要用户额外配置。
+ * 等待话风与等待口语表已抽到 `@/lib/butler/wait-lines`（2026-10-06）：
+ * 文案会持续扩写，三条规矩（句式不重样 / 只写永远成立的话 / 句尾不写省略号）靠测试守，
+ * 不靠注释提醒。本文件只负责"什么时候显示哪一句"。
  */
-function waitVoiceOf(persona: ButlerPersona | null): 'warm' | 'cool' | 'brief' {
-  const t = `${persona?.template ?? ''} ${persona?.personality ?? ''} ${persona?.style ?? ''}`;
-  if (/tsundere|傲娇|毒舌|高冷|冷静|沉稳|严肃|冷淡/.test(t)) return 'cool';
-  if (/简洁|简短|少话|利落|不啰嗦|直接/.test(t)) return 'brief';
-  return 'warm';
-}
 
-/** 三档等待口语（0-5s / 5-25s / 25s+），每 5 秒轮换一句；越久越安抚，但始终是「一个人在跟你说话」。
- *
- *  重写于 2026-09-27。上一版三档其实都在说同一件事——「我在处理，请稍等」，只是换了字数和语气词，
- *  读起来像客服话术模板。这一版立了三条规矩：
- *    ① **句式不重样**：口头反射（「这就去」）、自言自语（「想一下」）、安抚（「手上没停」）、
- *       自嘲（「比看着费劲」）各来一点；三档之间也换腔调，越久越软。
- *    ② **只写永远成立的话**：不写「在查资料 / 在写代码」这类**具体动作**——那是在猜进度，猜错就露馅。
- *       创意全落在**怎么说**，不在**说什么**，所以它不可能说错话。
- *    ③ **句子不以「…」收尾**：行尾已经挂了三个跳动点，再缀一个省略号就是同一个"话没说完"说两遍。
- *       （cool 档句首的「……」是语气停顿，不在此列。）
- *  注：0-5s 档轮换索引恒为 0，只会用到每档第一句，故首句单独打磨——warm 那句还会被拼上称呼（「老板，……」）。
+/**
+ * 取当前该显示的那句等待口语（每 5 秒换一句；分档按**距上次可见输出**的静默时长）。
+ * 口吻与**当前会话人设**关联：称呼（addressUser）与话风（性格 / 说话风格）都从 persona 取，
+ * 温和档第一句会带上对用户的称呼（「老板，On it.」），读起来就是这个人说的。
  */
-const WAIT_LINES: Record<'warm' | 'cool' | 'brief', [string[], string[], string[]]> = {
-  // 温和：像个熟人同事，先应一声，久了自己也着急
-  warm: [
-    ['On it.', 'Let me take a look.'],
-    ['Thinking, one sec.', 'Hands full, hold on.', 'Let me sort this out.'],
-    ['This is rougher than it looks, pushing on.', "Sorry for the wait, I'm not slacking.", 'Just a bit longer, almost there.'],
-  ],
-  // 高冷：嘴上不饶人，手上没停；不解释、不道歉，但会认账
-  cool: [
-    ['...Mm, watching it.', "...What's the rush, looking now."],
-    ["Not stuck, just thinking.", "Rushing won't make it faster.", '...Working on it, quit staring.'],
-    ["...I know it's been a while — rushing won't help.", "Slow, but I'm not slacking.", "Hold on, this can't be rushed."],
-  ],
-  // 简洁：能省则省，但每个字都还在动
-  brief: [
-    ['Taking a look.', 'One sec.'],
-    ['On it.', 'Almost.', 'Still moving.'],
-    ['Not done yet.', 'A bit more.', 'Nearly there, one sec.'],
-  ],
-};
+function useWaitLine(persona: ButlerPersona | null, since: number): { line: string; sec: number } {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const sec = since > 0 ? Math.max(0, Math.floor((now - since) / 1000)) : 0;
+  const line = waitLineFor({ voice: waitVoiceOf(persona), silenceSec: sec, addressUser: persona?.addressUser });
+  return { line, sec };
+}
 
 /**
  * Butler 的等待行 —— 它**就是那条还没吐字的助手气泡**：头像 → 灰底气泡（一句随时长换档的口语
@@ -520,10 +501,8 @@ const WAIT_LINES: Record<'warm' | 'cool' | 'brief', [string[], string[], string[
  * 共用同一套灰底气泡样式：吐字时只是文字接着往下长，视觉上不跳。
  * （发送期间调用方会跳过那条空占位气泡，见中栏时间线，否则这里会出现两颗头像。）
  *
- * 不报「思考」、不报工具名、不带秒表，也不猜具体动作（见 WAIT_LINES 的规矩②）：只写永远成立的话，
+ * 不报「思考」、不报工具名、不带秒表，也不猜具体动作（见 wait-lines 的规矩②）：只写永远成立的话，
  * 创意落在怎么说而不是说什么，因此不可能说错话。
- * 口吻与**当前会话人设**关联：称呼（addressUser）与话风（性格 / 说话风格）都从 persona 取，
- * 温和档第一句会带上对用户的称呼（「老板，这就去」），读起来就是这个人说的。
  */
 function ButlerWaitingLine({
   persona,
@@ -536,19 +515,7 @@ function ButlerWaitingLine({
   title: string;
   personality?: string;
 }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, []);
-  const sec = since > 0 ? Math.max(0, Math.floor((now - since) / 1000)) : 0;
-  const addr = persona?.addressUser?.trim() || '';
-  const voice = waitVoiceOf(persona);
-  const tiers = WAIT_LINES[voice];
-  const pool = sec < 5 ? tiers[0] : sec < 25 ? tiers[1] : tiers[2];
-  let line = pool[Math.floor(sec / 5) % pool.length];
-  // 温和档的第一句带上人设对用户的称呼（人设没填称呼就保持原样）
-  if (voice === 'warm' && sec < 5 && addr) line = `${addr}, ${line}`;
+  const { line } = useWaitLine(persona, since);
   return (
     <div className="flex items-start gap-2">
       {/* 头像：与正式回复同款同尺寸——等待与正文是同一个说话人，换的只是气泡里的字 */}
@@ -566,6 +533,60 @@ function ButlerWaitingLine({
         </span>
         <BubbleTail side="left" color={WECHAT_OTHER_BUBBLE} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * 流式**静默状态条**（2026-10-06 新增）—— 等待气泡的续命版。
+ *
+ * 事故背景（2026-10-06 16:32：管家起草协议）：等待气泡只在"还没吐第一个字"时存在
+ *（见中栏时间线 `sending && !draftStarted`），第一个字一落下它就卸载；而管家那一轮
+ * 有 **74 秒**只吐了 131 个字（其余 22.6K 全在思考与工具参数里），于是屏幕彻底静止——
+ * 连"我还活着"的三个跳动点都没有，用户只能怀疑卡死了。
+ *
+ * 它补的就是这段：正文气泡之下挂一条**无头像**的小状态条（同一套口语 + 三个跳动点），
+ * 静默 ≥ WAIT_STRIP_MIN_SILENCE_SEC 秒才出场，一有新的可见输出（静默计时归零）立刻消失。
+ * 仍然**不报工序**（不报工具名、不报思考、不带秒表）——只是让"还在动"这件事一直可见。
+ */
+function ButlerStatusStrip({ persona, since }: { persona: ButlerPersona | null; since: number }) {
+  const { line, sec } = useWaitLine(persona, since);
+  if (sec < WAIT_STRIP_MIN_SILENCE_SEC) return null;
+  return (
+    <div className="flex items-center gap-1.5 pl-10 text-11" style={{ color: 'var(--ink-muted)' }}>
+      <span className="min-w-0 truncate">{line}</span>
+      <span className="flex shrink-0 items-center gap-0.5">
+        <span className="think-dot" />
+        <span className="think-dot" />
+        <span className="think-dot" />
+      </span>
+    </div>
+  );
+}
+
+/**
+ * 断流提示条（2026-10-06 看门狗）—— 与上面那条状态条的**分工**：
+ *   状态条说「我还在弄」（可见正文静默，但流一直有字节）；
+ *   本条件说「我这边好像收不到了」（连字节都断了 ≥ SSE_STALL_SEC 秒）。
+ *
+ * 为什么要单列一条：在此之前这两种情况在界面上完全一样（都是一条不动的气泡），
+ * 用户无法区分"它在想"和"它已经死了"——焦虑正来自这个不确定性。
+ * 它不自动掐断流（管家任务动辄几分钟，误杀比多等更贵），只如实报数 + 给一个「重新发送」。
+ */
+function ButlerStalledStrip({ seconds, onResend }: { seconds: number; onResend: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 pl-10 text-11" style={{ color: 'var(--ink-muted)' }}>
+      <span className="min-w-0">
+        ⚠ 已经 {seconds} 秒没有收到任何响应，连接可能断了（重发有可能让这件事被做两遍，确认再点）
+      </span>
+      <button
+        type="button"
+        onClick={onResend}
+        className="shrink-0 rounded-md border px-2 py-0.5 transition-colors hover:bg-[var(--paper-hover)]"
+        style={{ borderColor: 'var(--line)', color: 'var(--ink)' }}
+      >
+        重新发送
+      </button>
     </div>
   );
 }
@@ -650,6 +671,7 @@ const WECHAT_OTHER_BUBBLE = 'var(--paper-soft)';
 const WECHAT_BUBBLE_RADIUS = 8;
 /** 气泡头像边长（微信两侧头像同尺寸） */
 const BUBBLE_AVATAR_SIZE = 32;
+
 /**
  * 抽屉内区域分割线（左轨右边界 / 联系人列右边界 / 中栏工具行下沿 / 右栏左边界 …）：
  * 比 --line-soft（--line 的 0.08 档）再淡两档 ≈0.03 —— 区域边界只留"看得出分区"的程度，
@@ -2077,10 +2099,27 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   /**
-   * 本轮提问的开始时刻 —— 只服务时间线末尾那条「等待行」（见 ButlerWaitingLine）：
-   * 它按等待时长换口语，但**不展示秒表**，所以这里只存时刻、不做阶段状态机。
+   * 本轮提问的**上次可见输出时刻** —— 服务两处等待口语（见 ButlerWaitingLine / ButlerStatusStrip）：
+   * 等待气泡（首个字之前）与流式静默状态条（首字之后再次静默）都按「距此刻多久」分档换口语，
+   * 但**不展示秒表**，所以这里只存时刻、不做阶段状态机。每有新的可见输出就置为当前时刻
+   *（2026-10-06 起语义由「本轮开始时刻」改为「上次可见输出时刻」，静默才升级安抚）。
    */
   const [waitSince, setWaitSince] = useState(0);
+  /** 上一次可见输出的时间戳（毫秒）：给上面的 setWaitSince 做 1 秒节流，避免逐帧重渲染 */
+  const lastVisibleAtRef = useRef(0);
+  /**
+   * 流是否**真的**没动静（2026-10-06 新增看门狗）——与"正文静默"是两件事：
+   *   - `waitSince` 衡量**可见正文**停了多久（思考期间照样在涨，所以只会让文案更安抚）；
+   *   - 本项衡量**一个字节都没到**多久。服务端在长工具期每 20s 发 tool_call_update 心跳、
+   *     模型流式期间逐块下发 reasoning / content，所以「连续 SSE_STALL_SEC 秒无字节」= 异常
+   *     （进程挂了 / 网络断了 / 流被中间层截了）。此时必须如实说，而不是继续"还在弄"。
+   */
+  const lastStreamAtRef = useRef(0);
+  const [streamStalledSec, setStreamStalledSec] = useState(0);
+  /** 最近一次实际发出的正文（含注入块）：看门狗触发时的「重新发送」用它原样重发，不重新拼块 */
+  const lastOutgoingRef = useRef<string>('');
+  /** 待重发文本：点重试先 abort，等 sending 落地后由 effect 发出（send 在 sending 时会直接返回） */
+  const retryRef = useRef<string | null>(null);
   /**
    * 待发送附件（已上传到 Butler 存储空间，仅等随消息发出「资料列表」块）。
    * 上传即落盘：不随输入框清空而删除文件；移除 chip 只解除引用，不删盘上文件
@@ -3080,7 +3119,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
    * 这里边读边渲染：content 增量更新气泡，butler_confirm 帧弹可编辑确认卡（复用画布同款组件）。
    */
   const send = useCallback(
-    async (textArg?: string) => {
+    async (textArg?: string, opts?: { asIs?: boolean }) => {
       const text = (textArg ?? draft).trim();
       // 有附件但无文本也应可发（把文件甩给 Butler 让它读）；两者皆空才拦。
       // 上传中同样拦下：否则会发出一个「资料列表」里缺本次文件的块。
@@ -3096,16 +3135,19 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       //    排程确认卡/结构化提问这类挂起帧会让它一直转圈（见本函数上方注释）。
       // /chat 命令已退役（含更早退役的 /chat out、/chat new）：普通文本本就直连管家同一 agent，
       // 会话线程随当前联系人复用（reuseThreadId），切联系人即切线程。
-      const cmd = detectCommand(text);
-      if (cmd) {
-        outgoing = normalizeSlashInput(text);
+      // opts.asIs（看门狗「重新发送」专用）：传进来的已是完整正文（含注入块），原样送出、不再翻译与拼块。
+      if (!opts?.asIs) {
+        const cmd = detectCommand(text);
+        if (cmd) {
+          outgoing = normalizeSlashInput(text);
+        }
+        // 附件「资料列表」块追加在正文之后（与画布 `text + blocks` 同序）；
+        // 路径是 Butler 存储空间的**绝对路径**，模型据此用 read_attachment 直读。
+        outgoing += attachmentBlock(pendingAtts);
+        // 工作区块**每轮都带**（常驻的操作范围，不是本轮附件）——放在附件之后，
+        // 让「本轮资料」与「本会话操作范围」在正文里界限分明。
+        outgoing += workspaceBlock(workspaceFolder);
       }
-      // 附件「资料列表」块追加在正文之后（与画布 `text + blocks` 同序）；
-      // 路径是 Butler 存储空间的**绝对路径**，模型据此用 read_attachment 直读。
-      outgoing += attachmentBlock(pendingAtts);
-      // 工作区块**每轮都带**（常驻的操作范围，不是本轮附件）——放在附件之后，
-      // 让「本轮资料」与「本会话操作范围」在正文里界限分明。
-      outgoing += workspaceBlock(workspaceFolder);
 
       const uid = `u-${Date.now()}`;
       const aid = `a-${Date.now()}`;
@@ -3117,8 +3159,16 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       setPendingAtts([]);
       setAttachError(null);
       setSending(true);
-      // 等待行从此刻起换口语（首 token 未到那段静默最像卡住，越早给交代越好）
-      setWaitSince(Date.now());
+      // 等待行从此刻起换口语（首 token 未到那段静默最像卡住，越早给交代越好）；
+      // 同时作为「上次可见输出」的基线——首字落下后由流式帧把静默计时归零（见 send 内的 content 分支）。
+      const startedAt = Date.now();
+      setWaitSince(startedAt);
+      lastVisibleAtRef.current = startedAt;
+      // 看门狗基线：本轮开头即视为"刚有字节"；此后每读到一段流就刷新（见下方 reader.read()）。
+      lastStreamAtRef.current = startedAt;
+      setStreamStalledSec(0);
+      // 记下实际发出的正文：看门狗判定断流后「重新发送」用它原样重发（不再翻译 / 不再拼块）。
+      lastOutgoingRef.current = outgoing;
       const ac = new AbortController();
       streamAbortRef.current = ac;
       // 流是否被主动打断（关闭抽屉 / 切会话）：决定回复落地时要不要置已读，见 finally
@@ -3164,6 +3214,9 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
+          // 看门狗：**任何字节**（含被本组件忽略的 reasoning / tool_call_update 心跳帧）都算"流还活着"。
+          // 这里只更新 ref、不 setState——1s 节拍由下方 sending 期间的 ticker 统一判定，避免逐帧重渲染。
+          lastStreamAtRef.current = Date.now();
           buf += decoder.decode(value, { stream: true });
           let idx: number;
           while ((idx = buf.indexOf('\n\n')) >= 0) {
@@ -3281,6 +3334,13 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                 // （stripThinkTags 会把未闭合的 think 段截断到末尾，流式安全）
                 const shown = stripThinkTags(acc);
                 setMessages((prev) => prev.map((m) => (m.id === aid ? { ...m, content: shown } : m)));
+                // 静默计时归零（2026-10-06）：等待口语的档位按「距上次可见输出」升级，
+                // 一出新字就回落，并把静默状态条收掉。1 秒内不重复置位——逐帧 setState 没有必要。
+                const nowMs = Date.now();
+                if (nowMs - lastVisibleAtRef.current > 1000) {
+                  lastVisibleAtRef.current = nowMs;
+                  setWaitSince(nowMs);
+                }
               }
             }
           }
@@ -3333,6 +3393,42 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     },
     [draft, sending, attaching, pendingAtts, workspaceFolder, confirmAsk, refreshChatSessions, markThreadRead, modelTag, thinking],
   );
+
+  /**
+   * 看门狗节拍（2026-10-06）：发送期间每秒判一次「距上次收到字节多久」，
+   * ≥ SSE_STALL_SEC 就置成"断流态"（UI 换成如实提示 + 重新发送），字节恢复即自动清零。
+   * 只在 sending 期间跑：不发送时既没有流也没有可提示的东西。
+   */
+  useEffect(() => {
+    if (!sending) {
+      setStreamStalledSec(0);
+      return;
+    }
+    const tick = () => {
+      setStreamStalledSec(stalledSeconds(lastStreamAtRef.current, Date.now(), SSE_STALL_SEC));
+    };
+    tick();
+    const t = window.setInterval(tick, 1000);
+    return () => window.clearInterval(t);
+  }, [sending]);
+
+  /**
+   * 「重新发送」（断流态下用户点按钮）：先 abort 当前流，把待发文本挂到 retryRef，
+   * 由下面的 effect 在 sending 落地后发出——send 在 sending 为真时会直接返回，不能当场调。
+   * 用 asIs 原样重发（正文里已含附件/工作区块），避免二次拼接与二次归一化。
+   */
+  const requestResend = useCallback(() => {
+    if (!lastOutgoingRef.current) return;
+    retryRef.current = lastOutgoingRef.current;
+    streamAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (sending || !retryRef.current) return;
+    const text = retryRef.current;
+    retryRef.current = null;
+    void send(text, { asIs: true });
+  }, [sending, send]);
 
   // ===== `/` 指令下拉（纯逻辑在 lib/core/commands.ts，本抽屉是唯一渲染方） =====
 
@@ -4483,6 +4579,19 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                     title={currentContactTitle}
                     personality={currentContactPersonality}
                   />
+                )}
+
+                {/* 流式静默状态条（2026-10-06）：接着上一条——第一个字落下、等待气泡退场之后，
+                    若正文又静默 ≥8s（实测事故：一轮 74 秒只吐 131 字），这里补一条**无头像**的小状态条，
+                    让"还在动"始终可见；一有新字就消失。不报工序、不带秒表（口径见 ButlerStatusStrip）。
+                    断流态（连字节都断了 ≥60s）由 ButlerStalledStrip 接管——那是"可能真的断了"，
+                    与"还在想"必须让用户分得清（看门狗见 SSE_STALL_SEC）。 */}
+                {sending && draftStarted && (
+                  streamStalledSec > 0 ? (
+                    <ButlerStalledStrip seconds={streamStalledSec} onResend={requestResend} />
+                  ) : (
+                    <ButlerStatusStrip persona={currentContactPersona} since={waitSince} />
+                  )
                 )}
               </div>
               {/* 公众号检索「过程块」：时间线末尾的一块，**只表达进行中**，检索一结束就退场。

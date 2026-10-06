@@ -3296,16 +3296,24 @@ export function DocEditor({
 
       {/* ProseMirror 专属样式：复用 .html-renderer 的全局样式，此处补充编辑器特有样式 */}
       <style>{`
-        /* 编辑区平铺：占满整个区域，无卡片边框/圆角/限宽，背景与面板一致（2026-09-12 改纯白） */
+        /* 编辑区：跟随全局字号档位（--fs-md：M/L/XL = 15/17/19px），正文列限宽居中
+           （736px 正文 + 2×32px 内边距 = 800px）。此前是 width:100% + 仅 40px 内边距：
+           面板一宽，一行就是 100+ 汉字，眼睛回行时找不到下一行开头（阅读度量失控）。
+           限宽后行长落回 40~50 汉字。
+           字体走 --font-reading（无衬线）而非 --font-sans（衬线栈）：理由见 globals.css 该 token 注释。
+           行高用无单位 1.75：字号换档时按比例跟着变，无需同步维护 --lh-*（那套是给 UI 文本的，
+           1.35 左右偏紧，不适合长文阅读）。 */
         .doc-editor-content {
           outline: none;
           flex: 1 0 auto;
           min-height: 200px;
           width: 100%;
-          padding: 32px 40px;
-          font-family: var(--font-sans);
-          font-size: 14px;
-          line-height: 1.8;
+          max-width: 800px;
+          margin: 0 auto;
+          padding: 40px 32px;
+          font-family: var(--font-reading);
+          font-size: var(--fs-md);
+          line-height: 1.75;
           color: var(--ink);
           user-select: text;
           background: #fff;
@@ -3531,14 +3539,23 @@ export function DocEditor({
           box-shadow: 0 0 0 1.5px var(--primary);
           border-radius: 2px;
         }
-        .doc-editor-content p { margin: 0 0 14px; }
-        .doc-editor-content h1 { margin: 34px 0 14px; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; }
-        .doc-editor-content h2 { margin: 26px 0 12px; font-size: 19px; font-weight: 680; letter-spacing: -0.015em; line-height: 1.35; }
-        .doc-editor-content h3 { margin: 18px 0 10px; font-size: 16px; font-weight: 650; line-height: 1.4; }
+        /* 标题梯度用 em，锚定「16px 正文下的 26/20/17」这套比例，随正文字号等比缩放
+           （字号档位 M/L/XL 切换时，标题与正文的相对关系保持恒定，不会出现 h3 被正文追平）。
+           字重 700/600/600：中文无衬线（苹方）只有 Medium/Semibold 两档，
+           原来的 680/650 会被浏览器吸附到 700，导致 h1/h2/h3 全变 Bold、只剩字号一个维度。
+           letter-spacing 回到 normal：此处原为 -0.02em/-0.015em，那是西文大标题的收紧技巧，
+           中文字面本就顶格，负字距只会让标题字挤在一起。 */
+        /* 行高必须钉在 p / li 上：globals 的 .html-renderer 给 p 写了 1.7、给 li 写了 1.6，
+           而它们与 .doc-editor-content p / li 同权重、又会直接命中元素（覆盖继承），
+           只靠容器上的 line-height 是压不住的——所以正文段落实际行高取这里，不是容器值。 */
+        .doc-editor-content p { margin: 0 0 16px; line-height: 1.75; }
+        .doc-editor-content h1 { margin: 34px 0 14px; font-size: 1.625em; font-weight: 700; letter-spacing: normal; line-height: 1.3; }
+        .doc-editor-content h2 { margin: 26px 0 12px; font-size: 1.25em; font-weight: 600; letter-spacing: normal; line-height: 1.35; }
+        .doc-editor-content h3 { margin: 18px 0 10px; font-size: 1.0625em; font-weight: 600; line-height: 1.4; }
         .doc-editor-content a { color: var(--primary); text-decoration: none; }
         .doc-editor-content a:hover { text-decoration: underline; }
-        .doc-editor-content ul, .doc-editor-content ol { margin: 0 0 14px; padding-left: 1.6em; }
-        .doc-editor-content li { margin: 4px 0; }
+        .doc-editor-content ul, .doc-editor-content ol { margin: 0 0 16px; padding-left: 1.6em; }
+        .doc-editor-content li { margin: 4px 0; line-height: 1.75; }
         .doc-editor-content blockquote {
           margin: 14px 0;
           padding: 12px 16px;
@@ -3554,9 +3571,13 @@ export function DocEditor({
           border: 1px solid var(--line);
           border-radius: 4px;
           padding: 1px 5px;
-          font-size: 12.5px;
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         }
+        /* 行内代码字号必须用 (0,1,2) 权重的选择器接管：globals 的
+           「.html-renderer :not(pre) > code { font-size: 12px }」 比上面的
+           「.doc-editor-content code」 (0,1,1) 更具体，否则这里写多少都不生效
+           （此前写 14px 就一直被盖掉，实测仍是 12px）。0.875em = 随正文字号缩放。 */
+        .doc-editor-content :not(pre) > code { font-size: 0.875em; }
         .doc-editor-content pre {
           background: var(--paper-soft);
           border: 1px solid var(--line);
@@ -3570,7 +3591,14 @@ export function DocEditor({
           border: none;
           border-radius: 0;
           padding: 0;
-          font-size: 13px;
+          font-size: 0.875em;
+          line-height: 1.6;
+        }
+        /* 真实代码块走 NodeView（contentDOM 是 div.code-block-content，不是 code 元素）：
+           globals 的 「.html-renderer pre .code-block-content { font-size: 12px }」 同为 (0,1,2)，
+           靠后置顺序接管，同样按 0.875em 随正文字号缩放。 */
+        .doc-editor-content pre .code-block-content {
+          font-size: 0.875em;
           line-height: 1.6;
         }
         /* 标题（CollapsibleHeading NodeView：标题文本 flex 布局，data-pos 供目录定位） */
@@ -3878,6 +3906,17 @@ export function DocEditor({
           table-layout: fixed;
           width: 100%;
         }
+        /* 表格文字随正文重新配平：globals 的 .html-renderer 把表头（th 与首行 td）
+           钉在 12px，正文换档后表头会比表体小一截、整张表看着断裂。
+           这里表头与表体统一 0.875em（16px 正文下约 14px，较正文小一档），
+           行高不写、沿用正文行高，字号随档位等比缩放。
+           两条选择器与 globals 原规则同权重，且本 <style> 在文档中后置，故能生效
+           （与上方 h1/h2 覆盖 .html-renderer 同理）。 */
+        .doc-editor-content table th,
+        .doc-editor-content table td,
+        .doc-editor-content table tr:first-child td {
+          font-size: 0.875em;
+        }
         .doc-editor-content th,
         .doc-editor-content td {
           border: 1px solid var(--line);
@@ -3955,6 +3994,10 @@ export function DocEditor({
             border-radius: 0 !important;
             background: #fff !important;
             color: #000 !important;
+            /* 屏幕正文改无衬线后，.doc-editor-content 上的 font-family 会直接命中元素，
+               压过打印根继承下来的宋体，令打印产物丢掉「正文宋体 / 标题黑体」的字族对比。
+               此处显式钉回宋体（与 #doc-print-root 同栈），保证既有打印产物不变。 */
+            font-family: "Times New Roman", Times, 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', 'Liberation Serif', serif !important;
             font-size: 10.5pt !important;
             line-height: 1.5 !important;
             text-align: justify;
@@ -4028,6 +4071,23 @@ export function DocEditor({
             break-inside: avoid;
             page-break-inside: avoid;
           }
+          /* —— 屏幕版式改动（正文改无衬线 16px / 限宽 736px，2026-10）的打印对账 ——
+             屏幕态给 .doc-editor-content 及其子元素新增/修改的声明，会直接命中打印克隆里的同名元素；
+             而打印块多数是在**父级**（容器 / table）上设值，继承永远输给直接声明，于是会漏进打印产物。
+             这里把受影响的属性在打印态显式钉回改动前的取值，保证打印 / 导出产物逐字不变。
+             若要一并调整打印版式，改这一段即可（例如把 li 也统一到容器的 1.5 倍行距）。 */
+          #doc-print-root .doc-editor-content ul,
+          #doc-print-root .doc-editor-content ol { margin: 0 0 14px !important; }
+          #doc-print-root .doc-editor-content li { line-height: 1.6 !important; }
+          #doc-print-root .doc-editor-content table th,
+          #doc-print-root .doc-editor-content table td { font-size: 9pt !important; }
+          #doc-print-root .doc-editor-content pre code { font-size: 13px !important; line-height: 1.6 !important; }
+          /* 代码块 NodeView 与行内代码：屏幕态新增的 0.875em 与 globals 原规则同权重、
+             又后置，会一并漏进打印；按打印克隆内的原有有效值（均为 12px）钉回。 */
+          #doc-print-root .doc-editor-content pre .code-block-content,
+          #doc-print-root .doc-editor-content :not(pre) > code { font-size: 12px !important; }
+          #doc-print-root .doc-editor-content h1 { letter-spacing: -0.02em !important; }
+          #doc-print-root .doc-editor-content h2 { letter-spacing: -0.015em !important; }
           #doc-print-root .doc-editor-content pre { text-align: left !important; text-indent: 0 !important; }
           #doc-print-root .doc-editor-content img { max-width: 100% !important; height: auto !important; }
           /* 页眉：左品牌（图标 + BobWork）、右打印时间；与正文用一条细线分隔。

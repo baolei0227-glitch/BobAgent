@@ -6,6 +6,15 @@
  *   插件启用（MCP 设置面板）即对主 Agent 开放，无独立暴露开关。
  *   画布 BobbyNode 仅用于观察状态（含实时进度）与授权管理。
  *
+ * ⚠️ **命名歧义（2026-10-06 显式记录）：本仓有两个「Bobby」，同名不同物。**
+ *   - **本文件这个 Bobby** = **本地软件操控插件**（本机软件控制 / 屏幕与无障碍能力 + 授权控制台）：
+ *     MCP server id `bobby`（工具场景 `local`，见 app/api/chat/tools/index.ts 的 MCP_SERVER_SCENES）、
+ *     画布观察节点 BobbyNode、全局授权宿主 components/bobby/BobbyAuthHost.tsx。
+ *   - **另一个 Bobby** = **管家（identity `butler`）通知助理会话的显示名**：真源常量
+ *     `NOTIFY_TITLE`（lib/butler/storage.ts），线程 `butler-notify`，落盘目录 `butler/Bobby/`，头像 `bell`。
+ *     那是"跟你对话的那个助理"，与操控能力无关。
+ *   搜索 "Bobby" 时先辨别是哪一个；两边都写了这条互指注释。
+ *
  * GET                                            → 查询插件状态（enabled + 实时进度 + 待授权 + 授权列表）
  * POST { action: 'grant', target }               → 授权软件
  * POST { action: 'revoke', target }              → 撤销授权

@@ -6,13 +6,16 @@
  * 微信 / Butler 通知中心，全应用**没有任何免打扰或负荷策略**（B5 证据）。
  *
  * 本模块是**唯一**的推送裁决点，规则三档（按「谁定的」区分，而不是按内容长度）：
- *   1. `reminder` —— 用户自己在日历上订的时间点，**永不被免打扰静默**（静默别人替你定的闹钟
- *      是失信行为）。它只受「单日上限」约束，且逾期项视为必做。
+ *   1. `reminder` —— 用户自己在日历上订的时间点，**永不被静默**（静默别人替你定的闹钟是失信行为）：
+ *      免打扰窗口与单日上限**双豁免**，也不计入当日配额。2026-10-06 决定：上限的立法目的是约束
+ *      **助理主动汇报**的频度；把用户自订的闹钟算进去，会让「报告配额」把晚上的闹钟挤掉
+ *      （上限是防刷屏，不是防提醒）。
  *   2. `report` / `meeting` / `other` —— 助理**主动发起**的汇报，免打扰时段内一律静默：
- *      微信推送直接跳过（内容仍进抽屉收件箱，不丢内容）。
- *      （2026-09-27 起日报三页签已移交 Today 面板、不再推送，`report` 档位实际已无来自日报的调用；
- *      规则保留，供会议纪要等其它主动汇报复用。）裁决结果带 `resumeAt` 供调用方说明顺延时刻。
- *   3. 单日上限 —— 到顶后主动推送一律静默（含 reminder），避免"刷屏式关心"。
+ *      外部通道（微信 / 飞书）直接跳过，但**内容仍进抽屉收件箱，不丢内容**。
+ *      （2026-09-27 起日报三页签已移交 Today 面板，`report` 档现由晚间回顾使用。）
+ *      裁决结果带 `resumeAt` 供调用方说明顺延时刻。
+ *   3. 单日上限 —— 到顶后**助理主动汇报**一律静默，避免"刷屏式关心"；只有计入配额的档位
+ *      在放行时 `recordPush()` +1（见 `countsTowardDailyLimit`）。
  *
  * 折叠（对齐 Today 的克制原则）：一次要推多条待办时，**只推最紧急的一件** + 未展示计数，
  * 而不是把 20 条待办一次性倒给用户。紧急度排序 = 高优先级 > 已逾期 > 开始时间更早。
@@ -38,8 +41,8 @@ export const DEFAULT_DAILY_PUSH_LIMIT = 6;
 
 /**
  * 推送类别。语义差别决定它是否可被免打扰静默：
- *  - `reminder`：用户自订的时间点提醒（日历提前提醒）→ **不静默**
- *  - `report`  ：助理主动汇报（Morning / Sticky / 笔记维护）
+ *  - `reminder`：用户自订的时间点提醒（日历提前提醒）→ **窗口与单日上限双豁免**，且不计入配额
+ *  - `report`  ：助理主动汇报（晚间回顾 / 笔记维护）
  *  - `meeting` ：会议纪要等衍生通知
  *  - `other`   ：兜底（未知来源），按主动推送处理（静默）
  */
@@ -210,7 +213,8 @@ export function evaluatePush(
   if (!policy.enabled) {
     return { allow: true, reason: 'disabled', used, limit };
   }
-  // 用户自订的时间点提醒不受免打扰静默（只受单日上限）
+  // 用户自订的时间点提醒两处都豁免 —— 窗口见下，上限见 countsTowardDailyLimit 的说明。
+  // 两条判据必须同源：只豁免窗口不豁免上限，会让「报告配额」把晚上的闹钟挤掉。
   const mutableKind = kind !== 'reminder';
   if (mutableKind && isInQuietWindow(localMinutes(now), policy.quietStartMin, policy.quietEndMin)) {
     return {
@@ -221,10 +225,25 @@ export function evaluatePush(
       limit,
     };
   }
-  if (limit > 0 && used >= limit) {
+  if (mutableKind && limit > 0 && used >= limit) {
     return { allow: false, reason: 'daily-limit', used, limit };
   }
   return { allow: true, reason: 'ok', used, limit };
+}
+
+/**
+ * 哪些档位计入「单日上限」。
+ *
+ * 上限约束的是**助理主动汇报**的频度，用户自订的日历提醒不计入 —— 否则白天 6 条闹钟
+ * 会把晚间报告的配额吃光，而闹钟本身也不该被上限静默。
+ *
+ * 🔴 与 `evaluatePush` 的上限豁免同源：**改一处必须改另一处**（`evaluatePush` 决定
+ * 「拦不拦」，本函数决定「放行后要不要 +1」；只改一边会出现「不计入却仍被拦」或
+ * 「计入却从不触发」这类静默错配）。调用方：`/api/butler/push-gate`（桌面侧）与
+ * `lib/core/push-out.ts`（外部通道）。
+ */
+export function countsTowardDailyLimit(kind: PushKind): boolean {
+  return kind !== 'reminder';
 }
 
 /* ==================== 状态落盘（当日计数） ==================== */

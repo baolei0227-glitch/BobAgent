@@ -15,6 +15,90 @@
 ***
 
 
+## v0.7.684 (2026-10-06)
+
+> 本版是 **v0.7.683 之后的增量**：补齐 Butler「主动播报」这条缺失的链路 —— ① P0 修**外部通道绕过裁决**：`event-reminder` 此前直接调微信 / 飞书桥的 `pushText`，从不经过 `decidePush`；而唯一守闸的 `/api/butler/push-gate` 跑在浏览器里（弹 toast 前问一次），**管不到服务端直推** ⇒ 免打扰窗口与单日上限对**手机端完全不生效**。现把「裁决 → 投递 → 计数」收敛到新模块 `push-out.ts`，成为服务端出站的**唯一路径**。② 同时重划**单日上限的适用范围**：`reminder`（用户自订闹钟）由「只豁免窗口」改为**窗口 + 上限双豁免、且不吃配额** —— 上限的立法目的是约束**助理主动汇报**的频度，把用户自订的闹钟算进去会让「报告配额」把晚上的闹钟挤掉（上限是防刷屏，不是防提醒）。③ P1 新增**晚间回顾**（每天 20:00）：Butler 目前**唯一会推外部通道**的「助理主动汇报」，复用 Today 同一份事实、不调模型、今天与逾期都为空时彻底闭嘴；内容同时落收件箱与文档（**被静默 ≠ 丢内容**）。共 11 个源文件改动（8 改 + 3 新增）。
+
+### 修复与优化
+
+* **外部通道统一出站口**（新增 [push-out.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/push-out.ts)，[event-reminder.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/event-reminder.ts) 改为经它投递）：入口 `pushToBridges(text, kind, deps?)` 把三件事收敛到一处 —— 裁决（`decidePush`）、投递（并行 `wechatBridge.pushText` / `feishuBridge.pushText`，`allSettled` 保证一通道失败不影响另一条）、计数（放行**且**计入配额**且**确实投出才 `recordPush()` +1）。与 `push-gate` 的分工：那个管**桌面侧**（toast / 系统通知），本模块管**外部通道**；两者共用同一份策略（`quiet-hours`）与同一份计数状态（`butler/notify-state.json`），所以档位口径必须同源。三条硬约束：**失败即放行**（策略层抛错 → 不吞推送，宁可多打扰一次）、**被静默 ≠ 丢内容**（本模块只回答「要不要打扰手机」，内容该由调用方落进抽屉收件箱）、**放行才计数**。另补一处留痕：`pushText` 在「未绑定 / 无收件人 / 未运行 / 发送失败」时一律返回 `false` 且不抛错，此前**完全静默** —— 「飞书从未私聊过机器人 ⇒ 所有提醒丢推」这类冷启动问题永远不可见，现由出站口统一打 warn。
+
+* **单日上限重新划界：reminder 双豁免且不吃配额**（[quiet-hours.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/quiet-hours.ts) 新增 `countsTowardDailyLimit`，[push-gate/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/push-gate/route.ts) 改为「只有计入配额的档位才 +1」）：`evaluatePush` 的上限判据加 `mutableKind`（`kind !== 'reminder'`），与既有的窗口豁免同源。**改一处必须改另一处**：`evaluatePush` 决定「拦不拦」、`countsTowardDailyLimit` 决定「放行后要不要 +1」，只改一边会出现「不计入却仍被拦」或「计入却从不触发」这类**静默错配**——注释里用 🔴 标死。
+
+* **晚间回顾：每天 20:00 一条助理主动汇报**（新增 [evening-report.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/evening-report.ts)，[instrumentation.ts](file:///Users/baolei/Desktop/BobWork/projects/src/instrumentation.ts) 启动调度）：三条设计取舍 —— ① **内容复用 Today 的同一份事实**（`loadTodayBundle`），面板与推送不许各算一遍口径（与 `today-advice.ts` 存在的理由同源）；② **不调模型**，建议文案直接用规则引擎的 `title` / `reason` 原文（AI 润色留给用户主动打开面板时按需生成）；③ **知道什么时候该闭嘴** —— 今天与逾期都为空 → `composeEveningText` 返回 `null`，连「你今天很空」都不推。投递三条链路**互不阻塞**：桌面收件箱（`insertInbox`，**不弹 toast** —— 晚间回顾是「回来再看」，不是打断）、归档成文档、外部通道 `pushToBridges(text, 'report')`（档位用 `report`，所以它才真正受免打扰窗口与单日上限约束）。幂等靠 `butler/.state/evening-report/<YYYY-MM-DD>.done` 的 `wx` 独占创建（与 `daily-tasks` 的 `tryAcquireSendMarker` 同手法）。**调度器自带、不挂进 `daily-tasks`**：后者被 `lib/butler/today-advice.ts` 静态依赖，而晚间回顾要用 today-advice；反向引用即形成 core ↔ butler 的 import 环（`eslint import/no-cycle` 连动态 `import()` 也算），形态与 `event-reminder` 一致。时间点 20:00 落在默认免打扰窗口（22:00–08:00）之外，正常会送达；用户若把窗口调宽盖住 20:00，则出站口静默外部通道、内容仍进收件箱。
+
+* **调度注释修订**（[daily-tasks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/daily-tasks.ts)）：明确本调度器**不推任何外部通道**（深夜补做一次 progress 摘要也无妨），并说明「会推手机的晚间回顾不在本调度器内」及其模块方向原因。
+
+### 新增单测
+
+* 新增 [push-out.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/push-out.test.ts)（**7 例**）：守出站四条不变量 —— 窗口内 `report` **压根没尝试投递**（断言两个桥的 spy `not.toHaveBeenCalled`，而不是「投了没送达」），同刻 `reminder` 照投（对照组）；达单日上限后 `report` 被拦、`reminder` 照投**且看计数不吃配额**；放行且送达才 +1（每条推送一次，不按通道数累加）；**策略层抛错 → fail-open 仍投递且不计数**；通道返回 `false` → `pushed=false` 且不计数、不抛错；一通道失败不影响另一条；空文本 → 直接返回。
+
+* 新增 [evening-report.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/evening-report.test.ts)（**9 例**）：A 段守纯函数 `composeEveningText` —— **空快照必须返回 `null`**（闭嘴判据，且即便有 clear 卡也不改变）、逾期 / 今日分段与「今日为空显式写 none」、超预览补折叠计数行（计数用真实总数）、建议卡「标题 — 依据」渲染、数据源降级必须明示（避免「查询失败 = 今天很空」被误读）；B 段守 `runEveningReport` —— 首跑落收件箱 + 走外部通道且**档位必须是 `report`**、同日再跑 `already-run` 且不再落库 / 不再推送（幂等）、无可播报内容 `nothing-to-report` 且不落库 / 不推送、**外部通道被静默时收件箱仍要落库**（被静默 ≠ 丢内容）。
+
+* 扩写 [quiet-hours.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/quiet-hours.test.ts) 与 [route.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/push-gate/route.test.ts)：前者把「达上限后一律静默」改为「静默主动汇报、`reminder` 双豁免」，并新增 `countsTowardDailyLimit` 的档位口径用例；后者在配额打满后补**对照组** —— 连推 3 条日历提醒后，主动汇报读到的 `used` 必须仍是 2（若 `calendar` 误吃配额会读到 5）。⚠️ 特意不只断言「仍被拦」：配额被吃空时也照样被拦，那是**平凡为真**的判据，抓不到本 bug。本批合计 **+17 例**；`tsc --noEmit` 与 `vitest run` 全绿。
+
+
+## v0.7.683 (2026-10-06)
+
+> 本版是 **v0.7.682 之后的增量**：管家两处「久等」体验与一处长文交付修复 —— ① 长文写入被输出长度截断导致工具调用失败时，不再只让模型「重新调用」（等于再撞同一面墙），而对写文件类工具直接给出**分段写**的可执行路径，工具描述同步补 LONG DOCUMENTS；② 等待口语从 ButlerDrawer 抽成纯函数模块并**扩写约一倍**，分档改按「距上次可见输出」的静默时长（吐字即归零），三条文案规矩由单测守；③ 新增 **SSE 看门狗**，连续 60s 一个字节都没到就如实提示断流并给「重新发送」（管家不掐断）。共 5 个源文件改动（3 改 + 2 新增）。
+
+### 修复与优化
+
+* **长文写入：截断后给可执行的分段路径**（[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts) + [tools/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/index.ts)）：实测事故（2026-10-06）—— 管家把整份协议塞进 `write_file` 的 content，22604 字输出被长度上限截断 → arguments JSON 解析失败 → 自动修复也没救回。原来的提示只说「重新调用、确保 JSON 完整」，等于让模型再撞同一面墙。现对 `write_file` / `edit_code` 长出 `longWriteHint`：先只写第一段、末尾留占位标记（`<!-- MORE -->`），再用 `edit_code` 逐段把标记替换成后续内容（可多次），最后删掉标记行。同时给 `write_file` / `edit_code` 的工具描述补上 `LONG DOCUMENTS` 段（超过约 3000 字就分段写）。
+
+* **等待口语抽成模块 + 扩写 + 静默分档**（新增 [wait-lines.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/wait-lines.ts)，[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 改为 import）：文案有三条硬规矩（句式不重样 / 只写永远成立的话 / 句尾不写省略号），此前靠注释提醒、扩写必然漂移；抽成纯函数模块后由 `wait-lines.test.ts` 逐条守住。文案量从 24 句扩到 **50+ 句**，档位从三档改**四档**（0-5 / 5-25 / 25-60 / 60+）。关键改动：分档口径由「整轮总时长」改为**「距上次可见输出」的静默时长** —— 一旦又吐字，计时归零、回到第一档（实测事故：一轮 74 秒无新字，三个跳动点早已随首个字退场，却还在说「马上好」）。状态条另设 **8s 静默**才出场（比第一档上界 5s 略大），避开正常顿挫时的闪烁。
+
+* **新增 SSE 看门狗：60s 无字节即如实提示断流**（新增 [sse-liveness.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/sse-liveness.ts)，[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 接入）：与等待口语说的不是一件事 —— 等待口语看**可见正文**停了多久（思考期间照样在涨，只会让文案更安抚）；看门狗看**一个字节都没到**多久，到阈值就必须如实说。阈值 60s ≈ 服务端长耗时工具 **20s 心跳**连丢 3 个（[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts) 的「长耗时工具 keepalive」），正常链路不可能出现，同时留足模型 TTFT 余量。管家这条**不掐断**（管家任务动辄几分钟，误杀比多等更贵），只如实提示 + 给「重新发送」；画布节点链路的 90s 硬超时不受影响。
+
+### 新增单测
+
+* 新增 [wait-lines.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/wait-lines.test.ts)（**11 例**）与 [sse-liveness.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/sse-liveness.test.ts)（**4 例**）：前者把三条规矩钉成闸门（每档 ≥4 句、不含具体动作 / 进度词、句尾无省略号、话风内不重样、合计 ≥50 句）、分档与 5 秒轮换口径、称呼只拼在温和档第一档、状态条阈值 8s；后者守断流判定边界（阈值下方不算断流、阈值可下压、非法输入 / 时钟回拨返 0、默认阈值 60s）。本批合计 **+15 例**；`tsc --noEmit` 与 `vitest run` 全绿。
+
+
+## v0.7.682 (2026-10-06)
+
+> 本版是 **v0.7.681 之后的增量**：修一处**管家派单事故** —— 用户以「新建会话，<任务>」开头说话时，管家此前把这句读成「本次对话的背景说明」，**0 次调用 create_session**、自己在管家线程里把活干完了。现由**宿主按用户原文判定**「以『新建会话』开头 = 派单」，命中才注入当轮意图指令，并同步收紧工具描述与管家提示词；边界（句中提到「会话」、对已建会话的追问）一律零注入，不劫持普通对话。另把 v0.7.681 引入的 MD 编辑器正文字号**从固定 16px 改为跟随全局字号档位**（M/L/XL）。共 6 个源文件改动。
+
+### 修复与优化
+
+* **「新建会话」开头即派单，由宿主判定并注入**（新增 [context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts) 的 `buildButlerNewSessionInjection` + [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts) 接入动态通道）：实测事故（2026-10-06 16:31）—— 用户对管家说「新建会话，涉及一份合作模式，甲方是十三幺公司…」，管家把这句话读成了本次对话的背景说明，**0 次调用 create_session**，自己在管家线程里把协议写完了：既没建成会话，也违背「你是调度者，不是执行者」。工具的可用性没问题（cacheguard 证明 `create_session` 当时在册），卡点是「一句话两种读法」的判定。**为什么走动态注入而不是改提示词**：管家提示词已被物化为 `<APP_ROOT>/agents/butler/agent.json`（本机实况 2026-09-28 物化，源码里后补的说明一个字都没进去），改 [profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts) 对**已装用户不生效**；而这条判定必须立刻对所有人生效，故由宿主判定、命中才以当前轮 user 消息注入（system / 工具 / 历史前缀字节不变）。判定正则 `NEW_SESSION_INTENT_RE` 只认**开头**（可带「帮我 / 请 / 麻烦」前缀），且用 `NEW_SESSION_FOLLOWUP_RE` 否决「新建会话**那边**怎么样了 / **的**任务做完了吗」这类对已建会话的追问；「新建会话，X」带分隔符 → 永远算派单。
+
+* **注入文案给足执行要素**（[context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts)）：指明 `project` 不传（用当前项目）、`task` 原样带上「新建会话」之后的任务描述（自包含：当事人 / 交付物 / 约束 / 参考材料）、`agent` 按任务性质选已装身份、`title` 用几个字概括；并明确「不要自己在管家线程里把这项工作做完」，以及工具返回 `ui_not_open` 时如实回报、不谎称已建。
+
+* **工具描述补 TRIGGER 段**（[butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts)）：`create_session` 描述开头新增 —— 用户消息**以** 新建会话 / 新建一个会话 / 新开一个会话 / 开个会话 / 建个新会话 **开头**并跟任务描述时，那**就是**建会话并派单的指令（imperative，非 context），不要读成本次对话的背景、也不要自己在管家线程里做。
+
+* **管家提示词同步收紧**（[profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts)）：【专属意图优先】段补一条 —— 「以『新建会话 / 开个会话』开头并跟任务描述 → create_session 把任务派给新会话（这是派单，不是本次对话的背景说明；不要自己在管家线程里把活做完）」。
+
+* **MD 编辑器正文字号跟随全局字号档位**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：v0.7.681 把正文钉在 16px，但全局字号档位 M/L/XL 是给 UI 的、编辑器正文此前不跟随；现改为 `font-size: var(--fs-md)`（M/L/XL = 15/17/19px），行高仍用无单位 1.75（随字号等比缩放，无需再维护 `--lh-*` 那套偏紧的 UI 行高）。标题梯度由固定 26/20/17px 改为 `1.625em / 1.25em / 1.0625em`，锚定「16px 正文下的 26/20/17」这套比例，**随正文字号等比缩放**，档位切换时标题与正文的相对关系恒定、不会出现 h3 被正文追平。
+
+* **修字号失效：行内代码被更高权重规则盖掉**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：globals 的 `.html-renderer :not(pre) > code { font-size: 12px }` 是 (0,1,2) 权重，比原来的 `.doc-editor-content code` (0,1,1) 更具体 —— v0.7.681 里写的 14px **一直不生效、实测仍是 12px**。现改用同权重的 `.doc-editor-content :not(pre) > code { font-size: 0.875em }`；代码块 NodeView（contentDOM 是 `div.code-block-content`，非 `code` 元素）同理用 `.doc-editor-content pre .code-block-content` 接管。表格文字亦改为 `0.875em`，随档位等比缩放。
+
+* **打印 / 导出产物仍逐字不变**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：屏幕态新增的 `0.875em` 与 globals 原规则同权重又后置，会一并漏进打印克隆；在 `#doc-print-root` 内按原有有效值（均为 12px）显式钉回 `code` 与 `.code-block-content`。
+
+### 新增单测
+
+* **增补 [context.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.test.ts)（+5 例，新增一个 describe）**：① 事故原文（以「新建会话，」开头）→ 注入「本轮意图：新建会话」并点明不要自己做、须交代 `ui_not_open` 口径；② 各种派单式说法（含帮我 / 请前缀、口语变体）均命中；③ 句中提到「会话」及空串 / 纯空白 → 零注入（不劫持普通对话）；④ 只说「新建会话」没给任务 → 仍注入但提示不传 task；⑤ 已建会话的追问（「新建会话那边怎么样了」等）零注入，并附无反例对照「开个会话把这件事办了」仍命中。本批合计 **+5 例**；`tsc --noEmit` 与 `vitest run` 全绿。
+
+
+## v0.7.681 (2026-10-06)
+
+> 本版是 **v0.7.680 之后的增量**：重做画布 **MD 编辑器正文的屏幕阅读版式** —— 正文列限宽居中、字号改为跟随全局字号档位（`var(--fs-md)`：M/L/XL = 15/17/19px）、行高 1.75、并由衬线栈（Times New Roman → 宋体）换成无衬线栈（系统字体 → 苹方）；标题梯度、行内 code / 代码块、表格文字随正文等比缩放。打印 / 导出的产物**逐字保持不变**（打印态对新增声明显式对账）。共 2 个源文件改动。
+
+### 优化
+
+* **正文改无衬线 + 限宽居中**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：`.doc-editor-content` 此前是 `width:100%` + 仅 40px 内边距，面板一宽一行就是 100+ 汉字，眼睛回行时找不到下一行开头（阅读度量失控）。现限宽 `max-width:800px`（736px 正文 + 2×32px 内边距）并 `margin:0 auto` 居中，行长落回 40~50 汉字（L 档约 43 字）；字号由硬编码 `14px` 改为跟随全局档位 `var(--fs-md)`（M/L/XL = 15/17/19px），顺带修掉「设置 → 字号档位对 MD 编辑器正文无效、该面板永远比全 UI 小 3px」这个既有一致性问题；行高 1.8→1.75 且用**无单位**值，换档时按比例自动跟随（不引 `--lh-md`，那套是配 UI 文本的≈1.35，长文偏紧）；字族由 `--font-sans`（衬线）换成新增的 `--font-reading`（无衬线）—— 整段正文用衬线时，屏幕小字号宋体笔画细、字面小、灰度低，长段落发暗发灰、回行吃力。
+
+* **新增阅读字体令牌 `--font-reading`**（[globals.css](file:///Users/baolei/Desktop/BobWork/projects/src/app/globals.css)）：`-apple-system → BlinkMacSystemFont → PingFang SC → …`，与 UI 基调的 `--font-sans` 衬线栈刻意分离，**仅** `.doc-editor-content` 使用，全局 UI 与标题字体不受影响。
+
+* **标题梯度随正文字号等比缩放**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：原 24 / 19 / 16px 是按 14px 正文配的，正文改为跟随档位（L 档 17px）后会与 h3 同号、层级塌掉 → 改为 `1.625 / 1.25 / 1.0625em`（锚定原 26 / 20 / 17px @16px 正文的比例，L 档实渲 27.6 / 21.3 / 18.1px）。用 `em` 而非 `--fs-*` 令牌，是为了让「标题 ↔ 正文」的相对关系在任何档位下恒定（若用令牌，XL 档正文 19px、h3 会顶到 20px，层级几乎被追平）。字重由 700 / 680 / 650 改为 700 / 600 / 600：中文无衬线（苹方）只有 Medium / Semibold 两档，原 680 / 650 会被浏览器吸附到 700，导致三级标题全变 Bold、只剩字号一个维度。`letter-spacing` 回到 `normal`（原 -0.02em / -0.015em 是西文大标题的收紧技巧，中文字面本就顶格，负字距只会让标题挤在一起）。
+
+* **行高显式钉在 `p` / `li` 上**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：globals 的 `.html-renderer` 给 `p` 写了 `line-height:1.7`、给 `li` 写了 `1.6`，与 `.doc-editor-content p/li` 同权重且直接命中元素（覆盖继承），只靠容器上的 `line-height` 压不住 —— 故正文段落实际行高从此处取（`p`/`li` 均 1.75）。
+
+* **行内 code / 代码块 / 表格文字改为随正文等比缩放**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：行内 `code` 与代码块此前的字号声明**实际从未生效** —— globals 的 `.html-renderer :not(pre) > code`（行内码）与 `.html-renderer pre .code-block-content`（代码块 NodeView 的真实 contentDOM）都是 **(0,1,2)** 权重，压过 (0,1,1) 的 `.doc-editor-content code`，二者一直停在 12px、且不随正文变化。本次改用**同权重选择器 + 后置顺序**接管，并按 `0.875em` 随正文字号缩放（L 档 14.9px）。表格表头（`th` 与首行 `td`）由 globals 钉的 12px 与表体一并统一到 `0.875em`（较正文小一档），避免表头比表体小一截、整张表看着断裂。
+
+* **打印 / 导出产物逐字不变（打印态对账）**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：屏幕态给 `.doc-editor-content` 及其子元素新增 / 修改的直接声明会命中打印克隆里的同名元素，而打印块多数是在**父级**（容器 / `table`）上设值，继承永远输给直接声明，于是会漏进打印产物。故在 `#doc-print-root` 内显式钉回改动前的取值 —— 正文 `font-family` 钉回宋体（保住「正文宋体 / 标题黑体」的字族对比）、`ul/ol` margin 14px、`li` 行高 1.6、表格 9pt、`pre code` 13px、代码块 / 行内码 12px、h1/h2 字距回到 -0.02em / -0.015em。**既有打印与导出结果不变**（已用 19 个元素 × 22 个属性的 computed style 快照逐项对账：改前 vs 改后 0 处差异）。
+
+
 ## v0.7.680 (2026-10-06)
 
 > 本版是 **v0.7.679 之后的增量**：把移动端 `/butler` 从「只有一个对话」补成**完整 Butler** —— 会话为主，分区（Today / Memories / Preferences / Calendar / Meeting / 检索实况 / 回执）从左侧导航滑入、全屏成栈，面板直接复用桌面组件。为此把桌面抽屉里四处能力抽成**共享模块**（检索实况面板 / 公众号检索链路 / 回执动作层 / 回执格式层），两端共用一份真源。另修两处：产物文件卡片**读不出来时把 `OutputFile:` 行还原回正文**（管家切过项目后，早先发出的相对路径卡片会指到别的项目而打不开，路径不该凭空消失）；远端会话 Cookie 收敛成单一真源，并在 Bearer 校验通过时**顺带下发 Cookie**（修 WebView 子资源 401 白屏）。共 14 个源文件改动（7 改 + 7 新增）。

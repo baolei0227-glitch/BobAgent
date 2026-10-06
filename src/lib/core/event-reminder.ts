@@ -123,22 +123,21 @@ async function foldReminderBatch(produced: PendingReminder[]): Promise<PendingRe
 
 /**
  * 服务端直推外部通道：日程提醒产出时并行推一条到微信与飞书（BobWork 后台运行时手机端也能收到）。
- * 两个桥未绑定 / 未运行（pushText 内部判断）时静默 no-op —— 桌面队列仍照常投递，不影响原链路。
- * 用 allSettled 保证任一通道失败既不影响另一通道，也不影响原链路。
- * 用动态 import 避免与桥形成模块初始化环（桥反向上游走 node-chat）。
+ *
+ * 2026-10-06（Butler 主动播报工单 P0）：改为走 `lib/core/push-out.ts` 的**统一出站口**。
+ * 改造前这里直接 `pushText`，绕过了 `decidePush` —— 而 `/api/butler/push-gate` 跑在浏览器里，
+ * 管不到服务端直推，于是免打扰窗口与单日上限对手机端完全不生效。
+ *
+ * 档位固定 `'reminder'`：日历提醒是用户自订的时间点，**窗口与上限双豁免**（闹钟必达，见
+ * `quiet-hours.countsTowardDailyLimit`），也不吃当日配额 —— 所以「会不会被静默」与当天已推条数无关。
+ * 仍然统一从出站口走，是为了让「投递留痕 + 计数口径」只存在一处。
+ * 未绑定 / 无收件人的静默失败由出站口统一打 warn（本模块不再各写一份日志）。
  */
 async function pushReminderToBridges(reminder: PendingReminder): Promise<void> {
   const text = reminder.body ? `${reminder.title}\n${reminder.body}` : reminder.title;
-  const tasks = [
-    import('@/lib/bridge/wechat-bridge').then(({ wechatBridge }) => wechatBridge.pushText(text)),
-    import('@/lib/bridge/feishu-bridge').then(({ feishuBridge }) => feishuBridge.pushText(text)),
-  ];
-  const results = await Promise.allSettled(tasks);
-  for (const r of results) {
-    if (r.status === 'rejected') {
-      console.warn('[event-reminder] 通道推送失败:', r.reason instanceof Error ? r.reason.message : String(r.reason));
-    }
-  }
+  // 动态 import 避免与出站口 / 桥形成模块初始化环（沿用既有做法）
+  const { pushToBridges } = await import('@/lib/core/push-out');
+  await pushToBridges(text, 'reminder');
 }
 
 /** 拉取待发布的到期提醒（前端轮询调用），拉取后清空队列

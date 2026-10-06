@@ -5,7 +5,8 @@
  * 免打扰窗口与单日上限从未生效。本用例锁住接线后的三条不变量：
  *   ① 免打扰窗口内，主动推送类别（report / meeting / other）**被拦**；
  *   ② 「用户自订日历提醒永不被静默」——`calendar` 在窗口内**照样放行**（映射错会吞掉夜间闹钟）；
- *   ③ 放行时**就地计数**，单日上限成为真上限（第 N+1 次被 `daily-limit` 拦）。
+ *   ③ 放行时**就地计数**，单日上限成为真上限（第 N+1 次被 `daily-limit` 拦），
+ *      但 `calendar` **不吃配额也不受上限**（2026-10-06 起，见 countsTowardDailyLimit）。
  *
  * 隔离：BOBWORK_HOME 指向临时目录 + 写入 `.settings.json`；`readSettingsFromFile()` 每次读盘，
  * 故同进程内改设置即刻生效。时间用假定时器钉死，避免依赖测试运行时刻。
@@ -62,7 +63,7 @@ describe('B5 打扰闸', () => {
     expect((await gate('meeting')).allow).toBe(false);
     // 未知名 / 空体 → 'other'，可静默类别
     expect((await gate()).allow).toBe(false);
-    // 日历提醒：窗口内不静默（只受单日上限）
+    // 日历提醒：窗口内不静默（窗口 + 上限双豁免）
     const cal = await gate('calendar');
     expect(cal.allow).toBe(true);
     expect(cal.reason).toBe('ok');
@@ -87,6 +88,18 @@ describe('B5 打扰闸', () => {
     const third = await gate('notes-maintenance');
     expect(third.allow).toBe(false);
     expect(third.reason).toBe('daily-limit');
+
+    // 对照组：配额已满，用户自订的日历提醒仍必须放行，且**不吃配额**
+    const cal = await gate('calendar');
+    expect(cal.allow).toBe(true);
+    expect(cal.reason).toBe('ok');
+    // 连推 3 条日历提醒后，主动汇报读到的 used 必须仍是 2 —— 若 calendar 误吃配额，这里会读到 5。
+    // ⚠️ 不能只断言「仍被拦」：配额被吃空时也照样被拦，那是平凡为真的判据，抓不到本 bug。
+    await gate('calendar');
+    await gate('calendar');
+    const after = await gate('notes-maintenance');
+    expect(after.reason).toBe('daily-limit');
+    expect(after.used).toBe(2);
 
     vi.useRealTimers();
   });
