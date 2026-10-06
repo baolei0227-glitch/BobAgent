@@ -46,8 +46,11 @@ import type { AppSettings } from '@/lib/settings';
  *  write_notebook_answer / restore_note / ingest_notes / review_notes / set_note_rules /
  *  delete_notebook），令「工具面 = 声称的能力边界」成立；微信通道由 WECHAT_ALLOWED_WRITES
  *  单独放行（delete_notebook 不放行——已被管家 coreExclusions 剔除，且属破坏性操作）。
- *  （偏好 remember/update/delete_preference 与 set_model_price 同为写类，暂不拦——
- *    避免顺手改出无关行为差异；微信通道另有 WECHAT_ALLOWED_WRITES 白名单单独放行。）
+ *  2026-10-02 再补**用户记忆写类**（remember_preference / update_preference / delete_preference）：
+ *  它们是**跨会话、跨联系人的全局副作用**（改的是 `butler/preferences.md`，所有联系人共享），
+ *  沙盒/编排链路的契约是「不对外部状态产生副作用」，此前名单外的空档等于给着写接口。
+ *  （仍**不拦** set_model_price：它写的是模型单价配置，属应用数据而非用户记忆；
+ *    要不要拦是另一个决定，不在本次范围内——故此处显式记录，避免被当成漏改。）
  *  注：lint_notes 是只读自检（仅产出报告，不改数据），故不列入本名单。 */
 export const SANDBOX_BLOCKED_TOOLS = new Set([
   'write_file',
@@ -66,6 +69,12 @@ export const SANDBOX_BLOCKED_TOOLS = new Set([
   'create_sticky_note',
   // 新建项目（应用结构写动作：落目录 + 改全局项目配置）
   'create_project',
+  // 打开/切换当前项目 + 新建会话（2026-10-05，同属应用结构写动作）：
+  //   switch_project 改的是"当前项目"这一应用级状态（不落数据，但会移动用户眼前的画布）；
+  //   create_session 会在画布里派生一个会话、并可能让它在后台自动跑任务（节点由前端建，
+  //   界面未打开时工具自身也会拒），副作用外溢到「无人看守的执行」——故两者都列入本名单。
+  'switch_project',
+  'create_session',
   // 笔记写类（P2 补齐：此前散落名单外 → 在聚合链路被静默直接执行、不弹确认）
   'create_note',
   'update_notebook',
@@ -75,6 +84,11 @@ export const SANDBOX_BLOCKED_TOOLS = new Set([
   'review_notes',
   'set_note_rules',
   'delete_notebook', // 破坏性：微信白名单亦不放行（管家工具面已由 coreExclusions 剔除）
+  // 用户记忆写类（2026-10-02 补）：改的是 `butler/preferences.md`——**所有联系人共享**的全局记忆，
+  // 沙盒/编排链路不该有这种跨会话副作用。只读的 read_preferences 不拦（仍可据此回答提问）。
+  'remember_preference',
+  'update_preference',
+  'delete_preference',
 ]);
 
 /** 微信通道（channel='wechat'）**放行**的写类工具白名单（C 档）。
@@ -101,6 +115,11 @@ export const WECHAT_ALLOWED_WRITES = new Set([
   'create_sticky_note',
   // 新建项目（低风险且可逆：只建目录不删改；与便签同为「创建容器」类，微信直接放行）
   'create_project',
+  // 打开项目 / 新建会话（2026-10-05）：手机端最典型的「打开 X 项目，建个会话把这件事跑了」。
+  // 两者都不删改数据：切换只改当前项目指针；建会话由前端画布落地，界面未打开时工具自己就拒
+  // （回 ui_not_open）——不会在用户不知情时凭空跑起任务。
+  'switch_project',
+  'create_session',
   'create_note',
   'update_notebook',
   'write_notebook_answer',
@@ -354,6 +373,32 @@ function buildAndSortToolDefs(defs: ToolDefinition[], mcpServers: McpServerConfi
   return sorted;
 }
 
+/**
+ * 解析「本轮真正生效的场景集合」（2026-10-05 抽出，纯重构）。
+ *
+ * 语义与 `computeActiveToolDefs` 原有三档分支一字不差：
+ *   - sandbox（无确认回传编排链路）→ 用 activeScenes；
+ *   - fixed 画像 → **完全忽略**请求级 activeScenes，用画像的 fixedScenes；
+ *   - 其余（dynamic）→ 用 activeScenes。
+ *
+ * 抽出的动因：可见源清单与工具面必须用**同一套判据**——可见清单里出现的源，
+ * 其入口工具必须真在手里（否则「清单说有、工具没有」）。两处共用本函数即该保证的机制。
+ *
+ * 注意 `input.fixedScenes ?? []`：不能写成 `... && input.fixedScenes` 的条件式，否则
+ * `profileMode==='fixed'` 而 fixedScenes 缺省时，行为会从「空集合」漂移成「activeScenes」。
+ */
+export function resolveEffectiveScenes(input: {
+  sandbox: boolean;
+  profileMode: 'dynamic' | 'fixed';
+  fixedScenes?: readonly ToolScene[];
+  activeScenes: Set<ToolScene>;
+}): Set<ToolScene> {
+  if (!input.sandbox && input.profileMode === 'fixed') {
+    return new Set<ToolScene>(input.fixedScenes ?? []);
+  }
+  return input.activeScenes;
+}
+
 /** ToolRuntime 构造入参：请求级只读快照（语义与迁移前 route 内胶水一致） */
 export interface ToolRuntimeOptions {
   /** settings 快照（readSettingsFromFile 结果；每请求读取一次，与迁移前语义一致） */
@@ -457,11 +502,17 @@ export class ToolRuntime {
    *  此处按 activeScenes / profile 画像（scenes=fixed 用固定场景子集、coreExclusions 剔除）过滤，
    *  再兜底校验工具名（OpenAI API ^[a-zA-Z0-9_-]+$），最后并入节点"强制使用"MCP（mergeForcedMcpToolDefs）。 */
   private computeActiveToolDefs(activeScenes: Set<ToolScene>): ToolDefinition[] {
+    // 生效场景解析与可见源派生共用同一判据（resolveEffectiveScenes）：纯重构，行为不变
+    const effectiveScenes = resolveEffectiveScenes({
+      sandbox: this.sandbox,
+      profileMode: this.profile.scenes,
+      fixedScenes: this.profile.fixedScenes,
+      activeScenes,
+    });
+    const defs = getToolDefinitions(effectiveScenes);
     const base = this.sandbox
-      ? getToolDefinitions(activeScenes).filter((t) => !SANDBOX_BLOCKED_TOOLS.has((t as { name?: string }).name as string))
-      : this.profile.scenes === 'fixed'
-        ? getToolDefinitions(new Set<ToolScene>(this.profile.fixedScenes))
-        : getToolDefinitions(activeScenes);
+      ? defs.filter((t) => !SANDBOX_BLOCKED_TOOLS.has((t as { name?: string }).name as string))
+      : defs;
     // 兜底校验：工具名必须匹配 ^[a-zA-Z0-9_-]+$（OpenAI API 要求）。
     // MCP 工具名/自定义工具名可能在动态注册时产生非法字符，这里过滤掉避免 400。
     const valid = base.filter((t) => {

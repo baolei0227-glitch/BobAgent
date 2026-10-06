@@ -62,4 +62,33 @@ describe('沙盒工具面与写类名单的对齐', () => {
     // lint_notes 是只读自检，不得误拦
     expect(SANDBOX_BLOCKED_TOOLS.has('lint_notes')).toBe(false);
   });
+
+  it('用户记忆写类一律拦掉（2026-10-02 补），但读取不受影响', () => {
+    // 背景：记忆真源 `butler/preferences.md` 是**所有联系人共享**的全局状态；
+    // 沙盒/编排链路的契约是「不对外部状态产生副作用」，此前这三个写工具在名单外 = 给着写接口。
+    for (const name of ['remember_preference', 'update_preference', 'delete_preference']) {
+      expect(SANDBOX_BLOCKED_TOOLS.has(name), name).toBe(true);
+      // 也不走微信白名单：手机端高频低风险写类里没有它们（记忆由管家在对话中自己维护）
+      expect(WECHAT_ALLOWED_WRITES.has(name), name).toBe(false);
+    }
+    // 只读记忆必须仍可用，否则沙盒链路回答不了「我有哪些偏好」
+    for (const name of ['read_preferences', 'read_rules']) {
+      expect(SANDBOX_BLOCKED_TOOLS.has(name), name).toBe(false);
+    }
+  });
+
+  it('打开项目 / 新建会话（2026-10-05 补）：沙盒一律拦掉，微信通道放行', () => {
+    // 背景：管家新增 switch_project（切当前项目）与 create_session（在画布里派生会话，
+    // 并可能让该会话在后台无人看守地跑任务）。两者都改应用结构状态——
+    // 沙盒/编排链路（team 成员、organize-send）不该动用户眼前的画布与项目指针；
+    // 微信是用户本人的手机入口，「打开 X 项目，建个会话把这件事跑了」正是典型指令，故放行。
+    for (const name of ['switch_project', 'create_session']) {
+      expect(SANDBOX_BLOCKED_TOOLS.has(name), name).toBe(true);
+      expect(WECHAT_ALLOWED_WRITES.has(name), name).toBe(true);
+    }
+    // 只读的项目/应用状态查询不得误拦（否则沙盒里答不出「有哪些项目 / 当前在哪个」）
+    for (const name of ['list_projects', 'list_nodes', 'get_app_status']) {
+      expect(SANDBOX_BLOCKED_TOOLS.has(name), name).toBe(false);
+    }
+  });
 });

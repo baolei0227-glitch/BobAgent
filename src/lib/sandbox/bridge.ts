@@ -24,6 +24,7 @@ import { GRAPH_BRIDGE_ACTIONS } from '@/lib/graph/graph-bridge';
 import { getSandboxChatPermission } from '@/lib/settings';
 import { executeSandboxChat, type SandboxChatMessage } from '@/lib/sandbox/chat-bridge';
 import { callNotes, renderNotesText } from '@/lib/mcp/notes-bridge';
+import { isProtectedButlerFile } from './bridge-guards';
 
 // ==================== Type Definitions ====================
 
@@ -384,8 +385,11 @@ export function buildBridgeClientScript(appId: string): string {
           return Promise.reject(new Error('当前为独立页面（Hippo），不支持画布对接操作'));
         }
         // 人工确认型动作：先 in-page 确认，复刻宿主弹窗语义（服务端权限闸仍生效）
+        // 确认文案带上目标文件名（2026-10-02）：原先只说「执行 writeWanted」，用户看不到写哪个文件、
+        // 更看不到会覆盖什么 —— 现在至少把落点摆在他眼前（受保护文件由服务端直接拒绝，见 bridge-guards）。
         var manual = MANUAL_CONFIRM_ACTIONS.indexOf(action) >= 0;
-        if (manual && !window.confirm('小程序请求执行「' + action + '」，是否允许？')) {
+        var manualTarget = data && data.filename ? '（目标文件：' + String(data.filename) + '）' : '';
+        if (manual && !window.confirm('小程序请求执行「' + action + '」' + manualTarget + '，是否允许？')) {
           return Promise.reject(new Error('user denied: ' + action));
         }
         return relayRequest(action, data);
@@ -984,6 +988,15 @@ export async function handleBridgeRequest(
         const content = String(data.content ?? '');
         if (!filename) throw new Error('filename is required');
         const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+        // 2026-10-02 护栏：butler/ 根下的**真源 / 状态文件**不给小程序写。
+        // 此前只清洗文件名（挡目录穿越），却把 preferences.md（用户记忆，所有人共享）、
+        // roles.json、notify-state.json 一起暴露成「可被 fs.writeFile 全量覆盖」——
+        // 一次笼统确认就能清空全部记忆。详见 ./bridge-guards.ts。
+        if (isProtectedButlerFile(safeName)) {
+          throw new Error(
+            `refused: ${safeName} is Butler's own file (user memory / registry / notify state) and cannot be overwritten by a mini-app`,
+          );
+        }
         const butlerDir = join(resolveAppRoot(), 'butler');
         await fs.mkdir(butlerDir, { recursive: true });
         const filePath = join(butlerDir, safeName);

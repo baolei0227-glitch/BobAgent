@@ -22,14 +22,15 @@
 import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
-import { getLocalAuthorizedRoots } from '@/app/api/chat/tools';
+import { getLocalAuthorizedRoots, type ToolScene } from '@/app/api/chat/tools';
 import { pluginDataHome } from '@/lib/extensions/data-home';
 import type { NodeMarkdown } from '@/lib/node-markdown';
 import { readAppEntry, hasAppImplementation } from '@/lib/sandbox/apps';
 import { getBridgeActionsText } from '@/lib/sandbox/bridge';
 import { BUTLER_COMMANDS } from '@/lib/core/commands';
-import { BUTLER_SCHEDULE_DISCIPLINE } from '@/lib/agents/profiles';
+import { BUTLER_SCHEDULE_DISCIPLINE, BUTLER_MEMORY_ROUTING, BUTLER_ROUTING_HINT } from '@/lib/agents/profiles';
 import { getMeetingState } from '@/lib/core/meeting-session';
+import { SOURCES, type SourceStatus } from '@/lib/runtime/sources';
 
 /** 项目路径/授权目录段生成所需的最小入参（route 已解析好的请求级上下文） */
 export interface PathContextInput {
@@ -113,18 +114,22 @@ export class ContextRuntime {
 
   /** 段③：用户记忆注入文本（listPreferences 读取 + 注入分档，原 route 2941-2962 纯生成部分）。
    *  分档：常驻档（身份画像 / 偏好习惯）注入正文；其余类型只注入 type 目录，按需 read_preferences 取全文。
-   *  安全阀：常驻档条目数超过 ALWAYS_INJECTED_MAX 时整体退化为只注入目录，避免 token 无上限增长。
+   *  安全阀：常驻档**合计**超 ALWAYS_INJECTED_MAX 时按类型**逐级退化**（2026-10-02 改：此前是整体退化，
+   *  连身份画像也一起掉出常驻，用户会突然觉得「它不记得我了」；判定抽成纯函数 `selectResidentTypes`）。
    *  无记忆/读取失败返回 ''（原代码 prefs.length > 0 才注入、读取异常被 catch 忽略）。 */
   async buildUserPreferencesInjection(): Promise<string> {
     try {
-      const { listPreferences, ALWAYS_INJECTED_TYPES, ALWAYS_INJECTED_MAX } = await import('@/lib/core/preferences');
+      const { listPreferences, ALWAYS_INJECTED_TYPES, ALWAYS_INJECTED_MAX, selectResidentTypes } = await import(
+        '@/lib/core/preferences'
+      );
       const prefs = await listPreferences();
       if (prefs.length === 0) return '';
 
-      // 常驻档：条数少、每轮都用，注入正文；超阈值则整体退化为目录（安全阀）
-      const residentOverflow =
-        prefs.filter((p) => ALWAYS_INJECTED_TYPES.includes(p.type)).length > ALWAYS_INJECTED_MAX;
-      const isResident = (type: string) => !residentOverflow && ALWAYS_INJECTED_TYPES.includes(type);
+      // 常驻档：条数少、每轮都用，注入正文；合计超阈值则从**最低优先级**的类型开始退回目录档
+      const counts: Record<string, number> = {};
+      for (const p of prefs) counts[p.type] = (counts[p.type] ?? 0) + 1;
+      const residentTypes = selectResidentTypes(counts, ALWAYS_INJECTED_TYPES, ALWAYS_INJECTED_MAX);
+      const isResident = (type: string) => residentTypes.includes(type);
       const resident = prefs.filter((p) => isResident(p.type));
       const rest = prefs.filter((p) => !isResident(p.type));
 
@@ -132,7 +137,7 @@ export class ContextRuntime {
       const hints: string[] = [];
       if (resident.length > 0) {
         const lines = resident.map((p) => `- [${p.type}] ${p.content}`).join('\n');
-        blocks.push(`**常驻档（${ALWAYS_INJECTED_TYPES.join(' / ')}，每轮注入正文）**\n${lines}`);
+        blocks.push(`**常驻档（${residentTypes.join(' / ')}，每轮注入正文）**\n${lines}`);
         hints.push('上方常驻档每轮随上下文给出全文');
       }
       // 目录档：按 type 分组统计条数（不注入具体内容，节省上下文、避免无关记忆干扰）
@@ -151,7 +156,7 @@ export class ContextRuntime {
         );
       }
 
-      return `\n\n## 用户记忆（统一长期记忆，所有联系人共享，记的是用户本人）\n已记录 ${prefs.length} 条。${hints.join('；')}。识别到持久的偏好/事实时主动调用 remember_preference 写入（type 取六类：身份画像 / 偏好习惯 / 工作上下文 / 事实经历 / 目标计划 / 关系边界）；写入前先 read_preferences 查同类：有矛盾走 update_preference 覆盖、同一件事（哪怕措辞不同）合并成一条，而非重复追加或另起条目；密码/密钥/token/证件号等敏感信息不记录；遗忘用 delete_preference（按序号）。\n\n${blocks.join('\n\n')}`;
+      return `\n\n## 用户记忆（统一长期记忆，所有联系人共享，记的是用户本人）\n已记录 ${prefs.length} 条。${hints.join('；')}。识别到持久的偏好/事实时主动调用 remember_preference 写入（type 取六类：身份画像 / 偏好习惯 / 工作上下文 / 事实经历 / 目标计划 / 关系边界）；写入前先 read_preferences 查同类：有矛盾走 update_preference 覆盖、同一件事（哪怕措辞不同）合并成一条，而非重复追加或另起条目；密码/密钥/token/证件号等敏感信息不记录；遗忘用 delete_preference（按序号）；${BUTLER_ROUTING_HINT}。\n\n${blocks.join('\n\n')}`;
     } catch {
       // 记忆读取失败忽略（与原 route 内联 try/catch 一致）
       return '';
@@ -210,6 +215,87 @@ export class ContextRuntime {
     if (basePrompt && basePrompt.includes(BUTLER_SCHEDULE_DISCIPLINE)) return '';
     // 已装用户的 agent.json 里是旧版排期纪律，故显式声明「以本段为准」避免两条规则打架
     return `\n\n以下是宿主层下发的最新排期口径（与提示词里的旧版不一致时，一律以本段为准）：\n${BUTLER_SCHEDULE_DISCIPLINE}`;
+  }
+
+  /**
+   * 信息分层纪律注入（2026-10-04）—— 与排期纪律**同款双通道、同款幂等去重**。
+   *
+   * 为什么：用户四类信息（人与分工 / 口径与标准 / 节奏 / 授权接源）此前没有落层纪律，容易
+   * 把可执行的习惯只记成不会被执行的偏好、把事实写成规则。管家提示词被物化为 agent.json，
+   * 改常量对已装用户不生效 → 每轮经本动态通道注入同一段（真源见 profiles.ts 的 BUTLER_MEMORY_ROUTING）。
+   *
+   * 幂等：basePrompt 已含同一常量（新装 / agent.json 已刷新的用户）→ 返回空串，零重复、零伪冲突；
+   *       不含（已装老用户）→ 照常注入并附「以本段为准」。
+   * 缓存影响：注入落在所有历史之后（当前轮 user 消息内），system + 工具 + 历史前缀字节不变。
+   */
+  buildMemoryRoutingInjection(basePrompt?: string): string {
+    if (basePrompt && basePrompt.includes(BUTLER_MEMORY_ROUTING)) return '';
+    return `\n\n以下是宿主层下发的最新信息分层口径（与提示词里的旧版不一致时，一律以本段为准）：\n${BUTLER_MEMORY_ROUTING}`;
+  }
+
+  /**
+   * 可见源（能力边界）注入（2026-10-04；2026-10-05 改为**注册表派生**）。仅管家身份调用。
+   *
+   * 「授权 / 接源」既不是记忆也不是规则，而是**能力边界**：模型看不见自己接了哪些源，就会含糊
+   * 承诺或假装执行。本段把「当前能看见什么 / 看不见什么」如实下发，缺什么就引导用户去接源 / 授权。
+   *
+   * 清单不再硬编码在此，而是从 `runtime/sources.ts` 的 SOURCES 注册表**派生**：
+   *   - 场景命中（`entry.scenes` 为空 = 恒在候选；否则需与本轮 `scenes` 有交集）且 render 非 null → 收行；
+   *   - 新增一个源只改注册表一处，可见性文案与漂移护栏（sources.registry.test.ts）同时就位。
+   * 本文件只负责**采集 IO**（不新增网络请求 / 轮询，全部取自既有内存态 / 落盘态）：
+   *   - 微信桥 wechatBridge.getStatus()（同步）
+   *   - 飞书桥 feishuBridge.getStatus()（同步）
+   *   - 本地授权目录 getLocalAuthorizedRoots()（异步，与段②同源）
+   * 各源分别容错：单项取数失败只令该源不展示；全部无行或整体异常 → 返回 ''（静默降级，不阻断对话）。
+   *
+   * 缓存影响：与其余动态注入同走 prependDynamicContext（落在当前轮 user 消息内），
+   * system + 工具 + 历史前缀字节不变，不影响前缀缓存命中。
+   */
+  async buildVisibleSourcesInjection(scenes: Set<ToolScene>): Promise<string> {
+    try {
+      // ① 采集 IO（逐项容错：单项失败只令该源不展示，不阻断其余）
+      const status: SourceStatus = {
+        // 场景含 ledger = 该画像有项目档案面（投影自生效场景集，与工具面同判据）
+        hasProject: scenes.has('ledger'),
+        authorizedRoots: [],
+      };
+
+      try {
+        const { wechatBridge } = await import('@/lib/bridge/wechat-bridge');
+        const st = wechatBridge.getStatus();
+        status.wechat = { running: st.running, bound: st.bound };
+      } catch { /* 微信桥不可用 → 该源不展示 */ }
+
+      try {
+        const { feishuBridge } = await import('@/lib/bridge/feishu-bridge');
+        const st = feishuBridge.getStatus();
+        status.feishu = { running: st.running, bound: st.bound };
+      } catch { /* 飞书桥不可用 → 该源不展示 */ }
+
+      try {
+        const roots = await getLocalAuthorizedRoots();
+        status.authorizedRoots = roots.map((r) => r.replace(homedir(), '~'));
+      } catch { /* 读取失败 → 该源不展示 */ }
+
+      // ② 注册表派生：场景命中且 render 非 null 才收行（顺序即 SOURCES 登记顺序）
+      const lines: string[] = [];
+      for (const src of SOURCES) {
+        if (src.scenes.length > 0 && !src.scenes.some((s) => scenes.has(s))) continue;
+        const line = src.render(status);
+        if (line) lines.push(line);
+      }
+
+      // ③ 全部无行 → 静默降级（与改造前语义一致）
+      if (lines.length === 0) return '';
+
+      return (
+        `\n\n## 你当前能看见什么（能力边界，勿承诺清单外的事）\n` +
+        `${lines.join('\n')}\n` +
+        `- 清单之外的东西（未接入的源、未授权的目录）你**看不到**：如实说明，并一句话引导用户去接源 / 授权，不要假装能执行。`
+      );
+    } catch {
+      return '';
+    }
   }
 
   /**
