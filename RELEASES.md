@@ -15,6 +15,260 @@
 ***
 
 
+## v0.7.680 (2026-10-06)
+
+> 本版是 **v0.7.679 之后的增量**：把移动端 `/butler` 从「只有一个对话」补成**完整 Butler** —— 会话为主，分区（Today / Memories / Preferences / Calendar / Meeting / 检索实况 / 回执）从左侧导航滑入、全屏成栈，面板直接复用桌面组件。为此把桌面抽屉里四处能力抽成**共享模块**（检索实况面板 / 公众号检索链路 / 回执动作层 / 回执格式层），两端共用一份真源。另修两处：产物文件卡片**读不出来时把 `OutputFile:` 行还原回正文**（管家切过项目后，早先发出的相对路径卡片会指到别的项目而打不开，路径不该凭空消失）；远端会话 Cookie 收敛成单一真源，并在 Bearer 校验通过时**顺带下发 Cookie**（修 WebView 子资源 401 白屏）。共 14 个源文件改动（7 改 + 7 新增）。
+
+### 新增
+
+* **移动端 `/butler` 升级为「完整 Butler · 分区栈」**（[page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler/page.tsx) 重写）：此前手机上只有一个「列表 ↔ 对话」两屏，其余功能一概没有。现改为**栈式导航** —— 首屏仍是会话，分区从右侧全屏滑入（返回即回），入口是左缘滑出的导航（[SectionRail.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/mobile/SectionRail.tsx)）或对话里的就地入口。为什么不用桌面那套四栏抽屉：它是「居中模态框 + 全屏透明挡板」，在 390px 视口里既压不住内容、点任意处还会误关；更糟的是若 localStorage 里存有桌面拖拽几何，面板宽度会被钳到 520px 硬塞进手机 → 横向溢出（见 [SectionStack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/mobile/SectionStack.tsx) 文件头）。
+
+* **分区栈容器与导航**（新增 [SectionStack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/mobile/SectionStack.tsx) / [SectionRail.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/mobile/SectionRail.tsx)）：前者只做容器（标题栏 / 转场 / 安全区 / 滚动归属，不含业务），样式走 `bws-` 前缀；后者是左缘 24px 内向右拖 > 56px 打开的滑出导航（条目：Today / Memories / Preferences / Calendar / Meeting / Search Live / Notifications，带未读红点与会议「进行中」绿点），样式走 `bwr-` 前缀。
+
+* **分区内容直接复用桌面组件**（[page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler/page.tsx)）：`ButlerTodayPanel` / `ButlerMemoryConsole` / `ButlerCalendarPanel` / `MeetingStart` + `MeetingConsole` / `ButlerSearchTrace` 原样挂载，不建副本。两处刻意的形态差异：① 会议视图不用栈 —— `MeetingConsole` 卸载即停录，故常驻挂载、只用 `display:none` 收起；② 会议轮询按需启停（只在「有会议在跑 / 正看会议分区 / 导航已展开」时轮询），避免常驻轮询净耗电。工作区 / 人设 / 模型选型未上移动端（依赖桌面目录选择器或属重度设置面）。
+
+* **移动端回执面板**（新增 [ButlerNoticePanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/mobile/ButlerNoticePanel.tsx)）：桌面那份回执详情内联在抽屉右栏、读的是中栏时间线的 `selectedNotice`，**不是受控组件**、无法被另一页挂载，故此处只重建**视图层**（列表 + 详情两级，扁平倒序，不做桌面那套分组 / 过滤），行为与桌面完全同源（共用 `noticeActions` 落库链路 + `noticeFormat` 格式口径）。样式走 `bwn-` 前缀。
+
+* **四处能力从桌面抽屉抽出为共享模块**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 相应删除内联实现、改为 import；抽出时实现逐字不变，桌面零回归）：
+  - [ButlerSearchTrace.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerSearchTrace.tsx)（原 `WechatSearchTrace`，完全受控，两端共用）；
+  - [useWechatSearch.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/useWechatSearch.ts)（「公众号检索」整条链路 hook，约 230 行内联抽出 —— 逐篇判定按下标 + url 双键匹配，复制一份必然漂移出两份真源）；
+  - [noticeActions.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/noticeActions.ts)（回执动作层：待办勾选的三条联动链路 / 删除 / 下载 .md / 复制分享链接）；
+  - [noticeFormat.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/noticeFormat.ts)（回执详情的展示格式层：`formatTime` / `ScheduleDetail` / `fmtEventWhen` / `fmtReminderMinutes`）。
+
+* **事件总线在移动端就近接住**（[page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler/page.tsx)）：与桌面 `ButlerHost` 同源监听 `BUTLER_DOC_EVENT` / `BUTLER_TODAY_EVENT` / `BUTLER_PREFERENCES_EVENT` / `BUTLER_RULES_EVENT` / `BUTLER_FOCUS_NOTICE_EVENT` —— 面板内部（今日 / 记忆 / 回执正文）发出的「打开文档 / 跳到某分区」请求，在移动端不再是点了没反应。文档栈叠在分区栈之上，关掉文档即回到原分区。
+
+### 修复与优化
+
+* **产物文件卡片读不出来时，`OutputFile:` 行还原回正文**（[output-files.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/output-files.ts) 新增 `restoreOutputFileLines` + [ButlerDocPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDocPanel.tsx) 新增 `onLoadResult` + [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 接 `failedPaths`）：产物行在渲染时会被剥离、改由卡片承载；卡片一旦点不开，那一行已不在正文里，用户连路径都看不到、文件等于凭空消失（实测：管家切过项目后，早先发出的相对路径卡片会解析到别的项目而打不开）。现由 `ButlerDocPanel` 把读取结果回调出去，读失败的路径**还原回正文末尾**（保证路径始终可见、可复制）。
+
+* **交付纪律收紧为「必须写绝对路径」**（[profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts)）：`OutputFile:` 行由「路径原样照抄工具返回」改为**必须写绝对路径**（自己写的产物用 `<当前项目路径>/homework/<文件名>`；工具返回相对路径时前置当前项目路径）。原因：卡片按路径定位文件，项目相对路径在点击时按「那一刻的当前项目」解析 —— 管家中途 `switch_project` 切过项目后，此前发出的卡片就会指到别的项目里去、用户打不开。
+
+* **远端会话 Cookie 单一真源 + Bearer 顺带下发**（[server.ts](file:///Users/baolei/Desktop/BobWork/projects/src/server.ts)）：抽出 `sessionCookieHeader`（值 = HMAC(token)，HttpOnly + SameSite=Lax，Max-Age 180 天），登录页换 Cookie 与新增的「Bearer 校验通过时顺带 `Set-Cookie`」两处共用，避免参数漂移。为什么要在 Bearer 通过时也下发：WebView 的 `Authorization` 头只作用于**主文档**，页面内引用的 `/_next/static/**` 与 `fetch` 子请求不带它、会各自吃 401 → 主文档能开但 JS 加载失败、白屏；一旦种下 Cookie，同源子请求自动携带，主链路与所有子资源一并放行。
+
+### 新增单测
+
+* **增补 [output-files.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/output-files.test.ts)（+4 例）**：读失败的路径还原回正文末尾（可见可复制）；无失败项时正文原样返回（不引入多余空行）；纯文件消息（正文为空）只给还原行、不留前导空行；多个失败项按给定顺序逐行还原。本批合计 **+4 例**；`tsc --noEmit` 与 `vitest run` 全绿。
+
+
+## v0.7.679 (2026-10-05)
+
+> 本版是 **v0.7.678 之后的增量**：给管家补上「动手开界面」的两枚工具 —— `switch_project`（打开 / 切换当前项目）与 `create_session`（在指定项目新建会话、可选立刻后台跑一个任务），并新开 `project-switched` / `session-request` 两条 SSE 通道，由侧边栏翻译成画布既有的窗口事件落地（服务端只做解析 + 授权 + 广播，节点本体仍由画布创建，避免两套建节点语义漂移）。同时把 Butler 正文的 `OutputFile:` 解析抽成独立模块并放开**绝对路径**（跨项目交付），把 `search_materials` 扩成**跨项目检索**（其它项目一律回绝对路径与项目名限定的来源串），并修掉跨项目文件在抽屉里打不开。共 11 个源文件改动（含 1 个新增模块）、6 个测试文件（5 新增 + 1 增补）。
+
+### 新增
+
+* **管家可以打开 / 切换当前项目（`switch_project`）**（`src/app/api/chat/tools/butler.ts` 新增 `toolSwitchProject`）：此前 Butler 只有 `create_project` 且语义是「只建不切」——用户说「打开余靖潘案」时无工具可用。新工具与 `create_project` 分工互补：入参 `project` 必填，**只认显式引用**（项目名 / id / `current`），走 `resolveExplicitProject`，同名多命中或未找到时原样回传交模型澄清，**绝不猜项目**（缺参回 `{ok:false,error:'project is required'}` + hint）。已是当前项目 → 回 `already_current: true` 且不重复切换；否则 `switchProject(id)` 后 `emitProjectSwitched(project.id)`。回执带 `via`（解析来源）与 `ui_synced`（= `hasProjectsChangedListeners()`）：界面开着就说「界面已同步切换」，没开则说明「切换已生效，下次打开即为该项目」。工具描述显式禁止「为了写数据去切项目」，`maxOutput: 800`。
+
+* **管家可以新建会话并顺手把活派下去（`create_session`）**（同文件新增 `toolCreateSession`）：把「打开项目 → 建会话 → 跑任务」合成一次调用，入参 `project` / `agent` / `title` / `task`（均非必填）。语义边界：**节点本体由前端画布创建**，服务端只做「解析项目 + 解析 agent + 必要时切项目 + 广播 `session-request`」。三条硬约束：① 界面在线性检查放在最前，`hasProjectsChangedListeners()` 为假直接回 `ui_not_open`（不静默失败、不留半状态）；② 无激活项目回 `no_active_project`；③ agent 经 `listSessionAgents()`（`listAgents()` + `loadInstalledAgentProfiles()`，按 `readAgentsState()` 的 `disabled` / `hiddenMenu` 过滤、按 id 去重）解析，空取 `chat`，未命中回 `agent_not_available` + `candidates`（**不静默换身份**）。`title` 取 `args.title || agent.label` 并 `.slice(0, 40)`；目标项目不是当前项目时先 `switchProject` + `emitProjectSwitched`（回执 `switched: true`），切换失败回 `switch_failed` 且不建会话；最后 `emitSessionRequest({project_id,label,agent,prompt,auto: task.length>0})`。`maxOutput: 1200`。
+
+* **服务端 → 前端新增两条「界面动作」通道**（`src/lib/project/project-events.ts` 新增 `onProjectSwitched` / `emitProjectSwitched` / `onSessionRequest` / `emitSessionRequest` 与 `SessionRequestPayload`；`src/app/api/projects/events/route.ts` 新增 `event: project-switched` 与 `event: session-request`）：`SessionRequestPayload = { project_id, label, agent, prompt, auto }`。两条通道都用 `Set` 存订阅者、广播时 `[...listeners]` 快照 + 逐个 `try/catch` 隔离；SSE 路由在原有 `unsubProjects` / `unsubFiles` / `unsubOutcome` 之后补 `unsubSwitched()` / `unsubSession()`。注释写明取舍：**不让工具直接写节点文件**——会话节点是画布状态，创建要经过节点定位、agent 壳、后台自动执行缓冲 `window.__pendingNodeTasks`。
+
+### 修复与优化
+
+* **`search_materials` 支持跨项目检索**（`src/app/api/chat/tools/materials.ts` 新增 `project` 参数与 `resolveTargetProject`）：此前只认当前激活项目（`currentProjectRoot()`）。现按 `mode: 'current' | 'foreign'` 分流，两种模式只差回执路径形态：当前项目仍给项目相对路径；其它项目一律给**绝对路径**（相对路径会被解析到当前项目根，必然读错文件）。未点名 → `getCurrentProject()`（无 → `NO_PROJECT`，文案改为「未点名项目时材料检索只在打开的项目的画布下可用。要查别的项目，用 project 参数点名」）；点名 → `resolveExplicitProject`，失败时附「候选：名称（id）、…」。跨项目时先 `isReadablePath(join(projectRoot,'materials'))` 探原文可读性，不可读就在回执最前加 `⚠ …索引结果可用，但 read_attachment 读不到原文`。`limit` 默认 20 / 上限 50、`SNIPPET_MAX_CHARS = 200` 未变。
+
+* **跨项目来源串带项目名限定**（同文件新增导出 `materialSourceTag` / `materialPathToken` / 公开 `renderInventory`）：跨项目命中行改为 `- [来源: 材料:余靖潘案:materials/被告/合同.pdf#p3] /abs/余靖潘案_20260927/materials/被告/合同.pdf（第 3/12 页 · 文字层 · 项目「余靖潘案」）`，读取提示改为按**绝对路径**调 `read_attachment`；绝对路径拼接先去尾斜杠，避免双斜杠。
+
+* **跨项目清单不再分组、逐条给绝对路径**（同文件 `renderInventory`）：标题变为 `项目「X」材料清单（已建索引 N 份；未建索引 / 不支持索引的文件用 list_directory "<项目绝对路径>/materials" 查看）`；**当前项目模式逐字节不变**（不传 `target` 即旧口径，显式传 `mode:'current'` 输出一致）。
+
+* **抽屉里的跨项目文件不再打不开**（`src/components/butler/ButlerDocPanel.tsx`）：绝对路径此前无条件走 `/api/butler/report-doc?action=read`，跨项目文件必然 `success:false` 报错。现两段式：先走服务端只读通道（保留目录越界校验与 2MB 上限），`data.success` 才采用；失败回落 `getSource('local').read(path)`（人类 UI 通道，可读任意路径）+ `src.proxy(path).catch(() => null)`；两路都失败才回显服务端第一个错误。客户端**刻意不做路径猜测**（不知道 `APP_ROOT`，猜错会丢掉服务端校验）；AI 工具侧 `isReadablePath` 授权不受影响。
+
+* **`OutputFile:` 行放开绝对路径**（新增 `src/lib/butler/output-files.ts`，`src/components/butler/ButlerDrawer.tsx` 改为引入）：管家是跨项目助手，`search_materials project=…` 给的是绝对路径，而此前内联前缀只认 `homework/ | materials/ | attachments/ | .sandbox/ | ~/`，绝对路径被丢弃 —— 表现为「管家说发了文件，对话里什么都没有」。现抽出纯字符串模块，新增导出 `isDeliverablePath`（判可交付形态，**不判存在性**）+ `extractOutputFiles`（保序去重、命中行从正文剥离）。行尾换行一并吃掉、Windows 反斜杠归一化，`foo.md` / `tmp/x.md` / `../outside.md` / `https://…` 明确不做卡片，行为与旧实现一致；与画布 `ChatNodeKernel.extractOutputFileBlocks` 的口径差异（画布只认项目相对路径）刻意保留并写入注释。
+
+### 改进
+
+* **两枚新工具只归 butler、并入写类收口名单**（`src/app/api/chat/tools/registry.ts`、`src/lib/runtime/tools.ts`）：场景归属都只挂 `['butler']`（普通 chat 不注入，避免随口一句「建个会话」派生无人看守的后台任务）；`SANDBOX_BLOCKED_TOOLS`（沙盒 / 编排链路不得移动用户眼前的画布与项目指针）与 `WECHAT_ALLOWED_WRITES`（微信是用户本人手机入口，「打开 X 项目，建个会话把这件事跑了」是典型指令，故放行）同时补齐。
+
+* **管家系统提示词补上调用时机与交付纪律**（`src/lib/agents/profiles.ts`）：①「应用结构」一行由 `create_project` 单条扩成三条（create_project 只建不切、用户要进去就用 switch_project；switch_project 在用户明确说打开 / 进入 / 切到 X 时**直接切**、**不要为了写数据去切项目**；create_session 传 `project + agent + task` 一次办完，传了 task 会后台无人看守执行，`ui_not_open` 要如实告知）。②【输出纪律 · 分端】新增「**把文件交给用户**」：正文末尾**单独一行** `OutputFile: <路径>`，路径原样照抄工具返回；只写「文件在 xxx 目录」用户拿不到文件，没有真实路径不要编。
+
+* **`search_materials` 工具描述同步重写**（`src/app/api/chat/tools/materials.ts`）：清单态描述去掉「project-relative」限定；新增 `OTHER PROJECTS` 段（结果带绝对路径、来源串带项目名前缀、**不要为了搜索去切项目**）与 `TO HAND A FILE TO THE USER` 段；`parameters.project` 描述明确「省略 = 当前激活项目，绝不猜名字」。
+
+### 界面细节
+
+* **跨项目新建会话要等画布重载完成再落节点**（`src/components/canvas/Sidebar.tsx`）：SSE 两条新事件翻译成画布既有链路 —— `project-switched` → `bobagent:project-switched`（`detail.projectId`，与点侧边栏切换同一条无刷新链）、`session-request` → `quick-launch-open`（`detail = { label, agent, prompt, auto, projectId }`，label 空兜底 `'Quick'`、agent 空兜底 `'chat'`、auto 需严格 `=== true`）。新增 `currentIdRef` 与 `canvasReadyProjectRef`（监听 `bobagent:project-canvas-ready`）；目标项目 == 当前项目或画布已在该项目就绪 → 立即落节点，跨项目则等 `project-canvas-ready`（projectId 不符继续等），否则新节点会被随后到达的重载结果（`setNodes` 整表替换）冲掉；另有 **5000ms 超时兜底**不吞请求；订阅与 `removeEventListener` 成对补齐。
+
+### 新增单测
+
+* **`src/lib/butler/output-files.test.ts`（6 例）**：项目相对路径解析并剥离正文；绝对路径；`~/` home 路径与反斜杠归一化；同路径只出一张卡 + 多行保序；非交付形态（裸文件名 / `tmp/x.md` / URL / `../outside.md`）不做卡片并配反例；无产物行时正文原样返回（含空串）。
+* **`src/lib/project/project-events.test.ts`（4 例）**：project-switched 送达 + 取消后不再收到；session-request 契约原样送达；单订阅者抛异常不影响其他订阅者与后续广播；`hasProjectsChangedListeners()` 作为「界面是否在线」判据的三态断言。
+* **`src/app/api/projects/events/route.test.ts`（3 例）**：真读 SSE 流 —— 负载键必须是 `project_id`（把「字段名写成 camelCase 就真机全无反应」钉成断言）、session-request 含 `auto` 原样送达、取消后停止订阅不泄漏。
+* **`src/app/api/chat/tools/butler-session.test.ts`（3 例）**：switch_project 缺引用（`{}` / `''` / 纯空白）恒回 `project is required` 且 hint 要求确认项目名；create_session 无 SSE 订阅者时回 `ui_not_open`（不切项目、不建会话）；两枚工具都在 butler 工具表里。
+* **`src/app/api/chat/tools/materials-format.test.ts`（6 例）**：当前 / 跨项目路径 token；来源串两态；**当前项目清单输出与改造前逐字节一致**（不传 target 与显式 `mode:'current'` 比对同一份字面量）；跨项目清单绝对路径 + 不再分组 + 截断提示。
+* **增补 `src/lib/runtime/sandbox-blocked.test.ts`（+1 例）**：两工具必须同时命中 `SANDBOX_BLOCKED_TOOLS` 与 `WECHAT_ALLOWED_WRITES`，并反向断言 `list_projects` / `list_nodes` / `get_app_status` 不得误拦。
+* 本批测试合计 **5 个新增测试文件 / 22 例 + 1 例增补**；`pnpm test` 全仓 **990 例全绿**，`tsc -p tsconfig.json` 通过。
+
+## v0.7.678 (2026-10-05)
+
+> 本版是 **v0.7.677 之后的增量**：把 Butler 文件卡片的图标重做 —— 去掉 36px 的灰底方块，改为占满图标槽的无底色折角纸，纸面印上类型字标（MD / DOC / PDF / XLS / PPT）。共 1 个源文件改动。
+
+### 优化
+
+* **文件卡片图标去掉灰底方块、改为折角纸印字标**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：v0.7.677 的卡片图标是「36px 灰底方块里塞一张 20px 白纸」，纸被压得太小、折角与描边全糊在一起。本次去掉灰底方块，让折角纸 glyph **直接放大到 34px 贴着图标槽**，细节看得清、长列表里也更好认；纸面按类型印上中性灰字标（`Markdown`→MD、`Word`→DOC、`PDF`→PDF、`Excel`→XLS、`PowerPoint`→PPT），图片与未知类型留空（纯折角纸）。字标与描边统一用 `var(--ink-muted)`，颜色仍交给文件名与大小承载，图标本身不抢戏。
+
+
+## v0.7.677 (2026-10-05)
+
+> 本版是 **v0.7.676 之后的增量**：Butler 正文里的产物文件从一行干巴巴的 `OutputFile: …` 升级为**微信式文件卡片**（折角文档图标 + 文件名 / 类型 · 大小，整卡可点）；卡片点开在抽屉右栏预览后，还能在标题栏按「Edit」把 Markdown 产物**转交画布右侧的 md 编辑器**继续改。共 2 个源文件改动。
+
+### 优化
+
+* **产物文件改为微信式文件卡片**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：正文里的 `OutputFile: <path>` 行（只认项目内相对路径 `homework/` `materials/` `attachments/` `.sandbox/` `~/`）不再以纯文本出现，改由**文件卡片**承载 —— 左侧中性灰折角文档 glyph（自绘 SVG，不随类型变色），右侧两行「文件名 / 类型 · 大小」，整卡可点。解析**只在回复完成后**进行（流式期间路径可能还是半行，先做卡会闪出一张坏卡），命中后把标记行从显示正文里剥离；文件大小异步 `stat` 得到，拿不到就不显示、不影响打开。
+
+* **产物文档可在画布编辑器里继续编辑**（[ButlerDocPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDocPanel.tsx) 新增 `onEdit` + [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 的 `handleEditDoc`）：抽屉的文档预览栏此前是**纯只读**，产物 md 想改却没入口。现按路径形态放开 —— 项目内的 Markdown 产物（`.md` / `.markdown`）在标题栏显示「Edit」；点击先 `openFileByProjectRelPath` 让画布挂上文件标签、再收起抽屉（并清掉右栏 `docPath`），用户直接落到画布右侧预览面板的 md 编辑器（抽屉是居中浮层会盖住画布，所以必须先撤）。Butler 报告文档（绝对路径的只读沉淀）不提供编辑入口。
+
+* **文档栏标题精简**：移除「重新载入」按钮与文件名下的「· 只读」副标题（只留文件名），`aria-label` 统一为英文（Edit / Close）。
+
+* **聊天列表隐藏原生滚动条**（`hide-scrollbar` 工具类）：侧边栏靠窗口左边缘，原生滚动条会压在联系人列表最左一列文字上；改为隐藏滚动条（仍可滚动）。
+
+
+## v0.7.676 (2026-10-05)
+
+> 本版是 **v0.7.675 之后的增量**：把已名不副实的 `daily-report` 模块**正名**为 `daily-tasks`（模块 / 路由 / 类型 / 调度器 / 状态目录 / 通知 kind 一并改，旧状态目录与历史收件箱行都做幂等迁移）；Butler 正文里的文件链接改为**开在抽屉自己的右栏**（覆盖式浮层下 `file.open` 会被遮住，表现为点了没反应）；修掉正文文件链接的**括号截断**。共 33 个源文件改动，含 3 个改名 / 删除。
+
+### 修复与优化
+
+* **日报模块正名为 `daily-tasks`**（[daily-tasks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/daily-tasks.ts)、[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/daily-tasks/route.ts)）：日报三页签（Report / Schedule / Sticky）早已整体移交 Today 面板，模块里只剩「progress 摘要 + Notes 知识库维护」两类每日任务 —— 名字却还叫 `daily-report`。本次把**模块、路由、类型、调度器**一并正名：`lib/core/daily-report.ts` → `daily-tasks.ts`、`/api/butler/daily-report` → `/api/butler/daily-tasks`、`DailyReportType` → `DailyTaskType`、`startDailyReportScheduler` → `startDailyTaskScheduler`。所有引用方（`instrumentation.ts`、`butler/today-advice.ts`、`butler/advice.ts`、`api/butler/today/route.ts` 等）同步切换。
+
+* **状态目录带一次性幂等迁移**（`ensureTaskDir`）：内部状态目录由 `butler/.state/daily-report/` 搬到 `daily-tasks/`，首次访问时若新目录不存在才把旧目录整体 `rename` 过去（已有新目录则不动），保证升级后去重标记 / notes-review 状态不丢、当天不重复执行。
+
+* **通知 kind 正名为 `notes-maintenance`**（[inbox.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/inbox.ts)）：`kind='daily-report'` 那句在日报退役后已是空壳，现正名为 `'notes-maintenance'`（该 kind 只剩知识库每日维护一种来源）。DB 里对历史行做幂等迁移 `UPDATE inbox SET kind='notes-maintenance' WHERE kind='daily-report'`（迁完即无匹配行）；`push-gate` 的 `toPushKind`、`butler-notify` / `ButlerDrawer` 的 `NOTIFY_KINDS`、`bus.ts` 的 `ButlerNoticePayload.kind` 联合类型与 `report-share.ts` 的可分享 kind 清单一并同步。
+
+* **退役 `inspect` 桶**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：跨项目 sticky 检查改由 Today 的 Sticky 页签承载后，抽屉里单独的 `INSPECT` 分区已无新来源 —— 删除其 `BucketKey`、`BUCKET_LABEL` 与 `NOTIFY_KINDS` 中的 `inspect`，避免「Bobby 没有未读项却亮着角标」。
+
+* **Butler 正文文件链接开在抽屉自己的右栏**（[HtmlRenderer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/HtmlRenderer.tsx) 新增 `onOpenDoc` + [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 的 `openDocInDrawer`）：点开 Butler 正文里的 `homework/…` / `materials/…` 链接时，**不能走 `file.open`** —— 抽屉是覆盖式浮层（z-1320），画布右侧预览面板会被它整块遮住，表现为「点了没反应」。现由渲染器透传一个 `onOpenDoc(path): boolean` 接管回调（返回 `true` = 调用方已处理），抽屉把它开在自己的右栏 `ButlerDocPanel`（复用画布的 md 阅读器）；正文、流式消息、通知 body 三处渲染全部接上。
+
+* **`ButlerDocPanel` 从「只读报告文档」扩展为「也读对话产物」**（[ButlerDocPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDocPanel.tsx)）：此前只支持**绝对路径**的 Butler 报告文档（走服务端目录越界校验的只读通道）。现在按路径形态分流 —— 绝对路径仍走 `/api/butler/report-doc`；**项目相对路径**（对话产物）改走项目来源 `getSource('project')` 读取与 proxy，与画布查看器同口径；标题相应显示 `Butler 报告文档 · 只读` 或 `项目文档 · 只读`。
+
+* **修正文文件链接的括号截断**（[HtmlRenderer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/HtmlRenderer.tsx) 新增 `trimUnbalancedClosers`）：原正则把中英文括号一律排除，导致「xx（孵化模式）条款大纲.md」被截断成「xx」→ 点到不存在的路径（静默失败）；全不排除则会把句读的 `）` 吃进路径。改为**按配对判定**：逐字符剥离末尾收尾括号，只要该括号在本串里已有配对开括号（说明括号属于文件名）就停手；被剔除的句读原样还回正文，不吞字。
+
+* **路由测试随名迁移，回归全绿**：`src/app/api/butler/daily-report/route.test.ts` → `src/app/api/butler/daily-tasks/route.test.ts`（打扰闸用例随模块正名迁移，断言不变）；`push-gate` / `advice` 两处 co-located 测试同步更新 kind 口径。本版无新增测试文件，`tsc --noEmit` 与 `vitest run` 全绿（85 文件 / 967 用例）。
+
+
+## v0.7.675 (2026-10-05)
+
+> 本版是 **v0.7.674 之后的增量**：把「习惯学习」从「攒够次数才提议」改成**一次即记忆 + 主动遗忘**兜底；给 Butler 的记忆路由补上**先判层再落库**的纪律；把散在四处的「可见源」硬编码收敛成**单一注册表**并加漂移护栏；规则被废除 / 删除时落负样本，防止静默学回。共 20 个源文件改动，含 3 个新增文件。
+
+### 修复与优化
+
+* **习惯学习改为「一次即记忆 + 主动遗忘」**（重写 [rule-nearmiss.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/rule-nearmiss.ts)）：此前是「攒够 N 次（`NEAR_MISS_BEHAVIOR_N=3`）才提议固化，再问用户 `NEAR_MISS_ASK_LIMIT=2` 次」——攒次数的窗口既要额外落 `rule-behavior.json` 计数、又让「说一次就该记住」的偏好被拖延。现改为：命中弱信号**一次**就静默落一条 `draft` 规则（用户不会被弹窗打断），再次命中只记一次印证（`reinforced`）但**不自动转正**——转正与否由用户在 Pending 收件箱里裁决。`noteBehavior` / `consumeAsk` / `readAskCounts` / `proposeForText` 与两个计数存储根一并移除，不再产生行为计数文件。
+
+* **新建习惯只对可执行的动作建 draft**（`rememberFromText`）：弱触发词能表达的是「类别」，但宿主执行器只认 `create_todo` / `create_scheduled_todo`。排期需要确定时刻、弱触发词给不了；note / meeting / project 没有确定性动作 ⇒ 这些类别 `ruleObjectType` 为 null，只做记忆不落规则。已有 active 规则覆盖该 todo 时直接跳过；已有 draft 时只记印证不重复建。
+
+* **主动遗忘：draft 超期自动清除，active 只给软提示**（新增 [rule-forget.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/rule-forget.ts)）：`sweepForgottenDrafts` 惰性清除「30 天未确认」的 draft（记 `lastHitAt`，命中即续命），active 规则**绝不静默删**——只在 90 天无命中时产出 `stale` 软提示，交由用户决定是否废除。走「拉」不走「推」：由 [runtime.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/runtime.ts) 的 `butlerTick` 顺带 sweep，不引入常驻调度器。`ButlerTickResult` 相应新增 `learned` / `forgotten` 两字段。
+
+* **两项超期阈值落进 `rules-shared`**（[rules-shared.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/rules-shared.ts)）：新增 `DRAFT_FORGET_DAYS=30` / `ACTIVE_STALE_DAYS=90` 与纯函数 `ruleLastActivityMs` / `isDraftExpired` / `isRuleStale`；移除 `NEAR_MISS_ASK_LIMIT` 与 `NEAR_MISS_BEHAVIOR_N`。同时 `CreateRuleInput` 新增 `status?`，让 [rules.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/rules.ts) 的 `createRule` 不再写死 `'active'`，而是落盘调用方指定的 `draft`。
+
+* **Butler 记忆路由纪律：先判层，再落库**（[profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts) 新增 `BUTLER_MEMORY_ROUTING`）：把「人与分工 / 口径与标准 / 节奏 / 授权接源」四类信息配三条铁律（可执行的习惯落规则、纯陈述事实记偏好、多步编排才走技能），明确「同一句话先判断属于哪一层，再决定写 Memory 还是 Rules」。以 `${BUTLER_MEMORY_ROUTING}` 插值进 `BUTLER_BASE_SYSTEM_PROMPT`，并新增 `BUTLER_ROUTING_HINT` 一句短语，供空态文案与记忆段尾句复用（文案同源）。
+
+* **记忆路由走双通道幂等注入**（[context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts) 新增 `buildMemoryRoutingInjection`）：与既有排期纪律同款做法——既进系统提示词、又作为注入段下发，且在注入段做**幂等去重**（已在 base prompt 里出现则不再重复），避免双通道把同一段喂两遍。用户记忆段尾句追加 `；${BUTLER_ROUTING_HINT}。`，调用点在 [chat/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts)。
+
+* **可见源收敛为单一注册表**（新增 [sources.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/sources.ts)）：微信桥 / 飞书桥 / 文件 / 资料 / 台账 / 笔记 / 会议 / Butler 事务域这八类源的「存在性 / 可见性 / 检索方式 / 渲染文案」此前散在 `registry.ts` / `official-packages.ts` / `route.ts` / `context.ts` 四处硬编码，任何一处改口径都会漂移。现以 `SOURCES` 表做唯一真源（纯数据 + 纯渲染，不持有 IO），由 `SourceStatus` 派生可见行、能力边界与检索面。`context.ts` 的 `buildVisibleSourcesInjection` 改为从注册表按场景派生（IO 采集逐项容错，全空返回 `''`），桥接文案与改造前逐字节一致。
+
+* **可见源与工具面同判据**（[tools.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/tools.ts) 抽出 `resolveEffectiveScenes`）：把「沙箱 / 固定 profile / 动态」三态下有效场景集合的判定抽成独立纯函数，`computeActiveToolDefs` 与可见源注入**共用同一份场景判定**，杜绝「工具放出来了但源没声明可见」这类错位。
+
+* **注册表漂移护栏测试**（新增 [sources.registry.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/sources.registry.test.ts)）：以真实工具面 `getToolDefinitions` 为基准做四组断言 —— 注册表引用的工具必须存在、场景归属一致、`excludedTools` 有效、反向一致性（工具面里不该有源外的漏网场景）。注册表与工具定义一旦分叉，测试即红。
+
+* **规则废除 / 删除时落负样本，防静默学回**（[rules/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/rules/route.ts) 新增 `blockReProposal`）：用户把一条习惯规则 `retired` 或直接 `DELETE`，意味着「这不是习惯」——但近邻学习可能下次又把它学回来。现在这两条路径都落 `not_a_habit` 负样本（`recordNegativeSample`），`rememberFromText` 命中黑名单即跳过，用户否决过的行为不会被静默重新提议。
+
+* **Pending 收件箱 + 陈旧提示落地 UI**（[ButlerMemoryConsole.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerMemoryConsole.tsx)）：`draft` 规则单独归入 Pending 收件箱，按印证次数（`hits`）降序，`hits >= 2` 显示 `Seen N times`，提供 Keep / Edit / Discard（二次确认）三个动作；主列表只展示非 draft 规则；`stale && !isRetired` 的行附 `No hits for a while — consider retiring`。同步移除了 askQuota 相关 UI 与 Proactive budget 里的 Ask quota 文案。
+
+* **signals 端点下发活动度**（[rules/signals/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/rules/signals/route.ts)）：无 id 分支响应新增 `activity` 映射，由 `ruleActivityOf` 逐条派生 `hits` / `lastHitAt` / `stale`，供前端排序与陈旧提示消费。
+
+* **移除 askQuota 审计段**（[memory-audit/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/memory-audit/route.ts) 与 [其测试](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/memory-audit/route.test.ts)）：`readAskCounts` / `NEAR_MISS_ASK_LIMIT` / askQuota 断言随机制一并下线。
+
+* **read_rules 空态文案同源**（[tools/butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts)）：改用 `BUTLER_ROUTING_HINT`，并补充「判断标准（口径）写成规则的 judgment 步骤，只有多步编排才走 skill_draft」。
+
+* **测试补齐**：[rule-nearmiss.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/rule-nearmiss.test.ts) 重写为「一次即记忆 / 印证不转正 / active 覆盖不学 / not_a_habit 压制 / 主动遗忘 sweep」五组场景（含手写规则文件绕过 `createdAt` 不可改）；[context.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.test.ts) 新增 `buildMemoryRoutingInjection` 幂等去重 3 例与 `buildVisibleSourcesInjection` 注册表派生 3 例（`vi.mock` 打掉微信桥 / 飞书桥 / 授权目录）。
+
+
+## v0.7.674 (2026-10-04)
+
+> 本版是 **v0.7.673 之后的增量**：把 Butler 的**三层（Memory / Rules / Skills）真正接起来** —— 规则可以调用已固化技能、技能有了内容修订写口；记忆台的 Memories 段正名为 Preferences；Daily News 增加策展新闻源（RSS）并按读者长期记忆挑选；docx 分页推进到 **P4 节几何动态化 + 页码归位 + 打印/导出 PDF**。共 21 个源文件改动，含 3 个新增文件。
+
+### 修复与优化
+
+* **规则可调用已固化技能（`action: 'skill'`）**（[rules/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/rules/route.ts) / [tools/butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts)）：确定性步此前只能绑两种宿主执行器（`create_todo` / `create_scheduled_todo`），Skills 虽已能固化却**没有任何调用入口**——三层里最外面那层是断的。现补上第三类 `action='skill'`，用 `action_params.skillId` 绑定 `sk-…`：规则命中时由宿主执行该技能。两端（面板写入与 MCP 工具侧）共用同一份动作白名单，且**`skill` 动作必须带 `skillId`，否则视为非法入参直接拒绝** —— 允许一个永远跑不起来的规则写进盘里，比报错更难排查。
+
+* **新增只读工具 `read_skills`**（[registry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/registry.ts)）：模型要绑定技能就得先知道有哪些 id。工具按行列出「id｜名（生命周期·版本·来源·原语链）+ 触发词」，可选 `lifecycle` 过滤；并在回执里写清「技能只能通过规则的确定性步调用、仅 active 可执行、起草新技能走 skill_draft」—— 把「读」与「写」的边界一并交代给模型，避免它误用只读工具去创建。归入 `butler` 场景，与 `skill_draft` 同组。
+
+* **规则编辑器补齐动作绑定 UI**（[ButlerMemoryConsole.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerMemoryConsole.tsx)）：每个确定性步新增动作下拉（Describe only / Create todo / Scheduled todo / Run skill），选 `Run skill` 时展开技能选择器（显示 `名 · 生命周期`，已失效的旧 id 标 `not found` 而不是静默丢失），选 `Scheduled todo` 时展开时刻输入。提交前本地校验「Run skill 必须选到技能」，并把草稿转成 wire 形态（`action_params`）—— 面板与路由、工具三者同一口径，杜绝「面板存了一份、路由解析不了」的分叉。Rules 段现在也预载技能列表（此前只在 Skills 段加载）。
+
+* **技能有了内容修订写口 `revise`**（[skills/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/skills/route.ts) / [skills.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/skills.ts)）：技能此前只有生命周期治理（停用 / 解封），**改不了内容** —— 用户想调一个参数只能重走草案卡。现补上 `POST { action:'revise', revision_kind:'param'|'flow', note?, name?, description?, when?, steps?, grants?, effects?, expected_version? }`：改内容一律 `version++` 并**追加一条 revision（新的在前）**，与规则的修订语义对齐；`expected_version` 走乐观锁，冲突返回 `conflict:true`。`id` / `created_at` / `origin` / `lifecycle` **不在可修订字段内**（生命周期仍走 `setSkillLifecycle`）；新建技能仍只能走草案卡审固。修订**不放宽执行边界**：`runtime='compose'` 的步骤照样受静态拦截。适用条件新增 `normalizeWhen`，未传字段沿用原值、`objectTypes` 走白名单。
+
+* **记忆台的 Memories 段正名为 Preferences**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) / [butlerEvents.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/butlerEvents.ts) / [ButlerHost.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerHost.tsx) / [ButlerMemoryConsole.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerMemoryConsole.tsx)）：整个记忆台叫 Memories，里面却有一段也叫 Memories（用户长期记忆），读起来是「记忆里的记忆」。现把该段改名为 **Preferences**（类型 `'memories'` → `'preferences'`、左栏 rail 标签 `Memory` → `Memories`、脑图节点 `MEMORIES` → `PREFERENCES`、事件 `BUTLER_MEMORIES_EVENT` → `BUTLER_PREFERENCES_EVENT`），新增 `openButlerPreferences()`，旧函数名 `openButlerMemories()` **保留为 deprecated 别名**（等价调用），外部调用方零改动。
+
+* **抓网页正文改用 Mozilla Readability**（[web.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/web.ts)）：原先的正文字段是 `replace(/<[^>]+>/g,' ')`—— 把导航 / 侧栏 / 页脚 / 广告和正文一视同仁。现引入 Firefox 阅读模式同款 `@mozilla/readability`（配 `linkedom` 提供 DOM），**按语义定位正文容器**；抽出的正文短于 200 字视为「没抽到」（列表页 / JS 渲染页常如此），**回退到旧的启发式清洗** —— 换抽取器也保证任何页面不会退化成空。两个依赖用**动态 import**：`web.ts` 同时导出工具定义，需防被前端引用时把 DOM 库拖进客户端 bundle。
+
+* **Daily News 增加策展新闻源（RSS）**（新增 [feed.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/feed.ts) / [types.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/types.ts) / [generate.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/generate.ts)）：发现层此前只有关键词搜索，抓回来的常是列表页 / 二手转载。现新增 RSS/Atom 拉取：`parseFeedXml` 是**纯函数**（不碰网络，RSS2.0/Atom/RDF 三形态归一，含 CDATA / 实体解码 / Atom 的 `link@href`），`searchNewsRss` 逐个抓取且**单个源失败不影响其余、永不抛异常**。内置策展表只收**实测可用**的源（Tech：ifanr / ithome / sspai；Finance：中新网财经）—— Google News / BBC / RSSHub 在境内不可达、Bing 的 RSS 已失效、法律类无任何可用源，故**没有源的主题自然回退关键词搜索**。表按主题 **id** 索引，老 config.json（无 `feeds` 字段）也能直接吃到。合并用**源间轮转**而非全局按时间排序：实测纯排序时 Tech 的 4 条全来自 ithome，另外两家一条都进不来；轮转保证每个可用源都有发言权，源内仍是最新在前。主题新增可选 `feeds`（归一化：只留 http(s)、去重、上限 6 条）。
+
+* **新闻按读者长期记忆挑选（方案 A）**：归纳这一步额外喂入读者长期记忆（`butler/preferences.md`，上限 30 条），用来**在既定主题范围内挑更贴读者的条目并说明 why**；**记忆不参与检索** —— 候选集合完全由 topics 决定，prompt 明确禁止据此新增条目或编造 id。记忆为空 / 读失败即整段略去，prompt 与加记忆前**逐字一致**，因此**记忆变化不触发当日重算**（当天那份仍由「缓存即标记 + Refresh now」决定，与改主题同口径）。
+
+* **docx 分页推进到 P4：节几何动态化**（[docx-pagination.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/docx-pagination.ts)）：P1–P3 把 794 / 1123 / 96 / 24 写成了模块级常量，等于「所有 docx 都是 A4 + 1in 边距」，而真源在文档自己的 `w:sectPr`（单位 twips）。现引入 `PageGeometry`（纸宽/高、左右与上下边距、灰缝、页脚距）与 `geometryFromSection`（twips→px），宿主从 `readSections(parsed)[0].settings` 取节属性并 `setPageGeometry`。两处刻意取舍：① 只暴露**左右一个、上下一个**的对称边距（纸面容器用 `padding: marginY marginX`，非对称表达不出来），取**上下均值**——`2·均值 = 上下之和`，故 `h − 2·marginY` **精确等于**真实可用高，换页精度不受损；② 几何住在**模块级可变单例**里而非 React state —— `measurePageBreaks` 是纯函数、被靶场直接驱动，必须能在没有 React 时读到几何；宿主另存一份 state 用于渲染，两者在 `applyParsed` 同点写入。**只有文档确实声明了 sectPr 才切换几何，读不到就复位为 A4 默认** —— 不能拿引擎的 `DEFAULT_SECTION` 兜底（它是 **US Letter**，会让「无 sectPr 的文档」平白从 A4 变 Letter，那是视觉回归不是修 bug）。
+
+* **页码从「页间灰缝」迁到「每页页脚」**：旧方案把页码画在页间灰缝正中，有两个硬伤 —— ① spacer 只在断点处生成 ⇒ **末页永远没有页码**；② 页码单调性靠「闭包先取值 + widget key」维持，P1 就栽在这上面。现改为宿主持有 `pageCount` 后按纯函数 `pageFooterTopAt` 渲染每页页脚，序号 `i+1` **由构造保证单调**，末页页码自然存在；页脚**绝对定位在纸内**（不参与文档流、不进 `getJSON`，因此不影响 docx 字节保真）。`pageFooterTopAt` 的口径相对工单草案做过修正：草案写 `pageTopAt(i) + …`，而 `pageTopAt` 含 `marginY`（正文区偏移），照算 i=0 会得到 1171 > 纸高 1123、**掉到纸外**；实现改为从 `i·stride` 起算，并把「页脚必须落在正文区之下」写成断言由测试守住。文档自带页脚文本时以它为准，并把引擎的 `PAGE` / `NUMPAGES` 字段占位符换成真实值。
+
+* **docx 支持打印 / 导出 PDF**（[DocxTiptapEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/DocxTiptapEditor.tsx) / [docx-commands.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/docx-commands.tsx) / [globals.css](file:///Users/baolei/Desktop/BobWork/projects/src/app/globals.css)）：新增「打印 / PDF」菜单项，走系统打印面板（`api.print()`，失败兜底 `window.print()`）。与 MD 编辑器的关键差异：**docx 不克隆 DOM** —— 纸面本身就是按「打印成品」排的（页高/边距/页脚纵坐标/灰缝都已在几何里定死），克隆一份反而要重建整套坐标；打印期只靠 CSS 剥掉编辑态。三条打印要点写进 `docxPaperCss`：① 灰缝不占高（spacer 内联 height 只能用 `!important` + `calc()` 覆盖，故暴露 `--docx-h` / `--docx-page-gap` 两个 CSS 变量，否则第 k 页整体下移 `(k−1)·gap`）；② 纸面 `min-height` 归零（内联值含 `(pages−1)·gap`，不归零会多打一张空白纸）；③ **`@page` 是全局单例、无法用选择器限定作用域**，docx 要 `margin:0` 而 MD 依赖全局 `@page` 的 25.4/25/25.4/30mm 版心 —— 两者共用一份规则会互相破坏，故给 docx 起**命名页 `docx-page`**，并让纸型跟着节几何走（非 A4 文档也能按自己的纸型打印）。样式表 `docxPaperCss` 刻意与产出类名的代码同址，让 Electron 靶场能 import 同一份做真打印验证。
+
+* **顺带修掉的两处静默缺陷**：① `pageSpacerKey` 去掉 `manual` 维度（灰缝内已无页码，`manual` 不影响 DOM，少一次无谓重建）；② 编辑器样式表从**模块级常量变成函数** `docxStyleSheet(geom)` —— 几何层的两条规则含节几何（负 margin 必须等于 `marginX`、`@page` 纸尺寸必须等于 `w`/`h`），写成常量的话非 A4 文档的白带就顶不到纸张边缘。标尺（横/竖）、页眉页脚编辑面板、自动适配缩放也一并改为按 `geom` 取值。
+
+* **P4 纯函数单测**（新增 [pagination-p4.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/docx-editor/pagination-p4.test.ts) / [feed.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/feed.test.ts)）：页脚几何（「页脚落在正文区之下」）与节几何切换用断言直接钉死，不依赖 Electron 靶场（`docx-pagination.ts` 刻意用结构化类型入参、不 import 引擎，因此不受冷启动 9–15s 影响）；RSS 解析覆盖 RSS2.0 / Atom / RDF、CDATA、实体、时间缺失等边界，以及**源间轮转**的合并顺序。
+
+
+## v0.7.673 (2026-10-04)
+
+> 本版是 **v0.7.672 之后的增量**：Today 页的「建议卡」从 Today 聚合里拆出来，做成**规则引擎 + AI 只写依据**的三层结构，并新增第 4 个页签 **Daily News**；沙箱桥补上「小程序不得覆盖 Butler 真源」的护栏；docx 分页推进到 **P1 段落跨页**（Word 化）。共 36 个源文件改动，含 14 个新增文件。
+
+### 修复与优化
+
+* **建议卡改为「规则引擎 + AI 只写依据」三层结构**（新增 [advice.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/advice.ts) / [advice-ai.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/advice-ai.ts) / [today-advice.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/today-advice.ts)）：此前建议与日程聚在一起（`today.ts` 的 `buildSuggestion`），既算不快也说不清。现在拆成三层，分工互不越界 —— ① `advice.ts` 是**实时纯规则**引擎（零 I/O、不落盘、不进模型）：四类信号 `overdue` / `overload` / `sticky` / `stalled`，按优先级最多出 3 张卡，每张卡带可点击条目；② `advice-ai.ts` **只做一件事** —— 给已产出的卡片各写一句 `reason`，**AI 不产出、不增删卡片与条目**（id 必须来自输入卡片，多出的 id 一律丢弃，模型幻觉伤不到「可点、可勾、可跳」的结构），且输入**必须带 Memory / Rules**，否则只会产出「建议你优先处理重要的事」这类正确的废话；③ `today-advice.ts` 是组合层，让「读」与「生成」用同一份事实拼装 —— 缓存键是**卡片集合 hash**，两个入口各自拼装会让口径漂移、缓存永远打不中。
+
+* **建议的 AI 判断走缓存，首屏绝不因等模型而卡住**（新增 [advice/refresh/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/advice/refresh/route.ts)）：`GET /api/butler/today` **只读缓存**（秒开），命中就用 AI 的 reason 覆盖规则文案；未命中返回规则文案并置 `adviceStale: true`，由前端在后台打 `POST /api/butler/advice/refresh` 生成并落缓存（`butler/.state/advice/<日期>-<hash>.json`，跨天自然失效）。模型不可用 / 超时 / 解析失败一律返回 `null`，调用方**保留规则文案，绝不半截覆盖**。
+
+* **两条「不误报」硬约束**（写在 `advice.ts` 里，非事后补丁）：① **降级不误报** —— 数据源失败的信号直接跳过（`overdue` 查询失败时 count 是 0，不跳过就会得出「今天很空」的虚假结论），`clear` 卡只在**完全未降级**时才给；② **不假装能算工作量** —— `ScheduleEvent` 没有 `estimated_minutes` / `due_at`、`priority` 也多为默认值，所以「建议顺延哪几项」退化为可解释的两级排序（低优先级优先、同级取时间最晚），并把判据**写进文案**，让建议可解释、可反驳。
+
+* **Today 面板建议区落地为可点击清单**（[ButlerTodayPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerTodayPanel.tsx)）：移除了顶部那张蓝色建议卡，建议回归 Report 页签顶部、做成结构化可点清单；「项目停滞」项新增行动入口 `openProjectById`（[butlerEvents.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/butlerEvents.ts)），与 NavSearchBox / Sidebar **走同一条切换链路**（`POST /api/projects` switch → 广播 `bobagent:project-switched`），避免出现「只切了一半」。
+
+* **新增 Daily News：Today 面板第 4 个页签**（新增 [types.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/types.ts) / [store.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/store.ts) / [generate.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/generate.ts) / [news/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/news/route.ts)）：主题是**结构化**的（每个主题自带检索词 / 条数 / 语言，软上限 8），**刻意不复用 Memories**（后者是自由文本、每轮注入耗 token，且否定式会被拦成规则）。采集**复用** web 搜索链路 —— 从 `web.ts` 拆出 `searchLocalProviders`（多源降级：百度 → Bing → DDG）与 `fetchReadableText`（charset 感知解码 + 正文清洗）供新闻复用，同一套降级与垃圾结果过滤。归纳**必须基于抓到的正文**（先 `web_fetch` 再归纳，禁止只拿 search snippet 脑补），且**标题 / 链接 / 来源一律由代码从检索结果带过来，模型只回 id + summary + why，不产生 URL**（防幻觉链接）。降级时退成纯链接列表并置 `summarized=false`，界面标注 "Not summarized" —— **绝不留半截空壳**。
+
+* **新闻主题支持对话与界面双入口**（新增 `news_topics` 工具）：与界面 chips **写同一份 config**（`butler/.state/news/config.json`），「别再推体育了」自然落成 `action=remove`。工具只改主题列表，**不触发**简报重算（重算走界面 Refresh now 或每日调度），并明确告知用户这一点。
+
+* **沙箱桥护栏：小程序不得覆盖 Butler 真源**（新增 [bridge-guards.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/bridge-guards.ts)）：`bridge.ts` 的 `writeWanted` 此前只做文件名清洗（够挡目录穿越），却**没有区分文件归属** —— `preferences.md`（用户记忆真源，所有联系人共享）、`roles.json`、`notify-state.json`、`profile.md` 全在射程内，且写的是 `fs.writeFile` **全量覆盖**：一次笼统的「是否允许」就能清空用户的全部记忆。现对 `butler/` 根下的平铺真源加硬护栏（`isProtectedButlerFile`，大小写不敏感），拒绝写入并说明原因；同时把**目标文件名**带进确认文案，让用户在按下确认前看得到会覆盖什么。
+
+* **编排链路的「不对外部状态产生副作用」契约补齐**（[tools.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/tools.ts)）：`SANDBOX_BLOCKED_TOOLS` 补入 `remember_preference` / `update_preference` / `delete_preference` —— 它们改的是**跨会话、跨联系人共享**的全局记忆，此前名单外的空档等于给着写接口。只读的 `read_preferences` 不拦。（`set_model_price` 仍**不拦**：它写的是应用数据而非用户记忆，是否要拦是另一个决定，此处显式记录以免被当成漏改。）
+
+* **docx 分页推进到 P1：段落可以跨页断开**（[docx-pagination.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/docx-pagination.ts)，+415 行）：此前只有块级断点（间隙插在**顶层块之前**，整块下移），段落永远不劈开。现新增**段内断点**（`inlinePos`）—— 用 `view.coordsAtPos` 定位「哪一行是下页首行」，间隙插在**段落内部的文档位置**，段落因此能在页底断开、下半段从下页页首继续，与 Word 的跨页行为一致；只有「剩余空间不足以留下 2 行」或「该块不是文本块（表格 / 图片 / 占位）」时才退化为整块下移。分页仍是**纯视觉层**（装饰不进文档模型，`getJSON` 逐字节不变、分页 meta 不压撤销栈）。
+
+* **段内断点的两个实测坑**（都写进了代码注释）：① 段内间隙必须 `display:block` 才能断行（`inline-block` 实测**无效**，只撑高当前行）；而 `display:block` 插进行内会让浏览器多生成一个匿名行盒 ⇒ 实际推进量 = 设定高度 + 一个恒定碎屑（15px→+3.0 / 17px→+3.2 / 19px→+3.9，**与设定高度无关**），故新增 `inlineBreakExtra()` 按实测点做**分段线性插值**（字号档位会变，不能写死常数）。② 取行几何只能走 `SHOW_TEXT` 遍历 —— 段内 spacer 就住在段落内部，若用 `range.selectNodeContents().getClientRects()`，那条数百 px 的 spacer 会被当成「一行」计进去；落在 spacer 上的那条缝隙也不能按差值扣减，直接归一为一个正常行距。
+
+* **分页测量下沉为纯函数 + 修两处静默缺陷**：测量算法抽成 `measurePageBreaks(view, opts)`（输出纯数据，无 DOM 副作用），宿主只负责「就绪判定」与「落盘 + 触发装饰重算」。顺带修掉两处 —— ① spacer 的装饰 key **必须涵盖一切影响 DOM 的量**（`prosemirror-view` 的 `WidgetType.eq` 在 `spec.key` 相同时直接判定相等并**复用旧 DOM**，于是「padTop 变了但高度不更新」会静默发生）；② 段间白带左右用负 margin 顶到纸张边缘，让白带与灰缝**铺满整张 A4**（此前只铺正文列 602px）。
+
+* **修「打开 docx 后整个面板反复闪烁」**（[DocxTiptapEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/DocxTiptapEditor.tsx)）：`onError` 是父层传入的**内联箭头函数**（`UnifiedViewer.tsx`），父组件每渲染一次就换一个新身份；它一旦进了装载 effect 的依赖数组，父层的**任何一次重渲染**都会重跑装载（`setLoading(true)` → 整块面板含标题栏 / 工具条被换成一页「正在加载文档…」占位）。现用 `onErrorRef` 固定最新回调使其不参与依赖比较，并把占位符改为**只在还没有任何内容时**才整块替换（`loading && !parsedRef.current`），一旦装入过一次就保留面板结构。
+
+* **P2 保真属性往返单测抓到真缺陷**（新增 [pagination-fidelity-roundtrip.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/docx-editor/pagination-fidelity-roundtrip.test.ts)）：`keepNext` / `keepLines` / `widowControl` 的分页消费侧此前由 Electron 靶场验证，但靶场是**手工构造 JSON + `setContent`** 灌进编辑器的，**绕过了适配器 A**。补上「引擎 `Block[]` → `blocksToDoc` → JSON → 编辑器」的完整链路验证后，本文件第一版是**红的** —— 它抓到 `docx-schema.ts` 的 paragraph / heading **未声明**这三个属性，而 `NodeType.createChecked` 走 `computeAttrs`（只遍历 schema 声明的属性）⇒ **未声明属性被静默丢弃**，适配器 A 那条写入形同虚设。修法：在 `docx-schema.ts` 与 `docx-tiptap-extensions.ts` **同名同形**地声明这三项。
+
+* **项目日报补「昨日待办对账」**（[daily-digest.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/daily-digest.ts)）：输入里多一份按 `status` 分「完成 / 遗留」的对账（另以确定性的 `#### ⏱ 昨日待办对账` 小节落在明细之后，**模型路径与兜底路径共用同一份，不靠模型转述**），让小结能给出**判断**（完成情况、遗留了什么、今天该先接手什么）而不是复述流水。对账**直连 DB 而非 `querySchedule`** —— 本函数由日报调度器调用时没有 baseUrl，相对 URL 在 Node 下 fetch 会失败；区间用本地日界，与 `localDateKey` / `today.ts` / `schedule.ts` 三处同口径。已知口径限制（不额外补接口）：`listEventsInRange` 硬排除 `cancelled`，故只分完成 / 遗留两类。
+
+* **项目停滞信号有界求得**（[activity.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/activity.ts) 新增 `getProjectLastActivityAt`）：新增有界 mtime 扫描 + 进程内 memo，为建议引擎提供「最近一次活动」；失败只丢这一类信号、不影响其余建议（建议引擎对空数组是安全的）。
+
+
+## v0.7.672 (2026-10-02)
+
+> 本版是 **v0.7.671 之后的增量**：给记忆补上**用户手写入口**（此前唯一的写入者是模型），并把「这条记忆是哪次对话记的」真正做成可溯；另把记忆真源的并发写保护补齐，常驻档安全阀从「整体退化」改为「按优先级逐级退化」。编辑器侧把 docx 工具条的二元宽窄档换成 Word 式自适应折叠，并把一期误合并的对齐 / 列表下拉还原为按钮。共 13 个源文件改动，含 2 个新增测试文件。
+
+### 修复与优化
+
+* **记忆面板补上「用户手写」入口**（[preferences/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/preferences/route.ts) 新增 `POST`）：此前记忆的**唯一写入者是模型**（对话里的 `remember_preference`），用户想「记住这个」没有任何兜底。现在 Memory 面板有 `+ New memory`（内容 + 类型），而 POST 与 `remember_preference` **复用同一套四道闸** —— ① 敏感信息拒写、② 否定式表达转规则、③ 精确重复拒写、④ 同类型高相似倒逼更新 —— 回执按原因分流（`blocked` / `routed` / `duplicate` / `conflict`），敏感与冲突都**不回显原文**。`conflict` 额外在界面上给出 **`Update #N instead`** 出口（走 `PATCH` 更新既有条目，正是那道硬闸想让人做的事）。手写来源记 `source: 'panel'`，与模型抽取区分，用户能看出「这条是我自己写的」。
+
+* **记忆来源可溯到「哪次对话」**（[entry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/entry.ts) → `/api/chat` → `ToolExecContext.threadId`）：Butler 链路此前只传 `nodeId`，而那是**占位符**（`BUTLER_PLACEHOLDER_NODE_ID`）—— 等于**同一把钥匙开所有会话的锁**。现在 `entry.ts` 的两处调用都带上真正的 `threadId`，route 解析出 `butlerThreadId` 后注入工具执行上下文；`remember_preference` 据此把来源写成 **`chat:<threadId>`**（长度收敛到 120 字符，异常超长的 id 不该把元数据行撑爆），Memory 台里就能看出「这条是哪次对话记的」；规则预算（`.state/rule-budget`）也随之分片到**真实会话**，不再所有会话共用一个桶。**非 Butler 链路不传该字段 → 全部退化为原行为**。
+
+* **记忆真源补上并发写保护**（[preferences.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/preferences.ts)）：`addPreference` / `updatePreference` / `removePreference` 此前都是裸的 `readFile → writeFile`（无锁、无 tmp+rename）。记忆是**单文件真源**（`preferences.md`），而写入方有两条独立链路（抽屉会话 + 微信 / 飞书桥，后者是**另一个进程**），并发读改写会**整条丢记忆**。现统一到 `createLock` + `atomicWriteFile`（`lib/butler/fs-atomic`），首建 `preferences.md` 也走原子写 —— 这是 rules / skills / threads / rule-logs / storage 之后补齐的最后一个落点。⚠️ 锁**不嵌进** `ensurePreferencesFile`：它也会被只读的 `listPreferences` 调用，而三个写函数在持锁期间会调它，同锁二次 acquire 会死锁。
+
+* **常驻档安全阀由「整体退化」改为「按优先级逐级退化」**（[preferences-shared.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/preferences-shared.ts) 新增纯函数 `selectResidentTypes`）：此前只要「身份画像 + 偏好习惯」**合计**超过 20 条，就整体退化为只注入目录 —— 连**身份画像**也一起掉出常驻档，用户会突然感觉「它不记得我了」，而这恰恰是常驻档存在的理由。现在按优先级**前缀**从高到低逐级纳入，某一级放不下就**到此为止**（不跳过它去纳更低优先级，否则会出现「低优先级的还在常驻档、高的反而掉进目录档」的倒挂）；空条数的类型不占额度、也不打断前缀；退化粒度是**整类型**（同类型一起进退，口径才好解释）。[context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts) 的注入标题随之写实际驻留的类型，而非写死名单。
+
+* **docx 工具条：二元宽窄档 → Word 式自适应折叠**（[DocxTiptapEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/DocxTiptapEditor.tsx)）：原来的 `WIDE_TOOLBAR_MIN = 700` 是二元档，**要么全给要么全收**，在默认面板宽度上就表现为「字体 / 样式的下拉忽然消失」，用户观感是功能被藏了。现改为宿主持一张 `toolbarSlots()` 槽位表（展示顺序 + `evictRank` 淘汰优先级 + 宽度估算），由 `fitToolbar()` **按可用宽度逐个槽位贪心淘汰**，被挤出的整组由 `renderOverflowRow` 在 ⋯ 菜单里补位（功能始终可达），容器由 `overflow-x-auto` 改成 `overflow-hidden`（永不出现横向滚动条）。**宽度不写死 px**：工具条尺寸类全是 rem，而本项目 `html` 字号随「字号档位」在 15 / 17 / 19px 间切换，按 16px 基准估算会在**大字号档位下低估宽度、把按钮剪掉** —— 故新增 `remPx` 实测根字号 + `toolMetrics` 换算；因档位走 `:root[data-fontscale]` 属性切换、`font-size` 变化未必触发 ResizeObserver，另用 MutationObserver 兜住。
+
+* **对齐 / 列表由下拉还原为按钮**（[docx-commands.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/docx-editor/docx-commands.tsx)）：一期把 4 个对齐 + 2 个列表并成 2 个下拉，理由是「省空间」；实际宽度核算显示 **6 个按钮（160px）比 2 个下拉（164px）还窄** —— 前提根本不成立，却牺牲了 Word 的所见即所得，属误判，已还原为 6 个独立按钮（新增 `alignLeft` / `alignCenter` / `alignRight` / `alignJustify`、`bulletList` / `orderedList`），判据 `alignActive` / `liKindOf` 一并下沉到命令表，宿主不再各存一份。同时命令表引入 **`toolSection`** 分区（`inline` / `script` / `align` / `list` / `paraIndent` / `paraMisc` / `insert`），上标 / 下标 / 缩进 / 分页符 / 清除格式 / 表格 / 图片由 `menu` 升为 `primary`（候选常驻、可被挤出），`commandsOfToolSection()` 成为工具条的唯一取数入口，`commandsOfTier()` 退为 ⋯ 菜单入口。新增 `preferences-shared.test.ts` 与 `preferences/route.test.ts` 锁住上述闸门与退化优先级。
+
+
 ## v0.7.671 (2026-10-02)
 
 > 本版是 **v0.7.670 之后的增量**：把 Butler 的「定制总览页 Customize」正式改名并扩为**记忆台 Memory**（四段 → 六段），为此新增一个只读聚合端点把此前**分散在四类落点、且没有任何读口**的记忆证据收进视图。共 14 个源文件改动，含 2 个新增实现/测试文件与 1 处文件改名。
