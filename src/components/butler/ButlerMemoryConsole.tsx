@@ -1,16 +1,16 @@
 'use client';
 
 /**
- * ButlerMemoryConsole —— **Butler 的记忆台（Memory）**
+ * ButlerMemoryConsole —— **Butler 的记忆台（Memories）**
  *
  * 2026-10-02 由 `ButlerRulesPanel`（原名「我的定制总览页 / Customize」）改名与扩段：
  * 这个面管的是**「Butler 记得什么、学到什么、凭什么」**，不是外观定制，故：
- *   - 名字统一为 **Memory**（rail 键 / 顶栏 / aria-label 三处同字，事件名保持不变）；
+ *   - 名字统一为 **Memories**（rail 键 / 顶栏 / aria-label 三处同字）；
  *   - 从「四段」扩为**六段**，把原先缺位的两类记忆实体与一类外部锚点收进来；
  *   - SIGNALS 从「与实体并列的入口」降级为**证据视图 EVIDENCE**（视图不是实体）。
  *
  * 六段（三实体 + 上下文 + 证据 + 锚点）：
- *   Memories     用户长期记忆（内嵌 ButlerMemoryPanel，增 / 改 / 删全功能）
+ *   Preferences  用户长期记忆（内嵌 ButlerMemoryPanel，增 / 改 / 删全功能）
  *   Rules        规则列表（commitment / kind / status）+ 一键停用 + 悬挂提示 + 修订建议标记
  *   Skills       技能列表（适用条件 / 版本 / 来源 / 成败）+ 详情 + Retire / Unquarantine
  *   Threads      会话上下文（**只读锚点**）：常驻三行 + 普通联系人、人设、条数、未读、常驻工作区
@@ -20,7 +20,7 @@
  *
  * 首屏为**脑图落点**（BrainMap）：一张简笔画大脑接**六个**入口节点，点节点才进对应分区页；
  * 分区页不再保留横向标签，只留左上角 `← All` 回到脑图。
- * 例外：外部传 initialSection（如 openButlerMemories）时跳过脑图，直接落在指定分区。
+ * 例外：外部传 initialSection（如 openButlerPreferences）时跳过脑图，直接落在指定分区。
  *
  * 数据源与既有实现同源，不新造存储（真源路径随脑图落点展示，方便用户自行备份）：
  *   /api/butler/preferences                    用户记忆（butler/preferences.md）
@@ -56,14 +56,14 @@ import {
 import { ButlerMemoryPanel } from './ButlerMemoryPanel';
 
 /** 六个分区（三实体 + 上下文 + 证据 + 锚点；2026-10-02 由四段扩为六段） */
-export type Section = 'rules' | 'memories' | 'skills' | 'threads' | 'evidence' | 'knowledge';
+export type Section = 'rules' | 'preferences' | 'skills' | 'threads' | 'evidence' | 'knowledge';
 
 export interface ButlerMemoryConsoleProps {
   /** 独立浮窗模式的关闭回调；嵌入抽屉栏时省略（关闭由抽屉统一提供） */
   onClose?: () => void;
   /** 嵌入抽屉栏：去掉 fixed/锚定/阴影/圆角，填满父容器 */
   embedded?: boolean;
-  /** 初始分区：左栏 Memory 默认 Rules；外部 `openButlerMemories()` 直接落到 Memories */
+  /** 初始分区：左栏 Memories 默认 Rules；外部 `openButlerPreferences()` 直接落到 Preferences */
   initialSection?: Section;
 }
 
@@ -72,6 +72,17 @@ interface StepDraft {
   kind: StepKind;
   text: string;
   annex: boolean;
+  /** deterministic 步的宿主执行器绑定（'' = 只描述、不自动执行） */
+  action: '' | 'create_todo' | 'create_scheduled_todo' | 'skill';
+  /** action='skill' 时绑定的技能 id */
+  skillId: string;
+  /** action='create_scheduled_todo' 时的确定时刻：'occurrence' 或 ISO */
+  when: string;
+}
+
+/** 新建一个空步骤（默认确定性，无动作绑定） */
+function emptyStepDraft(): StepDraft {
+  return { kind: 'deterministic', text: '', annex: false, action: '', skillId: '', when: '' };
 }
 
 /** 新建 / 编辑共用一份草稿 */
@@ -93,6 +104,13 @@ interface Revision {
   active: boolean;
   ratio: number;
   shouldPropose: boolean;
+}
+
+/** 规则活动度（/api/butler/rules/signals 无 id 时批量返回；draft 的「印证」与 active 的「建议废除」由此派生） */
+interface RuleActivity {
+  hits: number;
+  lastHitAt?: string;
+  stale: boolean;
 }
 
 /** 单技能的成败信号（/api/butler/skills 响应体的 signals 字段） */
@@ -166,25 +184,50 @@ interface AuditData {
   };
   recent?: { kind: 'memory' | 'rule' | 'skill'; title: string; at: string }[];
   negative?: { blocked?: NegativeSample[] };
-  askQuota?: { objectType: string; used: number; limit: number }[];
   budget?: { threadId: string; asks: number; limit: number }[];
   productions?: { ruleId: string; ruleName: string; producedRef: string; at: string }[];
 }
 
 /** 规则 → 表单草稿 */
 function toDraft(rule: RuleRecord): StepDraft[] {
-  return rule.steps.map((s) => ({ kind: s.kind, text: s.text, annex: s.annex === true }));
+  return rule.steps.map((s) => ({
+    kind: s.kind,
+    text: s.text,
+    annex: s.annex === true,
+    action: s.kind === 'deterministic' ? (s.action ?? '') : '',
+    skillId: s.action === 'skill' ? (s.actionParams?.skillId ?? '') : '',
+    when: s.action === 'create_scheduled_todo' ? (s.actionParams?.when ?? '') : '',
+  }));
 }
 
-/** 表单草稿 → 提交用 steps（丢空文本；annex 只随 judgment 携带） */
+/** 表单草稿 → 提交用 steps（丢空文本；annex 只随 judgment 携带；动作参数只随 deterministic 携带） */
 function toSteps(drafts: StepDraft[]): RuleStep[] {
   return drafts
     .filter((d) => d.text.trim())
-    .map((d) => ({
-      kind: d.kind,
-      text: d.text.trim(),
-      ...(d.kind === 'judgment' && d.annex ? { annex: true } : {}),
-    }));
+    .map((d) => {
+      const step: RuleStep = { kind: d.kind, text: d.text.trim() };
+      if (d.kind === 'judgment') {
+        if (d.annex) step.annex = true;
+        return step;
+      }
+      if (d.action) {
+        step.action = d.action;
+        if (d.action === 'skill' && d.skillId.trim()) step.actionParams = { skillId: d.skillId.trim() };
+        else if (d.action === 'create_scheduled_todo' && d.when.trim()) step.actionParams = { when: d.when.trim() };
+      }
+      return step;
+    });
+}
+
+/** RuleStep → /api/butler/rules 的 wire 形态（该路由按 `action_params` 解析，与工具 schema 同口径） */
+function toWireSteps(steps: RuleStep[]): Array<Record<string, unknown>> {
+  return steps.map((s) => ({
+    kind: s.kind,
+    text: s.text,
+    ...(s.annex === true ? { annex: true } : {}),
+    ...(s.action ? { action: s.action } : {}),
+    ...(s.actionParams ? { action_params: s.actionParams } : {}),
+  }));
 }
 
 /** 逗号（中英）分隔的触发词 → 数组 */
@@ -202,7 +245,7 @@ function emptyDraft(): Draft {
     name: '',
     intent: '',
     keywords: '',
-    steps: [{ kind: 'deterministic', text: '', annex: false }],
+    steps: [emptyStepDraft()],
   };
 }
 
@@ -460,7 +503,7 @@ const BRAIN_GYRI = [
 /** 六个入口节点：标签 + 一行说明（说明文案与各分区页的实际内容对应）。
  *  `sub` 前缀即**语义分组**（entity / context / evidence / anchor），避免读者以为六者同类。 */
 const BRAIN_NODES: { key: Section; label: string; sub: string; left: string; top: string }[] = [
-  { key: 'memories', label: 'MEMORIES', sub: 'entity · about you', left: '20.8%', top: '15%' },
+  { key: 'preferences', label: 'PREFERENCES', sub: 'entity · about you', left: '20.8%', top: '15%' },
   { key: 'rules', label: 'RULES', sub: 'entity · commitments', left: '20.8%', top: '50%' },
   { key: 'skills', label: 'SKILLS', sub: 'entity · learned', left: '20.8%', top: '85%' },
   { key: 'threads', label: 'THREADS', sub: 'context · conversations', left: '79.2%', top: '15%' },
@@ -639,7 +682,7 @@ function BrainMap({ onPick }: { onPick: (s: Section) => void }) {
 
 export function ButlerMemoryConsole({ onClose, embedded, initialSection }: ButlerMemoryConsoleProps) {
   const [section, setSection] = useState<Section>(initialSection ?? 'rules');
-  /** 是否停在脑图落点：默认是；被外部指定分区（如 openButlerMemories）时直接进页 */
+  /** 是否停在脑图落点：默认是；被外部指定分区（如 openButlerPreferences）时直接进页 */
   const [landing, setLanding] = useState(!initialSection);
 
   /** 规则列表（Rules 段 + Signals 段的规则选择器共用） */
@@ -657,6 +700,8 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
   const [dangling, setDangling] = useState<Set<string>>(new Set());
   /** 各规则修订评估（用于列表上的「修订建议」标记） */
   const [revisions, setRevisions] = useState<Record<string, Revision>>({});
+  /** 各规则活动度（draft 收件箱的「已印证」排序 / active 的「建议废除」标记） */
+  const [activity, setActivity] = useState<Record<string, RuleActivity>>({});
 
   /** Signals 段：当前查看的规则与详情 */
   const [signalRuleId, setSignalRuleId] = useState<string | null>(null);
@@ -701,14 +746,17 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
     return data.rules as RuleRecord[];
   }, []);
 
-  /** 拉取全部规则的修订评估（一次批量，避免列表逐规则 N 次请求） */
+  /** 拉取全部规则的修订评估 + 活动度（一次批量，避免列表逐规则 N 次请求） */
   const loadRevisions = useCallback(async () => {
     try {
       const res = await fetch('/api/butler/rules/signals');
       const data = await res.json();
-      if (data?.success) setRevisions((data.revisions ?? {}) as Record<string, Revision>);
+      if (data?.success) {
+        setRevisions((data.revisions ?? {}) as Record<string, Revision>);
+        setActivity((data.activity ?? {}) as Record<string, RuleActivity>);
+      }
     } catch {
-      /* 修订标记拿不到不阻塞规则列表 */
+      /* 修订标记 / 活动度拿不到不阻塞规则列表 */
     }
   }, []);
 
@@ -821,6 +869,10 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
       setError('At least one step is required');
       return;
     }
+    if (draft.steps.some((s) => s.kind === 'deterministic' && s.action === 'skill' && !s.skillId.trim())) {
+      setError('Each "Run skill" step needs a skill selected');
+      return;
+    }
     setBusy(true);
     try {
       const isEdit = draft.mode === 'edit' && draft.id;
@@ -833,14 +885,14 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
                 id: draft.id,
                 name: draft.name,
                 intent_raw: draft.intent,
-                steps,
+                steps: toWireSteps(steps),
                 trigger: { keywords: parseKeywords(draft.keywords) },
                 expected_version: draft.version,
               }
             : {
                 name: draft.name,
                 intent_raw: draft.intent,
-                steps,
+                steps: toWireSteps(steps),
                 trigger: { keywords: parseKeywords(draft.keywords) },
               },
         ),
@@ -1055,7 +1107,7 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
    *  放在各 loader 定义**之后**：依赖数组在 render 期求值，引用后面才定义的 useCallback 会 TDZ。 */
   useEffect(() => {
     if (landing) return;
-    if (section === 'skills') void loadSkills();
+    if (section === 'skills' || section === 'rules') void loadSkills();
     else if (section === 'threads') void loadThreads();
     else if (section === 'knowledge') void loadKnowledge();
     else if (section === 'evidence') {
@@ -1125,7 +1177,7 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
   );
 
   return (
-    <aside style={panelStyle(embedded)} role="dialog" aria-label="Memory panel">
+    <aside style={panelStyle(embedded)} role="dialog" aria-label="Memories panel">
       <header style={{ padding: 14, borderBottom: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1156,8 +1208,8 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
           <BrainMap onPick={openSection} />
           <MemoryFooter audit={audit} loading={auditLoading} />
         </div>
-      ) : section === 'memories' ? (
-        /* Memories 段直接嵌整个面板（它自带栏头与滚动区），不再套这层带内边距的滚动容器。
+      ) : section === 'preferences' ? (
+        /* Preferences 段直接嵌整个面板（它自带栏头与滚动区），不再套这层带内边距的滚动容器。
            外面这层 flex-1/min-h-0 是必需的：内嵌面板是 height:100% 的 column，
            直接放在本栏 header 之下会被 header 顶出去，留出可收缩的槽位才对。 */
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -1227,7 +1279,7 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
 
                 <div style={{ ...labelStyle, marginTop: 10 }}>Steps</div>
                 {draft.steps.map((s, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
                     <select
                       value={s.kind}
                       onChange={(e) => updateStep(i, { kind: e.target.value as StepKind })}
@@ -1253,6 +1305,24 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
                         annex
                       </label>
                     )}
+                    {s.kind === 'deterministic' && (
+                      <select
+                        value={s.action}
+                        onChange={(e) => {
+                          const action = e.target.value as StepDraft['action'];
+                          updateStep(i, { action });
+                          if (action === 'skill' && skills.length === 0) void loadSkills();
+                        }}
+                        aria-label="Step action"
+                        title="Bind a host executor so this step actually runs when the rule matches"
+                        style={{ ...inputStyle, width: 132, flexShrink: 0 }}
+                      >
+                        <option value="">Describe only</option>
+                        <option value="create_todo">Create todo</option>
+                        <option value="create_scheduled_todo">Scheduled todo</option>
+                        <option value="skill">Run skill</option>
+                      </select>
+                    )}
                     <button
                       type="button"
                       onClick={() => setDraft({ ...draft, steps: draft.steps.filter((_, idx) => idx !== i) })}
@@ -1262,11 +1332,38 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
                     >
                       ✕
                     </button>
+                    {s.kind === 'deterministic' && s.action === 'skill' && (
+                      <select
+                        value={s.skillId}
+                        onChange={(e) => updateStep(i, { skillId: e.target.value })}
+                        aria-label="Bound skill"
+                        style={{ ...inputStyle, width: '100%', marginTop: 2 }}
+                      >
+                        <option value="">Select a skill…</option>
+                        {skills.map((sk) => (
+                          <option key={sk.id} value={sk.id}>
+                            {sk.name} · {LIFECYCLE_LABELS[sk.lifecycle]}
+                          </option>
+                        ))}
+                        {s.skillId && !skills.some((sk) => sk.id === s.skillId) && (
+                          <option value={s.skillId}>{s.skillId} · not found</option>
+                        )}
+                      </select>
+                    )}
+                    {s.kind === 'deterministic' && s.action === 'create_scheduled_todo' && (
+                      <input
+                        value={s.when}
+                        onChange={(e) => updateStep(i, { when: e.target.value })}
+                        aria-label="Schedule time"
+                        placeholder="occurrence, or an ISO datetime"
+                        style={{ ...inputStyle, width: '100%', marginTop: 2 }}
+                      />
+                    )}
                   </div>
                 ))}
                 <button
                   type="button"
-                  onClick={() => setDraft({ ...draft, steps: [...draft.steps, { kind: 'deterministic', text: '', annex: false }] })}
+                  onClick={() => setDraft({ ...draft, steps: [...draft.steps, emptyStepDraft()] })}
                   style={smallBtn}
                 >
                   + Step
@@ -1293,11 +1390,78 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
               <p style={mutedText}>Nothing yet.</p>
             )}
 
-            {items.map((rule) => {
+            {/* 待确认收件箱：弱信号「一次即记忆」落下的 draft（静默、不执行）。
+                印证过的排前面（命中次数降序）；确认（Keep）即转正，Discard 即废除并拉黑该类习惯。 */}
+            {(() => {
+              const drafts = [...items.filter((r) => r.status === 'draft')].sort(
+                (a, b) => (activity[b.id]?.hits ?? 0) - (activity[a.id]?.hits ?? 0),
+              );
+              if (drafts.length === 0) return null;
+              return (
+                <>
+                  <div style={sectionHeading}>Pending</div>
+                  <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
+                    Noted once from what you said. Kept quiet until you decide — Keep to make it live, Discard to stop
+                    learning it.
+                  </p>
+                  {drafts.map((rule) => {
+                    const act = activity[rule.id];
+                    const hits = act?.hits ?? 0;
+                    return (
+                      <div
+                        key={rule.id}
+                        style={{
+                          padding: 10,
+                          borderRadius: 10,
+                          background: 'var(--surface-muted)',
+                          marginBottom: 8,
+                          border: '1px solid var(--border)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: 500, lineHeight: 1.5 }}>{rule.name}</span>
+                          <span style={badge}>{STATUS_LABELS[rule.status] ?? rule.status}</span>
+                          {hits >= 2 && <span style={revisionBadge}>Seen {hits} times</span>}
+                        </div>
+                        {rule.intentRaw && (
+                          <div style={{ marginTop: 4, color: 'var(--muted-foreground)', lineHeight: 1.6 }}>{rule.intentRaw}</div>
+                        )}
+                        <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+                          {(rule.trigger?.keywords ?? []).map((k) => (
+                            <span key={k} style={badge}>{k}</span>
+                          ))}
+                          <span style={mutedText}>
+                            {rule.steps.length} step{rule.steps.length === 1 ? '' : 's'} · {rule.scope}
+                          </span>
+                          <span style={{ flex: 1 }} />
+                          <button type="button" onClick={() => startEdit(rule)} style={smallBtn}>Edit</button>
+                          <button type="button" onClick={() => void setStatus(rule, 'active')} disabled={busy} style={smallBtn}>
+                            Keep
+                          </button>
+                          {pendingDelete === rule.id ? (
+                            <>
+                              <button type="button" onClick={() => void doDelete(rule.id)} disabled={busy} style={dangerBtn}>
+                                Confirm discard
+                              </button>
+                              <button type="button" onClick={() => setPendingDelete(null)} style={smallBtn}>Cancel</button>
+                            </>
+                          ) : (
+                            <button type="button" onClick={() => setPendingDelete(rule.id)} style={smallBtn}>Discard</button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              );
+            })()}
+
+            {items.filter((rule) => rule.status !== 'draft').map((rule) => {
               const keywords = rule.trigger?.keywords ?? [];
               const isRetired = rule.status === 'retired';
               const isDangling = dangling.has(rule.id);
               const rev = revisions[rule.id];
+              const stale = activity[rule.id]?.stale === true;
               return (
                 <div
                   key={rule.id}
@@ -1325,6 +1489,13 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
                   {isDangling && (
                     <div style={{ marginTop: 4, fontSize: 11, color: 'var(--danger)' }}>
                       Owning project no longer exists
+                    </div>
+                  )}
+
+                  {/* 主动遗忘（软）：长期无命中 → 建议废除，绝不静默删，用户可恢复 */}
+                  {stale && !isRetired && (
+                    <div style={{ marginTop: 4, fontSize: 11, color: 'var(--muted-foreground)' }}>
+                      No hits for a while — consider retiring
                     </div>
                   )}
 
@@ -1453,22 +1624,16 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
               })}
             </div>
 
-            {/* 额度与预算：策略是否在起作用、还能问几次（数据来自只读 /api/butler/memory-audit） */}
+            {/* 主动冒头预算：策略是否在起作用（数据来自只读 /api/butler/memory-audit） */}
             <div style={{ ...sectionHeading, marginTop: 16 }}>Proactive budget</div>
             <p style={{ ...mutedText, marginTop: 0, marginBottom: 8 }}>
-              How much Butler is still allowed to interrupt about. Ask quota is per object type (near-miss);
-              session budget is per conversation.
+              How much Butler is still allowed to interrupt about. Session budget is per conversation.
             </p>
             {auditLoading && <p style={mutedText}>Loading…</p>}
             {auditError && <p style={{ color: 'var(--danger)' }}>{auditError}</p>}
-            {!auditLoading && (audit?.askQuota?.length ?? 0) === 0 && (audit?.budget?.length ?? 0) === 0 && (
+            {!auditLoading && (audit?.budget?.length ?? 0) === 0 && (
               <p style={mutedText}>Nothing consumed yet.</p>
             )}
-            {(audit?.askQuota ?? []).map((q) => (
-              <div key={`ask-${q.objectType}`} style={{ ...mutedText, lineHeight: 1.7 }}>
-                ask · <strong>{q.objectType}</strong> — {q.used}/{q.limit} used
-              </div>
-            ))}
             {(audit?.budget ?? []).map((b) => (
               <div key={`bud-${b.threadId}`} style={{ ...mutedText, lineHeight: 1.7 }}>
                 session · <strong>{b.threadId}</strong> — {b.asks}/{b.limit} used

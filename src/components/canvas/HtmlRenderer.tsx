@@ -18,6 +18,14 @@ interface HtmlRendererProps {
   /** 正文链接标注：键为归一化 URL（normalizeSourceUrl）→ 弹窗内容。
    *  只在「本轮真的读过这些页面」的研究档传入；缺省时渲染管线与今日完全一致。 */
   readSources?: Map<string, ReadSourceInfo>;
+  /**
+   * 正文文件链接（.file-mention / 项目相对路径的 md 链接）的接管回调。
+   * 返回 true = 调用方已处理，不再发 file.open 事件。
+   *
+   * Butler 抽屉用它把正文里的文件链接开在**抽屉自己的右栏**：抽屉是覆盖式浮层，
+   * 走 file.open 只会开在被它遮住的画布右侧面板，表现为「点了没反应」。
+   */
+  onOpenDoc?: (path: string) => boolean;
 }
 
 /** 正文链接 hover 弹窗的内容（由调用方算好，渲染器不碰业务） */
@@ -104,6 +112,32 @@ function fixFootnoteAnchors(html: string): string {
   return html.replace(/id="user-content-user-content-([^"]+)"/g, 'id="user-content-$1"');
 }
 
+/** 中文/半角收尾括号 → 对应开括号 */
+const CLOSER_TO_OPENER: Record<string, string> = {
+  '）': '（', '】': '【', '》': '《', '〕': '〔', '」': '「', '』': '『', ')': '(',
+};
+
+/**
+ * 剔除**不配对的收尾括号**，配对则保留。
+ *
+ * 走两个方向都会错，只能按配对判：
+ *   - 全排除中文括号 → 「xx（孵化模式）条款大纲.md」被截断成「xx」→ 点到不存在的路径（本次修复的 bug）；
+ *   - 全不排除       → 「（见 materials/x.pdf）」会把句读的 `）` 吃进路径。
+ * 逐字符剥离末尾收尾括号，只要该括号在本串里已有配对开括号（说明括号属于文件名）就停手。
+ */
+function trimUnbalancedClosers(s: string): string {
+  let out = s;
+  for (;;) {
+    const last = out[out.length - 1];
+    const opener = CLOSER_TO_OPENER[last];
+    if (!opener) return out;
+    const opens = out.split(opener).length - 1;
+    const closes = out.split(last).length - 1;
+    if (closes <= opens) return out; // 已配对（括号在文件名内）→ 保留
+    out = out.slice(0, -1);          // 多余的收尾括号（句读）→ 剔除
+  }
+}
+
 function wrapFileMentions(html: string): string {
   const guards: string[] = [];
   const guarded = html.replace(
@@ -115,9 +149,14 @@ function wrapFileMentions(html: string): string {
   );
   const wrapped = guarded.replace(
     // 排除 [] # 的原因：账本引用标记形如 `[来源: 材料:materials/x.pdf#p3]`，
-    // 若把 `]` / `#p3` 吃进路径，点开的就是一个不存在的文件（静默失败）
-    /(materials|homework|attachments)\/(?!\.{1,2}(?:\/|$))[^\s<>"'`，。；：、！？（）【】《》〔〕「」『』\[\]#\uE000]+/g,
-    (m) => `<a class="file-mention" data-path="${m}" title="Open ${m}">${m}</a>`,
+    // 若把 `]` / `#p3` 吃进路径，点开的就是一个不存在的文件（静默失败）。
+    // 括号（中英文）**不在排除类里**：它们是合法文件名字符，靠 trimUnbalancedClosers 处理句读。
+    /(materials|homework|attachments)\/(?!\.{1,2}(?:\/|$))[^\s<>"'`，。；：、！？\[\]#\uE000]+/g,
+    (m) => {
+      const path = trimUnbalancedClosers(m);
+      const trailing = m.slice(path.length); // 被剔除的句读要原样还回正文，不能吞掉
+      return `<a class="file-mention" data-path="${path}" title="Open ${path}">${path}</a>${trailing}`;
+    },
   );
   return wrapped.replace(/\uE000(\d+)\uE000/g, (_, i) => guards[Number(i)] ?? '');
 }
@@ -202,7 +241,7 @@ function maskQuestionnaireBlocks(md: string): string {
 }
 
 /** 基于 unified.js 生态的 Markdown/HTML 统一渲染器 */
-function HtmlRendererImpl({ content, readSources }: HtmlRendererProps) {
+function HtmlRendererImpl({ content, readSources, onOpenDoc }: HtmlRendererProps) {
   const html = useMemo(() => {
     if (!content) return '';
 
@@ -266,7 +305,7 @@ function HtmlRendererImpl({ content, readSources }: HtmlRendererProps) {
     if (mention) {
       e.preventDefault();
       const rel = mention.getAttribute('data-path');
-      if (rel) void openFileByProjectRelPath(rel);
+      if (rel && !onOpenDoc?.(rel)) void openFileByProjectRelPath(rel);
       return;
     }
     // 正文图片：点击放大预览（代码块内的图片不触发，属代码展示）
@@ -294,7 +333,7 @@ function HtmlRendererImpl({ content, readSources }: HtmlRendererProps) {
       rel = rel.replace(/^\.\//, '').replace(/\\/g, '/');
       if (isProjectRelPath(rel)) {
         e.preventDefault();
-        openFileByProjectRelPath(rel);
+        if (!onOpenDoc?.(rel)) openFileByProjectRelPath(rel);
       }
     }
   };
@@ -414,11 +453,14 @@ export function StreamingMarkdown({
   content,
   streaming,
   readSources,
+  onOpenDoc,
 }: {
   content: string;
   streaming: boolean;
   /** 正文链接标注（研究档传入）；流式期间调用方通常不传，见 ChatNodeKernel 的 isAssistantDone 门 */
   readSources?: Map<string, ReadSourceInfo>;
+  /** 正文文件链接接管回调（见 HtmlRendererProps.onOpenDoc） */
+  onOpenDoc?: (path: string) => boolean;
 }) {
   const [rendered, setRendered] = useState(content);
   const lastRenderRef = useRef(0);
@@ -484,7 +526,7 @@ export function StreamingMarkdown({
     const { stable, tail } = stabilizeStreamingMarkdown(rendered);
     return (
       <>
-        <HtmlRenderer content={stable} readSources={readSources} />
+        <HtmlRenderer content={stable} readSources={readSources} onOpenDoc={onOpenDoc} />
         {tail && (
           <div
             className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] [word-break:break-word]"
@@ -496,5 +538,5 @@ export function StreamingMarkdown({
       </>
     );
   }
-  return <HtmlRenderer content={rendered} readSources={readSources} />;
+  return <HtmlRenderer content={rendered} readSources={readSources} onOpenDoc={onOpenDoc} />;
 }

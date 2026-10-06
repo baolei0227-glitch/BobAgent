@@ -164,6 +164,20 @@ export function ButlerMemoryPanel({ onClose, embedded }: ButlerMemoryPanelProps)
   const [pendingDelete, setPendingDelete] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /** 新增（2026-10-02）：用户手写一条记忆 —— 此前唯一的写入者是模型 */
+  const [creating, setCreating] = useState(false);
+  const [newContent, setNewContent] = useState('');
+  const [newType, setNewType] = useState<string>('偏好习惯');
+  /**
+   * 新增的结果回执。四种「未落盘」都要说清原因（敏感 / 转规则 / 重复 / 太像），
+   * 其中 `conflict` 额外给出「改成更新第 N 条」的出口（同类型相似度硬闸的正面用法）。
+   */
+  const [notice, setNotice] = useState<
+    | { kind: 'ok' | 'blocked' | 'routed' | 'duplicate'; text: string }
+    | { kind: 'conflict'; text: string; index: number; content: string }
+    | null
+  >(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -234,6 +248,72 @@ export function ButlerMemoryPanel({ onClose, embedded }: ButlerMemoryPanelProps)
     }
   };
 
+  /** 新增一条记忆（走 POST；服务端复用与模型同一套四道闸，回执按原因分流） */
+  const createNew = async () => {
+    const content = newContent.trim();
+    if (!content) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const res = await fetch('/api/butler/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, type: newType }),
+      });
+      const data = await res.json();
+      if (!data?.success) {
+        setError(data?.error ?? 'Failed to save memory');
+        return;
+      }
+      if (data.reason === 'conflict' && data.conflict) {
+        setNotice({
+          kind: 'conflict',
+          text: data.message as string,
+          index: data.conflict.index as number,
+          content: content,
+        });
+        return;
+      }
+      if (data.reason) {
+        setNotice({ kind: data.reason as 'blocked' | 'routed' | 'duplicate', text: data.message as string });
+        return;
+      }
+      setNotice({ kind: 'ok', text: 'Remembered.' });
+      setNewContent('');
+      setCreating(false);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save memory');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 冲突出口：把刚写的内容合并进既有的第 N 条（update 而非追加，正是那道硬闸想让人做的事） */
+  const applyConflictUpdate = async (index: number, content: string) => {
+    setBusy(true);
+    try {
+      const res = await fetch('/api/butler/preferences', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ index, content }),
+      });
+      const data = await res.json();
+      if (!data?.success) {
+        setError(data?.error ?? 'Failed to update');
+        return;
+      }
+      setNotice({ kind: 'ok', text: `Updated entry #${index}.` });
+      setNewContent('');
+      setCreating(false);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const groups = groupByType(items);
 
   return (
@@ -250,7 +330,7 @@ export function ButlerMemoryPanel({ onClose, embedded }: ButlerMemoryPanelProps)
         <div>
           <div style={{ fontSize: 14, fontWeight: 500 }}>Memories</div>
           <div style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
-            What Butler remembers about you · edit or delete
+            What Butler remembers about you · add, edit or delete
           </div>
         </div>
         {onClose && (
@@ -261,11 +341,124 @@ export function ButlerMemoryPanel({ onClose, embedded }: ButlerMemoryPanelProps)
       </header>
 
       <div style={{ padding: 12, overflowY: 'auto', ...(embedded ? { flex: 1, minHeight: 0 } : {}) }}>
+        {/* 新增入口（2026-10-02）：模型自动抽取之外的**显式写入**兜底 */}
+        {!creating && (
+          <button
+            type="button"
+            onClick={() => {
+              setCreating(true);
+              setNotice(null);
+              setEditing(null);
+              setPendingDelete(null);
+            }}
+            style={{ ...smallBtn, marginBottom: 10 }}
+          >
+            + New memory
+          </button>
+        )}
+        {creating && (
+          <section
+            style={{
+              padding: 10,
+              borderRadius: 10,
+              background: 'var(--surface-muted)',
+              border: '1px solid var(--border)',
+              marginBottom: 10,
+            }}
+          >
+            <textarea
+              value={newContent}
+              onChange={(e) => setNewContent(e.target.value)}
+              rows={3}
+              placeholder="e.g. 习惯用表格输出结论"
+              aria-label="New memory"
+              style={{
+                width: '100%',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                padding: 8,
+                fontSize: 13,
+                background: 'var(--popover)',
+                color: 'var(--foreground)',
+                resize: 'vertical',
+              }}
+            />
+            <select
+              value={newType}
+              onChange={(e) => setNewType(e.target.value)}
+              aria-label="Category"
+              style={{
+                marginTop: 6,
+                width: '100%',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                padding: '6px 8px',
+                fontSize: 12,
+                background: 'var(--popover)',
+                color: 'var(--foreground)',
+              }}
+            >
+              {MEMORY_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {displayType(t)}
+                </option>
+              ))}
+            </select>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button type="button" onClick={() => void createNew()} disabled={busy || !newContent.trim()} style={smallBtn}>
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreating(false);
+                  setNewContent('');
+                }}
+                style={smallBtn}
+              >
+                Cancel
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* 回执：四种「未落盘」都要说清原因，相似冲突额外给「改成更新第 N 条」 */}
+        {notice && (
+          <div
+            style={{
+              marginBottom: 10,
+              padding: 8,
+              borderRadius: 8,
+              fontSize: 12,
+              lineHeight: 1.6,
+              color: notice.kind === 'ok' ? 'var(--muted-foreground)' : 'var(--danger)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <div>{notice.text}</div>
+            {notice.kind === 'conflict' && (
+              <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => void applyConflictUpdate(notice.index, notice.content)}
+                  disabled={busy}
+                  style={smallBtn}
+                >
+                  Update #{notice.index} instead
+                </button>
+                <button type="button" onClick={() => setNotice(null)} style={smallBtn}>
+                  Dismiss
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {loading && <p style={{ color: 'var(--muted-foreground)' }}>Loading…</p>}
         {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
         {!loading && !error && items.length === 0 && (
           <p style={{ color: 'var(--muted-foreground)' }}>
-            Nothing yet. Butler remembers your preferences and facts as you chat — edit or delete them anytime.
+            Nothing yet. Butler remembers your preferences and facts as you chat — or add one yourself above.
           </p>
         )}
 

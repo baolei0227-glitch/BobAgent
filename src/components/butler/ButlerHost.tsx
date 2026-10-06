@@ -25,7 +25,7 @@ import {
   BUTLER_DOC_EVENT,
   BUTLER_FOCUS_NOTICE_EVENT,
   BUTLER_INBOX_EVENT,
-  BUTLER_MEMORIES_EVENT,
+  BUTLER_PREFERENCES_EVENT,
   BUTLER_RULES_EVENT,
   BUTLER_TODAY_EVENT,
 } from './butlerEvents';
@@ -67,7 +67,7 @@ export function ButlerHost() {
       openSection('detail', d?.toggle === true);
     };
     const onToday = () => openSection('today');
-    const onMemories = () => openSection('memories');
+    const onPreferences = () => openSection('preferences');
     const onRules = () => openSection('rules');
     const onDoc = (e: Event) => {
       const detail = (e as CustomEvent<{ path?: string }>).detail;
@@ -92,7 +92,7 @@ export function ButlerHost() {
 
     window.addEventListener(BUTLER_INBOX_EVENT, onInbox);
     window.addEventListener(BUTLER_TODAY_EVENT, onToday);
-    window.addEventListener(BUTLER_MEMORIES_EVENT, onMemories);
+    window.addEventListener(BUTLER_PREFERENCES_EVENT, onPreferences);
     window.addEventListener(BUTLER_RULES_EVENT, onRules);
     window.addEventListener(BUTLER_DOC_EVENT, onDoc);
     window.addEventListener(BUTLER_FOCUS_NOTICE_EVENT, onFocusNotice);
@@ -101,7 +101,7 @@ export function ButlerHost() {
     return () => {
       window.removeEventListener(BUTLER_INBOX_EVENT, onInbox);
       window.removeEventListener(BUTLER_TODAY_EVENT, onToday);
-      window.removeEventListener(BUTLER_MEMORIES_EVENT, onMemories);
+      window.removeEventListener(BUTLER_PREFERENCES_EVENT, onPreferences);
       window.removeEventListener(BUTLER_RULES_EVENT, onRules);
       window.removeEventListener(BUTLER_DOC_EVENT, onDoc);
       window.removeEventListener(BUTLER_FOCUS_NOTICE_EVENT, onFocusNotice);

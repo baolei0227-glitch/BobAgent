@@ -7,7 +7,7 @@
  * window 事件与 UI 树解耦，也不需要把 provider 套到整个应用。
  */
 export const BUTLER_TODAY_EVENT = 'butler:open-today';
-export const BUTLER_MEMORIES_EVENT = 'butler:open-memories';
+export const BUTLER_PREFERENCES_EVENT = 'butler:open-preferences';
 export const BUTLER_RULES_EVENT = 'butler:open-rules';
 export const BUTLER_CLOSE_EVENT = 'butler:close';
 /** 打开文档阅读面板：detail = { path } */
@@ -29,11 +29,14 @@ export function openButlerToday(): void {
   window.dispatchEvent(new Event(BUTLER_TODAY_EVENT));
 }
 
-/** 唤起记忆台（Memory；原名「记忆面板」/ Customize）。
- *  2026-10-02 改名只动了 UI 文案，**事件名与函数名保持不变**，避免打断既有调用方
- *  （落到 section='memories'，由面板带 initialSection='memories' 打开）。 */
+/** 唤起记忆台（Memories；原名「记忆面板」/ Customize / Memory），直接落到 Preferences 段。 */
+export function openButlerPreferences(): void {
+  window.dispatchEvent(new Event(BUTLER_PREFERENCES_EVENT));
+}
+
+/** @deprecated 兼容别名，等价 openButlerPreferences()（落到 section='preferences'）。 */
 export function openButlerMemories(): void {
-  window.dispatchEvent(new Event(BUTLER_MEMORIES_EVENT));
+  openButlerPreferences();
 }
 
 /** 唤起规则面板（长期承诺） */
@@ -60,4 +63,25 @@ export function openButlerInbox(anchor?: DOMRect | null): void {
 export function notifyButlerUnreadChanged(): void {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new Event(BUTLER_UNREAD_CHANGED_EVENT));
+}
+
+/**
+ * 切换到某个项目（Today 建议区「项目停滞」的行动入口）。
+ * 与 NavSearchBox / Sidebar 同源：POST switch 成功后广播 `bobagent:project-switched`，
+ * 由 CanvasFlow 等宿主重载画布 —— 三处必须走同一条链路，避免出现「只切了一半」。
+ */
+export async function openProjectById(projectId: string): Promise<boolean> {
+  try {
+    const resp = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'switch', project_id: projectId }),
+    });
+    const data = (await resp.json()) as { success?: boolean };
+    if (!data.success) return false;
+    window.dispatchEvent(new CustomEvent('bobagent:project-switched', { detail: { projectId } }));
+    return true;
+  } catch {
+    return false;
+  }
 }

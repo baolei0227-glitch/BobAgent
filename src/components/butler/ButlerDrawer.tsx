@@ -56,7 +56,7 @@
  *           **右栏是增量**：展开不从中栏扣面积，而是把抽屉整体加宽（中栏宽度不变）；
  *           窗口不够时先压右栏宽度，最后才动中栏。
  *           日报三页签（2026-09-27 起）**已整体移交右栏的 Today 面板**（Report / Schedule / Sticky），
- *           通知助理不再推送日报；这里每条回执都是「标题 + 正文 + 待办」的单一形态。
+ *           不再作为回执推送；仍会到这里来的只有知识库每日维护（kind=notes-maintenance）。
  *           栏首自带关闭键，可**单独收起**（不关整个抽屉）。
  *
  * 「左栏管右栏（分区）、联系人列管中栏（会话）」两条轴互相独立；
@@ -110,8 +110,6 @@ import {
   Sparkles,
   Square,
   Sun,
-  ThumbsDown,
-  ThumbsUp,
   Trash2,
   UserRound,
   UsersRound,
@@ -125,10 +123,12 @@ import {
   type ButlerNoticeItem,
   type WechatArticleCard,
   type WechatSearchTrace,
-  type WechatSearchTraceItem,
 } from '@/lib/bus';
 /** 周期规则短标签（纯函数，通知详情日程块复用日历面板的文案口径） */
-import { recurrenceLabel, type RecurrenceRule } from '@/lib/calendar/recurrence';
+import { recurrenceLabel } from '@/lib/calendar/recurrence';
+/** 回执详情的展示格式层（2026-10-05 抽出，桌面与移动端共用一份口径）：
+ *  formatTime / ScheduleDetail / fmtEventWhen / fmtReminderMinutes 见该文件注释。 */
+import { fmtEventWhen, fmtReminderMinutes, formatTime, type ScheduleDetail } from './noticeFormat';
 /** 头像：人物素材 id + 底色都由名字/性格稳定派生（纯函数，见文件注释） */
 import { avatarTint, defaultAvatarId } from '@/lib/butler/avatar';
 import PersonaAvatar from '@/components/butler/PersonaAvatar';
@@ -157,11 +157,9 @@ import {
   recordCommandUsage,
   type ButlerCommand,
 } from '@/lib/core/commands';
-import {
-  buildReportShareUrl,
-  isShareableReportKind,
-  sanitizeReportFileName,
-} from '@/lib/butler/report-share';
+/** 报告类回执判定（决定右栏是否渲染「复制链接 / 下载 .md」）；分享 URL 与文件名规则
+ *  已随 2026-10-05 的 noticeActions 抽出，本文件不再直接引用。 */
+import { isShareableReportKind } from '@/lib/butler/report-share';
 /** 附件上传：复用画布 composer 的 base64 与体积格式化（**只借这两个纯函数**——
  *  上传端点不同：Butler 走 /api/butler/attachments 落自己的存储空间，见下方 uploadButlerAttachment）。 */
 import { fileToBase64, formatFileSize } from '@/components/canvas/composer/useComposer';
@@ -174,6 +172,7 @@ import { ModelBrandLogo, MoonPhaseIcon } from '@/components/canvas/chatNodeKerne
 /** 朗读回复：与上面的语音输入对称的出口（引擎 = 设置里已选中的那一款 TTS） */
 import { stopReadAloud, useReadAloud } from './useReadAloud';
 import { clearActiveThreadId, readActiveThreadId, writeActiveThreadId } from './butlerSession';
+import { extractOutputFiles, restoreOutputFileLines } from '@/lib/butler/output-files';
 import {
   DEFAULT_THINKING_LEVEL,
   THINKING_LEVELS,
@@ -189,7 +188,7 @@ import { loadSettings } from '@/lib/settings';
 import { ButlerConfirmModal, type ButlerConfirmState } from '@/components/canvas/ButlerConfirmModal';
 /** 正文渲染器：与画布对话节点同源（rAF 合并 + 200ms 节流 + 未闭合代码围栏稳定化）。
  *  HtmlRenderer 早已由 page.tsx → CanvasFlow → ChatNodeKernel 进入首屏包，故此处静态引用不新增首载成本。 */
-import { StreamingMarkdown } from '@/components/canvas/HtmlRenderer';
+import { StreamingMarkdown, openFileByProjectRelPath } from '@/components/canvas/HtmlRenderer';
 import QuestionPopup, {
   type AnswerEntry,
   type QuestionItem,
@@ -203,6 +202,13 @@ import { ButlerTodayPanel } from './ButlerTodayPanel';
 import { ButlerMemoryConsole } from './ButlerMemoryConsole';
 import { ButlerDocPanel } from './ButlerDocPanel';
 import { ButlerCalendarPanel } from './ButlerCalendarPanel';
+/** 检索实况面板（2026-10-05 自本文件抽出，见 ./ButlerSearchTrace 文件头）：桌面右栏 search 分区
+ *  与移动端 /butler 分区栈共用同一份实现，避免「复制一份」造成的双真源。原名为 WechatSearchTrace。 */
+import { ButlerSearchTrace } from './ButlerSearchTrace';
+/** 回执动作层（2026-10-05 抽出）：桌面与移动端共用同一套落库链路，见 ./noticeActions */
+import { copyNoticeReportLink, downloadNoticeMd, removeNoticesByIds, toggleNoticeItem } from './noticeActions';
+/** 公众号检索整条链路（状态 + SSE 判定 + 历史回看）：桌面与移动端共用一份，见 ./useWechatSearch */
+import { useWechatSearch } from './useWechatSearch';
 /** 会议模式控制台：会议进行中顶替中栏（顶部条 + 实时字幕流），见该文件注释 */
 import { MeetingConsole, type MeetingSnapshot } from './MeetingConsole';
 import { MeetingStart } from './MeetingStart';
@@ -210,11 +216,22 @@ import PersonaDialog from './PersonaDialog';
 import {
   getButlerNotices,
   patchButlerNotice,
-  removeButlerNotice,
   subscribeButlerNotices,
   type ButlerNotice,
 } from './butlerNotices';
-import { BUTLER_UNREAD_CHANGED_EVENT, notifyButlerUnreadChanged } from './butlerEvents';
+import { BUTLER_UNREAD_CHANGED_EVENT, notifyButlerUnreadChanged, openButlerDoc } from './butlerEvents';
+
+/**
+ * 正文文件链接的接管回调（稳定引用，避免破坏 HtmlRenderer 的 memo）。
+ *
+ * 点开 Butler 正文里的 `homework/…` / `materials/…` 链接时，**开在抽屉自己的右栏**
+ * （ButlerDocPanel，复用画布的 md 阅读器）。不能走 file.open：抽屉是覆盖式浮层
+ * （z-[1320]），画布右侧预览面板会被它整块遮住，表现为「点了没反应」。
+ */
+const openDocInDrawer = (path: string): boolean => {
+  openButlerDoc(path);
+  return true;
+};
 
 /**
  * 右栏（预览区）的分区：由左栏功能键切换。
@@ -223,7 +240,7 @@ import { BUTLER_UNREAD_CHANGED_EVENT, notifyButlerUnreadChanged } from './butler
  * 'search' = 公众号「检索实况」（**没有左栏键**，由「Search WeChat Articles」触发时自动切入）：
  * 逐篇显示召回结果与 AI 精选的判定（留下 / 去除）。它是**过程态**，不落库。
  */
-export type ButlerSection = 'detail' | 'today' | 'memories' | 'rules' | 'calendar' | 'meeting' | 'search';
+export type ButlerSection = 'detail' | 'today' | 'preferences' | 'rules' | 'calendar' | 'meeting' | 'search';
 
 export interface ButlerDrawerProps {
   section: ButlerSection;
@@ -399,17 +416,16 @@ function workspaceBlock(folder: ButlerWorkspaceFolder | null): string {
 }
 
 /** kind → 分区（与原通知中心同一分类口径，保证历史回执落入正确的筛选 chip） */
-type BucketKey = 'schedules' | 'actions' | 'web' | 'inspect' | 'notes' | 'meeting';
+type BucketKey = 'schedules' | 'actions' | 'web' | 'notes' | 'meeting';
 const BUCKET_OF: Record<string, BucketKey> = {
   check: 'schedules',
   todo_del: 'schedules',
   calendar: 'schedules',
-  'daily-report': 'schedules',
+  'notes-maintenance': 'schedules',
   task: 'actions',
   note: 'actions',
   info: 'actions',
   web: 'web',
-  inspect: 'inspect',
   notes: 'notes',
   meeting: 'meeting',
 };
@@ -417,7 +433,6 @@ const BUCKET_LABEL: Record<BucketKey, string> = {
   schedules: 'SCHEDULES',
   actions: 'ACTIONS',
   web: 'WEB',
-  inspect: 'INSPECT',
   notes: 'NOTES',
   meeting: 'MEETINGS',
 };
@@ -555,74 +570,10 @@ function ButlerWaitingLine({
   );
 }
 
-/** 紧凑时间：今天只给「21:30」，跨天给「09-26 21:30」。用于联系人列预览 / 通知卡片头等**列表位**。 */
-function formatTime(ms: number): string {
-  const d = new Date(ms);
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  if (sameDay) return hm;
-  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`;
-}
-
 /**
- * 通知详情里「日程」块的完整事件信息。
- * 通知条目（ButlerNoticeItem）只带 title / 开始时刻，地点 / 备注 / 结束时间 / 重复 / 提醒
- * 都要点开后按事件 id 到日历库现取（GET /api/calendar/events?event_id=…）。
+ * （原 `formatTime` / `ScheduleDetail` / `fmtEventWhen` / `fmtReminderMinutes`
+ *  已于 2026-10-05 迁往 `./noticeFormat`，桌面与移动端共用；本地仅保留 import。）
  */
-interface ScheduleDetail {
-  event_id: string;
-  title: string;
-  description: string | null;
-  location: string | null;
-  start_time: string | null;
-  end_time: string | null;
-  all_day: boolean;
-  status: string;
-  priority: string;
-  recurrence: RecurrenceRule | null;
-  reminder_minutes: number[];
-  reminder_disabled: boolean;
-}
-
-/** 本地日期 YYYY-MM-DD */
-function fmtEventDate(iso: string): string {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return iso;
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-/** 本地 HH:mm */
-function fmtEventHm(iso: string): string {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return iso;
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
-/** 日程时间：`2026-09-25 · All day` / `2026-09-25 · 14:00 - 15:00`；结束跨天补一段日期 */
-function fmtEventWhen(startIso: string | null, endIso: string | null, allDay: boolean): string {
-  if (!startIso) return '';
-  const date = fmtEventDate(startIso);
-  if (allDay) return `${date} · All day`;
-  const start = `${date} · ${fmtEventHm(startIso)}`;
-  if (!endIso) return start;
-  const sameDay = fmtEventDate(endIso) === date;
-  return `${start} - ${sameDay ? fmtEventHm(endIso) : `${fmtEventDate(endIso)} ${fmtEventHm(endIso)}`}`;
-}
-
-/** 提前量人类可读：`30 min` / `1 h` / `1 day`（与推送正文口径一致） */
-function fmtReminderMinutes(minutes: number): string {
-  if (minutes >= 1440) {
-    const d = minutes / 1440;
-    return `${Number.isInteger(d) ? d : d.toFixed(1)} day`;
-  }
-  if (minutes >= 60) {
-    const h = minutes / 60;
-    return `${Number.isInteger(h) ? h : h.toFixed(1)} h`;
-  }
-  return `${minutes} min`;
-}
 
 /**
  * 联系人列**标题右侧**那枚时间（比 formatTime 更省宽度）：
@@ -673,14 +624,8 @@ function wechatTimeLabel(ms: number, now = Date.now()): string {
 }
 
 /**
- * 公众号检索的**阶段**（curate → read → summarize → digest → verify → done）。
- *
- * 为什么只剩一个枚举：本次收敛后，检索的产物（综述 + 每篇卡片）由服务端落库、以小微的
- * **真实消息**呈现；前端不再自己攒一份「精选列表 / 逐篇摘要 / 要点」的镜像状态
- * （旧 WechatAIState 里的 picks/articles/digest/points 已无人读，属死状态）。
- * 前端在检索期间只需要两件事：当前处于哪个阶段（→ 一句过程文案）、有没有失败。
+ * （原 `WechatPhase` 阶段枚举已随检索流程迁往 `./useWechatSearch`，本文件不再持有它。）
  */
-type WechatPhase = 'curating' | 'reading' | 'summarizing' | 'digest' | 'verifying' | 'done';
 
 /** 微信式时间分隔条：**居中、极小、灰字**，不占底色——它只是时间轴上的一个刻度 */
 function TimeSeparator({ ms }: { ms: number }) {
@@ -824,7 +769,7 @@ const RIGHT_MIN_W = 280;
  * 2026-09-27 起并入这里 —— 否则它既进不了本时间线、又被行角标计入，
  * 表现为「Bobby 没有未读项却亮着角标」。
  */
-const NOTIFY_KINDS = new Set(['daily-report', 'calendar', 'inspect', 'meeting']);
+const NOTIFY_KINDS = new Set(['notes-maintenance', 'calendar', 'meeting']);
 
 /**
  * 抽屉（居中弹窗）高度上限：min(760px, 86vh)。
@@ -1110,6 +1055,122 @@ function SelectActionBar({
   );
 }
 
+/* 正文产物行（`OutputFile: <path>`）的解析已抽到 lib/butler/output-files（纯字符串逻辑，可单测）：
+   管家是跨项目助手，除项目相对路径外还接受绝对路径（别的项目的材料要发给用户时用的就是绝对路径）。 */
+
+/** 文件大小展示（微信式卡片副标题的一截） */
+function formatFileBytes(bytes: number): string {
+  if (!bytes || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 按扩展名给出卡片副标题用的类型名，以及图标纸面上的字标（留空 = 纯折角纸，如图片与未知类型） */
+function fileKindMeta(name: string): { label: string; mark: string } {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  if (ext === 'md' || ext === 'markdown') return { label: 'Markdown', mark: 'MD' };
+  if (ext === 'docx' || ext === 'doc') return { label: 'Word', mark: 'DOC' };
+  if (ext === 'pdf') return { label: 'PDF', mark: 'PDF' };
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return { label: 'Excel', mark: 'XLS' };
+  if (ext === 'pptx' || ext === 'ppt') return { label: 'PowerPoint', mark: 'PPT' };
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return { label: 'Image', mark: '' };
+  return { label: ext ? ext.toUpperCase() : 'File', mark: '' };
+}
+
+/**
+ * 折角文档字标（自绘 SVG）：一张占满图标槽的折角纸，纸面印类型字标（MD / PDF / DOC…）。
+ *
+ * 为什么去掉灰底方块：36px 的灰底会把里面的纸压到 20px，折角与描边全都糊掉。去掉底色后
+ * glyph 直接放大到 34px 贴着槽位，细节看得清，长列表里也更好认；字标沿用中性灰，
+ * 颜色仍交给文件名与大小承载，图标本身不抢戏。
+ */
+function DocTypeGlyph({ mark }: { mark?: string }) {
+  const ink = 'var(--ink-muted)';
+  return (
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0">
+      {/* 纸身：右上角被切掉，留给折角 */}
+      <path
+        d="M4.5 2H14.5L21.5 9V19.5A2.5 2.5 0 0 1 19 22H4.5A2.5 2.5 0 0 1 2 19.5V4.5A2.5 2.5 0 0 1 4.5 2Z"
+        stroke={ink}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      {/* 折起的一角 */}
+      <path
+        d="M14.5 2L21.5 9H14.5Z"
+        fill={ink}
+        fillOpacity={0.22}
+        stroke={ink}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      {mark ? (
+        <text
+          x="11.7"
+          y="17.4"
+          textAnchor="middle"
+          fontSize="6.2"
+          fontWeight={600}
+          letterSpacing="0.3"
+          fill={ink}
+          style={{ fontFamily: 'inherit' }}
+        >
+          {mark}
+        </text>
+      ) : null}
+    </svg>
+  );
+}
+
+/**
+ * 微信式文件卡片：左侧折角文档字标（无底色，占满图标槽）+ 右侧「文件名 / 类型 · 大小」，整卡可点。
+ * 点击走 openDocInDrawer —— 在抽屉自己的右栏用 md 阅读器打开（画布面板被抽屉遮挡）。
+ */
+function WechatFileCard({ path, name }: { path: string; name: string }) {
+  const [size, setSize] = useState<number | null>(null);
+  const meta = fileKindMeta(name);
+  const relPath = !(path.startsWith('/') || path.startsWith('~/'));
+
+  useEffect(() => {
+    if (!relPath) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cur = await fetch('/api/projects').then((r) => r.json());
+        const projectId = cur?.current_id || '';
+        if (!projectId) return;
+        const resp = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stat', project_id: projectId, file_path: path }),
+        });
+        const data = await resp.json();
+        if (!cancelled && data?.success && data.exists) setSize(data.size ?? 0);
+      } catch { /* 拿不到大小就不显示，不影响打开 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [path, relPath]);
+
+  const sub = [meta.label, size !== null ? formatFileBytes(size) : ''].filter(Boolean).join(' · ');
+
+  return (
+    <button
+      type="button"
+      onClick={() => openDocInDrawer(path)}
+      className="flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
+      style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)' }}
+      title={`Open ${name}`}
+    >
+      <DocTypeGlyph mark={meta.mark} />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-xs" style={{ color: 'var(--ink-strong)' }}>{name}</span>
+        <span className="block truncate text-10" style={{ color: 'var(--ink-muted)' }}>{sub}</span>
+      </span>
+    </button>
+  );
+}
+
 /**
  * 助手气泡（含「朗读」按钮）。
  *
@@ -1134,6 +1195,7 @@ function AssistantBubble({
   onEnterSelect,
   onOpenCard,
   onOpenTrace,
+  failedPaths,
 }: {
   message: DialogMessage;
   title: string;
@@ -1148,6 +1210,8 @@ function AssistantBubble({
   onOpenCard?: (url: string) => void;
   /** 摘要消息携带的检索实况账本：点开右栏回看这一轮「留了哪几篇、判掉了哪几篇」 */
   onOpenTrace?: () => void;
+  /** 打不开的产物路径：这些路径的 `OutputFile:` 行还原回正文，保证路径仍可见、可复制 */
+  failedPaths: Set<string>;
 }) {
   const read = useReadAloud(message.id, () => message.content);
   const busy = read.phase === 'loading';
@@ -1172,6 +1236,27 @@ function AssistantBubble({
   /** 复制 / 多选的操作对象：无正文时退化为卡片标题列表，免得「复制」复制出一段空串 */
   const actionText = message.content || (message.cards ?? []).map((c) => c.title).join('\n');
 
+  /**
+   * 正文里的产物文件（`OutputFile:` 行）→ 独立文件卡片。
+   * 只在回复**完成后**解析：流式期间路径还可能是半行，先做卡会闪出一张坏卡；
+   * 完成后把标记行从显示正文里剥离，改由卡片承载（正文只剩「说人话」的部分）。
+   */
+  const parsed = message.pending
+    ? { files: [] as Array<{ path: string; name: string }>, clean: message.content }
+    : extractOutputFiles(message.content);
+  const outputFiles = parsed.files;
+  /**
+   * 读不出来的产物：把它的 `OutputFile:` 行还原回正文（2026-10-05）。
+   * 卡片点不开时那一行已被剥离，用户连路径都看不到、文件等于凭空消失；还原后至少能复制路径。
+   */
+  const bodyContent = restoreOutputFileLines(
+    parsed.clean,
+    outputFiles.filter((f) => failedPaths.has(f.path)).map((f) => f.path),
+  );
+  const hasBody = !!bodyContent.trim();
+  /** 纯文件消息（正文只剩空串）时不渲染空气泡，只留卡片；其余情况照常渲染 */
+  const showBubble = hasBody || !!message.pending || outputFiles.length === 0;
+
   const Icon = busy ? Loader2 : read.phase === 'playing' ? Pause : read.phase === 'paused' ? Play : Volume2;
   const label = busy ? 'Preparing…' : read.phase === 'playing' ? 'Pause' : read.phase === 'paused' ? 'Resume' : 'Read aloud';
 
@@ -1182,37 +1267,48 @@ function AssistantBubble({
       )}
       <ContactAvatar name={title} personality={personality} size={BUBBLE_AVATAR_SIZE} />
       <div className="min-w-0 max-w-[80%]">
-        <div className="butler-md relative px-3 py-1.5 text-xs" style={bubbleOtherStyle}>
-          {message.content ? (
-            <StreamingMarkdown content={message.content} streaming={!!message.pending} />
-          ) : hasTrace ? (
-            // 综述写失败但有账本：给一句落点并指向右栏，别留一排假 loading 点
-            <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
-              检索到 {traceKept} 篇文章 · 见右侧实况
-            </span>
-          ) : message.cards?.length ? (
-            // 存量消息（无账本）：只有卡片、没有综述正文，同样给一句落点
-            <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
-              检索到 {message.cards.length} 篇文章
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1">
-              <span
-                className="h-1 w-1 animate-pulse rounded-full"
-                style={{ backgroundColor: 'var(--primary)' }}
-              />
-              <span
-                className="h-1 w-1 animate-pulse rounded-full"
-                style={{ backgroundColor: 'var(--primary)', animationDelay: '150ms' }}
-              />
-              <span
-                className="h-1 w-1 animate-pulse rounded-full"
-                style={{ backgroundColor: 'var(--primary)', animationDelay: '300ms' }}
-              />
-            </span>
-          )}
-          <BubbleTail side="left" color={WECHAT_OTHER_BUBBLE} />
-        </div>
+        {showBubble && (
+          <div className="butler-md relative px-3 py-1.5 text-xs" style={bubbleOtherStyle}>
+            {message.content ? (
+              <StreamingMarkdown content={bodyContent} streaming={!!message.pending} onOpenDoc={openDocInDrawer} />
+            ) : hasTrace ? (
+              // 综述写失败但有账本：给一句落点并指向右栏，别留一排假 loading 点
+              <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
+                检索到 {traceKept} 篇文章 · 见右侧实况
+              </span>
+            ) : message.cards?.length ? (
+              // 存量消息（无账本）：只有卡片、没有综述正文，同样给一句落点
+              <span className="text-11" style={{ color: 'var(--ink-muted)' }}>
+                检索到 {message.cards.length} 篇文章
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1">
+                <span
+                  className="h-1 w-1 animate-pulse rounded-full"
+                  style={{ backgroundColor: 'var(--primary)' }}
+                />
+                <span
+                  className="h-1 w-1 animate-pulse rounded-full"
+                  style={{ backgroundColor: 'var(--primary)', animationDelay: '150ms' }}
+                />
+                <span
+                  className="h-1 w-1 animate-pulse rounded-full"
+                  style={{ backgroundColor: 'var(--primary)', animationDelay: '300ms' }}
+                />
+              </span>
+            )}
+            <BubbleTail side="left" color={WECHAT_OTHER_BUBBLE} />
+          </div>
+        )}
+
+        {/* 产物文件卡片（微信式）：正文 `OutputFile:` 行剥离后由这里承载，整卡点开右栏预览 */}
+        {outputFiles.length > 0 && (
+          <div className={hasBody ? 'mt-1.5 flex flex-col gap-1.5' : 'flex flex-col gap-1.5'}>
+            {outputFiles.map((f) => (
+              <WechatFileCard key={f.path} path={f.path} name={f.name} />
+            ))}
+          </div>
+        )}
 
         {/* 检索到的文章卡片：**只在没有实况账本时才显示**（存量消息的兜底，见 showCards）。
             有账本时这一整块让位给下方的单一入口 —— 右栏已经逐篇列全（含被判掉的），
@@ -1418,227 +1514,11 @@ function WechatSearchLive({
  * 只是标一枚拇指向下，说明「模型看过它、没选它」。
  */
 
-/**
- * 检索实况里一行的**副文案**：按判定给不同的信息——
- * 留下 = 入选理由（优先）→ 一句摘要；去除 = 搜索摘要（它能说明「为什么这篇没用」）；待判定 = 阶段提示。
- */
-function traceSubtitle(it: WechatSearchTraceItem): string {
-  if (it.verdict === 'kept') return (it.reason || it.summary || it.snippet || '').trim();
-  if (it.verdict === 'dropped') return (it.snippet || '未给出入选理由').trim();
-  return '等待精选判定…';
-}
+/* 检索实况（traceSubtitle / traceVerdictIcon / TraceRow / TraceSection / 面板本体）
+   已于 2026-10-05 抽出到 ./ButlerSearchTrace —— 该面板完全受控，移动端 /butler 需复用同一份实现。
+   下方 import 的 ButlerSearchTrace 即原 WechatSearchTrace 组件。 */
 
-/** 判定 → 图标 + 配色（拇指是唯一的状态语言：向上 = 留下看，向下 = 判掉） */
-function traceVerdictIcon(it: WechatSearchTraceItem) {
-  if (it.verdict === 'kept') {
-    return { Icon: ThumbsUp as LucideIcon, color: 'var(--primary)', title: '精选留下（已精读）' };
-  }
-  if (it.verdict === 'dropped') {
-    return { Icon: ThumbsDown as LucideIcon, color: 'var(--ink-faint)', title: '精选去除（仍可点开）' };
-  }
-  return { Icon: Loader2 as LucideIcon, color: 'var(--ink-faint)', title: '待判定' };
-}
 
-/** 实况一行（提到组件外：在 render 里现造组件会让它每次渲染都重新挂载） */
-function TraceRow({ it, onOpen }: { it: WechatSearchTraceItem; onOpen: (url: string) => void }) {
-  const { Icon, color, title } = traceVerdictIcon(it);
-  const sub = traceSubtitle(it);
-  return (
-    <button
-      type="button"
-      onClick={() => onOpen(it.url)}
-      className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[var(--paper-hover)]"
-      title={`${it.title}\n${it.url}`}
-    >
-      <div className="min-w-0 flex-1">
-        <div
-          className="line-clamp-2 text-11 font-medium"
-          style={{ color: it.verdict === 'dropped' ? 'var(--ink-muted)' : 'var(--ink-strong)' }}
-        >
-          {it.title}
-        </div>
-        <div className="mt-0.5 flex items-center gap-1.5">
-          {it.account ? (
-            <span className="min-w-0 truncate text-10" style={{ color: 'var(--ink-faint)' }}>
-              {it.account}
-            </span>
-          ) : null}
-          {it.verdict === 'kept' && it.readOk === false ? (
-            <span className="shrink-0 text-10" style={{ color: 'var(--ink-faint)' }}>
-              正文未读到
-            </span>
-          ) : null}
-          {it.verdict === 'kept' && it.keypoint ? (
-            <span
-              className="shrink-0 rounded px-1 text-10"
-              style={{ backgroundColor: 'var(--primary-soft)', color: 'var(--primary-strong)' }}
-            >
-              {it.keypoint}
-            </span>
-          ) : null}
-        </div>
-        {sub ? (
-          <div className="mt-0.5 line-clamp-2 text-10" style={{ color: 'var(--ink-faint)' }}>
-            {sub}
-          </div>
-        ) : null}
-      </div>
-      <span className="mt-0.5 shrink-0" title={title}>
-        <Icon className={`h-3.5 w-3.5 ${it.verdict === 'pending' ? 'animate-spin' : ''}`} style={{ color }} />
-      </span>
-    </button>
-  );
-}
-
-/** 实况一段（留下 / 判定中 / 去除） */
-function TraceSection({
-  label,
-  rows,
-  tone,
-  onOpen,
-}: {
-  label: string;
-  rows: WechatSearchTraceItem[];
-  tone: string;
-  onOpen: (url: string) => void;
-}) {
-  if (rows.length === 0) return null;
-  return (
-    <div className="mt-2">
-      <div className="px-2 text-10 font-semibold tracking-wide" style={{ color: tone }}>
-        {label} · {rows.length}
-      </div>
-      <div className="mt-0.5 flex flex-col gap-0.5">
-        {rows.map((it) => (
-          <TraceRow key={it.id} it={it} onOpen={onOpen} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * 右栏「检索实况」（2026-10-01）：本轮公众号检索的**逐篇账本**。
- *
- * 与中栏的关系：中栏只呈现结果（小微落库的综述 + 精选卡片），这里呈现**过程判定**——
- * 召回的全部文章、哪几篇被留下、哪几篇被判掉。**过程态临时、不落库**
- * （与 lib/core/butler-search.ts 的「结果态落库」互补，记忆 §K 同一条铁律的两面）。
- *
- * 分三段：留下 / 判定中 / 去除。段内保持召回原顺序（序即检索排序，不重排以免对不上号）。
- * 每一行整行可点 —— 包括被判掉的：判定只是「模型没选它」，不该剥夺用户打开它的权利。
- */
-function WechatSearchTrace({
-  query,
-  plan,
-  items,
-  busy,
-  status,
-  notice,
-  onOpen,
-}: {
-  query: string;
-  /** 检索前规划：问题被拆成哪几个检索方向（2026-10-01 自中栏过程块移交至此） */
-  plan: { intent?: string; queries?: string[] } | null;
-  items: WechatSearchTraceItem[];
-  /** 检索是否还在跑（跑完就不再显示「判定中」段） */
-  busy: boolean;
-  status: string;
-  notice: string;
-  onOpen: (url: string) => void;
-}) {
-  const kept = items.filter((i) => i.verdict === 'kept');
-  const pending = items.filter((i) => i.verdict === 'pending');
-  const dropped = items.filter((i) => i.verdict === 'dropped');
-
-  return (
-    <div className="flex h-full flex-col">
-      {/* 头部：检索词 + 计数。计数是这一栏的「一句话结论」：召回了多少、留下几篇、判掉几篇 */}
-      <div className="shrink-0 px-3 pb-1 pt-2.5">
-        <div className="truncate text-11 font-semibold" style={{ color: 'var(--ink-strong)' }} title={query}>
-          {query || '公众号检索'}
-        </div>
-        {/* 问题下方 = 这个问题的拆解（2026-10-01 自中栏过程块移来）：
-            拆解与判定读的本来是同一件事——「按这几个方向搜、收回来这些篇、留这几篇」，
-            分处两栏就得来回对；同屏之后，方向与篇目才对得上号。
-            单方向时不显示（「已拆为 1 个方向」是废话，与原来中栏的门控一致）。 */}
-        {plan?.queries && plan.queries.length > 1 ? (
-          <div className="mt-1 flex flex-wrap items-center gap-1">
-            <span className="text-10" style={{ color: 'var(--ink-faint)' }}>
-              已拆为 {plan.queries.length} 个检索方向{plan.intent ? `（${plan.intent}）` : ''}：
-            </span>
-            {plan.queries.map((qq, i) => (
-              <span
-                key={i}
-                className="inline-flex items-center rounded-md px-1.5 py-0.5 text-10"
-                style={{ backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)', border: '1px solid var(--line)' }}
-              >
-                {qq}
-              </span>
-            ))}
-          </div>
-        ) : null}
-        {/* 计数只在有账本时出现：候选还没回来时写「召回 0 / 留下 0 / 去除 0」是废话，
-            那半程由下面的空态负责交代（正在检索…）。 */}
-        {items.length > 0 ? (
-          <div className="mt-0.5 flex items-center gap-2 text-10" style={{ color: 'var(--ink-muted)' }}>
-            <span className="tabular-nums">召回 {items.length}</span>
-            <span className="tabular-nums" style={{ color: 'var(--primary-strong)' }}>
-              留下 {kept.length}
-            </span>
-            <span className="tabular-nums">去除 {dropped.length}</span>
-            {busy ? (
-              <span className="inline-flex items-center gap-1" style={{ color: 'var(--ink-faint)' }}>
-                <span className="h-1 w-1 animate-pulse rounded-full" style={{ backgroundColor: 'var(--primary)' }} />
-                {notice || status}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
-        {!busy && notice ? (
-          <div className="mt-1 text-10" style={{ color: 'var(--danger)' }}>
-            {notice}
-          </div>
-        ) : null}
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
-        {items.length === 0 ? (
-          <div className="px-3 py-8 text-center text-xs" style={{ color: 'var(--ink-faint)' }}>
-            {busy ? (
-              /* 起搜到候选回来之间还有几秒：这一档不能写成「还没有检索记录」，
-                 否则点下去的那一瞬间面板在说反话。 */
-              <>
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-1 w-1 animate-pulse rounded-full" style={{ backgroundColor: 'var(--primary)' }} />
-                  <span className="h-1 w-1 animate-pulse rounded-full" style={{ backgroundColor: 'var(--primary)', animationDelay: '150ms' }} />
-                  <span className="h-1 w-1 animate-pulse rounded-full" style={{ backgroundColor: 'var(--primary)', animationDelay: '300ms' }} />
-                </span>
-                <div className="mt-1.5 text-10">{notice || status}</div>
-              </>
-            ) : (
-              <>
-                还没有检索记录
-                <div className="mt-1 text-10">在联系人列输入关键词，点「Search WeChat Articles」</div>
-              </>
-            )}
-          </div>
-        ) : (
-          <>
-            <TraceSection label="留下" rows={kept} tone="var(--primary-strong)" onOpen={onOpen} />
-            {/* 判定中 / 未判定：检索被验证码拦下时 enrich 根本没跑，这些篇目既不留下也没被判掉，
-                得照常列出来（否则面板只剩头部计数、看起来像没搜到东西）。 */}
-            <TraceSection
-              label={busy ? '判定中' : '未判定'}
-              rows={pending}
-              tone="var(--ink-faint)"
-              onOpen={onOpen}
-            />
-            <TraceSection label="去除" rows={dropped} tone="var(--ink-muted)" onOpen={onOpen} />
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
 
 /**
  * 通知卡片的文本源（Copy 与朗读共用）：
@@ -2100,6 +1980,13 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
    * 栏首自带关闭键，可**单独收起**（不关整个抽屉，见 closeRight）。
    */
   const [rightOpen, setRightOpen] = useState(false);
+  /**
+   * Today 面板的「这次打开」令牌，仅用作 key：每点一次左栏 Today 就 +1，强制面板重挂载。
+   * 为什么需要：右栏收起 / 从别的分区切回时面板本就会卸载（rightMounted = rightVisible || meetingActive），
+   * 页签自然回到 Report；唯独「右栏已停在 Today、再点一次 Today」不会卸载 ——
+   * 不加 token 就会留在上次那一页（如 Schedule），与「点 Today 默认展示 Report」相悖。
+   */
+  const [todayOpenSeq, setTodayOpenSeq] = useState(0);
   /** Today 键红点：当日 Report 摘要的日期键（null = 今天还没生成 / 探针未返回） */
   const [todayDigestDate, setTodayDigestDate] = useState<string | null>(null);
   /** 红点已读标记：用户看过的摘要日期键（localStorage 同步过来） */
@@ -2228,285 +2115,55 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
    * 联系人列把命中嵌在对应联系人行下面，形成微信式「聊天记录」结果。
    */
   const [searchHits, setSearchHits] = useState<Record<string, ThreadMessageHit[]>>({});
-  /** 搜狗微信检索的候选（enrich 请求的入参；**不再单独渲染** —— 展示统一走落库卡片） */
-  const [wechatLoading, setWechatLoading] = useState(false);
-  const [wechatCaptcha, setWechatCaptcha] = useState(false);
-  /** 精编当前阶段（enrich SSE 的 phase 帧）——只用来选一句过程文案 */
-  const [wechatPhase, setWechatPhase] = useState<WechatPhase | null>(null);
-  /** 精编是否报错（error 帧）：过程文案降级为「AI summary unavailable」 */
-  const [wechatFailed, setWechatFailed] = useState(false);
-  /** 检索前规划产出的「意图 + 检索方向」：用于在面板显式展示问题已被拆解为 N 个方向 */
-  const [wechatPlan, setWechatPlan] = useState<{ intent?: string; queries?: string[] } | null>(null);
-  /** 检索进行中：时间线末尾显示「小微正在检索」过程块；检索一结束即由落库消息接管 */
-  const [wechatBusy, setWechatBusy] = useState(false);
-  /** 检索兜底说明（桥离线 / 未找到文章等）；非空 → 过程块显示这条说明 */
-  const [wechatNotice, setWechatNotice] = useState('');
   /**
-   * 右栏「检索实况」的逐篇账本（本轮召回的每一篇 + 精选判定）。
-   * **过程态临时、不落库** —— 落库的是结果（综述 + 精选卡片）。这里刻意保留「被判掉的那几篇」：
-   * AI 一次只精读 3 篇，剩下的是**被判掉而不是没搜到**，用户有权看到并照旧点开。
+   * ⚠️ 2026-10-05 起，「公众号检索」的**全部状态与流程**（候选 / 阶段 / 逐篇账本 / 历史回看）
+   * 已抽到 `./useWechatSearch`，桌面与移动端共用同一份判定逻辑（抽取原因见该文件头）。
+   * 本文件不再内联任何检索状态；下方只保留与本检索无关的 `searchHits`（跨会话消息搜索）。
    */
-  const [wechatTrace, setWechatTrace] = useState<WechatSearchTraceItem[]>([]);
-  /** 本轮检索词（实况面板的标题；起搜时与 searchQ 同步，避免之后改搜索词把标题改掉） */
-  const [wechatTraceQuery, setWechatTraceQuery] = useState('');
-  /**
-   * 从**历史消息**重开的账本（点综述气泡下方「查看检索实况」）。
-   *
-   * 与 `wechatTrace` 的分工：那个是**本轮进行中**的实时账本；这个是**落库后回看**某一轮的账本。
-   * 二者互斥显示（历史优先），因为一份面板同时只能摆一份账本。
-   * `messageId` 是它与消息的绑定键 —— 消息被删时据此把右栏一并清空（见 deleteMessages）。
-   */
-  const [openedTrace, setOpenedTrace] = useState<{ messageId: string; trace: WechatSearchTrace } | null>(null);
-  /** 在途的公众号检索/精编请求（再次点击或抽屉卸载时中断） */
-  const wechatAbortRef = useRef<AbortController | null>(null);
-  /** 中断在途检索并收掉过程块 */
-  const cancelWechatSearch = () => {
-    wechatAbortRef.current?.abort();
-    wechatAbortRef.current = null;
-    setWechatBusy(false);
-  };
-  /** 当前会话 threadId（与 activeThreadId 同源）。声明在此（早于 runWechatSearch）：起搜/收尾都要按它切换并回填。 */
+  /** 当前会话 threadId（与 activeThreadId 同源）。起搜 / 收尾都要按它切换并回填。 */
   const threadIdRef = useRef<string | null>(null);
   /**
-   * 主动触发公众号检索（搜索栏按钮）：
-   *   关键词 → 搜狗微信候选 → enrich SSE（LLM 精选 3 篇 → 读正文 → 逐篇摘要 + 综述 → CoVe 校验）。
-   * **不再随输入自动检索**：公众号检索要开专属后台标签、读正文耗时，必须由用户显式点击才发起。
-   *
-   * 结果去向（2026-09-30 收敛为「一条小微对话回合」）：服务端把「提问 + 综述 + 文章卡片」落库进
-   * 小微常驻线程（见 lib/core/butler-search.ts）；前端起搜切到小微、跑完**重载小微消息**，
-   * 于是结果以真实对话消息呈现（综述气泡 + 每篇卡片）；进行中这段由 WechatSearchLive 补过程感知。
+   * 「公众号检索」整条链路已抽到 `./useWechatSearch`（2026-10-05）：桌面与移动端共用同一份
+   * 判定逻辑，本处只注入**抽屉才有的动作** ——
+   *   - activateSearchThread：起搜 / 收尾都把「小微」切到中栏并加载其真源消息
+   *     （只切 id 不加载 → 中栏会残留上一个会话的内容）
+   *   - openTrace：起搜那一刻把右栏推到「检索实况」（文档预览优先占右栏，故先收掉它）
    */
-  const runWechatSearch = async () => {
-    const q = searchQ.trim();
-    if (!q) return;
-    wechatAbortRef.current?.abort();
-    const ac = new AbortController();
-    wechatAbortRef.current = ac;
-    let dead = false;
-    const isDead = () => dead || ac.signal.aborted;
+  const activateSearchThread = useCallback(async () => {
+    const st = await fetchSessionState(SEARCH_THREAD_ID).catch(() => null);
+    threadIdRef.current = SEARCH_THREAD_ID;
+    setActiveThreadId(SEARCH_THREAD_ID);
+    writeActiveThreadId(SEARCH_THREAD_ID);
+    if (st) setMessages(st.messages);
+  }, []);
 
-    /** 切到「小微」并加载其真源消息（含上一轮落库的综述 + 卡片）。
-     *  只 setActiveThreadId 不加载消息 → 中栏残留上一个会话的内容（旧缺陷）。 */
-    const focusSearchThread = async () => {
-      const st = await fetchSessionState(SEARCH_THREAD_ID).catch(() => null);
-      threadIdRef.current = SEARCH_THREAD_ID;
-      setActiveThreadId(SEARCH_THREAD_ID);
-      writeActiveThreadId(SEARCH_THREAD_ID);
-      if (st) setMessages(st.messages);
-    };
-
-    // 搜索结果归属「小微」常驻会话：起搜即切到小微，综述 + 每篇卡片作为小微的回复呈现
-    await focusSearchThread();
-    if (isDead()) return;
-    setWechatBusy(true);
-    setWechatNotice('');
-    setWechatLoading(true);
-    setWechatCaptcha(false);
-    setWechatPhase(null);
-    setWechatFailed(false);
-    setWechatPlan(null);
-    // 实况从头开始：本轮召回还没到手，先把上一轮的账本清掉（过程态不跨轮保留），
-    // 并退出「回看历史某一轮」的状态 —— 新任务接管右栏，不能还停在旧账本上。
-    setWechatTrace([]);
-    setWechatTraceQuery(q);
-    setOpenedTrace(null);
-    // 实时预览从**点下去那一刻**就开始：先切到实况（此时还没有候选，面板写「正在检索…」），
-    // 候选一到就逐篇入账。若等几秒候选回来后才跳过去，前半程就是黑的——那不叫实时。
-    // 文档预览会**优先占住右栏**（见右栏渲染的 docPath 分支），不先收掉它，实况就被挡在下面。
+  const openSearchTrace = useCallback(() => {
     if (docPath) onCloseDoc();
     setRightOpen(true);
     onSectionChange('search');
+  }, [docPath, onCloseDoc, onSectionChange]);
 
-    /**
-     * 消费 enrich SSE —— 只挑「过程可见性」需要的帧：
-     *   captcha → 要人工验证；phase → 阶段文案；error → 失败降级；done → 收尾。
-     *   curated / article / summary → **只用于右栏「检索实况」的判定展示**（哪篇留下、哪篇判掉）。
-     *   它们记的是**判定过程**而不是结果内容，不落库也不进会话，所以在这里接一份不算镜像真源：
-     *   结果内容（综述 + 卡片）仍只由服务端落库、前端重载后呈现，两者互不覆盖。
-     * digest 帧刻意不接：综述是结果态，中栏已有落库的那一份。
-     */
-    const applyEnrichEvent = (ev: Record<string, unknown>) => {
-      if (isDead()) return;
-      switch (ev.type as string) {
-        case 'captcha':
-          setWechatCaptcha(true);
-          break;
-        case 'phase':
-          setWechatPhase(((ev.phase as WechatPhase) || 'curating'));
-          break;
-        case 'curated': {
-          // 精选结果：入选的置 kept（带理由），**没入选的置 dropped**（而不是留着转圈）。
-          // 判定键用服务端回的 id（= 候选下标），url 相同再兜一层，避免下标错位。
-          const items = (Array.isArray(ev.items) ? ev.items : []) as Array<{
-            id?: number; title?: string; url?: string; account?: string; reason?: string;
-          }>;
-          const picked = new Set(items.map((i) => (typeof i.id === 'number' ? i.id : -1)));
-          const pickedUrls = new Set(items.map((i) => i.url || ''));
-          setWechatTrace((prev) =>
-            prev.map((t) => {
-              const hit = items.find((i) => i.id === t.id) ?? items.find((i) => i.url && i.url === t.url);
-              const isPicked = picked.has(t.id) || (!!t.url && pickedUrls.has(t.url));
-              return {
-                ...t,
-                verdict: isPicked ? 'kept' : 'dropped',
-                ...(hit?.title ? { title: hit.title } : {}),
-                ...(hit?.account ? { account: hit.account } : {}),
-                ...(hit?.reason ? { reason: hit.reason } : {}),
-              };
-            }),
-          );
-          break;
-        }
-        case 'article': {
-          // 单篇正文读取结果：只在 kept 上出现，用来标「正文没读到 → 只有搜索摘要」
-          const id = typeof ev.id === 'number' ? ev.id : -1;
-          const url = typeof ev.url === 'string' ? ev.url : '';
-          const ok = !!ev.ok;
-          setWechatTrace((prev) =>
-            prev.map((t) =>
-              t.id === id || (!!url && t.url === url)
-                ? {
-                    ...t,
-                    readOk: ok,
-                    ...(typeof ev.title === 'string' && ev.title ? { title: ev.title } : {}),
-                    ...(typeof ev.account === 'string' && ev.account ? { account: ev.account } : {}),
-                  }
-                : t,
-            ),
-          );
-          break;
-        }
-        case 'summary': {
-          const id = typeof ev.id === 'number' ? ev.id : -1;
-          setWechatTrace((prev) =>
-            prev.map((t) =>
-              t.id === id
-                ? {
-                    ...t,
-                    ...(typeof ev.summary === 'string' && ev.summary ? { summary: ev.summary } : {}),
-                    ...(typeof ev.keypoint === 'string' && ev.keypoint ? { keypoint: ev.keypoint } : {}),
-                  }
-                : t,
-            ),
-          );
-          break;
-        }
-        case 'error':
-          setWechatFailed(true);
-          // 精编中断：还没判定的一律按「判掉」落定（模型没选它们，也没读它们），
-          // 免得面板上留一排永远转圈的「判定中」。
-          setWechatTrace((prev) => prev.map((t) => (t.verdict === 'pending' ? { ...t, verdict: 'dropped' } : t)));
-          break;
-        case 'done':
-          setWechatPhase('done');
-          break;
-      }
-    };
-    /** 读取 SSE 流并按 `data:` 行分帧 */
-    const consumeEnrich = async (resp: Response) => {
-      const reader = resp.body?.getReader();
-      if (!reader) return;
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (isDead()) { try { await reader.cancel(); } catch { /* ignore */ } break; }
-        buf += dec.decode(value, { stream: true });
-        let i = buf.indexOf('\n\n');
-        while (i !== -1) {
-          const chunk = buf.slice(0, i);
-          buf = buf.slice(i + 2);
-          for (const line of chunk.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            const payload = line.slice(5).trim();
-            if (!payload) continue;
-            try { applyEnrichEvent(JSON.parse(payload) as Record<string, unknown>); } catch { /* 忽略坏帧 */ }
-          }
-          i = buf.indexOf('\n\n');
-        }
-      }
-    };
-    /** 命中候选后触发的 AI 精选流水线（模型不可用/桥离线时静默保留原始列表） */
-    const runEnrich = async (
-      hits: Array<{ title: string; url: string; account?: string; snippet?: string }>,
-      meta?: { intent?: string; queries?: string[] },
-    ) => {
-      try {
-        const resp = await fetch('/api/butler/wechat-search/enrich', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ q, hits, intent: meta?.intent || '', queries: meta?.queries || [] }),
-          signal: ac.signal,
-        });
-        if (!resp.ok || !resp.body) return;
-        await consumeEnrich(resp);
-      } catch { /* 中断/失败：保留原始列表 */ }
-    };
+  /**
+   * 检索状态全部来自 hook（命名逐项对齐改造前的本地 state，下游调用点零改动）。
+   * loading / phase / failed 三项不进本文件 —— 它们只用于拼 `status`，由 hook 内部消费完毕。
+   */
+  const {
+    captcha: wechatCaptcha,
+    plan: wechatPlan,
+    busy: wechatBusy,
+    notice: wechatNotice,
+    trace: wechatTrace,
+    traceQuery: wechatTraceQuery,
+    status: wechatSummaryStatus,
+    openedTrace,
+    run: runWechatSearchRaw,
+    openTraceFromMessage,
+    clearOpenedTraceIfDeleted,
+    openHit: openWechatHit,
+  } = useWechatSearch({ activateSearchThread, openTrace: openSearchTrace });
 
-    try {
-      const resp = await fetch(`/api/butler/wechat-search?q=${encodeURIComponent(q)}`, { signal: ac.signal });
-      const data = (await resp.json().catch(() => ({}))) as {
-        ok?: boolean;
-        captcha?: boolean;
-        results?: Array<{ title: string; url: string; account?: string; snippet?: string }>;
-        intent?: string;
-        queries?: string[];
-      };
-      if (isDead()) return;
-      if (!data.ok) {
-        // 桥离线（非桌面端 / 未启动）：不静默——过程块给一句兜底说明，免得像卡死
-        setWechatCaptcha(false);
-        setWechatPlan(null);
-        setWechatNotice('公众号检索暂不可用（桥未启动 / 非桌面端）');
-      } else {
-        setWechatCaptcha(!!data.captcha);
-        const hits = data.results && data.results.length ? data.results : null;
-        // 检索前规划结果（意图 + 拆解方向）即时上屏：用户刚发起就能看到问题被拆成几个方向
-        setWechatPlan({ intent: data.intent, queries: data.queries });
-        // 候选到手就立刻收掉 loading：过程块切到「读正文 / 写综述」阶段（由 wechatPhase 驱动）
-        setWechatLoading(false);
-        if (hits) {
-          // 逐篇账本入账（全 pending）：右栏已在本轮起搜时切过来了，
-          // 从这里开始用户能看着候选一篇篇被判留下 / 判掉，不用等综述写完。
-          setWechatTrace(
-            hits.map((h, i) => ({
-              id: i,
-              title: h.title,
-              url: h.url,
-              ...(h.account ? { account: h.account } : {}),
-              ...(h.snippet ? { snippet: h.snippet } : {}),
-              verdict: 'pending' as const,
-            })),
-          );
-        }
-        if (!hits && !data.captcha) setWechatNotice('没有检索到相关公众号文章');
-        if (hits && !data.captcha) await runEnrich(hits, { intent: data.intent, queries: data.queries });
-      }
-    } catch {
-      if (!isDead()) {
-        setWechatCaptcha(false);
-        setWechatNotice('检索中断，请重试');
-      }
-    } finally {
-      if (!ac.signal.aborted) {
-        setWechatLoading(false);
-        // 服务端已把本轮「提问 + 综述 + 卡片」落库（enrich 路由末尾 recordSearchExchange）
-        // → 重载小微消息，让这一轮以**真实对话消息**呈现（综述气泡 + 卡片），过程块随之退场。
-        const st = await fetchSessionState(SEARCH_THREAD_ID).catch(() => null);
-        if (st) {
-          threadIdRef.current = SEARCH_THREAD_ID;
-          setActiveThreadId(SEARCH_THREAD_ID);
-          writeActiveThreadId(SEARCH_THREAD_ID);
-          setMessages(st.messages);
-        }
-        setWechatBusy(false);
-      }
-      dead = true;
-    }
-  };
-  /** 组件卸载 → 中断在途请求 */
-  useEffect(() => () => { wechatAbortRef.current?.abort(); }, []);
+  /** 「Search WeChat Articles」入口：取搜索栏当前词发起（空词在 hook 内直接返回） */
+  const runWechatSearch = useCallback(() => void runWechatSearchRaw(searchQ), [runWechatSearchRaw, searchQ]);
   /**
    * 跨会话消息搜索（联系人列嵌套「聊天记录」结果）：输入去抖 220ms 后打服务端，
    * 命中按 threadId 归组。清空搜索词 / 请求中断一律清空映射，不残留上一词的结果。
@@ -2534,41 +2191,6 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       ac.abort();
     };
   }, [searchQ]);
-  /** 检索过程文案：只反映「现在这一步在干什么」，不承载任何结果（结果已落库成消息） */
-  const wechatSummaryStatus = wechatLoading
-    ? 'Searching WeChat…'
-    : wechatFailed
-      ? 'AI summary unavailable'
-      : wechatPhase === 'reading'
-        ? 'Reading articles…'
-        : wechatPhase === 'summarizing'
-          ? 'Summarizing…'
-          : wechatPhase === 'digest'
-            ? 'Writing summary…'
-            : wechatPhase === 'verifying'
-              ? 'Verifying…'
-              : 'AI interpreting…';
-  /** 点击公众号结果 → 在 Hippo Browser 打开（保留 /link?url= 形态，不打断当前页面） */
-  const openWechatHit = useCallback((url: string) => {
-    void desktop.hippoBrowser.navigate(url);
-  }, []);
-  /**
-   * 点综述气泡下方的「查看检索实况」→ 右栏切到实况，并显示**这一轮**的账本（落库那份）。
-   *
-   * 与实时预览的区别只在于账本从哪来：这里来自消息（可跨会话/重启回看），
-   * 那里来自本轮 SSE 帧。两者的显示口径完全一致（同一个 WechatSearchTrace 组件）。
-   * 若正开着文档预览，先收掉（docPath 优先占右栏，不收就被挡在下面）。
-   */
-  const openTraceFromMessage = useCallback(
-    (msg: DialogMessage) => {
-      if (!msg.searchTrace?.items.length) return;
-      setOpenedTrace({ messageId: msg.id, trace: msg.searchTrace });
-      if (docPath) onCloseDoc();
-      setRightOpen(true);
-      onSectionChange('search');
-    },
-    [docPath, onCloseDoc, onSectionChange],
-  );
   /** Butler 结构化确认卡（排程创建/改/删）：由服务端 butler_confirm 帧触发，用户确认后才真正执行 */
   const [butlerConfirm, setButlerConfirm] = useState<ButlerConfirmState | null>(null);
   /** 刚复制过链接的报告 id（1.6s 内显示 ✓ 反馈） */
@@ -3001,120 +2623,24 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     onSectionChange('meeting');
   }, [meetingActive, onSectionChange]);
 
-  /** 按 id 批量删除（一条请求带全部 id，服务端 DELETE 接数组） */
-  const removeNotices = useCallback((ids: string[]) => {
-    if (ids.length === 0) return;
-    void fetch('/api/butler/inbox', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    }).catch(() => undefined);
-    for (const id of ids) removeButlerNotice(id);
-  }, []);
+  /** 按 id 批量删除（实现见 noticeActions：一条请求带全部 id） */
+  const removeNotices = useCallback((ids: string[]) => removeNoticesByIds(ids), []);
 
   const removeNotice = useCallback((n: ButlerNotice) => removeNotices([n.id]), [removeNotices]);
 
-  /**
-   * 待办项勾选。默认只写回 items 快照（避免刷新后回到未勾选）；
-   * 带 `source` 的项（日历提醒的事件 / 便签待办行）接**真实链路**，与日历、StickyTodo 双向联动：
-   *   - 'event'：PATCH 日历事件状态 → 广播 calendar-events-changed（日历面板 / 便签画布重载）
-   *     与 butler-event-sync（其余回执里同事件的条目一并联动）；
-   *     事件源自便签行时，服务端 PATCH 会反向落回那一行（pushCalendarEventToSticky）。
-   *   - 'sticky'：POST /api/sticky-notes action=toggle_line 勾掉便签正文对应行，
-   *     该行已入日历则由便签侧前向同步把事件置为完成（reconcileStickyNoteEvents）。
-   * 写盘失败时**不翻转本地**——宁可看起来没点上，也不要显示一个假的完成态。
-   */
-  const toggleItem = useCallback((n: ButlerNotice, item: ButlerNoticeItem) => {
-    const done = item.status !== 'done';
-    const nextItems = (n.items ?? []).map((it) =>
-      it.key === item.key ? { ...it, status: done ? 'done' : '' } : it,
-    );
-    const patchLocal = () => {
-      void fetch('/api/butler/inbox', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: [n.id], items: nextItems }),
-      }).catch(() => undefined);
-      patchButlerNotice(n.id, { items: nextItems });
-    };
+  /** 待办项勾选（实现见 noticeActions：含日历事件 / 便签行的真实联动链路，移动端共用） */
+  const toggleItem = useCallback((n: ButlerNotice, item: ButlerNoticeItem) => toggleNoticeItem(n, item), []);
 
-    // 事件类条目：source 显式声明，或**存量行兜底**——改造前落库的日程提醒 items_json 没写
-    // source，但 kind='calendar' 的条目 key 恒为日历事件 id，等同 source='event'，否则老卡片点完成仍不联动。
-    const eventKey = item.source === 'event' || n.kind === 'calendar' ? item.key : '';
-    if (eventKey) {
-      const eventId = eventKey;
-      void fetch(`/api/calendar/events?event_id=${encodeURIComponent(eventId)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: done ? 'done' : 'scheduled' }),
-      })
-        .then(() => {
-          window.dispatchEvent(new Event('calendar-events-changed'));
-          if (done) {
-            window.dispatchEvent(
-              new CustomEvent('butler-event-sync', { detail: { eventId, action: 'done' } }),
-            );
-          }
-        })
-        .catch(() => undefined);
-      patchLocal();
-      return;
-    }
+  /** 报告类回执：把正文下载为 .md（实现见 noticeActions） */
+  const downloadReportMd = useCallback((n: ButlerNotice) => downloadNoticeMd(n), []);
 
-    if (item.source === 'sticky' && item.sticky) {
-      const s = item.sticky;
-      void fetch('/api/sticky-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'toggle_line',
-          project_id: s.projectId,
-          note_id: s.noteId,
-          page_id: s.pageId,
-          line_index: s.lineIndex,
-          text: s.text,
-          done,
-        }),
-      })
-        .then(async (res) => {
-          const data = (await res.json().catch(() => ({}))) as { success?: boolean };
-          if (!data.success) return;
-          patchLocal();
-          // 勾选可能改到了关联事件（该行已入日历）→ 广播重载日历 / 便签画布
-          window.dispatchEvent(new Event('calendar-events-changed'));
-        })
-        .catch(() => undefined);
-      return;
-    }
-
-    patchLocal();
-  }, []);
-
-  /** 报告类回执：把正文下载为 .md（文件名规则与 /api/butler/report 的 Content-Disposition 同源） */
-  const downloadReportMd = useCallback((n: ButlerNotice) => {
-    const blob = new Blob([n.body || ''], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${sanitizeReportFileName(n.title)}.md`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }, []);
-
-  /** 报告类回执：复制 AI 可 web_fetch 的正文链接（粘贴到对话框即可让 Butler 读取分析） */
+  /** 报告类回执：复制正文链接（实现见 noticeActions；「已复制」反馈仍由本组件计时器负责） */
   const copyReportLink = useCallback((id: string) => {
-    const link = buildReportShareUrl(window.location.origin, id);
     const done = () => {
       setCopiedLinkId(id);
       window.setTimeout(() => setCopiedLinkId((c) => (c === id ? null : c)), 1600);
     };
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(link).then(done).catch(() => undefined);
-    } else {
-      done();
-    }
+    void copyNoticeReportLink(id).then(done).catch(() => undefined);
   }, []);
 
   /** 拉会话列表（打开抽屉 / 删除后刷新）；返回列表便于调用方接着用 */
@@ -3336,16 +2862,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         index: m.id.startsWith('h-') ? Number(m.id.slice(2)) : undefined,
       }));
       setMessages((prev) => prev.filter((m) => !want.has(m.id)));
-      // 删掉的若是「正被右栏回看的那一轮检索」→ 右栏一并清空。
-      // 账本本来就挂在消息上（落库同生共死），这里是**当前这一屏**的同步：
-      // 否则右栏会继续摆着一份已经没有出处的账本。
-      // 连**实时那份**（wechatTrace）一起清：本轮刚从实时账本切到历史回看时，两份是同一轮的两份副本，
-      // 只清 openedTrace 会让右栏「看起来没清」（退回显示实时那份、内容一模一样）。
-      if (openedTrace && want.has(openedTrace.messageId)) {
-        setOpenedTrace(null);
-        setWechatTrace([]);
-        setWechatTraceQuery('');
-      }
+      // 删掉的若是「正被右栏回看的那一轮检索」→ 右栏一并清空（口径见 hook 内注释，桌面与移动端同源）。
+      clearOpenedTraceIfDeleted(want);
       leaveSelectMode();
       const tid = threadIdRef.current;
       if (!tid) return;
@@ -3360,7 +2878,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       }
       void refreshChatSessions();
     },
-    [messages, openedTrace, leaveSelectMode, refreshChatSessions],
+    [messages, leaveSelectMode, refreshChatSessions, clearOpenedTraceIfDeleted],
   );
 
   /**
@@ -3915,6 +3433,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   /** 左栏功能键：切预览区分区，并**展开右栏**（右栏默认不占位，不展开等于点了没反应） */
   const pickSection = useCallback(
     (s: ButlerSection) => {
+      // 点 Today = 「重新打开 Today」：换 token 强制面板重挂载，页签回到 Report（理由见 todayOpenSeq）。
+      if (s === 'today') setTodayOpenSeq((n) => n + 1);
       setRightOpen(true);
       onSectionChange(s);
     },
@@ -3929,6 +3449,20 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     setRightOpen(false);
     onCloseDoc();
   }, [onCloseDoc]);
+
+  /**
+   * 文档预览栏「编辑」：把文档转交画布右侧预览面板的 md 编辑器打开。
+   * 抽屉是居中浮层（z-[1320]）会盖住画布，所以先发 file.open 让画布挂上文件标签，
+   * 再收起抽屉（并清掉右栏 docPath），用户直接落到画布的编辑器里。
+   */
+  const handleEditDoc = useCallback(
+    (path: string) => {
+      openFileByProjectRelPath(path);
+      onCloseDoc();
+      onClose();
+    },
+    [onCloseDoc, onClose],
+  );
 
   /** 右栏「就这条继续问」→ 把回执标题拼成提问并发送 */
   const askAboutNotice = useCallback(
@@ -4285,6 +3819,22 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     inputRef.current?.focus();
   }, []);
   /**
+   * 打不开的产物卡片路径（2026-10-05）。ButlerDocPanel 读失败时回调上报，记在这里，
+   * 由 AssistantBubble 把这些路径的 `OutputFile:` 行**还原回正文**——卡片点不开时
+   * 用户至少还能看到并复制路径（原先该行被剥离，文件等于凭空消失）。
+   */
+  const [docOpenFailed, setDocOpenFailed] = useState<Set<string>>(() => new Set());
+  const handleDocLoadResult = useCallback((path: string, ok: boolean) => {
+    setDocOpenFailed((prev) => {
+      if (ok === !prev.has(path)) return prev; // 状态没变：保持引用稳定，不触发重渲染
+      const next = new Set(prev);
+      if (ok) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  /**
    * 右栏（预览区）可见性 —— **默认不显示**，与宽窄无关（`rightOpen` 默认 false）：
    *   - `rightOpen`：点左栏功能键 / 点中栏某条回执 / 点桌面通知 → true；栏首关闭键 → false
    *   - `docPath`：文档预览由 ButlerHost 从外部推入，推入即展开（用户在画布上点开了一个文档）
@@ -4403,15 +3953,15 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         }
       : null;
   /** 右栏顶部条的标题（文档预览态不叠此条——ButlerDocPanel 自带 header）。
-   *  文案与左栏 RailItem 保持一致（Memory / Calendar）：同一栏目在两处的名字必须同字，
-   *  否则顶部条写「Memory」、左栏写 Memories，读起来像两个不同的地方。
-   *  memories 与 rules 是**同一个 Memory 面板**的两个段，顶栏统一写 Memory
+   *  文案与左栏 RailItem 保持一致（Memories / Calendar）：同一栏目在两处的名字必须同字，
+   *  否则顶部条与左栏读起来像两个不同的地方。
+   *  preferences 与 rules 是**同一个 Memories 面板**的两个段，顶栏统一写 Memories
    *  （2026-10-02 由 Customize 改名：这个面管的是「我记得你什么」，不是外观定制）。 */
   const rightTitle =
     section === 'today'
       ? 'Today'
-      : section === 'rules' || section === 'memories'
-        ? 'Memory'
+      : section === 'rules' || section === 'preferences'
+        ? 'Memories'
         : section === 'calendar'
           ? 'Calendar'
           : section === 'meeting'
@@ -4515,18 +4065,19 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         {/* 原「详情」键已删（2026-09-26）：它与联系人列置顶的常驻「通知助理」行重复，
             而右栏详情分区本身仍可由悬浮球 / 桌面通知 / 点通知卡片头部打开，能力没有丢。 */}
         <RailItem icon={Sun} label="Today" active={rightOpen && section === 'today'} dot={todayHasNew} onClick={() => pickSection('today')} />
-        {/* Memories 键已删（2026-09-29）：记忆并入 Memory 台的第四段，不再单占一个左栏键。
-            外部的 `openButlerMemories()` 事件仍可用——它落到 section='memories'，由同一个
-            Memory 面板带 `initialSection='memories'` 打开（见右栏渲染与 rightTitle）。 */}
-        {/* Memory（2026-10-02 由 Customize 改名）：Butler 的记忆台，六段
-            —— Memories / Rules / Skills / Threads / Evidence / Knowledge（见 ButlerMemoryConsole 头注释；
-            "don't …" 类否定式写入落 Rules 段，不落 Memories）。
+        {/* 独立的 Memories 键已删（2026-09-29）：记忆并入 Memories 台的 Preferences 段，不再单占一个左栏键。
+            外部的 `openButlerPreferences()`（旧名 `openButlerMemories()` 为兼容别名）事件仍可用——
+            它落到 section='preferences'，由同一个 Memories 面板带 `initialSection='preferences'` 打开
+            （见右栏渲染与 rightTitle）。 */}
+        {/* Memories（2026-10-02 由 Customize 改名）：Butler 的记忆台，六段
+            —— Preferences / Rules / Skills / Threads / Evidence / Knowledge（见 ButlerMemoryConsole 头注释；
+            "don't …" 类否定式写入落 Rules 段，不落 Preferences）。
             图标沿用原 Memories 的 Brain（2026-09-29）：记忆已并入本页，
             「大脑 = 关于我的认知」这层含义跟着搬过来，比通用清单图标更贴。 */}
         <RailItem
           icon={Brain}
-          label="Memory"
-          active={rightOpen && (section === 'rules' || section === 'memories')}
+          label="Memories"
+          active={rightOpen && (section === 'rules' || section === 'preferences')}
           onClick={() => pickSection('rules')}
         />
         <RailItem icon={CalendarDays} label="Calendar" active={rightOpen && section === 'calendar'} onClick={() => pickSection('calendar')} />
@@ -4620,7 +4171,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
               小微执行检索任务时，右栏自动切到实况并逐篇刷新（见 runWechatSearch）；
               任务跑完账本留在右栏，翻篇即退出——「实时显示」依附于这次任务，不是一个单独的去处。 */}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        {/* hide-scrollbar：侧边栏靠左贴边，原生滚动条会压在最左一列文字上（见 globals.css 工具类） */}
+        <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-2 py-2">
           {contactRows.length === 0 ? (
             <div className={`px-3 text-center text-xs ${searchQ ? 'py-3' : 'py-10'}`} style={{ color: 'var(--ink-faint)' }}>
               {searchQ ? 'No matching chats' : 'No chats yet — say something to Butler'}
@@ -4883,6 +4435,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                             onEnterSelect={enterSelectMode}
                             onOpenCard={openWechatHit}
                             onOpenTrace={() => openTraceFromMessage(m)}
+                            failedPaths={docOpenFailed}
                           />
                         )}
                       </Fragment>
@@ -5487,18 +5040,19 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
           </div>
           {/* 其余分区：会议视图不可见时才渲染，避免与它同时占位 */}
           {!meetingVisible && (docPath ? (
-            <ButlerDocPanel path={docPath} embedded onClose={closeRight} />
+            <ButlerDocPanel path={docPath} embedded onClose={closeRight} onEdit={handleEditDoc} onLoadResult={handleDocLoadResult} />
           ) : section === 'today' ? (
-            <ButlerTodayPanel embedded />
-          ) : section === 'rules' || section === 'memories' ? (
-            /* rules 与 memories 同一面板（Memory 台），区别只在「一进来落在哪」：
-               - rules    → 不给 initialSection，面板默认停在脑图落点
-               - memories → 直接落到 Memories 段（openButlerMemories 走的也是这里）
+            /* key：点 Today 一律重挂载，页签回到 Report（理由见 pickSection / todayOpenSeq） */
+            <ButlerTodayPanel key={`today-${todayOpenSeq}`} embedded />
+          ) : section === 'rules' || section === 'preferences' ? (
+            /* rules 与 preferences 同一面板（Memories 台），区别只在「一进来落在哪」：
+               - rules        → 不给 initialSection，面板默认停在脑图落点
+               - preferences  → 直接落到 Preferences 段（openButlerPreferences 走的也是这里）
                key 让两段之间切换时重挂载，initialSection 才会生效。 */
             <ButlerMemoryConsole
               key={section}
               embedded
-              {...(section === 'memories' ? { initialSection: 'memories' as const } : {})}
+              {...(section === 'preferences' ? { initialSection: 'preferences' as const } : {})}
             />
           ) : section === 'calendar' ? (
             <ButlerCalendarPanel />
@@ -5509,7 +5063,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                    此时自然不显示，不必特殊处理）
                  - 否则 = 本轮实时预览（SSE 帧攒的，带检索方向拆解）
                **被判掉的那几篇照样能点开** —— 判定只是「模型没选它」。 */
-            <WechatSearchTrace
+            <ButlerSearchTrace
               query={openedTrace ? openedTrace.trace.query : wechatTraceQuery}
               plan={
                 openedTrace
@@ -5528,7 +5082,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                 <>
               <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
                 {/* 正文：通知标题（原「邮箱头」那一行）+ body —— **只在没有待办项时才出现**；
-                    有待办项时清单本身就是正文内容（inspect / 笔记整理类报告没有 items，正文照旧显示，
+                    有待办项时清单本身就是正文内容（/inspect 与笔记整理类报告没有 items，正文照旧显示，
                     那才是它们唯一的内容）。
                     标题保留在这里：calendar 等回执的 body 往往把标题又写一遍，还带上推送当时才成立的
                     相对时间（in ~5 min 早已过期），标题放在这里反而最清楚。
@@ -5542,7 +5096,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                       </div>
                       <div className="butler-md mt-2 text-xs" style={{ color: 'var(--ink)' }}>
                         {selectedNotice.body ? (
-                          <StreamingMarkdown content={selectedNotice.body} streaming={false} />
+                          <StreamingMarkdown content={selectedNotice.body} streaming={false} onOpenDoc={openDocInDrawer} />
                         ) : null}
                       </div>
                     </>

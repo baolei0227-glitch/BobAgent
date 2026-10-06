@@ -4,8 +4,8 @@
  * Butler 通知常驻宿主（无骨架，仅 toast 栈 + 「执行中」浮层）
  *
  * 承接原 WantedNoticeCenter 的全部「非收件箱」职责，使收件箱 UI 可以彻底重做/替换：
- *   1. 轮询消费舱（唯一）：/api/butler/daily-report（30s）+ /api/butler/reminders（30s + calendar-events-changed 立即）
- *      —— 生产舱（daily-report.ts / event-reminder.ts）只写 pending.json，其他组件禁止做同类轮询（避免双消费竞态）
+ *   1. 轮询消费舱（唯一）：/api/butler/daily-tasks（30s）+ /api/butler/reminders（30s + calendar-events-changed 立即）
+ *      —— 生产舱（daily-tasks.ts / event-reminder.ts）只写 pending.json，其他组件禁止做同类轮询（避免双消费竞态）
  *   1.5 Butler 独立心跳：/api/butler/tick（60s，body 带当前 projectId）—— 唤醒到期定时规则，
  *      产出 notice 时同样走 butler.notice bus（不新增展示通道，也不引入常驻后台调度器）。
  *   2. 订阅 bus butler.notice → 内存去重 → 落库 inbox / 桌面通知 → 写入 butlerNotices store；
@@ -14,7 +14,7 @@
  *   4. 日历反向联动（butler-event-sync）：日历端完成/删除事件 → 收件箱对应条目自动完成/删除
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CalendarClock, CheckCircle2, ClipboardList, Info, Loader2, Mic, NotebookPen, Search, Zap } from 'lucide-react';
+import { CalendarClock, CheckCircle2, ClipboardList, Info, Loader2, Mic, NotebookPen, Zap } from 'lucide-react';
 import { bus, BusEvents, type ButlerExecutingPayload, type ButlerNoticeItem, type ButlerNoticePayload } from '@/lib/bus';
 import { desktop } from '@/lib/desktop-adapter';
 import { getCurrentProjectId } from '@/lib/current-project';
@@ -49,8 +49,7 @@ const KIND_ICON: Record<string, { Icon: typeof Zap; color: string; label: string
   notes: { Icon: NotebookPen, color: 'var(--primary)', label: 'NOTES' },
   info: { Icon: Info, color: 'var(--info)', label: 'INFO' },
   calendar: { Icon: CalendarClock, color: 'var(--warn)', label: 'REMINDER' },
-  'daily-report': { Icon: ClipboardList, color: 'var(--info)', label: 'REPORT' },
-  inspect: { Icon: Search, color: 'var(--warn)', label: 'CHECK' },
+  'notes-maintenance': { Icon: ClipboardList, color: 'var(--info)', label: 'NOTES' },
   meeting: { Icon: Mic, color: 'var(--primary)', label: 'MEETING' },
   web: { Icon: Info, color: 'var(--info)', label: 'WEB' },
   check: { Icon: CalendarClock, color: 'var(--warn)', label: 'SCHEDULE' },
@@ -246,7 +245,7 @@ export function ButlerNoticeHost() {
       if (polling) return;
       polling = true;
       try {
-        const res = await fetch('/api/butler/daily-report');
+        const res = await fetch('/api/butler/daily-tasks');
         const d = (await res.json()) as {
           success?: boolean;
           reports?: { kind?: string; title: string; body: string; time: number; items?: ButlerNoticeItem[]; dedupeKey?: string }[];
@@ -254,7 +253,8 @@ export function ButlerNoticeHost() {
         if (alive && d?.success && Array.isArray(d.reports)) {
           for (const r of d.reports) {
             bus.publish(BusEvents.butlerNotice, {
-              kind: r.kind === 'inspect' ? 'inspect' : 'daily-report',
+              // 服务端 pending 的 kind 即最终 kind（唯一来源为 notes-maintenance）
+              kind: (r.kind ?? 'notes-maintenance') as ButlerNoticePayload['kind'],
               title: r.title,
               body: r.body,
               time: r.time,
@@ -262,7 +262,7 @@ export function ButlerNoticeHost() {
               items: r.items,
               source: 'scheduled',
               dedupeKey: r.dedupeKey,
-              // 服务端（GET /api/butler/daily-report）已按同一策略裁决并计数：
+              // 服务端（GET /api/butler/daily-tasks）已按同一策略裁决并计数：
               // 免打扰窗口内报告**留在队列**、窗口结束后续发。客户端不再二次过闸，否则双重计数。
               interrupt: 'always',
             });
@@ -402,8 +402,8 @@ export function ButlerNoticeHost() {
       const evId = detail?.eventId;
       if (!evId) return;
       const current = getButlerNotices();
-      // 单事件提醒邮件（calendar 等）整封联动；多事件日报只动对应 item
-      const noticeLevel = (n: ButlerNotice) => n.kind !== 'daily-report';
+      // 单事件提醒回执整封联动；多事件回执只动对应 item
+      const noticeLevel = (n: ButlerNotice) => n.kind !== 'notes-maintenance';
 
       if (detail.action === 'done') {
         for (const n of current) {

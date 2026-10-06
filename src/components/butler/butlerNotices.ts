@@ -25,7 +25,7 @@ export interface ButlerNotice {
    * 未点开 → 卡片右上角亮红点、好友头像角标计数 +1；点开即置 true（只前不退）。
    */
   read: boolean;
-  /** 结构化待办项（日历提醒 / 日报），卡片内渲染为可勾选 chip 行 */
+  /** 结构化待办项（日历提醒 / 日程查询），卡片内渲染为可勾选 chip 行 */
   items: ButlerNoticeItem[] | null;
   /** 点击通知时的动作（open-calendar 等） */
   actionType: string | null;
@@ -34,7 +34,7 @@ export interface ButlerNotice {
   /** kind='web'/'info' 时携带的对话存档（详情内可展开） */
   messages: ChatMessage[] | null;
   /**
-   * 服务端幂等去重键（`morning:YYYY-MM-DD` / `sticky:YYYY-MM-DD` / `evt:…`）。
+   * 服务端幂等去重键（`notes:YYYY-MM-DD` / `evt:…`）。
    * 每日报告同日归组靠它认（标题正则只是兜底，见 lib/butler/report-group.ts）；
    * 存量行的历史数据也可能为空 → 归组时回落到标题。
    */
