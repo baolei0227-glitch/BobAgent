@@ -53,6 +53,7 @@ import type { MessageAttachment } from '@/lib/types';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import type { TagScope } from '@/lib/files/tags';
+import type { SessionRequestPayload } from '@/lib/project/project-events';
 import { Button } from '@/components/ui/button';
 
 export interface ProjectInfo {
@@ -1247,7 +1248,12 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   // 后端 watcher：工作区目录/项目内文件变更实时推送（SSE）
   //  - projects-changed：项目列表增删 → 刷新项目列表
   //  - files-changed：项目内文件可见变更 → Workspace 浮层打开时刷新已展开项目的文件树
-  // workspaceOpen / expandedProjects 用 ref 镜像：回调读取最新值，同时避免重建 EventSource
+  //  - project-switched / session-request：**服务端工具（管家）发起的界面动作**（2026-10-05）——
+  //    管家在对话里切了项目 / 要求新建会话时，服务端只能改自己的状态，界面得自己跟上；
+  //    这里把两条推送翻译成画布既有的窗口事件（与用户手动点击走同一条刷新链路）：
+  //      project-switched → bobagent:project-switched（Sidebar 刷新列表 + CanvasFlow 重载画布）
+  //      session-request  → quick-launch-open（CanvasFlow 既有的「新建会话并可选自动执行」链路）
+  // workspaceOpen / expandedProjects / currentId 用 ref 镜像：回调读取最新值，同时避免重建 EventSource
   const workspaceOpenRef = useRef(workspaceOpen);
   useEffect(() => {
     workspaceOpenRef.current = workspaceOpen;
@@ -1256,6 +1262,20 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   useEffect(() => {
     expandedProjectsRef.current = expandedProjects;
   }, [expandedProjects]);
+  const currentIdRef = useRef(currentId);
+  useEffect(() => {
+    currentIdRef.current = currentId;
+  }, [currentId]);
+  // 最近一次「画布重载完成」的项目 id：跨项目新建会话要等它变成目标项目再落节点，
+  // 否则新节点会被随后到达的重载结果（setNodes 整表替换）冲掉
+  const canvasReadyProjectRef = useRef<string>('');
+  useEffect(() => {
+    const onReady = (e: Event) => {
+      canvasReadyProjectRef.current = (e as CustomEvent<{ projectId?: string }>).detail?.projectId || '';
+    };
+    window.addEventListener('bobagent:project-canvas-ready', onReady);
+    return () => window.removeEventListener('bobagent:project-canvas-ready', onReady);
+  }, []);
   useEffect(() => {
     const es = new EventSource('/api/projects/events');
     const onChanged = () => loadProjects();
@@ -1276,13 +1296,76 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
         /* 负载非法（心跳/异常）忽略 */
       }
     };
+    // 管家切换了当前项目：走与侧边栏点击切换同一条无刷新链路
+    const onProjectSwitched = (e: MessageEvent) => {
+      try {
+        const { project_id } = JSON.parse(e.data || '{}') as { project_id?: string };
+        if (!project_id) return;
+        window.dispatchEvent(new CustomEvent('bobagent:project-switched', { detail: { projectId: project_id } }));
+      } catch {
+        /* 负载非法忽略 */
+      }
+    };
+    // 管家要求新建会话（可带首个任务）：复用 quick-launch-open 的建节点 + 后台自动执行链路
+    const onSessionRequest = (e: MessageEvent) => {
+      let payload: SessionRequestPayload | null = null;
+      try {
+        payload = JSON.parse(e.data || '{}') as SessionRequestPayload;
+      } catch {
+        return;
+      }
+      const projectId = payload?.project_id;
+      if (!projectId) return;
+      const open = () => {
+        window.dispatchEvent(
+          new CustomEvent('quick-launch-open', {
+            detail: {
+              label: payload?.label || 'Quick',
+              agent: payload?.agent || 'chat',
+              prompt: payload?.prompt || '',
+              auto: payload?.auto === true,
+              projectId,
+            },
+          }),
+        );
+      };
+      // 目标项目就是当前项目、或画布已在该项目上就绪 → 直接建
+      if (projectId === currentIdRef.current || canvasReadyProjectRef.current === projectId) {
+        open();
+        return;
+      }
+      // 跨项目：等服务端切项目 + 画布重载完成再落节点（否则新节点会被随后到达的重载结果冲掉）；
+      // 超时兜底，避免重载失败/未广播时把这次请求吞掉
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onReady = (ev: Event) => {
+        if (done) return;
+        const pid = (ev as CustomEvent<{ projectId?: string }>).detail?.projectId;
+        if (pid && pid !== projectId) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        window.removeEventListener('bobagent:project-canvas-ready', onReady);
+        open();
+      };
+      window.addEventListener('bobagent:project-canvas-ready', onReady);
+      timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        window.removeEventListener('bobagent:project-canvas-ready', onReady);
+        open();
+      }, 5000);
+    };
     es.addEventListener('projects-changed', onChanged);
     es.addEventListener('files-changed', onFilesChanged);
     es.addEventListener('node-outcome', onNodeOutcome);
+    es.addEventListener('project-switched', onProjectSwitched);
+    es.addEventListener('session-request', onSessionRequest);
     return () => {
       es.removeEventListener('projects-changed', onChanged);
       es.removeEventListener('files-changed', onFilesChanged);
       es.removeEventListener('node-outcome', onNodeOutcome);
+      es.removeEventListener('project-switched', onProjectSwitched);
+      es.removeEventListener('session-request', onSessionRequest);
       es.close();
     };
   }, [loadProjects]);

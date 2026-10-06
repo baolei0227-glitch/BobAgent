@@ -124,6 +124,15 @@ export function UnifiedViewer({
     if (status !== 'stale') setOutcomeStaleReason(null);
   }, []);
 
+  /**
+   * 传给渲染器宿主的错误回调必须是**引用稳定**的。
+   * 原先是内联箭头 `onError={(msg) => setError(msg)}`，父组件每重渲染就换一个新身份；
+   * 而下游组件（如 DocxTiptapEditor）会把它放进装载 effect 的依赖数组 ⇒
+   * **父层任何一次重渲染都会让子组件重跑一次整篇装载**（表现为整个面板反复闪烁）。
+   * setError 是 useState 的 setter（本身引用稳定），故空依赖锁定即可，行为完全等价。
+   */
+  const handleViewerError = useCallback((msg: string) => setError(msg), []);
+
   // --- 轨迹事件检查器（TraceTimeline 选中事件 → 右侧检查器） ---
   const [inspectorSpan, setInspectorSpan] = useState<TraceSpan | null>(null);
   useEffect(() => {
@@ -674,7 +683,7 @@ export function UnifiedViewer({
                 proxyUrl={proxyUrl}
                 fileName={fileName}
                 source={effectiveSource ?? 'local'}
-                onError={(msg) => setError(msg)}
+                onError={handleViewerError}
                 nodeMdId={nodeMdId || discoveredNodeId || undefined}
                 filePath={filePath}
                 projectId={projectId || undefined}
