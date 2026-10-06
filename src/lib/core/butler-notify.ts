@@ -23,7 +23,7 @@ export { NOTIFY_THREAD_ID, NOTIFY_TITLE };
 /** 系统推送类通知：其余 kind 是用户主动操作的回执（只弹 toast 或归属各自会话），不进这个联系人。
  *  meeting（会议纪要 / 会议记录）由 meeting-finalize 直写 inbox、没有自己的会话，2026-09-27 并入本范围：
  *  否则它 thread_id 为空、既不属于任何联系人，又会被角标计入 → 「Bobby 没有未读项却亮着角标」。 */
-const NOTIFY_KINDS = ['daily-report', 'calendar', 'inspect', 'meeting'];
+const NOTIFY_KINDS = ['notes-maintenance', 'calendar', 'meeting'];
 const NOTIFY_KIND_SET = new Set(NOTIFY_KINDS);
 
 export function isNotifyKind(kind: string): boolean {

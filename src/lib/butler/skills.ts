@@ -289,6 +289,24 @@ function normalizeSteps(steps?: SkillStep[]): SkillStep[] {
   return out;
 }
 
+/** 归一化适用条件（修订写口用）：未传的字段沿用原值；objectTypes 走白名单。 */
+function normalizeWhen(input: Partial<SkillWhen> | undefined, base: SkillWhen): SkillWhen {
+  if (!input) return base;
+  const when: SkillWhen = {
+    keywords:
+      input.keywords !== undefined
+        ? (Array.isArray(input.keywords) ? input.keywords : []).map((k) => String(k).trim()).filter(Boolean)
+        : base.keywords,
+  };
+  const scenes = input.scenes !== undefined ? toStringArray(input.scenes) : (base.scenes ?? []);
+  if (scenes.length > 0) when.scenes = scenes;
+  const objectTypes = input.objectTypes !== undefined ? toObjectTypes(input.objectTypes) : (base.objectTypes ?? []);
+  if (objectTypes.length > 0) when.objectTypes = objectTypes;
+  const preconditions = input.preconditions !== undefined ? toStringArray(input.preconditions) : (base.preconditions ?? []);
+  if (preconditions.length > 0) when.preconditions = preconditions;
+  return when;
+}
+
 /**
  * 新建一条技能（id / version / 时间戳 / lifecycle 自动生成）。
  * 固化口径：`status` 不适用——技能用 `lifecycle`；新建一律 `active`（可匹配）。
@@ -327,6 +345,68 @@ export async function createSkill(input: CreateSkillInput): Promise<SkillRecord>
 
   await withLock(() => writeSkillFile(skill));
   return skill;
+}
+
+/** 可修订字段（内容写口；id / created_at / origin / lifecycle 不在其中）。 */
+export interface ReviseSkillPatch {
+  name?: string;
+  description?: string;
+  when?: Partial<SkillWhen>;
+  steps?: SkillStep[];
+  grants?: SkillGrants;
+  effects?: string[];
+}
+
+/**
+ * 内容修订写口（与规则的修订语义对齐）：
+ *   - 改内容 → `version++`（乐观锁与 `rules.updateRule` 同口径，与 lifecycle 切换不同）；
+ *   - 追加一条 `revision`（`kind='param'` 改参数 / `'flow'` 改流程），新的在前；
+ *   - `lifecycle` 不在此改（走 `setSkillLifecycle`）。
+ * 写口不放宽执行边界：`runtime='compose'` 的步骤仍受 skill-sandbox 静态拦截。
+ */
+export async function reviseSkill(
+  id: string,
+  patch: ReviseSkillPatch,
+  kind: 'param' | 'flow',
+  note: string,
+  expectedVersion?: number,
+): Promise<{ ok: true; skill: SkillRecord } | { ok: false; conflict?: true; error: string }> {
+  if (!SKILL_ID_RE.test(id)) return { ok: false, error: `invalid skill id: ${id}` };
+  return withLock(async () => {
+    const current = await readSkill(id);
+    if (!current) return { ok: false, error: `skill not found: ${id}` };
+    if (typeof expectedVersion === 'number' && expectedVersion !== current.version) {
+      return { ok: false, conflict: true, error: `version conflict: expected ${expectedVersion}, on disk ${current.version}` };
+    }
+
+    const name = patch.name !== undefined ? patch.name.trim() : current.name;
+    if (!name) return { ok: false, error: 'skill name cannot be empty' };
+    const description = patch.description !== undefined ? patch.description.trim() : current.description;
+    if (!description) return { ok: false, error: 'skill description cannot be empty' };
+
+    const steps = patch.steps !== undefined ? normalizeSteps(patch.steps) : current.steps;
+    const effects = patch.effects !== undefined
+      ? patch.effects.filter((e): e is string => typeof e === 'string' && e.trim().length > 0).map((e) => e.trim())
+      : (current.effects ?? []);
+
+    const stamp = nowStamp();
+    const next: SkillRecord = {
+      ...current,
+      name,
+      description,
+      when: normalizeWhen(patch.when, current.when),
+      steps,
+      grants: patch.grants !== undefined ? normalizeGrants(patch.grants) : current.grants,
+      ...(effects.length > 0 ? { effects } : {}),
+      version: current.version + 1,
+      updatedAt: stamp,
+      revisions: [{ at: stamp, kind, note: (note || '').trim(), fromVersion: current.version }, ...current.revisions],
+    };
+    if (effects.length === 0) delete next.effects;
+
+    await writeSkillFile(next);
+    return { ok: true, skill: next };
+  });
 }
 
 /**

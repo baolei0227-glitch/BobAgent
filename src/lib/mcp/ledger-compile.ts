@@ -43,7 +43,7 @@ const running = new Set<string>();
 /** 跑动期间又来了新材料 / 上一批还没编完 → 跑完再排一轮 */
 const queued = new Set<string>();
 
-/** 服务端自调用绝对 base（Node fetch 不支持相对路径），与 daily-report / query_todos 同一约定 */
+/** 服务端自调用绝对 base（Node fetch 不支持相对路径），与 daily-tasks / query_todos 同一约定 */
 function selfBaseUrl(): string {
   return `http://localhost:${process.env.PORT || '5000'}`;
 }

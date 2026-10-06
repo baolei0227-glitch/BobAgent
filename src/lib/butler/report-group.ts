@@ -42,7 +42,7 @@ export interface ReportGroupInput {
 }
 
 /** 页签顺序（Report 在前）与显示名 —— 卡片与右栏共用，避免两处顺序不一致。
- *  显示名即生产侧标题前缀（见 lib/core/daily-report.ts）：`Report — …` / `Schedule — …` / `Sticky Report — …`。 */
+ *  显示名即生产侧标题前缀（见 lib/core/daily-tasks.ts）：`Report — …` / `Schedule — …` / `Sticky Report — …`。 */
 export const REPORT_SECTION_ORDER: readonly DailyReportSection[] = ['progress', 'morning', 'sticky'];
 export const REPORT_SECTION_LABEL: Record<DailyReportSection, string> = {
   progress: 'Report',

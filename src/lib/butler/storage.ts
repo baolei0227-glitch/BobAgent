@@ -6,7 +6,7 @@
  *   <APP_ROOT>/butler/
  *     roles.json                        # 角色注册表：threadId → { name, dir }
  *     .state/                           # 内部状态（去重标记等），与用户可见内容分离
- *       daily-report/<YYYY-MM-DD>.<type>
+ *       daily-tasks/<YYYY-MM-DD>.<type>
  *     <角色名>/<YYYY-MM-DD>/
  *       attachments/                    # 当天上传的附件
  *       docs/                           # 当天生成的输出文档（报告等）

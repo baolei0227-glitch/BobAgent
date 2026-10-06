@@ -59,7 +59,7 @@ async function getDb(): Promise<DB> {
     if (!cols.some((c) => c.name === 'messages_json')) {
       _db.exec(`ALTER TABLE inbox ADD COLUMN messages_json TEXT`);
     }
-    // 迁移：老库补充 dedupe_key 列（显式全局唯一去重键，evt:xxx / daily-report:xxx / chat:xxx）
+    // 迁移：老库补充 dedupe_key 列（显式全局唯一去重键，evt:xxx / notes:xxx / chat:xxx）
     if (!cols.some((c) => c.name === 'dedupe_key')) {
       _db.exec(`ALTER TABLE inbox ADD COLUMN dedupe_key TEXT`);
     }
@@ -67,6 +67,9 @@ async function getDb(): Promise<DB> {
     if (!cols.some((c) => c.name === 'query_key')) {
       _db.exec(`ALTER TABLE inbox ADD COLUMN query_key TEXT`);
     }
+    // 迁移：'daily-report' kind 正名为 'notes-maintenance'（日报三页签退役后，该 kind 只剩
+    //  知识库每日维护一种来源）。幂等：迁完即无匹配行。
+    _db.prepare(`UPDATE inbox SET kind = 'notes-maintenance' WHERE kind = 'daily-report'`).run();
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_created ON inbox(created_at DESC);`);
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_read ON inbox(read);`);
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_done ON inbox(done);`);
@@ -150,7 +153,7 @@ function rowToRecord(row: InboxRow): InboxRecord {
 
 /** 写入一条收件箱消息，返回落库后的完整记录。
  *  幂等分两层（两层任一命中即复用，不产生重复）：
- *    1) 显式 dedupeKey（若提供）：全局唯一键（如 evt:<projectId>:<eventId>、daily-report:<YYYY-MM-DD>、chat:<threadId>）
+ *    1) 显式 dedupeKey（若提供）：全局唯一键（如 evt:<projectId>:<eventId>、notes:<YYYY-MM-DD>、chat:<threadId>）
  *       命中即直接返回（不限制自然日，如跨 00:00 的补发仍正确去重）
  *    2) (kind, title) 在同一自然日内匹配（兜底，兼容未传 dedupeKey 的老路径）
  *  覆盖场景：

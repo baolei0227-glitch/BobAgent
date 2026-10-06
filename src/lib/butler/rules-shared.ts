@@ -104,6 +104,11 @@ export interface CreateRuleInput {
   kind?: RuleKind;
   /** 未传时系统生成（默认 50） */
   priority?: number;
+  /**
+   * 落盘状态（缺省 'active'，与既有调用方行为一致）。
+   * 传 'draft' 用于「弱信号一次即记忆」：静默记录、不进候选、不执行，等用户在面板确认后转正。
+   */
+  status?: RuleStatus;
 }
 
 /**
@@ -174,11 +179,44 @@ export function evaluateRevision(
   return { active, ratio, shouldPropose: active && ratio > REVISION_THRESHOLD };
 }
 
-/** near-miss 限流：同一模式累计询问上限 2 次（v6 §3.4；「问过即计数」，与「被否」分离） */
-export const NEAR_MISS_ASK_LIMIT = 2;
+/**
+ * 主动遗忘阈值（2026-10-05 学习机制改造）。
+ *
+ * 改造前：弱触发累计 N 次才「提议固化」（NEAR_MISS_BEHAVIOR_N 作学习闸）；
+ * 改造后：**一次即记忆**（命中 1 次即落一条 draft），改由**主动遗忘**兜底——
+ *   - draft ：超过 DRAFT_FORGET_DAYS 未被用户确认、也未再命中 → 后台惰性清除（静默学来的草稿可自动遗忘）；
+ *   - active：超过 ACTIVE_STALE_DAYS 无命中 → **绝不静默删**，只在面板产「建议废除」软提示，用户可恢复。
+ * 判据放 shared：宿主侧 sweep 与客户端面板必须同源，避免阈值漂移。
+ */
+export const DRAFT_FORGET_DAYS = 30;
+export const ACTIVE_STALE_DAYS = 90;
 
-/** 提议固化的重复行为阈值：同一对象类型累计 N 次即提议（v6 §3.4 / D10；数值待实测） */
-export const NEAR_MISS_BEHAVIOR_N = 3;
+/** 规则的「最近活动时刻」（ms）：最近一次命中与创建时刻取较晚者；都无效 → null（视为新鲜，不误删） */
+export function ruleLastActivityMs(createdAt: string, lastHitAt?: string): number | null {
+  const parse = (s?: string): number | null => {
+    if (!s) return null;
+    // createdAt 为 `YYYY-MM-DD HH:mm`（本地），hits 的 at 为 ISO；统一把空格换成 T 再交给 Date.parse
+    const t = Date.parse(s.replace(' ', 'T'));
+    return Number.isFinite(t) ? t : null;
+  };
+  const a = parse(lastHitAt);
+  const b = parse(createdAt);
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
+}
+
+/** draft 是否已过遗忘期（可被惰性清除） */
+export function isDraftExpired(createdAt: string, lastHitAt?: string, now: Date = new Date()): boolean {
+  const last = ruleLastActivityMs(createdAt, lastHitAt);
+  return last !== null && now.getTime() - last > DRAFT_FORGET_DAYS * 86_400_000;
+}
+
+/** active 规则是否已陈旧（只产「建议废除」软提示，不改状态、不删） */
+export function isRuleStale(createdAt: string, lastHitAt?: string, now: Date = new Date()): boolean {
+  const last = ruleLastActivityMs(createdAt, lastHitAt);
+  return last !== null && now.getTime() - last > ACTIVE_STALE_DAYS * 86_400_000;
+}
 
 /**
  * near-miss 模式键：**只由对象类型构成**（v6 §3.4 Q13）。

@@ -7,6 +7,9 @@
  *   PATCH  → 更新 { id, name?, intent_raw?, steps?, trigger?, scope?, scope_target?, priority?, status?, expected_version? }
  *   DELETE → 删除 ?id=r-…
  *
+ * steps 的确定性步可绑定宿主执行器：`action: 'create_todo' | 'create_scheduled_todo' | 'skill'`
+ * 配 `action_params`（`when` / `skillId`）——与 MCP 工具侧共用同一白名单，`skill` 用于调用已固化技能。
+ *
  * 全部经 lib/butler/rules.ts（<APP_ROOT>/butler/.rules/<id>.md）落地，与 MCP 工具侧同源，
  * 避免「工具写一份、面板写一份」导致规则分叉。
  *
@@ -16,12 +19,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   listRules,
+  readRule,
   createRule,
   updateRule,
   deleteRule,
   type CreateRuleInput,
 } from '@/lib/butler/rules';
 import type { RuleStatus, RuleStep } from '@/lib/butler/rules';
+import { recordNegativeSample } from '@/lib/butler/rule-signals';
+import { ruleObjectType } from '@/lib/butler/rules-shared';
+
+/**
+ * 用户「废除（retire）/ 删除」一条规则 → 落一条 `not_a_habit` 负样本。
+ * 语义：这是用户的显式否决——near-miss「一次即记忆」不得再把同类习惯静默学回；
+ * 用户若反悔，可在面板「被拉黑模式」里解封（append-only，可恢复）。
+ */
+function blockReProposal(rule: { steps: RuleStep[] }): void {
+  const ot = ruleObjectType(rule);
+  if (!ot) return;
+  void recordNegativeSample(ot, ot, 'blocked', 'not_a_habit').catch(() => { /* 负样本写失败不阻断主操作 */ });
+}
 
 export async function GET() {
   try {
@@ -54,7 +71,7 @@ export async function POST(request: NextRequest) {
     }
     const steps = parseStepsArg(body.steps);
     if (!steps) {
-      return NextResponse.json({ success: false, error: 'steps required: array of { kind: "deterministic"|"judgment", text }' });
+      return NextResponse.json({ success: false, error: 'steps required: array of { kind: "deterministic"|"judgment", text, action?, action_params? }; action="skill" requires action_params.skillId' });
     }
     const scope = body.scope === 'project' ? 'project' : 'global';
     const input: CreateRuleInput = {
@@ -109,7 +126,7 @@ export async function PATCH(request: NextRequest) {
     }
     if (body.steps !== undefined) {
       const steps = parseStepsArg(body.steps);
-      if (!steps) return NextResponse.json({ success: false, error: 'steps invalid' });
+      if (!steps) return NextResponse.json({ success: false, error: 'steps invalid: action="skill" requires action_params.skillId' });
       patch.steps = steps;
     }
     if (body.trigger !== undefined && typeof body.trigger === 'object' && body.trigger !== null) {
@@ -151,6 +168,8 @@ export async function PATCH(request: NextRequest) {
       if (res.conflict) return NextResponse.json({ success: false, conflict: true, error: res.error });
       return NextResponse.json({ success: false, error: res.error });
     }
+    // 废除（retire）→ 记负样本：用户否决了这类习惯，near-miss 不得再学回（可解封恢复）
+    if (patch.status === 'retired') blockReProposal(res.rule);
     return NextResponse.json({ success: true, rule: res.rule });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -163,8 +182,11 @@ export async function DELETE(request: NextRequest) {
   try {
     const id = request.nextUrl.searchParams.get('id');
     if (!id) return NextResponse.json({ success: false, error: 'id required (r-<date>-<hex>)' });
+    // 删除前先读原件：删除＝用户显式否决，需按对象类型落负样本，防止 near-miss 静默学回
+    const existed = await readRule(id);
     const removed = await deleteRule(id);
     if (!removed) return NextResponse.json({ success: false, error: `rule ${id} not found` });
+    if (existed) blockReProposal(existed);
     return NextResponse.json({ success: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -173,16 +195,38 @@ export async function DELETE(request: NextRequest) {
   }
 }
 
-/** 校验并归一化 steps 入参；非法 → null */
+/** 合法的确定性 action 取值（与 rules.ts 的解析白名单同源）。`'skill'` = 调用已固化技能（`action_params.skillId`）。 */
+const RULE_STEP_ACTIONS = ['create_todo', 'create_scheduled_todo', 'skill'] as const;
+
+/** 校验并归一化 steps 入参；非法 → null。
+ *  确定性步可带 `action`（宿主执行器）+ `action_params`（`when` / `skillId`），与 MCP 工具侧同口径。 */
 function parseStepsArg(raw: unknown): RuleStep[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const steps: RuleStep[] = [];
   for (const s of raw) {
     if (!s || typeof s !== 'object') return null;
-    const o = s as { kind?: unknown; text?: unknown; annex?: unknown };
+    const o = s as { kind?: unknown; text?: unknown; annex?: unknown; action?: unknown; action_params?: unknown };
     if (o.kind !== 'deterministic' && o.kind !== 'judgment') return null;
     if (typeof o.text !== 'string' || !o.text.trim()) return null;
-    steps.push({ kind: o.kind, text: o.text.trim(), ...(o.kind === 'judgment' && o.annex === true ? { annex: true } : {}) });
+    const step: RuleStep = { kind: o.kind, text: o.text.trim(), ...(o.kind === 'judgment' && o.annex === true ? { annex: true } : {}) };
+    if (o.kind === 'deterministic') {
+      const action = RULE_STEP_ACTIONS.find((a) => a === o.action);
+      if (action) step.action = action;
+      const ap = o.action_params;
+      if (ap && typeof ap === 'object' && !Array.isArray(ap)) {
+        const when = (ap as { when?: unknown }).when;
+        const skillId = (ap as { skillId?: unknown }).skillId;
+        if ((typeof when === 'string' && when) || (typeof skillId === 'string' && skillId)) {
+          const actionParams: NonNullable<RuleStep['actionParams']> = {};
+          if (typeof when === 'string' && when) actionParams.when = when;
+          if (typeof skillId === 'string' && skillId) actionParams.skillId = skillId;
+          step.actionParams = actionParams;
+        }
+      }
+      // skill 动作必须绑定技能 id，否则规则永远无法执行 → 视为非法入参
+      if (step.action === 'skill' && !step.actionParams?.skillId) return null;
+    }
+    steps.push(step);
   }
   return steps;
 }

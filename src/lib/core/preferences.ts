@@ -26,12 +26,19 @@
  *     created_at: 2026-08-07 14:30
  *     source: chat
  */
-import { readFile, writeFile, mkdir, access } from 'fs/promises';
+import { readFile, mkdir, access } from 'fs/promises';
 import { join } from 'path';
 import { resolveAppRoot } from '@/lib/app-root';
+import { atomicWriteFile, createLock } from '@/lib/butler/fs-atomic';
 // 纯常量与类型放 preferences-shared（客户端「记忆面板」直接引用）：本模块含 fs 读写与
 // app-root 解析，客户端链路无法 bundle，故词表 / 常驻档名单 / 相似度门限抽到无 Node 依赖的模块共用。
-import { CONFLICT_SIMILARITY_THRESHOLD, detectNegation, similarity, type UserPreference } from './preferences-shared';
+import {
+  CONFLICT_SIMILARITY_THRESHOLD,
+  detectNegation,
+  selectResidentTypes,
+  similarity,
+  type UserPreference,
+} from './preferences-shared';
 
 export type { UserPreference } from './preferences-shared';
 export {
@@ -39,7 +46,7 @@ export {
   ALWAYS_INJECTED_TYPES,
   ALWAYS_INJECTED_MAX,
 } from './preferences-shared';
-export { CONFLICT_SIMILARITY_THRESHOLD, similarity };
+export { CONFLICT_SIMILARITY_THRESHOLD, similarity, selectResidentTypes };
 
 const APP_ROOT = resolveAppRoot();
 
@@ -85,7 +92,8 @@ export async function ensurePreferencesFile(): Promise<string> {
   try {
     await access(prefPath);
   } catch {
-    await writeFile(prefPath, `# User Memory
+    // 首建走原子写（与三条写原语同源）：避免与并发写撞出半截文件
+    await atomicWriteFile(prefPath, `# User Memory
 
 > 用户记忆的唯一长期存储：记的是**用户**，所有联系人共享同一份（联系人差异只体现在会话人设）。
 > AI 会在对话中自动记住持久事实与偏好（无需用户显式说「记住」）；写入前先查同类：有矛盾则覆盖更新，同一件事（哪怕措辞不同）则合并成一条。
@@ -95,7 +103,7 @@ export async function ensurePreferencesFile(): Promise<string> {
 > 敏感信息（密码 / 密钥 / token / 证件号 / 银行卡等）一律不记录。
 > 查看用 read_preferences，删除用 delete_preference（按序号）。
 
-`, 'utf-8');
+`);
   }
   return prefPath;
 }
@@ -153,6 +161,17 @@ export async function listPreferences(): Promise<UserPreference[]> {
 }
 
 /**
+ * 记忆真源的**读写串行化 + 原子写**（2026-10-02 补，评审 P2 同类问题）：
+ * 此前 add / update / remove 都是裸的 `readFile → writeFile` —— 无锁、无 tmp+rename。
+ * 记忆是**单文件真源**（`preferences.md`），而写入方有两条独立链路（抽屉会话 + 微信/飞书桥，
+ * 后者是另一个进程），并发读改写**会整条丢记忆**。rules / skills / threads / rule-logs / storage
+ * 已统一到 `fs-atomic`，这里补齐最后一个。
+ * ⚠️ 锁**不得**嵌进 `ensurePreferencesFile`：它也会被 `listPreferences`（只读路径）调用，
+ * 而三个写函数在持锁期间会调它 —— 同锁二次 acquire 会死锁（对齐 event-reminder 的同类注释）。
+ */
+const withMemoryLock = createLock();
+
+/**
  * 追加一条偏好（按 content 去重；自动写入 created_at，默认 source=chat）。
  * 写前三道闸：① 敏感信息拒写（明文落盘）；② **否定式表达拒收并路由到规则集**（v6 §4.2 / ⑧，
  * 偏好层不得承载承诺性内容）；③ 同类型高相似拒写（倒逼走 update_preference，防同一事实换措辞重复累积）。
@@ -175,42 +194,46 @@ export async function addPreference(
   const hit = detectSensitive(text);
   if (hit) return { added: false, total: 0, blocked: hit };
   const type = (opts?.type || '通用').trim() || '通用';
-  const path = await ensurePreferencesFile();
-  const raw = await readFile(path, 'utf-8');
-  const existing = parseEntries(raw.split('\n'));
-  // ⑧：否定式表达是硬约束（执行上无中间态），不属于偏好层——写入前拒收，交调用方路由到规则集。
-  if (detectNegation(text)) return { added: false, total: existing.length, routed: { content: text } };
-  const dup = existing.find((e) => e.content === text);
-  if (dup) return { added: false, total: existing.length, duplicate: dup.content };
-  // 同类型相似度门限：命中拒绝追加，回执带既有序号，让模型判断是「更新」还是「换措辞的新事实」
-  for (let i = 0; i < existing.length; i++) {
-    const e = existing[i];
-    if ((e.meta.type || '通用') !== type) continue;
-    const score = similarity(e.content, text);
-    if (score >= CONFLICT_SIMILARITY_THRESHOLD) {
-      return { added: false, total: existing.length, conflict: { index: i + 1, content: e.content, score } };
+  return withMemoryLock(async () => {
+    const path = await ensurePreferencesFile();
+    const raw = await readFile(path, 'utf-8');
+    const existing = parseEntries(raw.split('\n'));
+    // ⑧：否定式表达是硬约束（执行上无中间态），不属于偏好层——写入前拒收，交调用方路由到规则集。
+    if (detectNegation(text)) return { added: false, total: existing.length, routed: { content: text } };
+    const dup = existing.find((e) => e.content === text);
+    if (dup) return { added: false, total: existing.length, duplicate: dup.content };
+    // 同类型相似度门限：命中拒绝追加，回执带既有序号，让模型判断是「更新」还是「换措辞的新事实」
+    for (let i = 0; i < existing.length; i++) {
+      const e = existing[i];
+      if ((e.meta.type || '通用') !== type) continue;
+      const score = similarity(e.content, text);
+      if (score >= CONFLICT_SIMILARITY_THRESHOLD) {
+        return { added: false, total: existing.length, conflict: { index: i + 1, content: e.content, score } };
+      }
     }
-  }
-  const source = (opts?.source || 'chat').trim() || 'chat';
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const createdAt = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-  const block = `- ${text}\n  type: ${type}\n  created_at: ${createdAt}\n  source: ${source}\n`;
-  await writeFile(path, `${raw.trimEnd()}\n${block}`, 'utf-8');
-  return { added: true, total: existing.length + 1 };
+    const source = (opts?.source || 'chat').trim() || 'chat';
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const createdAt = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const block = `- ${text}\n  type: ${type}\n  created_at: ${createdAt}\n  source: ${source}\n`;
+    await atomicWriteFile(path, `${raw.trimEnd()}\n${block}`);
+    return { added: true, total: existing.length + 1 };
+  });
 }
 
 /** 按序号删除一条偏好（1-based，整块删除含元数据；返回是否删除成功与剩余条数） */
 export async function removePreference(index: number): Promise<{ removed: boolean; remaining: number }> {
-  const path = await ensurePreferencesFile();
-  const raw = await readFile(path, 'utf-8');
-  const lines = raw.split('\n');
-  const entries = parseEntries(lines);
-  if (index < 1 || index > entries.length) return { removed: false, remaining: entries.length };
-  const target = entries[index - 1];
-  const kept = lines.filter((_, i) => i < target.startLine || i > target.endLine);
-  await writeFile(path, kept.join('\n'), 'utf-8');
-  return { removed: true, remaining: entries.length - 1 };
+  return withMemoryLock(async () => {
+    const path = await ensurePreferencesFile();
+    const raw = await readFile(path, 'utf-8');
+    const lines = raw.split('\n');
+    const entries = parseEntries(lines);
+    if (index < 1 || index > entries.length) return { removed: false, remaining: entries.length };
+    const target = entries[index - 1];
+    const kept = lines.filter((_, i) => i < target.startLine || i > target.endLine);
+    await atomicWriteFile(path, kept.join('\n'));
+    return { removed: true, remaining: entries.length - 1 };
+  });
 }
 
 /**
@@ -223,39 +246,41 @@ export async function updatePreference(
   index: number,
   patch: { content?: string; type?: string },
 ): Promise<{ updated: boolean; remaining?: number; preference?: UserPreference; error?: string; routed?: { content: string } }> {
-  const path = await ensurePreferencesFile();
-  const raw = await readFile(path, 'utf-8');
-  const lines = raw.split('\n');
-  const entries = parseEntries(lines);
-  if (index < 1 || index > entries.length) {
-    return { updated: false, error: `Entry ${index} not found (currently ${entries.length} entries)` };
-  }
-  const target = entries[index - 1];
-  const content =
-    patch.content !== undefined ? patch.content.trim().replace(/\s+/g, ' ') : target.content;
-  if (!content) return { updated: false, error: 'Preference content cannot be empty' };
-  // ⑧：把一条偏好改成否定式表达 = 把偏好改成规则，不在偏好层写回。
-  if (patch.content !== undefined && detectNegation(content)) {
-    return { updated: false, routed: { content } };
-  }
-  const type = patch.type !== undefined && patch.type.trim() ? patch.type.trim() : target.meta.type || '通用';
-  // 显式标注 Record 类型：对象 spread 不保留索引签名（TS 行为），否则 meta.created_at 等访问报错
-  const meta: Record<string, string> = { ...target.meta, type };
-  const newBlock = [`- ${content}`];
-  for (const [k, v] of Object.entries(meta)) {
-    newBlock.push(`  ${k}: ${v}`);
-  }
-  const kept = [...lines.slice(0, target.startLine), ...newBlock, ...lines.slice(target.endLine + 1)];
-  await writeFile(path, kept.join('\n'), 'utf-8');
-  return {
-    updated: true,
-    remaining: entries.length,
-    preference: {
-      index,
-      content,
-      type,
-      createdAt: meta.created_at || '',
-      source: meta.source || 'chat',
-    },
-  };
+  return withMemoryLock(async () => {
+    const path = await ensurePreferencesFile();
+    const raw = await readFile(path, 'utf-8');
+    const lines = raw.split('\n');
+    const entries = parseEntries(lines);
+    if (index < 1 || index > entries.length) {
+      return { updated: false, error: `Entry ${index} not found (currently ${entries.length} entries)` };
+    }
+    const target = entries[index - 1];
+    const content =
+      patch.content !== undefined ? patch.content.trim().replace(/\s+/g, ' ') : target.content;
+    if (!content) return { updated: false, error: 'Preference content cannot be empty' };
+    // ⑧：把一条偏好改成否定式表达 = 把偏好改成规则，不在偏好层写回。
+    if (patch.content !== undefined && detectNegation(content)) {
+      return { updated: false, routed: { content } };
+    }
+    const type = patch.type !== undefined && patch.type.trim() ? patch.type.trim() : target.meta.type || '通用';
+    // 显式标注 Record 类型：对象 spread 不保留索引签名（TS 行为），否则 meta.created_at 等访问报错
+    const meta: Record<string, string> = { ...target.meta, type };
+    const newBlock = [`- ${content}`];
+    for (const [k, v] of Object.entries(meta)) {
+      newBlock.push(`  ${k}: ${v}`);
+    }
+    const kept = [...lines.slice(0, target.startLine), ...newBlock, ...lines.slice(target.endLine + 1)];
+    await atomicWriteFile(path, kept.join('\n'));
+    return {
+      updated: true,
+      remaining: entries.length,
+      preference: {
+        index,
+        content,
+        type,
+        createdAt: meta.created_at || '',
+        source: meta.source || 'chat',
+      },
+    };
+  });
 }

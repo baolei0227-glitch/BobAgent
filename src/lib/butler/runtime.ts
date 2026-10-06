@@ -26,6 +26,8 @@ import {
   type AdjudicateResult,
   type RuleAnchor,
 } from './rule-exec';
+import { rememberFromText, type LearnOutcome } from './rule-nearmiss';
+import { sweepForgottenDrafts } from './rule-forget';
 
 /**
  * 触发源：Butler 被唤醒的原因。
@@ -56,7 +58,13 @@ function triggerText(trigger: ButlerTrigger): string {
 }
 
 /** 心跳结果：裁决结果 + 「错过且不会补跑」的定时实例（只用于告知，见 `missedTimerRules`） */
-export type ButlerTickResult = AdjudicateResult & { missed: MissedTimerHit[] };
+export type ButlerTickResult = AdjudicateResult & {
+  missed: MissedTimerHit[];
+  /** 本轮「一次即记忆」的产物（新建 / 印证 draft）；无动作时缺省 */
+  learned?: LearnOutcome | null;
+  /** 本轮惰性遗忘清除的 draft（供审计；无则缺省） */
+  forgotten?: { id: string; name: string }[];
+};
 
 /**
  * Butler 心跳：能力匹配 → 裁决 → 执行 → 信号回写。
@@ -80,5 +88,13 @@ export async function butlerTick(input: ButlerTickInput): Promise<ButlerTickResu
     timerHits,
   });
   const missed = trigger.kind === 'timer' ? await missedTimerRules(activeRules, now) : [];
-  return { ...result, missed };
+
+  // 主动遗忘（惰性 sweep，不接调度器）：清理超期 draft；失败不影响主链路。
+  const forgotten = await sweepForgottenDrafts(now).catch(() => [] as { id: string; name: string }[]);
+
+  // 「一次即记忆」：只在**用户说话**时学（scene/timer 无用户原话，学了也无意义）。
+  // 命中弱触发且尚无覆盖规则 → 静默落一条 draft（不执行、不打扰），冒头走面板「待确认」收件箱（拉模式）。
+  const learned = trigger.kind === 'speech' ? await rememberFromText(trigger.text).catch(() => null) : null;
+
+  return { ...result, missed, learned, ...(forgotten.length > 0 ? { forgotten } : {}) };
 }

@@ -34,11 +34,41 @@ export const MEMORY_TYPES = [
   '关系边界',
 ] as const;
 
-/** 常驻档类型：每轮注入正文（条数少、每轮都用，漏掉就不像「记得你」） */
+/** 常驻档类型：每轮注入正文（条数少、每轮都用，漏掉就不像「记得你」）。
+ *  **数组顺序 = 优先级**（靠前的更该保常驻），[0] 是「身份画像」——它掉了最不像「记得你」。 */
 export const ALWAYS_INJECTED_TYPES: readonly string[] = ['身份画像', '偏好习惯'];
 
-/** 常驻档安全阀：条目数超过该阈值时整体退化为只注入目录，避免 token 无上限增长 */
+/** 常驻档安全阀：常驻档条目**合计**上限，避免 token 无上限增长（超限按类型逐级退化，见下） */
 export const ALWAYS_INJECTED_MAX = 20;
+
+/**
+ * 安全阀判定（纯函数）：给定各类型条数，选出本轮仍**注入正文**的常驻档类型。
+ *
+ * 为什么不是「整体退化」（2026-10-02 改）：此前只要 `身份画像 + 偏好习惯` 合计超上限，
+ * **连身份画像也一起掉进目录档** —— 用户会突然感觉「它不记得我了」，而这恰恰是常驻档存在的理由。
+ * 现在取 `alwaysTypes` 的**优先级前缀**：从高到低逐级纳入，某一级放不下就**到此为止**
+ * （不跳过去纳更低优先级——否则会出现「低的在常驻档、高的反而在目录档」的倒挂）。
+ * 空条数的类型不占额度、也不打断前缀。
+ *
+ * 粒度是**整类型**而不是「留前 K 条」：同类型条目一起进退，口径才好解释、也才好向用户交代。
+ * 返回的类型里没有谁，其条目由调用方并入目录档（**数据不丢**，只是不再每轮注入正文）。
+ */
+export function selectResidentTypes(
+  counts: Record<string, number>,
+  alwaysTypes: readonly string[] = ALWAYS_INJECTED_TYPES,
+  max: number = ALWAYS_INJECTED_MAX,
+): string[] {
+  const kept: string[] = [];
+  let used = 0;
+  for (const t of alwaysTypes) {
+    const n = counts[t] ?? 0;
+    if (n <= 0) continue; // 没有条目 → 不占额度，也不打断前缀
+    if (used + n > max) break; // 这一级放不下 → 其后（优先级更低）一律不进常驻档
+    kept.push(t);
+    used += n;
+  }
+  return kept;
+}
 
 /**
  * 同类型条目相似度门限：命中则拒绝追加，倒逼模型改走 update_preference（防同一事实换措辞重复累积）。

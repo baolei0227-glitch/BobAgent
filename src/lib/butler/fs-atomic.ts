@@ -6,7 +6,7 @@
  *     `rule-logs.ts`（`_logLock`）、`storage.ts`（`_rolesLock`，还是内联未抽函数的写法）；
  *   - 按 key 分键的锁：`threads.ts`（`Map<threadId, Promise>`，含队尾归还）。
  * 另有 **8 处** `${pid}.${Date.now()}.tmp` 的临时文件名，同毫秒并发会互相覆盖。
- * 该坑仓库里已有记载与正确先例：`lib/core/daily-report.ts:253-257` 用随机后缀修掉了
+ * 该坑仓库里已有记载与正确先例：`lib/core/daily-tasks.ts` 的 pushPending 用随机后缀修掉了
  * 「同名 tmp 相互覆盖 → 后一个 rename 的源已不存在 → ENOENT」。
  *
  * 本模块把两者收敛成唯一真源，**不引入任何新锁协议**（仍是进程内 promise 队列 + tmp→rename）。
@@ -71,7 +71,7 @@ export function createKeyedLock<K = string>(): <T>(key: K, fn: () => Promise<T>)
  *
  * 随机后缀是必须的：旧写法 `${pid}.${Date.now()}.tmp` 在同一进程同一毫秒发起两次写时会同名，
  * 后者覆盖前者的 tmp，先完成的 rename 把源移走后，另一个 rename 就 ENOENT。
- * （每日报告链路已按此修过并留了注释，见 `lib/core/daily-report.ts:253-257`。）
+ * （每日任务链路已按此修过并留了注释，见 `lib/core/daily-tasks.ts` 的 pushPending。）
  *
  * rename 失败会重试 3 次并退化为直写：宁可少一次原子性，也不要把内容丢掉。
  * 失败路径统一清掉自己的 tmp，避免遗留在数据目录里（评审实测 `.state/threads/` 曾有 4 个残留）。

@@ -11,10 +11,10 @@
  *
  * 仍然走通知中心（Bobby）的只有 **Notes 知识库每日维护**（每周节奏，不属于日报三页签）。
  *
- * 去重：progress / notes 每个自然日只做一次，标记文件存于 butler/.state/daily-report/ 目录
+ * 去重：progress / notes 每个自然日只做一次，标记文件存于 butler/.state/daily-tasks/ 目录
  * （应用每天首次打开会兜底补做，未到 9:00 则等到 9:00 再发，不重复）。
  */
-import { readFile, writeFile, mkdir, access } from 'fs/promises';
+import { readFile, writeFile, mkdir, access, rename } from 'fs/promises';
 import { randomBytes } from 'crypto';
 import { join } from 'path';
 import { STATE_DIR } from '@/lib/butler/storage';
@@ -22,16 +22,36 @@ import { atomicWriteFile } from '@/lib/butler/fs-atomic';
 import type { TodaySnapshot, TodayEvent } from '@/lib/butler/today';
 import type { ButlerNoticeItem } from '@/lib/bus';
 
-/** 报告内部状态目录：butler/.state/daily-report（去重标记 / pending / error.log / notes-review）。
+/** 报告内部状态目录：butler/.state/daily-tasks（去重标记 / pending / error.log / notes-review）。
  *  与用户可见的角色目录分离——这些是内部状态，不该混进 <角色>/<日期>/ 的内容区。 */
-const REPORT_DIR = join(STATE_DIR, 'daily-report');
-const PENDING_FILE = join(REPORT_DIR, 'pending.json');
+const TASK_DIR = join(STATE_DIR, 'daily-tasks');
+/** 旧状态目录（模块改名前为 daily-report），首次访问时一次性搬运到 TASK_DIR。 */
+const LEGACY_TASK_DIR = join(STATE_DIR, 'daily-report');
+const PENDING_FILE = join(TASK_DIR, 'pending.json');
 /** 报告链路失败留痕文件：睡眠/静默失败场景不再靠猜，关键失败点统一 append 到这里 */
-const ERROR_LOG = join(REPORT_DIR, 'error.log');
+const ERROR_LOG = join(TASK_DIR, 'error.log');
+
+/** 首次访问前把旧目录整体搬过来（幂等：已有新目录则不动），再确保目录存在。 */
+let _taskDirReady = false;
+async function ensureTaskDir(): Promise<void> {
+  if (_taskDirReady) return;
+  try {
+    await access(LEGACY_TASK_DIR);
+    try {
+      await access(TASK_DIR);
+    } catch {
+      await rename(LEGACY_TASK_DIR, TASK_DIR);
+    }
+  } catch {
+    /* 无旧目录：首次安装或已迁移过 */
+  }
+  await mkdir(TASK_DIR, { recursive: true });
+  _taskDirReady = true;
+}
 
 /** 仍走「每日一次」的两种：progress=各项目昨日进展（给 Today 的 Report 页签缓存内容）
  *  / notes=知识库每日维护（仍由 Bobby 通知）。morning / sticky 已改为 Today 面板实算，不再是一类「报告」。 */
-export type DailyReportType = 'progress' | 'notes';
+export type DailyTaskType = 'progress' | 'notes';
 
 function todayStr(): string {
   const d = new Date();
@@ -75,8 +95,9 @@ function eventLine(ev: TodayEvent): string {
 
 /** 待办事件 → 结构化通知项（供通知中心渲染待办表格）。
  *  source='event'：key 即日历事件 id，点击完成时由 UI 直接 PATCH 事件状态（见 ButlerDrawer.toggleItem），
- *  不再只是翻转通知里的一份快照——日历 / 便签两侧的联动交给既有的日历反向同步。 */
-function toNoticeItem(ev: TodayEvent): ButlerNoticeItem {
+ *  不再只是翻转通知里的一份快照——日历 / 便签两侧的联动交给既有的日历反向同步。
+ *  导出供 lib/butler/advice.ts 复用：建议区点名的行与 Schedule 页签必须同构。 */
+export function toNoticeItem(ev: TodayEvent): ButlerNoticeItem {
   const d = new Date(ev.start_time);
   const startMs = Number.isFinite(d.getTime()) ? d.getTime() : 0;
   return {
@@ -147,14 +168,14 @@ export function buildScheduleSection(snap: TodaySnapshot): { text: string; items
 }
 
 /** 当天某类报告的标记文件路径（存在 = 今天已发过） */
-function markerPath(type: DailyReportType): string {
-  return join(REPORT_DIR, `${todayStr()}.${type}`);
+function markerPath(type: DailyTaskType): string {
+  return join(TASK_DIR, `${todayStr()}.${type}`);
 }
 
-/** 进程内并发锁 + 标记文件原子抢占：双进程同时调 sendDailyReport 时仅第一个抢占成功。
+/** 进程内并发锁 + 标记文件原子抢占：双进程同时执行同一每日任务时仅第一个抢占成功。
  *  抢占顺序：先拿进程内锁 → 再 double-check 标记文件 → 再 fs 原子写入抢占（失败回滚锁）。 */
 let _sendLock: Promise<void> | null = null;
-async function tryAcquireSendMarker(type: DailyReportType): Promise<boolean> {
+async function tryAcquireSendMarker(type: DailyTaskType): Promise<boolean> {
   // ① 进程内串行化（避免同进程多次并发调用时 access 结果互相踩空）
   const prev = _sendLock;
   let release: () => void = () => {};
@@ -167,7 +188,7 @@ async function tryAcquireSendMarker(type: DailyReportType): Promise<boolean> {
     if (await alreadySent(type)) return false;
     // ③ 原子抢占：用 wx 标志写 + 独占式原子创建（Node.js fs.writeFile 'wx' = O_EXCL）
     //  抢占失败（文件已存在，EEXIST）= 另一进程/线程已先拿到；标记为已发。
-    await mkdir(REPORT_DIR, { recursive: true });
+    await ensureTaskDir();
     try {
       const { writeFile } = await import('fs/promises');
       await writeFile(markerPath(type), new Date().toISOString(), { encoding: 'utf-8', flag: 'wx' });
@@ -181,7 +202,7 @@ async function tryAcquireSendMarker(type: DailyReportType): Promise<boolean> {
   }
 }
 
-async function alreadySent(type: DailyReportType): Promise<boolean> {
+async function alreadySent(type: DailyTaskType): Promise<boolean> {
   try {
     await access(markerPath(type));
     return true;
@@ -192,25 +213,25 @@ async function alreadySent(type: DailyReportType): Promise<boolean> {
 
 /** 报告链路失败留痕（error.log，append）：写入/发送失败时落盘具体原因，
  *  下次排查直接看日志文件，不再依赖猜（如本次 pushPending 静默失败导致 Butler 未收到）。 */
-async function logReportError(type: DailyReportType, phase: string, err: unknown): Promise<void> {
+async function logReportError(type: DailyTaskType, phase: string, err: unknown): Promise<void> {
   try {
     const detail = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
     const { appendFile } = await import('fs/promises');
-    await mkdir(REPORT_DIR, { recursive: true });
+    await ensureTaskDir();
     await appendFile(ERROR_LOG, `[${new Date().toISOString()}] [${type}] ${phase}: ${detail}\n---\n`, 'utf-8');
   } catch { /* 留痕失败静默，不影响主链路 */ }
 }
 
 /** 写入待发布通知（通知中心）。
  *  每条写 dedupeKey=type:YYYY-MM-DD，用于前端 POST inbox 时按(kind,title)幂等去重；
- *  pending 项带 kind 字段（morning → daily-report / sticky → inspect），前端轮询时按 kind 分流发布。
+ *  pending 项带 kind 字段（当前唯一来源是 notes → notes-maintenance），前端轮询时按 kind 发布。
  *  用进程内锁 + 原子 rename 保证 pending.json 的读-改-写不被并发打断。 */
 let _pendingLock: Promise<void> | null = null;
 async function pushPending(
   title: string,
   body: string,
   items: ButlerNoticeItem[],
-  type: DailyReportType,
+  type: DailyTaskType,
 ): Promise<void> {
   // 进程内 pending 文件的读写串行化
   const prev = _pendingLock;
@@ -220,7 +241,7 @@ async function pushPending(
     await new Promise<void>((res) => { release = res; });
   })();
   try {
-    await mkdir(REPORT_DIR, { recursive: true });
+    await ensureTaskDir();
     let pending: {
       kind: string;
       title: string;
@@ -235,15 +256,15 @@ async function pushPending(
       if (Array.isArray(parsed)) pending = parsed as typeof pending;
     } catch { /* 无文件或损坏则从空开始 */ }
     const dedupeKey = `${type}:${todayStr()}`;
-    // 写入前对同 dedupeKey 做一次去重（兜底：如果 sendDailyReport 被外部并发调了两次，
+    // 写入前对同 dedupeKey 做一次去重（兜底：如果每日任务被外部并发调了两次，
     //  抢占锁理论上已拦住，但这里再做一次 content 级去重，防历史遗留脏 pending）
     if (pending.some((p) => p.dedupeKey === dedupeKey)) {
-      console.warn(`[daily-report] pending 已存在 key=${dedupeKey}，跳过重复 push`);
+      console.warn(`[daily-tasks] pending 已存在 key=${dedupeKey}，跳过重复 push`);
       return;
     }
     pending.push({
       // Notes 维护仍走 SCHEDULES 桶（有未读角标 / 置顶）；日报三页签已不再产生收件箱回执
-      kind: 'daily-report',
+      kind: 'notes-maintenance',
       title,
       body,
       time: Date.now(),
@@ -251,7 +272,7 @@ async function pushPending(
       dedupeKey,
     });
     // 原子替换：先写 tmp 再 rename（rename 在 POSIX 是原子的；Windows NTFS 也支持）。
-    // tmp 名带随机后缀：旧实现用 pid+Date.now，morning/sticky 并发推送等极端场景下
+    // tmp 名带随机后缀：旧实现用 pid+Date.now，并发推送等极端场景下
     // 同名 tmp 相互覆盖 → 后一个 rename 的源已不存在 → ENOENT。随机后缀彻底避免重名。
     // rename 失败自动重试（源可能被并发清理）；仍失败直写兜底，保证报告不丢。
     const data = JSON.stringify(pending.slice(-20));
@@ -278,11 +299,11 @@ async function pushPending(
       const { writeReportDoc } = await import('@/lib/butler/report-doc');
       await writeReportDoc(type, title, body);
     } catch (docErr) {
-      console.error(`[daily-report] ${type} 报告文档落盘失败:`, docErr);
+      console.error(`[daily-tasks] ${type} 报告文档落盘失败:`, docErr);
       void logReportError(type, 'writeDoc', docErr);
     }
   } catch (e) {
-    console.error('[daily-report] 写入通知队列失败:', e);
+    console.error('[daily-tasks] 写入通知队列失败:', e);
     void logReportError(type, 'pushPending', e);
   } finally {
     release();
@@ -314,7 +335,7 @@ async function buildStickyTodoItems(): Promise<ButlerNoticeItem[]> {
     try {
       rows = await listOpenTodoRows(p.path);
     } catch (e) {
-      console.warn('[daily-report] 读取便签待办失败:', p.id, e);
+      console.warn('[daily-tasks] 读取便签待办失败:', p.id, e);
       continue;
     }
     const projectName = p.name || p.id;
@@ -352,7 +373,7 @@ async function buildStickyTodoItems(): Promise<ButlerNoticeItem[]> {
 
 /**
  * Sticky 段（Today 的 Sticky 页签）：全项目未完成便签待办 —— **每次请求实算**，不进通知中心。
- * 正文走 inspect 的三级折叠文案；结构化项带行定位（source='sticky'），Today 页据此渲染可勾选清单。
+ * 正文复用 /inspect 的三级折叠文案；结构化项带行定位（source='sticky'），Today 页据此渲染可勾选清单。
  * 结构化项构建失败不阻断正文：退回纯文本（只读）。
  */
 export async function buildStickySection(): Promise<{
@@ -368,14 +389,14 @@ export async function buildStickySection(): Promise<{
   try {
     items = await buildStickyTodoItems();
   } catch (e) {
-    console.error('[daily-report] sticky 待办项构建失败:', e);
+    console.error('[daily-tasks] sticky 待办项构建失败:', e);
   }
   return { text, items, totalPending: result.totalPending, projectCount: result.projectCount };
 }
 
 /** Today 的 Report 页签缓存文件：每天一份，生成后即被 /api/butler/today 读取 */
 function progressDigestPath(): string {
-  return join(REPORT_DIR, `digest-${todayStr()}.md`);
+  return join(TASK_DIR, `digest-${todayStr()}.md`);
 }
 
 /** 读当日 Progress 摘要缓存（Today 的 Report 页签数据源）；未生成（还没到 9:00）返回 null */
@@ -408,7 +429,8 @@ export async function readProgressDigestDate(): Promise<string | null> {
  *   2. 归纳各项目**昨天**的流水（LLM 归纳，失败走结构化兜底，见 lib/project/daily-digest.ts）
  *   3. 落缓存文件供 Today 读 + 落报告文档供归档；**不进通知中心、不推微信**
  *
- * 昨天全项目都无活动时不写缓存（当日标记已占，防重复）——宁缺一条空摘要，也不给 Today 添噪音。
+ * 昨日全项目都无活动、且昨日无任何待办事件时不写缓存（当日标记已占，防重复）——
+ * 宁缺一条空摘要，也不给 Today 添噪音。
  */
 export async function generateProgressDigest(): Promise<{ sent: boolean; reply: string }> {
   const acquired = await tryAcquireSendMarker('progress');
@@ -418,25 +440,25 @@ export async function generateProgressDigest(): Promise<{ sent: boolean; reply: 
     const { buildDailyProjectDigest } = await import('@/lib/project/daily-digest');
     digest = await buildDailyProjectDigest(-1);
   } catch (e) {
-    console.error('[daily-report] progress 摘要生成失败:', e);
+    console.error('[daily-tasks] progress 摘要生成失败:', e);
     void logReportError('progress', 'digest', e);
     return { sent: true, reply: 'digest failed' };
   }
-  if (!digest.markdown) return { sent: true, reply: 'no project activity yesterday' };
+  if (!digest.markdown) return { sent: true, reply: 'nothing to report yesterday' };
   try {
-    await mkdir(REPORT_DIR, { recursive: true });
+    await ensureTaskDir();
     await writeFile(progressDigestPath(), digest.markdown, 'utf-8');
   } catch (e) {
-    console.error('[daily-report] progress 摘要缓存写入失败:', e);
+    console.error('[daily-tasks] progress 摘要缓存写入失败:', e);
     void logReportError('progress', 'cache', e);
   }
   try {
     const { writeReportDoc } = await import('@/lib/butler/report-doc');
     await writeReportDoc('progress', `Report — ${todayStr()}`, digest.markdown);
   } catch (e) {
-    console.error('[daily-report] progress 文档落盘失败:', e);
+    console.error('[daily-tasks] progress 文档落盘失败:', e);
   }
-  console.log(`[daily-report] progress 摘要已生成（${digest.projectCount} 个项目 / ${digest.itemCount} 条流水）`);
+  console.log(`[daily-tasks] progress 摘要已生成（${digest.projectCount} 个项目 / ${digest.itemCount} 条流水）`);
   return { sent: true, reply: digest.markdown };
 }
 
@@ -445,7 +467,7 @@ export async function generateProgressDigest(): Promise<{ sent: boolean; reply: 
 /** 整库回看（review + lint）的周期：距离上次回看 ≥ N 天执行一次（每周一次） */
 const NOTES_REVIEW_INTERVAL_DAYS = 7;
 /** 上次整库回看的落盘状态（{ lastReview: 'YYYY-MM-DD' }），独立于当天一次性标记 */
-const NOTES_REVIEW_STATE = join(REPORT_DIR, 'notes-review.json');
+const NOTES_REVIEW_STATE = join(TASK_DIR, 'notes-review.json');
 
 async function loadNotesLastReview(): Promise<string | null> {
   try {
@@ -459,10 +481,10 @@ async function loadNotesLastReview(): Promise<string | null> {
 
 async function saveNotesReview(date: string): Promise<void> {
   try {
-    await mkdir(REPORT_DIR, { recursive: true });
+    await ensureTaskDir();
     await writeFile(NOTES_REVIEW_STATE, JSON.stringify({ lastReview: date }), 'utf-8');
   } catch (e) {
-    console.error('[daily-report] 保存 notes-review 状态失败:', e);
+    console.error('[daily-tasks] 保存 notes-review 状态失败:', e);
   }
 }
 
@@ -509,7 +531,7 @@ export async function sendNotesMaintenance(): Promise<{ sent: boolean; reply: st
       alerts.push(`⚠️ Notes ingest failed: ${r.error}`);
     }
   } catch (e) {
-    console.error('[daily-report] notes ingest 异常:', e);
+    console.error('[daily-tasks] notes ingest 异常:', e);
   }
 
   // ② 周期 review + lint（距上次 ≥ N 天；大脑缺失时不推进日期，避免配好后长期漏回看）
@@ -544,7 +566,7 @@ export async function sendNotesMaintenance(): Promise<{ sent: boolean; reply: st
       if (didRun) await saveNotesReview(todayStr());
     }
   } catch (e) {
-    console.error('[daily-report] notes review/lint 异常:', e);
+    console.error('[daily-tasks] notes review/lint 异常:', e);
   }
 
   // 大脑缺失告警（无论回看是否到期都提示一次；配置好前每天一条，提醒尽快修复）
@@ -559,7 +581,7 @@ export async function sendNotesMaintenance(): Promise<{ sent: boolean; reply: st
   }
   const title = `Notes Maintenance — ${todayStr()}`;
   await pushPending(title, body, [], 'notes');
-  console.log(`[daily-report] notes 维护已发送: ${alerts.length > 0 ? '含告警' : ''} ${body.split('\n')[0]} ${body.split('\n').length > 1 ? `(+${body.split('\n').length - 1} 行)` : ''}`);
+  console.log(`[daily-tasks] notes 维护已发送: ${alerts.length > 0 ? '含告警' : ''} ${body.split('\n')[0]} ${body.split('\n').length > 1 ? `(+${body.split('\n').length - 1} 行)` : ''}`);
   return { sent: true, reply: body };
 }
 
@@ -594,7 +616,7 @@ const SCHEDULE_HOUR = 9;
  *  短周期轮询保证睡眠唤醒 / 事件循环阻塞 / 错过整点后 ≤5 分钟内补发，不再整天漏发。 */
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
-const SCHEDULER_KEY = '__dailyReportSchedulerStarted__';
+const SCHEDULER_KEY = '__dailyTaskSchedulerStarted__';
 
 /**
  * 启动每日任务调度（instrumentation 调用，幂等）：
@@ -606,25 +628,36 @@ const SCHEDULER_KEY = '__dailyReportSchedulerStarted__';
  * 现在没有任何东西会打扰用户，深夜补做一次 progress 摘要也无妨。
  */
 
-export async function startDailyReportScheduler(): Promise<void> {
+export async function startDailyTaskScheduler(): Promise<void> {
   const g = globalThis as unknown as { [SCHEDULER_KEY]?: boolean };
   if (g[SCHEDULER_KEY]) return;
   g[SCHEDULER_KEY] = true;
 
-  const safeRun = async (type: DailyReportType) => {
+  const safeRun = async (type: DailyTaskType) => {
     try {
       if (type === 'notes') await sendNotesMaintenance();
       else await generateProgressDigest();
     } catch (e) {
-      console.error(`[daily-report] ${type} 执行失败:`, e);
+      console.error(`[daily-tasks] ${type} 执行失败:`, e);
       void logReportError(type, 'run', e);
+    }
+  };
+
+  // Daily News（Today 的 News 页签）：与 progress 同走「每日一次 + 缓存」——当天简报已存在则直接返回，
+  // 不重算、不打扰；采集 + 归纳的重活只在这条链上跑（Butler 的 tick 路径不经模型，不能挂这里）。
+  const safeRunNews = async () => {
+    try {
+      const { generateNewsBriefing } = await import('@/lib/news/generate');
+      await generateNewsBriefing({ force: false });
+    } catch (e) {
+      console.error('[news] 每日简报执行失败:', e);
     }
   };
 
   // 到点判定：已过当天 9:00（未到 9:00 跳过，等下一次检查）；任务内部原子抢占，重复调用天然去重
   const maybeRunDue = async () => {
     if (new Date().getHours() < SCHEDULE_HOUR) return;
-    await Promise.all([safeRun('progress'), safeRun('notes')]);
+    await Promise.all([safeRun('progress'), safeRun('notes'), safeRunNews()]);
   };
 
   // 立即检查一次（覆盖"当天首次打开已过 9:00"的兜底）+ 每 5 分钟循环续期
@@ -632,5 +665,5 @@ export async function startDailyReportScheduler(): Promise<void> {
   const timer = setInterval(() => void maybeRunDue(), CHECK_INTERVAL_MS);
   timer.unref?.(); // 不阻止进程退出
 
-  console.log(`[daily-report] 每日调度已启动（每天 ${String(SCHEDULE_HOUR).padStart(2, '0')}:00 后每 ${CHECK_INTERVAL_MS / 60000} 分钟检查补做 Report 摘要 + Notes 知识库维护）`);
+  console.log(`[daily-tasks] 每日调度已启动（每天 ${String(SCHEDULE_HOUR).padStart(2, '0')}:00 后每 ${CHECK_INTERVAL_MS / 60000} 分钟检查补做 Report 摘要 + Notes 知识库维护）`);
 }

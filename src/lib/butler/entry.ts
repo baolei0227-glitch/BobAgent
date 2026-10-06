@@ -211,6 +211,9 @@ export async function askButler(
       body: JSON.stringify({
         messages,
         nodeId: BUTLER_PLACEHOLDER_NODE_ID,
+        // 会话身份（2026-10-02）：nodeId 是占位符，**真正的会话是 threadId**。
+        // 带上它 route 才能把记忆来源写成 chat:<threadId>，并让规则预算按会话分片。
+        threadId,
         thinkingLevel: level,
         // 恒为管家身份（完整画像 + fixedScenes 工具面）；channel 标记聚合链路
         // （wechat / panel：route 据此不登记挂起，写类权限按通道分档，见上）。
@@ -359,6 +362,8 @@ export async function streamButlerTurn(
     body: JSON.stringify({
       messages,
       nodeId: BUTLER_PLACEHOLDER_NODE_ID,
+      // 会话身份（2026-10-02）：同上——记忆来源归因与规则预算都靠它，nodeId 只是占位符
+      threadId,
       thinkingLevel: level,
       // 常驻「Recorder」线程走专属身份（工具面收口到会议场景）；其余抽屉/微信会话恒为管家身份
       identity: threadId === RECORDER_THREAD_ID ? 'recorder' : 'butler',

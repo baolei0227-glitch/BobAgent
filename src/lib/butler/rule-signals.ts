@@ -85,8 +85,9 @@ export async function recordRuleViolated(
 /**
  * 用户显式否定：写 **一条** `user_dismissed`（拉黑与修订阈值两处共读同一条）。
  * 「**否决即拉黑**」（v6 §3.4）：传入该规则覆盖的**对象类型**时，**立即**额外落一条
- * class='signal_mismatch' 的负样本，使该对象类型的 near-miss 询问不再产生候选。
- * 「问过几次」的限流是**另一个计数**（rule-nearmiss.consumeAsk），二者分离（D8）。
+ * class='signal_mismatch' 的负样本，使该对象类型的近似命中不再走「询问」。
+ * （2026-10-05 学习机制改造：near-miss 的「询问额度」计数已随「一次即记忆」废止，
+ *  负样本仍是唯一的抑制通道——`signal_mismatch` 压询问、`not_a_habit` 压静默学。）
  */
 export async function recordUserDismissed(
   ruleId: string,

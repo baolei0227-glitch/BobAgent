@@ -15,7 +15,7 @@
  */
 
 /** 可对外分享正文的收件箱 kind —— 即「报告类」。不含 chat / task / note(s) / calendar / todo_del / check */
-export const SHAREABLE_REPORT_KINDS = ['web', 'daily-report', 'inspect', 'info'] as const;
+export const SHAREABLE_REPORT_KINDS = ['web', 'notes-maintenance', 'info'] as const;
 
 /** 该 kind 的正文是否可分享 / 下载 */
 export function isShareableReportKind(kind: string | null | undefined): boolean {

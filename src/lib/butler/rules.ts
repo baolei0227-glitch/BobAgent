@@ -296,6 +296,10 @@ export async function createRule(input: CreateRuleInput): Promise<RuleRecord> {
   const scope = input.scope === 'project' ? 'project' : 'global';
   if (scope === 'project' && !input.scopeTarget) throw new Error('scope_target is required when scope is project');
 
+  // 状态：缺省 'active'（既有调用方零行为变更）；'draft' 供「弱信号一次即记忆」——静默记录、不执行。
+  const statuses: RuleStatus[] = ['draft', 'active', 'paused', 'retired'];
+  const status: RuleStatus = input.status && statuses.includes(input.status) ? input.status : 'active';
+
   const rule: RuleRecord = {
     id: generateRuleId(),
     name,
@@ -311,7 +315,7 @@ export async function createRule(input: CreateRuleInput): Promise<RuleRecord> {
     scope,
     ...(scope === 'project' ? { scopeTarget: input.scopeTarget } : {}),
     priority: typeof input.priority === 'number' && Number.isFinite(input.priority) ? input.priority : DEFAULT_RULE_PRIORITY,
-    status: 'active',
+    status,
     version: 1,
     createdAt: nowStamp(),
   };

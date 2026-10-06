@@ -1,5 +1,5 @@
 /**
- * /api/butler/daily-report
+ * /api/butler/daily-tasks
  *
  * 每日任务（2026-09-27 起日报三页签已移交 Today 面板承载，这里只剩两类每日任务）：
  *   - POST { type: 'progress' | 'notes' } — 手动触发 / 每日 9:00 调度器调用
@@ -17,13 +17,13 @@ import {
   generateProgressDigest,
   sendNotesMaintenance,
   takePendingReports,
-  type DailyReportType,
-} from '@/lib/core/daily-report';
+  type DailyTaskType,
+} from '@/lib/core/daily-tasks';
 import { decidePush, recordPush } from '@/lib/core/quiet-hours';
 
 export async function POST(request: NextRequest) {
   try {
-    const { type } = (await request.json()) as { type?: DailyReportType };
+    const { type } = (await request.json()) as { type?: DailyTaskType };
     const result =
       type === 'progress' ? await generateProgressDigest() : type === 'notes' ? await sendNotesMaintenance() : null;
     if (!result) {
@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, ...result });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error('[core/daily-report] 执行失败:', msg);
+    console.error('[core/daily-tasks] 执行失败:', msg);
     return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }

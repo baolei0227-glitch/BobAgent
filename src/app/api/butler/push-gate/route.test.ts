@@ -57,8 +57,8 @@ describe('B5 打扰闸', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 9, 2, 23, 0, 0)); // 本地时间 23:00
 
-    expect((await gate('daily-report')).allow).toBe(false);
-    expect((await gate('daily-report')).reason).toBe('quiet-hours');
+    expect((await gate('notes-maintenance')).allow).toBe(false);
+    expect((await gate('notes-maintenance')).reason).toBe('quiet-hours');
     expect((await gate('meeting')).allow).toBe(false);
     // 未知名 / 空体 → 'other'，可静默类别
     expect((await gate()).allow).toBe(false);
@@ -82,9 +82,9 @@ describe('B5 打扰闸', () => {
       'utf-8',
     );
 
-    expect((await gate('daily-report')).allow).toBe(true);
-    expect((await gate('daily-report')).allow).toBe(true);
-    const third = await gate('daily-report');
+    expect((await gate('notes-maintenance')).allow).toBe(true);
+    expect((await gate('notes-maintenance')).allow).toBe(true);
+    const third = await gate('notes-maintenance');
     expect(third.allow).toBe(false);
     expect(third.reason).toBe('daily-limit');
 
@@ -99,7 +99,7 @@ describe('B5 打扰闸', () => {
       JSON.stringify({ version: 1, butlerNotify: { enabled: false } }),
       'utf-8',
     );
-    const d = await gate('daily-report');
+    const d = await gate('notes-maintenance');
     expect(d.allow).toBe(true);
     expect(d.reason).toBe('disabled');
     vi.useRealTimers();

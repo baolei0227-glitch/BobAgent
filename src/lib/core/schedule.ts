@@ -1,9 +1,9 @@
 /**
- * 日程查询共享内核（原 Butler /schedule 指令能力，命令已删除，能力并入 /todo check 与 daily-report）。
+ * 日程查询共享内核（原 Butler /schedule 指令能力，命令已删除，能力并入 /todo check 与 daily-tasks）。
  *
  * 调用方：
  *   - /todo check 子命令（⌘F 面板 / 微信桥）→ resolveReadCalendarQuery + querySchedule
- *   - 每日报告 daily-report → querySchedule
+ *   - 每日任务 daily-tasks → querySchedule
  *   - 日程查询统一管线：parseScheduleInput（正则快路径）→ /api/core/schedule-parse（LLM 回退）
  *
  * 支持的自然语言（query_text / parseScheduleInput 输入）：

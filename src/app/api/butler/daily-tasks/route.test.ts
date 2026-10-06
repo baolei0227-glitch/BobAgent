@@ -1,5 +1,5 @@
 /**
- * 路由级回归：`GET /api/butler/daily-report` 的 B5 打扰闸（报告**暂缓而非丢弃**）。
+ * 路由级回归：`GET /api/butler/daily-tasks` 的 B5 打扰闸（报告**暂缓而非丢弃**）。
  *
  * 设置界面承诺「Quiet hours silence proactive pushes… the report is never lost —
  * it still lands in the drawer inbox」以及「held back and resume when it ends」。
@@ -8,7 +8,7 @@
  *   ② 窗口结束后（下一轮轮询）→ 同一份报告照常投递并清空队列（**不丢**）；
  *   ③ 放行会累计当日推送计数（供单日上限使用）。
  *
- * 隔离：BOBWORK_HOME 指向临时目录；pending.json 直接落盘造数（形状见 daily-report.ts 的 pushPending）。
+ * 隔离：BOBWORK_HOME 指向临时目录；pending.json 直接落盘造数（形状见 daily-tasks.ts 的 pushPending）。
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -21,7 +21,7 @@ let route: typeof import('./route');
 let pendingFile = '';
 
 beforeAll(async () => {
-  home = mkdtempSync(join(tmpdir(), 'bobwork-daily-report-gate-'));
+  home = mkdtempSync(join(tmpdir(), 'bobwork-daily-tasks-gate-'));
   process.env.BOBWORK_HOME = home;
   writeFileSync(
     join(home, '.settings.json'),
@@ -31,8 +31,8 @@ beforeAll(async () => {
     }),
     'utf-8',
   );
-  pendingFile = join(home, 'butler', '.state', 'daily-report', 'pending.json');
-  mkdirSync(join(home, 'butler', '.state', 'daily-report'), { recursive: true });
+  pendingFile = join(home, 'butler', '.state', 'daily-tasks', 'pending.json');
+  mkdirSync(join(home, 'butler', '.state', 'daily-tasks'), { recursive: true });
   route = await import('./route');
 });
 
@@ -46,7 +46,7 @@ function seedPending(): void {
   writeFileSync(
     pendingFile,
     JSON.stringify([
-      { kind: 'daily-report', title: '知识库维护', body: '今日笔记已整理', time: Date.now(), items: [], dedupeKey: 'notes:2026-10-02' },
+      { kind: 'notes-maintenance', title: '知识库维护', body: '今日笔记已整理', time: Date.now(), items: [], dedupeKey: 'notes:2026-10-02' },
     ]),
     'utf-8',
   );
@@ -57,7 +57,7 @@ async function get(): Promise<{ reports?: unknown[]; held?: boolean; reason?: st
   return (await res.json()) as { reports?: unknown[]; held?: boolean; reason?: string };
 }
 
-describe('GET /api/butler/daily-report —— 打扰闸', () => {
+describe('GET /api/butler/daily-tasks —— 打扰闸', () => {
   it('免打扰窗口内：暂缓（reports 空 + held），且 pending 不动（报告没丢）', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 9, 2, 23, 0, 0));

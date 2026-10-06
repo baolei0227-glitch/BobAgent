@@ -18,8 +18,8 @@
  *  - 启动时立即扫描一次 → 应用关闭期间错过的提前提醒在下次打开时补发
  *  - 之后每 60s 扫描一次 → 运行中事件到点即提醒
  *
- * 与每日报告（daily-report）的分工：
- *  - 每日报告：每天 9:00 汇总"今日待办 + 已过期"- 整体概览
+ * 与每日任务（daily-tasks）的分工：
+ *  - 每日任务：每天 9:00 生成 Report 摘要（Today 面板）+ 知识库维护 + News 简报，不做即时提醒
  *  - 本模块：事件提前提醒（粒度更细，kind='calendar'）
  */
 import { readFile, writeFile, mkdir } from 'fs/promises';

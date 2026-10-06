@@ -40,15 +40,15 @@ export async function register() {
     console.error('[butler/threads] 启动清理加载失败:', e);
   }
   try {
-    // 每日自动报告调度：每天 9:00 或当天首次打开软件时发送 Morning 报告
-    const { startDailyReportScheduler } = await import('@/lib/core/daily-report');
+    // 每日任务调度：每天 9:00 或当天首次打开软件时生成 Report 摘要 + Notes 知识库维护 + News 简报
+    const { startDailyTaskScheduler } = await import('@/lib/core/daily-tasks');
     setTimeout(() => {
-      startDailyReportScheduler().catch((e) => {
-        console.error('[daily-report] 调度启动失败:', e);
+      startDailyTaskScheduler().catch((e) => {
+        console.error('[daily-tasks] 调度启动失败:', e);
       });
     }, 4000);
   } catch (e) {
-    console.error('[daily-report] 调度加载失败:', e);
+    console.error('[daily-tasks] 调度加载失败:', e);
   }
   try {
     // 历史日报回执清理：日报三页签已整体移交 Today 面板（Bobby 不再推送日报），

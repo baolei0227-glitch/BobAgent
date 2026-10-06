@@ -2,8 +2,8 @@
  * 路由级回归：`GET /api/butler/memory-audit`（Memory 台「证据视图」的只读聚合）。
  *
  * 锁三条不变量：
- *   ① 空态是**安全输入**：无负样本/无额度/无预算/无产出的全新数据根 → 各段为空数组、不 500；
- *   ② 各段数据来自**既有落点**且聚合正确（负样本两类 / 询问额度 / 会话预算 / 规则产出引用 / 最近活动）；
+ *   ① 空态是**安全输入**：无负样本/无预算/无产出的全新数据根 → 各段为空数组、不 500；
+ *   ② 各段数据来自**既有落点**且聚合正确（负样本两类 / 会话预算 / 规则产出引用 / 最近活动）；
  *   ③ 真源路径是**绝对路径**且指向既有四个落点（供用户自行备份）。
  *
  * 隔离：BOBWORK_HOME 指向临时目录，且必须在**动态 import** 之前设置（storage 的模块级常量在 import 时求值）。
@@ -33,7 +33,6 @@ interface AuditBody {
   paths?: Record<string, string>;
   recent?: { kind: string; title: string; at: string }[];
   negative?: { blocked: unknown[]; grouped: { signal_mismatch: unknown[]; not_a_habit: unknown[] } };
-  askQuota?: { objectType: string; used: number; limit: number }[];
   budget?: { threadId: string; asks: number; limit: number }[];
   productions?: { ruleId: string; ruleName: string; producedRef: string; at: string }[];
 }
@@ -51,7 +50,6 @@ describe('GET /api/butler/memory-audit', () => {
     expect(b.negative?.blocked).toEqual([]);
     expect(b.negative?.grouped.signal_mismatch).toEqual([]);
     expect(b.negative?.grouped.not_a_habit).toEqual([]);
-    expect(b.askQuota).toEqual([]);
     expect(b.budget).toEqual([]);
     expect(b.productions).toEqual([]);
     // 真源路径（绝对）+ 四个落点齐全
@@ -62,17 +60,14 @@ describe('GET /api/butler/memory-audit', () => {
     expect(b.paths?.threads).toBe(join(home, 'butler', '.state', 'threads'));
   });
 
-  it('有数据时聚合正确（负样本 / 额度 / 预算 / 产出 / 最近活动）', async () => {
+  it('有数据时聚合正确（负样本 / 预算 / 产出 / 最近活动）', async () => {
     const { recordNegativeSample } = await import('@/lib/butler/rule-signals');
-    const { consumeAsk } = await import('@/lib/butler/rule-nearmiss');
     const { createRule } = await import('@/lib/butler/rules');
     const { recordHit } = await import('@/lib/butler/rule-signals');
     const { addPreference } = await import('@/lib/core/preferences');
 
     // 负样本：一类拉黑（signal_mismatch）
     await recordNegativeSample('todo', 'todo', 'blocked', 'signal_mismatch');
-    // 询问额度：问过一次（上限 2，见 NEAR_MISS_ASK_LIMIT）
-    await consumeAsk('schedule');
     // 会话预算：手写落点（真源格式由 rule-exec 定义：{ asks }）
     mkdirSync(join(home, 'butler', '.state', 'rule-budget'), { recursive: true });
     writeFileSync(join(home, 'butler', '.state', 'rule-budget', 'b-1.json'), JSON.stringify({ asks: 1 }), 'utf-8');
@@ -93,7 +88,6 @@ describe('GET /api/butler/memory-audit', () => {
     expect(tagged.some((e) => e.objectType === 'todo' && e.class === 'signal_mismatch')).toBe(true);
     expect(b.negative?.grouped.signal_mismatch.length).toBeGreaterThan(0);
 
-    expect(b.askQuota?.find((q) => q.objectType === 'schedule')).toMatchObject({ used: 1, limit: 2 });
     expect(b.budget?.find((x) => x.threadId === 'b-1')).toMatchObject({ asks: 1, limit: 2 });
 
     expect(b.productions?.[0]).toMatchObject({ ruleId: rule.id, ruleName: '每天提醒喝水', producedRef: 'evt-drink-water' });

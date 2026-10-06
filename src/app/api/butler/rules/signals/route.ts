@@ -29,6 +29,7 @@ import {
 } from '@/lib/butler/rule-logs';
 import { evaluateRuleRevision } from '@/lib/butler/rule-signals';
 import { listRules } from '@/lib/butler/rules';
+import { ruleActivityOf, type RuleActivity } from '@/lib/butler/rule-forget';
 
 /** 每类信号返回的最近条数上限（页面是「最近发生了什么」的视图，不需要全量） */
 const DETAIL_LIMIT = 50;
@@ -69,7 +70,13 @@ export async function GET(request: NextRequest) {
       );
       const revisions: Record<string, Revision> = {};
       for (const [rid, rev] of pairs) revisions[rid] = rev;
-      return NextResponse.json({ success: true, revisions });
+      // 活动度（命中次数 / 最近命中 / 是否陈旧）：draft 的「已印证」与 active 的「建议废除」都由此派生
+      const activityPairs = await Promise.all(
+        rules.map(async (r) => [r.id, await ruleActivityOf(r)] as const),
+      );
+      const activity: Record<string, RuleActivity> = {};
+      for (const [rid, a] of activityPairs) activity[rid] = a;
+      return NextResponse.json({ success: true, revisions, activity });
     }
 
     // 有 id：该规则的信号详情

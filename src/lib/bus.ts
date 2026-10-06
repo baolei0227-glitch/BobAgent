@@ -144,10 +144,10 @@ export interface TraceInspectPayload {
   span: import('@/lib/types').TraceSpan;
 }
 
-/** Butler 通知负载（由 ⌘F 面板 / 每日报告 等发布，ButlerNoticeHost 消费） */
+/** Butler 通知负载（由 ⌘F 面板 / 每日任务 等发布，ButlerNoticeHost 消费） */
 export interface ButlerNoticePayload {
-  /** kind：task=任务已建 / calendar=日历提醒 / note=想法已存 / notes=笔记列表（/note check） / todo_del=日程已删 / check=日程查询（/todo check） / info=通用 / web=一键整理网页报告 / daily-report=每日报告 / inspect=跨项目 sticky 待办检查 */
-  kind: 'task' | 'calendar' | 'note' | 'notes' | 'todo_del' | 'check' | 'info' | 'web' | 'daily-report' | 'inspect';
+  /** kind：task=任务已建 / calendar=日历提醒 / note=想法已存 / notes=笔记列表（/note check） / todo_del=日程已删 / check=日程查询（/todo check） / info=通用 / web=一键整理网页报告 / notes-maintenance=知识库每日维护 */
+  kind: 'task' | 'calendar' | 'note' | 'notes' | 'todo_del' | 'check' | 'info' | 'web' | 'notes-maintenance';
   title: string;
   body: string;
   time?: number;
@@ -155,13 +155,13 @@ export interface ButlerNoticePayload {
   desktop?: boolean;
   /** 点击通知时执行的动作 */
   action?: { type: 'open-calendar' };
-  /** 结构化待办列表（每日报告 / 日程查询邮件）：通知中心顶部据此渲染标签栏，点击标签筛选该类待办 */
+  /** 结构化待办列表（日程查询邮件）：通知中心顶部据此渲染标签栏，点击标签筛选该类待办 */
   items?: ButlerNoticeItem[];
-  /** 通知来源：panel=Butler 面板输入 / wechat=微信桥 / scheduled=定时（日报等） */
+  /** 通知来源：panel=Butler 面板输入 / wechat=微信桥 / scheduled=定时（知识库维护等） */
   source?: 'panel' | 'wechat' | 'scheduled';
   /** 去重 key：防止同一事件被并发 publish 两遍；消费端按此 key 做窗口内去重
    *  - calendar 提醒：evt:<projectId>:<eventId>（由服务端写入 pending.json）
-   *  - daily-report：daily-report:<YYYY-MM-DD>
+   *  - notes-maintenance：notes:<YYYY-MM-DD>
    *  - 其他项可选：不填则按 kind+title+time 兜底生成
    */
   dedupeKey?: string;
@@ -180,7 +180,7 @@ export interface ButlerNoticePayload {
    *  - `'gate'`（缺省）：先问 `POST /api/butler/push-gate`，免打扰窗口内/**超单日上限**时不打扰；
    *    落库不受影响（条目照常进抽屉收件箱），故**不丢数据**。
    *  - `'always'`：不过闸。用于两类——① **义务性通知**（规则执行回执等，v6 §3.2「义务不是打扰」）；
-   *    ② **服务端已裁决过的**推送（如日报：服务端在 `GET /api/butler/daily-report` 已按同一策略
+   *    ② **服务端已裁决过的**推送（如知识库维护：服务端在 `GET /api/butler/daily-tasks` 已按同一策略
    *    决定放行或留在队列，客户端再过闸会双重计数）。
    */
   interrupt?: 'gate' | 'always';
@@ -211,10 +211,13 @@ export interface ButlerNoticeItem {
    * 点击完成时接的真实链路（缺省 = 只翻转通知内的本地勾选，不动任何底层数据）：
    *  - 'event'：key 即日历事件 id（日报 Schedule 页）→ PATCH 事件状态，日历 / 便签侧随之联动
    *  - 'sticky'：便签待办行（日报 Sticky 页）→ 勾掉便签正文对应行，该行已入日历则事件同步完成
+   *  - 'project'：项目行（Today 建议区的「项目停滞」）→ 该行无勾选，点击即切到该项目
    */
-  source?: 'event' | 'sticky';
+  source?: 'event' | 'sticky' | 'project';
   /** source='sticky' 的行定位：项目 + 便签 / 页 + 行号（text 用于行号漂移后的兜底匹配） */
   sticky?: { projectId: string; noteId: string; pageId: string; lineIndex: number; text?: string };
+  /** source='project' 的行定位：点击后切换到该项目（替代勾选动作） */
+  project?: { projectId: string; projectName: string };
   /** sticky 项所属项目名（Sticky 页按项目分组渲染） */
   group?: string;
   /** sticky 项的次级归属（便签标题；与项目同名 / 只有一张便签时为空，不占一行） */

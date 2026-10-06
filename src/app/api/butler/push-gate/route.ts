@@ -23,7 +23,7 @@ import { decidePush, recordPush, type PushKind } from '@/lib/core/quiet-hours';
 function toPushKind(kind: string): PushKind {
   if (kind === 'calendar' || kind === 'reminder') return 'reminder';
   if (kind === 'meeting') return 'meeting';
-  if (kind === 'daily-report' || kind === 'report' || kind === 'inspect') return 'report';
+  if (kind === 'notes-maintenance' || kind === 'report') return 'report';
   return 'other';
 }
 

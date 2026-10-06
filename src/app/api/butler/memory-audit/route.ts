@@ -2,11 +2,12 @@
  * /api/butler/memory-audit —— Memory 台「证据视图」的**只读聚合**端点
  *
  * 背景（《Butler-Memory设计_20261002.md》§4 / M3）：记忆台的 Evidence 段要回答
- * 「Butler 凭什么这么记、这么学」——这些数据此前**分散在四类落点且没有任何读口**：
+ * 「Butler 凭什么这么记、这么学」——这些数据此前**分散在多类落点且没有任何读口**：
  *   - 被拉黑模式（负样本）      `butler/.rules/.logs/negative-sample/<objectType>.jsonl`
- *   - near-miss 询问额度        `butler/.state/rule-nearmiss.json`
  *   - 每会话主动冒头预算        `butler/.state/rule-budget/<threadId>.json`
  *   - 规则产出引用（去了哪）    `butler/.rules/.logs/hits/<ruleId>.jsonl` 的 `producedRef`
+ * （2026-10-05 学习机制改造：near-miss 由「攒 N 次才提议」改为「一次即记忆」，
+ *  不再有「询问额度」这一计数，「询问额度」段随之移除。）
  * 外加「最近记忆活动」时间线（记忆 / 规则 / 技能的新建时间）与**真源绝对路径**（供用户自行备份）。
  *
  * 纪律：
@@ -27,9 +28,7 @@ import {
   NEGATIVE_OBJECT_TYPES,
   type NegativeSampleClass,
 } from '@/lib/butler/rule-signals';
-import { readAskCounts } from '@/lib/butler/rule-nearmiss';
 import { listRuleBudgets, RULE_ASK_BUDGET } from '@/lib/butler/rule-exec';
-import { NEAR_MISS_ASK_LIMIT } from '@/lib/butler/rules-shared';
 import { listPreferences } from '@/lib/core/preferences';
 import { join } from 'path';
 
@@ -54,11 +53,10 @@ interface RecentActivity {
 
 export async function GET() {
   try {
-    const [rules, skills, prefs, askCounts, budgets] = await Promise.all([
+    const [rules, skills, prefs, budgets] = await Promise.all([
       listRules().catch(() => []),
       listSkills().catch(() => []),
       listPreferences().catch(() => []),
-      readAskCounts().catch(() => ({}) as Record<string, number>),
       listRuleBudgets().catch(() => [] as { threadId: string; asks: number }[]),
     ]);
 
@@ -81,12 +79,7 @@ export async function GET() {
       not_a_habit: blocked.filter((e) => e.class === 'not_a_habit'),
     };
 
-    // ② near-miss 询问额度（每个对象类型）：used >= limit 即不再问
-    const askQuota = Object.entries(askCounts)
-      .map(([objectType, used]) => ({ objectType, used, limit: NEAR_MISS_ASK_LIMIT }))
-      .sort((a, b) => b.used - a.used);
-
-    // ③ 每会话主动冒头预算
+    // ② 每会话主动冒头预算
     const budget = budgets.map((b) => ({ ...b, limit: RULE_ASK_BUDGET }));
 
     // ④ 规则产出引用：每条规则最近一次带 producedRef 的命中（「它到底做了什么」）
@@ -139,7 +132,6 @@ export async function GET() {
       paths,
       recent,
       negative: { blocked, samples, grouped, classes: ['signal_mismatch', 'not_a_habit'] as NegativeSampleClass[] },
-      askQuota,
       budget,
       productions,
     });
