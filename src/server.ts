@@ -235,6 +235,18 @@ function hasValidSessionCookie(req: IncomingMessage, token: string): boolean {
   }
 }
 
+/** 会话 Cookie 的有效期（秒）。180 天：iOS「添加到主屏幕」后进程退出会丢会话 Cookie，
+ *  给持久化以免每次打开都要重登；rotate token 让派生值失配即等效吊销，无黑名单负担。 */
+const REMOTE_COOKIE_MAX_AGE = 180 * 24 * 60 * 60;
+
+/**
+ * 构造会话 Cookie 串。值 = HMAC(token)，HttpOnly + SameSite=Lax，Path=/。
+ * 单一真源：登录页换 Cookie 与「Bearer 顺带下发」两处共用，避免两侧参数漂移。
+ */
+function sessionCookieHeader(token: string): string {
+  return `${REMOTE_COOKIE}=${expectedCookieValue(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${REMOTE_COOKIE_MAX_AGE}`;
+}
+
 /** 返回 true = 放行；false = 已写响应并结束。 */
 function requireRemoteToken(req: IncomingMessage, res: ServerResponse): boolean {
   const ra = remoteAccessCache;
@@ -243,7 +255,16 @@ function requireRemoteToken(req: IncomingMessage, res: ServerResponse): boolean 
   if (!needAuth) return true; // 本机豁免（loopback + 本机网卡地址：服务端内部自调用经隧道 IP 回环）
   // ① Bearer 头：Expo 壳 / curl / strict 模式下 electron 网络层注入
   const auth = req.headers['authorization'];
-  if (auth && auth.startsWith('Bearer ') && auth.slice(7) === ra.token) return true;
+  if (auth && auth.startsWith('Bearer ') && auth.slice(7) === ra.token) {
+    // 顺带下发会话 Cookie（关键）：WebView 的 Authorization 头只作用于**主文档**，
+    // 页面内引用的 /_next/static/**（Accept 非 text/html）与 fetch 子请求不会带它，
+    // 会各自吃 401 → 主文档能开、JS 加载失败 → 白屏。一旦种下 Cookie，
+    // 同源子请求自动携带，主链路与所有子资源一并放行。
+    if (!hasValidSessionCookie(req, ra.token)) {
+      res.setHeader('Set-Cookie', sessionCookieHeader(ra.token));
+    }
+    return true;
+  }
 
   // ② 会话 Cookie：浏览器导航请求带不了 Authorization 头，只能靠它
   if (hasValidSessionCookie(req, ra.token)) return true;
@@ -382,13 +403,8 @@ async function handleRemoteLogin(req: IncomingMessage, res: ServerResponse): Pro
     }
 
     res.statusCode = 200;
-    // Max-Age：会话 Cookie 在 iOS「添加到主屏幕」的独立 Web App 里会随进程退出被清掉，
-    // 每次打开都要重登。这里给 180 天持久化；rotate token 会让派生值失配而等效吊销，无黑名单负担。
-    const COOKIE_MAX_AGE = 180 * 24 * 60 * 60;
-    res.setHeader(
-      'Set-Cookie',
-      `${REMOTE_COOKIE}=${expectedCookieValue(ra.token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
-    );
+    // Cookie 参数与「Bearer 顺带下发」共用 sessionCookieHeader（单一真源）
+    res.setHeader('Set-Cookie', sessionCookieHeader(ra.token));
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ success: true }));
     return true;
