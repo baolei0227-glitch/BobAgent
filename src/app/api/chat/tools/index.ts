@@ -358,6 +358,13 @@ export interface ToolExecContext {
   teamQuestionText?: string;
   /** 当前项目 id（透传给队长会话的 /api/chat，用于项目上下文） */
   projectId?: string;
+  /**
+   * Butler 会话线程 id（2026-10-02 新增，仅 Butler 链路注入）。
+   * 用途：记忆类工具把「这条记忆是哪次对话记下的」写进 `source`（`chat:<threadId>`）——
+   * v6 §4.1 要的「来源可溯」只做到了「来自 chat」这一层，补上会话维度才真的可溯。
+   * 非 Butler 链路缺省 undefined → 行为与改造前一致（source 写死 'chat'）。
+   */
+  threadId?: string;
   /** 宿主自身的绝对 base（`new URL(request.url).origin`，route 注入）。
    *  工具内**自调用宿主 API** 时用：Node fetch 不支持相对路径（见 /api/core/execute 的同类处理），
    *  如会议工具 meeting_end 调 /api/core/meeting 整理纪要。未注入（无 HTTP 宿主）= 缺省。 */

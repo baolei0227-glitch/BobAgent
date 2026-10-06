@@ -5,6 +5,8 @@
  *             resolve_datetime / query_free_slots / query_schedule / create_scheduled_todo /
  *             query_todos / todo_update / todo_delete / create_sticky_note
  *   - 应用结构：create_project（新建项目——应用级写动作，挂 butler 场景，并列入写类收口名单）
+ *             switch_project（打开/切换当前项目——只切不建，前端 SSE 同步）、
+ *             create_session（在指定项目新建会话并可选执行任务——节点本体由画布创建）
  *   - 计划树：project_plan_start / project_plan_view / project_plan_add_steps / project_plan_step_status
  *   - 模型计费：get_model_price / set_model_price（对话维护单价覆盖，新增模型 / 厂商调价）
  *   - 规则原语（v6 §5.1；Phase 0 只固化与可见、不自动执行）：
@@ -20,9 +22,14 @@
 
 import { randomUUID } from 'crypto';
 import { readFile, writeFile, mkdir, rename } from 'fs/promises';
-import { getCurrentProject, createProject } from '@/lib/project/project-manager';
-import { resolveProjectWithFallback } from '@/lib/project/resolve-explicit-project';
-import { emitProjectsChanged } from '@/lib/project/project-events';
+import { getCurrentProject, createProject, switchProject } from '@/lib/project/project-manager';
+import { resolveProjectWithFallback, resolveExplicitProject } from '@/lib/project/resolve-explicit-project';
+import {
+  emitProjectsChanged,
+  emitProjectSwitched,
+  emitSessionRequest,
+  hasProjectsChangedListeners,
+} from '@/lib/project/project-events';
 import { initDb } from '@/lib/db';
 import { join } from 'path';
 import { PROJECT_DB_FILENAME } from '@/lib/app-root';
@@ -31,7 +38,10 @@ import type { ModelPriceOverride } from '@/lib/settings';
 import type { RecurrenceRule } from '@/lib/calendar/recurrence';
 import { parseRecurrence, recurrenceLabel } from '@/lib/calendar/recurrence';
 import { parseTodoTime } from '@/lib/todo-time-parse';
-import type { Tool } from './index';
+import { listAgents, BUTLER_ROUTING_HINT } from '@/lib/agents/profiles';
+import { loadInstalledAgentProfiles } from '@/lib/agents/market-server';
+import { readAgentsState } from '@/lib/agents/store';
+import type { Tool, ToolExecContext } from './index';
 
 /**
  * 解析工具入参里的周期重复设置（create_scheduled_todo / todo_update 共用）。
@@ -283,13 +293,19 @@ async function toolReadTodo(args: Record<string, unknown>): Promise<string> {
 }
 
 /** remember_preference 工具 — 记录用户记忆（识别到持久事实/偏好即自主写入，带类型元数据；敏感信息拒绝） */
-async function toolRememberPreference(args: Record<string, unknown>): Promise<string> {
+async function toolRememberPreference(args: Record<string, unknown>, ctx?: ToolExecContext): Promise<string> {
   const content = typeof args.content === 'string' ? args.content.trim() : '';
   if (!content) return 'Error: content is required（记忆内容必填，例如「用户习惯用表格输出」）';
   const type = typeof args.type === 'string' && args.type.trim() ? args.type.trim() : undefined;
+  // 来源归因（2026-10-02）：带上会话线程 id → `chat:<threadId>`，Memory 台里能看出「哪次对话记的」。
+  // 长度收敛到 120 字符（异常超长 id 不该把元数据行撑爆）；非 Butler 链路 ctx 缺省 → 退回 'chat'。
+  const source = ctx?.threadId ? `chat:${String(ctx.threadId).slice(0, 120)}` : undefined;
   try {
     const { addPreference, ALWAYS_INJECTED_TYPES } = await import('@/lib/core/preferences');
-    const res = await addPreference(content, type ? { type } : undefined);
+    const res = await addPreference(content, {
+      ...(type ? { type } : {}),
+      ...(source ? { source } : {}),
+    });
     // 敏感信息守卫：明文落盘 + 每轮注入，凭证/证件一律拒绝（提示模型向用户说明、不要复述原文）
     if (res.blocked) {
       return `未记录：内容疑似敏感信息（命中「${res.blocked}」特征）。记忆以明文保存并每轮注入，为保证安全不作记录；请告知用户不保存此类信息，且不要在回复中复述其原文。`;
@@ -311,6 +327,59 @@ async function toolRememberPreference(args: Record<string, unknown>): Promise<st
     return `该记忆此前已记录：「${content}」（共 ${res.total} 条，未重复添加）。`;
   } catch (e) {
     return `记录记忆失败: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/**
+ * news_topics 工具 — 维护 Daily News 的主题（与 Today 面板 News 页签写**同一份** config）。
+ *
+ * 双入口同一写口：界面 chips 与对话改口都落 `butler/.state/news/config.json`。
+ * 只增删/列出主题，**不触发**简报重算（重算走界面 Refresh now 或每日调度）。
+ * 否定式（「别推体育」）自然落成 action=remove。
+ */
+async function toolNewsTopics(args: Record<string, unknown>): Promise<string> {
+  const action = typeof args.action === 'string' && args.action.trim() ? args.action.trim() : 'list';
+  try {
+    const { readNewsConfig, addNewsTopic, removeNewsTopic } = await import('@/lib/news/store');
+    const { NEWS_TOPIC_SOFT_MAX } = await import('@/lib/news/types');
+
+    if (action === 'list') {
+      const cfg = await readNewsConfig();
+      if (cfg.topics.length === 0) return '暂无新闻主题。用 news_topics(action="add", label="Tech") 添加。';
+      return `当前新闻主题（${cfg.topics.length}）：${cfg.topics.map((t) => `${t.label}（检索词 ${t.query}，${t.limit} 条）`).join('；')}`;
+    }
+
+    if (action === 'add') {
+      const label = typeof args.label === 'string' ? args.label.trim() : '';
+      if (!label) return 'Error: label is required（要新增的主题名必填，例如 "Tech"）';
+      const query = typeof args.query === 'string' && args.query.trim() ? args.query.trim() : undefined;
+      const limit = typeof args.limit === 'number' ? args.limit : undefined;
+      const cfg = await addNewsTopic({ label, query, limit });
+      const warn =
+        cfg.topics.length > NEWS_TOPIC_SOFT_MAX
+          ? `（现有 ${cfg.topics.length} 个，建议不超过 ${NEWS_TOPIC_SOFT_MAX} 个，可合并同类主题）`
+          : '';
+      return `已添加新闻主题「${label}」（现有 ${cfg.topics.length} 个）${warn}。当天简报不会自动重写，用户在 News 页点 Refresh now 才更新内容。`;
+    }
+
+    if (action === 'remove') {
+      const key =
+        typeof args.label === 'string' && args.label.trim()
+          ? args.label.trim()
+          : typeof args.query === 'string'
+            ? args.query.trim()
+            : '';
+      if (!key) return 'Error: label is required（要移除的主题名必填）';
+      const { config, removed } = await removeNewsTopic(key);
+      if (removed === 0) {
+        return `未找到匹配「${key}」的新闻主题；当前主题：${config.topics.map((t) => t.label).join('、') || '（空）'}`;
+      }
+      return `已移除 ${removed} 个新闻主题（现有 ${config.topics.length} 个）。`;
+    }
+
+    return `Error: unknown action "${action}"（支持 list / add / remove）`;
+  } catch (e) {
+    return `新闻主题操作失败: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -394,7 +463,7 @@ async function routeNegationToRule(content: string): Promise<string> {
 // ==================== 规则原语（v6 §5.1；Phase 0 只固化与可见，不自动执行）====================
 
 /** 解析 steps 入参：接受对象 {kind, text, annex?, action?} 或字符串（默认 deterministic）；非法 → null */
-const RULE_ACTIONS = ['create_todo', 'create_scheduled_todo'] as const;
+const RULE_ACTIONS = ['create_todo', 'create_scheduled_todo', 'skill'] as const;
 
 function parseRuleStepsArg(
   raw: unknown,
@@ -402,16 +471,16 @@ function parseRuleStepsArg(
   kind: 'deterministic' | 'judgment';
   text: string;
   annex?: boolean;
-  action?: 'create_todo' | 'create_scheduled_todo';
-  actionParams?: { when?: string };
+  action?: 'create_todo' | 'create_scheduled_todo' | 'skill';
+  actionParams?: { when?: string; skillId?: string };
 }> | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const out: Array<{
     kind: 'deterministic' | 'judgment';
     text: string;
     annex?: boolean;
-    action?: 'create_todo' | 'create_scheduled_todo';
-    actionParams?: { when?: string };
+    action?: 'create_todo' | 'create_scheduled_todo' | 'skill';
+    actionParams?: { when?: string; skillId?: string };
   }> = [];
   for (const s of raw) {
     if (typeof s === 'string') {
@@ -428,12 +497,21 @@ function parseRuleStepsArg(
     if (kind === 'judgment' && o.annex === true) step.annex = true;
     if (kind === 'deterministic') {
       // 确定性步可选绑定宿主执行器：create_todo（便签待办）/ create_scheduled_todo（日程待办）
+      // / skill（调用一条已固化技能，需 action_params.skillId）
       const action = RULE_ACTIONS.find((a) => a === o.action);
       if (action) step.action = action;
       const ap = o.action_params;
-      if (ap && typeof ap === 'object' && typeof (ap as { when?: unknown }).when === 'string' && (ap as { when: string }).when) {
-        step.actionParams = { when: (ap as { when: string }).when };
+      if (ap && typeof ap === 'object') {
+        const when = (ap as { when?: unknown }).when;
+        const skillId = (ap as { skillId?: unknown }).skillId;
+        if ((typeof when === 'string' && when) || (typeof skillId === 'string' && skillId)) {
+          step.actionParams = {};
+          if (typeof when === 'string' && when) step.actionParams.when = when;
+          if (typeof skillId === 'string' && skillId) step.actionParams.skillId = skillId;
+        }
       }
+      // skill 动作必须绑定技能 id，否则规则永远无法执行 → 视为非法入参
+      if (step.action === 'skill' && !step.actionParams?.skillId) return null;
     }
     out.push(step);
   }
@@ -450,7 +528,7 @@ async function toolReadRules(args: Record<string, unknown>): Promise<string> {
     if (rules.length === 0) {
       return statusFilter
         ? `没有状态为「${statusFilter}」的规则。可 read_rules 不带 status 查看全部。`
-        : '暂无规则。用户口述「以后都要 / 每次必须 / 不要…」这类硬约束时，用 rule_create 固化（倾向类走 remember_preference）。';
+        : `暂无规则。用户口述的硬约束按此口径落层：${BUTLER_ROUTING_HINT}。判断标准（口径）写成规则的 judgment 步骤，只有多步编排才走 skill_draft。`;
     }
     const list = rules.map((r) => {
       const kw = r.trigger.keywords.length > 0 ? `，触发词 ${r.trigger.keywords.join('/')}` : '';
@@ -461,6 +539,30 @@ async function toolReadRules(args: Record<string, unknown>): Promise<string> {
     return `共 ${rules.length} 条规则（${scope}）：\n${list}\n\n改状态：rule_pause / rule_retire（传 id）；改内容：rule_update（传 id）。`;
   } catch (e) {
     return `读取规则失败: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** read_skills 工具 — 列出已固化技能（id/名/适用条件/原语链/生命周期），供模型取 skillId 绑进规则 */
+async function toolReadSkills(args: Record<string, unknown>): Promise<string> {
+  try {
+    const { listSkills } = await import('@/lib/butler/skills');
+    const all = await listSkills();
+    const lifecycleFilter = typeof args.lifecycle === 'string' && args.lifecycle.trim() ? args.lifecycle.trim() : '';
+    const skills = lifecycleFilter ? all.filter((s) => s.lifecycle === lifecycleFilter) : all;
+    if (skills.length === 0) {
+      return lifecycleFilter
+        ? `没有生命周期为「${lifecycleFilter}」的技能。可 read_skills 不带 lifecycle 查看全部。`
+        : '暂无已固化技能。需要重复执行的多步流程可用 skill_draft 起草，用户确认固化后才能被规则调用。';
+    }
+    const list = skills.map((s) => {
+      const kw = s.when.keywords.length > 0 ? `，触发词 ${s.when.keywords.join('/')}` : '';
+      const prims = s.steps.length > 0 ? s.steps.map((st) => st.primitive).join('→') : '（无步骤）';
+      return `${s.id}｜${s.name}（${s.lifecycle}·v${s.version}·${s.origin}·${prims}）${kw}`;
+    }).join('\n');
+    const scope = lifecycleFilter ? `生命周期「${lifecycleFilter}」` : '全部';
+    return `共 ${skills.length} 个技能（${scope}）：\n${list}\n\n技能只能通过规则的确定性步调用：rule_create / rule_update 的 steps 里写 action="skill" 并在 action_params.skillId 传上面的 sk-… id（仅 active 可执行）。`;
+  } catch (e) {
+    return `读取技能失败: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -688,7 +790,7 @@ async function toolRuleResolveConflict(args: Record<string, unknown>): Promise<s
  * query_todos 工具执行器：
  *   - view=schedule（默认）：复用 /todo check 的查询管线（resolveReadCalendarQuery 自由语义解析
  *     → querySchedule 读全局日历库并精确过滤/格式化）。服务端自调用带绝对 base（Node fetch
- *     不支持相对路径），与 daily-report / organize-send 同一约定。
+ *     不支持相对路径），与 daily-tasks / organize-send 同一约定。
  *   - view=sticky（P2 承接 /inspect）：复用 lib/core/inspect 的跨项目便签待办聚合
  *     （项目 → 便签 → 页，排除已完成），无需自调用宿主 API。
  */
@@ -726,7 +828,7 @@ async function toolQueryTodos(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-/** 服务端自调用绝对 base（Node fetch 不支持相对路径），与 daily-report / query_todos 同一约定 */
+/** 服务端自调用绝对 base（Node fetch 不支持相对路径），与 daily-tasks / query_todos 同一约定 */
 function selfBaseUrl(): string {
   return `http://localhost:${process.env.PORT || '5000'}`;
 }
@@ -1934,8 +2036,8 @@ async function toolSetModelPrice(args: Record<string, unknown>): Promise<string>
 
 /**
  * create_project 工具执行器：新建一个 BobWork 项目（落盘目录结构 + 写入全局项目配置）。
- * 语义边界（与 Butler 定位一致）：**应用级写动作，只创建、不切换**当前项目——
- * 新项目出现在侧边栏，是否进入由用户在界面决定（Butler 无切换项目工具）。
+ * 语义边界（与 Butler 定位一致）：**只创建、不切换**当前项目——新项目出现在侧边栏，
+ * 是否进入交给 switch_project（用户明确说"打开/进入"时调用）或用户在界面里点击。
  * 完成后广播 projects-changed，让侧边栏 SSE 即时刷新出新项目。
  */
 async function toolCreateProject(args: Record<string, unknown>): Promise<string> {
@@ -1967,6 +2069,170 @@ async function toolCreateProject(args: Record<string, unknown>): Promise<string>
       error: e instanceof Error ? e.message : String(e),
     }, null, 2);
   }
+}
+
+/**
+ * switch_project 工具执行器：把某个已有项目切为**当前项目**（画布上打开的那个）。
+ * 与 create_project 的分工：create_project 只建不切，本工具只切不建。
+ * 界面同步：切完广播 project-switched，前端（Sidebar 的 SSE 桥）转成画布既有的
+ * `bobagent:project-switched` 无刷新切换链路；界面没开时切换仍对应用状态生效，
+ * 下次打开 BobWork 即为该项目（回执里的 ui_synced 说明这一点）。
+ */
+async function toolSwitchProject(args: Record<string, unknown>): Promise<string> {
+  const raw = typeof args.project === 'string' ? args.project.trim() : '';
+  if (!raw) {
+    return JSON.stringify({
+      ok: false,
+      error: 'project is required',
+      hint: '要打开哪个项目还没说清：先向用户确认项目名/id（或让用户从左侧项目列表选），不要猜。',
+    }, null, 2);
+  }
+  // 解析只认显式引用（项目名 / id / "current"）；同名多命中、未找到原样回传，交模型澄清
+  const resolved = await resolveExplicitProject(raw);
+  if (!resolved.ok) return JSON.stringify(resolved, null, 2);
+  const target = resolved.project;
+  try {
+    const current = await getCurrentProject().catch(() => null);
+    if (current && current.id === target.id) {
+      return JSON.stringify({
+        ok: true,
+        id: target.id,
+        name: target.name,
+        path: target.path,
+        already_current: true,
+        message: `「${target.name}」已经是当前项目，无需切换。`,
+      }, null, 2);
+    }
+    const project = await switchProject(target.id);
+    emitProjectSwitched(project.id);
+    const uiSynced = hasProjectsChangedListeners();
+    return JSON.stringify({
+      ok: true,
+      id: project.id,
+      name: project.name,
+      path: project.path,
+      already_current: false,
+      via: resolved.via,
+      ui_synced: uiSynced,
+      message: `已打开项目「${project.name}」（id: ${project.id}）${uiSynced
+        ? '，界面已同步切换到该项目'
+        : '；BobWork 界面当前未打开，切换已生效，下次打开即为该项目'}。此后不点名项目的写入都会落在这里；要写别的项目请显式传 project。`,
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    }, null, 2);
+  }
+}
+
+/** 可建会话的 agent 名单：与 ＋ Add session 菜单同口径（内置可见画像 + 已装市场画像，
+ *  再按设置里的 disabled / hiddenMenu 过滤）——菜单里点得到的身份，管家才建得出来。 */
+async function listSessionAgents(): Promise<Array<{ id: string; label: string }>> {
+  const state = await readAgentsState();
+  const disabled = new Set(state.disabled);
+  const hidden = new Set(state.hiddenMenu);
+  const seen = new Set<string>();
+  const out: Array<{ id: string; label: string }> = [];
+  for (const a of [...listAgents(), ...loadInstalledAgentProfiles()]) {
+    if (seen.has(a.id) || disabled.has(a.id) || hidden.has(a.id)) continue;
+    seen.add(a.id);
+    out.push({ id: a.id, label: a.label });
+  }
+  return out;
+}
+
+/** 解析建会话用的 agent 身份：空 = 默认 chat；未知/被禁用 → 结构化错误 + 候选（交模型回问，不静默回退） */
+async function resolveSessionAgent(
+  raw: string,
+): Promise<{ ok: true; id: string; label: string } | { ok: false; payload: string }> {
+  const agents = await listSessionAgents();
+  const fallback = agents.find((a) => a.id === 'chat') ?? { id: 'chat', label: 'Chat' };
+  if (!raw) return { ok: true, ...fallback };
+  const key = raw.toLowerCase();
+  const hit = agents.find((a) => a.id.toLowerCase() === key) ?? agents.find((a) => a.label.toLowerCase() === key);
+  if (hit) return { ok: true, id: hit.id, label: hit.label };
+  return {
+    ok: false,
+    payload: JSON.stringify({
+      ok: false,
+      error: 'agent_not_available',
+      message: `没有可用的 agent「${raw}」（只匹配已安装且未禁用、未隐藏的画像）。请让用户确认用哪个，不要自行换身份。`,
+      candidates: agents,
+    }, null, 2),
+  };
+}
+
+/**
+ * create_session 工具执行器：在指定项目里新建一个会话节点，并可选在其上执行一个任务。
+ * 语义边界：**节点本体由前端画布创建**——会话是画布状态，创建要走既有链路（节点定位、
+ * agent 壳、后台自动执行缓冲 window.__pendingNodeTasks），所以服务端只做
+ * 「解析项目 + 解析 agent + 必要时切项目 + 广播 session-request」，避免两套建节点语义漂移。
+ * 由此：界面未打开时直接返回 ui_not_open（不静默失败、也不留半状态）。
+ * 指定项目不是当前项目时，先切过去（= 打开该项目）再派发，保证界面显示与后续不点名写入一致。
+ */
+async function toolCreateSession(args: Record<string, unknown>): Promise<string> {
+  // 界面在线性检查放在最前：会话只能在打开的画布里诞生，界面不在就不动任何状态
+  if (!hasProjectsChangedListeners()) {
+    return JSON.stringify({
+      ok: false,
+      error: 'ui_not_open',
+      message: 'BobWork 界面当前未打开，会话只能在打开的画布里创建。请让用户先打开 BobWork，再重试本次请求。',
+    }, null, 2);
+  }
+  const pr = await resolveProjectWithFallback(args.project);
+  if (!pr.ok) return pr.payload;
+  if (!pr.project) {
+    return JSON.stringify({
+      ok: false,
+      error: 'no_active_project',
+      message: '应用当前没有激活项目，无法新建会话。请让用户先在 BobWork 中新建或激活一个项目。',
+    }, null, 2);
+  }
+  const project = pr.project;
+  const agentRes = await resolveSessionAgent(typeof args.agent === 'string' ? args.agent.trim() : '');
+  if (!agentRes.ok) return agentRes.payload;
+  const task = typeof args.task === 'string' ? args.task.trim() : '';
+  const title = ((typeof args.title === 'string' ? args.title.trim() : '') || agentRes.label).slice(0, 40);
+  // 目标项目不是当前项目 → 先切过去（等价于"打开该项目"）
+  let switched = false;
+  try {
+    const current = await getCurrentProject().catch(() => null);
+    if (!current || current.id !== project.id) {
+      await switchProject(project.id);
+      emitProjectSwitched(project.id);
+      switched = true;
+    }
+  } catch (e) {
+    return JSON.stringify({
+      ok: false,
+      error: 'switch_failed',
+      message: `切换项目「${project.name}」失败，未新建会话。`,
+      detail: e instanceof Error ? e.message : String(e),
+    }, null, 2);
+  }
+  emitSessionRequest({
+    project_id: project.id,
+    label: title,
+    agent: agentRes.id,
+    prompt: task,
+    auto: task.length > 0,
+  });
+  return JSON.stringify({
+    ok: true,
+    project_id: project.id,
+    project_name: project.name,
+    project_source: pr.source,
+    switched,
+    agent: agentRes.id,
+    agent_label: agentRes.label,
+    title,
+    task: task || null,
+    auto: task.length > 0,
+    message: `${switched ? `已打开项目「${project.name}」，` : ''}已在项目「${project.name}」新建 ${agentRes.label} 会话「${title}」${task
+      ? '，任务已下发，正在后台执行（画布会话列表会多出这一条）。'
+      : '（空会话，等用户输入）。'}`,
+  }, null, 2);
 }
 
 /** butler 场景工具定义（由 tools/index.ts 聚合进 toolDefs） */
@@ -2071,6 +2337,37 @@ export const butlerToolDefs: Tool[] = [
     },
     category: '记忆',
     execute: toolUpdatePreference,
+    maxOutput: 2000,
+  },
+  {
+    name: 'news_topics',
+    description:
+      'Manage the topics for the Daily News briefing shown in the Today panel (News tab). The same config backs the panel chips, so both entry points stay in sync. Use action="list" to show current topics, "add" to add one (label required; optional query = search keywords, limit = items per topic), "remove" to drop one by label. When the user says things like "别再推体育了" / "关注一下新能源", translate that into a removal/addition here. This only edits the topic list — it does NOT rebuild today\'s briefing (that happens once daily or via the panel\'s Refresh now).',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'add', 'remove'],
+          description: 'list = show topics, add = add a topic, remove = drop a topic. Defaults to list.',
+        },
+        label: {
+          type: 'string',
+          description: 'Topic display name, e.g. "Tech" or "新能源". Required for add / remove.',
+        },
+        query: {
+          type: 'string',
+          description: 'Optional search keywords for an added topic (defaults to the label). e.g. "新能源 电池 政策".',
+        },
+        limit: {
+          type: 'number',
+          description: 'Optional item count for an added topic (1–6, default 4).',
+        },
+      },
+      required: ['action'],
+    },
+    category: '配置',
+    execute: toolNewsTopics,
     maxOutput: 2000,
   },
   {
@@ -2405,6 +2702,54 @@ export const butlerToolDefs: Tool[] = [
     maxOutput: 500,
   },
   {
+    name: 'switch_project',
+    description:
+      'Open / switch an EXISTING BobWork project so it becomes the CURRENT project (the one shown on the canvas). Pass the project name or id exactly as the user said it, or "current" when they explicitly said "current project"/"这个项目". Use ONLY when the user asks to open / enter / switch to a project ("打开余靖潘案"、"切到诉讼那个项目"、"先打开 X 项目"). Do NOT use it to write data into a project: every write tool takes its own `project` argument and works without switching, and switching just to write moves the user\'s canvas. If the user wants to CREATE a new project use create_project instead. Idempotent (already current → says so) and reversible (writes no data). When BobWork is open the UI follows the switch; when it is closed the app state is still switched and takes effect on next load (ui_synced in the result says which happened). Report the project you opened in one short sentence.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Project name or id, exactly as named by the user (base name matches the <name>_YYYYMMDD form), or "current" when the user explicitly said "current project"/"这个项目". Required — never guess a project the user did not name.',
+        },
+      },
+      required: ['project'],
+    },
+    category: '系统',
+    execute: toolSwitchProject,
+    maxOutput: 800,
+  },
+  {
+    name: 'create_session',
+    description:
+      'Create a new session (a canvas chat node) in a project — with a chosen installed agent — and, when `task` is given, RUN that task in the new session right away in the background. Use when the user asks to "新建一个会话/开个会话/让 X 干这件事/开个项目建个会话跑这个任务". Compose the three steps the user usually means in ONE call: pass `project` (opens it if it is not the current one), `agent` (default chat; e.g. coding / note (Kar) / archivist / legal-intern), `title`, and `task` (the work to execute). Notes: (1) The session is created by the OPEN canvas — if BobWork is not open the tool returns ui_not_open; tell the user to open it and retry, never claim the session was created. (2) A `task` runs unattended in the background with that agent\'s own tools — hand over a complete, self-contained task, and never pass a task the user did not ask for. (3) Without `task` it only opens an empty session. (4) This does not replace team_run: for multi-agent jobs use team_run instead of spawning a session.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Project to create the session in: name or id as the user said it, or "current" when they explicitly said "current project"/"这个项目". Omit only when the conversation has no project context — the tool then uses the CURRENT active project and reports the landing point (project_source). When it is not the current project the project is switched (opened) first.',
+        },
+        agent: {
+          type: 'string',
+          description: 'Agent identity for the session: chat (default) | coding | note (Kar, knowledge base) | mind (Buzan) | archivist | legal-intern | legal-reviewer … Must be an installed, enabled agent; a name that is not available returns the candidate list — ask the user instead of substituting one.',
+        },
+        title: {
+          type: 'string',
+          description: 'Session title (max 40 chars), usually the task in a few words. Omit to use the agent label.',
+        },
+        task: {
+          type: 'string',
+          description: 'The task to execute in the new session, self-contained (goal + deliverable + constraints + referenced materials) — it runs unattended in the background. Pass the user\'s own task verbatim in intent; omit for an empty session. Do NOT invent work the user did not ask for.',
+        },
+      },
+      required: [],
+    },
+    category: '系统',
+    execute: toolCreateSession,
+    maxOutput: 1200,
+  },
+  {
     name: 'project_plan_start',
     description:
       'Start a persistent project plan (plan tree) in .butler/plans.json: milestones → steps; returns its id. Pass title/goal and either a flat "steps" list or structured "milestones" [{title, steps}]. Track afterwards with project_plan_view / project_plan_add_steps / project_plan_step_status. TARGET PROJECT: pass `project` when the user named a project (name or id), or "current" when they explicitly said "current project"/"这个项目". If the user did not mention any project, omit it — the tool falls back to the current active project and reports the landing point (project_source); only rely on that when the write is clearly meant for the active project, and never guess a different one.',
@@ -2574,6 +2919,24 @@ export const butlerToolDefs: Tool[] = [
     maxOutput: 4000,
   },
   {
+    name: 'read_skills',
+    description: 'List the user\'s SOLIDIFIED skills (stored under butler/skills/, ids start with sk-…). Each line shows id, name, lifecycle (active/quarantine/retired), version, origin, the primitive chain it runs, and trigger keywords. Call this BEFORE binding a skill into a rule: rule_create / rule_update take a skill by id in action_params.skillId (with action="skill"). Only ACTIVE skills are runnable. A skill is a programmable capability (loops / conditions / multi-step) — this tool only READS; to draft a NEW skill use skill_draft.',
+    parameters: {
+      type: 'object',
+      properties: {
+        lifecycle: {
+          type: 'string',
+          enum: ['active', 'quarantine', 'retired'],
+          description: 'Optional: only list skills in this lifecycle. Omit to list all.',
+        },
+      },
+      required: [],
+    },
+    category: '技能',
+    execute: toolReadSkills,
+    maxOutput: 3000,
+  },
+  {
     name: 'rule_create',
     description: 'Create a standing rule/flow from what the user just told you — for HARD constraints ("以后每次都要…" / "不要…" / "禁止…"), i.e. something with no middle ground. Do NOT use this for preferences/tendencies ("我不太喜欢很长的回复") — those go to remember_preference. Always keep intent_raw as the USER\'S ORIGINAL WORDS (do not paraphrase). Every step MUST carry a kind: "deterministic" (the host can do it exactly — no model judgment) or "judgment" (needs model judgment; set annex=true only for an accessory refinement of an otherwise deterministic rule). The server derives commitment from the steps and returns it: all-deterministic → 必做到; accessory judgment only → 基本做到; a primary judgment step → 会启动并尽力 and the rule is classified as a 流程 (flow). When a rule matches, deterministic steps run on the host and judgment steps are executed by you (the model); a flow does NOT run silently — after it fires, tell the user the commitment level.',
     parameters: {
@@ -2589,7 +2952,7 @@ export const butlerToolDefs: Tool[] = [
         },
         steps: {
           type: 'array',
-          description: 'Ordered action steps. Each item: { kind: "deterministic"|"judgment", text: string, annex?: boolean, action?: "create_todo"|"create_scheduled_todo", action_params?: { when: string } }. kind is required on every step. Required (at least one).',
+          description: 'Ordered action steps. Each item: { kind: "deterministic"|"judgment", text: string, annex?: boolean, action?: "create_todo"|"create_scheduled_todo"|"skill", action_params?: { when?: string, skillId?: string } }. kind is required on every step. Required (at least one).',
           items: {
             type: 'object',
             properties: {
@@ -2600,11 +2963,14 @@ export const butlerToolDefs: Tool[] = [
               },
               text: { type: 'string', description: 'One concrete step, e.g. "回复中不使用感叹号".' },
               annex: { type: 'boolean', description: 'Only for kind=judgment: true = an accessory refinement of an otherwise deterministic rule (→ 基本做到). Default false = a primary judgment step (→ flow).' },
-              action: { type: 'string', enum: ['create_todo', 'create_scheduled_todo'], description: 'Only for kind=deterministic: bind a host executor so the step actually runs when the rule matches. "create_todo" = create a sticky todo from the user\'s words; "create_scheduled_todo" = create a calendar scheduled todo (needs a time — pair it with time-triggered rules and action_params.when="occurrence"). Omit for a plain deterministic step.' },
+              action: { type: 'string', enum: ['create_todo', 'create_scheduled_todo', 'skill'], description: 'Only for kind=deterministic: bind a host executor so the step actually runs when the rule matches. "create_todo" = create a sticky todo from the user\'s words; "create_scheduled_todo" = create a calendar scheduled todo (needs a time — pair it with time-triggered rules and action_params.when="occurrence"); "skill" = run an already-solidified skill — pass its id in action_params.skillId (get ids from read_skills). Omit for a plain deterministic step.' },
               action_params: {
                 type: 'object',
-                description: 'Only for kind=deterministic with an action. when: "occurrence" = use the time this time-triggered rule fired (use this for periodic scheduled todos); or an absolute ISO datetime resolved at creation time.',
-                properties: { when: { type: 'string', description: '"occurrence" or an ISO datetime string.' } },
+                description: 'Only for kind=deterministic with an action. when: "occurrence" = use the time this time-triggered rule fired (use this for periodic scheduled todos); or an absolute ISO datetime resolved at creation time. skillId: required when action="skill" — the sk-… id of the skill to run.',
+                properties: {
+                  when: { type: 'string', description: '"occurrence" or an ISO datetime string.' },
+                  skillId: { type: 'string', description: 'Required when action="skill": the sk-<date>-<hex> id of the solidified skill to run.' },
+                },
               },
             },
             required: ['kind', 'text'],
@@ -2699,18 +3065,21 @@ export const butlerToolDefs: Tool[] = [
         intent_raw: { type: 'string', description: 'New original wording.' },
         steps: {
           type: 'array',
-          description: 'Replacement steps. Each item: { kind: "deterministic"|"judgment", text, annex?, action? }.',
+          description: 'Replacement steps. Each item: { kind: "deterministic"|"judgment", text, annex?, action?, action_params? }.',
           items: {
             type: 'object',
             properties: {
               kind: { type: 'string', enum: ['deterministic', 'judgment'] },
               text: { type: 'string' },
               annex: { type: 'boolean' },
-              action: { type: 'string', enum: ['create_todo', 'create_scheduled_todo'], description: 'Only for kind=deterministic: bind a host executor. "create_todo" = sticky todo; "create_scheduled_todo" = calendar scheduled todo (pair with action_params.when).' },
+              action: { type: 'string', enum: ['create_todo', 'create_scheduled_todo', 'skill'], description: 'Only for kind=deterministic: bind a host executor. "create_todo" = sticky todo; "create_scheduled_todo" = calendar scheduled todo (pair with action_params.when); "skill" = run a solidified skill (requires action_params.skillId).' },
               action_params: {
                 type: 'object',
-                description: 'Only for kind=deterministic with create_scheduled_todo. when: "occurrence" = the time this time-triggered rule fired; or an absolute ISO datetime.',
-                properties: { when: { type: 'string', description: '"occurrence" or an ISO datetime string.' } },
+                description: 'Only for kind=deterministic with an action. when: "occurrence" = the time this time-triggered rule fired; or an absolute ISO datetime. skillId: required when action="skill".',
+                properties: {
+                  when: { type: 'string', description: '"occurrence" or an ISO datetime string.' },
+                  skillId: { type: 'string', description: 'Required when action="skill": the sk-<date>-<hex> id of the solidified skill to run.' },
+                },
               },
             },
             required: ['kind', 'text'],
@@ -2781,18 +3150,21 @@ export const butlerToolDefs: Tool[] = [
         intent_raw: { type: 'string', description: 'New original wording.' },
         steps: {
           type: 'array',
-          description: 'Replacement steps. Each item: { kind: "deterministic"|"judgment", text, annex?, action? }.',
+          description: 'Replacement steps. Each item: { kind: "deterministic"|"judgment", text, annex?, action?, action_params? }.',
           items: {
             type: 'object',
             properties: {
               kind: { type: 'string', enum: ['deterministic', 'judgment'] },
               text: { type: 'string' },
               annex: { type: 'boolean' },
-              action: { type: 'string', enum: ['create_todo', 'create_scheduled_todo'], description: 'Only for kind=deterministic: bind a host executor. "create_todo" = sticky todo; "create_scheduled_todo" = calendar scheduled todo (pair with action_params.when).' },
+              action: { type: 'string', enum: ['create_todo', 'create_scheduled_todo', 'skill'], description: 'Only for kind=deterministic: bind a host executor. "create_todo" = sticky todo; "create_scheduled_todo" = calendar scheduled todo (pair with action_params.when); "skill" = run a solidified skill (requires action_params.skillId).' },
               action_params: {
                 type: 'object',
-                description: 'Only for kind=deterministic with create_scheduled_todo. when: "occurrence" = the time this time-triggered rule fired; or an absolute ISO datetime.',
-                properties: { when: { type: 'string', description: '"occurrence" or an ISO datetime string.' } },
+                description: 'Only for kind=deterministic with an action. when: "occurrence" = the time this time-triggered rule fired; or an absolute ISO datetime. skillId: required when action="skill".',
+                properties: {
+                  when: { type: 'string', description: '"occurrence" or an ISO datetime string.' },
+                  skillId: { type: 'string', description: 'Required when action="skill": the sk-<date>-<hex> id of the solidified skill to run.' },
+                },
               },
             },
             required: ['kind', 'text'],

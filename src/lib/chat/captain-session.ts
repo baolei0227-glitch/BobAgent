@@ -24,7 +24,7 @@
 
 import type { TeamRunMemberSpec, TeamRunTaskSpec } from './team-run';
 
-/** 服务端自调用绝对 base（Node fetch 不支持相对路径），与 ledger-compile / daily-report 同一约定 */
+/** 服务端自调用绝对 base（Node fetch 不支持相对路径），与 ledger-compile / daily-tasks 同一约定 */
 function selfBaseUrl(): string {
   return `http://localhost:${process.env.PORT || '5000'}`;
 }

@@ -64,6 +64,8 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   //   触发由模型自主判断（如用户说"用表格输出"无偏好字样），门控会阻断偏好遵循链路
   delete_preference: ['butler'],
   update_preference: ['butler'],
+  // Daily News 主题（Today 面板 News 页签）：与界面 chips 同写口，归 butler 场景
+  news_topics: ['butler'],
   // ---- 规则原语（v6 §5.1；Phase 0 只固化与可见，不自动执行）----
   // 与偏好同归 butler 场景；用户发起即免确认（确认闸按「谁发起」切）。
   read_rules: ['butler'],
@@ -79,12 +81,22 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   // 技能账本（Phase 3 §3.5）：AI 起草一条技能（程序化能力），经可编辑草案卡审固后落 .skills/<id>.md。
   // 与 Rules 同归 butler 场景；本工具只**起草**，确认链路复用规则草案卡的三段（弹卡 → 等确认 → 落盘）。
   skill_draft: ['butler'],
+  // 技能账本只读（Phase 3 §3.6）：列出已固化技能及其 id，供模型把 skill 动作绑进规则
+  // （rule_create / rule_update 的 action="skill" + action_params.skillId）。与 skill_draft 同归 butler 场景。
+  read_skills: ['butler'],
   // 便签（画布/记忆类）：按事务域意图触发（记忆/备忘/便签关键词）；butler 专项固定画像放行
   create_sticky_note: ['butler'],
   // 新建项目（应用结构写动作）：归 butler——管家对话里「新建一个项目：X」直接办；
   // butler 固定画像直接放行，普通 chat 不注入（避免随口一句"新建项目"产生副作用）。
   // 副作用收口：列入 runtime/tools.ts 的 SANDBOX_BLOCKED_TOOLS（工具面 = 能力边界）。
   create_project: ['butler'],
+  // 打开/切换当前项目（2026-10-05）：应用结构写动作，但**可逆且不落数据**——用户说「打开 X 项目」
+  // 时才调；界面经 project-switched SSE 无刷新跟随。同样只归 butler、并列入写类收口名单。
+  switch_project: ['butler'],
+  // 新建会话（画布节点）并可选执行任务（2026-10-05）：会话是画布状态，节点本体由前端建，
+  // 服务端只解析+授权+广播 session-request（界面未打开时拒绝，不静默失败）。
+  // 归 butler：普通 chat 画像不注入，避免随口一句"建个会话"就派生一个无人看守的后台任务。
+  create_session: ['butler'],
   // ---- butler（管家：日程/待办）----
   query_schedule: ['butler'],
   query_todos: ['butler'],

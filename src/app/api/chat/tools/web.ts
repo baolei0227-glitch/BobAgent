@@ -51,41 +51,53 @@ async function toolWebSearch(args: Record<string, unknown>): Promise<string | En
     // SDK 不可用，降级到本地搜索
   }
 
-  // Provider 2 & 3 & 4: 本地 HTTP 抓取（无需 API Key）
-  // 百度优先（中文搜索质量最好），Bing 次之，DDG 兜底
+  // Provider 2 & 3 & 4: 本地 HTTP 抓取（无需 API Key）——百度优先，Bing 次之，DDG 兜底
+  const { hits, provider, errors } = await searchLocalProviders(query, 5);
+  if (hits.length > 0) {
+    const items: CardItem[] = hits.map((r) => ({
+      title: r.title || 'Untitled',
+      badge: provider || 'Web',
+      meta: hostOf(r.url),
+      body: r.snippet,
+      url: r.url,
+      btnText: '访问',
+    }));
+    const parts: string[] = ['Search results:'];
+    for (const r of hits) {
+      parts.push(`- ${r.title}${r.url ? ` (${r.url})` : ''}: ${r.snippet}`);
+    }
+    return { text: parts.join('\n'), cardHtml: buildCardListHtml(items) };
+  }
+
+  return `Search failed after trying ${errors.length} providers:\n${errors.map((e) => `  - ${e}`).join('\n')}\n\nCheck network and retry.`;
+}
+
+/**
+ * 本地多 provider 搜索（百度 → Bing → DuckDuckGo）：返回第一个有结果且过滤后非空的 provider。
+ * 从 toolWebSearch 拆出，供 Daily News 采集复用（同一套降级与垃圾结果过滤）。
+ * 全部失败时 hits 为空、errors 记录各 provider 的失败原因。
+ */
+export async function searchLocalProviders(
+  query: string,
+  maxResults = 5,
+): Promise<{ hits: LocalSearchResult[]; provider: string; errors: string[] }> {
   const providers = [
     { name: 'Baidu', search: searchBaiduHttp },
     { name: 'Bing', search: searchBingHttp },
     { name: 'DuckDuckGo', search: searchDuckDuckGoLite },
   ];
   const errors: string[] = [];
-
   for (const { name, search } of providers) {
     try {
       // 字典/攻略类无关站直接过滤；若该 provider 过滤后无结果则尝试下一个（避免把无关垃圾当有效结果返回）
-      const results = filterJunkSearchResults(await search(query, 5));
-      if (results.length > 0) {
-        const items: CardItem[] = results.map((r) => ({
-          title: r.title || 'Untitled',
-          badge: name,
-          meta: hostOf(r.url),
-          body: r.snippet,
-          url: r.url,
-          btnText: '访问',
-        }));
-        const parts: string[] = ['Search results:'];
-        for (const r of results) {
-          parts.push(`- ${r.title}${r.url ? ` (${r.url})` : ''}: ${r.snippet}`);
-        }
-        return { text: parts.join('\n'), cardHtml: buildCardListHtml(items) };
-      }
+      const results = filterJunkSearchResults(await search(query, maxResults));
+      if (results.length > 0) return { hits: results, provider: name, errors };
       errors.push(`${name}: no results`);
     } catch (e) {
       errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-
-  return `Search failed after trying ${providers.length} providers:\n${errors.map((e) => `  - ${e}`).join('\n')}\n\nCheck network and retry.`;
+  return { hits: [], provider: '', errors };
 }
 
 /** web_fetch 工具：抓取指定 URL 的文本内容（HTML 自动清洗为纯文本） */
@@ -93,6 +105,48 @@ async function toolWebFetch(args: Record<string, unknown>): Promise<string> {
   const url = (args.url as string || '').trim();
   if (!url) return 'Error: url 必填';
   if (!/^https?:\/\//i.test(url)) return 'Error: 请输入合法的 http(s):// URL';
+  return fetchReadableText(url);
+}
+
+/** Readability 抽出的正文低于此长度即视为「没抽到」（列表页 / JS 渲染页常返回极短结果） */
+const MIN_READABLE_BODY = 200;
+
+/**
+ * 用 Mozilla Readability 抽取正文（Firefox 阅读模式同款）。
+ * 比 `replace(/<[^>]+>/g,' ')` 强的地方：它按语义定位正文容器，会丢掉导航 / 侧栏 / 页脚 / 广告。
+ *
+ * 两个依赖用**动态 import**：只在服务端调用时加载 —— web.ts 同时导出 webToolDefs（工具定义），
+ * 需防被前端引用时把 DOM 库拖进客户端 bundle。
+ *
+ * 任何异常（DOM 解析失败 / 抽不到正文）统一返回 null，由调用方回退到启发式清洗。
+ * `MIN_BODY` 以下视为没抽到正文（列表页 / JS 渲染页常返回极短结果）。
+ */
+async function extractWithReadability(html: string, minBody: number): Promise<{ title: string; text: string } | null> {
+  try {
+    const [{ parseHTML }, { Readability }] = await Promise.all([
+      import('linkedom'),
+      import('@mozilla/readability'),
+    ]);
+    const { document } = parseHTML(html);
+    const parsed = new Readability(document).parse();
+    if (!parsed) return null;
+    const text = (parsed.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length < minBody) return null;
+    return { title: (parsed.title || '').trim(), text };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 抓取一个 URL 并返回「标题 + 清洗后正文」的纯文本。
+ * 从 toolWebFetch 拆出（Daily News 采集复用同一套 charset 感知解码与正文清洗），
+ * 失败时返回 `Error: …` 文本而非抛异常 —— 调用方可直接透传或自行截断。
+ *
+ * 正文抽取分两级：**Readability 优先**（语义定位正文），抽不到再回退到原先的启发式清洗
+ * （整页去标签）—— 保证任何页面都不会因为换抽取器而退化成空。
+ */
+export async function fetchReadableText(url: string): Promise<string> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20_000);
@@ -157,22 +211,36 @@ async function toolWebFetch(args: Record<string, unknown>): Promise<string> {
       return `URL: ${url}\nContent-Type: ${ctype}\n（内容疑似二进制，无法直接读取）`;
     }
 
-    const titleMatch = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title = titleMatch ? titleMatch[1].trim().replace(/\s+/g, ' ') : '';
-    const clean = text
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/gi, "'")
-      .replace(/\s+/g, ' ')
-      .trim();
-    const body = truncate(clean, 6000);
-    return `URL: ${url}\n标题: ${title || '(未识别)'}\n\n${body || '(未提取到正文，可能为 JS 动态渲染页面)'}`;
+    // 正文抽取：Readability 优先（语义定位正文，丢掉导航 / 页脚 / 广告），抽不到再回退启发式清洗
+    const looksHtml = /<\s*(?:html|body|div|p|article|section|main|head)\b/i.test(text);
+    let title = '';
+    let body = '';
+    if (looksHtml) {
+      const extracted = await extractWithReadability(text, MIN_READABLE_BODY);
+      if (extracted) {
+        title = extracted.title;
+        body = extracted.text;
+      }
+    }
+    if (!body) {
+      // 回退：整页去标签（旧口径，保证换抽取器后任何页面都不会退化成空）
+      const titleMatch = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      title = titleMatch ? titleMatch[1].trim().replace(/\s+/g, ' ') : '';
+      body = text
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    const out = truncate(body, 6000);
+    return `URL: ${url}\n标题: ${title || '(未识别)'}\n\n${out || '(未提取到正文，可能为 JS 动态渲染页面)'}`;
   } catch (e) {
     return `Error: 抓取失败 ${e instanceof Error ? e.message : String(e)}`;
   }

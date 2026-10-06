@@ -16,7 +16,7 @@ import {
 import { TOOL_DEFINITIONS, executeTool, getToolSummary, describeToolCall } from './tools';
 import type { ToolScene } from './tools';
 // K2-S1 工具面 runtime service 抽取，行为不变：注册/组装/排序/CacheGuard 收敛进 ToolRuntime
-import { ToolRuntime, SANDBOX_BLOCKED_TOOLS, isBridgeWriteAllowed } from '@/lib/runtime/tools';
+import { ToolRuntime, SANDBOX_BLOCKED_TOOLS, isBridgeWriteAllowed, resolveEffectiveScenes } from '@/lib/runtime/tools';
 // K2-S2 会话态 runtime service 抽取，行为不变：chatStickyScenes 收敛进 SessionRuntime 单例
 import { sessionRuntime } from '@/lib/runtime/session';
 // K2-S3 动态上下文链 runtime service 抽取，行为不变：路径/授权/偏好/OCR 文本生成收敛进 ContextRuntime
@@ -3819,6 +3819,10 @@ export async function POST(request: NextRequest) {
       initialOutputFiles?: OutputFileItem[];
       /** R-14-C：前端透传压缩模型配置（节点自定义模型在用的 apiKey/baseURL/model；与 /api/nodes append 同字段同校验） */
       compact_model_config?: { apiKey?: string; baseURL?: string; model?: string };
+      /** Butler 会话线程 id（2026-10-02）：仅 Butler 链路（`lib/butler/entry.ts`）会带。
+       *  用途见下方 `butlerThreadId` 的注释（记忆来源归因 + 规则预算按会话分片）。
+       *  与 `nodeId` 的区别：Butler 不走画布节点，`nodeId` 传的是占位符，**不是**会话身份。 */
+      threadId?: string;
     };
     const {
       messages,
@@ -3841,6 +3845,14 @@ export async function POST(request: NextRequest) {
       lite,
       initialOutputFiles,
     } = body;
+    /**
+     * Butler 会话线程 id（2026-10-02 新增字段）：**只有 Butler 链路会带**。
+     * 为什么需要它：① 记忆来源要能归到「哪次对话」（`remember_preference` 的 source）；
+     * ② 规则预算（`.state/rule-budget`）本就按会话分片，而此前传的是 `entry.ts` 的
+     * **占位 nodeId**（`BUTLER_PLACEHOLDER_NODE_ID`）——同一把钥匙开所有会话的锁。
+     * 非 Butler 链路不传 → 全部退化为原行为。
+     */
+    const butlerThreadId = typeof body.threadId === 'string' && body.threadId ? body.threadId : undefined;
     const initialUserInput = extractLastUserContent(messages);
     // Agent 配置（AGENT_PROFILES + 覆盖项）：决定工具画像、场景策略与专属 prompt（chat 通用 / coding 专项）。
     // 专项 agent 被禁用 → 回退 chat；自定义 prompt → 覆盖 baseSystemPrompt
@@ -4136,6 +4148,13 @@ export async function POST(request: NextRequest) {
       if (scheduleInjection) {
         finalMessages = prependDynamicContext(finalMessages, scheduleInjection);
       }
+      // 信息分层纪律（2026-10-04）：与排期纪律同因——管家提示词被物化为 agent.json，改常量对已装
+      // 用户不生效；「人与分工→记忆 / 口径与节奏→规则 / 授权→能力边界」这条落层纪律须立刻对所有人生效。
+      // 传 agentBasePrompt 做幂等去重（system 里已含同一常量时不再重复注入）。
+      const routingInjection = contextRuntime.buildMemoryRoutingInjection(agentBasePrompt);
+      if (routingInjection) {
+        finalMessages = prependDynamicContext(finalMessages, routingInjection);
+      }
       // 会议进行中：注入当前会议状态（P1-b /meeting 工具化）——详见上方「全身份注入」段；
       // 此处为管家保留原有注入位置（命令表 → 会议 → 人设，字节序不变），仅补记 meetingActive 供场景过滤。
       const meetingInjection = await contextRuntime.buildMeetingStateInjection();
@@ -4305,7 +4324,7 @@ export async function POST(request: NextRequest) {
           const { butlerTick } = await import('@/lib/butler/runtime');
           const adj = await butlerTick({
             trigger: { kind: 'speech', text: extractLastUserContent(messagesWithNodeBridge) },
-            anchor: { projectId: activeProjectId || undefined, threadId: nodeId },
+            anchor: { projectId: activeProjectId || undefined, threadId: butlerThreadId ?? nodeId },
           });
           if (adj.notice) finalMessages = prependDynamicContext(finalMessages, adj.notice);
         } catch (e) {
@@ -4423,6 +4442,24 @@ export async function POST(request: NextRequest) {
         /报告|调研|研报|白皮书|可行性|尽调|意见书/i.test(extractLastUserContent(messagesWithNodeBridge))
       ) {
         finalMessages = prependDynamicContext(finalMessages, REPORT_RULES);
+      }
+
+      // 可见源 · 能力边界（2026-10-04；2026-10-05 下移至此处）：把「当前能看见什么 / 看不见什么」
+      // 如实下发，避免模型对未接入的源含糊承诺或假装执行。
+      // 清单由 runtime/sources.ts 注册表按**生效场景集**派生，故调用点贴近 assemble、与工具面同判据
+      // （resolveEffectiveScenes 为两者共用），保证「清单里有的源，工具一定在手里」。
+      if (identity === 'butler') {
+        const sourcesInjection = await contextRuntime.buildVisibleSourcesInjection(
+          resolveEffectiveScenes({
+            sandbox: !!sandbox,
+            profileMode: profile.scenes,
+            fixedScenes: toolProfile.fixedScenes,
+            activeScenes,
+          }),
+        );
+        if (sourcesInjection) {
+          finalMessages = prependDynamicContext(finalMessages, sourcesInjection);
+        }
       }
 
       // 缓存前缀稳定化（P4 + 来源分组）+ CacheGuard 守卫在 ToolRuntime.assemble 内完成
@@ -5646,6 +5683,9 @@ export async function POST(request: NextRequest) {
                     // 内层分片上限跟外层同源：read_attachment 等读取类工具按此收缩单次返回，
                     // 保证续读 offset 提示不被外层截断（小窗口模型也能一段段读完长材料）
                     maxOutputChars: callCap,
+                    // Butler 会话线程 id（2026-10-02）：记忆类工具据此把「来源」写成 chat:<threadId>
+                    // （此前只能写死 'chat'，用户看到「via chat」但不知道是哪次对话）。非 Butler 链路为 undefined。
+                    ...(butlerThreadId ? { threadId: butlerThreadId } : {}),
                     // 宿主自身绝对 base（Node fetch 不支持相对路径）：工具内自调用宿主 API 用
                     // （如管家会议工具 meeting_end → /api/core/meeting 整理纪要）
                     baseUrl: new URL(request.url).origin,
