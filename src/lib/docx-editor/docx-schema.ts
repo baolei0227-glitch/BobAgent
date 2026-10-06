@@ -23,6 +23,27 @@ const docxIndexAttr = { docxIndex: { default: null as number | null } }
 const styleIdAttr = { styleId: { default: null as string | null } }
 
 /**
+ * 段落级「同页 / 孤行」保真属性（P2 · 2026-10-04）。
+ *
+ * 🔴 **必须与 `components/canvas/docx-editor/docx-tiptap-extensions.ts` 的同名常量逐字对齐。**
+ * 本 schema 是适配器 A（`blocksToDoc`）建节点的目标 schema，而 `NodeType.createChecked`
+ * 走 `computeAttrs` —— 它**只遍历 schema 声明的属性**，未声明的键**静默丢弃**。
+ * 三者缺一的后果不是报错，而是「引擎解析出的 w:keepNext 走不到编辑器的分页层」，
+ * 表现为「属性明明在，分页却当它不存在」（本单 P2 第一版即如此，已由
+ * `pagination-fidelity-roundtrip.test.ts` 抓出）。
+ * 默认值必须为 `null`：`tiptap-to-blocks.ts` 的 `mergeFmt` 在 null 时**删除**该键
+ * （保持「原文没有的属性，保存后仍然没有」），而显式 `false` 会被保留。
+ */
+const paginationFidelityAttrs = {
+  /** w:keepNext —— 本段与下一段必须同页（标题与其首段同页就靠它） */
+  keepNext: { default: null },
+  /** w:keepLines —— 段内不允许跨页（整段必须落在同一页） */
+  keepLines: { default: null },
+  /** w:widowControl —— 孤行控制（缺省视为**开**：页底与下页各至少 2 行） */
+  widowControl: { default: null },
+}
+
+/**
  * 非文本块（table / image / listItem / 其它复杂块）在 PM 文档中的只读占位节点。
  * 阶段 3 的 passthrough 策略：这些块无法表达为可生成的 `GeneratedBlock`，
  * 编辑器用原子占位节点承载其 `docxIndex`，保存时走 `{kind:'original'}` 逐字节搬运原 XML。
@@ -53,6 +74,7 @@ const paragraph: NodeSpec = {
   attrs: {
     ...docxIndexAttr,
     ...styleIdAttr,
+    ...paginationFidelityAttrs,
     align: { default: null as string | null },
     // 段落级分页符 / 段间距 / 缩进 / 行距（与 docx-tiptap-extensions 同名同形；经 Block.format 字节保真）
     pageBreakBefore: { default: null },
@@ -73,6 +95,7 @@ const heading: NodeSpec = {
     level: { default: 1 },
     ...docxIndexAttr,
     ...styleIdAttr,
+    ...paginationFidelityAttrs,
     align: { default: null as string | null },
     pageBreakBefore: { default: null },
     spaceBefore: { default: null },

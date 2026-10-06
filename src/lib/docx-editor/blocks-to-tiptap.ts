@@ -141,6 +141,10 @@ function blockToNode(block: Block, schema: Schema, counters: Map<string, number>
       styleId: block.styleId ?? null,
       align: (fmt?.align as string | null | undefined) ?? null,
       pageBreakBefore: fmt?.pageBreakBefore ?? null,
+      // 同页 / 孤行（P2）：引擎层已解析，编辑器层据此分页。缺省 null = 原文无此属性。
+      keepNext: (fmt?.keepNext as boolean | null | undefined) ?? null,
+      keepLines: (fmt?.keepLines as boolean | null | undefined) ?? null,
+      widowControl: (fmt?.widowControl as boolean | null | undefined) ?? null,
       spaceBefore: fmt?.spaceBefore ?? null,
       spaceAfter: fmt?.spaceAfter ?? null,
       indentLeft: fmt?.indentLeft ?? null,

@@ -16,7 +16,7 @@
  *   docxIndex 并入脏集；保存时把脏集换算回 `newBlocks` 数组下标交给 `buildSaveBlocks`。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { EditorContent, useEditor, type JSONContent } from '@tiptap/react';
 import type { ViewerRenderProps } from '@/components/canvas/viewers/types';
 import type { ParsedDocFull } from '@/lib/docx-engine';
@@ -28,8 +28,7 @@ import { buildSaveBlocks } from '@/lib/docx-editor/save-blocks'
 import { docxRenderDirty } from '@/lib/docx-editor/render-dirty';
 import { redoDepth, undoDepth } from '@tiptap/pm/history';
 import { docxExtensions } from './docx-tiptap-extensions';
-import { DocxPagination, docxPaginationKey, paginationBreaksRef, setPaginationBreaks, PAGE_W, PAGE_H, PAGE_GAP, PAGE_MARGIN_X, PAGE_MARGIN_Y, PAGE_USABLE_H, PAGE_STRIDE, type PaginationBreak } from './docx-pagination';
-import { DocxSearch, searchKey, DOCX_SEARCH_NAV_META } from './docx-search';
+import { DocxPagination, docxPaginationKey, paginationBreaksRef, setPaginationBreaks, measurePageBreaks, DEFAULT_GEOMETRY, docxPaperCss, geometryFromSection, pageFooterTopAt, pageGeometry, paperBoxStyle, setPageGeometry, type PageGeometry } from './docx-pagination';import { DocxSearch, searchKey, DOCX_SEARCH_NAV_META } from './docx-search';
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
 import { bus, BusEvents } from '@/lib/bus';
 import { convertDocxToMarkdown } from '@/lib/docx-to-md';
@@ -53,11 +52,11 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
   commandsOfGroup,
-  commandsOfTier,
-  liKindOf,
+  commandsOfToolSection,
   type DocxCmdApi,
   type DocxCommand,
   type DocxGroup,
+  type DocxToolSection,
 } from './docx-commands';
 
 /** Uint8Array → base64（写回原稿用，content 为不含 data: 前缀的 base64） */
@@ -175,7 +174,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     return () => document.removeEventListener('mousedown', onDocDown);
   }, [menuOpen]);
 
-  // ---- 面板宽度观测：驱动工具条宽/窄档 + 自动适配缩放 ----
+  // ---- 面板宽度观测：驱动工具条自适应折叠 + 自动适配缩放 ----
   // 用 callback ref 而不是 useRef + useEffect([])：根节点在 loading 结束前不存在，
   // 空依赖的 effect 只跑一次会拿到 null，之后永远不再观测（自动适配会静默失效）。
   const [panelW, setPanelW] = useState(0);
@@ -195,16 +194,40 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   }, []);
   useEffect(() => () => roRef.current?.disconnect(), []);
 
+  // ---- 根字号（rem 基准）观测 ----
+  // 工具条宽度按 rem 换算（w-6 / gap-1 / px-2 全是 rem），而本项目的 html 字号 = --fs-md
+  // 会随「字号档位」在 15/17/19px 间切换 ⇒ 档位一变，同一块工具条的实际宽度就变了。
+  // 不观测就会出现「切到大字号后按钮被 overflow-hidden 剪掉」这种只在特定档位出现的故障。
+  const [remPx, setRemPx] = useState(16);
+  useEffect(() => {
+    const el = document.documentElement;
+    const read = () => {
+      const v = parseFloat(getComputedStyle(el).fontSize);
+      if (Number.isFinite(v) && v > 0) setRemPx(v);
+    };
+    read();
+    // 档位走 :root[data-fontscale] 属性切换，font-size 变化未必触发 ResizeObserver，用 MutationObserver 兜住
+    const mo = new MutationObserver(read);
+    mo.observe(el, { attributes: true, attributeFilter: ['style', 'data-fontscale'] });
+    return () => mo.disconnect();
+  }, []);
+
   // ---- 视觉分页 / 缩放 / 状态栏（S1 · Word chrome） ----
   const [zoom, setZoom] = useState(1);
   const [pageCount, setPageCount] = useState(1);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInput, setPageInput] = useState('1');
-  const [paperHeightPx, setPaperHeightPx] = useState(PAGE_H);
+  /**
+   * 当前**节几何**（P4）：纸宽 / 纸高 / 边距 / 灰缝 / 页脚距。
+   * 渲染侧的唯一真源；模块级的 `pageGeometry()` 供纯函数 `measurePageBreaks` 读取，
+   * 两者由 `applyParsed` 在同一处写入（React 靠这份 state 重渲染）。
+   */
+  const [geom, setGeom] = useState<PageGeometry>(DEFAULT_GEOMETRY);
+  const [paperHeightPx, setPaperHeightPx] = useState(DEFAULT_GEOMETRY.h);
   const paperRef = useRef<HTMLDivElement | null>(null);
   const scalerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const pageTopsRef = useRef<number[]>([PAGE_MARGIN_Y]);
+  const pageTopsRef = useRef<number[]>([DEFAULT_GEOMETRY.marginY]);
   const measureRafRef = useRef<number | null>(null);
   // 「布局未就绪 → 延时重测」的重试定时器与计数：
   // 测量若早于布局完成，块高会全部读成 0 ⇒ breaks 为空 ⇒ 页数被钉死在 1，
@@ -347,6 +370,18 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     setHfEdit(false);
     setRevisions([]);
     revisionsRef.current = [];
+
+    // ── 节几何（P4）：页面尺寸 / 边距 / 页脚距从文档自己的 `w:sectPr` 取 ──
+    // ⚠️ 只有文档**确实声明了 sectPr** 时才切换几何；读不到就**复位**为 A4 默认。
+    //    不能拿引擎的 `DEFAULT_SECTION` 兜底：它是 **US Letter**（12240×15840 twips），
+    //    会让「无 sectPr 的文档」平白从 A4 变 Letter —— 这是视觉回归，不是修 bug。
+    // 引擎走动态 import（见 parseBytes）：静态 import 会把整个引擎拖进组件 chunk。
+    const { readSections } = await import('@/lib/docx-engine');
+    const sec = readSections(parsed)[0]?.settings;
+    const nextGeom = sec ? geometryFromSection(sec) : null;
+    setPageGeometry(nextGeom);
+    setGeom(nextGeom ? { ...DEFAULT_GEOMETRY, ...nextGeom } : DEFAULT_GEOMETRY);
+
     const pmDoc = blocksToDoc(parsed.blocks);
     const json = pmDoc.toJSON() as JSONContent;
     loadingRef.current = true;
@@ -367,9 +402,16 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   }, [editor]);
 
   // ---- 视觉分页测量（S1 · 离散 A4 页面，启发式换页） ----
-  // 遍历顶层块 DOM 累加高度；当累计超过单页可用区（PAGE_USABLE_H）时，记该块为「新页首块」，
+  // 遍历顶层块 DOM 累加高度；当累计超过单页可用区（PAGE_USABLE_H）时记一处换页，
   // 并记录把上一页补足到满页所需的 padTop —— 装饰层据此把间隙拆成「白 → 灰缝 → 白」，
   // 使每一页都是等高的完整 A4（内容不足则页底留白），而不是只有第 1 页像纸。
+  //
+  // P1（2026-10-03）：块放不下时**优先在块内按行断页**（= Word 的段落跨页行为）——
+  // 用 `view.coordsAtPos` 二分定位「哪一行是下页首行」，得到段内断点的文档位置。
+  // 只有「剩余空间不足以留下 2 行」或「该块不是文本块（表格/图片/占位）」时才退化为整块下移。
+  //
+  // 测量算法本身已下沉为 `docx-pagination.ts` 的纯函数 `measurePageBreaks(view, opts)`；
+  // 本函数只负责「就绪判定（未就绪则延时重测且**不写状态**）」与「把结果落盘 + 触发装饰重算」。
   const measurePagination = useCallback((): boolean => {
     // 视图 / 布局尚未就绪：**不写状态**，延时重测（有上限，不会无限重试）
     const notReady = (): boolean => {
@@ -395,50 +437,41 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     // `.ProseMirror` 的直接子元素，且**仅在数量一致时**启用（尾随 hack 节点会导致错位）。
     const domKids = Array.from(pm.children) as HTMLElement[];
     const alignable = domKids.length === doc.childCount;
-    let acc = 0;
-    let measuredTotal = 0;
-    const breaks: PaginationBreak[] = [];
-    let di = 0;
-    doc.forEach((node, offset) => {
+    // 段内断点用 display:block 的行内插入，须把实测的额外撑高（随字号变）扣掉
+    const fontSizePx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 15;
+
+    const blockEls: Array<HTMLElement | null> = [];
+    doc.forEach((_node, offset) => {
       const fromView = ed.view.nodeDOM(offset) as HTMLElement | null;
-      const fallback: HTMLElement | null = alignable ? (domKids[di] ?? null) : null;
-      const el: HTMLElement | null = fromView && fromView.nodeType === 1 ? fromView : fallback;
-      const h = el ? el.offsetHeight || 0 : 0;
-      measuredTotal += h;
-      const manualBreak = node.attrs.pageBreakBefore === true;
-      // 手动分页符（段落级 w:pageBreakBefore）或累计高度超单页可用区 → 该块作为新页首块
-      if (di > 0 && (manualBreak || acc + h > PAGE_USABLE_H)) {
-        breaks.push({ index: di, manual: manualBreak, padTop: Math.max(0, PAGE_USABLE_H - acc) });
-        acc = 0;
-      }
-      acc += h;
-      di++;
+      const fallback: HTMLElement | null = alignable ? (domKids[blockEls.length] ?? null) : null;
+      blockEls.push(fromView && fromView.nodeType === 1 ? fromView : fallback);
     });
+
+    const res = measurePageBreaks(ed.view, { blockEls, fontSizePx });
     // 有内容却一个块高都没读到 ⇒ 布局未就绪。此时**绝不能**写入状态：breaks=[] 会让
     // pageCount 停在 1、paperHeightPx 停在 PAGE_H，多页文档就渲染成一页高的白纸，
     // 正文直接溢出到画布灰上（表现为「只有第一页是白的，其他页全是灰底」）。
-    if (measuredTotal <= 0 && doc.childCount > 0) return notReady();
-    const pages = breaks.length + 1;
-    // 页起点只与页码有关：第 i 页（0-based）起点 = PAGE_MARGIN_Y + i * PAGE_STRIDE。
-    // 因为每页内容已被 padTop 补足成等高 A4，不再需要用实际内容高度累加（旧算法漏加 spacer
-    // 占位，导致第 n 页的滚动定位/页码判定整整偏上 (n-1)*PAGE_SPACER）。
-    const tops = Array.from({ length: pages }, (_, i) => PAGE_MARGIN_Y + i * PAGE_STRIDE);
-    const total = pages * PAGE_H + (pages - 1) * PAGE_GAP;
+    if (res.measuredTotal <= 0 && doc.childCount > 0) return notReady();
     const prev = paginationBreaksRef.current;
     const changed =
-      prev.length !== breaks.length ||
-      breaks.some(
+      prev.length !== res.breaks.length ||
+      res.breaks.some(
         (b, i) =>
-          prev[i]?.index !== b.index || prev[i]?.manual !== b.manual || prev[i]?.padTop !== b.padTop,
+          prev[i]?.index !== b.index ||
+          prev[i]?.manual !== b.manual ||
+          prev[i]?.padTop !== b.padTop ||
+          prev[i]?.inlinePos !== b.inlinePos,
       );
     if (changed) {
-      setPaginationBreaks(breaks);
+      setPaginationBreaks(res.breaks);
       // 触发 ProseMirror 装饰重算（decorations 读取 paginationBreaksRef.current）
       ed.view.dispatch(ed.state.tr.setMeta(docxPaginationKey, Date.now()));
     }
-    pageTopsRef.current = tops;
-    setPaperHeightPx(Math.max(PAGE_H, Math.round(total)));
-    setPageCount(pages);
+    pageTopsRef.current = res.pageTops;
+    // 下限取当前纸高（而不是 A4 常量）：页脚距 / 纸高都可能被节属性改掉。
+    // 这里读模块几何而不是闭包里的 `geom`，避免给 useCallback 增加依赖（几何在测量前已写好）。
+    setPaperHeightPx(Math.max(pageGeometry().h, Math.round(res.paperHeightPx)));
+    setPageCount(res.pages);
     measureTriesRef.current = 0;
     return true;
   }, [editor]);
@@ -500,10 +533,10 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   // 自动适配：面板宽度 / 标尺显隐变化时重算缩放；用户手改缩放或点放大缩小后停止自动适配
   useEffect(() => {
     if (!autoFit || panelW <= 0) return;
-    const contentW = PAGE_W + (showRuler ? V_RULER_W : 0);
+    const contentW = geom.w + (showRuler ? V_RULER_W : 0);
     const avail = panelW - 2 * PANEL_CANVAS_PAD;
     setZoom(Math.max(0.4, Math.min(1, Math.round((avail / contentW) * 100) / 100)));
-  }, [autoFit, panelW, showRuler]);
+  }, [autoFit, panelW, showRuler, geom]);
 
   // 缩放
   const zoomIn = useCallback(() => setZoom((z) => Math.min(2, Math.round((z + 0.1) * 100) / 100)), []);
@@ -618,10 +651,8 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     return () => window.removeEventListener('keydown', onKey);
   }, [openFind]);
 
-  // 当前选区对齐 / 列表态（驱动 ribbon 高亮）
-  const isAlign = (a: string) => Boolean(editor?.isActive('paragraph', { align: a }) || editor?.isActive('heading', { align: a }));
-  // 列表类型与命令表同源（docx-commands.tsx liKindOf），避免两处判据漂移
-  const liKind = liKindOf(editor);
+  // 当前选区对齐 / 列表态：判据已随「对齐 / 列表还原为按钮」一并迁入命令表
+  // （docx-commands.tsx 的 alignActive / liKindOf），宿主不再各存一份，避免两处漂移。
   const rfAttrs = editor?.getAttributes('runFormat');
   const rfFont = (rfAttrs?.font as string) || '';
   const rfSize = rfAttrs?.sizeHalfPoints as number | undefined;
@@ -658,6 +689,16 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     [editor],
   );
 
+  // ⚠️ onError 是父层传入的回调，而 `UnifiedViewer.tsx:677` 传的是**内联箭头函数**
+  //    ⇒ 父组件每渲染一次就换一个新身份。一旦把它放进装载 effect 的依赖数组，父层的
+  //    **任何一次重渲染**都会重跑装载：setLoading(true) → 整块面板（含标题栏/工具条）
+  //    被换成一页「正在加载文档…」占位 ⇒ 观感就是「打开 docx 后整个面板反复闪烁」。
+  //    故用 ref 固定最新回调，使其不参与依赖比较。
+  const onErrorRef = useRef(onError);
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
   // 打开文档：fetch proxyUrl → parseDocx → 适配为 PM 文档 → 装入编辑器
   useEffect(() => {
     let cancelled = false;
@@ -688,7 +729,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
         const msg = e instanceof Error ? e.message : 'Word 文档加载失败';
         if (!cancelled) {
           setError(msg);
-          onError?.(msg);
+          onErrorRef.current?.(msg);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -698,8 +739,10 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     return () => {
       cancelled = true;
     };
+    // 依赖只保留「真正改变要重新装载的输入」：文档地址 / 编辑器实例 / 装入实现。
+    // onError 刻意排除（见上），否则父层每次重渲染都会引发一次整篇重装载。
     // editor 实例就绪后也会触发一次加载（首帧 editor 为 null）
-  }, [proxyUrl, editor, onError, applyParsed]);
+  }, [proxyUrl, editor, applyParsed]);
 
   /**
    * 构造当前文档的 docx 字节（不走写回）。供「保存」与「一键转 MD」复用：
@@ -858,6 +901,45 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
       setLoading(false);
     }
   }, [fileInfo.full_path, dirty, saving, handleSave, onError]);
+
+  /**
+   * 打印 / 导出 PDF（P4）。
+   *
+   * 与 MD 编辑器（`DocEditor.tsx:2294-2330` 的 `handlePrint`）的关键差异：docx **不克隆 DOM**。
+   * 原因：纸面本身就是按「打印成品」排的 —— 页高 / 页边距 / 页脚纵坐标 / 页间灰缝都已在
+   * 几何里定死，克隆一份出去反而要重建整套坐标。打印期只靠 CSS 把编辑态剥掉：
+   *   · 隐藏 chrome（`.docx-print-hide`）、解除缩放与滚动约束（`.docx-print-*`）
+   *   · spacer 高度减去灰缝（`--docx-h − --docx-page-gap`）⇒ 第 k 页不再整体下移 (k−1)·24
+   *   · 纸面 `min-height` 归零 ⇒ 元素高度恰好是 `pages × 纸高`，不多出空白末页
+   *   · `@page docx-page { margin: 0; size: 纸型 }` 与纸面同尺寸（见 `docxStyleSheet`）
+   */
+  const handlePrint = useCallback(async () => {
+    // 打印前重测一次：确保 padTop / 页数是最新的（脏内容没重测会让页尾多出一张空白纸）
+    measurePaginationRef.current();
+    // 等两帧：装饰层（页间灰缝）落进 DOM 之后再呼出打印面板
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))));
+    const prevTitle = document.title;
+    // 打印面板/「存储为 PDF」默认取 document.title 作文件名
+    document.title = (fileName || fileInfo.name || 'document').replace(/\.docx$/i, '');
+    try {
+      const api = (window as unknown as { api?: { print?: () => Promise<{ success?: boolean; error?: string }> } }).api;
+      if (api?.print) {
+        const res = await api.print();
+        if (res && res.success === false) {
+          // 主进程打印面板失败（如 macOS OOP printing 异常）→ 兜底走 Chromium 原生打印
+          alert(res.error || '打印失败');
+          window.print();
+        }
+      } else {
+        window.print();
+      }
+    } catch (e) {
+      alert(`打印失败：${e instanceof Error ? e.message : String(e)}`);
+      window.print();
+    } finally {
+      document.title = prevTitle;
+    }
+  }, [fileName, fileInfo.name]);
 
   // ---- 一键转 Markdown：把当前文档（含未保存改动）转成 .md 存入 homework，
   //      并发布 file.open 在 md 编辑器中打开 ----
@@ -1275,7 +1357,10 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     }
   }, [aiSel, aiInstruction, aiBusy, applyRevise]);
 
-  if (loading) {
+  // 只在「还没有任何内容」时整块替换成占位符（= 真正的首次打开）。
+  // 一旦装入过一次（parsedRef 有值），后续任何 loading 过渡都保留面板结构 ——
+  // 否则每触发一次重装，标题栏 / 工具条 / 画布就被一起换掉，观感正是「整个面板反复闪烁」。
+  if (loading && !parsedRef.current) {
     return (
       <div style={centerStyle}>
         <div style={{ fontSize: 13, opacity: 0.7 }}>正在加载文档…</div>
@@ -1297,21 +1382,35 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
   /** 竖标尺宽度（隐藏时为 0，内容列随之收窄） */
   const rulerW = showRuler ? V_RULER_W : 0;
   /** 内容列宽度 = 标尺 / 白纸共用真值（缩放联动） */
-  const contentWidth = (PAGE_W + rulerW) * zoom;
-  /** 工具条宽档：低于阈值收起字体/字号/列表/缩进/样式（下沉到 ⋯ 菜单） */
-  const wide = panelW >= WIDE_TOOLBAR_MIN;
+  const contentWidth = (geom.w + rulerW) * zoom;
+  /**
+   * 工具条自适应折叠（Word 式优先级溢出）：
+   * 按面板可用宽度贪心淘汰最不重要的槽位，装不下的整组下沉到 ⋯ 菜单（功能始终可达）。
+   * 取代了此前的二元宽窄档（`panelW >= 700`）—— 那个阈值要么全给要么全收，
+   * 在默认面板宽度上表现为「字体 / 样式的下拉忽然消失」，观感是功能被藏了。
+   * 宽度按实测根字号换算（见 `toolMetrics`），故字号档位切换后不会剪掉按钮。
+   */
+  const toolM = toolMetrics(remPx);
+  const toolbarPlan = panelW > 0 ? fitToolbar(panelW - toolM.padX - TOOLBAR_SLACK, toolM) : toolbarSlots(toolM);
+  /** 某分区是否已被工具条收录（未收录则在 ⋯ 菜单里补位） */
+  const inToolbar = (key: string) => toolbarPlan.some((s) => s.key === key);
+  /** 工具条未收录的 primary 命令（按分区取，保持声明顺序） */
+  const overflowCmds = (section: DocxToolSection) => (inToolbar(section) ? [] : commandsOfToolSection(section));
   /** 修订侧栏：够宽推开画布，否则浮层 */
   const revDocked = panelW >= REV_DOCK_MIN;
   /** 当前段落样式（正文 / 标题 1-3） */
   const styleValue = editor?.isActive('heading') ? `h${editor?.getAttributes('heading').level ?? 1}` : 'p';
 
   /* ================================================================
-   * 工具条 / ⋯ 菜单渲染器（2026-10-01 去重整改）
+   * 工具条 / ⋯ 菜单渲染器（2026-10-01 去重 → 2026-10-02 自适应折叠）
    *
    * 单一真源：按钮命令一律取自 docx-commands.tsx 的 DOCX_COMMANDS，由 renderCmd 按
    *   tier 渲染成「工具条外观」或「菜单外观」——同一功能不再在两处各写一份 JSX。
-   * 下拉类控件（字体 / 字号 / 样式 / 对齐 / 列表）各自只有一份实现，
-   *   宽档 / 窄档通过条件渲染决定落点，保证同屏不重复、窄档不丢失。
+   * 落点规则（结构上互斥，同屏绝不重复）：
+   *   · tier='primary' → 候选常驻。由 TOOL_SECTIONS 按可用宽度贪心填充；
+   *     装得下的在工具条，装不下的整组下沉到 ⋯ 菜单（overflowCmds 补位）。
+   *   · tier='menu'    → 永不上工具条，只在 ⋯ 菜单里出现。
+   * 下拉类控件（字体 / 字号 / 样式）同一时刻只渲染一份：inToolbar 命中则在工具条，否则在 ⋯。
    * ================================================================ */
 
   /** 命令执行所需的外部能力（宿主闭包），供 docx-commands.tsx 的 run / disabled 使用 */
@@ -1342,6 +1441,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     openExternal: () => void handleOpenExternal(),
     convertMd: () => void handleConvertToMd(),
     reload: handleReload,
+    printDoc: () => void handlePrint(),
   };
 
   /**
@@ -1429,43 +1529,11 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     </PanelSelect>
   );
 
-  /** 对齐方式：四种对齐收成 1 个下拉（常驻工具条，任何宽度都有） */
-  const renderAlignSelect = () => (
-    <PanelSelect
-      key="sel-align"
-      width="82px"
-      title="对齐方式"
-      value={ALIGN_OPTIONS.find((a) => isAlign(a.v))?.v ?? 'left'}
-      onChange={(e) => editor?.chain().focus().setTextAlign(e.target.value as AlignValue).run()}
-    >
-      {ALIGN_OPTIONS.map((a) => (
-        <option key={a.v} value={a.v}>
-          {a.label}
-        </option>
-      ))}
-    </PanelSelect>
-  );
-
-  /** 列表类型：项目符号 / 编号 收成 1 个下拉（常驻工具条，任何宽度都有） */
-  const renderListSelect = () => (
-    <PanelSelect
-      key="sel-list"
-      width="78px"
-      title="列表类型"
-      value={liKind ?? ''}
-      onChange={(e) => {
-        const v = e.target.value;
-        if (v === 'bullet') editor?.chain().focus().toggleBulletList().run();
-        else if (v === 'ordered') editor?.chain().focus().toggleNumberedList().run();
-        else if (liKind === 'bullet') editor?.chain().focus().toggleBulletList().run();
-        else if (liKind === 'ordered') editor?.chain().focus().toggleNumberedList().run();
-      }}
-    >
-      <option value="">无列表</option>
-      <option value="bullet">• 项目符号</option>
-      <option value="ordered">1. 编号</option>
-    </PanelSelect>
-  );
+  /* 对齐 / 列表已还原为独立按钮（2026-10-02）——
+   * 原来的 renderAlignSelect / renderListSelect 两个下拉已删除：
+   * 宽度核算显示 4 个对齐按钮 + 2 个列表按钮（160px）比两个下拉（164px）**更窄**，
+   * 「合并以省空间」的前提不成立，反而牺牲了 Word 的所见即所得。
+   * 两种渲染现在都由命令表的 renderCmd 承担，判据（alignActive / liKindOf）也随之下沉。 */
 
   /** 字体颜色（唯一实现，落在 ⋯ 菜单字体区；低频不上工具条） */
   const renderColorInput = () => (
@@ -1569,31 +1637,30 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
     </>
   );
 
-  /** ⋯ 菜单：按分区 + 行号渲染命令（工具条不消费 menu 级命令，故两者永不重复） */
-  const renderMenuRow = (group: DocxGroup, row = 1) => (
-    <MenuRow>
-      {commandsOfGroup(group)
-        .filter((c) => (c.row ?? 1) === row)
-        .map((c) => renderCmd(c, 'menu'))}
-    </MenuRow>
-  );
-
-  /** 一个分区内的命令按 row 拆成多行渲染 */
+  /** ⋯ 菜单：把 menu 级命令按分区 + 行号拆成多行渲染 */
   const renderMenuRows = (group: DocxGroup) => {
-    const rows = Array.from(new Set(commandsOfGroup(group).map((c) => c.row ?? 1))).sort((a, b) => a - b);
+    const cmds = commandsOfGroup(group);
+    const rows = Array.from(new Set(cmds.map((c) => c.row ?? 1))).sort((a, b) => a - b);
     return rows.map((r) => (
-      <MenuRow key={`${group}-${r}`}>
-        {commandsOfGroup(group)
-          .filter((c) => (c.row ?? 1) === r)
-          .map((c) => renderCmd(c, 'menu'))}
-      </MenuRow>
+      <MenuRow key={`${group}-${r}`}>{cmds.filter((c) => (c.row ?? 1) === r).map((c) => renderCmd(c, 'menu'))}</MenuRow>
     ));
   };
 
+  /**
+   * ⋯ 菜单里给「被工具条挤出的 primary 命令」补位。
+   * 与 renderMenuRows 的区别：数据源按 toolSection 取，且工具条已收录该分区时返回 null ——
+   * 这条互斥关系是「同屏不重复」的结构性保证。
+   */
+  const renderOverflowRow = (section: DocxToolSection) => {
+    const cmds = overflowCmds(section);
+    if (!cmds.length) return null;
+    return <MenuRow key={`ov-${section}`}>{cmds.map((c) => renderCmd(c, 'menu'))}</MenuRow>;
+  };
+
   return (
-    <div ref={attachRoot} style={rootStyle} className={hideRev ? 'docx-hide-rev' : undefined}>
+    <div ref={attachRoot} style={rootStyle} className={cn('docx-print-frame', hideRev && 'docx-hide-rev')}>
       {/* ============ 面板标题栏（32px）：身份 + 保存态 + 全局动作 ============ */}
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--line-soft)] bg-white px-2" style={headerStyle}>
+      <div className="docx-print-hide flex shrink-0 items-center gap-1.5 border-b border-[var(--line-soft)] bg-white px-2" style={headerStyle}>
         <span
           className="grid h-4 w-4 shrink-0 place-items-center rounded text-9 font-bold"
           style={{ background: 'var(--brand-soft-strong)', color: 'var(--brand-strong)' }}
@@ -1686,28 +1753,30 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
               className="docx-pop absolute right-0 top-[26px] z-50 w-[268px] overflow-auto rounded-xl border border-[var(--line)] bg-white p-2"
               style={{ maxHeight: '68vh', boxShadow: 'var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.16))' }}
             >
-              <MenuSection label="插入">{renderMenuRows('insert')}</MenuSection>
+              {/* 插入分区没有 menu 级命令（表格/图片已升为 primary），此处只做工具条溢出补位 */}
+              {overflowCmds('insert').length ? (
+                <MenuSection label="插入">{renderOverflowRow('insert')}</MenuSection>
+              ) : null}
 
               <MenuSection label="字体">
-                {/* 宽档下字体 / 字号已在工具条常驻，此处不再渲染（去重） */}
-                {wide ? null : (
+                {/* 字体 / 字号下拉：工具条装不下时才下沉到这里（同一时刻只渲染一份） */}
+                {inToolbar('font') && inToolbar('size') ? null : (
                   <MenuRow>
-                    {renderFontSelect()}
-                    {renderSizeSelect('58px')}
+                    {inToolbar('font') ? null : renderFontSelect()}
+                    {inToolbar('size') ? null : renderSizeSelect('58px')}
                   </MenuRow>
                 )}
-                <MenuRow>
-                  {commandsOfGroup('font').map((c) => renderCmd(c, 'menu'))}
-                  {renderColorInput()}
-                </MenuRow>
+                {renderOverflowRow('script')}
+                <MenuRow>{renderColorInput()}</MenuRow>
               </MenuSection>
 
               <MenuSection label="段落">
-                {/* 窄档下样式下拉下沉到这里（宽档在工具条） */}
-                {wide ? null : <MenuRow>{renderStyleSelect()}</MenuRow>}
-                {renderMenuRow('paragraph', 1)}
+                {inToolbar('style') ? null : <MenuRow>{renderStyleSelect()}</MenuRow>}
+                {renderOverflowRow('align')}
+                {renderOverflowRow('list')}
                 {renderParaFields()}
-                {renderMenuRow('paragraph', 2)}
+                {renderOverflowRow('paraIndent')}
+                {renderOverflowRow('paraMisc')}
               </MenuSection>
 
               {inTable ? <MenuSection label="表格">{renderMenuRows('table')}</MenuSection> : null}
@@ -1727,39 +1796,28 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
         </div>
       </div>
 
-      {/* ============ 单行工具条（36px）：宽档 9 控件 / 窄档 6 控件，其余全在 ⋯ 里 ============ */}
+      {/* ============ 单行工具条（36px）：按可用宽度自适应，装不下的整组下沉 ⋯ 菜单 ============ */}
       <div
-        className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--line-soft)] bg-white px-2"
+        className="docx-print-hide flex shrink-0 items-center gap-1 overflow-hidden border-b border-[var(--line-soft)] bg-white px-2"
         style={toolbarStyle}
       >
-        {wide ? (
-          <>
-            {renderFontSelect('104px')}
-            {renderSizeSelect('56px')}
-            <ToolSep />
-          </>
-        ) : null}
-
-        {/* 行内格式：primary 命令（任何宽度常驻，不再出现在 ⋯ 菜单里） */}
-        {commandsOfTier('primary').map((c) => renderCmd(c, 'tool'))}
-
-        <ToolSep />
-
-        {/* 对齐 / 列表：四种对齐与两种列表各收成 1 个下拉 */}
-        {renderAlignSelect()}
-        {renderListSelect()}
-
-        {wide ? (
-          <>
-            <ToolSep />
-            {renderStyleSelect()}
-          </>
-        ) : null}
+        {toolbarPlan.map((slot, i) => (
+          <Fragment key={slot.key}>
+            {i > 0 && slot.sepBefore ? <ToolSep /> : null}
+            {slot.section
+              ? commandsOfToolSection(slot.section).map((c) => renderCmd(c, 'tool'))
+              : slot.widget === 'font'
+                ? renderFontSelect(`${slot.width}px`)
+                : slot.widget === 'size'
+                  ? renderSizeSelect(`${slot.width}px`)
+                  : renderStyleSelect(`${slot.width}px`)}
+          </Fragment>
+        ))}
       </div>
 
       {/* 查找 / 替换面板（⌘F） */}
       {findOpen ? (
-        <div style={findBarStyle}>
+        <div className="docx-print-hide" style={findBarStyle}>
           <input
             ref={findInputRef}
             style={findInputStyle}
@@ -1814,7 +1872,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
       ) : null}
 
       {/* ============ 编辑区（+ 修订侧栏：宽面板推开、窄面板浮层） ============ */}
-      <div className="relative flex min-h-0 flex-1">
+      <div className="docx-print-area relative flex min-h-0 flex-1">
         <div
           style={canvasStyle}
           ref={canvasRef}
@@ -1823,10 +1881,10 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
             onCanvasScroll();
           }}
         >
-          <div style={{ width: contentWidth, margin: '0 auto' }}>
+          <div className="docx-print-col" style={{ width: contentWidth, margin: '0 auto' }}>
             {hfEdit ? (
-              <div style={{ marginLeft: rulerW, width: PAGE_W }}>
-                <div style={hfPanelStyle}>
+              <div className="docx-print-hide" style={{ marginLeft: rulerW, width: geom.w }}>
+                <div style={hfPanelStyleOf(geom)}>
                   <div style={hfLabelStyle}>页眉</div>
                   <textarea
                     style={hfTextareaStyle}
@@ -1843,33 +1901,62 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
               </div>
             ) : null}
             {showRuler ? (
-              <div style={rulerStickyStyle}>
+              <div className="docx-print-hide" style={rulerStickyStyle}>
                 <DocxRuler
                   zoom={zoom}
                   vrW={rulerW}
+                  geom={geom}
                   firstLinePt={curFirstLinePt}
                   leftIndentPt={curIndentLeftPt}
                   onCommit={handleRulerCommit}
                 />
               </div>
             ) : null}
-            <div style={{ ...scalerStyle, width: contentWidth, height: paperHeightPx * zoom }} ref={scalerRef}>
+            <div
+              className="docx-paper-scaler"
+              style={{ ...scalerStyle, width: contentWidth, height: paperHeightPx * zoom }}
+              ref={scalerRef}
+            >
               <div
+                className="docx-paper-wrap"
                 style={{
                   ...paperWrapperStyle,
                   transform: `scale(${zoom})`,
-                  width: PAGE_W + rulerW,
+                  width: geom.w + rulerW,
                   height: paperHeightPx,
                 }}
               >
-                {showRuler ? <DocxVRuler height={paperHeightPx} /> : null}
+                {showRuler ? <DocxVRuler height={paperHeightPx} geom={geom} /> : null}
                 <div
+                  className="docx-paper"
                   ref={paperRef}
-                  style={{ ...pageStyle, minHeight: paperHeightPx }}
+                  style={{ ...pageStyleOf(geom), minHeight: paperHeightPx }}
                   onMouseUp={onEditorMouseUp}
                   onMouseDown={onEditorMouseDown}
                 >
                   <EditorContent editor={editor} style={{ height: '100%' }} />
+                  {/*
+                    每页页脚（P4）：页码常住在这里，**不再画在页间灰缝里**。
+                    灰缝方案的两个硬伤：① spacer 只在断点处生成 ⇒ 末页永远没有页码；
+                    ② 页码单调性靠「闭包先取值 + widget key」维持，P1 就栽在这上面。
+                    改由宿主按 `pageCount` 渲染后：序号 = `i + 1` 由构造保证单调，整类缺陷消失。
+                    纵坐标走纯函数 `pageFooterTopAt`（可单测，不依赖靶场），绝对定位在纸内
+                    ⇒ 不参与文档流、不进 `getJSON`，因此**不影响 docx 字节保真**。
+                  */}
+                  {Array.from({ length: pageCount }, (_, i) => (
+                    <div
+                      key={`foot-${i}`}
+                      className="docx-page-footer"
+                      style={{
+                        top: pageFooterTopAt(i, DOCX_FOOTER_LINE_H, geom),
+                        left: geom.marginX,
+                        right: geom.marginX,
+                        lineHeight: `${DOCX_FOOTER_LINE_H}px`,
+                      }}
+                    >
+                      {footerLineText(i + 1, pageCount, footerText)}
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
@@ -1879,7 +1966,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
         {/* 修订面板：面板够宽就推开画布，太窄就浮层（320px 面板里推开会把纸挤成 0 宽） */}
         {panelOpen ? (
           <aside
-            className="docx-slide"
+            className="docx-slide docx-print-hide"
             style={revDocked ? revPanelDockedStyle : revPanelOverlayStyle}
             onMouseDown={(e) => e.stopPropagation()}
           >
@@ -2059,7 +2146,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
       ) : null}
 
       {/* ============ 状态栏（24px）：页码 / 字数 / 标尺 / 缩放 ============ */}
-      <div style={statusBarStyle}>
+      <div className="docx-print-hide" style={statusBarStyle}>
         <span>第 {currentPage} / {pageCount} 页</span>
         <span style={{ color: 'var(--line)' }}>·</span>
         <span>字数 {wordCount}</span>
@@ -2112,7 +2199,7 @@ export function DocxTiptapEditor({ proxyUrl, fileInfo, fileName, onError }: View
         </Button>
       </div>
 
-      <style>{editorCss}</style>
+      <style>{docxStyleSheet(geom)}</style>
     </div>
   );
 }
@@ -2136,8 +2223,6 @@ const PANEL_TOOLBAR_H = 36;
 const PANEL_STATUS_H = 24;
 /** 画布左右留白（面板内比整页更紧） */
 const PANEL_CANVAS_PAD = 12;
-/** 工具条「宽档」阈值：低于此值收起字体/字号/列表/缩进/样式，全部下沉到 ⋯ 菜单 */
-const WIDE_TOOLBAR_MIN = 700;
 /**
  * 修订侧栏改为推开画布的最小面板宽度。
  * 之所以门槛要高：推开后画布只剩 panelW-288，A4 纸会被自动适配压到 0.6 以下就不可读了；
@@ -2151,15 +2236,118 @@ const V_RULER_W = 20;
 
 const FONT_OPTIONS = ['宋体', '黑体', '微软雅黑', 'Calibri', 'Arial', 'Times New Roman', 'Cambria', '仿宋', '楷体', 'Consolas'];
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 48, 72];
-/** 对齐方式（四种对齐压缩为 1 个下拉，减少常驻控件数） */
-const ALIGN_OPTIONS = [
-  { v: 'left', label: '左对齐' },
-  { v: 'center', label: '居中' },
-  { v: 'right', label: '右对齐' },
-  { v: 'justify', label: '两端对齐' },
-] as const;
-/** 对齐取值类型（与 Tiptap setTextAlign 的入参联合严格对齐） */
-type AlignValue = (typeof ALIGN_OPTIONS)[number]['v'];
+/* ================================================================
+ * 工具条自适应折叠（Word 式优先级溢出）—— 2026-10-02
+ *
+ * 取代此前的二元宽窄档（`WIDE_TOOLBAR_MIN = 700`）：二元档要么全给要么全收，
+ * 在默认面板宽度上表现为「字体/样式的下拉忽然消失」，用户观感是功能被藏了。
+ * 现在改为按可用宽度**逐个槽位**淘汰，填满可用空间，且永不出现横向滚动条。
+ *
+ * ⚠️ 宽度**不能写死 px**：本项目的 `html, body { font-size: var(--fs-md) }`
+ *    会随「字号档位」（`html[data-fontscale]`）在 15 / 17 / 19px 间切换，而工具条的
+ *    尺寸类全是 rem 单位 ⇒ 按 16px 基准估算会在「大字号」档位下低估宽度、把按钮剪掉。
+ *    故统一从**实测根字号**换算（见 `toolMetrics`），并在档位切换时重算。
+ *
+ * 与渲染实现的对应关系（Tailwind v4，`--spacing` = 0.25rem）：
+ *   · ToolBtn      `h-6 w-6`        → 1.5rem
+ *   · 容器         `gap-1`          → 0.25rem
+ *   · ToolSep      `mx-0.5 w-px`    → 0.125rem×2 + 1px
+ *   · 容器         `px-2`           → 0.5rem×2（左右合计 1rem）
+ *   · 三个下拉     `style={{width}}` → 固定 px（不随字号档位变）
+ * ================================================================ */
+
+/** 折叠安全余量：估算已按实测根字号换算，这里只兜住亚像素舍入，宁可少放一个也不溢出 */
+const TOOLBAR_SLACK = 8;
+
+/** 字体 / 字号 / 样式三个下拉的宽度（内联 px，不随字号档位变） */
+const FONT_SEL_W = 104;
+const SIZE_SEL_W = 56;
+const STYLE_SEL_W = 78;
+
+/** 工具条尺寸度量：全部由实测根字号换算 */
+interface ToolMetrics {
+  /** 图标按钮宽（ToolBtn：w-6） */
+  btn: number;
+  /** 相邻控件间距（容器 gap-1） */
+  gap: number;
+  /** 分隔线宽含两侧 margin（ToolSep：mx-0.5 w-px） */
+  sep: number;
+  /** 容器左右内边距合计（px-2） */
+  padX: number;
+}
+
+function toolMetrics(rem: number): ToolMetrics {
+  return { btn: 1.5 * rem, gap: 0.25 * rem, sep: 0.25 * rem + 1, padX: rem };
+}
+
+/** 工具条上的一个槽位：一个下拉控件，或一组同分区命令按钮 */
+interface ToolSlot {
+  /** 稳定标识（React key）；命令分区槽位与 DocxToolSection 同名 */
+  key: string;
+  /** 命令分区（下拉控件槽位为 undefined） */
+  section?: DocxToolSection;
+  /** 下拉控件槽位（命令分区槽位为 undefined） */
+  widget?: 'font' | 'size' | 'style';
+  /** 内容宽度，不含相邻 gap 与分隔线 */
+  width: number;
+  /** 非首位渲染时前面插一条分隔线（视觉分组） */
+  sepBefore: boolean;
+  /** 淘汰次序：数字越大越先被挤出工具条；0 = 永不淘汰 */
+  evictRank: number;
+}
+
+/** 一组命令按钮的宽度：n 个按钮 + (n-1) 个间距（分区空则为 0） */
+function groupWidth(section: DocxToolSection, m: ToolMetrics): number {
+  const n = commandsOfToolSection(section).length;
+  return n > 0 ? n * m.btn + (n - 1) * m.gap : 0;
+}
+
+/**
+ * 工具条槽位表 —— **数组顺序即工具条展示顺序**，`evictRank` 决定「先牺牲谁」。
+ * 顺序对齐 Word「开始」选项卡：字体 → 字形 → 段落 → 样式 → 低频项。
+ * 分区宽度由 `groupWidth` 从命令表算出，避免宽度常量与命令表分头维护导致漂移。
+ */
+function toolbarSlots(m: ToolMetrics): ToolSlot[] {
+  return [
+    { key: 'font', widget: 'font', width: FONT_SEL_W, sepBefore: false, evictRank: 1 },
+    { key: 'size', widget: 'size', width: SIZE_SEL_W, sepBefore: false, evictRank: 2 },
+    { key: 'inline', section: 'inline', width: groupWidth('inline', m), sepBefore: true, evictRank: 0 },
+    { key: 'script', section: 'script', width: groupWidth('script', m), sepBefore: false, evictRank: 3 },
+    { key: 'align', section: 'align', width: groupWidth('align', m), sepBefore: true, evictRank: 4 },
+    { key: 'list', section: 'list', width: groupWidth('list', m), sepBefore: false, evictRank: 5 },
+    { key: 'style', widget: 'style', width: STYLE_SEL_W, sepBefore: true, evictRank: 6 },
+    { key: 'paraIndent', section: 'paraIndent', width: groupWidth('paraIndent', m), sepBefore: true, evictRank: 7 },
+    { key: 'paraMisc', section: 'paraMisc', width: groupWidth('paraMisc', m), sepBefore: false, evictRank: 8 },
+    { key: 'insert', section: 'insert', width: groupWidth('insert', m), sepBefore: true, evictRank: 9 },
+  ];
+}
+
+/** 一组槽位渲染后的估算总宽（含 flex gap 与分隔线），与工具条 JSX 的插槽逻辑一一对应 */
+function slotsWidth(slots: ToolSlot[], m: ToolMetrics): number {
+  let w = 0;
+  slots.forEach((s, i) => {
+    if (i > 0) {
+      w += m.gap;
+      if (s.sepBefore) w += m.sep + m.gap;
+    }
+    w += s.width;
+  });
+  return w;
+}
+
+/**
+ * 按可用宽度贪心淘汰：从最不重要的槽位开始丢，丢到装得下为止。
+ * 对标 Word ribbon 的自适应折叠；被丢掉的槽位由 ⋯ 菜单按分区补位，功能始终可达。
+ */
+function fitToolbar(avail: number, m: ToolMetrics): ToolSlot[] {
+  let keep = toolbarSlots(m);
+  const evictOrder = keep.filter((s) => s.evictRank > 0).sort((a, b) => b.evictRank - a.evictRank);
+  for (const s of evictOrder) {
+    if (slotsWidth(keep, m) <= avail) break;
+    keep = keep.filter((k) => k.key !== s.key);
+  }
+  return keep;
+}
 
 /** 下拉框统一样式（与 Button xs 同高同圆角） */
 const SELECT_CLS =
@@ -2301,15 +2489,44 @@ const canvasStyle: React.CSSProperties = {
   padding: `${CANVAS_PAD}px 0`,
 };
 
-/** 白纸几何：全部取自 docx-pagination 的唯一真值，避免 794/1123/96 双份定义 */
-const pageStyle: React.CSSProperties = {
+/* ---------------- 每页页脚（P4） ---------------- */
+
+/**
+ * 页脚行高（px）—— 同一时刻是 `.docx-page-footer` 的 `line-height` 与
+ * `pageFooterTopAt(i, lineH, g)` 的 `lineH`。**两者必须同源**：页脚底边距纸底恒为
+ * `footerDist` 这条不变量，是靠「顶 = 纸底 − footerDist − 行高」推出来的。
+ */
+const DOCX_FOOTER_LINE_H = 16;
+
+/** 引擎对 `w:fldSimple PAGE` / `NUMPAGES` 的占位符（同源：lib/docx-engine/types.ts:852-854） */
+const PAGE_FIELD_MARK = '\uE001';
+const TOTAL_PAGES_FIELD_MARK = '\uE000';
+
+/**
+ * 第 n 页（1-based）的页脚文字。
+ * 文档自带页脚文本时以它为准，并把引擎的字段占位符换成真实页码 / 总页数；
+ * 文档没有页脚时退回「只有页码」—— 这正是 P4 之前完全缺失的**末页页码**。
+ */
+function footerLineText(n: number, total: number, text: string | null | undefined): string {
+  const raw = (text ?? '').trim();
+  if (!raw) return String(n);
+  return raw.split(PAGE_FIELD_MARK).join(String(n)).split(TOTAL_PAGES_FIELD_MARK).join(String(total));
+}
+
+/**
+ * 白纸几何：**数值**全部来自 `paperBoxStyle(geom)`（`docx-pagination` 的几何唯一真源），
+ * 宿主只补视觉部分（底色 / 阴影），避免 794 / 1123 / 96 出现第二份定义。
+ *
+ * P4：`position: relative` 是新增的 —— 每页页脚由 `pageFooterTopAt` 算出的纵坐标
+ * **绝对定位在纸内**（页脚住在纸的下边距带里，不参与文档流，所以不污染 docx 字节）。
+ */
+const pageStyleOf = (g: PageGeometry): React.CSSProperties => ({
+  position: 'relative',
   background: '#fff',
-  width: PAGE_W,
-  minHeight: PAGE_H,
-  padding: `${PAGE_MARGIN_Y}px ${PAGE_MARGIN_X}px`,
   boxShadow: '0 1px 2px rgba(0,0,0,0.10), 0 8px 24px rgba(0,0,0,0.13)',
   boxSizing: 'border-box',
-};
+  ...paperBoxStyle(g),
+});
 
 /* ---------------- 查找 / 替换 ---------------- */
 
@@ -2347,15 +2564,15 @@ const findSepStyle: React.CSSProperties = { width: 1, height: 16, background: 'v
 
 /* ---------------- 页眉页脚编辑面板 ---------------- */
 
-const hfPanelStyle: React.CSSProperties = {
-  width: PAGE_W,
+const hfPanelStyleOf = (g: PageGeometry): React.CSSProperties => ({
+  width: g.w,
   margin: `0 auto ${CANVAS_PAD / 2}px`,
   background: '#fff',
   border: '1px solid var(--line)',
   borderRadius: 10,
   padding: 12,
   boxSizing: 'border-box',
-};
+});
 
 const hfLabelStyle: React.CSSProperties = {
   fontSize: 12,
@@ -2378,9 +2595,19 @@ const hfTextareaStyle: React.CSSProperties = {
   color: 'var(--ink)',
 };
 
-/* ---------------- 文档内容样式（编辑面 / 修订标记 / 分页 / 标尺） ---------------- */
+/* ---------------- 文档内容样式（编辑面 / 修订标记 / 查找高亮） ---------------- */
 
-const editorCss = `
+/**
+ * 编辑器样式表 = **几何层皮肤**（`docxPaperCss`：纸面 / 间隙 / 页脚 / `@page` / 打印规则）
+ *              + 编辑面专属规则（占位符 / 表格 / 图片 / 修订 / 查找高亮 / 进场动画）。
+ *
+ * ⚠️ P4 起它从模块级常量变成**函数**：几何层的两条规则含节几何（负 margin 必须等于 `marginX`，
+ * `@page` 纸尺寸必须等于 `w`/`h`）。写成常量的话，非 A4 文档的白带就顶不到纸张边缘。
+ * 纸面/间隙/页脚/打印这些**几何皮肤**刻意不写在这里 —— 它们归 `docxPaperCss`，
+ * 这样 Electron 靶场能 import 同一份（打印规则只在真实打印时生效，靶场是唯一验证途径）。
+ */
+const docxStyleSheet = (g: PageGeometry): string => `${docxPaperCss(g)}
+
 .docx-placeholder {
   display: block;
   margin: 8px 0;
@@ -2418,12 +2645,7 @@ const editorCss = `
 /* 隐藏修订标记：显示最终文本（接受态预览） */
 .docx-hide-rev .docx-rev-ins { color: inherit; background: none; border-bottom: none; }
 .docx-hide-rev .docx-rev-del { color: inherit; background: none; text-decoration: none; }
-/* 视觉分页：间隙外层是白（页底留白 + 上页下边距 + 下页上边距），只在中间挖一条灰缝
-   —— 这样每一页都是完整的 A4 白纸，而不是「一整块画布灰把纸切断」 */
-.docx-page-spacer { contenteditable: false; position: relative; background: #fff; }
-.docx-page-gap { position: absolute; left: 0; right: 0; background: var(--canvas-bg); box-shadow: inset 0 7px 6px -7px rgba(0,0,0,0.22), inset 0 -7px 6px -7px rgba(0,0,0,0.22); }
-/* 每页页码角标（居中于页间灰隙，拟 Word 页脚页码） */
-.docx-page-num { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 11px; color: var(--ink-faint, #71717a); user-select: none; }
+/* 视觉分页 / 页脚规则见 docxPaperCss（几何层皮肤，与靶场共用同一份） */
 /* 左侧竖标尺：窄条（20px），底色与横标尺同为浅灰，刻度线只贴右边缘向左伸 5px（不遮数字） */
 .docx-vruler {
   background-color: var(--paper-hover);
@@ -2732,12 +2954,14 @@ function PanelSelect({
 function DocxRuler({
   zoom,
   vrW,
+  geom,
   firstLinePt,
   leftIndentPt,
   onCommit,
 }: {
   zoom: number;
   vrW: number;
+  geom: PageGeometry;
   firstLinePt: number;
   leftIndentPt: number;
   onCommit: (kind: 'first' | 'left', pt: number) => void;
@@ -2745,14 +2969,14 @@ function DocxRuler({
   const drag = useRef<{ kind: 'first' | 'left'; startX: number; basePt: number; lastPt: number } | null>(null);
 
   const pageLeft = vrW * zoom;
-  const textLeft = pageLeft + PAGE_MARGIN_X * zoom;
-  const textRight = pageLeft + (PAGE_W - PAGE_MARGIN_X) * zoom;
+  const textLeft = pageLeft + geom.marginX * zoom;
+  const textRight = pageLeft + (geom.w - geom.marginX) * zoom;
   /** pt → 屏幕 px（1pt = 4/3px @96dpi） */
   const pxPerPt = (4 / 3) * zoom;
 
   const ticks: React.ReactNode[] = [];
   // 细刻度：铺满整页（含左右页边距区），1/4 英寸
-  for (let x = pageLeft; x <= pageLeft + PAGE_W * zoom - 0.5; x += (INCH / 4) * zoom) {
+  for (let x = pageLeft; x <= pageLeft + geom.w * zoom - 0.5; x += (INCH / 4) * zoom) {
     ticks.push(<span key={`n${Math.round(x)}`} style={{ ...rulerMinorStyle, left: x }} />);
   }
   // 粗刻度 + 数字：只铺正文区，0 起于左页边距
@@ -2799,12 +3023,12 @@ function DocxRuler({
         style={{
           ...rulerTextZoneStyle,
           left: textLeft,
-          width: (PAGE_W - 2 * PAGE_MARGIN_X) * zoom,
+          width: (geom.w - 2 * geom.marginX) * zoom,
         }}
       />
       {ticks}
       <span style={{ ...rulerPageEdgeStyle, left: pageLeft }} />
-      <span style={{ ...rulerPageEdgeStyle, left: pageLeft + PAGE_W * zoom }} />
+      <span style={{ ...rulerPageEdgeStyle, left: pageLeft + geom.w * zoom }} />
       <div
         style={{ ...rulerHandleStyle, top: 0, left: textLeft + firstLinePt * pxPerPt }}
         title="首行缩进（拖拽调整）"
@@ -2832,15 +3056,15 @@ function DocxRuler({
  * 的**未缩放**值；因此这里只需按高度生成数字即可。刻度线由 `.docx-vruler` 的
  * background 贴右边缘向左伸 5px 绘制，数字故右对齐并留 6px 空档，两者不重叠。
  */
-function DocxVRuler({ height }: { height: number }) {
+function DocxVRuler({ height, geom }: { height: number; geom: PageGeometry }) {
   const labels: React.ReactNode[] = [];
-  for (let i = 0; PAGE_MARGIN_Y + i * INCH <= height - 10; i++) {
+  for (let i = 0; geom.marginY + i * INCH <= height - 10; i++) {
     labels.push(
       <span
         key={i}
         style={{
           position: 'absolute',
-          top: PAGE_MARGIN_Y + i * INCH - 5,
+          top: geom.marginY + i * INCH - 5,
           left: 0,
           right: 6,
           textAlign: 'right',
@@ -2856,7 +3080,7 @@ function DocxVRuler({ height }: { height: number }) {
   }
   return (
     <div
-      className="docx-vruler"
+      className="docx-vruler docx-print-hide"
       style={{ width: V_RULER_W, flex: '0 0 auto', position: 'relative' }}
       aria-hidden
     >

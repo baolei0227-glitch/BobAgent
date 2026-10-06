@@ -91,6 +91,22 @@ export const DocxText = Node.create({
   group: 'inline',
 })
 
+// ---------- 段落级「同页 / 孤行」保真属性（P2 · 2026-10-04） ----------
+// 引擎层**早已完整解析与生成**这三项（parse.ts:3505-3506 写入 run/para format，
+// generate.ts:1152/1336/1568 写出，types.ts:453-454 定义 keepNext），
+// 但编辑器层此前**零消费** —— 数据在、功能不在。
+// 现在声名为节点属性，`measurePageBreaks` 据此调整换页（与既有 `pageBreakBefore` 同一模式）。
+// ⚠️ 默认值必须为 `null`：`tiptap-to-blocks.ts` 的 `mergeFmt` 在值为 null 时**删除**该键，
+// 于是「原文没有该属性」保持没有；而显式 `false`（`false != null`）会被保留。
+const PAGINATION_FIDELITY_ATTRS = {
+  /** w:keepNext —— 本段与下一段必须同页（标题与其首段同页就靠它） */
+  keepNext: { default: null },
+  /** w:keepLines —— 段内不允许跨页（整段必须落在同一页） */
+  keepLines: { default: null },
+  /** w:widowControl —— 孤行控制（缺省视为**开**：页底与下页各至少 2 行） */
+  widowControl: { default: null },
+} as const
+
 // ---------- paragraph（带 docxIndex / styleId 锚点） ----------
 export const DocxParagraph = Node.create({
   name: 'paragraph',
@@ -98,6 +114,7 @@ export const DocxParagraph = Node.create({
   content: 'inline*',
   addAttributes() {
     return {
+      ...PAGINATION_FIDELITY_ATTRS,
       docxIndex: { default: null },
       styleId: { default: null },
       align: {
@@ -205,6 +222,7 @@ export const DocxHeading = Node.create({
   content: 'inline*',
   addAttributes() {
     return {
+      ...PAGINATION_FIDELITY_ATTRS,
       level: { default: 1 },
       docxIndex: { default: null },
       styleId: { default: null },

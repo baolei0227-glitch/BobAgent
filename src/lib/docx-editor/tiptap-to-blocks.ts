@@ -205,6 +205,10 @@ function blockFromNode(node: PMNode, index: number, originalBlocks: Block[]): Bl
   }
   mergeFmt('align', align)
   mergeFmt('pageBreakBefore', node.attrs.pageBreakBefore)
+  // 同页 / 孤行（P2）：与既有一致 —— 值为 null 时删键（保持「原文没有」），显式 false 会被保留
+  mergeFmt('keepNext', node.attrs.keepNext)
+  mergeFmt('keepLines', node.attrs.keepLines)
+  mergeFmt('widowControl', node.attrs.widowControl)
   mergeFmt('spaceBefore', node.attrs.spaceBefore)
   mergeFmt('spaceAfter', node.attrs.spaceAfter)
   mergeFmt('indentLeft', node.attrs.indentLeft)
