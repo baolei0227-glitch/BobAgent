@@ -10,7 +10,11 @@
  * 模型不可用 / 超时 / 无有效输出 → **结构化兜底**（计数式小结 + 按类型计数 + 代表性条目），
  * 保证这段要么有实质内容、要么整体缺席，绝不留半截空壳。
  *
- * 只列**当天确有活动**的项目；全部项目都无活动时返回空串（调用方据此跳过这一份报告）。
+ * 只列**当天确有活动**的项目；项目无活动且昨日也无任何待办事件时返回空串（调用方据此跳过这一份报告）。
+ *
+ * 2026-10-03 起输入里多了一份「昨日待办对账」（日历事件按开始时间落在昨天，按 status 分完成 / 遗留）：
+ * 让小结能给出**判断**（完成情况、遗留了什么、今天该先接手什么），而不是复述流水。
+ * 对账另以确定性的 `#### ⏱ 昨日待办对账` 小节落在明细之后 —— 模型路径与兜底路径共用同一份，不靠模型转述。
  */
 import { listProjects } from '@/lib/project/project-manager';
 import { collectProjectActivity, type ActivityItem, type ActivityKind } from '@/lib/project/activity';
@@ -24,13 +28,37 @@ const MODEL_TIMEOUT_MS = 25_000;
 const ACTIVITY_LIMIT = 500;
 
 export interface DailyDigest {
-  /** 报告正文（归纳要点 / 结构化兜底）；无活动时为空串 */
+  /** 报告正文（归纳要点 / 结构化兜底）；无活动且无待办对账时为空串 */
   markdown: string;
   /** 有活动的项目数 */
   projectCount: number;
   /** 参与归纳的条目总数 */
   itemCount: number;
+  /** 昨日待办对账（供日志 / 测试；正文细节已并入 markdown） */
+  reconcile: DayReconcile;
 }
+
+/**
+ * 昨日待办对账：开始时间落在昨天的日历事件的完成情况。
+ *
+ * 已知口径限制（不额外补接口，避免动 DB 层）：
+ *   - `listEventsInRange` 硬排除 `status='cancelled'`，所以拿不到「已取消」——只分完成 / 遗留两类；
+ *   - 无 `start_time` 的全局待办不落在任何区间里，不参与对账。
+ */
+export interface DayReconcile {
+  /** 区间内事件总数 */
+  total: number;
+  /** status === 'done' */
+  done: number;
+  /** 其余（scheduled 等）即为遗留 */
+  leftover: number;
+  /** 遗留项标题（最多 3 条，供文案点名） */
+  leftoverTitles: string[];
+}
+
+const EMPTY_RECONCILE: DayReconcile = { total: 0, done: 0, leftover: 0, leftoverTitles: [] };
+/** 对账文案里最多点名几条遗留项 */
+const RECONCILE_TITLE_LIMIT = 3;
 
 /** 昨天（缺省 offsetDays=-1）的本地日期键 YYYY-MM-DD */
 function localDateKey(offsetDays: number): string {
@@ -38,6 +66,48 @@ function localDateKey(offsetDays: number): string {
   const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * 取某一天的待办对账。
+ *
+ * **直连 DB 而不是 querySchedule**：本函数由日报调度器调用时没有 baseUrl，
+ * querySchedule 内部拼的相对 URL 在 Node 下 fetch 会失败。
+ * 区间用**本地日界** `new Date(y, m-1, d)`，与 localDateKey / today.ts / schedule.ts 三处同口径。
+ * 日历不可用时返回空对账（不阻断整份报告）。
+ */
+async function collectDayReconcile(dateKey: string): Promise<DayReconcile> {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  if (!y || !m || !d) return EMPTY_RECONCILE;
+  try {
+    const { getCalendarDb, listEventsInRange } = await import('@/lib/db');
+    const db = await getCalendarDb();
+    const start = new Date(y, m - 1, d).toISOString();
+    const end = new Date(y, m - 1, d + 1).toISOString();
+    const rows = await listEventsInRange(db, null, start, end);
+    let done = 0;
+    const leftoverTitles: string[] = [];
+    let leftover = 0;
+    for (const row of rows) {
+      if (row.status === 'done') {
+        done += 1;
+        continue;
+      }
+      leftover += 1;
+      if (leftoverTitles.length < RECONCILE_TITLE_LIMIT && row.title) leftoverTitles.push(row.title);
+    }
+    return { total: rows.length, done, leftover, leftoverTitles };
+  } catch (e) {
+    console.warn('[daily-digest] 昨日待办对账读取失败，跳过:', e);
+    return EMPTY_RECONCILE;
+  }
+}
+
+/** 待办对账小节（确定性可见，模型路径与兜底路径共用一份）；无待办时返回空串 */
+export function formatReconcileSection(r: DayReconcile): string {
+  if (r.total === 0) return '';
+  const names = r.leftoverTitles.length > 0 ? `：${r.leftoverTitles.join('、')}` : '';
+  return `#### ⏱ 昨日待办对账\n- ✅ 完成 ${r.done} / ⏳ 遗留 ${r.leftover}${names}`;
 }
 
 function fmtClock(iso: string): string {
@@ -67,18 +137,30 @@ interface DigestProject {
   items: ActivityItem[];
 }
 
-/** 归纳提示词：给模型紧凑的流水清单，要求输出中文 markdown 要点 */
-function buildPrompt(projects: DigestProject[], dateKey: string): string {
-  const blocks = projects.map((p) => {
-    const lines = p.items
-      .slice(0, MAX_ITEMS_PER_PROJECT)
-      .map((it) => {
-        const t = fmtClock(it.ts);
-        return `- [${it.kind}${t ? ` ${t}` : ''}] ${itemText(it)}`;
-      });
-    return `【项目】${p.name}\n${lines.join('\n')}`;
-  });
-  return `以下是各项目在 ${dateKey} 当天产生的流水记录（任务执行 / 文档生成 / 附件添加 / 项目状态变更）。
+/** 对账 → prompt 里的一段事实（无待办时为空串，prompt 不留空标题） */
+function reconcilePromptBlock(r: DayReconcile): string {
+  if (r.total === 0) return '';
+  const lines = [
+    `昨日待办对账（日历事件按开始时间落在昨天统计）：共 ${r.total} 项，完成 ${r.done} 项，遗留 ${r.leftover} 项。`,
+  ];
+  if (r.leftoverTitles.length > 0) lines.push(`遗留项：${r.leftoverTitles.join('、')}`);
+  return `${lines.join('\n')}\n\n`;
+}
+
+/** 归纳提示词：给模型紧凑的流水清单 + 昨日待办对账，要求输出中文 markdown 要点 */
+function buildPrompt(projects: DigestProject[], dateKey: string, reconcile: DayReconcile): string {
+  const blocks = projects.length > 0
+    ? projects.map((p) => {
+        const lines = p.items
+          .slice(0, MAX_ITEMS_PER_PROJECT)
+          .map((it) => {
+            const t = fmtClock(it.ts);
+            return `- [${it.kind}${t ? ` ${t}` : ''}] ${itemText(it)}`;
+          });
+        return `【项目】${p.name}\n${lines.join('\n')}`;
+      })
+    : ['（昨日各项目无新流水）'];
+  return `${reconcilePromptBlock(reconcile)}以下是各项目在 ${dateKey} 当天产生的流水记录（任务执行 / 文档生成 / 附件添加 / 项目状态变更）。
 请输出「昨日小结 + 各项目明细」两部分，输出中文 markdown。
 
 要求：
@@ -92,7 +174,10 @@ function buildPrompt(projects: DigestProject[], dateKey: string): string {
    （例如：生成文档 📄、执行任务 🔧、新增附件 📎、新建项目 🆕、状态变更 🔄；同一类事项用同一个 emoji）；
 4. 小结只做整体概括，不重复明细里已列的条目，不编造未出现的内容；
    信息不足的项目在明细里保留一行概述即可；
-5. 只输出 markdown 正文，不要额外说明、不要代码块围栏。
+   若昨日各项目无新流水，明细部分直接省略，不要写空标题；
+5. 小结必须给出**判断**：结合「昨日待办对账」说明昨天完成得怎么样、遗留了什么、
+   今天该先接手什么；**不要复述流水**，也不要引入对账之外的新事实；
+6. 只输出 markdown 正文，不要额外说明、不要代码块围栏。
 
 --- 流水开始 ---
 ${blocks.join('\n\n')}
@@ -148,8 +233,9 @@ const KIND_EMOJI: Record<ActivityKind, string> = {
 };
 
 /** 结构化兜底：先给一段计数式「昨日小结」，再按类型计数 + 最多 3 条代表性条目
- *  （模型不可用时仍有可读日报，且与模型输出的「小结 + 明细」结构一致）。 */
-function fallbackBody(projects: DigestProject[]): string {
+ *  （模型不可用时仍有可读日报，且与模型输出的「小结 + 明细」结构一致）。
+ *  项目无新流水但昨日有待办时也会走到这里（见 buildDailyProjectDigest 的放宽口径）。 */
+function fallbackBody(projects: DigestProject[], reconcile: DayReconcile): string {
   const out: string[] = [];
   const totalItems = projects.reduce((n, p) => n + p.items.length, 0);
   const kindCount = new Map<ActivityKind, number>();
@@ -159,7 +245,14 @@ function fallbackBody(projects: DigestProject[]): string {
   const parts = KIND_ORDER.filter((k) => kindCount.get(k)).map((k) => `${KIND_LABEL[k]} ${kindCount.get(k)} 次`);
   // 与模型输出的版式保持同构：小结 blockquote → `---` 分隔 → 每个项目一个 `📁 ####` 标题 + emoji 要点
   //（「📋 昨日小结」三级分区标题不在这里——它由 buildDailyProjectDigest 统一拼装，两条路径共用同一份）
-  out.push(`> 昨日共 ${projects.length} 个项目有活动，累计 ${totalItems} 条流水（${parts.join('、')}）。`);
+  const flowClause = projects.length > 0
+    ? `昨日共 ${projects.length} 个项目有活动，累计 ${totalItems} 条流水（${parts.join('、')}）。`
+    : '昨日各项目无新流水。';
+  // 兜底小结也要有判断：把对账结论写进同一段，而不是只把数字堆在结尾小节里
+  const reconcileClause = reconcile.total > 0
+    ? `待办侧共 ${reconcile.total} 项，完成 ${reconcile.done}、遗留 ${reconcile.leftover}。`
+    : '';
+  out.push(`> ${flowClause}${reconcileClause}`);
   out.push('');
   out.push('---');
   out.push('');
@@ -185,41 +278,58 @@ function fallbackBody(projects: DigestProject[]): string {
 /**
  * 生成「昨日项目进展」报告正文。
  * @param offsetDays 相对今天的天数偏移，缺省 -1（昨天）
- * @returns markdown 正文；无任何活动时为空串
+ * @returns markdown 正文；项目无活动**且**昨日无任何待办事件时为空串
  */
 export async function buildDailyProjectDigest(offsetDays = -1): Promise<DailyDigest> {
   const dateKey = localDateKey(offsetDays);
   const { active_projects } = await listProjects();
 
-  const projects: DigestProject[] = [];
-  for (const p of active_projects) {
-    let items: ActivityItem[] = [];
-    try {
-      const res = await collectProjectActivity(p, { order: 'desc', limit: ACTIVITY_LIMIT });
-      items = res.groups.find((g) => g.date === dateKey)?.items ?? [];
-    } catch (e) {
-      console.warn(`[daily-digest] 项目「${p.name}」流水聚合失败，跳过:`, e);
-      continue;
-    }
-    if (items.length > 0) projects.push({ name: p.name, items });
-  }
+  const [projects, reconcile] = await Promise.all([
+    (async () => {
+      const out: DigestProject[] = [];
+      for (const p of active_projects) {
+        let items: ActivityItem[] = [];
+        try {
+          const res = await collectProjectActivity(p, { order: 'desc', limit: ACTIVITY_LIMIT });
+          items = res.groups.find((g) => g.date === dateKey)?.items ?? [];
+        } catch (e) {
+          console.warn(`[daily-digest] 项目「${p.name}」流水聚合失败，跳过:`, e);
+          continue;
+        }
+        if (items.length > 0) out.push({ name: p.name, items });
+      }
+      return out;
+    })(),
+    collectDayReconcile(dateKey),
+  ]);
 
   const itemCount = projects.reduce((n, g) => n + g.items.length, 0);
-  if (projects.length === 0) return { markdown: '', projectCount: 0, itemCount: 0 };
+  // 放宽口径（2026-10-03）：项目没流水但昨日有待办事件时也要出报告 ——
+  // 「昨天没动项目、但完成了 4 项日程」不该是空白。
+  if (projects.length === 0 && reconcile.total === 0) {
+    return { markdown: '', projectCount: 0, itemCount: 0, reconcile };
+  }
 
   let body = '';
   try {
     const cfg = await resolveTaskModel();
-    if (cfg) body = await summarizeWithModel(cfg, buildPrompt(projects, dateKey));
+    if (cfg) body = await summarizeWithModel(cfg, buildPrompt(projects, dateKey, reconcile));
   } catch (e) {
     console.warn('[daily-digest] 模型归纳失败，改用结构化兜底:', e);
   }
-  if (!body) body = fallbackBody(projects);
+  // 模型可能返回空正文（无有效输出）→ 同样退兜底
+  if (!body) body = fallbackBody(projects, reconcile);
+
+  // 分区标题（代码拼装，含日期）统一加在两条路径的产物之前 —— 模型只写小结正文与明细；
+  // 对账小节固定落在明细之后，两条路径共用同一份（不靠模型转述，避免数字被写错）
+  const sections = [`${summaryHeading(dateKey)}\n\n${body}`];
+  const reconcileSection = formatReconcileSection(reconcile);
+  if (reconcileSection) sections.push(reconcileSection);
 
   return {
-    // 分区标题（代码拼装，含日期）统一加在两条路径的产物之前 —— 模型只写小结正文与明细
-    markdown: `${summaryHeading(dateKey)}\n\n${body}`,
+    markdown: sections.join('\n\n'),
     projectCount: projects.length,
     itemCount,
+    reconcile,
   };
 }

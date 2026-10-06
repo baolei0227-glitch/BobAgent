@@ -276,3 +276,52 @@ export async function collectProjectActivity(
 
   return { groups, total, nextCursor };
 }
+
+/** 「最近一次活动」结果：时间 + 类型（供 Today 建议区的「项目停滞」判据用） */
+export interface LastActivityAt {
+  /** ISO 时间串 */
+  at: string;
+  kind: ActivityKind;
+}
+
+/** memo 有效期：停滞是天尺度的判据，实时性要求低，用它把每次 Today 请求的扫描成本摊平 */
+const LAST_ACTIVITY_TTL_MS = 10 * 60 * 1000;
+const lastActivityMemo = new Map<string, { value: LastActivityAt | null; expiresAt: number }>();
+
+/**
+ * 有界求「项目最近一次活动时间」。
+ *
+ * **刻意不用 collectProjectActivity**：它会读全部 notes-memory/*.md 并 parse、递归扫
+ * materials / homework 最深 6 层，`limit:1` 不减少任何 IO —— 放进每次 Today 请求不可接受。
+ * 这里只做有界扫描：notes-memory 取文件 mtime 最大值（**不读内容、不 parse**），
+ * materials / homework 限 2 层取 mtime 最大值，最后用 created_at 兜底。
+ * mtime 是近似代理，与 attachment / document 条目同一口径（见文件头注释）。
+ */
+export async function getProjectLastActivityAt(project: ProjectConfig): Promise<LastActivityAt | null> {
+  const now = Date.now();
+  const cached = lastActivityMemo.get(project.path);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const scans: Array<{ sub: string; kind: ActivityKind; opts: Parameters<typeof scanFiles>[2] }> = [
+    { sub: 'notes-memory', kind: 'task', opts: { maxDepth: 2 } },
+    { sub: 'materials', kind: 'attachment', opts: { maxDepth: 2, stripHashPrefix: true } },
+    { sub: 'homework', kind: 'document', opts: { maxDepth: 2, skipTopLevel: ['template'] } },
+  ];
+
+  let best: { ms: number; kind: ActivityKind } | null = null;
+  for (const s of scans) {
+    const files = await scanFiles(project.path, s.sub, s.opts);
+    for (const f of files) {
+      const ms = f.mtime.getTime();
+      if (!best || ms > best.ms) best = { ms, kind: s.kind };
+    }
+  }
+
+  let value: LastActivityAt | null = best ? { at: new Date(best.ms).toISOString(), kind: best.kind } : null;
+  if (!value && project.created_at && !Number.isNaN(new Date(project.created_at).getTime())) {
+    value = { at: project.created_at, kind: 'project' };
+  }
+
+  lastActivityMemo.set(project.path, { value, expiresAt: now + LAST_ACTIVITY_TTL_MS });
+  return value;
+}

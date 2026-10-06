@@ -7,9 +7,19 @@
  *    → 刷新已展开项目的文件树
  *  - `node-outcome`：某节点成果块被后台自动提炼改写 → 负载 `{"node_id":"n_xxx"}`，
  *    前端转为 `node-outcome-refresh` 窗口事件，让画布上该节点的成果块状态立即更新
+ *  - `project-switched`：服务端工具（管家）切换了当前项目 → 负载 `{"project_id":"..."}`，
+ *    前端转为 `bobagent:project-switched` 窗口事件（与用户点侧边栏切换同一条刷新链路）
+ *  - `session-request`：服务端工具（管家）要求在某个项目里新建会话、并可选执行一个任务
+ *    → 负载为 SessionRequestPayload，前端转为 `quick-launch-open` 窗口事件落节点
  * 连接断开自动清理订阅。
  */
-import { onProjectsChanged, onProjectFilesChanged, onNodeOutcomeChanged } from '@/lib/project/project-events';
+import {
+  onProjectsChanged,
+  onProjectFilesChanged,
+  onNodeOutcomeChanged,
+  onProjectSwitched,
+  onSessionRequest,
+} from '@/lib/project/project-events';
 
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +51,12 @@ export async function GET() {
       const unsubOutcome = onNodeOutcomeChanged((nodeId) => {
         send(`event: node-outcome\ndata: ${JSON.stringify({ node_id: nodeId })}\n\n`);
       });
+      const unsubSwitched = onProjectSwitched((projectId) => {
+        send(`event: project-switched\ndata: ${JSON.stringify({ project_id: projectId })}\n\n`);
+      });
+      const unsubSession = onSessionRequest((payload) => {
+        send(`event: session-request\ndata: ${JSON.stringify(payload)}\n\n`);
+      });
 
       const heartbeat = setInterval(() => {
         send(': keepalive\n\n');
@@ -53,6 +69,8 @@ export async function GET() {
         unsubProjects();
         unsubFiles();
         unsubOutcome();
+        unsubSwitched();
+        unsubSession();
       };
       cleanups.set(controller, cleanup);
 
