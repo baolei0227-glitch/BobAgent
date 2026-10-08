@@ -185,6 +185,25 @@ function main(): void {
     );
   }
 
+  // 分标记 × 分档：区分"哪些标记真的贵"。同一档位内横向比较才有意义——
+  // 整体看 historyRewritten 的 miss/call 可能比首调还低，但同档位一比就是 2 倍。
+  console.log('\n分标记 × 同规模档位（同档位内横向比，才看得出哪个标记真的在烧钱）：');
+  const flagDefs: Array<[string, (r: CallRec) => boolean]> = [
+    ['toolsChanged', (r) => r.toolsChanged],
+    ['historyRewritten', (r) => r.historyRewritten],
+    ['lastTurnRewritten', (r) => r.lastTurnRewritten],
+  ];
+  console.log(`  ${'档位'.padEnd(12)} ${'无任何标记'.padStart(16)} ${flagDefs.map(([n]) => n.padStart(18)).join(' ')}`);
+  for (const b of buckets) {
+    const rows = all.filter((r) => sizeBucket(r.payloadChars) === b);
+    const cell = (g: CallRec[]): string => (g.length === 0 ? '-' : `${pct(miss(g), hit(g) + miss(g))} (n=${g.length})`);
+    const clean = rows.filter((r) => !flagDefs.some(([, pick]) => pick(r)));
+    console.log(
+      `  ${b.padEnd(12)} ${cell(clean).padStart(16)} ` +
+        flagDefs.map(([, pick]) => cell(rows.filter(pick)).padStart(18)).join(' '),
+    );
+  }
+
   // ==================== 3. Q2 首调成本 ====================
   console.log('\n================ 3. Q2 首调成本占比 ================');
   const firstCalls = all.filter((r) => r.callIdx === 1);
@@ -214,6 +233,35 @@ function main(): void {
     );
     const single = [...byTask.values()].filter((rows) => rows.length === 1).length;
     console.log(`其中单次调用任务 ${single} 个（首调占比必然 100%，是"一次冷读"的下限形态）`);
+  }
+
+  // 工具段规模 × 首调成本：工具块越大，冷启动越贵（实测最大的一根杠杆）
+  console.log('\n工具段规模 × 首调成本（工具块越大 → 冷启动全价读越多）：');
+  const toolBucket = (bytes: number): string =>
+    bytes <= 40960 ? '<=40KB' : bytes <= 81920 ? '40-80KB' : bytes <= 122880 ? '80-120KB' : '>120KB';
+  for (const b of ['<=40KB', '40-80KB', '80-120KB', '>120KB']) {
+    const rows = firstCalls.filter((r) => toolBucket(r.toolsBytes) === b);
+    if (rows.length === 0) continue;
+    const prompt = hit(rows) + miss(rows);
+    console.log(
+      `  ${b.padEnd(9)} n=${String(rows.length).padStart(3)}  首调命中 ${pct(hit(rows), prompt).padStart(6)}  ` +
+        `miss/call ${fmt(miss(rows) / rows.length).padStart(9)}  miss 合计 ${k(miss(rows)).padStart(8)}`,
+    );
+  }
+  const bigFirst = firstCalls.filter((r) => r.toolsBytes > 81920);
+  if (bigFirst.length > 0) {
+    console.log(
+      `  → 工具段 >80KB 的首调占全部 miss 的 ${pct(miss(bigFirst), totalMiss)}（${bigFirst.length} 次调用，` +
+        `平均工具段 ${(bigFirst.reduce((s, r) => s + r.toolsBytes, 0) / bigFirst.length / 1024).toFixed(0)}KB）`,
+    );
+  }
+  const toolCounts = all.map((r) => r.toolCount).sort((a, b) => a - b);
+  if (toolCounts.length > 0) {
+    const medianTools = toolCounts[Math.floor(toolCounts.length / 2)];
+    console.log(
+      `  工具数：中位 ${medianTools}，最大 ${toolCounts[toolCounts.length - 1]}` +
+        (medianTools > 60 ? '（中位 >60 → 场景 sticky 在累积，值得加衰减/上限）' : ''),
+    );
   }
 
   // ==================== 4. Q3 @引用块与漂移 ====================

@@ -78,6 +78,16 @@ const EXECUTION_DOWNGRADE: Record<ReasoningEffort, ReasoningEffort> = {
   none: 'none',
 };
 
+/**
+ * 定向降一档（与 EXECUTION_DOWNGRADE 同表）：max→high、high→low、low→none、none→none。
+ * 与 executionDowngrade 的区别：不受 harnessPure / round / downgradeOnExecution 开关约束——
+ * 供「本任务已发生输出触顶（finish_reason=length）」这类**已观测故障**的定向纠偏使用
+ * （见 src/lib/chat/empty-round.ts 的截断重试）。
+ */
+export function downgradeEffortOnce(effort: ReasoningEffort): ReasoningEffort {
+  return EXECUTION_DOWNGRADE[effort];
+}
+
 /** 工具循环执行轮降级结果（统一 effort；与 base 档位比对用于降级遥测） */
 export interface ExecutionDowngradeResult {
   /** 执行轮 reasoning_effort（wire 词表：none/low/high/max） */

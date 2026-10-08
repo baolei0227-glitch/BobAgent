@@ -13,7 +13,7 @@
  * 不依赖打包资源，dev/打包一致。
  */
 
-import { WebContentsView, BrowserWindow, Menu, session, ipcMain, shell, clipboard, nativeImage, app, dialog, type MenuItemConstructorOptions } from 'electron';
+import { WebContentsView, BrowserWindow, Menu, screen, session, ipcMain, shell, clipboard, nativeImage, app, dialog, type MenuItemConstructorOptions } from 'electron';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
@@ -1496,8 +1496,51 @@ async function sogouWechatRead(
 
 // ============ 窗口显隐 ============
 
+/** 宿主主窗口 provider（main.ts 注入）。
+ *  Hippo 是独立顶层窗口、与主窗口无父子关系，建窗时未给 x/y → macOS 默认落在主屏；
+ *  主窗口被拖到副屏后两者会被拆到两块屏，故唤起前需按主窗口所在显示器重新定位。 */
+let mainWindowProvider: (() => BrowserWindow | null) | null = null;
+
+/** 宿主注入主窗口读取器（main.ts 调用：返回当前 BobWork 主窗口，可能为 null 或已销毁） */
+export function setMainWindowProvider(fn: (() => BrowserWindow | null) | null): void {
+  mainWindowProvider = fn;
+}
+
+/** BobWork 主窗口中心点所在显示器；主窗口不可用时回退主屏 */
+function displayForMainWindow(): Electron.Display {
+  const main = mainWindowProvider?.() ?? null;
+  if (main && !main.isDestroyed()) {
+    const b = main.getBounds();
+    return screen.getDisplayNearestPoint({
+      x: Math.round(b.x + b.width / 2),
+      y: Math.round(b.y + b.height / 2),
+    });
+  }
+  return screen.getPrimaryDisplay();
+}
+
+/** 把窗口搬到 BobWork 所在显示器（已在该屏则完全不动：保留用户手动拖出的位置与尺寸）。
+ *  尺寸同时按目标屏工作区钳制：默认 1080x760 在更小的副屏上放不下。 */
+function ensureOnMainWindowDisplay(): void {
+  if (!win || win.isDestroyed()) return;
+  const display = displayForMainWindow();
+  const b = win.getBounds();
+  const center = { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) };
+  if (screen.getDisplayNearestPoint(center).id === display.id) return;
+  const area = display.workArea;
+  const width = Math.min(Math.max(b.width, WIN_MIN_WIDTH), area.width);
+  const height = Math.min(Math.max(b.height, WIN_MIN_HEIGHT), area.height);
+  win.setBounds({
+    x: area.x + Math.round((area.width - width) / 2),
+    y: area.y + Math.round((area.height - height) / 2),
+    width,
+    height,
+  });
+}
+
 function reveal(): void {
   if (win && !win.isDestroyed()) {
+    ensureOnMainWindowDisplay();
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
@@ -3483,6 +3526,8 @@ export function setupHippoBrowser(): void {
   win.on('resize', scheduleRelayout);
   win.on('resized', scheduleRelayout);
   relayoutView();
+  // 建窗未给坐标（系统默认放主屏），此处按 BobWork 所在显示器先摆一次，避免首帧出现在错误的屏
+  ensureOnMainWindowDisplay();
 
   win.on('show', broadcastState);
   win.on('hide', broadcastState);

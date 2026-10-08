@@ -2996,6 +2996,23 @@ ${rows.join('\n')}
                   );
                 }
               }
+              if (parsed.truncation_retry) {
+                // 输出触顶空轮重试：本轮 reasoning 吃满输出预算被截断（无正文/无工具调用），
+                // 后端已放宽输出预算（第 2 次起再降一档思考）并重跑该轮。
+                // 追加轻提示，避免用户在这段重跑时间里以为「卡住了/没结果就停了」。
+                const tr = parsed.truncation_retry as { attempt?: number; maxAttempts?: number; downgradeEffort?: boolean };
+                if (mountedRef.current) {
+                  setCurrentStage({ kind: 'tool', name: 'truncation-retry' });
+                  assistantContent += `\n\n> 🔁 **Output hit the length limit**: the whole round was spent on thinking, so no answer or tool call came out. Retrying with a larger output budget (${tr.attempt ?? 1}/${tr.maxAttempts ?? 2})${tr.downgradeEffort ? ' and a lower thinking depth' : ''}...`;
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantId
+                        ? { ...m, content: assistantContent, toolCalls: [...toolCallRecords] }
+                        : m,
+                    ),
+                  );
+                }
+              }
               if (parsed.completion_check) {
                 // 系统注入「假完成确认」：本轮无工具调用但此前执行过工具，系统正要求模型确认是否真正完成。
                 // 模型可能随后重答一遍——在此追加轻提示，避免用户看到"无头两遍答案"的错觉。

@@ -344,7 +344,8 @@ function buildAndSortToolDefs(defs: ToolDefinition[], mcpServers: McpServerConfi
   const toolSourceRank = (name: string): number => {
     const src = getToolSource(name);
     // builtin 段内再按 layer 分层：core（常驻，字节稳定）最前，ondemand（按场景动态）随后。
-    // 前缀缓存语义：core 段永远稳定；ondemand 段只在场景首次激活时变化（sticky 后不再变），
+    // 前缀缓存语义：core 段永远稳定；ondemand 段只在场景首次激活时变化（sticky 期间不再变；
+    // sticky 现带 24h TTL + 每会话 6 个上限，见 SessionRuntime，届时该段变化一次后重新稳定），
     // 变化点之后的字节该轮 miss，但 core 段 + 已激活的 ondemand 段仍命中 —— 最大化缓存复用。
     if (src === 'builtin') return getToolLayer(name) === 'core' ? 0 : 1;
     return src === 'custom' ? 2 : 3;

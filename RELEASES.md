@@ -15,6 +15,27 @@
 ***
 
 
+## v0.7.685 (2026-10-08)
+
+> 本版是 **v0.7.684 之后的增量**：两条线 —— ① P0 修**「没有结果就暂停了」**。2026-10-08 事故（济星-20261008 /「从甲方角度对本协提出修改意见」）中，`thinkingLevel=high` 时每轮 `max_tokens=16384` 被 reasoning 吃满 → 连续两轮 `finish_reason=length`、正文与工具调用双双为空（两轮各 73s/74s ≈ 216 tok/s × 16k）；旧逻辑把这类空轮一律当「模型假完成」：补问一次后强制收尾，并把空正文原样落盘，节点里只剩「⏳ Completion check」+「⚠️ Output reached the model limit」两条系统提示。现把**输出触顶当可恢复故障**：加输出预算（第 2 次起再降一档思考）定向重试，并给整轮无正文的收尾路径补**可读兜底正文**，任何收尾路径都不再落空答案（新增 [empty-round.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/chat/empty-round.ts)）。② 收**场景 sticky 的单调膨胀**：2026-10-02 把 sticky 落盘解决了跨重启漂移，却顺手拿掉了「重启即衰减」这个天然复位阀 —— 一周回测工具数中位 79、最大 130（工具段 150KB），而首调 miss 随工具段增大 4.4 倍（≤40KB 时 5.4k → >120KB 时 23.7k），>80KB 的首调吃掉全部 miss 的 38%。现给 sticky 加 **TTL(24h) + 每会话 6 个上限**，只有「被本轮意图重新命中 / 中途显式激活」才续命。共 8 个源文件改动（6 改 + 2 新增）。
+
+### 修复与优化
+
+* **空轮收尾：输出触顶按可恢复故障重试**（新增 [empty-round.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/chat/empty-round.ts)，[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts) 接入）：新模块提供两个纯函数 —— `planTruncationRetry` 只看「本轮是否 `finish_reason=length`」（**刻意不看是否调用过工具**：纯问答首轮被截断同样需要一个重试机会，否则会静默收尾成空答案），第 1 次重试只放宽输出预算（最贴近故障原因、改动最小），第 2 次起再降一档思考（思考本身就要吃掉这么多，降档会影响质量故不放在第一次），连续两次仍撞顶才回到原「假完成」判定；`buildTruncationRetryNudge` 注入定向指令，要求模型换策略（直接成文 / 长文拆段写文件 / 别再空转思考）而非原地重撞同一面墙。route 侧配套：`TRUNCATION_RETRY_MAX_TOKENS=32768` 与 max 档同款，**只对 `baseMaxTokens ≥ 16384` 的档位放大**（低档位放大可能超模型支持上限触发 API 400）；`kctx` 新增 `truncationRetries / truncatedRounds / finalAnswerText`；流末 `finish_reason=length` 置 `roundTruncated` 并累计 `truncatedRounds`；截断重试分支 `continue` 重跑该轮，前端收 `truncation_retry` 事件；`downgradeEffortOnce` 的定向降档在 `harnessPure=true` 下也生效（这是对**本任务已观测故障**的纠偏，不是常态执行轮降级）。
+
+* **空答案兜底：任何收尾路径都不再落空答案**（[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts)）：`buildEmptyAnswerFallback` 在一整轮没有任何可读正文时生成兜底正文（说明成因 + 可执行的下一步 + 本轮已产出的文件），按**最后一轮**而非「是否曾输出过」判定（中间轮的过程性叙述不构成最终答案）；同时把四处 `ASSISTANT_MESSAGE ... :final` 事件全部改为**正文非空才落**（强制收尾 / 收尾轮 / 假完成第二次 / 纯问答空正文），避免轨迹与落盘出现无语义的空 assistant 答案；整轮结束时若 `finalAnswerText` 仍为空 → `send({ content: fallback })` + `send({ empty_answer_fallback: true })` 并补落 `:fallback` 事件。扣档位也给了用户出口：反复出现时调低思考档或拆小任务。**刻意不搬 reasoning 正文**：思考已随 RMETA / 思考面板落盘，再抄一遍只会把 `.md` 撑成噪声。
+
+* **前端轻提示 + 定向降档纯函数**（[ChatNodeKernel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ChatNodeKernel.tsx)，[policy.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/thinking/policy.ts)）：前端识别 `truncation_retry` 事件，追加一行「🔁 Output hit the length limit … Retrying with a larger output budget (n/2)」轻提示，避免用户在这段重跑时间里以为「卡住了」；policy 侧新增 `downgradeEffortOnce`（与 `EXECUTION_DOWNGRADE` 同表：max→high、high→low、low→none、none→none），与 `executionDowngrade` 的区别是**不受 `harnessPure / round / downgradeOnExecution` 开关约束**，专供这类已观测故障的定向纠偏。
+
+* **场景 sticky 衰减：TTL(24h) + 每会话 6 个上限**（[session.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/session.ts)，[tools.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/tools.ts)）：落盘格式升级到 **v2**（`nodeId → { 场景: lastActivatedAt }`），v1 数组格式**平滑迁移**（无时间戳 → 统一按文件 `updatedAt` 打戳，解析不出就用 now，等价给一轮完整 TTL 的宽限）；`liveScenes` 按 TTL 过滤，`capByRecency` 按最近激活保留前 6 个。`mergeStickyScenes` 的关键顺序：**先**摘出本轮真正命中的 fresh 场景（读回 sticky 之前取快照，否则读回的旧场景会被误当成「本轮命中」，TTL 与上限同时失效——这正是本方法最容易写错的一步），**再**读回未过期 sticky 并入 `activeScenes`（保留原时间戳 = **不续命**，能按 TTL 自然脱落），**最后**只给 fresh 刷时间戳。`addStickyScene`（search_capabilities / load_skill 中途显式激活）同样按「此刻」续命。语义边界：衰减只影响「工具面是否常驻」，不影响正确性 —— 模型需要时仍可经 `search_capabilities` 重新激活（一次额外往返 ≈1–2k tokens，远小于每次冷启动 ~18k 的全价读）。两条约束都**不碰 system 提示词**，因此不触发全局重新预热。
+
+### 新增单测
+
+* 新增 [empty-round.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/chat/empty-round.test.ts)：以事故现场的可观测事实为用例输入，锁死两件事 —— ① 截断空轮必须给重试预算而不是记「假完成」（未截断返回 null；首轮截断只加预算不动思考档；第 2 次同时降档；预算用尽/脏值（负数、NaN）不绕过上限；重试次数单调递增不超上限）；② 空答案必须有可读兜底正文（截断 2 轮 + 工具已跑 → 说明成因且正文非空、给出可执行下一步；非截断空轮不谎称长度截断；有产物时列出文件；产物脏值不留空条目；脏值不产生 NaN 文案）。
+
+* 扩写 [session.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/session.test.ts)：覆盖四件事 —— 原有语义（同会话聚合、`team`/`general`/`coding` 永不落表）、跨重启落盘、**TTL 衰减**（24h 未重新命中 → 过期脱落；被本轮意图重新命中会续命；`addStickyScene` 中途显式激活同样续命）、**每会话 6 个上限**（超出按最近激活淘汰，新命中必须保留）；另补 v1 旧格式平滑迁移与 v2 落盘结构断言（场景 → 时间戳）。TTL 用 vitest 假时钟（`vi.setSystemTime`）推进，不动真实时间。
+
+
 ## v0.7.684 (2026-10-06)
 
 > 本版是 **v0.7.683 之后的增量**：补齐 Butler「主动播报」这条缺失的链路 —— ① P0 修**外部通道绕过裁决**：`event-reminder` 此前直接调微信 / 飞书桥的 `pushText`，从不经过 `decidePush`；而唯一守闸的 `/api/butler/push-gate` 跑在浏览器里（弹 toast 前问一次），**管不到服务端直推** ⇒ 免打扰窗口与单日上限对**手机端完全不生效**。现把「裁决 → 投递 → 计数」收敛到新模块 `push-out.ts`，成为服务端出站的**唯一路径**。② 同时重划**单日上限的适用范围**：`reminder`（用户自订闹钟）由「只豁免窗口」改为**窗口 + 上限双豁免、且不吃配额** —— 上限的立法目的是约束**助理主动汇报**的频度，把用户自订的闹钟算进去会让「报告配额」把晚上的闹钟挤掉（上限是防刷屏，不是防提醒）。③ P1 新增**晚间回顾**（每天 20:00）：Butler 目前**唯一会推外部通道**的「助理主动汇报」，复用 Today 同一份事实、不调模型、今天与逾期都为空时彻底闭嘴；内容同时落收件箱与文档（**被静默 ≠ 丢内容**）。共 11 个源文件改动（8 改 + 3 新增）。

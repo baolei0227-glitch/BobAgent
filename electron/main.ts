@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import { autoUpdater, type UpdateInfo } from 'electron-updater';
 import { readSettingsFromFile, writeSettingsToFile, settingsFileExists } from '../src/lib/settings-server';
 import { captureRegionToFile, cleanupShotFile, ocrRecognize, ensureScreenRecordingPermission as checkScreenRecordingPermission, requestScreenRecordingPermission, buildScreenPermissionError } from '../src/lib/screen-ocr/capture';
-import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener, setHippoChatCanvasNotifier } from './hippo-browser';
+import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener, setHippoChatCanvasNotifier, setMainWindowProvider } from './hippo-browser';
 import type { ScreenOcrGeometry } from './preload';
 
 let nextServerProc: ChildProcess | null = null;
@@ -2739,6 +2739,8 @@ app.whenReady().then(async () => {
   // （更新后首次启动 BobWork 即完成，无需等用户按快捷键才发现要授权）
   try { resolveCaptureHelperApp(); } catch { /* 安装失败留待快捷键触发时重试 */ }
   // Hippo Browser 独立窗口（Cmd+Shift+B 唤起）
+  // 先注入主窗口读取器：Hippo 建窗/唤起时据此把自己摆到 BobWork 所在显示器（见 ensureOnMainWindowDisplay）
+  setMainWindowProvider(() => mainWindow);
   setupHippoBrowser();
   // 浏览器收起为胶囊时，转发到主窗口渲染层（居中呼吸灯胶囊按钮）
   setMainWindowCapsuleListener((capsule) => {

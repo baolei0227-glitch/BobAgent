@@ -40,6 +40,8 @@ import { isDeclaredVisionModel } from '@/lib/model-capabilities';
 // P4b-1 审批策略层：tool_confirm 名单判定后走 decideToolApproval（纯函数裁决，见 approval.ts）
 import { decideToolApproval } from '@/lib/chat/approval';
 import { createPendingConfirm, CONFIRM_TIMEOUT_MS, type ConfirmResult } from '@/lib/chat/confirm-pending';
+// 空轮收尾策略：输出触顶（finish_reason=length）按可恢复故障处理 + 空答案兜底（见该文件头注释的事故复盘）
+import { planTruncationRetry, buildTruncationRetryNudge, buildEmptyAnswerFallback } from '@/lib/chat/empty-round';
 // P4a 三段化骨架：工具轮宿主接管注册表 + 场景激活统一执行（纯类型 + 编排，见 tool-pipeline.ts 文件头注释）
 // P4a-3-1：挂起型（host-pending）接管注册/查询（registerHostTakeover / hostTakeoverFor）
 import { registerTakeover, takeoverFor, takeoverOfKind, applyScenarioActivation, registerHostTakeover, hostTakeoverFor, assertConsultContract } from '@/lib/chat/tool-pipeline';
@@ -48,7 +50,7 @@ import type { TakeoverServices, HostTakeoverContext, HostTakeoverVerdict } from 
 // K3-2：工具轮咨询链契约加载期自检（9 咨询点顺序/覆盖/唯一性；热更加载即断言，与单测双保险）
 assertConsultContract();
 // Phase 2 策略层抽取：思考档位决策收敛到纯函数模块（S2a 后统一 reasoning_effort 词表，默认行为=纯固定档）
-import { effortForLevel, executionDowngrade, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
+import { effortForLevel, executionDowngrade, downgradeEffortOnce, isTrivialPrompt, shouldInjectThinkPrompt, type ThinkingPolicyConfig } from '@/lib/thinking/policy';
 
 // ── Butler 结构化确认卡片（排程创建/修改/删除走可编辑确认，而非直接执行）──
 const BUTLER_CARD_TOOLS = new Set(['create_scheduled_todo', 'todo_update', 'todo_delete']);
@@ -1197,6 +1199,8 @@ function extractLastUserContent(messages: ChatMessage[]): string {
 /** 普通对话已激活场景的会话内 sticky（key=nodeId；无 nodeId 不持久化，仅当轮生效）。
  *  目的：场景一旦激活即在该会话内保持，避免"每轮按意图变化"导致工具集在轮次间抖动——
  *  工具前缀只在首次激活时变化一次，之后逐轮字节稳定 → 前缀缓存命中率最大化。
+ *  衰减（2026-10-08）：保持不是无限期的——场景 24h 内未被本轮意图重新命中即脱落，
+ *  且每会话最多 6 个场景（见 SessionRuntime），避免工具段单调膨胀（实测中位 79/最大 130 个工具）。
  *  K2-S2 会话态 service，行为不变：本 module 级 Map 已收敛为 SessionRuntime 单例
  *  （src/lib/runtime/session.ts，保留跨请求全局态），读写点改走 sessionRuntime。 */
 
@@ -3455,6 +3459,13 @@ const COMPLETION_RETRY_BASE_MS = 1000;
 const COMPLETION_RETRY_CAP_MS = 8000;
 
 /**
+ * 输出触顶（finish_reason=length）空轮的放宽预算上限：与 max 档同款 32k。
+ * 仅对 baseMaxTokens ≥ 16384 的档位可用（1M 推理大模型），低档位放大可能超模型支持上限触发 API 400。
+ * 依据 2026-10-08 事故：high 档 16384 预算被 reasoning 吃满 → 连续两轮零正文零工具。
+ */
+const TRUNCATION_RETRY_MAX_TOKENS = 32768;
+
+/**
  * 工具循环思考降级（item 4）的降级表已收敛到 src/lib/thinking/policy.ts
  * （executionDowngrade），策略层说明见该文件。
  */
@@ -3740,6 +3751,15 @@ interface KernelContext {
   needRebuildTools: boolean;
   /** 完成确认轮只允许一次：已追加过「任务是否真正完成」确认即置 true（防假完成） */
   completionConfirmUsed: boolean;
+  /** 截断重试已用次数：空轮 + finish_reason=length 递增（不占用 completionConfirmUsed 预算，见 chat/empty-round.ts） */
+  truncationRetries: number;
+  /** 本任务发生输出触顶（finish_reason=length）的轮数（空答案兜底正文据实说明成因） */
+  truncatedRounds: number;
+  /**
+   * 最后一轮的正文（每轮覆盖）。整轮结束时若仍为空 → 判定没有任何可读正文，
+   * 触发空答案兜底（禁止节点里只剩系统提示，见 2026-10-08 事故复盘）。
+   */
+  finalAnswerText: string;
   /** 声明真实性校验纠偏次数计数（D-B：保持现状仅记录，不引行为变化） */
   claimMismatchCorrections: number;
   /** 停滞保护：连续无实质进展轮数（≥ STALL_LIMIT → 强制收尾轮） */
@@ -4303,6 +4323,11 @@ export async function POST(request: NextRequest) {
       //     避免工具集在轮次间抖动 → 前缀缓存只在首次激活变化一次，后续轮次字节稳定。
       //     注意：检测词含宽泛高频词（如 Butler 的"总结/计划"、admin 的"配置/设置"），
       //     实际效果近似"常用场景工具逐步常驻"，省上下文收益主要来自从未激活的场景工具不注入。
+      //     衰减（2026-10-08 一周回测）：sticky 落盘后失去了"重启即衰减"这个天然复位阀，
+      //     实测工具数中位 79、最大 130（工具段 150KB），而首调 miss 随工具段增大 4.4 倍
+      //     （≤40KB 时 5.4k → >120KB 时 23.7k），>80KB 的首调吃掉全部 miss 的 38%。
+      //     故 mergeStickyScenes 现按 TTL(24h) + 每会话上限(6) 收敛：只有**本轮真正命中**的
+      //     场景续命，仅靠读回的旧场景会自然脱落（代价是模型偶需 search_capabilities 重新激活）。
       //   - coding（专项）：固定场景子集，剔除 legal/core/ocr/audio/skill 等编码无关的
       //     专属工具与领域 MCP，过滤结果是节点类型决定的确定集合 → 工具前缀逐轮字节稳定。
       if (!sandbox && profile.scenes === 'dynamic') {
@@ -4654,6 +4679,10 @@ export async function POST(request: NextRequest) {
               // 完成确认轮只允许一次：模型本轮未调用任何工具时，追加一轮「任务是否真正完成」确认，
               // 防止模型过早自我判定完成（假完成）导致任务不完整；再次无工具调用才接受收尾
               completionConfirmUsed: false,
+              // 截断重试 / 触顶统计 / 空答案兜底判据（2026-10-08 事故：详见 chat/empty-round.ts 文件头）
+              truncationRetries: 0,
+              truncatedRounds: 0,
+              finalAnswerText: '',
               // 声明真实性校验纠偏次数计数（防无限纠偏循环；D-B：保持现状仅记录）
               claimMismatchCorrections: 0,
               // 停滞保护：连续 STALL_LIMIT 轮无实质进展 → 判定死循环，进入强制收尾轮（检测在循环末尾）
@@ -4816,8 +4845,11 @@ export async function POST(request: NextRequest) {
               // high→high 不放大）
               const baseMaxTokens = modelOutputTokenMaxForModel(providerModelId || '', baseEffort !== 'none');
               const highDepthRequest = baseEffort === 'max';
-              const effectiveMaxTokens = highDepthRequest && baseMaxTokens >= 16384
-                ? Math.min(baseMaxTokens * 2, 32768)
+              // 截断重试（kctx.truncationRetries>0）同样放宽预算：把「思考吃满输出预算」当可恢复故障处理，
+              // 而不是直接收尾。仍只对 ≥16384 档（1M 推理大模型）放大，低档位不动（超出支持上限会 400）。
+              const widenOutputBudget = highDepthRequest || kctx.truncationRetries > 0;
+              const effectiveMaxTokens = widenOutputBudget && baseMaxTokens >= 16384
+                ? Math.min(baseMaxTokens * 2, TRUNCATION_RETRY_MAX_TOKENS)
                 : baseMaxTokens;
               const baseRoundMessages = finalRoundInjection
                 ? [
@@ -4874,7 +4906,12 @@ export async function POST(request: NextRequest) {
               const downgradeDecision = modelSupportsThinking
                 ? executionDowngrade(round, isFinalRound, level, thinkingPolicyConfig)
                 : null;
-              const roundEffort = downgradeDecision?.reasoningEffort ?? baseEffort;
+              let roundEffort = downgradeDecision?.reasoningEffort ?? baseEffort;
+              // 截断重试第 2 次起：连输出预算翻倍都还撞顶 → 定向再降一档思考（harnessPure=true 下也生效：
+              // 这是对本任务**已观测故障**（finish_reason=length 空轮）的纠偏，不是常态执行轮降级）。
+              if (kctx.truncationRetries >= 2 && modelSupportsThinking && baseEffort !== 'none') {
+                roundEffort = downgradeEffortOnce(roundEffort);
+              }
               const thinkingDowngraded = round > 0 && !isFinalRound && roundEffort !== baseEffort;
               eventLog.mark(CORE_EVENT.STEP_START, `${taskId}:r${round}`, { round });
               kctx.totalRounds++;
@@ -5001,6 +5038,9 @@ export async function POST(request: NextRequest) {
               const contentParts: string[] = [];
               const reasoningParts: string[] = [];
               const toolCallBuf: Map<number, { id: string; name: string; arguments: string }> = new Map();
+              // 本轮是否被 max_tokens 截断（finish_reason=length）——空轮收尾时要区分
+              // 「模型摆烂」与「输出被截断」（后者可重试，见 §4.5 截断重试）
+              let roundTruncated = false;
 
               for await (const chunk of completion) {
                 // usage 汇总块（include_usage 时，末 chunk 无 choices 仅带 usage）需在 delta 判空之前采集
@@ -5052,6 +5092,8 @@ export async function POST(request: NextRequest) {
 
                 // 输出触顶检测：finish_reason=length 说明本次生成被 max_tokens 截断（内容不完整）
                 if (chunk.choices?.[0]?.finish_reason === 'length') {
+                  roundTruncated = true;
+                  kctx.truncatedRounds += 1;
                   send({ content_truncated: true, nodeId });
                 }
 
@@ -5086,6 +5128,9 @@ export async function POST(request: NextRequest) {
               // C5：流式内容一次性 join（每轮只 join 一次，后续统一使用聚合后的文本）
               const reasoningText = reasoningParts.join('');
               const contentText = contentParts.join('');
+              // 最后一轮正文（每轮覆盖）：整轮结束时为空 → 空答案兜底（§空答案兜底）。
+              // 用「最后一轮」而非「是否曾输出过」做判据：中间轮的过程性叙述不构成最终答案。
+              kctx.finalAnswerText = contentText;
 
               // ===== 工具调用回收（deepseek-harness / pi-reasonix scavenge）=====
               // DeepSeek 系模型偶发把工具调用写进 reasoning_content 而非结构化 tool_calls。
@@ -5105,7 +5150,8 @@ export async function POST(request: NextRequest) {
               // 检查是否有工具调用
               if (toolCallBuf.size === 0) {
                 // 强制收尾轮（带 tools 但模型无工具调用，仅输出文本）已完成 → 结束循环
-                if (kctx.forceFinalRound) eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
+                // 正文为空时不落 final 事件（收尾轮被截断的情况）：交给整轮结束的空答案兜底
+                if (kctx.forceFinalRound && contentText.trim()) eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText, reasoning: reasoningText || undefined, toolCalls: [] });
                 if (kctx.forceFinalRound) break;
 
                 // ── 声明真实性校验（Claim Verification）──
@@ -5155,8 +5201,35 @@ export async function POST(request: NextRequest) {
                 // "⏳ Completion check" 提示并诱导模型生成第二遍答案
                 // （去双轨：不再剥离 process_narration，正文全文直出，交付物不再被误吞）
                 if (contentText.trim()) {
-                  eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
+                  eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText, reasoning: reasoningText || undefined, toolCalls: [] });
                   break;
+                }
+
+                // 4.5 输出触顶（finish_reason=length）造成的空轮：按**可恢复故障**处理，不记「假完成」
+                // 依据 2026-10-08 事故（济星-20261008 /「从甲方角度对本协提出修改意见」）：
+                //   high 档 max_tokens=16384 被 reasoning 吃满 → 两轮各 73s/74s 只产出思考（正文与工具调用
+                //   全空）→ 旧逻辑把它当模型放弃：补问一次后强制收尾，落盘答案正文为空，
+                //   只剩下「⏳ Completion check」+「⚠️ Output reached the model limit」两条系统提示。
+                // 处理：加输出预算（第 2 次起再降一档思考）后重试该轮，最多 TRUNCATION_RETRY_LIMIT 次；
+                // 预算用尽仍空轮才回到下面的「假完成」判定（详见 src/lib/chat/empty-round.ts）。
+                const retryPlan = planTruncationRetry({ truncated: roundTruncated, retriesUsed: kctx.truncationRetries });
+                if (retryPlan) {
+                  kctx.truncationRetries = retryPlan.attempt;
+                  console.warn(
+                    `[chat] 本轮输出被长度上限截断且无正文/工具调用，第 ${retryPlan.attempt}/${retryPlan.maxAttempts} 次截断重试` +
+                    `（放宽输出预算${retryPlan.downgradeEffort ? ' + 降低思考深度' : ''}）`,
+                  );
+                  kctx.conversationMessages.push({ role: 'user', content: buildTruncationRetryNudge(retryPlan) });
+                  send({
+                    truncation_retry: {
+                      attempt: retryPlan.attempt,
+                      maxAttempts: retryPlan.maxAttempts,
+                      boostOutputBudget: retryPlan.boostOutputBudget,
+                      downgradeEffort: retryPlan.downgradeEffort,
+                    },
+                    nodeId,
+                  });
+                  continue;
                 }
 
                 // 5. 检查是否处于"假完成"状态（连续轮无正文且无任何工具调用）
@@ -5175,9 +5248,16 @@ export async function POST(request: NextRequest) {
                     send({ completion_check: true, nodeId });
                     continue;
                   } else {
-                    // 第二次仍无工具调用，视为真正的完成（或者模型放弃了），强制收尾
-                    console.warn('[chat] 模型连续两次未输出正文或调用工具，强制结束任务');
-                    eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
+                    // 第二次仍无工具调用：模型放弃（或输出触顶且重试预算已用尽），强制收尾。
+                    // 正文为空时**不在此落 final 事件**——交给整轮结束的空答案兜底生成可读正文，
+                    // 否则轨迹/落盘会出现一个无语义的空 assistant 答案（2026-10-08 事故）。
+                    console.warn(
+                      `[chat] 模型连续两次未输出正文或调用工具，强制结束任务` +
+                      `（截断 ${kctx.truncatedRounds} 轮 / 截断重试 ${kctx.truncationRetries} 次）`,
+                    );
+                    if (contentText.trim()) {
+                      eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText, reasoning: reasoningText || undefined, toolCalls: [] });
+                    }
                     break;
                   }
                 }
@@ -5206,7 +5286,10 @@ export async function POST(request: NextRequest) {
                       nodeId,
                     });
                   }
-                  eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText || '', reasoning: reasoningText || undefined, toolCalls: [] });
+                  // 纯问答空正文（本轮未输出任何正文）：交给整轮结束的空答案兜底，不落空 final 事件
+                  if (contentText.trim()) {
+                    eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:r${round}:final`, { round, role: 'assistant', content: contentText, reasoning: reasoningText || undefined, toolCalls: [] });
+                  }
                   break;
                 }
                 
@@ -6062,6 +6145,8 @@ export async function POST(request: NextRequest) {
             }
 
             // 发送本次交互中产生的输出文件卡片（homework/、materials/）
+            // answerOutputFileNames：同批产物路径留档，供下方空答案兜底正文列出（本块异常也不影响兜底）
+            let answerOutputFileNames: string[] = [];
             try {
               const workspacePath = projectRoot
                 ? join(projectRoot, 'homework', '.ai-workspace')
@@ -6095,6 +6180,7 @@ export async function POST(request: NextRequest) {
                   if (!outputFiles.some((o) => o.path === f.path)) outputFiles.push(f);
                 }
               }
+              answerOutputFileNames = outputFiles.map((f) => f.path);
               if (outputFiles.length > 0) {
                 send({
                   output_files: outputFiles,
@@ -6102,6 +6188,30 @@ export async function POST(request: NextRequest) {
                 });
               }
             } catch { /* ignore */ }
+
+            // ===== 空答案兜底（2026-10-08 事故）=====
+            // 整轮结束时最后一轮正文为空 → 节点/界面会只剩系统提示（⏳ Completion check、⚠️ 输出触顶），
+            // 用户侧表现就是「没有结果就暂停了」。此处补一段可读正文：说明成因 + 下一步 + 本轮产物，
+            // 保证任何收尾路径（强制收尾 / 收尾轮 / 纯问答 / 截断重试预算用尽）都不会落下空答案。
+            if (!kctx.finalAnswerText.trim()) {
+              const fallback = buildEmptyAnswerFallback({
+                truncatedRounds: kctx.truncatedRounds,
+                toolCallCount: kctx.allToolCalls.length,
+                producedFiles: answerOutputFileNames,
+              });
+              console.warn(
+                `[chat] 整轮无正文（截断 ${kctx.truncatedRounds} 轮 / 工具 ${kctx.allToolCalls.length} 次），已写入空答案兜底正文`,
+              );
+              send({ content: fallback, nodeId });
+              send({ empty_answer_fallback: true, nodeId });
+              kctx.finalAnswerText = fallback;
+              eventLog.mark(CORE_EVENT.ASSISTANT_MESSAGE, `${taskId}:fallback`, {
+                round: Math.max(0, kctx.totalRounds - 1),
+                role: 'assistant',
+                content: fallback,
+                toolCalls: [],
+              });
+            }
 
 
 
