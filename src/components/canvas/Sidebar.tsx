@@ -54,6 +54,7 @@ import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/t
 import { cn } from '@/lib/utils';
 import type { TagScope } from '@/lib/files/tags';
 import type { SessionRequestPayload } from '@/lib/project/project-events';
+import { getCurrentProjectId, canvasLagsServerProject } from '@/lib/current-project';
 import { Button } from '@/components/ui/button';
 
 export interface ProjectInfo {
@@ -1214,6 +1215,13 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
       if (data.success) {
         setProjects((data.active_projects || data.projects || []).filter((p: ProjectInfo) => !p.hidden));
         setCurrentId(data.current_id);
+        // 对账：服务端可能**单方面**改了当前项目（管家 create_project(make_current) 建完即切、
+        // 旧当前项目被归档/清空后的自动回退……），此时只刷新列表会让侧边栏高亮与画布内容分叉，
+        // 且用户点那条已高亮的项目会被「已是 current，无需切换」挡掉。画布落后就补发一次
+        // 无刷新切换，让 CanvasFlow 重载到同一个项目（判定口径见 lib/current-project）。
+        if (canvasLagsServerProject(getCurrentProjectId(), data.current_id || '')) {
+          window.dispatchEvent(new CustomEvent('bobagent:project-switched', { detail: { projectId: data.current_id } }));
+        }
         // 首次加载才自动展开当前项目文件树；刷新（focus/切换）不重置用户手动展开状态
         if (!projectsLoadedRef.current && data.current_id) {
           projectsLoadedRef.current = true;

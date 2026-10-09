@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { BUTLER_INBOX_EVENT, BUTLER_UNREAD_CHANGED_EVENT } from './butlerEvents';
 import { fetchUnreadCount } from './ButlerNoticeHost';
+import { HippoFace } from './HippoFace';
 
 /** 球体直径。28px：原 34px 在画布上偏抢眼，收小后回到「安静待在角落」的定位
  *  （其余定位/钳制逻辑均以本常量派生，改这里即可整体缩放）。 */
@@ -235,8 +236,9 @@ export function ButlerOrb() {
           -webkit-backdrop-filter: blur(6px) saturate(210%);
           backdrop-filter: blur(6px) saturate(210%);
         }
-        /* 河马线稿：黑色线条、透明底 → 叠在玻璃球里（不投影，才像「球里」而不是「球上」） */
-        .butler-orb .ball img { position: absolute; inset: 9%; width: 82%; height: 82%; object-fit: contain; }
+        /* 河马线稿：黑色线条、透明底 → 叠在玻璃球里（不投影，才像「球里」而不是「球上」）。
+           用矢量版 HippoFace（同一张线稿描的路径），好处是眼睛能独立分组、可眨眼。 */
+        .butler-orb .ball .hippo-face { position: absolute; inset: 9%; width: 82%; height: 82%; }
       `}</style>
       <button
         type="button"
@@ -270,7 +272,7 @@ export function ButlerOrb() {
         }}
       >
         <span className="ball" aria-hidden>
-          <img src="/butler-orb.png" alt="" draggable={false} />
+          <HippoFace className="hippo-face" />
         </span>
         {unread > 0 && (
           <span

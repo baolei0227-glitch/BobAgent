@@ -3331,8 +3331,9 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
               if (typeof d.content === 'string' && d.content) {
                 acc += d.content;
                 // 逐帧就剥 think：若只在收尾剥，模型吐 think 标签时气泡会把思考块一并显示出来
-                // （stripThinkTags 会把未闭合的 think 段截断到末尾，流式安全）
-                const shown = stripThinkTags(acc);
+                // （streaming: true = 未闭合的 think 视为"正在思考"，其中内容先不显示；
+                //  收尾那次不带该标记，走无损口径，绝不把回答吞成空串）
+                const shown = stripThinkTags(acc, { streaming: true });
                 setMessages((prev) => prev.map((m) => (m.id === aid ? { ...m, content: shown } : m)));
                 // 静默计时归零（2026-10-06）：等待口语的档位按「距上次可见输出」升级，
                 // 一出新字就回落，并把静默状态条收掉。1 秒内不重复置位——逐帧 setState 没有必要。

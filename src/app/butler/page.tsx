@@ -464,7 +464,8 @@ export default function ButlerMobilePage() {
             if (typeof d.content === 'string' && d.content) {
               acc += d.content;
               // 逐帧剥 think：只在收尾剥会让「思考块」在流式期间裸露在气泡里
-              const shown = stripThinkTags(acc);
+              // （streaming: true = 未闭合的 think 视为"正在思考"先不显示；收尾那次不带该标记）
+              const shown = stripThinkTags(acc, { streaming: true });
               setMessages((prev) => prev.map((m) => (m.id === aid ? { ...m, content: shown } : m)));
             }
           }

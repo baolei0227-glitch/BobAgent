@@ -15,6 +15,40 @@
 ***
 
 
+## v0.7.687 (2026-10-09)
+
+> 本版是 **v0.7.686 之后的增量**：管家悬浮球里的河马线稿从**位图换成矢量版，眼睛可以眨** —— 位图没法只靠 CSS 让眼睛闭合。共 2 个源文件改动（1 改 + 1 新增）。
+
+### 修复与优化
+
+* **管家悬浮球：河马线稿改矢量，能眨眼**（新增 [HippoFace.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/HippoFace.tsx)，[ButlerOrb.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerOrb.tsx) 接入）：把 `public/butler-orb.png` 的线稿描出轮廓、导出为路径（与原图 **IoU 0.948**，差异仅为 1px 抗锯齿边界；路径由脚本追踪生成，**请勿手改**），面部（头 / 耳 / 眉线 / 嘴）合成一条路径，**左右眼各自成组**，眨眼时对这两组做 `scaleY` 收缩（`transform-box: fill-box` + `transform-origin: center`，`scaleY(0.06)` 闭合）。眨眼节奏由 JS **随机调度**（2.2~6.2s 一次，约 28% 概率连眨两下、间隔 130ms），比固定周期更接近真实节奏；命中 `prefers-reduced-motion: reduce` 时保持睁眼、不闪，组件卸载时清掉全部定时器。（位图仍留作 Butler 抽屉里 20px 的小头像 —— 那个尺寸看不出眨眼，无需换。）
+
+* **外观与定位零改动**（[ButlerOrb.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerOrb.tsx)）：球体直径、定位与钳制逻辑一概未动；`inset: 9% / width: 82%` 的作用对象从位图 `<img>`（`object-fit: contain`）换成 SVG 自身的等比缩放，视觉上仍叠在玻璃球里（不投影），保持「球里」而不是「球上」的观感；`aria-hidden` 由组件自带，视觉装饰语义不变。
+
+
+## v0.7.686 (2026-10-09)
+
+> 本版是 **v0.7.685 之后的增量**：两条线都是 2026-10-09 当天的事故/报障 —— ① P0 修**「消息已落库，刷新也永远转圈」**。管家 18:23 回答「我在哪里可以看到计划」时，模型在**正文通道**里又起了一个 ` thinking` 且忘记闭合（落库内容出现「2 个开标签 / 1 个闭标签」），正式回答写在它后面；旧实现 `.replace(/ thinking[\s\S]*$/i, '')` 把「开标签 → 结尾」整段剥掉，**连正式回答一起吞了** → 气泡正文变空串，UI 落进「三个跳动点」的空态，而消息已经落库，刷新也永远转圈；同一函数还供会话预览 / 微信·飞书回执 / 轨迹导出，全都变成空串（新增 [bus.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/bus.ts) 无损口径 + 逐帧/收尾两套语义）。② 修**「第一次点不动，第二次项目看着切了、会话还是上一个项目的」**。管家 `create_project(make_current=true)` 建完即切，服务端当前项目已改，但工具只广播了 `projects-changed`（刷新列表）→ 侧边栏高亮跟上了，画布与会话列表却仍停在旧项目；此时用户去点那条**已高亮**的新项目，又会被「已是 current，无需切换」短路挡掉 —— 死结（新增 [current-project.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/current-project.ts) 对账判定 + Sidebar 补发无刷新切换）。共 11 个源文件改动（8 改 + 3 新增）。
+
+### 修复与优化
+
+* **未闭合 `think` 不再吞掉正式回答**（[bus.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/bus.ts)）：新增 `unwrapUnclosedThinkTags` —— 用标签栈配对，**只脱掉未配对的开标签本身、标签内的文字保留**，已配对的块原样不动；`stripThinkTags` 增加 `opts.streaming` 区分两套语义：逐帧渲染（思考还在长）时未闭合的 `think` 视为「正在思考」，其中内容先不显示；**完成态（历史回读 / 收尾落值 / 会话预览 / 微信·飞书回执 / 轨迹导出）改走无损口径** —— 万一正文里有个未闭合的 `think`，宁可把那段文字显示出来，也绝不把回答吞成空串（空串会让气泡落进空态，消息已落库、刷新也永远转圈）。兜底只在「正常剥离会得到空串」时才会走到，因此正常闭合的思考块照旧剥干净、不引入噪声。
+
+* **逐帧调用点与画布侧兜底同口径**（[page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler/page.tsx)，[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)，[chatNodeKernelUtils.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/chatNodeKernelUtils.ts)）：管家页与 Butler 抽屉的逐帧渲染改传 `{ streaming: true }`，收尾那次不带该标记（走无损口径）；画布侧的解析兜底同步改成「只脱标签、保留文字」，并**一并去掉未配对的开标签本身**，否则正文里会裸露一个 ` thinking` 标记。四处调用语义与 lib/bus 对齐，避免同一个未闭合标签在气泡、预览、回执、导出里表现不一致。
+
+* **管家建完即切：补广播「无刷新切换」**（[butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts)）：`create_project` 的语义边界补一条例外 —— 默认仍**只创建、不切换**；但 `make_current=true`（同一次请求还要紧接着往新项目里写东西）时，服务端当前项目已被切走，这就**等价于一次管家侧发起的项目切换**，同步口径必须与 `switch_project` 一致：`projects-changed` 刷新列表（让新项目先出现在列表里）+ `project-switched` 让画布无刷新重载。返回体新增 `ui_synced`，回执按**是否有界面订阅者**如实措辞（界面没开时说「切换已生效，下次打开即为该项目」，而不是谎称界面已同步）。
+
+* **侧边栏对账 + 画布落位去竞态**（[Sidebar.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/Sidebar.tsx)，[current-project.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/current-project.ts)，[CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：`current_project_id` 的真源在服务端 `.projects.json`，服务端还有若干**单方面改写**路径（管家建完即切、旧当前项目被归档/清空后的自动回退……），这些路径只广播 `projects-changed`，于是高亮与画布分叉。现侧边栏**每次拿到服务端快照都对一次账**：`canvasLagsServerProject(canvas, server)` 判定画布是否落后（**两边都有值且不一致**才算 —— 画布还没报到（启动瞬间 store 为空）不拿空值当「落后」，服务端没有当前项目时也无从跟随），落后才补发一次切换广播。CanvasFlow 侧在收到切换事件时**同步**写入「画布要落到哪个项目」，不等下面那个 effect —— 否则 Sidebar 的 loadProjects 会在竞态窗口里读到旧值、再补发一次，画布白重载一遍。
+
+### 新增单测
+
+* 新增 [bus.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/bus.test.ts)：以事故原文（2 开标签 / 1 闭标签、正式回答在后面）为输入，锁两条 —— 完成态**永远不把回答吞成空串**（回答必须还在、未配对的开标签不裸露、已配对的思考块照旧剥掉），且「只有思考没有正文」时不伪造正文；逐帧（`streaming: true`）仍保持「未闭合的思考先不显示」。另覆盖 `unwrapUnclosedThinkTags` 的配对/未配对/双未配对/多余闭标签四种形态与空输入原样返回。
+
+* 新增 [current-project.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/current-project.test.ts)：覆盖对账判定的三条边界 —— 不一致才落后；一致不落后（点当前项目不该白重载）；画布未报到 / 服务端无当前项目都不作落后依据。
+
+* 新增 [butler-project.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler-project.test.ts)：以管家建项目的报障现场为用例，锁两条契约 —— `make_current=true` 必须**两条广播都有**（少 `project-switched` 就是本次事故）且 `ui_synced=true`；未要求 `make_current` 时**绝不切当前项目、绝不广播切换**（不动用户画布）；界面无订阅者时切换仍生效但回执如实说 `ui_synced=false`。
+
+
 ## v0.7.685 (2026-10-08)
 
 > 本版是 **v0.7.684 之后的增量**：两条线 —— ① P0 修**「没有结果就暂停了」**。2026-10-08 事故（济星-20261008 /「从甲方角度对本协提出修改意见」）中，`thinkingLevel=high` 时每轮 `max_tokens=16384` 被 reasoning 吃满 → 连续两轮 `finish_reason=length`、正文与工具调用双双为空（两轮各 73s/74s ≈ 216 tok/s × 16k）；旧逻辑把这类空轮一律当「模型假完成」：补问一次后强制收尾，并把空正文原样落盘，节点里只剩「⏳ Completion check」+「⚠️ Output reached the model limit」两条系统提示。现把**输出触顶当可恢复故障**：加输出预算（第 2 次起再降一档思考）定向重试，并给整轮无正文的收尾路径补**可读兜底正文**，任何收尾路径都不再落空答案（新增 [empty-round.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/chat/empty-round.ts)）。② 收**场景 sticky 的单调膨胀**：2026-10-02 把 sticky 落盘解决了跨重启漂移，却顺手拿掉了「重启即衰减」这个天然复位阀 —— 一周回测工具数中位 79、最大 130（工具段 150KB），而首调 miss 随工具段增大 4.4 倍（≤40KB 时 5.4k → >120KB 时 23.7k），>80KB 的首调吃掉全部 miss 的 38%。现给 sticky 加 **TTL(24h) + 每会话 6 个上限**，只有「被本轮意图重新命中 / 中途显式激活」才续命。共 8 个源文件改动（6 改 + 2 新增）。

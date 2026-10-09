@@ -2491,6 +2491,10 @@ function CanvasFlowInner() {
       const projectId = ((e as CustomEvent).detail as { projectId?: string })?.projectId;
       if (!projectId) return;
       setCurrentProjectId(projectId);
+      // 同步公开「画布要落到哪个项目」：Sidebar 的 loadProjects 用它做对账（服务端单方面改了
+      // 当前项目时补发切换广播），必须在这里就写好，不能等下面那个 effect —— 否则 loadProjects
+      // 在竞态窗口里会看到旧值再补发一次，画布白重载一遍。
+      setCurrentProject(projectId);
       setHasProject(true);
       setSelectedNodeIds(new Set());
       // 切换项目同样属于「切页」：顺手把置顶的 Hippo Browser 收起为胶囊（幂等）

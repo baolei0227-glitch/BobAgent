@@ -225,14 +225,48 @@ export interface ButlerNoticeItem {
 }
 
 /**
+ * 把**未配对**的 `<think>` 开标签只脱掉标签本身（标签内的文字保留），已配对的块原样不动。
+ *
+ * 为什么要单独有这一步：模型偶尔会在**正文通道**里再起一个 `<think>` 且忘记闭合
+ * （2026-10-09 18:23 管家「我在哪里可以看到计划」那一轮就是这样：先一个闭合的思考块，
+ * 紧接着第二个 `<think>` 一直到结尾都没闭合，正式回答写在它后面）。此时若按
+ * 「开标签 → 结尾全是思考」剥离，会把**正式回答一起吞掉**。
+ */
+export function unwrapUnclosedThinkTags(content: string): string {
+  if (!content) return content;
+  const tagRe = /<\/?think>/gi;
+  const stray = new Set<number>();
+  const stack: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(content)) !== null) {
+    if (m[0].toLowerCase() === '</think>') {
+      if (stack.length > 0) stack.pop();
+    } else {
+      stack.push(m.index);
+    }
+  }
+  if (stack.length === 0) return content;
+  for (const i of stack) stray.add(i);
+  return content.replace(tagRe, (tag: string, offset: number) => (stray.has(offset) ? '' : tag));
+}
+
+/**
  * 剥离回复中的思考块（<think>...</think>，大小写不敏感、可跨行、兼容未闭合标签）。
  * 方案 B：微信 / Butler 抽屉展示层只保留回复正文；chat_sessions 存储仍保留完整（含思考）。
  * 放本模块（前后端共用的纯类型模块）而非 node-chat.ts，避免前端组件拉入 better-sqlite3 等 Node 依赖。
+ *
+ * `streaming: true` 用于**逐帧**渲染（思考还在长）：未闭合的 think 视为"正在思考"，其中内容不显示。
+ * 缺省（完成态：历史回读 / 收尾落值 / 会话预览 / 微信·飞书回执 / 轨迹导出）走**无损**口径：
+ * 万一正文里有个未闭合的 `<think>`，宁可把那段文字显示出来，也绝不把回答吞成空串 ——
+ * 空串会让气泡落进"三个跳动点"的空态，消息已落库，刷新也永远转圈（本次事故）。
  */
-export function stripThinkTags(content: string): string {
+export function stripThinkTags(content: string, opts?: { streaming?: boolean }): string {
   if (!content) return content;
-  return content
+  const stripped = content
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<think>[\s\S]*$/i, '')
     .trim();
+  if (stripped || opts?.streaming) return stripped;
+  // 兜底（仅完成态、且正常剥离会得到空串时才会走到）：只脱未配对的开标签，保住正文
+  return unwrapUnclosedThinkTags(content).replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }

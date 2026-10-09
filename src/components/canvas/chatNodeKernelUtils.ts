@@ -145,10 +145,14 @@ export function parseThink(content: string): { think: string; content: string } 
   }
 
   const result = clean.trim();
-  // 安全兜底：如果结果为空但原文有实质内容，可能是 think 未闭合导致全部清空
+  // 安全兜底：如果结果为空但原文有实质内容，可能是 think 未闭合导致全部清空。
+  // 用「只脱标签、保留文字」的无损口径（与 lib/bus.stripThinkTags 完成态一致）：
+  // 未配对的开标签本身要一并去掉，否则正文里会裸露一个 `<think>` 标记
+  // （2026-10-09 管家那条卡住的消息就是未闭合 think 把正式回答一起吞掉）。
   if (!result && content.length > 20) {
     const fallback = content
       .replace(THINK_TAG_RE, '')
+      .replace(/<(?:think|thinking|thought|reasoning)>/gi, '')
       .trim();
     return { think: think.trim(), content: fallback || content.trim() };
   }

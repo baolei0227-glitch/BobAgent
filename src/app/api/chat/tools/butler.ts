@@ -2036,9 +2036,14 @@ async function toolSetModelPrice(args: Record<string, unknown>): Promise<string>
 
 /**
  * create_project 工具执行器：新建一个 BobWork 项目（落盘目录结构 + 写入全局项目配置）。
- * 语义边界（与 Butler 定位一致）：**只创建、不切换**当前项目——新项目出现在侧边栏，
+ * 语义边界（与 Butler 定位一致）：默认**只创建、不切换**当前项目——新项目出现在侧边栏，
  * 是否进入交给 switch_project（用户明确说"打开/进入"时调用）或用户在界面里点击。
- * 完成后广播 projects-changed，让侧边栏 SSE 即时刷新出新项目。
+ * 例外是 make_current=true（同一次请求还要紧接着往新项目里写东西）：那时服务端已经把当前项目
+ * 切成了新项目，这就**等价于一次管家侧发起的项目切换**，界面同步必须与 switch_project 同口径 ——
+ * projects-changed 刷新列表 + project-switched 让画布无刷新重载。
+ * 只广播 projects-changed 会漏掉后半程：侧边栏高亮跟上了新快照，画布与会话列表却仍停在旧项目，
+ * 而用户此时去点侧边栏里那条已高亮的项目，又会被「已是 current，无需切换」挡掉 ——
+ * 表现正是「第一次点不动，第二次项目看着切了、会话还是上一个项目的」。
  */
 async function toolCreateProject(args: Record<string, unknown>): Promise<string> {
   const name = typeof args.name === 'string' ? args.name.trim() : '';
@@ -2052,15 +2057,23 @@ async function toolCreateProject(args: Record<string, unknown>): Promise<string>
   try {
     const makeCurrent = args.make_current === true;
     const project = await createProject(name, { makeCurrent });
+    // 新项目进列表（侧边栏 SSE）
     emitProjectsChanged();
+    // make_current=true：当前项目已在服务端切走 → 补一次「无刷新切换」广播，让画布跟上
+    // （顺序在 projects-changed 之后：先让新项目出现在列表里，画布重载完就是它）
+    if (makeCurrent) emitProjectSwitched(project.id);
+    const uiSynced = makeCurrent ? hasProjectsChangedListeners() : false;
     return JSON.stringify({
       ok: true,
       id: project.id,
       name: project.name,
       path: project.path,
       is_current: makeCurrent,
+      ui_synced: uiSynced,
       message: makeCurrent
-        ? `已新建项目「${project.name}」（id: ${project.id}），并已切换为当前项目——紧接着不点名项目的写入会落在这里。`
+        ? `已新建项目「${project.name}」（id: ${project.id}），并已切换为当前项目${uiSynced
+          ? '，界面已同步切到该项目'
+          : '；BobWork 界面当前未打开，切换已生效，下次打开即为该项目'}——紧接着不点名项目的写入会落在这里。`
         : `已新建项目「${project.name}」（id: ${project.id}）。当前项目未切换——要往里面写待办/便签，请把 project 传成「${project.name}」或它的 id；或让用户在左侧项目列表点击进入。`,
     }, null, 2);
   } catch (e) {
