@@ -6,7 +6,7 @@
   "scripts": {
     "build": "bash ./scripts/build.sh",
     "dev": "bash ./scripts/dev.sh",
-    "preinstall": "npx only-allow pnpm",
+    "preinstall": "node scripts/check-pm.mjs",
     "lint": "eslint",
     "lint:build": "eslint . --quiet",
     "lint:style": "stylelint \"src/**/*.css\"",

@@ -26,6 +26,7 @@ on:
       - 'src/lib/shell/**'
       - 'scripts/platform-*.ts'
       - 'scripts/compile-desktop.mjs'
+      - 'scripts/check-pm.mjs'
       - 'packages/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
