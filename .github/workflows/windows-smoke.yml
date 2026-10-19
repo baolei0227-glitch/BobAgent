@@ -114,24 +114,28 @@ jobs:
       - name: 单测 · 平台层与命令守卫
         shell: pwsh
         run: |
-          pnpm exec vitest run src/lib/platform src/lib/shell src/lib/python --reporter=verbose 2>&1 | Tee-Object -FilePath vitest.log
+          # 双 reporter：verbose 给人看（失败时能定位到断言），json 给机器读（做证据）。
+          pnpm exec vitest run src/lib/platform src/lib/shell src/lib/python --reporter=verbose --reporter=json --outputFile.json=vitest.json 2>&1 | Tee-Object -FilePath vitest.log
           if ($LASTEXITCODE -ne 0) {
             $t = (Get-Content vitest.log -Encoding UTF8 | Select-String -Pattern 'FAIL|×|AssertionError|Expected|Received' | Select-Object -First 12) -join ' | '
             Write-Host "::error title=vitest::$($t)"
             exit 1
           }
-          # 成功也要留可读证据：「绿了」不等于「跑了几条」。把汇总行打进 annotation，
-          # 否则匿名侧只能看到一个绿勾，无法确认断言数量没缩水（少跑了文件也会是绿的）。
-          #
-          # ⚠️ 模式必须行首锚定 + -CaseSensitive。上一版写的是 'Test Files\s+\d+|Tests\s+\d+'，
-          # PowerShell 的 Select-String 默认**大小写不敏感**，于是 Duration 行里的
-          # `tests 75ms` 也被抓进来，汇总变成 "Duration 1.02s (transform 382ms, …)" —— 
-          # 一条看起来成功、实际上什么都没证明的噪声。
-          $sum = (Get-Content vitest.log -Encoding UTF8 |
-                  Select-String -Pattern '^\s*(Test Files|Tests)\s+\d+' -CaseSensitive |
-                  ForEach-Object { ($_.Line -replace '\s+', ' ').Trim() }) -join ' / '
-          if (-not $sum) { $sum = '(未抓到汇总行 —— 断言条数无法确认，按缺陷处理)' }
+          # 证据必须从 JSON 取，**不能解析人读输出**。
+          # 实测：vitest 即使 stdout 不是 TTY 也照样上色，日志里是
+          #   \x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m4 passed\x1b[39m\x1b[22m
+          # 所以任何 `^\s*Test Files\s+\d+` 的行首锚定都必然落空（上一版就是这样把汇总丢掉，
+          # 只剩 Duration 行里的 `tests 75ms` 被当成证据 —— 看起来绿，其实什么都没证明）。
+          $j = Get-Content vitest.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $files = @($j.testResults).Count
+          $sum = "files=$files tests=$($j.numTotalTests) passed=$($j.numPassedTests) failed=$($j.numFailedTests)"
           Write-Host "::notice title=vitest-summary::$sum"
+          # 金标准下限：断言数缩水时 vitest 依然是绿的（少跑一个文件也是 success）。
+          # 下限是最低的护栏，不是覆盖率指标 —— 加测试不用改它，删测试必须扭红。
+          if ($files -lt 4 -or $j.numTotalTests -lt 90) {
+            Write-Host "::error title=vitest-coverage::断言数低于下限（$sum，期望 files>=4 且 tests>=90）—— 有测试文件没被跑到"
+            exit 1
+          }
 
       # 闸门 2：真机断言 —— 本工作流的核心。失败即为真缺陷，必须修代码而不是改断言。
       - name: 真机断言 · 进程层 / 命令守卫
@@ -176,6 +180,7 @@ jobs:
             install.log
             compile.log
             vitest.log
+            vitest.json
             selftest.log
             doctor.log
           if-no-files-found: ignore
