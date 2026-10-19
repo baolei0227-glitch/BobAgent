@@ -171,12 +171,21 @@ jobs:
             @{ n = 'electron-updater';      p = "$app/node_modules/electron-updater/package.json" },
             @{ n = 'adm-zip';               p = "$app/node_modules/adm-zip/package.json" },
             @{ n = 'next server.js';        p = "$ns/server.js" },
-            @{ n = 'static chunks';         p = "$ns/.next/static/chunks" }
+            @{ n = 'public（静态资源）';     p = "$ns/public" },
+            @{ n = '内置头像';              p = 'release/win-unpacked/resources/avatars' }
           )
           $bad = @()
           foreach ($c in $checks) {
             if (-not (Test-Path $c.p)) { $bad += $c.n; Write-Host "  [MISSING] $($c.n) -> $($c.p)" }
             else { Write-Host "  [OK] $($c.n)" }
+          }
+          # 目录存在 ≠ 有内容：`static chunks` 为空时页面会 SSR-only、前端 JS 全 404，
+          # 而 Test-Path 依然为真。所以这一条要数文件，不能只判存在。
+          $chunks = "$ns/.next/static/chunks"
+          if (-not (Test-Path $chunks)) { $bad += 'static chunks（目录不存在）' }
+          else {
+            $n = @(Get-ChildItem $chunks -Recurse -File).Count
+            if ($n -eq 0) { $bad += 'static chunks（目录为空）' } else { Write-Host "  [OK] static chunks（$n 个文件）" }
           }
           if ($bad.Count -gt 0) {
             Write-Host "::error title=pack-contents::缺少 $($bad -join ', ') —— 装出去会启动失败或功能静默缺失"
@@ -188,7 +197,7 @@ jobs:
             exit 1
           }
           $kb = [Math]::Round((Get-Item "$ns/server.js").Length / 1KB, 1)
-          Write-Host "::notice title=pack-contents::6 项齐全 / server.js 含 remote-login（$kb KB）"
+          Write-Host "::notice title=pack-contents::8 项齐全 / server.js 含 remote-login（$kb KB）"
 
       - name: 产物清单（匿名可读）
         shell: pwsh

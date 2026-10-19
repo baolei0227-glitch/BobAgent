@@ -33,9 +33,20 @@ asar: false
 #   - server.js 已被换成自定义入口（含 /remote-login）
 #   - 已补 assets/skills 与运行时脚本
 # 若直接指 .next/standalone 原样，server.js 会是 Next 的原生 wrapper（工单 W-4）。
+#
+# ⚠️ `.next/static` 与 `public` **不在** standalone 目录里（Next 只把服务端产物放那儿），
+#    必须单独挂进来。漏了它们不会报错，只会表现为「窗口打开一片空白 / JS 全 404」——
+#    第二次构建就是漏了这两条，靠「打包内容断言」里的 static chunks 检查才当场发现的。
 extraResources:
   - from: .next/standalone
     to: next-standalone
+  - from: .next/static
+    to: next-standalone/.next/static
+  - from: public
+    to: next-standalone/public
+  # 内置头像：与 mac 侧 build-electron.sh 的 Resources/avatars 布局对齐
+  - from: assets/avatars
+    to: avatars
 
 win:
   target:
