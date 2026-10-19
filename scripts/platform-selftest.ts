@@ -27,7 +27,7 @@ import {
   PLATFORM,
   isPidAlive,
   listListeningPidsSync,
-  processParentPidAsync,
+  queryParentPidDetailedAsync,
   resolvePowershell,
   systemExe,
   terminatePid,
@@ -142,12 +142,16 @@ async function probeLivenessAndKill() {
 // ==================== ③ 父 pid（Windows 走 CIM + PowerShell 编码命令） ====================
 
 async function probeParentPid() {
-  const ppid = await processParentPidAsync(process.pid);
-  record(
-    `父 pid 查询（应为 ${process.ppid}）`,
-    ppid === process.ppid,
-    ppid === null ? '查询失败（Windows 上通常是 PowerShell 通路问题）' : `实得 ${ppid}`,
-  );
+  const probe = await queryParentPidDetailedAsync(process.pid);
+  // 三态分开报（见 process.ts 的 ParentPidProbe 注释）：通道坏了 vs 进程查不到，
+  // 处置完全相反。只报「查询失败」等于把这两种情况都埋进「偶发」。
+  const detail =
+    probe.error !== null
+      ? `通道失败（尝试 ${probe.attempts} 次）：${probe.error}`
+      : probe.pid === null
+        ? `通道正常但查不到自身 pid ${process.pid}（CIM 未收录 / 进程刚退出）`
+        : `实得 ${probe.pid}（尝试 ${probe.attempts} 次）`;
+  record(`父 pid 查询（应为 ${process.ppid}）`, probe.pid === process.ppid, detail);
 }
 
 // ==================== ④ 平台专有可执行文件 ====================

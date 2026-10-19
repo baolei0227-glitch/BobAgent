@@ -9,9 +9,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  PS_EXIT_NOT_FOUND,
   cimCommandLineQueryScript,
+  cimParentPidScript,
+  describeExecFailure,
   encodePowershell,
   filterCimByCommandLine,
+  interpretPidQuery,
+  isRetryableExecFailure,
   parseCimProcessJson,
   parseListeningPids,
   parseLsofCwdPids,
@@ -20,6 +25,7 @@ import {
   parsePsByCommandPrefix,
   parseSinglePid,
   systemExe,
+  withParentPidRetry,
 } from './process';
 
 describe('lsof 输出解析', () => {
@@ -177,5 +183,171 @@ describe('命令构造', () => {
 
   it('查询脚本对单引号做 PowerShell 转义', () => {
     expect(cimCommandLineQueryScript("a'b")).toContain("'*a''b*'");
+  });
+
+  // 这条脚本是「CI 红灯无法归因」的根因所在：早期版本用 SilentlyContinue 把 WMI 报错
+  // 吞成空输出，与「进程不存在」不可区分。下面三条断言锁住修复后的三个契约。
+  it('ppid 脚本不再 SilentlyContinue（否则错误与空结果不可区分）', () => {
+    expect(cimParentPidScript(9480)).not.toContain('SilentlyContinue');
+    expect(cimParentPidScript(9480)).toContain("-ErrorAction Stop");
+  });
+
+  it('ppid 脚本用专用退出码表示「进程不存在」', () => {
+    expect(cimParentPidScript(9480)).toContain(`exit ${PS_EXIT_NOT_FOUND}`);
+  });
+
+  it('ppid 脚本把 WMI 报错写进 stderr（Node 侧才能读到原文）', () => {
+    const s = cimParentPidScript(9480);
+    expect(s).toContain('[Console]::Error.WriteLine');
+    expect(s).toContain('ProcessId=9480');
+  });
+});
+
+// 真机上「父 pid 查询偶发失败」的根因无法在 mac 上复现，但**重试判据**必须能单测：
+// 只有通道失败（error !== null）才重试；「进程不在了」重试没有意义。
+// 这段是本次「CI 红灯无法归因」的根因修复：退出码必须先被翻译成三态，
+// 否则「进程不存在」与「WMI 拒绝访问」在 Node 侧长得一模一样。
+describe('ppid 查询结果翻译（退出码 → 三态）', () => {
+  it('专用「不存在」退出码 = 合法结论（不是通道故障，不重试）', () => {
+    const r = interpretPidQuery({ code: PS_EXIT_NOT_FOUND }, '', '', [PS_EXIT_NOT_FOUND]);
+    expect(r).toEqual({ pid: null, error: null });
+  });
+
+  it('POSIX 的 ps 用退出码 1 表示进程已退出', () => {
+    expect(interpretPidQuery({ code: 1 }, '', '', [1])).toEqual({ pid: null, error: null });
+  });
+
+  it('别的非零退出码 = 通道故障，且正文要带上 stderr', () => {
+    const r = interpretPidQuery({ code: 1 }, '', 'CIMERR: Access denied', [PS_EXIT_NOT_FOUND]);
+    expect(r.pid).toBeNull();
+    expect(r.error).toContain('Access denied');
+  });
+
+  it('退出码 0 但输出不是数字：按通道故障处理（不能当成「进程不在」）', () => {
+    const r = interpretPidQuery(null, 'garbage', '', [PS_EXIT_NOT_FOUND]);
+    expect(r.pid).toBeNull();
+    expect(r.error).toContain('输出无法解析为 pid');
+  });
+
+  it('退出码 0 + 正常数字 = 成功', () => {
+    expect(interpretPidQuery(null, '  9480', '', [PS_EXIT_NOT_FOUND])).toEqual({ pid: 9480, error: null });
+  });
+
+  it('spawn 层的字符串 code 不可重试（确定性失败），数字退出码可重试', () => {
+    expect(isRetryableExecFailure({ code: 'ENOENT' })).toBe(false);
+    expect(isRetryableExecFailure({ code: 'EPERM' })).toBe(false);
+    expect(isRetryableExecFailure({ code: 1 })).toBe(true);
+    expect(isRetryableExecFailure({ killed: true })).toBe(true);
+  });
+});
+
+describe('父 pid 探测重试', () => {
+  const noSleep = () => Promise.resolve();
+
+  it('通道失败后重试成功：attempts 记录第几次成功', async () => {
+    let n = 0;
+    const r = await withParentPidRetry(
+      async () => {
+        n += 1;
+        return n === 1 ? { pid: null, error: 'code=ENOENT' } : { pid: 42, error: null };
+      },
+      { sleep: noSleep },
+    );
+    expect(r).toEqual({ pid: 42, error: null, attempts: 2 });
+  });
+
+  it('「进程确实不在了」不重试（否则每次启动都被拖慢 N 倍）', async () => {
+    let n = 0;
+    const r = await withParentPidRetry(
+      async () => {
+        n += 1;
+        return { pid: null, error: null };
+      },
+      { sleep: noSleep },
+    );
+    expect(r).toEqual({ pid: null, error: null, attempts: 1 });
+    expect(n).toBe(1);
+  });
+
+  it('全部失败时保留最后一次原因，且不超过上限次数', async () => {
+    const errors: string[] = [];
+    let n = 0;
+    const r = await withParentPidRetry(
+      async () => {
+        n += 1;
+        const error = `第 ${n} 次失败`;
+        errors.push(error);
+        return { pid: null, error };
+      },
+      { sleep: noSleep },
+    );
+    expect(n).toBe(3);
+    expect(r.attempts).toBe(3);
+    expect(r.error).toBe('第 3 次失败');
+    expect(errors).toHaveLength(3);
+  });
+
+  it('反例：成功路径一次 sleep 都不该发生', async () => {
+    const sleeps: number[] = [];
+    await withParentPidRetry(async () => ({ pid: 7, error: null }), {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(sleeps).toEqual([]);
+  });
+
+  it('退避次数 = 失败次数 - 1（3 次尝试只睡 2 次）', async () => {
+    const sleeps: number[] = [];
+    await withParentPidRetry(async () => ({ pid: null, error: 'boom' }), {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(sleeps).toEqual([200, 500]);
+  });
+
+  it('标记为不可重试的失败只尝试一次（确定性失败重试只会让启动变慢）', async () => {
+    const sleeps: number[] = [];
+    let n = 0;
+    const r = await withParentPidRetry(
+      async () => {
+        n += 1;
+        return { pid: null, error: 'code=ENOENT', retryable: false };
+      },
+      {
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+    expect(n).toBe(1);
+    expect(r.attempts).toBe(1);
+    expect(r.error).toBe('code=ENOENT');
+    expect(sleeps).toEqual([]);
+  });
+});
+
+describe('execFile 失败原因', () => {
+  it('超时被杀要说「超时」，不能说成 spawn 失败', () => {
+    expect(describeExecFailure({ killed: true, signal: 'SIGTERM' })).toBe('超时被杀（signal=SIGTERM）');
+  });
+
+  it('stderr 原文优先于 message（PowerShell 的报错在 stderr 里）', () => {
+    const s = describeExecFailure(
+      { code: '1', message: 'Command failed: powershell.exe -EncodedCommand AAAA…' },
+      'Get-CimInstance : 拒绝访问\r\n',
+    );
+    expect(s).toContain('code=1');
+    expect(s).toContain('拒绝访问');
+    expect(s).not.toContain('EncodedCommand');
+  });
+
+  it('没有 stderr 时退回 code（ENOENT = 机器上根本没有 PowerShell）', () => {
+    expect(describeExecFailure({ code: 'ENOENT' })).toBe('code=ENOENT');
+  });
+
+  it('超长 stderr 截断，避免一条 annotation 被撑爆', () => {
+    expect(describeExecFailure({ code: '1' }, 'x'.repeat(2000)).length).toBeLessThanOrEqual(330);
   });
 });

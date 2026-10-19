@@ -122,8 +122,15 @@ jobs:
           }
           # 成功也要留可读证据：「绿了」不等于「跑了几条」。把汇总行打进 annotation，
           # 否则匿名侧只能看到一个绿勾，无法确认断言数量没缩水（少跑了文件也会是绿的）。
+          #
+          # ⚠️ 模式必须行首锚定 + -CaseSensitive。上一版写的是 'Test Files\s+\d+|Tests\s+\d+'，
+          # PowerShell 的 Select-String 默认**大小写不敏感**，于是 Duration 行里的
+          # `tests 75ms` 也被抓进来，汇总变成 "Duration 1.02s (transform 382ms, …)" —— 
+          # 一条看起来成功、实际上什么都没证明的噪声。
           $sum = (Get-Content vitest.log -Encoding UTF8 |
-                  Select-String -Pattern 'Test Files\s+\d+|Tests\s+\d+') -join ' / '
+                  Select-String -Pattern '^\s*(Test Files|Tests)\s+\d+' -CaseSensitive |
+                  ForEach-Object { ($_.Line -replace '\s+', ' ').Trim() }) -join ' / '
+          if (-not $sum) { $sum = '(未抓到汇总行 —— 断言条数无法确认，按缺陷处理)' }
           Write-Host "::notice title=vitest-summary::$sum"
 
       # 闸门 2：真机断言 —— 本工作流的核心。失败即为真缺陷，必须修代码而不是改断言。
@@ -132,8 +139,12 @@ jobs:
         run: |
           pnpm exec tsx scripts/platform-selftest.ts 2>&1 | Tee-Object -FilePath selftest.log
           if ($LASTEXITCODE -ne 0) {
-            $t = (Get-Content selftest.log -Encoding UTF8 | Select-String -Pattern 'FAIL' | Select-Object -First 10) -join ' | '
-            Write-Host "::error title=selftest::$($t)"
+            # 每条 FAIL 行都要带「为什么不成立」——只报「查询失败」的断言与没有断言等价：
+            # 它只会教会人忽略红灯。所以 detail 由 selftest 自己产出（含尝试次数与原始 stderr）。
+            $fails = Get-Content selftest.log -Encoding UTF8 | Select-String -Pattern '\[FAIL\]'
+            $t = (($fails | Select-Object -First 10) | ForEach-Object { $_.Line.Trim() }) -join ' | '
+            if ($t.Length -gt 3500) { $t = $t.Substring(0, 3500) + ' …(截断)' }
+            Write-Host "::error title=selftest::$t"
             exit 1
           }
 

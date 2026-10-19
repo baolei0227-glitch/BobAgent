@@ -23,6 +23,7 @@
 
 import { execFile, spawnSync } from 'node:child_process';
 import * as path from 'node:path';
+import { resolvePowershell } from './binaries';
 import { IS_WIN, PLATFORM, type PlatformId } from './runtime';
 
 // ==================== 纯解析器（可在任意平台单测） ====================
@@ -195,10 +196,28 @@ export function cimCommandLineQueryScript(needle: string): string {
   );
 }
 
+/**
+ * 「进程不存在」的专用退出码。
+ *
+ * 为什么需要它：上一版脚本是
+ * `$ErrorActionPreference='SilentlyContinue'; (Get-CimInstance …).ParentProcessId`
+ * —— 这条写法把**两种完全不同的情况压成同一个空 stdout**：
+ *   ① 进程确实不存在（查不到 → $null → 不打印）；
+ *   ② WMI 查询本身失败（SilentlyContinue 把 Access denied / RPC 不可用吞掉 → 也不打印）。
+ * Node 侧只看到空串，无法判断该「当作进程已退出」还是「通道坏了要重试」，
+ * 于是只能报一句「查询失败」——这正是 CI 上那条无法归因的红灯。
+ *
+ * 现在改成：**错误走 stderr + 非零退出码**，进程不存在用专用码 3 显式区分。
+ */
+export const PS_EXIT_NOT_FOUND = 3;
+
 export function cimParentPidScript(pid: number): string {
   return (
-    "$ErrorActionPreference='SilentlyContinue';" +
-    `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').ParentProcessId`
+    "$ErrorActionPreference='Stop';" +
+    `try { $p = Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}' -ErrorAction Stop }` +
+    " catch { [Console]::Error.WriteLine('CIMERR: ' + $_.Exception.Message); exit 1 };" +
+    `if ($null -eq $p) { exit ${PS_EXIT_NOT_FOUND} };` +
+    '$p.ParentProcessId'
   );
 }
 
@@ -312,34 +331,172 @@ export function terminatePid(pid: number, opts: { force?: boolean; tree?: boolea
 }
 
 /**
- * 取父 pid（异步；失败 null）
+ * 父 pid 探测结果。
+ *
+ * **为什么要区分三态**（不是简单的 `number | null`）：`pid === null` 有两种截然不同的含义，
+ * 混在一起会让故障永远无法归因 ——
+ *   - `error === null && pid === null` → 查询通道是好的，**进程确实不在了**（正常情况，别重试）；
+ *   - `error !== null`                 → 通道坏了（PowerShell 超时/非零退出、ps 缺失），
+ *                                        **探测结论不可信**，值得重试并必须留下原因。
+ * 只有分成三态，CI 报红时才可能一眼看出该修哪边，而不是在「偶发」里打转。
+ */
+export interface ParentPidProbe {
+  pid: number | null;
+  /** null = 通道正常；非 null = 通道失败的可读原因（诊断专用，不参与业务判定） */
+  error: string | null;
+  attempts: number;
+}
+
+/** 通道失败时的重试次数与退避（只在 `error !== null` 时退避；「进程不在」不重试） */
+const PARENT_PID_ATTEMPTS = 3;
+const PARENT_PID_BACKOFF_MS = [200, 500];
+const PARENT_PID_TIMEOUT_MS = 6000;
+
+/**
+ * `execFile` 失败 → 一句话可读原因。
+ *
+ * ⚠️ 不要只回 `err.message`：Windows 上 PowerShell 非零退出时 message 是
+ * `Command failed: …` 后面跟着整条命令行（base64 巨长一串），既看不懂又淹没日志。
+ * 真正的信息在 `stderr`（PowerShell 的报错原文）与 `err.code`（ENOENT / EACCES / 退出码）。
+ *
+ * `err.code` 的类型是 `string | number | null`：**字符串** = Node 侧的 spawn 失败码
+ * （ENOENT/EPERM），**数字** = 子进程自己的退出码。这两种的含义完全不同，不能混。
+ */
+export function describeExecFailure(
+  err: { code?: string | number | null; errno?: number; killed?: boolean; signal?: string; message?: string },
+  stderr = '',
+): string {
+  if (err.killed) return `超时被杀（signal=${err.signal ?? 'n/a'}）`;
+  const parts: string[] = [];
+  if (err.code !== undefined && err.code !== null) parts.push(`code=${err.code}`);
+  const se = String(stderr || '').replace(/\s+/g, ' ').trim();
+  if (se) parts.push(`stderr=${se.slice(0, 300)}`);
+  if (parts.length === 0) parts.push(String(err.message || '未知错误').slice(0, 300));
+  return parts.join(' ');
+}
+
+/**
+ * 这次失败值不值得重试。
+ *
+ * 判据是**失败发生的层次**，不是「失败了就重试」：
+ *   - `code` 是字符串（ENOENT / EPERM / EACCES）→ 二进制不存在或没权限，
+ *     **确定性失败**，重试 3 次只会让启动慢 700ms 并刷三倍日志；
+ *   - `killed` → 超时，机器当时忙，第二次大概率能过；
+ *   - 数字退出码 → 子进程跑起来后自己失败（WMI 临时不可用 / RPC 忙），值得再试。
+ */
+export function isRetryableExecFailure(err: { code?: string | number | null; killed?: boolean }): boolean {
+  if (err.killed) return true;
+  if (typeof err.code === 'string') return false;
+  return true;
+}
+
+/** 单次探测的结论；`retryable` 只影响是否再试，不影响对外的三态语义 */
+interface PidAttempt {
+  pid: number | null;
+  error: string | null;
+  retryable?: boolean;
+}
+
+/**
+ * 带重试的父 pid 探测（纯逻辑，可单测）。
+ *
+ * 重试判据只认 `error !== null && retryable !== false`：
+ *   - 「进程确实不在了」（error 为 null）再问一次答案不会变，重试纯属浪费；
+ *   - spawn 层的确定性失败（ENOENT/EPERM）重试也不会变；
+ *   - 超时、WMI 临时故障才值得再试。
+ */
+export async function withParentPidRetry(
+  attempt: (n: number) => Promise<PidAttempt>,
+  opts: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<ParentPidProbe> {
+  const attempts = Math.max(1, opts.attempts ?? PARENT_PID_ATTEMPTS);
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let last: PidAttempt = { pid: null, error: '未尝试' };
+  for (let i = 1; i <= attempts; i += 1) {
+    last = await attempt(i);
+    if (last.error === null) return { pid: last.pid, error: null, attempts: i };
+    if (last.retryable === false || i >= attempts) {
+      return { pid: null, error: last.error, attempts: i };
+    }
+    await sleep(PARENT_PID_BACKOFF_MS[Math.min(i - 1, PARENT_PID_BACKOFF_MS.length - 1)]);
+  }
+  return { pid: null, error: last.error, attempts };
+}
+
+/**
+ * 把一次「问 ppid」的原始结果翻成三态。
+ *
+ * `notFoundExitCodes` 是**这个平台用来表示「没有这个进程」的退出码**：
+ *   - Windows：`PS_EXIT_NOT_FOUND`（我们自己的脚本显式 exit 3）
+ *   - POSIX：1（`ps -p <已退出的 pid>` 输出空、退出码 1）
+ * 命中它就返回 `{pid:null, error:null}` —— 这是**合法结论**，不是通道故障。
+ */
+export function interpretPidQuery(
+  err: { code?: string | number | null; killed?: boolean; signal?: string; message?: string } | null,
+  stdout: string,
+  stderr: string,
+  notFoundExitCodes: readonly number[],
+): PidAttempt {
+  if (err) {
+    const code = typeof err.code === 'number' ? err.code : null;
+    if (code !== null && notFoundExitCodes.includes(code)) return { pid: null, error: null };
+    return {
+      pid: null,
+      error: describeExecFailure(err, stderr),
+      retryable: isRetryableExecFailure(err),
+    };
+  }
+  const pid = parseSinglePid(String(stdout || ''));
+  if (pid === null) {
+    // 退出码 0 却拿不到数字：既不是「进程不在」（那有专用码），也不是可解释的空输出
+    return { pid: null, error: `输出无法解析为 pid：${JSON.stringify(String(stdout || '').slice(0, 120))}` };
+  }
+  return { pid, error: null };
+}
+
+/**
+ * 取父 pid（**带诊断**；供真机断言与排查用）
  *
  * ⚠️ 必须**永不 reject**：调用方是陈旧进程回收路径，一次 reject 就会让整个回收流程中断，
  * 而回收失败的表现只是「下一轮启动端口被占」。`execFile` 在 spawn 阶段失败（如 EPERM、
- * 沙盒拦截、PATH 里没有 ps）时**可能同步抛**，这里统一兜成 null。
+ * 沙盒拦截、PATH 里没有 ps）时**可能同步抛**，这里统一兜成 error 字符串。
  */
-export function processParentPidAsync(pid: number): Promise<number | null> {
-  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(null);
-  return new Promise((resolve) => {
+export async function queryParentPidDetailedAsync(pid: number): Promise<ParentPidProbe> {
+  if (!Number.isInteger(pid) || pid <= 0) return { pid: null, error: `非法 pid（${pid}）`, attempts: 0 };
+
+  return withParentPidRetry(async () => {
     try {
-      if (IS_WIN) {
-        const script = encodePowershell(cimParentPidScript(pid));
-        execFile(
-          systemExe('WindowsPowerShell\\v1.0\\powershell.exe'),
-          ['-NoProfile', '-NonInteractive', '-EncodedCommand', script],
-          { timeout: 6000 },
-          (err, stdout) => resolve(err ? null : parseSinglePid(String(stdout || ''))),
-        );
-        return;
-      }
-      // `ps` 用全路径：与 /usr/sbin/lsof 同理（GUI 进程 PATH 不完整），也避免依赖 PATH 解析
-      execFile('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 2000 }, (err, stdout) => {
-        resolve(err ? null : parseSinglePid(String(stdout || '')));
+      return await new Promise<PidAttempt>((resolve) => {
+        if (IS_WIN) {
+          const script = encodePowershell(cimParentPidScript(pid));
+          // 走 resolvePowershell()（含 Sysnative 回退），而不是硬编码 System32：
+          // 32 位进程在 64 位系统上访问 System32 会被 WOW64 重定向。
+          const exe = resolvePowershell() ?? systemExe('WindowsPowerShell\\v1.0\\powershell.exe');
+          execFile(
+            exe,
+            ['-NoProfile', '-NonInteractive', '-EncodedCommand', script],
+            { timeout: PARENT_PID_TIMEOUT_MS, windowsHide: true },
+            (err, stdout, stderr) => {
+              resolve(interpretPidQuery(err, String(stdout || ''), String(stderr || ''), [PS_EXIT_NOT_FOUND]));
+            },
+          );
+          return;
+        }
+        // `ps` 用全路径：与 /usr/sbin/lsof 同理（GUI 进程 PATH 不完整），也避免依赖 PATH 解析
+        execFile('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 2000 }, (err, stdout, stderr) => {
+          resolve(interpretPidQuery(err, String(stdout || ''), String(stderr || ''), [1]));
+        });
       });
-    } catch {
-      resolve(null);
+    } catch (e) {
+      // spawn 阶段同步抛（EPERM/ENOENT）：确定性失败，别重试
+      return { pid: null, error: `spawn 阶段抛错：${(e as Error).message}`, retryable: false };
     }
   });
+}
+
+/** 取父 pid（异步；失败 null）。业务调用方用这个，需要归因时用 `queryParentPidDetailedAsync` */
+export async function processParentPidAsync(pid: number): Promise<number | null> {
+  return (await queryParentPidDetailedAsync(pid)).pid;
 }
 
 /**

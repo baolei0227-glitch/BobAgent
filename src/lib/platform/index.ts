@@ -46,9 +46,16 @@ export {
   isPidAlive,
   terminatePid,
   processParentPidAsync,
+  queryParentPidDetailedAsync,
+  withParentPidRetry,
+  describeExecFailure,
+  interpretPidQuery,
+  isRetryableExecFailure,
+  PS_EXIT_NOT_FOUND,
   isReapableStale,
   listStaleServerPidsSync,
   type CimProcess,
+  type ParentPidProbe,
 } from './process';
 
 export {
