@@ -1,0 +1,53 @@
+# electron-builder.win.yml —— Windows 打包配置（测试版）
+#
+# 为什么不复用 package.json 里的 `build` 段：
+#   `build` 段是 mac/Windows 共用的，而测试版需要两处 Windows 专属的取舍
+#   （asar 关掉以便逐项断言、extraResources 只取整理后的 standalone）。
+#   写在单独文件里，`-c.xxx=false` 这类「字符串变布尔」的 CLI 覆盖就完全不需要了
+#   —— electron-builder 对 CLI 传入的 `"false"` 是否会当布尔处理并不保证，
+#   一旦被当成真值，asar 会悄悄开着，而断言脚本会因此查不到东西。
+#
+# 用法：pnpm exec electron-builder --config electron-builder.win.yml --win nsis --x64 --publish never
+
+appId: com.bobwork.app
+productName: BobWork
+
+directories:
+  output: release
+
+# 主进程是 tsup 的打包产物（electron/dist/main.js），但它里面**仍有外部 require**：
+#   require("electron-updater") / require("adm-zip")
+# 因为 tsup 默认把 package.json 的 dependencies 视为 external。
+# 这些由 electron-builder 按 dependencies 自动收进包，所以这里只列我们自己的产物目录。
+files:
+  - electron/dist/**/*
+  - package.json
+
+# ⚠️ 测试版刻意不打包进 asar：
+#   asar 里的内容只能靠二次工具打开，而「装完双击没反应」最常见的根因就是
+#   某个运行时依赖没进包。关掉之后 CI 能逐项断言 resources/app 的真实内容，
+#   用户排查问题时也能直接看到文件。
+asar: false
+
+# 只取 stage-standalone.mjs 整理过的产物：
+#   - server.js 已被换成自定义入口（含 /remote-login）
+#   - 已补 assets/skills 与运行时脚本
+# 若直接指 .next/standalone 原样，server.js 会是 Next 的原生 wrapper（工单 W-4）。
+extraResources:
+  - from: .next/standalone
+    to: next-standalone
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  # 未签名：Windows SmartScreen 会拦一次（更多信息 → 仍要运行）。
+  # 测试版不引入自签证书，避免把「证书装没装」混进「应用能不能跑」的判断里。

@@ -1,0 +1,186 @@
+/**
+ * scripts/stage-standalone.mjs — 把 `.next/standalone` 整理成「可打包」形态
+ *
+ * 为什么需要这一步（三个都是会被打成包、但打包前必须动的内容）：
+ *
+ *   1. **server.js 必须换成自定义入口**（工单 W-4）。`next build` 生成的是原生
+ *      standalone wrapper（只 startServer），而 `electron/main.ts` 启动的正是
+ *      `resourcesPath/next-standalone/server.js`。不换 ⇒ /remote-login、远程访问
+ *      Token 网关、CalDAV 的 PROPFIND/REPORT/MKCOL 全部静默失效，日志里没有一句异常。
+ *      以前只有 package-release.sh 做这件事，build:desktop 漏了，Windows 侧同样会漏。
+ *
+ *   2. **Next 16 的 standalone 可能落在子目录**（`<tracingRoot>/<项目目录名>/server.js`）。
+ *      build-electron.sh 里硬编码了 `projects` 这个名字 —— 那是**本机目录名**，
+ *      CI 上 checkout 目录叫 `BobAgent`，硬编码必然落空，且落空的形式是
+ *      「找不到 server.js」，而不是报错说名字不对。这里改成按内容探测。
+ *
+ *   3. **不是 import 进来的运行时资源要显式拷**：内置技能（`assets/skills`）与
+ *      Python 脚本（PDF 提取 / OOXML 修订 / 包清理）都不在 Next 的依赖图里。
+ *
+ * 只做「整理」，不删东西：删减交给 electron-builder 与后续瘦身，避免这一步变成
+ * 又一处「删多了没人发现」的地方。
+ */
+
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const STANDALONE = path.join(ROOT, '.next', 'standalone');
+
+const log = (m) => console.log(`[stage] ${m}`);
+const fail = (m) => {
+  console.error(`[stage] ❌ ${m}`);
+  process.exit(1);
+};
+
+const exists = (p) => {
+  try {
+    fs.accessSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** 把 symlink 目标里的 `<child>/` 段去掉并少退一层（与 build-electron.sh 的 sed 等价） */
+function repairSymlinksUnder(nodeModulesDir, childName) {
+  if (!exists(nodeModulesDir)) return 0;
+  let fixed = 0;
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, ent.name);
+      if (ent.isSymbolicLink()) {
+        const target = fs.readlinkSync(p);
+        const needle = `../${childName}/`;
+        if (target.includes(needle)) {
+          const next = target.replace(needle, '');
+          fs.unlinkSync(p);
+          try {
+            fs.symlinkSync(next, p);
+            fixed += 1;
+          } catch (e) {
+            log(`⚠️ 重写符号链接失败（${p}）：${e.message}`);
+          }
+        }
+      } else if (ent.isDirectory()) {
+        walk(p);
+      }
+    }
+  };
+  walk(nodeModulesDir);
+  return fixed;
+}
+
+/**
+ * 把 standalone 子目录提升一层。
+ * 只用 fs.cpSync 的 verbatimSymlinks 保留相对符号链接，再按需重写退级。
+ */
+function hoist(childName) {
+  const from = path.join(STANDALONE, childName);
+  log(`standalone 落在子目录 "${childName}"，提升一层…`);
+  for (const ent of fs.readdirSync(from)) {
+    const src = path.join(from, ent);
+    const dst = path.join(STANDALONE, ent);
+    if (exists(dst)) {
+      // 顶层已有同名项（Next 会放 package.json 之类）：保留已有，跳过
+      log(`  跳过已存在: ${ent}`);
+      continue;
+    }
+    fs.cpSync(src, dst, { recursive: true, verbatimSymlinks: true });
+  }
+  const fixed = repairSymlinksUnder(path.join(STANDALONE, '.next', 'node_modules'), childName);
+  if (fixed) log(`  修复符号链接 ${fixed} 个`);
+  fs.rmSync(from, { recursive: true, force: true });
+}
+
+function resolveStandalone() {
+  if (!exists(STANDALONE)) fail(`找不到 ${STANDALONE} —— next build 是否用了 output:'standalone'？`);
+  if (exists(path.join(STANDALONE, 'server.js'))) return;
+  const children = fs
+    .readdirSync(STANDALONE, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && exists(path.join(STANDALONE, e.name, 'server.js')))
+    .map((e) => e.name);
+  if (children.length === 0) fail('standalone 里找不到任何 server.js');
+  if (children.length > 1) fail(`standalone 里有多份 server.js（${children.join(', ')}），无法判断该用哪份`);
+  hoist(children[0]);
+}
+
+function copySkills() {
+  const src = path.join(ROOT, 'assets', 'skills');
+  if (!exists(src)) {
+    log('⚠️ assets/skills 不存在，技能功能将不可用');
+    return;
+  }
+  const dst = path.join(STANDALONE, 'assets', 'skills');
+  fs.cpSync(src, dst, { recursive: true });
+  log(`已拷入 assets/skills（${fs.readdirSync(dst).length} 项）`);
+}
+
+/** 运行时才被调用的脚本：不在依赖图里，必须显式拷到 next-standalone/scripts/ */
+const RUNTIME_SCRIPTS = [
+  'src/lib/pdf/core/pdf_extractor.py',
+  'src/lib/docx/ooxml-revise.py',
+  'src/lib/python/py-pkg-lifecycle.py',
+];
+
+function copyScripts() {
+  const dstDir = path.join(STANDALONE, 'scripts');
+  fs.mkdirSync(dstDir, { recursive: true });
+  const copied = [];
+  for (const rel of RUNTIME_SCRIPTS) {
+    const src = path.join(ROOT, rel);
+    if (!exists(src)) {
+      log(`⚠️ 缺脚本（跳过）：${rel}`);
+      continue;
+    }
+    fs.copyFileSync(src, path.join(dstDir, path.basename(rel)));
+    copied.push(path.basename(rel));
+  }
+  // 只报**我拷的**那几个。standalone/scripts 里本来就有 Next 追踪进来的一堆文件
+  // （.sh / .ts / .mjs），把整个目录列出来会让日志看起来像「拷进去 29 个」。
+  log(`已拷入运行时脚本：${copied.join(', ') || '(无)'}`);
+}
+
+function installCustomServer() {
+  const built = path.join(ROOT, 'dist', 'server.js');
+  if (!exists(built) || fs.statSync(built).size < 1024) {
+    fail(`自定义 server 产物缺失或过小：${built}（先跑 scripts/compile-desktop.mjs）`);
+  }
+  fs.mkdirSync(path.join(STANDALONE, 'dist'), { recursive: true });
+  fs.copyFileSync(built, path.join(STANDALONE, 'dist', 'server.js'));
+  fs.copyFileSync(built, path.join(STANDALONE, 'server.js'));
+
+  // 只断言「文件存在」没有意义：两份产物都存在，区别在内容。
+  // /remote-login 是自定义入口独有的字符串（next 生成的 wrapper 里没有）。
+  const text = fs.readFileSync(path.join(STANDALONE, 'server.js'), 'utf8');
+  if (!text.includes('remote-login')) {
+    fail('server.js 覆盖后仍不含 /remote-login —— 复制到了错误产物');
+  }
+  const kb = (fs.statSync(path.join(STANDALONE, 'server.js')).size / 1024).toFixed(1);
+  log(`✅ 自定义 server 就位（${kb} KB，含 /remote-login）`);
+}
+
+function report() {
+  const nm = path.join(STANDALONE, 'node_modules');
+  const native = [];
+  const walk = (dir, depth = 0) => {
+    if (depth > 6 || !exists(dir)) return;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, ent.name);
+      if (ent.isSymbolicLink()) continue; // 不跟随，避免环
+      if (ent.isDirectory()) walk(p, depth + 1);
+      else if (ent.name.endsWith('.node')) native.push(path.relative(STANDALONE, p));
+    }
+  };
+  walk(nm);
+  log(`standalone 原生模块 ${native.length} 个：${native.join(', ') || '(无)'}`);
+}
+
+resolveStandalone();
+installCustomServer();
+copySkills();
+copyScripts();
+report();
+log('完成');

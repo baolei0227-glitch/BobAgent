@@ -1,0 +1,207 @@
+# Windows 测试版安装包 —— 在真实 Windows x64 上构建 NSIS 安装包
+#
+# 为什么要在这里构建而不是在 mac 上交叉编译：
+#   `better-sqlite3` 是原生模块，且 `electron/main.ts` 用 Electron 自带的 Node 运行时
+#   （ELECTRON_RUN_AS_NODE）启动 Next 服务 ⇒ 这份 .node 必须按 **Electron + win32-x64** 的
+#   ABI 编出来。mac 上做不到（没有 MSVC），拿 wine 糊也只会得到「装完启动即崩」的包。
+#   所以构建必须发生在真正的 Windows 上。这里用 windows-latest（真机，不是模拟层）。
+#
+# 与 windows-smoke.yml 的分工：
+#   - windows-smoke  = 断言（进程模型 / 命令守卫 / 单测），快，每次改动都跑
+#   - windows-build  = 出货（安装包），慢（next build + 原生编译），只在需要时跑
+#
+# 手动触发：Actions → Windows Installer → Run workflow
+# 或 push 到 ci/win-installer 分支。
+
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/win-installer'
+
+concurrency:
+  group: windows-installer
+  cancel-in-progress: true
+
+jobs:
+  build-installer:
+    name: windows-latest / nsis x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v5
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      # ⚠️ 不能带 --ignore-scripts：
+      #   - electron 的 postinstall 负责下载 electron.exe（没有它 electron-builder 无法打包）
+      #   - better-sqlite3 的 postinstall 负责取/编译原生绑定
+      # windows-smoke 里之所以能带，是因为它只跑解析器单测，不需要这些。
+      - name: 安装依赖（需要 postinstall）
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | Tee-Object -FilePath install.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content install.log -Tail 40 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+            Write-Host "::error title=pnpm-install::$tail"
+            exit 1
+          }
+
+      - name: 编译主进程 / preload / 自定义 server
+        shell: pwsh
+        run: |
+          node scripts/compile-desktop.mjs 2>&1 | Tee-Object -FilePath compile.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content compile.log -Tail 30 -Encoding UTF8) -join ' | '
+            Write-Host "::error title=compile-desktop::$tail"
+            exit 1
+          }
+
+      # 堆给 8192：`next build` 的 TS 阶段是全量类型检查，2048 会在
+      # `Running TypeScript ...` 阶段 V8 abort（编译阶段早已 ✓，极易误判成代码问题）。
+      # 直接调 node_modules 里的入口，不用 npx（npx 在 .bin 缺失时会联网取任意版本）。
+      - name: next build（standalone）
+        shell: pwsh
+        run: |
+          $env:NEXT_DISABLE_TURBOPACK = '1'
+          $env:NODE_OPTIONS = '--max-old-space-size=8192'
+          node node_modules/next/dist/bin/next build 2>&1 | Tee-Object -FilePath nextbuild.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content nextbuild.log -Tail 40 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+            Write-Host "::error title=next-build::$tail"
+            exit 1
+          }
+
+      # 整理 standalone：换自定义 server（W-4）、提升子目录、补 skills 与运行时脚本
+      - name: 整理 standalone（含 server.js 覆盖断言）
+        shell: pwsh
+        run: |
+          node scripts/stage-standalone.mjs 2>&1 | Tee-Object -FilePath stage.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content stage.log -Tail 25 -Encoding UTF8) -join ' | '
+            Write-Host "::error title=stage-standalone::$tail"
+            exit 1
+          }
+          # 正向证据也要能看见：绿了不等于内容对
+          $native = (Get-Content stage.log -Encoding UTF8 | Select-String -Pattern '原生模块') -join ' '
+          Write-Host "::notice title=stage::$native"
+
+      # 把 standalone 里的原生模块重建到 Electron ABI，并用 Electron 自己加载一次做断言。
+      # 不做这一步的症状：装完启动即崩（NODE_MODULE_VERSION 不匹配），而主进程只显示「server 退出」。
+      - name: 原生模块重建到 Electron ABI（含真机加载断言）
+        shell: pwsh
+        run: |
+          node scripts/rebuild-standalone-native.mjs 2>&1 | Tee-Object -FilePath native.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content native.log -Tail 30 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+            Write-Host "::error title=electron-abi::$tail"
+            exit 1
+          }
+          $ok = (Get-Content native.log -Encoding UTF8 | Select-String -Pattern '✓ .*modversion') -join ' / '
+          Write-Host "::notice title=native-abi::$ok"
+
+      - name: 打包 NSIS 安装包
+        shell: pwsh
+        run: |
+          if (-not (Test-Path node_modules/.bin/electron-builder.cmd)) {
+            Write-Host "::error title=electron-builder::node_modules 里没有 electron-builder（依赖没装全）"
+            exit 1
+          }
+          # --publish never：package.json / 本配置里若有 publish，不加这个参数
+          # electron-builder 会尝试上传，失败又容易被误读成打包失败。
+          # --config 指向 Windows 专属配置（asar:false + 只收整理过的 standalone），
+          # 说明见 electron-builder.win.yml 顶部。
+          pnpm exec electron-builder --config electron-builder.win.yml --win nsis --x64 --publish never 2>&1 | Tee-Object -FilePath builder.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content builder.log -Tail 40 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+            Write-Host "::error title=electron-builder::$tail"
+            exit 1
+          }
+
+      # 出货前的内容断言。每一条都对应一个「装了但打不开」的已知死法：
+      #   - 缺 server.js 的自定义入口 ⇒ 远程访问/CalDAV 静默失效
+      #   - 缺 electron-updater / adm-zip ⇒ 主进程 require 抛错，双击图标直接没反应
+      - name: 打包内容断言
+        shell: pwsh
+        run: |
+          $app = 'release/win-unpacked/resources/app'
+          $ns  = 'release/win-unpacked/resources/next-standalone'
+          $checks = @(
+            @{ n = '主进程 main.js';        p = "$app/electron/dist/main.js" },
+            @{ n = 'preload.js';            p = "$app/electron/dist/preload.js" },
+            @{ n = 'electron-updater';      p = "$app/node_modules/electron-updater/package.json" },
+            @{ n = 'adm-zip';               p = "$app/node_modules/adm-zip/package.json" },
+            @{ n = 'next server.js';        p = "$ns/server.js" },
+            @{ n = 'static chunks';         p = "$ns/.next/static/chunks" }
+          )
+          $bad = @()
+          foreach ($c in $checks) {
+            if (-not (Test-Path $c.p)) { $bad += $c.n; Write-Host "  [MISSING] $($c.n) -> $($c.p)" }
+            else { Write-Host "  [OK] $($c.n)" }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host "::error title=pack-contents::缺少 $($bad -join ', ') —— 装出去会启动失败或功能静默缺失"
+            exit 1
+          }
+          # server.js 必须是自定义入口（原生 wrapper 里没有 /remote-login）
+          if (-not (Select-String -Path "$ns/server.js" -Pattern 'remote-login' -Quiet)) {
+            Write-Host "::error title=pack-contents::server.js 不是自定义入口（不含 /remote-login）"
+            exit 1
+          }
+          $kb = [Math]::Round((Get-Item "$ns/server.js").Length / 1KB, 1)
+          Write-Host "::notice title=pack-contents::6 项齐全 / server.js 含 remote-login（$kb KB）"
+
+      - name: 产物清单（匿名可读）
+        shell: pwsh
+        run: |
+          $arts = Get-ChildItem release -Filter '*.exe' -ErrorAction SilentlyContinue
+          if (-not $arts) {
+            Write-Host "::error title=artifact::release 下没有 .exe 产物"
+            exit 1
+          }
+          $list = ($arts | ForEach-Object {
+            "{0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)
+          }) -join ' / '
+          Write-Host "::notice title=installer::$list"
+          $list | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: 上传安装包
+        if: success()
+        uses: actions/upload-artifact@v5
+        with:
+          name: BobWork-win-installer
+          path: |
+            release/*.exe
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 上传构建日志
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: windows-build-logs
+          path: |
+            install.log
+            compile.log
+            nextbuild.log
+            stage.log
+            native.log
+            builder.log
+          if-no-files-found: ignore
+          retention-days: 7
