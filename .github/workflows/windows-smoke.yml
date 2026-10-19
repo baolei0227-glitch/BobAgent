@@ -159,9 +159,12 @@ jobs:
           $ppid = ($ok | Where-Object { $_.Line -like '*父 pid*' } | ForEach-Object { $_.Line.Trim() }) -join ''
           $brief = if ($ppid.Length -gt 160) { $ppid.Substring(0, 160) } else { $ppid }
           Write-Host "::notice title=selftest-summary::通过 $total 项 / $brief"
-          # 断言条数下限：少跑一条也是绿的（循环里 continue 掉就能悄悄少测），必须能扭红
-          if ($total -lt 15) {
-            Write-Host "::error title=selftest-coverage::断言数 $total 低于下限 15 —— 有断言没被执行"
+          # 断言条数下限：少跑一条也是绿的（循环里 continue 掉就能悄悄少测），必须能扭红。
+          # ⚠️ 18 是 **Windows** 下的实数：mac 上只有 15（可执行文件分支是 lsof 一项），
+          # Windows 多出 netstat/taskkill/PowerShell 三项、守卫多一条 del 系拦截。
+          # 写 15 会让 Windows 独有的那 3 项「静默消失」也照样绿 —— 下限必须按本平台取。
+          if ($total -lt 18) {
+            Write-Host "::error title=selftest-coverage::断言数 $total 低于下限 18（Windows 实数）—— 有断言没被执行"
             exit 1
           }
 
