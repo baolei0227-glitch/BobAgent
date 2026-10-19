@@ -44,20 +44,43 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
 
-      # ⚠️ 不能带 --ignore-scripts：
-      #   - electron 的 postinstall 负责下载 electron.exe（没有它 electron-builder 无法打包）
-      #   - better-sqlite3 的 postinstall 负责取/编译原生绑定
-      # windows-smoke 里之所以能带，是因为它只跑解析器单测，不需要这些。
-      - name: 安装依赖（需要 postinstall）
+      # ⚠️ 必须带 --ignore-scripts，且**必须**手动补装 Electron 二进制。
+      #
+      # 为什么不能让它跑脚本：`better-sqlite3` 的 package.json 没有 install 脚本，
+      # 但带 `binding.gyp` ⇒ npm/pnpm 的默认行为是跑 `node-gyp rebuild`，而 runner 上是
+      # Visual Studio「18」，node-gyp 的版本探测不认识，报
+      #   `find VS unknown version "undefined" found at "...\Visual Studio\18\Enterprise"`
+      # ⇒ install 阶段直接红（run #1 就是这么挂的）。
+      # 而这次编译纯属多余：该包自带 prebuilds/win32-x64.node，且用的是 node-addon-api（N-API），
+      # 二进制在 Node 与 Electron 之间通用 —— 详见 scripts/verify-standalone-native.mjs 顶部。
+      - name: 安装依赖（--ignore-scripts）
         shell: pwsh
         run: |
-          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | Tee-Object -FilePath install.log
+          pnpm install --frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | Tee-Object -FilePath install.log
           if ($LASTEXITCODE -ne 0) {
             $tail = (Get-Content install.log -Tail 40 -Encoding UTF8) -join ' | '
             $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
             Write-Host "::error title=pnpm-install::$tail"
             exit 1
           }
+
+      # --ignore-scripts 的代价：electron 的 postinstall（下载 electron.exe）不会执行。
+      # 没有它 electron-builder 无法打包，所以这一步不能省，失败必须立刻红。
+      - name: 补装 Electron 二进制
+        shell: pwsh
+        run: |
+          node node_modules/electron/install.js 2>&1 | Tee-Object -FilePath electron-install.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content electron-install.log -Tail 25 -Encoding UTF8) -join ' | '
+            Write-Host "::error title=electron-install::$tail"
+            exit 1
+          }
+          $exe = 'node_modules/electron/dist/electron.exe'
+          if (-not (Test-Path $exe)) {
+            Write-Host "::error title=electron-install::安装后仍没有 $exe"
+            exit 1
+          }
+          Write-Host "::notice title=electron::$((Get-Item $exe).VersionInfo.ProductVersion)"
 
       - name: 编译主进程 / preload / 自定义 server
         shell: pwsh
@@ -99,19 +122,20 @@ jobs:
           $native = (Get-Content stage.log -Encoding UTF8 | Select-String -Pattern '原生模块') -join ' '
           Write-Host "::notice title=stage::$native"
 
-      # 把 standalone 里的原生模块重建到 Electron ABI，并用 Electron 自己加载一次做断言。
-      # 不做这一步的症状：装完启动即崩（NODE_MODULE_VERSION 不匹配），而主进程只显示「server 退出」。
-      - name: 原生模块重建到 Electron ABI（含真机加载断言）
+      # 服务端是跑在 **Electron 自带的 Node** 里的（main.ts 用 ELECTRON_RUN_AS_NODE 启动），
+      # 所以原生模块必须能在 Electron 下加载。这里不「重编」（该包是 N-API 预编译，不需要），
+      # 而是用 Electron 亲自 require 一遍 —— 判据不依赖任何推断。
+      - name: 原生模块在 Electron 下可加载（真机断言）
         shell: pwsh
         run: |
-          node scripts/rebuild-standalone-native.mjs 2>&1 | Tee-Object -FilePath native.log
+          node scripts/verify-standalone-native.mjs 2>&1 | Tee-Object -FilePath native.log
           if ($LASTEXITCODE -ne 0) {
             $tail = (Get-Content native.log -Tail 30 -Encoding UTF8) -join ' | '
             $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
             Write-Host "::error title=electron-abi::$tail"
             exit 1
           }
-          $ok = (Get-Content native.log -Encoding UTF8 | Select-String -Pattern '✓ .*modversion') -join ' / '
+          $ok = (Get-Content native.log -Encoding UTF8 | Select-String -Pattern '✓|没有原生模块') -join ' / '
           Write-Host "::notice title=native-abi::$ok"
 
       - name: 打包 NSIS 安装包
@@ -198,6 +222,7 @@ jobs:
           name: windows-build-logs
           path: |
             install.log
+            electron-install.log
             compile.log
             nextbuild.log
             stage.log
