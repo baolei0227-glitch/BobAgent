@@ -10,16 +10,20 @@ APP_NAME="BobWork"
 APP_DIR="$PROJECT_DIR/release/$APP_NAME.app"
 
 echo "==> Step 1/4: Building Next.js (standalone)..."
-NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=2048" npx next build
+# 堆要给到 4096：`next build` 的 TS 阶段是全量类型检查，2048 会在
+# `Running TypeScript ...` 阶段直接 V8 abort（FATAL ERROR: Reached heap limit），
+# 而编译阶段早已 ✓ —— 误判成代码问题的典型现场。这里与 package-release.sh 对齐。
+# 调 `node node_modules/next/dist/bin/next` 而不是 npx：npx 在本地 bin 缺失时会联网取
+# 任意版本，构建结果静默漂移（§7）。
+NEXT_DISABLE_TURBOPACK=1 NODE_OPTIONS="--max-old-space-size=4096" \
+  node ./node_modules/next/dist/bin/next build
 
-echo "==> Step 2/4: Compiling Electron main process..."
-npx tsup electron/main.ts electron/preload.ts \
-  --format cjs \
-  --platform node \
-  --target node20 \
-  --outDir electron/dist \
-  --no-splitting \
-  --external electron
+echo "==> Step 2/4: Compiling Electron main/preload + custom server..."
+# 一次编三份产物（electron/dist/main.js、electron/dist/preload.js、dist/server.js）。
+# 走 compile-desktop.mjs 而不是原地 npx tsup：脚本内部用 node_modules/tsup 的
+# 绝对入口，并断言「产物存在且非空」—— tsup 退出码 0 但产物缺失时，
+# 错误会推迟到用户双击那一刻。
+node "$SCRIPT_DIR/compile-desktop.mjs"
 
 echo "==> Step 3/4: Assembling .app bundle (with symlink to project node_modules)..."
 
@@ -94,6 +98,29 @@ if [ ! -f "$APP_DIR/Contents/Resources/next-standalone/server.js" ] && [ -f "$AP
 fi
 rm -rf "$APP_DIR/Contents/Resources/next-standalone/release" "$APP_DIR/Contents/Resources/next-standalone/release-dist" 2>/dev/null
 rm -rf "$APP_DIR/Contents/Resources/next-standalone/.next/standalone" 2>/dev/null
+
+# ⚠️ 必须覆盖 server.js（工单 W-4）
+# Electron 启动的是 next-standalone/server.js（见 electron/main.ts），而 `next build`
+# 生成的该文件是**原生 standalone wrapper** —— 只有 startServer，不含任何自定义逻辑。
+# 不覆盖的后果不是报错，而是**静默缺功能**：远程访问的 Token 网关与登录页
+# （/remote-login）、CalDAV 的 PROPFIND/REPORT/MKCOL 全部失效，
+# 且没有任何日志提示「你启动的是错误的入口」。
+# 以前只有 package-release.sh 做了这一步，build:desktop 产出的 .app 一直是残缺入口。
+_CUSTOM_SERVER="$PROJECT_DIR/dist/server.js"
+if [ ! -s "$_CUSTOM_SERVER" ]; then
+  echo "❌ ERROR: 自定义 server 产物缺失（$_CUSTOM_SERVER），中止打包"
+  exit 1
+fi
+mkdir -p "$APP_DIR/Contents/Resources/next-standalone/dist"
+cp "$_CUSTOM_SERVER" "$APP_DIR/Contents/Resources/next-standalone/dist/server.js"
+cp "$_CUSTOM_SERVER" "$APP_DIR/Contents/Resources/next-standalone/server.js"
+# 断言覆盖成功：/remote-login 是自定义入口独有的字符串，原生 wrapper 里不存在。
+# 只断言「文件存在」不行 —— 两份产物都存在，区别在内容。
+if ! /usr/bin/grep -q "remote-login" "$APP_DIR/Contents/Resources/next-standalone/server.js"; then
+  echo "❌ ERROR: server.js 覆盖后仍不含 /remote-login（说明复制到了错误产物），中止打包"
+  exit 1
+fi
+echo "✅ 自定义 server 已就位（$(wc -c < "$APP_DIR/Contents/Resources/next-standalone/server.js" | tr -d ' ') bytes）"
 
 # Copy Python PDF extractor for PDF Bridge（T1-1 修复：从 core/ 真源复制；顶层曾是 172B 占位 stub，
 # 打包版 standalone 下 extractor 会探测到 scripts/pdf_extractor.py 并执行注释文件导致文本提取必败。
