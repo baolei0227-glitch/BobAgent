@@ -1,0 +1,102 @@
+# Windows 冒烟 —— 在**真实 Windows x64** 上验证阶段 C（进程模型）/ 阶段 D（安全边界）
+#
+# 为什么要这个工作流：`src/lib/platform/**` 的单测全部由**手写的 Windows 输出样例**驱动。
+# 手写样例只能证明「解析器符合我的想象」，不能证明「真实 netstat / taskkill / PowerShell
+# 在 Windows Server 2025 英文版上的输出与行为就是这样」。真机只有一处能免费拿到：
+# GitHub Actions 的 `windows-latest`（runners 是真正的 Windows Server，不是模拟层）。
+#
+# 三道闸门，语义不同，别混：
+#   1. 单测（Windows 样例驱动）—— 解析逻辑，任一失败 = 代码错
+#   2. platform-selftest（真机断言）—— 用真实进程自证，任一失败 = 阶段 C/D 是假的
+#   3. platform-doctor（环境报告）—— 只报告缺哪些能力，**不阻断**（缺 python/ffmpeg 属正常）
+#
+# 手动触发：仓库 Actions 页 → Windows Smoke → Run workflow。
+
+name: Windows Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/windows-smoke'
+      - 'main'
+    paths:
+      - 'src/lib/platform/**'
+      - 'src/lib/shell/**'
+      - 'scripts/platform-*.ts'
+      - '.github/workflows/windows-smoke.yml'
+
+concurrency:
+  group: windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-smoke:
+    name: windows-latest / node 22
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      # 版本由 package.json 的 packageManager 字段（pnpm@9.0.0）决定，不要在这里写死
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      # --ignore-scripts：本工作流不碰 Electron / better-sqlite3 的原生构建，
+      # 跳过 postinstall 可以省掉下载 electron 二进制（≈100MB）与 node-gyp 编译，
+      # 也让「装不上原生模块」不污染信号（那是阶段 A 打包时才需要证明的事）。
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: 环境信息
+        shell: pwsh
+        run: |
+          Write-Host "platform : $(node -p process.platform)"
+          Write-Host "arch     : $(node -p process.arch)"
+          Write-Host "node     : $(node -v)"
+          Write-Host "pnpm     : $(pnpm -v)"
+          Write-Host ([System.Environment]::OSVersion.VersionString)
+          Write-Host "--- netstat 是否可用（Windows 进程层的唯一见证）---"
+          & "$env:SystemRoot\System32\netstat.exe" -ano -p tcp | Select-Object -First 5
+
+      # 闸门 1：解析器单测（Windows 样例 + 反例）
+      - name: 单测 · 平台层与命令守卫
+        run: pnpm exec vitest run src/lib/platform src/lib/shell --reporter=verbose
+
+      # 闸门 2：真机断言 —— 本工作流的核心。失败即为真缺陷，必须修代码而不是改断言。
+      - name: 真机断言 · 进程层 / 命令守卫
+        run: pnpm exec tsx scripts/platform-selftest.ts
+
+      # 闸门 3：能力报告。缺 python/ffmpeg 在 runner 上是预期的，所以不阻断，
+      # 但输出必须留在日志与 Job Summary 里，供判断阶段 E/F/G 的前置条件。
+      - name: 能力自检（报告，不阻断）
+        shell: pwsh
+        run: |
+          pnpm exec tsx scripts/platform-doctor.ts > doctor.log 2>&1
+          $code = $LASTEXITCODE
+          Get-Content doctor.log -Encoding UTF8 | Write-Host
+          Write-Host "doctor exit = $code （1 = 有必需能力缺失，属环境信息，不算失败）"
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          "## platform-doctor (windows-latest)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          Get-Content doctor.log -Encoding UTF8 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          exit 0
+
+      - name: 上传诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-logs
+          path: |
+            doctor.log
+          if-no-files-found: ignore
+          retention-days: 7
