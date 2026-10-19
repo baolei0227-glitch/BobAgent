@@ -42,6 +42,7 @@
     "dist",
     "release",
     "release-dist",
-    "assets"
+    "assets",
+    "packages"
   ]
 }

@@ -228,8 +228,8 @@ importers:
         specifier: ^11.0.5
         version: 11.0.5
       unified-renderer:
-        specifier: file:../assets/unified-renderer
-        version: file:../assets/unified-renderer
+        specifier: file:./packages/unified-renderer
+        version: file:packages/unified-renderer
       utif2:
         specifier: ^4.1.0
         version: 4.1.0
@@ -7675,8 +7675,8 @@ packages:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
     engines: {node: '>=18'}
 
-  unified-renderer@file:../assets/unified-renderer:
-    resolution: {directory: ../assets/unified-renderer, type: directory}
+  unified-renderer@file:packages/unified-renderer:
+    resolution: {directory: packages/unified-renderer, type: directory}
     hasBin: true
 
   unified@11.0.5:
@@ -16780,7 +16780,7 @@ snapshots:
 
   unicorn-magic@0.3.0: {}
 
-  unified-renderer@file:../assets/unified-renderer:
+  unified-renderer@file:packages/unified-renderer:
     dependencies:
       commander: 12.1.0
       rehype-autolink-headings: 7.1.0
