@@ -23,8 +23,22 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
+import { IS_WIN, resolvePython } from '@/lib/platform';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * 本模块整体建立在「系统 Python + user site-packages」这一 **macOS 布局**上：
+ *   `~/Library/Python/3.9/lib/python/site-packages`
+ * Windows 上这个目录不存在，而且 `resolvePython() ?? 'python3'` 的兜底也不成立
+ * （解释器叫 `python.exe` / `py.exe`，**没有 `python3` 这个名字**）——
+ * 于是「解析不到解释器」会被替换成「spawn 一个不存在的命令」，把问题伪装成执行期噪声。
+ *
+ * 所以 Windows 下**整体关掉**这一功能：它只做「30 天未使用包自动清理」的后台维护，
+ * 不在任何主流程上。不硬编 `%APPDATA%\Python\Python3x\site-packages`，因为版本号会漂；
+ * 等阶段 E（随包分发解释器）落地后，改成向解释器自报路径（`site.getusersitepackages()`）。
+ */
+const SUPPORTED = !IS_WIN;
 
 const PY_VERSION = '3.9';
 const PY_SITE = path.join(os.homedir(), 'Library', 'Python', PY_VERSION, 'lib', 'python', 'site-packages');
@@ -170,6 +184,7 @@ function writeLedger(data: Ledger): void {
  * 绝不整体覆盖。返回是否就绪。
  */
 export function ensureUsageHook(): boolean {
+  if (!SUPPORTED) return false;
   try {
     fs.mkdirSync(PY_SITE, { recursive: true });
     if (fs.existsSync(HOOK_PATH)) {
@@ -235,6 +250,7 @@ export function parseInstallPackages(cmd: string): string[] {
  * 调用方在 run_command 执行成功路径调用；失败静默，不影响命令结果。
  */
 export function recordPipInstall(cmd: string): void {
+  if (!SUPPORTED) return;
   try {
     if (!/(pip3?|pipx|python3? -m pip)\s+.*\binstall\b/i.test(cmd)) return;
     const pkgs = parseInstallPackages(cmd);
@@ -263,6 +279,7 @@ export function recordPipInstall(cmd: string): void {
  * 供 instrumentation 服务启动时调用；内部全部 try/catch，失败不影响启动。
  */
 export async function runAutoCleanup(): Promise<void> {
+  if (!SUPPORTED) return;
   try {
     ensureUsageHook();
     const data = readLedger();
@@ -275,8 +292,11 @@ export async function runAutoCleanup(): Promise<void> {
     }
     const script = path.join(getScriptsDir(), 'py-pkg-lifecycle.py');
     if (!fs.existsSync(script)) return;
+    // 平台解析：darwin 仍是 PATH 里的 python3；Windows 取随包内置运行时。
+    // 这里保留 'python3' 兜底而不是抛错 —— 清理是后台任务，抛错会中断整轮维护。
+    const python = resolvePython() ?? 'python3';
     const { stdout } = await execFileAsync(
-      'python3',
+      python,
       [script, 'purge', '--days', String(CLEANUP_DAYS), '--protected', PROTECTED_PACKAGES.join(',')],
       { timeout: 180_000 },
     );
