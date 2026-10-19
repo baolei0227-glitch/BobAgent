@@ -120,6 +120,11 @@ jobs:
             Write-Host "::error title=vitest::$($t)"
             exit 1
           }
+          # 成功也要留可读证据：「绿了」不等于「跑了几条」。把汇总行打进 annotation，
+          # 否则匿名侧只能看到一个绿勾，无法确认断言数量没缩水（少跑了文件也会是绿的）。
+          $sum = (Get-Content vitest.log -Encoding UTF8 |
+                  Select-String -Pattern 'Test Files\s+\d+|Tests\s+\d+') -join ' / '
+          Write-Host "::notice title=vitest-summary::$sum"
 
       # 闸门 2：真机断言 —— 本工作流的核心。失败即为真缺陷，必须修代码而不是改断言。
       - name: 真机断言 · 进程层 / 命令守卫
