@@ -24,6 +24,9 @@ on:
       - 'src/lib/platform/**'
       - 'src/lib/shell/**'
       - 'scripts/platform-*.ts'
+      - 'packages/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/windows-smoke.yml'
 
 concurrency:
@@ -64,46 +67,31 @@ jobs:
           Write-Host "--- netstat 前 5 行（Windows 进程层的唯一见证）---"
           & "$env:SystemRoot\System32\netstat.exe" -ano -p tcp | Select-Object -First 5
 
-      # 🔴 本仓库**不能从干净检出装依赖**：package.json 有一条
-      #   "unified-renderer": "file:../assets/unified-renderer"
-      # 而 ../assets/unified-renderer 在 git 仓库之外（projects/ 才是仓库根），从未被提交。
-      # 干净 clone 上 pnpm install 会直接 ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND
-      #（真机上第一次跑工作流就撞到了）。这里造一个**依赖表与锁文件逐项相同**的占位包：
-      # 本工作流只跑 parsing 单测与进程断言，不 import 它，所以只要能解开依赖图即可。
-      # 该缺陷本身（仓库不自包含）需要单独修，不在本工作流职责内。
-      - name: 补齐仓库外的本地依赖（unified-renderer 不在版本控制内）
-        shell: pwsh
-        run: |
-          $dir = Join-Path (Split-Path $env:GITHUB_WORKSPACE -Parent) 'assets\unified-renderer'
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          # ⚠️ 不能写成 PowerShell here-string(@'...'@)：YAML 缩进后 '@ 不在行首会直接语法错。
-          # 也不能用 Set-Content -Encoding utf8（Windows PowerShell 会写 BOM，JSON.parse 会挂）。
-          $json = '{"name":"unified-renderer","version":"1.0.0","type":"module","main":"./dist/index.js","types":"./dist/index.d.ts","bin":{"unified-render":"./dist/cli/cli.js"},"dependencies":{"commander":"^12.1.0","rehype-autolink-headings":"^7.1.0","rehype-highlight":"^7.0.1","rehype-parse":"^9.0.1","rehype-raw":"^7.0.0","rehype-sanitize":"^6.0.0","rehype-slug":"^6.0.0","rehype-stringify":"^10.0.1","remark-gfm":"^4.0.0","remark-parse":"^11.0.0","remark-rehype":"^11.1.1","unified":"^11.0.5","vfile":"^6.0.3"}}'
-          [System.IO.File]::WriteAllText((Join-Path $dir 'package.json'), $json)
-          Write-Host "stub -> $dir"
-          node -e "console.log('stub ok:', require(process.argv[1]).name)" "$dir\package.json"
-
+      # 这里原先有一个「造占位包」的步骤，因为 `"unified-renderer": "file:../assets/unified-renderer"`
+      # 指向仓库之外的目录，干净检出必然 ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND。
+      # 该缺陷已修（依赖改为 file:./packages/unified-renderer，目录已入库），占位包随之删除 ——
+      # **保留它会让 CI 假装仓库是自包含的**，这类绕过一旦常驻，W-1 那类缺陷就再也暴露不出来。
+      #
       # --ignore-scripts：本工作流不碰 Electron / better-sqlite3 的原生构建，
       # 跳过 postinstall 可省掉 electron 二进制下载（≈100MB）与 node-gyp 编译，
       # 也让「原生模块装不上」不污染信号（那是阶段 A 打包时才需要证明的事）。
       #
-      # 失败时把真实报错**打进 annotation**：私有/公开仓库的 Actions 日志都需要
-      # token 才能下载，而 annotation 是匿名可读的 —— 否则只能看到「exit code 1」。
+      # 不再带 `--no-frozen-lockfile` 兜底：锁文件与 package.json 漂移本身就是缺陷，
+      # 要红，不要悄悄重算（重算会把 peer 解析整表刷新，问题被埋掉）。
+      #
+      # 失败时把真实报错**打进 annotation**：Actions 日志需要 token 才能下载，
+      # 而 annotation 匿名可读 —— 否则只能看到「exit code 1」。
       - name: 安装依赖
         shell: pwsh
         run: |
           pnpm install --frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | Tee-Object -FilePath install.log
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::frozen-lockfile 失败，改用可重算模式重试（仅影响 CI，不改仓库）"
-            pnpm install --no-frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | Tee-Object -FilePath install-retry.log -Append
-            if ($LASTEXITCODE -ne 0) {
-              $tail = (Get-Content install-retry.log -Tail 40 -Encoding UTF8) -join ' | '
-              $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
-              Write-Host "::error title=pnpm-install::$tail"
-              exit 1
-            }
+            $tail = (Get-Content install.log -Tail 40 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+            Write-Host "::error title=pnpm-install::$tail"
+            exit 1
           }
-          Write-Host "install OK"
+          Write-Host "install OK (frozen-lockfile)"
 
       # 闸门 1：解析器单测（Windows 样例 + 反例）
       - name: 单测 · 平台层与命令守卫
@@ -153,7 +141,6 @@ jobs:
           name: windows-smoke-logs
           path: |
             install.log
-            install-retry.log
             vitest.log
             selftest.log
             doctor.log
