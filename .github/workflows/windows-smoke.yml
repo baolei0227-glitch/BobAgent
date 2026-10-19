@@ -38,11 +38,15 @@ jobs:
 
     steps:
       - name: 检出
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      # 版本由 package.json 的 packageManager 字段（pnpm@9.0.0）决定，不要在这里写死
+      # 钉 9.15.9：本仓库的 pnpm-lock.yaml 由 9.15.9 写出，而 package.json 的
+      # packageManager 写的是 pnpm@9.0.0（2024-04 的版本）。两者对 lockfile 的
+      # 隐含校验并不完全一致，用 9.0.0 装 9.15.9 写的锁有概率直接报错。
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
 
       - name: 安装 Node
         uses: actions/setup-node@v4
@@ -50,12 +54,7 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
 
-      # --ignore-scripts：本工作流不碰 Electron / better-sqlite3 的原生构建，
-      # 跳过 postinstall 可以省掉下载 electron 二进制（≈100MB）与 node-gyp 编译，
-      # 也让「装不上原生模块」不污染信号（那是阶段 A 打包时才需要证明的事）。
-      - name: 安装依赖
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
+      # 证据先于结论：这一段在任何可能失败的步骤之前，保证「机器长什么样」总有记录
       - name: 环境信息
         shell: pwsh
         run: |
@@ -64,39 +63,82 @@ jobs:
           Write-Host "node     : $(node -v)"
           Write-Host "pnpm     : $(pnpm -v)"
           Write-Host ([System.Environment]::OSVersion.VersionString)
-          Write-Host "--- netstat 是否可用（Windows 进程层的唯一见证）---"
+          Write-Host "--- netstat 前 5 行（Windows 进程层的唯一见证）---"
           & "$env:SystemRoot\System32\netstat.exe" -ano -p tcp | Select-Object -First 5
+
+      # --ignore-scripts：本工作流不碰 Electron / better-sqlite3 的原生构建，
+      # 跳过 postinstall 可省掉 electron 二进制下载（≈100MB）与 node-gyp 编译，
+      # 也让「原生模块装不上」不污染信号（那是阶段 A 打包时才需要证明的事）。
+      #
+      # 失败时把真实报错**打进 annotation**：私有/公开仓库的 Actions 日志都需要
+      # token 才能下载，而 annotation 是匿名可读的 —— 否则只能看到「exit code 1」。
+      - name: 安装依赖
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | Tee-Object -FilePath install.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::frozen-lockfile 失败，改用可重算模式重试（仅影响 CI，不改仓库）"
+            pnpm install --no-frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | Tee-Object -FilePath install-retry.log -Append
+            if ($LASTEXITCODE -ne 0) {
+              $tail = (Get-Content install-retry.log -Tail 40 -Encoding UTF8) -join ' | '
+              $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+              Write-Host "::error title=pnpm-install::$tail"
+              exit 1
+            }
+          }
+          Write-Host "install OK"
 
       # 闸门 1：解析器单测（Windows 样例 + 反例）
       - name: 单测 · 平台层与命令守卫
-        run: pnpm exec vitest run src/lib/platform src/lib/shell --reporter=verbose
+        shell: pwsh
+        run: |
+          pnpm exec vitest run src/lib/platform src/lib/shell --reporter=verbose 2>&1 | Tee-Object -FilePath vitest.log
+          if ($LASTEXITCODE -ne 0) {
+            $t = (Get-Content vitest.log -Encoding UTF8 | Select-String -Pattern 'FAIL|×|AssertionError|Expected|Received' | Select-Object -First 12) -join ' | '
+            Write-Host "::error title=vitest::$($t)"
+            exit 1
+          }
 
       # 闸门 2：真机断言 —— 本工作流的核心。失败即为真缺陷，必须修代码而不是改断言。
       - name: 真机断言 · 进程层 / 命令守卫
-        run: pnpm exec tsx scripts/platform-selftest.ts
+        shell: pwsh
+        run: |
+          pnpm exec tsx scripts/platform-selftest.ts 2>&1 | Tee-Object -FilePath selftest.log
+          if ($LASTEXITCODE -ne 0) {
+            $t = (Get-Content selftest.log -Encoding UTF8 | Select-String -Pattern 'FAIL' | Select-Object -First 10) -join ' | '
+            Write-Host "::error title=selftest::$($t)"
+            exit 1
+          }
 
       # 闸门 3：能力报告。缺 python/ffmpeg 在 runner 上是预期的，所以不阻断，
-      # 但输出必须留在日志与 Job Summary 里，供判断阶段 E/F/G 的前置条件。
+      # 但结论必须**匿名可读**（Actions 日志要 token 才能下载，annotation 不用）。
       - name: 能力自检（报告，不阻断）
         shell: pwsh
         run: |
           pnpm exec tsx scripts/platform-doctor.ts > doctor.log 2>&1
           $code = $LASTEXITCODE
-          Get-Content doctor.log -Encoding UTF8 | Write-Host
+          $lines = Get-Content doctor.log -Encoding UTF8
+          $lines | Write-Host
           Write-Host "doctor exit = $code （1 = 有必需能力缺失，属环境信息，不算失败）"
-          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
-          "## platform-doctor (windows-latest)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $joined = ($lines | Where-Object { $_ -match '结论|缺|OK|warn|FAIL|能力' }) -join ' / '
+          if ($joined.Length -gt 3500) { $joined = $joined.Substring(0, 3500) }
+          Write-Host "::notice title=doctor::$joined"
+          "## platform-doctor (windows-latest)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
           '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-          Get-Content doctor.log -Encoding UTF8 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           exit 0
 
       - name: 上传诊断日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: windows-smoke-logs
           path: |
+            install.log
+            install-retry.log
+            vitest.log
+            selftest.log
             doctor.log
           if-no-files-found: ignore
           retention-days: 7
