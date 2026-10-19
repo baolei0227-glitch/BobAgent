@@ -65,7 +65,10 @@ describe('文件系统路径大小写语义', () => {
   it('fsPathKey 与 pathKey 的差别就在 Linux（PATH 去重不能小写化）', () => {
     expect(fsPathKey('/A/B', 'win32')).toBe('/a/b');
     expect(fsPathKey('/A/B', 'linux')).toBe('/A/B');
-    expect(pathKey('/A/B')).toBe('/A/B');
+    // ⚠️ pathKey 用的是**宿主**平台（IS_WIN），不是入参 —— 它只服务于「当前这台机器的
+    // PATH 去重」。所以这里不能写死 '/A/B'：那等于假设测试永远跑在 POSIX 上，
+    // 一旦在 windows-latest 上跑就必红（2026-10 真机 CI 抓到的就是这一条）。
+    expect(pathKey('/A/B')).toBe(PLATFORM === 'win32' ? '/a/b' : '/A/B');
   });
 });
 
