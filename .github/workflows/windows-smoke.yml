@@ -24,6 +24,7 @@ on:
       - 'src/lib/platform/**'
       - 'src/lib/shell/**'
       - 'scripts/platform-*.ts'
+      - 'scripts/compile-desktop.mjs'
       - 'packages/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -93,6 +94,21 @@ jobs:
           }
           Write-Host "install OK (frozen-lockfile)"
 
+      # 阶段 A 的前半段：桌面端产物能否在 Windows 上编出来。
+      # 这一步的价值不在「tsup 编 JS 与平台无关」，而在**证明整条链路没有 bash 依赖**：
+      # 原来的 build-electron.sh / package-release.sh 都是 `npx tsup` / `corepack pnpm tsup`，
+      # Windows 上既没有 bash，npx 在 .bin 缺失时还会联网取任意版本让产物静默漂移。
+      - name: 编译桌面端产物（主进程 / preload / 自定义 server）
+        shell: pwsh
+        run: |
+          node scripts/compile-desktop.mjs 2>&1 | Tee-Object -FilePath compile.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content compile.log -Tail 30 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3000, $tail.Length))
+            Write-Host "::error title=compile-desktop::$tail"
+            exit 1
+          }
+
       # 闸门 1：解析器单测（Windows 样例 + 反例）
       - name: 单测 · 平台层与命令守卫
         shell: pwsh
@@ -141,6 +157,7 @@ jobs:
           name: windows-smoke-logs
           path: |
             install.log
+            compile.log
             vitest.log
             selftest.log
             doctor.log
