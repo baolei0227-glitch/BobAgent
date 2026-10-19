@@ -40,13 +40,11 @@ jobs:
       - name: 检出
         uses: actions/checkout@v5
 
-      # 钉 9.15.9：本仓库的 pnpm-lock.yaml 由 9.15.9 写出，而 package.json 的
-      # packageManager 写的是 pnpm@9.0.0（2024-04 的版本）。两者对 lockfile 的
-      # 隐含校验并不完全一致，用 9.0.0 装 9.15.9 写的锁有概率直接报错。
+      # 不给 version 输入：pnpm/action-setup 会读 package.json 的 packageManager（pnpm@9.0.0）。
+      # ⚠️ 千万别同时显式写 version —— 两者不一致时 action-setup 直接报错
+      #    "Multiple versions of pnpm specified"，且在 setup 阶段就失败，连 install 都到不了。
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.9
 
       - name: 安装 Node
         uses: actions/setup-node@v4
