@@ -22,6 +22,7 @@ on:
       - 'main'
     paths:
       - 'src/lib/platform/**'
+      - 'src/lib/python/**'
       - 'src/lib/shell/**'
       - 'scripts/platform-*.ts'
       - 'scripts/compile-desktop.mjs'
@@ -113,7 +114,7 @@ jobs:
       - name: 单测 · 平台层与命令守卫
         shell: pwsh
         run: |
-          pnpm exec vitest run src/lib/platform src/lib/shell --reporter=verbose 2>&1 | Tee-Object -FilePath vitest.log
+          pnpm exec vitest run src/lib/platform src/lib/shell src/lib/python --reporter=verbose 2>&1 | Tee-Object -FilePath vitest.log
           if ($LASTEXITCODE -ne 0) {
             $t = (Get-Content vitest.log -Encoding UTF8 | Select-String -Pattern 'FAIL|×|AssertionError|Expected|Received' | Select-Object -First 12) -join ' | '
             Write-Host "::error title=vitest::$($t)"

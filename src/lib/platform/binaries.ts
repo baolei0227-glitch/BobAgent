@@ -150,15 +150,26 @@ export function resetBinaryCache(): void {
  *
  * 用途：替换散落 8 处的硬编码。darwin 上解析结果仍是 `/usr/bin/python3`（与历史一致），
  * Windows 上优先随包内置运行时（见 pythonCandidates）。
+ *
+ * 错误信息里**列出实际尝试过的路径**：只说「找不到 Python」等于让用户去猜，
+ * 而这张候选表恰恰是本项目最容易被改错的地方（WindowsApps 假解释器、py.exe、随包目录）。
+ * 把「找过哪儿」写进报错，下一次排查就不用再读源码。
  */
 export function pythonBin(usedBy = 'Python 脚本'): string {
   const p = resolvePython();
   if (!p) {
+    const tried = pythonCandidates(PLATFORM, process.env).filter(Boolean);
+    const shown = tried.slice(0, 8);
+    const more = tried.length > shown.length ? `\n  …（共 ${tried.length} 个候选）` : '';
     throw new Error(
-      `找不到 Python 解释器（${usedBy} 需要）。` +
+      `找不到 Python 解释器（${usedBy} 需要）。\n已尝试：\n` +
+        shown.map((t) => `  · ${t}`).join('\n') +
+        more +
+        '\n' +
         (IS_WIN
-          ? 'Windows 版需随包内置嵌入式 Python（含 python-docx / Pillow / lxml）。'
-          : '请安装 Xcode Command Line Tools 或 python3。'),
+          ? 'Windows 版应随包内置嵌入式 Python（含 python-docx / Pillow / lxml）：' +
+            '%LOCALAPPDATA%\\BobWork\\python\\python.exe。若该目录不存在，说明安装不完整。'
+          : '请安装 Xcode Command Line Tools（xcode-select --install）或 python3。'),
     );
   }
   return p;
