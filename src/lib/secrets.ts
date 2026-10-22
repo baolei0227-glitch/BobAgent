@@ -11,8 +11,7 @@
 
 import { createCipheriv, createDecipheriv, scryptSync, randomBytes } from 'crypto';
 import { hostname, userInfo } from 'os';
-import { execSync } from 'child_process';
-import { readFileSync } from 'fs';
+import { machineIds, localHostName } from './platform';
 
 const PREFIX = 'enc::v1::';
 const KEYLEN = 32; // AES-256
@@ -22,38 +21,18 @@ const TAGLEN = 16;
 /** 内置 pepper（仅用于提升暴力破解成本，不是安全边界） */
 const PEPPER = 'BobWork.Secrets.Pepper::v1::2026-07';
 
-/** 同步执行外部命令取机器特征；失败返回空串（该候选指纹直接跳过，不影响其它候选） */
-function tryExec(cmd: string): string {
-  try {
-    return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-  } catch {
-    return '';
-  }
-}
-
 /**
- * 硬件指纹候选（首选，跨重启/跨网络稳定）：
- *   - macOS：IOPlatformUUID（ioreg 读取）。注意 Apple Silicon 上 `sysctl -n hw.uuid`
- *     已返回 `unknown oid`，若此时退回主机名派生，主机名一变（DHCP 把 HostName 改成 IP、
- *     或用户改名）密钥就全部解不开。
- *   - Linux：/etc/machine-id
+ * 硬件指纹候选（首选，跨重启/跨网络稳定）。
+ *
+ * 取值来源已收进 `lib/platform/identity`（逐平台不同：macOS IOPlatformUUID、
+ * Windows 注册表 MachineGuid、Linux /etc/machine-id）—— 这里只负责把取到的值
+ * 拼成指纹串。**刻意分家**：那个串是数据契约（已落盘的密文全绑在它上，标签格式
+ * 或候选顺序一变老密文就解不开），而「怎么取」是纯粹的平台差异。
+ *
+ * 主候选（首个）用于加密，其余仅用于解密回退。
  */
 function hardwareFingerprints(): string[] {
-  const out: string[] = [];
-  if (process.platform === 'darwin') {
-    const ioreg = tryExec('/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice');
-    const uuid = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(ioreg)?.[1];
-    if (uuid) out.push(`hw.uuid:${uuid}`);
-    // Intel 机器仍可用（与 IOPlatformUUID 同值，去重后不重复派生）
-    const sysctl = tryExec('/usr/sbin/sysctl -n hw.uuid');
-    if (sysctl) out.push(`hw.uuid:${sysctl}`);
-  } else if (process.platform === 'linux') {
-    try {
-      const id = readFileSync('/etc/machine-id', 'utf-8').trim();
-      if (id) out.push(`machine-id:${id}`);
-    } catch { /* 读不到就退到主机名候选 */ }
-  }
-  return out;
+  return machineIds().map((m) => `${m.kind}:${m.value}`);
 }
 
 /**
@@ -66,13 +45,11 @@ function legacyFingerprints(): string[] {
   const out: string[] = [];
   const host = hostname().trim();
   if (host) out.push(`host:${host}:user:${user}`);
-  if (process.platform === 'darwin') {
-    // macOS 未设 HostName 时 gethostname() 返回 "<LocalHostName>.local"
-    const local = tryExec('/usr/sbin/scutil --get LocalHostName');
-    if (local) {
-      out.push(`host:${local}.local:user:${user}`);
-      out.push(`host:${local}:user:${user}`);
-    }
+  // macOS 未设 HostName 时 gethostname() 返回 "<LocalHostName>.local"；非 macOS 返回空串
+  const local = localHostName();
+  if (local) {
+    out.push(`host:${local}.local:user:${user}`);
+    out.push(`host:${local}:user:${user}`);
   }
   return out;
 }
@@ -162,6 +139,8 @@ const SENSITIVE_PATHS: Array<Array<string | '*'>> = [
   ['vision', 'apiKey'],
   ['vision', 'auxiliaryApiKey'],
   ['taskModel', 'apiKey'],
+  // 邮箱感知（IMAP）密码 / 应用专用密码（2026-10-10 感知面 ①）
+  ['mail', 'password'],
   // customTools.headers 是 Record<string,string>，也含 Token
   ['customTools', '*', 'headers'],
   // MCP env 是 Record<string,string>，含 BRAVE_API_KEY / GITHUB_TOKEN / NOTION_KEY 等

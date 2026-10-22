@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   parseNodeMarkdown,
   appendConversation,
+  createNodeMarkdown,
+  normalizeSandboxSpec,
   type ConversationAttachment,
   type ConversationReference,
 } from '../node-markdown';
@@ -255,5 +257,60 @@ describe('round-trip: appendConversation（真实数据流）', () => {
 
     expect(md).not.toContain('subagents');
     expect(turn.subagents).toBeUndefined();
+  });
+});
+
+describe('sandbox_spec: 许愿编程构建简报落盘/回读', () => {
+  it('normalizeSandboxSpec 只保留已知字段并限长', () => {
+    const spec = normalizeSandboxSpec({
+      category: '待办/任务管理',
+      interaction: '列表 + 增删改查',
+      persistence: '需要，磁盘持久化',
+      source: 'template',
+      fast_build: true,
+      hack: 'should-not-survive',
+      wish: 'w'.repeat(700),
+    });
+    expect(spec).toMatchObject({
+      category: '待办/任务管理',
+      interaction: '列表 + 增删改查',
+      persistence: '需要，磁盘持久化',
+      source: 'template',
+      fast_build: true,
+    });
+    expect(spec?.wish?.length).toBe(600);
+    expect(spec).not.toHaveProperty('hack');
+    // 只认显式 boolean true；字符串/false 不构成跳过 6 问的授权
+    expect(normalizeSandboxSpec({ wish: 'x', fast_build: 'true' })).not.toHaveProperty('fast_build');
+    expect(normalizeSandboxSpec({ wish: 'x', fast_build: false })).not.toHaveProperty('fast_build');
+  });
+
+  it('createNodeMarkdown 写入的 sandbox_spec 重新解析后保留（YAML 往返）', () => {
+    const md = createNodeMarkdown('n_spec_1', 'Spec Node', {
+      sandbox_app_id: 'app_x_1',
+      sandbox_spec: {
+        category: '待办/任务管理',
+        audience: '个人日常使用',
+        interaction: '列表 + 增删改查',
+        persistence: '需要，磁盘持久化',
+        style: '跟随 BobWork 主题默认',
+        ai: '不需要，纯工具型即可',
+        wish: '做一个能按项目分组的待办清单\n第二行：支持拖拽排序',
+        source: 'template',
+        fast_build: true,
+      },
+    });
+    const parsed = parseNodeMarkdown(md);
+    expect(parsed.frontmatter.sandbox_spec).toMatchObject({
+      category: '待办/任务管理',
+      audience: '个人日常使用',
+      interaction: '列表 + 增删改查',
+      persistence: '需要，磁盘持久化',
+      style: '跟随 BobWork 主题默认',
+      ai: '不需要，纯工具型即可',
+      wish: '做一个能按项目分组的待办清单\n第二行：支持拖拽排序',
+      source: 'template',
+      fast_build: true,
+    });
   });
 });

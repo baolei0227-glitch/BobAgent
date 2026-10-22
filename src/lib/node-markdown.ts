@@ -6,6 +6,45 @@ import type { SubagentPanel } from '@/lib/types';
 
 // ==================== 数据模型 ====================
 
+/**
+ * AI Coding 创建简报（创建对话框 → 节点 frontmatter → coding 注入）。
+ *
+ * 存在意义：用户在创建时**显式开启 Fast build** 并确认一份可编辑简报后，coding 首轮
+ * 直接按简报出首版，不再弹 6 问 Spec。默认（未开启 Fast build / 旧节点）仍走 6 问。
+ * 因此 fast_build 是唯一的跳过开关；缺省 = 完全保持原有 6 问行为。
+ */
+export interface SandboxSpec {
+  category?: string;
+  audience?: string;
+  interaction?: string;
+  persistence?: string;
+  style?: string;
+  ai?: string;
+  /** 用户创建时的原始愿望（截断存储） */
+  wish?: string;
+  /** 简报来源：template = 模板种子；wish = 愿望推断 */
+  source?: 'template' | 'wish';
+  /** 用户显式开启 Fast build 并确认简报：true 才允许 coding 首轮跳过 6 问 */
+  fast_build?: boolean;
+}
+
+const SANDBOX_SPEC_TEXT_KEYS = ['category', 'audience', 'interaction', 'persistence', 'style', 'ai', 'wish'] as const;
+
+/** 归一化创建简报：只保留已知文本字段并限长，避免 frontmatter 被任意 payload 撑大。 */
+export function normalizeSandboxSpec(raw: unknown): SandboxSpec | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const src = raw as Record<string, unknown>;
+  const out: SandboxSpec = {};
+  for (const key of SANDBOX_SPEC_TEXT_KEYS) {
+    const value = src[key];
+    if (typeof value === 'string' && value.trim()) out[key] = value.trim().slice(0, 600);
+  }
+  if (src.source === 'template' || src.source === 'wish') out.source = src.source;
+  // Fast build 是唯一允许跳过 6 问的显式标记；只认 true（字符串/false 一律不写）
+  if (src.fast_build === true) out.fast_build = true;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export interface NodeFrontmatter {
   node_id: string;
   title: string;
@@ -69,6 +108,11 @@ export interface NodeFrontmatter {
   team_ids?: string[];
   /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
   sandbox_app_id?: string;
+  /** 管家派发会话的产物暂存批次 id（Outbox）：存在时该节点的交付物落 <appRoot>/outbox/<批次>/，
+   *  不写入当前项目 homework/（见 lib/outbox/store.ts） */
+  outbox_batch_id?: string;
+  /** AI Coding 节点：创建时确认的构建简报（缺省=旧行为，首轮仍走 6 问 Spec） */
+  sandbox_spec?: SandboxSpec;
   /** 节点类型：aiChat（默认，缺省）/ imageGen（图像生成节点）等 */
   node_type?: string;
   /** 批注框节点（node_type='annotation'）：包裹的卡片节点 id 列表（自动跟随包围盒用） */
@@ -536,6 +580,8 @@ export function serializeNode(node: NodeMarkdown): string {
     ...(node.frontmatter.position_y !== undefined ? { position_y: node.frontmatter.position_y } : {}),
     // AI Coding 节点绑定的小程序 ID（缺此字段重启后 coding 上下文会丢失）
     ...(node.frontmatter.sandbox_app_id ? { sandbox_app_id: node.frontmatter.sandbox_app_id } : {}),
+    // AI Coding 创建简报（缺省不写；有则在首轮跳过 6 问 Spec）
+    ...(node.frontmatter.sandbox_spec ? { sandbox_spec: node.frontmatter.sandbox_spec } : {}),
     // 节点类型标记（imageGen 等；缺省视为 aiChat）
     ...(node.frontmatter.node_type ? { node_type: node.frontmatter.node_type } : {}),
     // 批注框（仅 annotation 节点使用）：关联卡片 + 批注文字
@@ -744,6 +790,10 @@ export function createNodeMarkdown(
     position_y?: number;
     /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
     sandbox_app_id?: string;
+    /** 管家派发会话的产物暂存批次 id（Outbox）：产物落暂存区而非当前项目 */
+    outbox_batch_id?: string;
+    /** AI Coding 节点：创建时确认的构建简报（避免首轮重复 6 问） */
+    sandbox_spec?: SandboxSpec;
     /** 节点类型：aiChat（缺省）/ imageGen / orchestrator */
     node_type?: string;
     /** 批注框（annotation）节点：关联的卡片节点 id 列表 */
@@ -771,6 +821,8 @@ export function createNodeMarkdown(
       ...(options?.position_x !== undefined ? { position_x: options.position_x } : {}),
       ...(options?.position_y !== undefined ? { position_y: options.position_y } : {}),
       ...(options?.sandbox_app_id ? { sandbox_app_id: options.sandbox_app_id } : {}),
+      ...(options?.outbox_batch_id ? { outbox_batch_id: options.outbox_batch_id } : {}),
+      ...(options?.sandbox_spec ? { sandbox_spec: options.sandbox_spec } : {}),
       ...(options?.node_type ? { node_type: options.node_type } : {}),
       ...(options?.annotation_node_ids && options.annotation_node_ids.length > 0 ? { annotation_node_ids: options.annotation_node_ids } : {}),
       ...(options?.annotation_text ? { annotation_text: options.annotation_text } : {}),

@@ -939,7 +939,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
     // groupDirRel 为项目内相对路径（含首段 materials），接口要的是 materials 根相对路径
     const groupPath = groupDirRel.slice('materials/'.length);
     if (!groupPath) return;
-    if (!window.confirm(`Delete group "${title}"? Files will be moved to the ungrouped folder.`)) return;
+    if (!window.confirm(`Delete group "${title}"?`)) return;
     try {
       const resp = await fetch('/api/materials', {
         method: 'POST',
@@ -964,7 +964,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
   // 删除文件/文件夹
   const handleDelete = useCallback(async (filePath: string, fileName: string) => {
     setCtxMenu(null);
-    if (!window.confirm(`Delete "${fileName}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete "${fileName}"?`)) return;
     try {
       const resp = await fetch('/api/local-files', {
         method: 'POST',
@@ -1333,6 +1333,8 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
               prompt: payload?.prompt || '',
               auto: payload?.auto === true,
               projectId,
+              ...(payload?.sandbox_app_id ? { sandboxAppId: payload.sandbox_app_id } : {}),
+              ...(payload?.output_mode === 'outbox' && payload?.batch_id ? { outboxBatchId: payload.batch_id } : {}),
             },
           }),
         );
@@ -1810,7 +1812,7 @@ export function Sidebar({ onOpenCalendar, projectId, onCollapsedChange, onCreate
 
   // 删除 homework 文件（同步清理 .ownership.json 归属清册，节点分组随刷新更新）
   const handleDeleteHomeworkFile = useCallback(async (absPath: string) => {
-    if (!confirm('Delete this file? It will be removed from homework and its node outputs.')) return;
+    if (!confirm('Delete this file?')) return;
     // 从绝对路径推导该文件所属项目的 homework 根目录
     const i = absPath.indexOf('/homework/');
     const homeworkRoot = i === -1 ? '' : absPath.slice(0, i + '/homework'.length);

@@ -270,6 +270,9 @@ export interface ArgsTransformContext {
   readonly currentNodeId: string | undefined;
   /** Coding 节点沙箱 appId（truthy 时注入 node_sandbox_app_id；非沙箱会话为 undefined 不注入） */
   readonly sandboxAppId: string | undefined;
+  /** 管家派发会话的产物暂存批次 id（truthy 时注入 node_outbox_batch_id；普通会话为 undefined 不注入）。
+   *  工具据此把交付物改道到 <appRoot>/outbox/<批次>/，不写当前项目 homework/（见 lib/outbox/store.ts） */
+  readonly outboxBatchId?: string | undefined;
   /** 当前 Agent 身份（注入按身份剔除的技能清单 __disallowed_skills，见 route.ts __skill_gate__）；
    *  省略该键 = 该调用点不做身份级能力过滤 */
   readonly agentId?: string;

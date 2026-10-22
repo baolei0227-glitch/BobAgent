@@ -24,6 +24,7 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { sherpaLibDir, sherpaSpkEmbedBinaryPath, speakerEmbeddingModelPath } from '@/lib/stt/sherpa';
+import { IS_WIN, sharedLibEnv } from '../platform';
 
 const execFileAsync = promisify(execFile);
 
@@ -79,6 +80,12 @@ async function resolveSourcePath(): Promise<string> {
 /** 幂等构建：二进制比源码新就直接复用；否则 clang 编译后原子落位 */
 async function ensureBuilt(binaryPath: string): Promise<void> {
   if (buildError) throw new Error(buildError);
+  // 与 punct-server 同因：spk_embed.c 依赖 POSIX clang，Windows 需预编译 DLL（阶段 G，尚未做）。
+  if (IS_WIN) {
+    buildError =
+      'spk-embed is not built for Windows yet (native/spk_embed.c needs a POSIX clang toolchain); speaker identification is unavailable.';
+    throw new Error(buildError);
+  }
   const src = await resolveSourcePath();
   const [srcStat, binStat] = await Promise.all([
     fs.stat(src),
@@ -201,7 +208,7 @@ async function runBatch(wavPaths: string[]): Promise<(number[] | null)[]> {
       maxBuffer: MAX_STDOUT_BYTES,
       env: {
         ...process.env,
-        DYLD_LIBRARY_PATH: [sherpaLibDir(), process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+        ...sharedLibEnv(sherpaLibDir()),
       },
     },
   );

@@ -1,7 +1,9 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { REMOTE_COOKIE, expectedCookieValue, hasValidSessionCookie } from '@/lib/http/remote-session';
+import { decidePreviewHostRequest, decideDavOnPreviewHost, davWriteAllowedOnPreviewHost } from '@/lib/http/preview-host';
 import { parse } from 'url';
 import { readFileSync, watch } from 'fs';
+import { timingSafeEqual } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { join } from 'path';
 import { resolveAppRoot } from '@/lib/app-root';
@@ -203,37 +205,8 @@ function isSelfRequest(addr: string | undefined): boolean {
  *   · rotate token 会自动让已下发的 Cookie 失效（派生值变了），无需维护黑名单
  *   · httpOnly + SameSite=Lax：token 本身不出现在浏览器 JS 可读范围内
  * ──────────────────────────────────────────────────────────── */
-const REMOTE_COOKIE = 'bw_remote';
 const LOGIN_PATH = '/remote-login';
 const LOGIN_API = '/api/remote-access/login';
-
-function expectedCookieValue(token: string): string {
-  return createHmac('sha256', token).update('bw-remote-session-v1').digest('hex');
-}
-
-function readRemoteCookie(req: IncomingMessage): string {
-  const raw = req.headers.cookie;
-  if (!raw) return '';
-  for (const part of raw.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx < 0) continue;
-    if (part.slice(0, idx).trim() !== REMOTE_COOKIE) continue;
-    return decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return '';
-}
-
-/** Cookie 是否有效：与「当前 token 的派生值」一致才算数（rotate 自动失效）。 */
-function hasValidSessionCookie(req: IncomingMessage, token: string): boolean {
-  const got = readRemoteCookie(req);
-  if (!got) return false;
-  const want = expectedCookieValue(token);
-  try {
-    return timingSafeEqual(Buffer.from(got, 'utf8'), Buffer.from(want, 'utf8'));
-  } catch {
-    return false;
-  }
-}
 
 /** 会话 Cookie 的有效期（秒）。180 天：iOS「添加到主屏幕」后进程退出会丢会话 Cookie，
  *  给持久化以免每次打开都要重登；rotate token 让派生值失配即等效吊销，无黑名单负担。 */
@@ -260,14 +233,14 @@ function requireRemoteToken(req: IncomingMessage, res: ServerResponse): boolean 
     // 页面内引用的 /_next/static/**（Accept 非 text/html）与 fetch 子请求不会带它，
     // 会各自吃 401 → 主文档能开、JS 加载失败 → 白屏。一旦种下 Cookie，
     // 同源子请求自动携带，主链路与所有子资源一并放行。
-    if (!hasValidSessionCookie(req, ra.token)) {
+    if (!hasValidSessionCookie(req.headers.cookie, ra.token)) {
       res.setHeader('Set-Cookie', sessionCookieHeader(ra.token));
     }
     return true;
   }
 
   // ② 会话 Cookie：浏览器导航请求带不了 Authorization 头，只能靠它
-  if (hasValidSessionCookie(req, ra.token)) return true;
+  if (hasValidSessionCookie(req.headers.cookie, ra.token)) return true;
 
   // ③ 都不过：浏览器文档导航送去登录页（这是 PWA 免安装方式的唯一可行入口），其余返 401
   const url = (req.url || '').split('?')[0];
@@ -417,6 +390,92 @@ async function handleRemoteLogin(req: IncomingMessage, res: ServerResponse): Pro
 }
 
 /* ────────────────────────────────────────────────────────────
+ * 内部优雅停服端点（只给桌面主进程用）
+ *
+ * 存在的理由：Windows 上**没有 SIGTERM 语义**，Electron 侧 `child.kill()` 被 Node 映射成
+ * `TerminateProcess` —— 子进程当场消失，SQLite 的 WAL 来不及收尾、正在写的 docx 半截落盘。
+ * 改成「主进程发一个本机 HTTP 请求，服务端自己关停」。
+ *
+ * 四道闸门（缺一不可，否则等于在监听端口上开了一个「谁都能停服」的后门）：
+ *   1. env 里有 `BOB_SHUTDOWN_TOKEN` —— 只有 Electron 主进程拉起时才有；dev / 云端部署没有，
+ *      此时端点等价于不存在（404）；
+ *   2. 只接受 POST；
+ *   3. 只接受**本机**请求（loopback / 本机网卡地址，与远程访问网关同一判据）；
+ *   4. 令牌用 `timingSafeEqual` 比较，避免按字节计时爆破。
+ *
+ * ⚠️ 读到令牌后**立刻从 process.env 删除**：服务端会 spawn 插件 / 工具子进程，它们继承 env，
+ * 留着令牌等于把停服权发给每一个插件。
+ * ──────────────────────────────────────────────────────────── */
+const SHUTDOWN_PATH = '/__bobwork/shutdown';
+const shutdownToken = (() => {
+  const t = process.env.BOB_SHUTDOWN_TOKEN || '';
+  if (t) delete process.env.BOB_SHUTDOWN_TOKEN;
+  return t;
+})();
+/** 由 app.prepare() 里创建的 http server 回填，供停服端点调用 close() */
+let httpServer: ReturnType<typeof createServer> | null = null;
+
+function timingSafeStrEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf-8');
+  const bb = Buffer.from(b, 'utf-8');
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
+/** 返回 true = 已处理（无论成功失败）。 */
+function handleInternalShutdown(req: IncomingMessage, res: ServerResponse): boolean {
+  const url = (req.url || '').split('?')[0];
+  if (url !== SHUTDOWN_PATH) return false;
+  if (!shutdownToken) {
+    // 没有令牌 = 不是桌面主进程拉起的（dev / 云端）⇒ 端点不存在
+    res.statusCode = 404;
+    res.end();
+    return true;
+  }
+  if (req.method !== 'POST') {
+    res.statusCode = 405;
+    res.setHeader('Allow', 'POST');
+    res.end();
+    return true;
+  }
+  if (!isSelfRequest(req.socket?.remoteAddress)) {
+    res.statusCode = 403;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ success: false, error: 'forbidden' }));
+    return true;
+  }
+  const got = req.headers['x-bob-shutdown-token'];
+  if (typeof got !== 'string' || !timingSafeStrEqual(got, shutdownToken)) {
+    res.statusCode = 403;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ success: false, error: 'forbidden' }));
+    return true;
+  }
+
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ success: true, closing: true }));
+
+  // 先让响应刷出去，再关监听：close() 停止接受新连接并等在飞请求自然结束。
+  setTimeout(() => {
+    try {
+      httpServer?.close();
+      // keep-alive 的空闲连接不会自己断，显式收掉，否则 close() 的回调要等到超时
+      (httpServer as unknown as { closeIdleConnections?: () => void } | null)?.closeIdleConnections?.();
+    } catch {
+      /* ignore */
+    }
+    // 兜底：在飞请求若是长连接（SSE / 流式响应）会一直不结束，最多再等 1200ms 就退出。
+    // 主进程侧另有强制终止兜底（GRACEFUL_KILL_DEADLINE_MS），两边都不赌「一定优雅结束」。
+    const hard = setTimeout(() => process.exit(0), 1200);
+    hard.unref?.();
+    // 最后一个连接关闭时立刻退出，不必等满 1200ms
+    httpServer?.once('close', () => process.exit(0));
+  }, 20);
+  return true;
+}
+
+/* ────────────────────────────────────────────────────────────
  * standalone 配置还原
  *
  * 打包版把本入口放在 next-standalone/server.js 的位置上。Next 官方生成的那个 wrapper
@@ -448,12 +507,63 @@ app.prepare().then(() => {
     try {
       // 登录端点必须先于网关处理，否则会被自身的 401 拦截，形成无法登录的死循环
       if (await handleRemoteLogin(req, res)) return;
+      // 内部优雅停服端点：同样必须先于网关 —— strict 模式下连 loopback 也要求 Bearer，
+      // 主进程的停服请求会被自己的网关 401 挡掉。它自带「本机 + 一次性令牌」双重闸门。
+      if (handleInternalShutdown(req, res)) return;
       // 远程访问鉴权网关：非本机 + 启用时要求 Bearer 或会话 Cookie（桌面 localhost 豁免；CalDAV 一并受保护）
       if (!requireRemoteToken(req, res)) return;
+      // ── 预览 origin 限制（2026-10-10 同源隔离 A 方案）──
+      // 宿主 UI = localhost，小程序预览 = 127.0.0.1（不同 origin → 读不到宿主存储/Cookie）；
+      // 这里再禁掉预览 origin 上的宿主高危 API，并把 UI 导航重定向回 localhost。
+      {
+        const decision = decidePreviewHostRequest({
+          host: req.headers.host ?? '',
+          pathname: parse(req.url || '/', true).pathname ?? '/',
+          accept: req.headers.accept,
+          port: String(port),
+        });
+        if (decision.action === 'deny') {
+          res.statusCode = 403;
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(JSON.stringify({ success: false, error: decision.message }));
+          return;
+        }
+        if (decision.action === 'redirect') {
+          res.statusCode = 302;
+          res.setHeader('Location', decision.location ?? '/');
+          res.end();
+          return;
+        }
+      }
+      // DAV 方法级策略（2026-10-10）：预览 origin 只读，写方法 403（自定义方法走这里）
+      if (isCalDavUrl(req.url || '')) {
+        const dav = decideDavOnPreviewHost({
+          host: req.headers.host ?? '',
+          method: req.method ?? 'GET',
+          allowWrite: await davWriteAllowedOnPreviewHost(),
+        });
+        if (dav.action === 'deny') {
+          res.statusCode = 403;
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(JSON.stringify({ success: false, error: dav.message }));
+          return;
+        }
+      }
       // 优先检查 CalDAV 自定义方法
       if (req.method && isCalDavMethod(req.method) && isCalDavUrl(req.url || '')) {
         const handled = await handleCalDavRequest(req, res);
         if (handled) return;
+      }
+
+      // 插件自带网页反代（/api/plugin-web/<id>/** → 插件运行时端口）。
+      // 位置：在鉴权网关与预览 origin 策略之后 ⇒ 自动继承两者；在 Next 之前 ⇒ 该前缀由宿主独占。
+      // 存在的理由：Hippo 原生书签只能存一个 URL 字符串，而插件面板端口每次启动都变。
+      {
+        const { handlePluginWebProxy } = await import('@/lib/http/plugin-web-proxy');
+        const { resolvePluginWebPanel } = await import('@/lib/mcp/plugin-web');
+        if (await handlePluginWebProxy(req, res, { resolve: resolvePluginWebPanel })) return;
       }
 
       // 常规请求交给 Next.js
@@ -469,6 +579,8 @@ app.prepare().then(() => {
     console.error(err);
     process.exit(1);
   });
+  // 回填给停服端点用（优雅关停时 server.close() 需要这个实例）
+  httpServer = server;
   server.listen(port, () => {
     console.log(
       `> Server listening at http://${hostname}:${port} as ${

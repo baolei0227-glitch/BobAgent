@@ -11,6 +11,7 @@ import { randomUUID } from 'crypto';
 import { stat, mkdir } from 'fs/promises';
 import { join } from 'path';
 import type { Tool } from './index';
+import { pythonBin } from '@/lib/platform';
 import { getProjectRootPath, resolvePath, truncate, OCR_MAX_LENGTH } from './shared';
 
 const execFileAsync = promisify(execFile);
@@ -93,7 +94,7 @@ async function toolCropImage(args: Record<string, unknown>): Promise<string> {
     await mkdir(outDir, { recursive: true });
     const outPath = join(outDir, `crop-${Date.now()}-${randomUUID().slice(0, 8)}.png`);
     const { stdout } = await execFileAsync(
-      'python3',
+      pythonBin('图片裁剪'),
       [
         '-c',
         `import json,sys;sys.path.insert(0,'src/lib/pdf/core');` +

@@ -1,7 +1,7 @@
 /**
  * Daily News —— 发现层：新闻源（RSS / Atom）拉取与解析（server-only）
  *
- * 为什么需要它：原先的发现层只有关键词搜索（web.ts 的 searchLocalProviders），
+ * 为什么需要它：原先的发现层只有关键词搜索（早期 web.ts 的本地多引擎抓取，现为 DeepSeek Search），
  * 抓回来的常是列表页 / 二手转载页。策展几个稳定的官方 feed 直接拉最新条目，
  * 命中率与时效性都更好，也省一次搜索。
  *

@@ -6,7 +6,7 @@
  * 与 Skills tab 同排版（SkillManagerModal 市场/已装 双视图约定）：
  *   - Market：随包/可下载 agent 包网格（Assets agents），已装卡片保留并显示 Installed 态；
  *   - Installed：系统内置 + 已装市场 agent 卡片（启用开关/卸载/编辑系统提示 —— agent 编辑统一入口；
- *     结构性改造场景/内核/技能池走 AI Coding → Sub-Agent → Existing Agent 的 update_agent_package）。
+ *     结构性改造场景/内核/技能池走 ＋ Add session → New Agent… → Existing Agent 的 update_agent_package）。
  * 数据经 /api/agents（GET market+agents / POST install_agent|uninstall_agent|set_disabled），
  * 持久化到 <appRoot>/agents + .agents.json。
  */
@@ -211,7 +211,7 @@ function InstalledAgentCard({ agent, isMarket, disabled, hidden, busy, promptTex
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             rows={5}
-            placeholder={`System prompt override (empty = package default). For structural edits (scenes / kernel tools / skills) use AI Coding → Sub-Agent → Existing Agent.`}
+            placeholder={`System prompt override (empty = package default). For structural edits (scenes / kernel tools / skills) use ＋ Add session → New Agent… → Existing Agent.`}
             className="w-full resize-none rounded border bg-[var(--input-bg)] px-2 py-1.5 text-xs outline-none transition-colors"
             style={{ borderColor: 'var(--line)', color: 'var(--ink)', fontFamily: 'var(--font-sans)', lineHeight: 1.6 }}
           />

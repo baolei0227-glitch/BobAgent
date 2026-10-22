@@ -515,7 +515,7 @@ export function LocalFileExplorer({
   // 删除文件
   const handleDelete = useCallback(async (filePath: string, fileName: string) => {
     setCtxMenu(null);
-    if (!window.confirm(`Delete "${fileName}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete "${fileName}"?`)) return;
     try {
       const resp = await fetch('/api/local-files', {
         method: 'POST',

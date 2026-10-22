@@ -14,6 +14,7 @@ import { join, extname, basename, resolve } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { docxTemplateLibraryRoot, sanitizeDocxScene, resolveDocxTemplateScript } from '@/lib/docx-template-mcp';
+import { pythonBin, shellArg, toolPathEnv } from '@/lib/platform';
 
 const execAsync = promisify(exec);
 
@@ -48,10 +49,10 @@ async function extractTemplateFields(filePath: string): Promise<string[] | null>
     return null;
   }
   try {
-    const cmd = ['/usr/bin/python3', `"${script}"`, `"${filePath}"`].join(' ');
+    const cmd = [shellArg(pythonBin('模板字段识别')), `"${script}"`, `"${filePath}"`].join(' ');
     const envChild = {
       ...process.env,
-      PATH: ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(':'),
+      PATH: toolPathEnv(),
     };
     const { stdout, stderr } = await execAsync(cmd, { timeout: 25_000, maxBuffer: 1024 * 1024, env: envChild });
     const out = (stdout || '').trim();

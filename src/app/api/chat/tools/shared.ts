@@ -87,6 +87,10 @@ export async function resolvePath(inputPath: string): Promise<string> {
   if (normalized.startsWith('bob-sandbox/') || normalized === 'bob-sandbox') {
     return resolve(join(resolveAppRoot(), p));
   }
+  // outbox/ 路径映射到 BobWork 根目录下的产物暂存区（管家派发会话的交付物先落这里）
+  if (normalized.startsWith('outbox/') || normalized === 'outbox') {
+    return resolve(join(resolveAppRoot(), p));
+  }
 
   return resolve(join(await getWorkspacePath(), p));
 }

@@ -2,7 +2,7 @@
  * Today 建议引擎（advice）回归。
  *
  * 覆盖三条硬约束：
- *   - 优先级与卡数上限（overdue > overload > sticky > stalled，最多 3 张）；
+ *   - 优先级与卡数上限（overdue > plan > overload > sticky > stalled，最多 3 张）；
  *   - 降级不误报（数据源失败时跳过该信号，且不给 clear）；
  *   - 跨卡去重（低优先级卡不重复点名高点名过的行）。
  *
@@ -161,6 +161,73 @@ describe('buildAdvice —— 项目停滞', () => {
       project: { projectId: 'p1', projectName: '老项目' },
     });
     expect(card.title).toContain('老项目');
+  });
+});
+
+describe('buildAdvice —— 计划逾期 / 停滞', () => {
+  const signal = (over: Partial<import('./advice').AdvicePlanSignal> = {}) => ({
+    projectId: 'p1',
+    projectName: '甲项目',
+    planId: 'plan-1',
+    planTitle: '诉讼推进',
+    overdueSteps: 0,
+    stalledDays: null as number | null,
+    ...over,
+  });
+
+  it('无逾期且未停滞的信号不产出 plan 卡', () => {
+    const cards = buildAdvice(inputOf({ snapshot: snap({}), planSignals: [signal()] }));
+    expect(cards.map((c) => c.kind)).not.toContain('plan');
+  });
+
+  it('有逾期步骤 → count 为逾期总数，items 为可跳转的 project 行，reason 点名最急项', () => {
+    const cards = buildAdvice(
+      inputOf({
+        snapshot: snap({}),
+        planSignals: [
+          signal({ overdueSteps: 2, topOverdue: { step: '取证', due: '2026-09-01', daysOverdue: 32 } }),
+          signal({ planId: 'plan-2', planTitle: '调解', projectId: 'p2', projectName: '乙项目', overdueSteps: 1, topOverdue: { step: '送达', due: '2026-09-30', daysOverdue: 3 } }),
+        ],
+      }),
+    );
+    expect(cards.map((c) => c.kind)).toEqual(['plan']);
+    const card = cards[0];
+    expect(card.count).toBe(3);
+    // 逾期多的计划排前面（items 取前 MAX_ITEMS_PER_CARD 条）
+    expect(card.items.map((i) => i.key)).toEqual(['plan:plan-1', 'plan:plan-2']);
+    expect(card.items[0]).toMatchObject({
+      source: 'project',
+      project: { projectId: 'p1', projectName: '甲项目' },
+    });
+    expect(card.title).toContain('3 个步骤已逾期');
+    expect(card.reason).toContain('已逾期 32 天');
+  });
+
+  it('仅停滞（无逾期）→ 标题走停滞文案，items 展示停滞天数', () => {
+    const cards = buildAdvice(inputOf({ snapshot: snap({}), planSignals: [signal({ stalledDays: 21 })] }));
+    expect(cards.map((c) => c.kind)).toEqual(['plan']);
+    expect(cards[0].count).toBe(0);
+    expect(cards[0].title).toContain('停滞');
+    expect(cards[0].reason).toContain('21 天未推进');
+    expect(cards[0].items[0].time).toBe('stalled 21d');
+  });
+
+  it('优先级：plan 紧随 overdue，排在 overload 之前（仍受 3 张上限约束）', () => {
+    const today = [
+      ev('o1', '逾期且今天也在', '2026-09-20T09:00:00'),
+      ev('t2', 'T2', '2026-10-03T08:00:00'),
+      ev('t3', 'T3', '2026-10-03T09:00:00'),
+      ev('t4', 'T4', '2026-10-03T10:00:00'),
+      ev('t5', 'T5', '2026-10-03T11:00:00'),
+    ];
+    const cards = buildAdvice(
+      inputOf({
+        snapshot: snap({ today, overdue: [ev('o1', '逾期且今天也在', '2026-09-20T09:00:00')] }),
+        sticky: { totalPending: 9, projectCount: 3, items: [{ key: 'sticky:1', title: '买菜', time: '', startMs: 0 }] },
+        planSignals: [signal({ overdueSteps: 1, topOverdue: { step: '取证', due: '2026-09-01', daysOverdue: 32 } })],
+      }),
+    );
+    expect(cards.map((c) => c.kind)).toEqual(['overdue', 'plan', 'overload']);
   });
 });
 

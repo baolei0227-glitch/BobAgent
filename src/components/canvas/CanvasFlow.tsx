@@ -1,8 +1,8 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore, type ReactNode } from 'react';
+import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore, lazy, Suspense, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCircle, Check, FileText, ClipboardList, NotebookText, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, Boxes, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil, GitMerge, GitFork, Network, Archive, MapPinned } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, X, Code2, MessageSquareText, MessageCirclePlus, Check, FileText, ClipboardList, NotebookText, Calendar, Folder, Monitor, Trash, Search, Plus, LayoutGrid, Loader2, Bot, Settings, Blocks, LayoutTemplate, FilePen, Globe, MoreVertical, Pencil, GitMerge, GitFork, Network, Archive, MapPinned, AudioLines } from 'lucide-react';
 import type { HostNode, HostEdge, NodeHostValue } from './node-host';
 import { NodeHostContext } from './node-host';
 import {
@@ -15,7 +15,7 @@ import {
   estimateTabWidth,
   pluginPanelTabIcon,
 } from './canvasUtils';
-import { useStarredApps, useUpdateStatus, usePluginPanels, useBrandLogo } from './canvasHooks';
+import { useUpdateStatus, usePluginPanels, useBrandLogo } from './canvasHooks';
 
 // —— 宿主自绘画布（2026-09 布局重构）：以本地类型替代旧 React Flow 的 Node/Edge/Connection。
 // 节点 state 统一以 AiChatNodeData 承载（非研究节点 data 语义照旧经断言访问）。
@@ -37,6 +37,9 @@ import { UsagePanel } from './UsagePanel';
 import { AnnotationNode } from './AnnotationNode';
 import { useConfirm } from './ConfirmDialog';
 import { SandboxPanel } from './SandboxPanel';
+import { SandboxPreviewFrame, type GraphExecutorResult } from './SandboxPreviewFrame';
+import { executeGraphBridgeAction } from '@/lib/graph/graph-bridge';
+import { updateSandboxGraphPermission, resolveSandboxGraphPermission, loadSettings, type SandboxGraphPermission } from '@/lib/settings';
 import { outcomeMaxLengthForModel } from '@/lib/context-limits';
 import { setCurrentProject } from '@/lib/current-project';
 import { NodeMap } from './NodeMap';
@@ -55,17 +58,18 @@ import { LocalFileExplorer } from './LocalFileExplorer';
 import { UnifiedPalette } from './UnifiedPalette';
 import { NavSearchBox } from './NavSearchBox';
 import { AICodingCreateDialog } from './AICodingCreateDialog';
+import { AgentCreateDialog } from './AgentCreateDialog';
+import { uploadAttachment } from './composer/useComposer';
 import { isBrowserDoc } from './viewers/registry';
 import type { AiChatNodeData, BobbyNodeData, ProviderConfig, ChatMessage } from '@/lib/types';
 import { DEFAULT_MODEL_ID, DEFAULT_THINKING_LEVEL } from '@/lib/types';
-import type { FileSourceKind } from '@/lib/files/types';
+import type { FileSourceKind, FileInfo } from '@/lib/files/types';
 import type { FileOpenPayload } from '@/lib/files/types';
 import { listAgents, agentFlowType } from '@/lib/agents/profiles';
 import { bus, BusEvents } from '@/lib/bus';
 import { edgeTypeToRelation } from '@/lib/edge/relations';
 import type { GraphGateway, GraphSnapshot } from '@/lib/graph/graph-gateway';
 import type { PluginPanelEntry } from '@/lib/plugin-panels';
-import { openSandboxPreviewInHippo } from '@/lib/sandbox/open-preview';
 import {
   setImageAiEditHidden,
   setImageAiEditKeepAlive,
@@ -75,6 +79,7 @@ import {
 import { ImageAiEditToast } from './ImageAiEditToast';
 import { SetupWizard } from './SetupWizard';
 import { desktop, isDesktop } from '@/lib/desktop-adapter';
+import { audioEditorUrl } from '@/lib/hippo-browser/audio-editor-url';
 import { HippoCapsule } from '@/components/hippo-browser/HippoCapsule';
 
 // —— 预览面板自由缩放常量 ——
@@ -433,19 +438,46 @@ function restoredBobbyToFlowNode(
 /** 置顶标签：这些插件面板的标签固定在标签栏最前面（先于会话/文件/沙盒标签） */
 const PINNED_PANEL_PLUGIN_IDS = new Set(['bob-mind-mcp']);
 
+/**
+ * 音频编辑器（左栏入口 → 预览面板单例标签）。
+ *
+ * 复用画布音频查看器 `viewers/AudioViewer`，但**不绑定任何文件**：传一个无路径的占位
+ * FileInfo，让它走自身的空态（Music 图标 + Library + Import audio）——用户 Import 或从
+ * 库里选一条即进入完整编辑（波形/打点/截取/转写），产物落 `<APP_ROOT>/.audio-library/`。
+ *
+ * 惰性加载：`AudioViewer` 带着 WaveSurfer 依赖，静态引入会把整块塞进画布主包，
+ * 故与 viewerRegistry 同款走动态 import（`React.lazy`）。
+ */
+const LazyAudioViewer = lazy(() => import('./viewers/AudioViewer').then((m) => ({ default: m.AudioViewer })));
+
+/** 空音频编辑器的占位文件信息：无 `full_path` ⇒ AudioViewer 判定为「没有源音频」并渲染空态 */
+const EMPTY_AUDIO_FILE: FileInfo = { name: 'Audio', type: 'binary', extension: '.mp3', content: '', size: 0, full_path: '' };
+
+/**
+ * 空编辑器不关心加载失败上报（它没有源音频可失败）。
+ * ⚠️ 必须是**模块级常量**而非内联箭头：AudioViewer 的加载 effect 依赖数组含 `onError`
+ *   （`AudioViewer.tsx:600`），内联箭头每次渲染换身份 ⇒ 父级任何一次重渲染都会重跑该 effect，
+ *   而 effect 顶部会 `setMarks([])/setNote(null)` ⇒ 打点与状态条被反复清空（见 MEMORY §7）。
+ */
+const IGNORE_AUDIO_VIEWER_ERROR = () => {};
+
 /** 统一悬浮面板：所有文档以标签页形式组织在单一可拖拽面板中 */
 function UnifiedReaderPanel({
   openReaderIds,
   fileTabs,
   readerTitles,
   activePanelTab,
+  previewApp,
+  graph,
   collapsed,
   panelWidth,
   onToggleCollapse,
   onSelectTab,
   onCloseNodeTab,
   onCloseFileTab,
+  onClosePreviewTab,
   onCloseTemplateTab,
+  onCloseAudioTab,
   pluginPanels,
   onClosePluginTab,
   openPluginIds,
@@ -467,7 +499,9 @@ function UnifiedReaderPanel({
     activeImagePath?: string;
   }>;
   readerTitles: Record<string, string>;
-  activePanelTab: { type: 'node' | 'file' | 'template' | 'plugin'; id: string } | null;
+  activePanelTab: { type: 'node' | 'file' | 'template' | 'plugin' | 'audio' | 'preview'; id: string } | null;
+  previewApp: { id: string; name: string } | null;
+  graph?: (action: string, data: Record<string, unknown>) => Promise<GraphExecutorResult>;
   collapsed: boolean;
   /** 面板当前宽度（px），可在 [PANEL_W_MIN, 可用上限] 之间自由缩放 */
   panelWidth: number;
@@ -475,10 +509,12 @@ function UnifiedReaderPanel({
   pluginPanels: PluginPanelEntry[];
   /** 已打开的插件面板 id（按打开顺序）：常驻标签栏，切走仅 display 隐藏，iframe 不重建 */
   openPluginIds: string[];
-  onSelectTab: (type: 'node' | 'file' | 'template' | 'plugin', id: string) => void;
+  onSelectTab: (type: 'node' | 'file' | 'template' | 'plugin' | 'audio' | 'preview', id: string) => void;
   onCloseNodeTab: (nodeMdId: string) => void;
   onCloseFileTab: (tabId: string) => void;
+  onClosePreviewTab: () => void;
   onCloseTemplateTab: () => void;
+  onCloseAudioTab: () => void;
   onClosePluginTab: (pluginId: string) => void;
   /** 打开模板 tab 时预选的场景名（AI 扫描到模板字段后跳转时携带） */
   templateInitialScene?: string;
@@ -531,6 +567,13 @@ function UnifiedReaderPanel({
     if (activePanelTab?.type === 'template') setTemplatePanelMounted(true);
   }, [activePanelTab?.type]);
 
+  // 音频编辑器（空态）单例惰性挂载：一旦打开过就保持挂载（切换 tab 仅 display 隐藏），
+  // 与模板插件同款 —— 用户在空态下已导入音频时，切走再回来不丢编辑状态。
+  const [audioPanelMounted, setAudioPanelMounted] = useState(false);
+  useEffect(() => {
+    if (activePanelTab?.type === 'audio') setAudioPanelMounted(true);
+  }, [activePanelTab?.type]);
+
   // 标签栏溢出折叠：放得下的标签数量（超出部分收进 "…" 下拉菜单）
   // 初始为 0，由 useLayoutEffect 在绘制前同步计算真实数量（effect 定义在 allTabs 之后）
 
@@ -541,7 +584,7 @@ function UnifiedReaderPanel({
   const tabsWrapRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
 
-  const handleSelectTab = (type: 'node' | 'file' | 'template' | 'plugin', id: string) => {
+  const handleSelectTab = (type: 'node' | 'file' | 'template' | 'plugin' | 'audio' | 'preview', id: string) => {
     onSelectTab(type, id);
   };
 
@@ -556,15 +599,20 @@ function UnifiedReaderPanel({
     }));
     const pinnedTabs = [
       ...(templatePanelMounted ? [{ id: 'template', type: 'template' as const, label: 'Templates' }] : []),
+      ...(audioPanelMounted ? [{ id: 'audio-editor', type: 'audio' as const, label: 'Audio Editor' }] : []),
       ...pluginTabs.filter(t => PINNED_PANEL_PLUGIN_IDS.has(t.id)),
     ];
+    const previewTabs = previewApp
+      ? [{ id: previewApp.id, type: 'preview' as const, label: previewApp.name }]
+      : [];
     return [
       ...pinnedTabs,
+      ...previewTabs,
       ...pluginTabs.filter(t => !PINNED_PANEL_PLUGIN_IDS.has(t.id)),
       ...openReaderIds.map(id => ({ id, type: 'node' as const, label: readerTitles[id] || '...' })),
       ...fileTabs.map(t => ({ id: t.id, type: 'file' as const, label: t.fileName })),
     ];
-  }, [openReaderIds, fileTabs, readerTitles, openPluginIds, pluginPanels, templatePanelMounted]);
+  }, [openReaderIds, fileTabs, readerTitles, openPluginIds, pluginPanels, templatePanelMounted, audioPanelMounted, previewApp]);
 
   // 计算可容纳的标签数量：预留 "…" 按钮宽度，按估算宽度逐个累加（面板尺寸/标签变化时重算）
   useLayoutEffect(() => {
@@ -674,7 +722,7 @@ function UnifiedReaderPanel({
         <div ref={tabsWrapRef} className="flex min-w-0 flex-1 items-center overflow-hidden">
           {allTabs.map((tab, idx) => {
             const isActive = activePanelTab?.id === tab.id && activePanelTab?.type === tab.type;
-            const TabIcon = tab.type === 'file' ? FileText : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
+            const TabIcon = tab.type === 'preview' ? Monitor : tab.type === 'file' ? FileText : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
             return (
               <div key={tab.id} className={`group flex shrink-0 items-center ${idx >= visibleCount ? 'hidden' : ''}`}>
                 {/* 圆角胶囊标签：类型图标 + 标签名 + 关闭按钮；选中态以背景+边框高亮，不加下划线 */}
@@ -720,10 +768,16 @@ function UnifiedReaderPanel({
                       e.preventDefault();
                       if (tab.type === 'node') onCloseNodeTab(tab.id);
                       else if (tab.type === 'file') onCloseFileTab(tab.id);
+                      else if (tab.type === 'preview') onClosePreviewTab();
                       else if (tab.type === 'template') {
                         // 退出常驻：从标签栏移除（onCloseTemplateTab 只会切走激活，需本地清标记）
                         setTemplatePanelMounted(false);
                         onCloseTemplateTab();
+                      }
+                      else if (tab.type === 'audio') {
+                        // 退出常驻：与模板同款，先清本地挂载标记再切走激活
+                        setAudioPanelMounted(false);
+                        onCloseAudioTab();
                       }
                       else if (tab.type === 'plugin') onClosePluginTab(tab.id);
                     }}
@@ -756,7 +810,7 @@ function UnifiedReaderPanel({
               >
                 {allTabs.map((tab) => {
                   const isActive = activePanelTab?.id === tab.id && activePanelTab?.type === tab.type;
-                  const TabIcon = tab.type === 'file' ? FileText : tab.type === 'template' ? ClipboardList : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
+                  const TabIcon = tab.type === 'preview' ? Monitor : tab.type === 'file' ? FileText : tab.type === 'template' ? ClipboardList : tab.type === 'audio' ? AudioLines : tab.type === 'plugin' ? pluginPanelTabIcon(pluginPanels.find(p => p.pluginId === tab.id)?.icon) : MessageSquareText;
                   return (
                     <button
                       key={tab.id}
@@ -791,6 +845,14 @@ function UnifiedReaderPanel({
             defaultOutcomeMode={outcomeModeTabIds.has(activePanelTab.id) ? true : undefined}
           />
         )}
+        {activePanelTab?.type === 'preview' && previewApp && (
+          <SandboxPreviewFrame
+            embedded
+            app={previewApp}
+            graph={graph}
+            onClose={onClosePreviewTab}
+          />
+        )}
         {activePanelTab?.type === 'file' && activeFileTab && (
           <UnifiedViewer
             key={activeFileTab.id}
@@ -813,6 +875,28 @@ function UnifiedReaderPanel({
         {(activePanelTab?.type === 'template' || templatePanelMounted) && (
           <div data-template-panel className="h-full" style={{ display: activePanelTab?.type === 'template' ? undefined : 'none' }}>
             <DocxTemplatePanel initialScene={templateInitialScene} />
+          </div>
+        )}
+        {/* 音频编辑器（空态）：左栏 Audio Editor 入口打开的单例标签。
+            复用画布音频查看器，但传入无路径的占位 FileInfo ⇒ 走它的空态（Import / Library）；
+            导入或从库中选一条即进入完整编辑。惰性挂载 + display 显隐：切走 tab 不丢已导入的音频。 */}
+        {(activePanelTab?.type === 'audio' || audioPanelMounted) && (
+          <div data-audio-panel className="h-full" style={{ display: activePanelTab?.type === 'audio' ? undefined : 'none' }}>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center">
+                  <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--ink-muted)' }} />
+                </div>
+              }
+            >
+              <LazyAudioViewer
+                fileInfo={EMPTY_AUDIO_FILE}
+                proxyUrl={null}
+                fileName="Audio"
+                source="local"
+                onError={IGNORE_AUDIO_VIEWER_ERROR}
+              />
+            </Suspense>
           </div>
         )}
         {/* 插件面板（注册表驱动）：内嵌插件自带 Web UI——serve 先探测就绪，static 直载宿主代理。
@@ -1273,10 +1357,14 @@ function CanvasFlowInner() {
     // 创建时间（ms）：取自 .md frontmatter created_at；
     // 本地刚新建、尚未重载 frontmatter 的节点无 createdAt → 按"最新"（+∞）处理，保证新建会话即时置顶
     const createdMs = new Map<string, number>();
-    for (const n of graphSnap.nodes) {
+    // 数组下标：本次运行内新建的节点无 createdAt，下标即创建先后（新节点恒追加在数组末尾），
+    // 用作时间持平时的兜底排序键（见下方 sort）
+    const orderIndex = new Map<string, number>();
+    graphSnap.nodes.forEach((n, i) => {
       const t = n.createdAt ? Date.parse(n.createdAt) : NaN;
       createdMs.set(n.id, Number.isFinite(t) ? t : Number.POSITIVE_INFINITY);
-    }
+      orderIndex.set(n.id, i);
+    });
     const timeOf = (id: string) => createdMs.get(id) ?? 0;
     const titleById = new Map(graphSnap.nodes.map((n) => [n.id, n.title]));
     // 关系符号只描述"侧边栏里看得见的会话关系"：两端都必须是会在 rail 出现的会话节点，
@@ -1304,7 +1392,14 @@ function CanvasFlowInner() {
         upstream: upstreamOf.get(n.id) ?? [],
         downstream: downstreamOf.get(n.id) ?? [],
       }))
-      .sort((a, b) => timeOf(b.id) - timeOf(a.id));
+      .sort((a, b) => {
+        const byTime = timeOf(b.id) - timeOf(a.id);
+        // 两个都无 createdAt（本次运行内新建、尚未重载 frontmatter）时 byTime = ∞ - ∞ = NaN，
+        // 若交给稳定排序会保留数组顺序（先建的反而在上面）→ 表现为「连续两个新会话排序颠倒」。
+        // 故时间无结论时改用数组下标：下标更大的（更晚创建）排前面，保证新建会话仍即时置顶。
+        if (!Number.isNaN(byTime) && byTime !== 0) return byTime;
+        return (orderIndex.get(b.id) ?? 0) - (orderIndex.get(a.id) ?? 0);
+      });
   }, [graphSnap.nodes, graphSnap.edges]);
 
   // 应用内置确认弹窗（macOS 风格英文文案）
@@ -1540,6 +1635,46 @@ function CanvasFlowInner() {
   };
   // Bob Sandbox 全屏管理页（小程序商城）开关
   const [storeOpen, setStoreOpen] = useState(false);
+  // 应用内沙箱预览目标（方案 B）：由 Coding 节点 ▶ 或商城卡片派发 sandbox-preview-open 打开
+  const [previewApp, setPreviewApp] = useState<{ id: string; name: string } | null>(null);
+
+  /**
+   * graph* 执行器（2026-10-10 方案 B 收尾）：把小程序的画布对接请求接到站内 GraphGateway。
+   * 画布状态在渲染进程内，所以这条链路**不能**走 /api/sandbox/bridge（那里没有画布）——
+   * 之前 `executeGraphBridgeAction` 一直没有调用方，正是缺了这一处接线。
+   */
+  const graphExecutor = useMemo(() => {
+    const appId = previewApp?.id ?? '';
+    if (!appId) return undefined;
+    return async (action: string, data: Record<string, unknown>) => {
+      return await executeGraphBridgeAction(action, data, {
+        appId,
+        gateway: graphGateway,
+        // 申请授权：完全信任模式（默认）下直接落盘；显式收紧后走宿主确认弹窗
+        requestPermission: async (id: string, level: SandboxGraphPermission) => {
+          const settings = await loadSettings().catch(() => null);
+          const fullTrust = settings ? resolveSandboxGraphPermission(settings, id) === 'control' : true;
+          let granted: SandboxGraphPermission = level;
+          if (!fullTrust) {
+            const ok = await confirmAsk({
+              title: 'Canvas Access',
+              message: `Mini-program "${id}" requests ${level} access to your canvas.${String.fromCharCode(10, 10)}read = snapshot only · control = also expand / move / select nodes`,
+              confirmLabel: 'Grant',
+              cancelLabel: 'Deny',
+            });
+            granted = ok ? level : 'none';
+          }
+          if (granted !== 'none') {
+            await updateSandboxGraphPermission(id, granted).catch(() => {});
+            window.dispatchEvent(new CustomEvent('sandbox-permission-changed', { detail: { appId: id, level: granted } }));
+          }
+          return granted;
+        },
+      });
+    };
+  }, [previewApp?.id, graphGateway, confirmAsk]);
+
+
   // 模型用量统计面板（图标栏/调色板入口派发 usage-panel-open 事件打开）
   const [usageOpen, setUsageOpen] = useState(false);
   // 统一悬浮面板
@@ -1736,11 +1871,12 @@ function CanvasFlowInner() {
     imagePaths?: string[];
     activeImagePath?: string;
   }>>([]);
-  // 新建节点对话框（双击画布空白触发）：AI Chat / AI Coding 类型选择 + 小程序项目绑定
+  // 新建小程序（AI Coding）对话框：新建/绑定 Bob Sandbox 小程序
   const [nodeCreateDialogOpen, setNodeCreateDialogOpen] = useState(false);
   const [nodeCreatePos, setNodeCreatePos] = useState<{ x: number; y: number } | null>(null);
-  // 新建对话框初始档位：'agent' = 打开即落在 Sub-Agent 档
-  const [nodeCreateKind, setNodeCreateKind] = useState<'mini' | 'agent'>('mini');
+  // 新建/改造子 Agent 对话框（＋ Add session → New Agent…）：原 AI Coding 创建框的 Sub-Agent 档
+  // 产出的是 chat 节点（不绑 sandbox），与小程序是两套产物模型，故从 AI Coding 框迁出独立入口
+  const [agentCreateDialogOpen, setAgentCreateDialogOpen] = useState(false);
   // 标题栏「＋」会话类型下拉菜单
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   // NodeMap 展开态：开关按钮置于左侧栏项目行（项目名右侧、＋ 新建会话左侧），
@@ -1796,14 +1932,12 @@ function CanvasFlowInner() {
   }, [marketAgents]);
   const { appVersion, setAppVersion, updateStatus, setUpdateStatus, updateVersion, updateProgress, updateErrText } = useUpdateStatus();
   // 回执未读角标已统一在 ButlerOrb（订阅 butler:inbox-pending），本组件不再持有
-  // 标星小程序（与 SandboxPanel 共享数据源）：在 ⌘F 面板输入框下方与功能按钮同排展示，点击直接打开预览
-  const [starredApps] = useStarredApps();
   // 底部品牌区 logo：跟随设置里的 Sidebar 品牌头像（settings.brandLogo），默认 hippo-icon.png
   const brandLogo = useBrandLogo();
   const [, setProviderConfigs] = useState<ProviderConfig[]>([]);
   const [openReaderIds, setOpenReaderIds] = useState<string[]>([]);
   const [activeReaderId, setActiveReaderId] = useState<string | null>(null);
-  const [activePanelTab, setActivePanelTab] = useState<{ type: 'node' | 'file' | 'template' | 'plugin'; id: string } | null>(null);
+  const [activePanelTab, setActivePanelTab] = useState<{ type: 'node' | 'file' | 'template' | 'plugin' | 'audio' | 'preview'; id: string } | null>(null);
   // 切换 BobWork 页面（预览面板 tab）时自动收起 Hippo Browser 为胶囊：
   // 浏览器是独立的系统级置顶窗口，不会随页面切换走，留在最上层会遮住新页面。
   // collapse 幂等，主进程会跳过「已收起 / 已关闭 / 用户正在浏览器里操作」的情况。
@@ -2058,6 +2192,13 @@ function CanvasFlowInner() {
     });
   }, [openFileTab, openLocalFileInBrowser]);
 
+  // Step 3：Hippo 里「Open as Markdown」的 .md —— 音频编辑器跑在 Hippo guest（无 preload），
+  // 发不出上面的 file.open，改由主进程收编后转发过来（hippo-browser.handoffMarkdownToCanvas）。
+  // 这里按本地文件打开，与画布其它 .md 走同一个预览面板 / 同一个 DocEditor。
+  useEffect(() => {
+    return desktop.hippoBrowser.onOpenLocalFile(({ path, name }) => openFileTab('local', name, path));
+  }, [openFileTab]);
+
   const closeFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
       const next = prev.filter(t => t.id !== tabId);
@@ -2077,16 +2218,23 @@ function CanvasFlowInner() {
   }, [activePanelTab, openReaderIds]);
 
   // 新建节点对话框创建成功回调：挂载节点；AI Coding 节点额外打开小程序预览并刷新 SandboxPanel
-  const handleNodeCreated = useCallback(async (payload: { nodeId: string; title: string; sandboxAppId?: string; appName?: string; initialPrompt?: string }) => {
+  const handleNodeCreated = useCallback(async (payload: { nodeId: string; title: string; sandboxAppId?: string; appName?: string; initialPrompt?: string; referenceFile?: File }) => {
     const pos = nodeCreatePos ?? { x: 0, y: 0 };
+    // 创建对话框附带的参考图/文件：上传后挂到首轮消息（AI 可先看再动手）
+    const attachment = payload.referenceFile
+      ? await uploadAttachment(payload.nodeId, payload.title, payload.referenceFile).catch(() => null)
+      : null;
+    const initialContent = payload.initialPrompt || (attachment ? `参考附件：${attachment.name}` : '');
+    const isCoding = !!payload.sandboxAppId;
     const initialMsg: ChatMessage[] =
-      payload.initialPrompt
+      initialContent && !isCoding
         ? [
             {
               id: `init-${payload.nodeId}-${Date.now()}`,
               role: 'user' as const,
-              content: payload.initialPrompt,
+              content: initialContent,
               timestamp: new Date().toISOString(),
+              ...(attachment ? { attachments: [attachment] } : {}),
             },
           ]
         : [];
@@ -2105,14 +2253,25 @@ function CanvasFlowInner() {
         ...(payload.sandboxAppId ? { sandboxAppId: payload.sandboxAppId } : {}),
       },
     };
+    // Coding 新建：创建框里的愿望就是首个任务，挂载后自动发送（非 Coding 仍保留预填、等用户确认）
+    if (initialContent && isCoding) {
+      (window.__pendingNodeTasks ??= {})[payload.nodeId] = {
+        text: initialContent,
+        ...(attachment ? { attachments: [attachment] } : {}),
+      };
+    }
     setNodes((nds) => [...nds, newNode]);
     // 单焦点：对话框新建（Coding/Chat）= 打开为新对话
     openNewlyCreatedNode(payload.nodeId);
     if (payload.sandboxAppId && payload.appName) {
-      void openSandboxPreviewInHippo({ id: payload.sandboxAppId, name: payload.appName });
+      // 创建后默认在应用内沙箱预览：写码后自动 reload + console 错误捕获；Hippo 从预览右上角打开。
+      // 2026-10-17 之前直接弹 Hippo 独立页，既看不到自动刷新，也与节点 ▶ 的预览入口不一致。
+      window.dispatchEvent(new CustomEvent('sandbox-preview-open', {
+        detail: { id: payload.sandboxAppId, name: payload.appName },
+      }));
     }
-    // 用户在创建对话框里填写了初始需求：同步写入节点 .md，保证刷新/重启后回放也能看到
-    if (payload.initialPrompt) {
+    // 非 Coding：预填的初始需求写入节点 .md，保证刷新/重启后回放也能看到（Coding 由自动发送落真实轮次）
+    if (initialContent && !isCoding) {
       try {
         await fetch('/api/nodes', {
           method: 'POST',
@@ -2120,7 +2279,8 @@ function CanvasFlowInner() {
           body: JSON.stringify({
             action: 'append',
             node_id: payload.nodeId,
-            question: payload.initialPrompt,
+            question: initialContent,
+            ...(attachment ? { question_attachments: [attachment] } : {}),
             // 占位 AI 回答，标记为"首轮预填需求占位"，后端首轮 spec 采集会跳过此类轮次
             answer: '__BAI_INITIAL_PROMPT_PLACEHOLDER__',
           }),
@@ -2137,6 +2297,29 @@ function CanvasFlowInner() {
     window.addEventListener('sandbox-store-open', handler);
     return () => window.removeEventListener('sandbox-store-open', handler);
   }, []);
+
+  // Step：订阅 sandbox-preview-open —— Coding 节点 ▶ / 创建后自动预览：在右侧预览面板里调试（方案 B）
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const d = (e as CustomEvent<{ id?: string; name?: string }>).detail;
+      if (!d?.id) return;
+      setPreviewApp({ id: d.id, name: d.name || 'Sandbox App' });
+      setPanelCollapsed(false);
+      setActivePanelTab({ type: 'preview', id: d.id });
+    };
+    window.addEventListener('sandbox-preview-open', handler);
+    return () => window.removeEventListener('sandbox-preview-open', handler);
+  }, []);
+
+  const closePreviewTab = useCallback(() => {
+    setPreviewApp(null);
+    setActivePanelTab((prev) => {
+      if (prev?.type !== 'preview') return prev;
+      if (fileTabs.length > 0) return { type: 'file', id: fileTabs[fileTabs.length - 1].id };
+      if (openReaderIds.length > 0) return { type: 'node', id: openReaderIds[openReaderIds.length - 1] };
+      return null;
+    });
+  }, [fileTabs, openReaderIds]);
 
   // 订阅 usage-panel-open 事件 —— 图标栏/⌘F 入口派发，打开用量统计面板
   useEffect(() => {
@@ -2190,6 +2373,44 @@ function CanvasFlowInner() {
     return () => window.removeEventListener('open-template-panel', handler);
   }, [openTemplateTab]);
 
+  // 音频编辑器已移到 Hippo 全页（/audio-editor）：左栏入口直接开 Hippo，不再开预览标签。
+  const openAudioInHippo = useCallback(() => {
+    const url = audioEditorUrl(
+      { path: '', name: 'Audio' },
+      typeof window !== 'undefined' ? window.location.origin : '',
+    );
+    if (!isDesktop()) {
+      window.open(url, '_blank', 'noopener');
+      return;
+    }
+    void (async () => {
+      await desktop.hippoBrowser.open();
+      await desktop.hippoBrowser.navigate(url);
+    })();
+  }, []);
+
+  const closeAudioTab = useCallback(() => {
+    setActivePanelTab((prev) => {
+      if (prev?.type !== 'audio') return prev;
+      if (fileTabs.length > 0) {
+        setActivePanelTab({ type: 'file', id: fileTabs[fileTabs.length - 1].id });
+      } else if (openReaderIds.length > 0) {
+        setActivePanelTab({ type: 'node', id: openReaderIds[openReaderIds.length - 1] });
+        setActiveReaderId(openReaderIds[openReaderIds.length - 1]);
+      } else {
+        return null;
+      }
+      return prev;
+    });
+  }, [fileTabs, openReaderIds]);
+
+  // 订阅 open-audio-editor：左栏快捷入口派发 → 在 Hippo 大屏打开全页编辑器
+  useEffect(() => {
+    const handler = () => openAudioInHippo();
+    window.addEventListener('open-audio-editor', handler);
+    return () => window.removeEventListener('open-audio-editor', handler);
+  }, [openAudioInHippo]);
+
   // 插件面板 tab（注册表驱动，每个插件一个单例）：在右侧预览面板打开；打开后常驻标签栏
   const openPluginPanel = useCallback((pluginId: string) => {
     if (!pluginPanels.some((p) => p.pluginId === pluginId)) return;
@@ -2204,7 +2425,7 @@ function CanvasFlowInner() {
     if (entry?.src && (await fetchPluginDirty(entry.src))) {
       const choice = await confirmAskChoices({
         title: 'Unsaved changes',
-        message: `${entry.name} has changes that haven't been saved to the current project. Save before closing?`,
+        message: `Save changes to "${entry.name}" before closing?`,
         // 取消由 ConfirmDialog 自带的 Cancel 提供（避免重复按钮）
         choices: [
           { label: 'Save', value: 'save' },
@@ -2260,11 +2481,15 @@ function CanvasFlowInner() {
   // project_id 由派发方（Draft）显式锚定当前打开的项目，建会话不落错项目。
   useEffect(() => {
     const handler = async (e: Event) => {
-      const d = (e as CustomEvent<{ label?: string; agent?: string; prompt?: string; auto?: boolean; projectId?: string }>).detail;
+      const d = (e as CustomEvent<{ label?: string; agent?: string; prompt?: string; auto?: boolean; projectId?: string; sandboxAppId?: string; outboxBatchId?: string }>).detail;
       const label = (d?.label || 'Quick').slice(0, 40);
       const prompt = d?.prompt || '';
       const auto = d?.auto === true;
-      const agent = d?.agent && d.agent !== 'chat' ? d.agent : 'chat';
+      const sandboxAppId = d?.sandboxAppId || undefined;
+      // 管家派发的会话：产物落 Outbox 暂存区（批次 id 随节点 frontmatter 落盘，服务端据此改道写盘）
+      const outboxBatchId = d?.outboxBatchId || undefined;
+      // 绑定小程序的会话必须是 coding：服务端 create_session 已强制，这里再兜一层
+      const agent = sandboxAppId ? 'coding' : (d?.agent && d.agent !== 'chat' ? d.agent : 'chat');
       const projectId = d?.projectId || undefined;
       const cx = typeof window !== 'undefined' ? Math.round(window.innerWidth / 2) - 140 : 200;
       const cy = typeof window !== 'undefined' ? Math.round(window.innerHeight / 2) - 120 : 160;
@@ -2281,6 +2506,8 @@ function CanvasFlowInner() {
             model: DEFAULT_MODEL_ID,
             sources: [],
             node_type: agent,
+            ...(sandboxAppId ? { sandbox_app_id: sandboxAppId } : {}),
+            ...(outboxBatchId ? { outbox_batch_id: outboxBatchId } : {}),
             position_x: newX,
             position_y: newY,
             project_id: projectId,
@@ -2300,6 +2527,8 @@ function CanvasFlowInner() {
             modelId: DEFAULT_MODEL_ID,
             thinkingLevel: DEFAULT_THINKING_LEVEL,
             nodeMdId: newNodeId,
+            ...(sandboxAppId ? { sandboxAppId } : {}),
+            ...(outboxBatchId ? { outboxBatchId } : {}),
           },
         };
         if (auto && prompt && typeof window !== 'undefined') {
@@ -2599,7 +2828,7 @@ function CanvasFlowInner() {
     if (delNodes.some((n) => n.type === 'bobby')) {
       await confirmAsk({
         title: '观察节点',
-        message: 'Bobby 节点不支持键盘删除。请点击节点标题栏的 ✕ 按钮执行删除。',
+        message: 'Bobby 节点不支持键盘删除，请用标题栏 ✕ 删除。',
       });
       return false;
     }
@@ -2607,24 +2836,15 @@ function CanvasFlowInner() {
     if (delNodes.every((n) => n.type === 'annotation')) {
       return confirmAsk({
         title: delNodes.length > 1 ? `Delete ${delNodes.length} annotations?` : 'Delete annotation?',
-        message: '删除批注框（不影响被包裹的卡片）。',
+        message: 'Cards inside are not affected.',
       });
     }
     const nodeTitles = delNodes.map((n) => (n.data as AiChatNodeData | undefined)?.title || n.id);
     const outboundCount = delEdges.filter((e) => delNodes.some((n) => n.id === e.source)).length;
-    const plural = delNodes.length > 1 ? 's' : '';
-    const messageLines = [
-      `Deleting ${delNodes.length} node${plural} will permanently remove their .md documents (outcome, conversations, annotations, citations), attachments, generated output files (homework/), and ${delEdges.length} connected edge(s).`,
-      `Nodes: ${nodeTitles.join(', ')}`,
-    ];
-    if (outboundCount > 0) {
-      messageLines.push(
-        `Some of these nodes are upstream of ${outboundCount} node(s). Deleting them will break their upstream references and may invalidate their conclusions.`,
-      );
-    }
-    messageLines.push('This action cannot be undone.');
+    const messageLines = [`Nodes: ${nodeTitles.join(', ')}`];
+    if (outboundCount > 0) messageLines.push(`Breaks links to ${outboundCount} downstream node(s).`);
     return confirmAsk({
-      title: delNodes.length > 1 ? `Delete ${delNodes.length} Nodes?` : 'Delete Node?',
+      title: delNodes.length > 1 ? `Delete ${delNodes.length} nodes?` : 'Delete node?',
       message: messageLines.join('\n'),
     });
   }, [confirmAsk, getNodes]);
@@ -2675,8 +2895,8 @@ function CanvasFlowInner() {
       }
     }
     const ok = await confirmAsk({
-      title: 'Delete Node?',
-      message: `Deleting "${nodeTitle}" will permanently remove its .md document (outcome, conversations, annotations, citations), attachments, generated output files (homework/), and connected edges.\nThis action cannot be undone.`,
+      title: `Delete "${nodeTitle}"?`,
+      message: 'Its files and connections will be removed.',
     });
     if (!ok) return;
     setNodes((nds) => nds.filter((n) => n.id !== nodeId));
@@ -3563,6 +3783,8 @@ function CanvasFlowInner() {
       fileTabs={fileTabs}
       readerTitles={readerTitles}
       activePanelTab={activePanelTab}
+      previewApp={previewApp}
+      graph={graphExecutor}
       collapsed={false}
       panelWidth={panelWidth}
       onSelectTab={(type, id) => {
@@ -3574,7 +3796,9 @@ function CanvasFlowInner() {
       }}
       onCloseNodeTab={closeReader}
       onCloseFileTab={closeFileTab}
+      onClosePreviewTab={closePreviewTab}
       onCloseTemplateTab={closeTemplateTab}
+      onCloseAudioTab={closeAudioTab}
       pluginPanels={pluginPanels}
       onClosePluginTab={closePluginPanel}
       openPluginIds={openPluginIds}
@@ -3591,7 +3815,6 @@ function CanvasFlowInner() {
   // （Calendar 已于 2026-09-25 移回左列底部品牌栏右侧）
   const navActions: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }> = [
     { key: 'store', label: 'Extensions Store', icon: <Blocks className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('skill-store-open')) },
-    { key: 'miniapps', label: 'Mini Programs', icon: <Boxes className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('sandbox-store-open')) },
     // Bob Notes 主入口 → 打开 bob-notes-mcp 原厂 Web 面板（宿主定制 UI 壳已去除）
     { key: 'notes', label: 'Bob Notes', icon: <NotebookText className="h-4 w-4 shrink-0" />, onClick: () => window.dispatchEvent(new CustomEvent('open-plugin-panel', { detail: { id: 'bob-notes-mcp' } })) },
   ];
@@ -3604,21 +3827,42 @@ function CanvasFlowInner() {
       return <Icon className={cls} />;
     }
     switch (key) {
+      case 'audio-editor':
+        return <AudioLines className={cls} />;
       case 'templates':
         return <LayoutTemplate className={cls} />;
       case 'md':
         return mdCreating ? <Loader2 className={`${cls} animate-spin`} /> : <FilePen className={cls} />;
     }
   };
+  // 插件面板快捷入口（注册表顺序）；以下插件不进侧边栏，但保留 panel 声明（Hippo / 预览面板入口不受影响）：
+  //   - bob-notes：经侧栏 Bob Notes 打开；
+  //   - bob-video-shot：网页入口已由 MCP 市场「Open in Hippo」承载（宿主反代 + Hippo 书签），
+  //     侧边栏再放一个只是同一页面的第二个入口。
+  const pluginQuickTools = pluginPanels
+    .filter((p) => p.pluginId !== 'bob-notes-mcp' && p.pluginId !== 'bob-video-shot-mcp')
+    .map((p) => ({
+      key: `plugin:${p.pluginId}`,
+      label: p.name,
+      onClick: () => window.dispatchEvent(new CustomEvent('open-plugin-panel', { detail: { id: p.pluginId } })),
+    }));
+  /**
+   * 音频编辑器入口：**紧跟在 Bob-Mind 之下**（用户指定位置）。
+   * 插在 bob-mind 条目之后、而不是整个插件列表之后 —— Bob-Mind 之后可能还有别的插件，
+   * 直接追加会让本入口离 Bob-Mind 越来越远，与「Bob-Mind 下方」不符。
+   * 点击 → 在 Hippo 里打开全页「Audio Editor」（空态，可 Import / 从音频库载入）。
+   * 预览面板不再渲染波形/对话稿：它只是入口，大屏编辑在 Hippo。
+   */
+  const AUDIO_QUICK_TOOL = {
+    key: 'audio-editor',
+    label: 'Audio Editor',
+    onClick: () => window.dispatchEvent(new CustomEvent('open-audio-editor')),
+  };
+  const mindIdx = pluginQuickTools.findIndex((t) => t.key === 'plugin:bob-mind-mcp');
   const quickTools: Array<{ key: string; label: string; onClick: () => void; disabled?: boolean }> = [
-    ...pluginPanels
-      // bob-notes 不再从“项目下方工具条”快捷入口进入（仍可经侧栏 Bob Notes 打开）
-      .filter((p) => p.pluginId !== 'bob-notes-mcp')
-      .map((p) => ({
-        key: `plugin:${p.pluginId}`,
-        label: p.name,
-        onClick: () => window.dispatchEvent(new CustomEvent('open-plugin-panel', { detail: { id: p.pluginId } })),
-      })),
+    ...pluginQuickTools.slice(0, mindIdx + 1),
+    AUDIO_QUICK_TOOL,
+    ...pluginQuickTools.slice(mindIdx + 1),
     { key: 'templates', label: 'Templates', onClick: () => window.dispatchEvent(new CustomEvent('open-template-panel', { detail: {} })) },
     { key: 'md', label: 'Markdown', onClick: () => void openCreateMdDialog(), disabled: mdCreating },
   ];
@@ -3820,7 +4064,7 @@ function CanvasFlowInner() {
                   onClick={() => setAddMenuOpen((v) => !v)}
                   className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink-strong)]"
                 >
-                  <MessageCircle className="h-[13px] w-[13px] shrink-0" />
+                  <MessageCirclePlus className="h-[13px] w-[13px] shrink-0" />
                 </button>
                 {addMenuOpen && (
                   <>
@@ -3841,7 +4085,7 @@ function CanvasFlowInner() {
                         const pos = spawnSiblingPosition();
                         let onClick: () => void;
                         if (a.id === 'coding') {
-                          onClick = () => { setNodeCreateKind('mini'); setNodeCreatePos(pos); setNodeCreateDialogOpen(true); };
+                          onClick = () => { setNodeCreatePos(pos); setNodeCreateDialogOpen(true); };
                         } else if (a.id === 'note') {
                           onClick = () => createNoteAgentNode(pos);
                         } else {
@@ -3887,6 +4131,22 @@ function CanvasFlowInner() {
                           })}
                         </>
                       )}
+                      {/* 新建/改造子 Agent：原 AI Coding 创建框的 Sub-Agent 档迁出（产物是 chat 节点，
+                          与小程序不是同一套产物模型）。入口统一收在这里，Agent Store 的文案指向本项 */}
+                      <div className="mx-2 my-1" style={{ borderTop: '1px solid color-mix(in oklab, var(--line) 35%, transparent)' }} />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNodeCreatePos(spawnSiblingPosition());
+                          setAgentCreateDialogOpen(true);
+                          setAddMenuOpen(false);
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--paper-hover)]"
+                        style={{ color: 'var(--ink)' }}
+                      >
+                        <Bot className="h-[13px] w-[13px] shrink-0" style={{ color: 'var(--primary-strong)' }} />
+                        <span className="flex-1 truncate">New Agent…</span>
+                      </button>
                     </div>
                   </>
                 )}
@@ -4348,14 +4608,14 @@ function CanvasFlowInner() {
         />
 
         {/* ⌘F 统一面板：纯搜索（原 GlobalSearch + TaskPanel；斜杠指令态已于 P1-c 移除，指令走 Butler 抽屉）。
-            2026-09-12：功能按钮（Extensions Store / Mini Programs / Bob Notes）
+            2026-09-12：功能按钮（Extensions Store / Bob Notes）
             从左侧边栏迁回本面板，渲染在输入框下方，仅图标 + 悬停显示名称；
-            2026-09-25：Calendar 移回左列底部品牌栏右侧 */}
+            2026-09-25：Calendar 移回左列底部品牌栏右侧；
+            2026-10-18：Mini Programs / 标星小程序入口迁到 Butler 左栏「Mini Apps」，本面板不再展示。 */}
         <UnifiedPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}
           actions={navActions}
-          starredApps={starredApps}
         />
 
         {/* 项目看板：全屏大视图（Workspace 标题看板按钮打开） */}
@@ -4377,17 +4637,25 @@ function CanvasFlowInner() {
           <SandboxPanel onClose={() => setStoreOpen(false)} />
         )}
 
+
         {/* 模型用量统计面板：图标栏/⌘F 入口打开，Esc / 关闭按钮退出 */}
         {usageOpen && (
           <UsagePanel onClose={() => setUsageOpen(false)} />
         )}
 
-        {/* 新建节点对话框：AI Chat / AI Coding 类型选择 + 小程序项目绑定 */}
+        {/* 新建小程序对话框：只负责 Bob Sandbox 小程序（新建/绑定） */}
         <AICodingCreateDialog
           open={nodeCreateDialogOpen}
           position={nodeCreatePos}
-          initialKind={nodeCreateKind}
           onClose={() => setNodeCreateDialogOpen(false)}
+          onCreated={handleNodeCreated}
+        />
+
+        {/* 新建/改造子 Agent 对话框：＋ Add session → New Agent… 打开，产出 chat 节点 */}
+        <AgentCreateDialog
+          open={agentCreateDialogOpen}
+          position={nodeCreatePos}
+          onClose={() => setAgentCreateDialogOpen(false)}
           onCreated={handleNodeCreated}
         />
 

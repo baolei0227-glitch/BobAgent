@@ -23,10 +23,13 @@ import {
 } from '@/lib/project/project-manager';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT } from '@/lib/types';
 import { inspectStickyTodos } from '@/lib/core/inspect';
-import { promises as fs } from 'fs';
+import { createReadStream, promises as fs } from 'fs';
+import { Readable } from 'stream';
 import { join, extname, dirname } from 'path';
 import { resolveAppRoot, BOB_SANDBOX_DIRNAME } from '@/lib/app-root';
 import { classifyOutputKind, HOMEWORK_KIND_LABEL, HOMEWORK_KIND_ORDER, type HomeworkKind } from '@/lib/homework/kind';
+import { parseRange, rangeHeaders, unsatisfiableHeaders } from '@/lib/files/range';
+import { fileMime } from '@/lib/files/mime';
 
 /** 截断后的文件名主体最长字符数（不含扩展名） */
 const OUTPUT_STEM_MAX = 40;
@@ -267,10 +270,36 @@ async function scanHomeworkOwners(
   return owners;
 }
 
+/** 「开庭」后接这些词＝只是提及开庭事项（如「关注立案及开庭时间」），不是庭审本身 */
+const HEARING_MENTION_RE =
+  /开庭\s*(?:的\s*)?(?:时间|日期|安排|通知|地点|信息|材料|事宜|准备|流程|前|后)/;
+/** 开庭句式：句中带法院/法庭要素（C 表单生成的「在{法院}第{N}法庭开庭」等） */
+const HEARING_COURT_RE = /(?:法院|法庭|第[^。；;，,]{1,10}庭)[^。；;]{0,20}开庭/;
+/** 老数据兜底：行内明确日期之后出现「开庭」（YYYY/M/D 或 YYYY年M月D日，兼容 M月D日） */
+const HEARING_DATE_RE =
+  /(?:\d{4}[/年]\d{1,2}[/月]\d{1,2}日?|\d{1,2}月\d{1,2}日)[^。；;]{0,40}开庭/;
+
+/**
+ * 该待办行是否为真正的开庭安排（2026-10-22 收紧）。
+ * 背景：原口径 `line.includes('开庭')` 会把「关注立案及开庭时间」这类普通任务误判成开庭，
+ * 而该行又被自动入日历排到默认时段，导致项目看板出现错误的「今天 开庭」呼吸灯。
+ * 允许的口径（先剥掉 `- [x]` 勾选前缀）：
+ *   1. 句中含有法院/法庭要素且随后出现「开庭」（C 表单固定句式 / 自然语言）；
+ *   2. 行内带明确日期且随后出现「开庭」（兼容老数据）。
+ * 「开庭时间 / 开庭安排 / 开庭材料 / 开庭前」等只是提及，不计入。
+ */
+function isHearingLine(line: string): boolean {
+  const text = line.replace(/^\s*-\s*\[[ xX]\]\s*/, '').trim();
+  if (!text.includes('开庭')) return false;
+  if (HEARING_MENTION_RE.test(text)) return false;
+  return HEARING_COURT_RE.test(text) || HEARING_DATE_RE.test(text);
+}
+
 /** 从项目 Sticky 待办解析未来最近的开庭日期，返回 YYYY-MM-DD。
  *  日期来源（二选一，取更早）：
  *   1. 该行绑定的日历事件开始时间（lineEventIds → events 表；2026-09-08 起行内不再写日期，日期存事件）
  *   2. 行文本里固定格式日期（YYYY/M/D 或 YYYY年M月D日 …开庭，兼容老数据）
+ *  行文本是否为开庭安排由 isHearingLine 判定（2026-10-22 起不再用「包含开庭」的模糊口径）。
  */
 async function scanHearingDate(projectDir: string): Promise<string | null> {
   try {
@@ -296,7 +325,7 @@ async function scanHearingDate(projectDir: string): Promise<string | null> {
         const evsArr = Array.isArray(pg.lineEventIds) ? (pg.lineEventIds as unknown[][]) : [];
         for (let i = 0; i < rows.length; i++) {
           const line = rows[i];
-          if (!line.includes('开庭')) continue;
+          if (!isHearingLine(line)) continue;
           // 已勾选完成的待办行（- [x] …）不再计入开庭提醒，与 todo-index 未完成统计口径一致
           if (/^\s*-\s*\[x\]/i.test(line)) continue;
           // 1) 锚点事件优先：行已入日历 → 用事件开始时间（行文本不含日期时也能识别）
@@ -342,7 +371,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const action = searchParams.get('action');
 
-    // PDF 等二进制文件的代理流
+    // PDF 等二进制文件的代理流（支持 HTTP Range 单区间，音频等大文件可分段拉取）
     if (action === 'file_proxy') {
       const projectId = searchParams.get('project_id');
       const filePath = searchParams.get('file_path');
@@ -361,29 +390,36 @@ export async function GET(request: NextRequest) {
 
       try {
         const stat = await fs.stat(fullPath);
-        const buffer = await fs.readFile(fullPath);
         const ext = extname(fullPath).toLowerCase();
-        const mimeMap: Record<string, string> = {
-          '.html': 'text/html; charset=utf-8',
-          '.htm': 'text/html; charset=utf-8',
-          '.pdf': 'application/pdf',
-          '.png': 'image/png',
-          '.jpg': 'image/jpeg',
-          '.jpeg': 'image/jpeg',
-          '.gif': 'image/gif',
-          '.webp': 'image/webp',
-          '.bmp': 'image/bmp',
-          '.svg': 'image/svg+xml',
+        // 200 / 206 / 416 三分支共用的头
+        const baseHeaders: Record<string, string> = {
+          'Content-Type': fileMime(ext),
+          // 打开时刻的 mtime 哨兵：docx 编辑器（DocxTiptapEditor）记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
+          'X-File-Mtime': String(stat.mtimeMs),
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'public, max-age=3600',
         };
+
+        const range = parseRange(request.headers.get('range'), stat.size);
+        if (range === 'unsatisfiable') {
+          return new NextResponse(null, {
+            status: 416,
+            headers: { ...baseHeaders, ...unsatisfiableHeaders(stat.size) },
+          });
+        }
+        if (range) {
+          // 只送该区间：用文件流，不再整份读进内存
+          const nodeStream = createReadStream(fullPath, { start: range.start, end: range.end });
+          return new NextResponse(Readable.toWeb(nodeStream) as unknown as ReadableStream, {
+            status: 206,
+            headers: { ...baseHeaders, ...rangeHeaders(range, stat.size) },
+          });
+        }
+
+        const buffer = await fs.readFile(fullPath);
         return new NextResponse(buffer, {
           status: 200,
-          headers: {
-            'Content-Type': mimeMap[ext] || 'application/octet-stream',
-            'Content-Length': String(stat.size),
-            // 打开时刻的 mtime 哨兵：docx 编辑器（DocxTiptapEditor）记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
-            'X-File-Mtime': String(stat.mtimeMs),
-            'Cache-Control': 'public, max-age=3600',
-          },
+          headers: { ...baseHeaders, 'Content-Length': String(stat.size) },
         });
       } catch {
         return new NextResponse('File not found', { status: 404 });

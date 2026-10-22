@@ -13,10 +13,11 @@
 //   - prependDynamicContext 机制与三次 prepend 调用点、顺序、if 条件全部留在 route，本 service
 //     只产出文本、绝不触碰消息数组；
 //   - 各段文本字节与迁移前逐字节一致（换行/前缀/插值格式原样复刻，此处无任何格式"优化"）。
-// 说明：AI Coding 沙盒上下文（route 原 2971-3174 一带，readAppEntry/hasAppImplementation/
-//   getBridgeActionsText 等依赖深、~170 行模板文本）为 K2-S3b 段：内容生成收敛进独立方法
-//   buildCodingSandboxInjection（本文件），node 定位（resolveNodeProject/loadNodeById）与
-//   prepend/场景/工具联动判定仍留在 route 原位（时序与迁移前一致）。
+// 说明：AI Coding 沙盒上下文（route 原 2971-3174 一带，readAppEntry/hasAppImplementation
+//   等依赖深、最初的模板文本 + Bridge 文档）为 K2-S3b 段：内容生成收敛进独立方法
+//   buildCodingSandboxInjection（本文件）。2026-10-18 起 Bridge 详细文档改为按需
+//   read_bridge_docs 工具读取（lib/sandbox/coding-docs.ts），此处只留核心索引与 UI 规范。
+//   node 定位（resolveNodeProject/loadNodeById）与 prepend/场景/工具联动判定仍留在 route 原位。
 // =====================================================================================
 
 import { homedir } from 'os';
@@ -24,9 +25,9 @@ import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { getLocalAuthorizedRoots, type ToolScene } from '@/app/api/chat/tools';
 import { pluginDataHome } from '@/lib/extensions/data-home';
-import type { NodeMarkdown } from '@/lib/node-markdown';
+import { normalizeSandboxSpec, type NodeMarkdown } from '@/lib/node-markdown';
 import { readAppEntry, hasAppImplementation } from '@/lib/sandbox/apps';
-import { getBridgeActionsText } from '@/lib/sandbox/bridge';
+import { codingDocIndex } from '@/lib/sandbox/coding-docs';
 import { BUTLER_COMMANDS } from '@/lib/core/commands';
 import { BUTLER_SCHEDULE_DISCIPLINE, BUTLER_MEMORY_ROUTING, BUTLER_ROUTING_HINT } from '@/lib/agents/profiles';
 import { getMeetingState } from '@/lib/core/meeting-session';
@@ -326,6 +327,13 @@ export class ContextRuntime {
       } catch { /* 飞书桥不可用 → 该源不展示 */ }
 
       try {
+        // 邮箱感知状态（同步内存态，由 mail-poll 的调度器写入；不在此触发任何 IMAP 取数）
+        const { getMailStatus } = await import('@/lib/bridge/mail-poll');
+        const st = getMailStatus();
+        status.mail = { running: st.running, bound: st.bound, unreadCount: st.unreadCount };
+      } catch { /* 邮件模块不可用 → 该源不展示 */ }
+
+      try {
         const roots = await getLocalAuthorizedRoots();
         status.authorizedRoots = roots.map((r) => r.replace(homedir(), '~'));
       } catch { /* 读取失败 → 该源不展示 */ }
@@ -484,7 +492,7 @@ export class ContextRuntime {
    *  与 toolLoopSandboxAppId 供 args_transform 注入等仍留在 route 原位：
    *    - node 由 route 按 resolveNodeProject + loadNodeById 解析后传入（null = 未定位到节点）；
    *    - frontmatter 无合法 sandbox_app_id（缺失/非 string/节点缺失）→ 返回 ''（原 route 不注入语义）；
-   *    - readAppEntry/hasAppImplementation/getBridgeActionsText 读取失败时向上抛，由 route 调用点
+   *    - readAppEntry/hasAppImplementation 读取失败时向上抛，由 route 调用点
    *      原 try/catch 统一 console.warn（toolLoopSandboxAppId 已在调用前按 frontmatter 赋值，
    *      读取失败时沙箱参数注入不丢、仅注入文本为 ''——与迁移前一致）。 */
   async buildCodingSandboxInjection(input: { node: NodeMarkdown | null }): Promise<string> {
@@ -504,7 +512,32 @@ export class ContextRuntime {
       // 新建节点对已有小程序的修改不强制采集 Spec——直接读现有文件按本次指令修改。
       // 仅"从零新建（无实现）"的首轮才强制走 6 问题采集。
       const appHasImpl = isFirstRound ? await hasAppImplementation(sandboxAppId) : true;
-      const requireSpec = isFirstRound && !appHasImpl;
+      // 创建对话框写入的构建简报（sandbox_spec）只在用户**显式开启 Fast build** 时才生效：
+      //  - fast_build === true，且至少给出功能/交互/持久化之一或愿望非空 → 跳过 6 问，按简报出首版；
+      //  - 其余情况（默认、旧节点、只选了模板/写了愿望但没开 Fast build）→ 完全保持原 6 问行为。
+      // 这样「6 问」仍是默认质量门禁，Fast build 是用户主动选择的加速路径，不是静默跳过。
+      const spec = normalizeSandboxSpec(node?.frontmatter?.sandbox_spec);
+      const specCategory = spec?.category ?? '';
+      const specInteraction = spec?.interaction ?? '';
+      const specPersistence = spec?.persistence ?? '';
+      const specWish = spec?.wish ?? '';
+      const specReady = !!spec && spec.fast_build === true && !!(
+        specWish || specCategory || specInteraction || specPersistence
+      );
+      const firstBuildFromSpec = isFirstRound && !appHasImpl && specReady;
+      const requireSpec = isFirstRound && !appHasImpl && !specReady;
+      // 构建简报（只列已确认项；未列项由模型按最简默认值处理）
+      const specBrief = specReady
+        ? [
+            specCategory ? `- 功能类型：${specCategory}` : '',
+            spec?.audience ? `- 使用场景/人群：${spec.audience}` : '',
+            specInteraction ? `- 交互方式：${specInteraction}` : '',
+            specPersistence ? `- 持久化：${specPersistence}` : '',
+            spec?.style ? `- 视觉风格：${spec.style}` : '',
+            spec?.ai ? `- AI 接入：${spec.ai}` : '',
+            specWish ? `- 用户的原始愿望：${specWish}` : '',
+          ].filter(Boolean).join('\n')
+        : '';
       const injectionText =
         `\n\n=== AI Coding 编程任务上下文 ===\n` +
         `你正在为一个 Bob Sandbox 小程序「${appName}」（appId: ${sandboxAppId}）进行 AI 编程开发。\n` +
@@ -530,7 +563,18 @@ export class ContextRuntime {
             `  - 正文开头先写一句话引导语（如「为了更准确地生成你想要的小程序，请先填写以下 6 个简单问题：」），然后紧接着调用 ask_user_questions 工具弹出表单；\n` +
             `  - 正文禁止输出任何代码、伪代码或"我来写吧"等跳过采集的声明；\n` +
             `  - 若用户在首轮消息里已明确写出需求（例如有具体功能点），请基于其描述自动预填/归纳各选项，仍调用 ask_user_questions 让用户确认或修改，不能省略采集。\n`
-          : (isFirstRound
+          : firstBuildFromSpec
+            ? `\n【首轮引导：已有构建简报，直接出首版 —— 不再弹需求表单】\n` +
+              `用户在创建小程序时已经表达了需求（来源：${spec?.source === 'wish' ? '愿望描述' : '模板 + 愿望'}）。创建时收集的构建简报：\n` +
+              `${specBrief}\n` +
+              `若简报与用户本次消息冲突，以用户本次消息为准，并在正文用一句话说明。\n` +
+              `做法：\n` +
+              `  1. 先用 read_file / list_files 读取 bob-sandbox/apps/${sandboxAppId}/ 下的模板文件，了解起点（空白模板可跳过，直接写）；\n` +
+              `  2. 直接写完整首版（以 index.html 为主，样式与脚本可内联）；不要生成 mockup.html，不要先等用户确认；\n` +
+              `  3. 简报没写到的次要决策按最简可用默认值处理，并在正文用一句话说明假设（如"默认按个人日常使用、跟随 BobWork 主题"）；\n` +
+              `  4. 视觉风格默认跟随 BobWork 主题变量；简报指定了风格则以其为准；\n` +
+              `  5. 写完后按下方【主动测试分级引导】自检。\n`
+            : (isFirstRound
             ? `\n【首轮引导：已有实现，修改模式 —— 不采集 Spec，直接动手】\n` +
               `这是该节点的首轮对话，但小程序「${appName}」已存在真实实现（非模板初始状态）。用户意图是对现有小程序进行修改/升级，不要弹出需求采集表单。\n` +
               `正确做法：先用 read_file / list_files 读取 bob-sandbox/apps/${sandboxAppId}/ 下的现有文件（尤其 index.html / manifest.json / smoke-test.js），了解当前实现与功能后，直接按用户本次输入执行修改；修改后按下方【主动测试分级引导】自检。\n` +
@@ -544,13 +588,15 @@ export class ContextRuntime {
             `     - 简单任务：单屏、纯展示或单一功能工具（计算器、倒计时、单位换算、单表单提交、简单信息展示等）\n` +
             `  2.【复杂任务 → 先方案后代码】\n` +
             `     - 先在正文输出交底方案：① 一句话目标定位 ② 功能模块清单（标注优先级）③ 页面结构（每页布局与关键交互）\n` +
-            `     - 然后调用 write_file 生成 HTML 原型稿 bob-sandbox/apps/${sandboxAppId}/mockup.html：用真实 CSS 搭出与最终一致的结构与配色（样式必须自包含——直接写具体色值即可，mockup.html 走静态文件路由、不经宿主注入，不要依赖 var(--primary) 等宿主主题变量），示例数据填充内容；页面间跳转/按钮用简单 JS 切换即可，不实现真实业务逻辑\n` +
+            `     - 然后调用 write_file 生成 HTML 原型稿 bob-sandbox/apps/${sandboxAppId}/mockup.html：用真实 CSS 搭出与最终一致的结构与配色（样式必须自包含——直接写具体色值即可：mockup.html 走子路径静态路由，**只注入桥脚本与 console 捕获、不注入主题变量**，所以不要在那里依赖 var(--primary)），示例数据填充内容；页面间跳转/按钮用简单 JS 切换即可，不实现真实业务逻辑\n` +
             `     - 正文附上原型预览地址（完整地址，禁止 localhost:PORT 占位符）：http://localhost:${process.env.PORT || '8321'}/api/sandbox/preview/${sandboxAppId}/mockup.html，并请用户确认或提出修改\n` +
             `     - 根据用户反馈迭代 mockup.html，直到用户明确确认后，再删除 mockup.html（用 delete_file）并开始编写真实功能代码\n` +
             `  3.【简单任务 → 直接写码】\n` +
             `     - 正文用两三句话简述将实现的功能与页面布局（不生成 mockup.html），然后直接按 spec 开始写代码\n` +
             `  4.【清理】mockup.html 是设计稿不是交付物：用户确认并进入写码后必须删除（delete_file），保持 bob-sandbox/apps/${sandboxAppId}/ 下只留真实交付文件\n`
-          : `\n【修改已有实现 · 直接动手】\n` +
+          : firstBuildFromSpec
+            ? ''
+            : `\n【修改已有实现 · 直接动手】\n` +
             `本次是对已有小程序的修改：无需交底方案，也禁止生成 mockup.html 原型稿。直接按用户本次指令修改现有文件；改动点较多时可在正文用两三句话简述将改动哪些位置。修改后按下方【主动测试分级引导】自检。\n`) +
         `- 该小程序的全部代码文件位于应用数据目录 bob-sandbox/apps/${sandboxAppId}/ 下，写入与修改一律使用相对路径 bob-sandbox/apps/${sandboxAppId}/<文件名>（例如 bob-sandbox/apps/${sandboxAppId}/index.html）。\n` +
         `- 【硬性规则】本节点的所有产物（HTML/JS/CSS 等）必须且只会落在 bob-sandbox/apps/${sandboxAppId}/ 内（宿主已强制：即使误用 homework/ 或裸文件名路径，也会自动重定向到该小程序目录），禁止在正文声称写入 homework/ 或任何项目目录；小程序全局存储是刻意设计——删除节点/项目后小程序依然保留\n` +
@@ -562,94 +608,24 @@ export class ContextRuntime {
         `  2.【交互测试·改动涉及交互时 + 每轮交付前的最小冒烟】视觉自检无法验证交互时序（点击、表单、跳转、状态切换、持久化）。此时调用 interact_preview 工具在真实浏览器内做交互测试：传 target（app 预览地址或 HTML 路径）与 script，脚本在页面全局作用域执行（document/window 可用），可模拟点击（el.click()）、填表（el.value=... 并派发 input 事件）、跳转、状态切换，并用 DOM 断言（querySelector 检查弹窗/按钮状态/渲染数据）验证结果，通过 window.__testResult = {...} 返回结构化结果；工具会捕获 console 日志（LOG/WARN/ERR）并截图，脚本异常会以 SCRIPT ERROR 报出。交互 bug（按钮无响应/表单不拦截/状态不保存）只有真实运行时才能暴露，禁止仅用截图代替\n` +
         `  2b.【冒烟脚本持久化·每轮交付前必做】把最小冒烟脚本（点击主入口 + 断言核心元素渲染 + 检查无 ERR 日志）保存到 bob-sandbox/apps/${sandboxAppId}/smoke-test.js（首次写好即可，后续轮次用 read_file 读取直接复用，不要每次重写）。每轮交付给用户前，必须用 interact_preview 执行一次该最小冒烟，确认应用可用、无 console 错误\n` +
         `  3.【逻辑测试·涉及计算/数据处理时】用 run_command / execute_script 写脚本校验计算结果与边界值（如金额计算、日期处理、表单必填校验），不要在脑子里算\n` +
+        `- 【交付底线】<!DOCTYPE html>、viewport meta、无 alert()、空态不显示 NaN/undefined/0 占位；复杂交互写 smoke-test.js（用 __testResult 返回结果）。\n` +
+        `- 小程序 UI 语言默认跟随用户愿望/需求的语言（中文愿望 → 中文界面，英文愿望 → 英文界面）；除非用户明确指定其他语言。\n` +
         `- 任一层发现问题 → 修改代码 → 重新从第 1 步自检，循环直至全部通过\n` +
-        `- 本节点的最终交付物就是这个小程序本身，无需在 homework/ 下额外生成说明文档（除非用户明确要求）；交底方案与 HTML 原型稿只在对话流与 mockup.html 中呈现，用户确认后即清理，不落盘为独立文档\n` +
+        `- 本节点的最终交付物就是这个小程序本身，无需在 homework/ 下额外生成说明文档（除非用户明确要求）；${firstBuildFromSpec ? '首版直接生成，不需要交底方案或 mockup.html 原型稿。' : '交底方案与 HTML 原型稿只在对话流与 mockup.html 中呈现，用户确认后即清理，不落盘为独立文档。'}\n` +
         `\n【manifest.json 字段说明（可选）】\n` +
         `小程序的 manifest.json 在 bob-sandbox/apps/${sandboxAppId}/manifest.json，默认包含以下字段，修改后立即生效（无需重启）：\n` +
-        `  - aiBadge: boolean (默认 true) —— 宿主是否在小程序预览右上角自动注入 AI 状态胶囊徽章。\n` +
-        `    * 默认注入：绿点（已授权调用模型）/灰点（未授权，点击可申请），无需小程序代码干预。\n` +
-        `    * 若小程序 UI 自带模型绑定状态展示（如自定义开关徽章），或右上角有自有按钮会遮挡，主动设为 false 关闭宿主注入，用自定义 UI 配合 BobWork.request('chatGetPermission') / 'chatRequestPermission' 自行管理。\n` +
-        `\n=== BobWork Host Bridge API（亲儿子待遇：主动对接、深度融合） ===\n` +
-        `\n【小程序定位 — BobWork 亲儿子功能组件】\n` +
-        `小程序是 BobWork 原生功能组件，不是外部"外勤物种"。鼓励主动对接主程序资源（Butler 待办、节点、主题、模型、技能、项目、日历等），让小程序成为用户在 BobWork 中的信息门户和工作面板，而非孤立的独立页面。\n` +
-        `只要功能合理且不会误操作，直接在代码中调用 Bridge API 即可，不需要等待用户明确要求。\n` +
-        `\n【持久化 API — 默认允许主动使用】\n` +
-        `以下为小程序自身的持久化能力（私有数据），用户提到"加持久化"、"保存记录"、"关掉再打开还在"、"恢复上次状态"、"存历史记录"等场景时，应主动使用，无需用户额外说明：\n` +
-        `  （小程序 iframe 运行时已全局注入 window.BobStorage 对象，直接调用即可）\n` +
-        `  - BobStorage.set(key, value)  → 浏览器端 localStorage，自动加 appId 前缀隔离，关闭 BobWork 清空浏览器缓存会丢失\n` +
-        `  - BobStorage.get(key)         → 读取上条，返回解析后的值或 null\n` +
-        `  - BobStorage.remove(key)      → 删除上条\n` +
-        `  - BobStorage.listLocalKeys()  → 列出该小程序在 localStorage 中所有的 key\n` +
-        `  - BobStorage.save(key, value) → 写入磁盘私有数据目录 ~/BobWork/bob-sandbox/apps/<appId>/data/<key>.json，真正持久化，重启/升级/重装均保留，推荐用于历史记录、长存档、表单完整状态等需要跨重启保留的数据\n` +
-        `  - BobStorage.load(key)        → 读取磁盘私有数据目录，返回解析后的值或 null\n` +
-        `  - BobStorage.listDiskKeys()   → 列出磁盘私有数据目录下所有 key\n` +
-        `  - BobStorage.deleteKey(key)   → 删除磁盘私有数据目录下某 key\n` +
-        `  选择原则：表单临时状态/UI 偏好 → 用 set/get（快，不需要等待 Promise）；历史记录/长存档/重要数据 → 用 save/load（写入磁盘，跨重启保留）。\n` +
-        `\n【主程序共享资源 API — 鼓励主动对接，只读接口默认自由使用】\n` +
-        `小程序作为 BobWork 亲儿子组件，默认鼓励主动调用以下 Bridge 只读接口读取主程序资源，打造信息门户/工作面板类体验：\n` +
-        `  - Butler 系列：readWantedTodo（待办看板）、readWantedNotebook（个人记录索引）、readWantedPreferences（偏好配置）—— 做全局待办面板、个人偏好驱动 UI 等场景直接用\n` +
-        `  - 节点信息系列：listNodes、readNode、getNodeAncestorChain、getNodeManifest —— 做节点导航/检索/目录页等场景直接用\n` +
-        `  - 技能与模型：searchSkills、listConfiguredModels —— 做能力缺口检测、模型选择 UI 等场景直接用\n` +
-        `  - 项目与配置：listProjects、getAppConfig、getProjectInfo、getTheme —— 做项目切换、主题适配、总览仪表盘等场景直接用\n` +
-        `  - 日历提醒：listCalendarEvents —— 做今日日程/待办提醒面板直接用\n` +
-        `  - 写入类接口（writeWanted）：仍需用户明确提及"写入 butler"场景才使用，避免误写全局交付目录\n` +
-        `  - 通过注入的 window.BobWork.request(action, data) 调用：\n` +
-        getBridgeActionsText() + '\n' +
-        `  - 调用示例：const nodes = await BobWork.request('listNodes', {}); const todo = await BobWork.request('readWantedTodo', {});\n` +
-        `  - 运行时可用 BobWork.listActions() 查询所有可用操作` +
-        `\n【画布对接 API（GraphGateway，太空舱对接协议）— 需要对接画布时主动申请授权】\n` +
-        `graph* 系列动作用于小程序对接主程序画布（如"节点地图"、"画布操控面板"、"节点导航器"等需求）。规则：\n` +
-        `  1. 小程序核心功能涉及画布操作/浏览时，主动申请授权，不要等用户反复要求；\n` +
-        `  2. 使用前调用 BobWork.request('graphRequestPermission', { level: 'read'|'control' }) 申请授权：\n` +
-        `     - read = 只读（graphGetSnapshot）；control = 可读可操作（展开、移动、选中节点）；\n` +
-        `     - 宿主会弹出确认框由用户授予，用户拒绝或未授权时返回 level: 'none'；\n` +
-        `  3. 未获授权就调用其他 graph* 动作会失败（Promise reject），代码应 catch 并给出友好提示（如"未获得画布访问权限，请先授权"），不得用 alert；\n` +
-        `  4. 可先用 BobWork.request('graphGetPermission', {}) 查询当前授权级别，避免无谓申请。\n` +
-        `\n【小程序模型调用 API（chat）— 需先获授权，AI 原生体验放开】\n` +
-        `chat* 系列动作用于让小程序直接调用 AI 模型（无工具、纯文本裸对话，与节点对话不同——模型没有文件/工具权限）。规则：\n` +
-        `  1. 使用前必须先调用 BobWork.request('chatRequestPermission', {}) 申请授权：宿主会弹出确认框由用户授予；\n` +
-        `     可先用 BobWork.request('chatGetPermission', {}) 查询当前是否已授权，避免无谓申请；\n` +
-        `  2. 调用示例：const res = await BobWork.request('chat', { messages: [{ role: 'user', content: '...' }], maxTokens: 4096 });\n` +
-        `     - model 参数可省略：默认走 Auto 模式（系统自动从已配置模型池里选可用模型，优先已勾选模型）；\n` +
-        `     - 如需显式指定，格式 provider:modelId，只要 provider 已配置 API Key 即可使用（不限 selectedModels 勾选范围）；\n` +
-        `     - 纯文本进出，默认输出 8192 tokens，最大支持 32768 tokens，无 PII 脱敏（亲儿子模式数据不篡改）；\n` +
-        `  3. 流式调用（推荐用于长回复、打字机效果）：const handle = BobWork.chatStream({ messages, maxTokens, onDelta: (text) => { /* 追加到输出 */ } });\n` +
-        `     - 返回 handle.promise 等待最终结果（{ model, provider, usage }），handle.abort() 可中途停止生成；\n` +
-        `     - 每段增量文本经 onDelta 回调实时获得，用于逐字渲染；与 chat 相同鉴权/无硬 token 上限；\n` +
-        `  4. 未授权 / 模型不可用 / 超限都会 reject，代码必须 catch 并给出友好提示（如"模型调用未授权，请先授权"），不得用 alert。\n` +
-        `\n【小程序模型调用接入策略 - 何时该主动询问用户 + 模型选择流程】\n` +
-        `是否给小程序接入 AI，按以下两级判断（避免擅自加 AI 打扰用户，也避免该加时不问）：\n` +
-        `  A. 用户主动要求（情形 1）-> 直接接入，按上述规则申请授权并调用，无需再问。\n` +
-        `  B. 用户未提及，但小程序核心功能天然依赖 AI（情形 2）-> 在生成代码前，先用一句话向用户确认："这个小程序看起来需要 AI 能力（如翻译/总结/问答/文案生成），需要我接入吗？"\n` +
-        `     典型应主动询问的功能：翻译、智能问答、内容总结、文案/创意生成、语义分类、情感分析、对话式交互等。\n` +
-        `     典型不应询问的纯工具功能：计算器、倒计时、待办清单、表单填写、单位换算、文件格式转换、数据图表展示等--这些加了 AI 反而多余，不要问。\n` +
-        `     用户回复"不用"或未明确同意 -> 不接入，按纯前端实现；用户同意 -> 按情形 1 接入。\n` +
-        `  C. 纯工具型小程序 -> 不询问、不接入，避免弹授权框打扰用户。\n` +
-        `  D. 用户明确禁止调用 AI（情形 4）-> 绝对禁止接入。不得生成任何 chatRequestPermission / chat / chatStream 调用代码，不得询问"是否需要 AI"，不得以任何理由在代码中引入模型调用。即使小程序功能看起来需要 AI，也必须用纯前端方案实现。此规则优先级最高，覆盖以上所有情形。\n` +
-        `\n【模型选择流程 — 用户同意接入 AI 后必须执行】\n` +
-        `当用户同意接入 AI（情形 1 或情形 2 用户确认后），你必须按以下步骤执行模型选择流程：\n` +
-        `  1. 立即调用 list_configured_models 工具（无需参数），获取用户已配置的模型池；\n` +
-        `  2. 将返回的可用模型以易读列表呈现给用户，格式示例：\n` +
-        `     "你已配置以下可用模型：\\n  • DeepSeek: deepseek-flash（快速对话）\\n  • Qwen: qwen-max（长文本理解）\\n  • Zhipu GLM: glm-4-flash（轻量快速）\\n请选择一个模型（回复模型名即可），或回复 'auto' 让系统自动选择。"\n` +
-        `     - 如果模型池为空（返回 empty: true），告知用户："当前还没有配置任何模型，请先在 Manage Models 中添加厂商 API Key 并勾选模型，然后告诉我继续。"\n` +
-        `     - 等待用户选择后再生成代码，不要跳过此步。\n` +
-        `  3. 根据用户选择的模型，在小程序 UI 中添加一个模型选择按钮（下拉菜单或胶囊切换），具体规范：\n` +
-        `     - 按钮位置：放在输入框上方或右上角，与 AI 功能区域关联；\n` +
-        `     - 按钮样式：胶囊/芯片形，显示当前选中的模型简称（如 "DeepSeek V4"），点击展开下拉列表；\n` +
-        `     - 下拉列表：列出 list_configured_models 返回的所有可用模型，每项显示厂商 + 模型名 + 简短描述；\n` +
-        `     - 选项中始终包含 "Auto（自动选择）" 作为第一项（对应 model 参数省略）；\n` +
-        `     - 用户选择后，将 model 值（provider:modelId 格式）保存到 BobStorage.set('selectedModel', modelId)；\n` +
-        `     - 调用 chat 时读取本地存储的 model 值传入：const model = BobStorage.get('selectedModel'); BobWork.request('chat', { model, messages, ... })；\n` +
-        `     - model 为 'auto' 或 null 时省略 model 参数，走 Auto 模式。\n` +
-        `  4. 模型选择按钮的交互细节：\n` +
-        `     - 默认选中 "Auto"（首次使用）；\n` +
-        `     - 切换模型后立即生效（下次调用 chat 时使用新模型），无需重新授权；\n` +
-        `     - 按钮文案使用英文（如 "Model: Auto" / "Model: DeepSeek V4"），不用中文；\n` +
-        `     - 配色跟随小程序主题（用 var(--primary) 等 CSS 变量），不要写死色值。\n` +
+        `  - aiBadge: 已废弃（2026-10-10「放开小程序权限」起宿主不再注入任何 AI 状态徽章）。旧清单里保留该字段无害，但不要再依赖它，也不需要为它写任何代码。\n` +
+        `  - 改坏了/要回退：调用 sandbox_rollback 查看并恢复历史版本；需要交付源码时用 sandbox_export。\n` +
+        `\n=== BobWork Host Bridge API ===\n` +
+        `小程序是 BobWork 原生功能组件。需要持久化、宿主资源、画布、AI 或 hostTool 时，先调用 read_bridge_docs 工具读取对应分区的完整 API 与示例，不要凭记忆写代码。\n` +
+        codingDocIndex() + '\n' +
+        `【AI 接入策略（简版）】A 用户明确要求 → 直接接；B 功能天然依赖 AI（翻译/总结/问答/文案/生成）→ 生成前先问一句；C 纯工具型 → 不接、不问；D 用户明确禁止 → 绝不接（最高优先级）。用户同意后调用 list_configured_models，并按 read_bridge_docs('chat') 的模型选择流程实现。\n` +
+        `【范围纪律】只实现用户愿望需要的集成；不要为了"亲儿子"主动加 AI / 日历 / 项目集成，除非功能确实需要或用户要求。\n` +
+        `【高权限】hostTool 与 graph 仅在功能需要时使用；破坏性命令先向用户说明。\n` +
         `\n\n=== 小程序 UI 默认规范（无需用户要求即可主动应用） ===\n` +
         `以下规范保证小程序在 BobWork 预览中风格一致且专业，按优先级执行：\n` +
         `1. 布局：外层卡片式容器，圆角 12px（border-radius: 12px）、柔和阴影 box-shadow: 0 4px 20px rgba(0,0,0,0.08)、内容区 padding 20-28px；viewport 移动端优先，容器 max-width 440px 水平居中；分组模块分区，标题字重 600 + 下边框 1px\n` +
-        `2. 配色（CSS 变量自适应）：小程序预览环境已自动注入当前主题的 44 个 CSS 变量到 :root，直接使用 var(--primary)、var(--background)、var(--paper)、var(--ink)、var(--ink-muted)、var(--border)、var(--danger)、var(--success) 等即可自动适配所有主题（含自定义主题），无需写死色值。映射关系：主色 var(--primary) / 背景 var(--background) / 卡片 var(--paper) / 正文 var(--ink) 或 var(--foreground) / 辅助文字 var(--ink-muted) 或 var(--muted-foreground) / 边框 var(--border) 或 var(--line) / 危险 var(--danger) / 成功 var(--success) / 警告 var(--warn) / 信息 var(--info)\n` +
+        `2. 配色（CSS 变量自适应）：小程序预览环境已自动注入当前主题的 61 个 CSS 变量到 :root（2026-10 起只剩单一内置品牌主题 warm，不再有自定义主题），直接使用 var(--primary)、var(--background)、var(--paper)、var(--ink)、var(--ink-muted)、var(--border)、var(--danger)、var(--success) 等即可自动适配明暗与主题，无需写死色值。映射关系：主色 var(--primary) / 背景 var(--background) / 卡片 var(--paper) / 正文 var(--ink) 或 var(--foreground) / 辅助文字 var(--ink-muted) 或 var(--muted-foreground) / 边框 var(--border) 或 var(--line) / 危险 var(--danger) / 成功 var(--success) / 警告 var(--warn) / 信息 var(--info)\n` +
         `   - Canvas/SVG/Chart 等无法用 CSS 变量的场景：调用 BobWork.request('getTheme') 获取 keyColors 对象，用 JS 读取色值后传给图表库\n` +
         `   - 深色判断：html[data-bob-dark="true"] 选择器可检测当前是否深色主题\n` +
         `3. 字体：正文 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Serif SC", serif；数字、金额、百分比一律 font-variant-numeric: tabular-nums（等宽对齐）；标题/正文/辅助三级字号（20px / 14px / 12px）\n` +

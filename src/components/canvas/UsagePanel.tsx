@@ -47,17 +47,30 @@ interface UsageRow {
   /** scope=all 时由路由附带的项目名（project 作用域无） */
   projectName?: string | null;
 }
+interface WebToolBucket {
+  /** 聚合键：`deepseek:web-search` / `deepseek:web-fetch` */
+  key: string;
+  calls: number;
+  estCost: number | null;
+}
 interface UsageApiResp {
   meta: { empty?: boolean; reason?: string; scope?: string; projectName?: string; costCurrency?: string; range?: string };
-  summary: { totals: Bucket; byModel: Bucket[]; byDay: Bucket[]; byMonth: Bucket[] } | null;
+  summary: {
+    totals: Bucket;
+    byModel: Bucket[];
+    byDay: Bucket[];
+    byMonth: Bucket[];
+    /** Web 工具按次计费流水（无 token），单列展示 */
+    webTools: WebToolBucket[];
+  } | null;
   recent: UsageRow[];
 }
 
-type RangeKey = 'today' | 'month' | 'all';
+type RangeKey = 'today' | 'month' | 'year';
 const RANGES: { key: RangeKey; label: string }[] = [
   { key: 'today', label: 'Today' },
   { key: 'month', label: 'Month' },
-  { key: 'all', label: 'All' },
+  { key: 'year', label: 'Year' },
 ];
 
 type ScopeKey = 'project' | 'all';
@@ -82,8 +95,10 @@ function fmtCost(n: number | null, currency: 'usd' | 'cny'): string {
   if (n == null) return '—';
   const sym = currency === 'cny' ? '¥' : '$';
   if (n === 0) return `${sym}0`;
-  if (n < 0.01) return `${sym}${n.toFixed(4)}`;
-  return `${sym}${n.toFixed(2)}`;
+  // 按金额量级取小数位：≥¥1 固定两位（¥7.25），小额保 3 位有效数字
+  // （单次 Web 工具调用 ¥0.005、三次 ¥0.015 不会被抹成 ¥0.01），再去掉尾随 0。
+  const digits = n >= 1 ? 2 : Math.min(5, Math.max(2, Math.ceil(-Math.log10(n)) + 2));
+  return `${sym}${n.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '')}`;
 }
 /** 完整模型引用 "deepseek:deepseek-flash" → 可读名 + 厂商前缀 */
 function splitModel(ref: string): { vendor: string; name: string } {
@@ -143,7 +158,7 @@ export function UsagePanel({
   // 清零全部用量记录（二次确认；成功后刷新当前视图为空账本）
   const [resetting, setResetting] = useState(false);
   const handleReset = async () => {
-    if (!window.confirm('Clear all recorded usage across all projects?\nThis cannot be undone.')) return;
+    if (!window.confirm('Clear all recorded usage?')) return;
     setResetting(true);
     try {
       const res = await fetch('/api/usage', { method: 'DELETE' });
@@ -300,7 +315,7 @@ export function UsagePanel({
             >
               No usage recorded in this period yet.
             </div>
-          ) : range === 'all' ? null : (
+          ) : range === 'year' ? null : (
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
               <StatCard
                 label="Total tokens"
@@ -333,8 +348,33 @@ export function UsagePanel({
             </div>
           )}
 
-          {/* byModel 排行（仅 Today / This month；All 阅读视图只留折线图） */}
-          {range !== 'all' && data.summary.byModel.length > 0 && (
+          {/* Web 工具（按次计费、无 token）：Search / Fetch 的调用次数与金额单列，不混进 token 排行 */}
+          {range !== 'year' && data.summary.webTools.length > 0 && (
+            <Section title="Web tools">
+              <div className="flex flex-col gap-1.5">
+                {data.summary.webTools.map((w) => {
+                  const { name } = splitModel(w.key);
+                  const label = name === 'web-search' ? 'Search' : name === 'web-fetch' ? 'Fetch' : name;
+                  return (
+                    <div key={w.key} className="flex items-center justify-between gap-3 text-xs">
+                      <span className="flex items-baseline gap-1.5">
+                        <span className="font-medium" style={{ color: 'var(--ink)' }}>{label}</span>
+                        <span className="text-10" style={{ color: 'var(--ink-muted)' }}>
+                          {w.calls} call{w.calls !== 1 ? 's' : ''} · billed per successful request
+                        </span>
+                      </span>
+                      <span className="shrink-0 tabular-nums" style={{ color: 'var(--warn)' }}>
+                        {fmtCost(w.estCost, cur)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </Section>
+          )}
+
+          {/* byModel 排行（仅 Today / Month；Year 阅读视图只留月度折线图） */}
+          {range !== 'year' && data.summary.byModel.length > 0 && (
             <Section title="By model">
               <div className="flex flex-col gap-2.5">
                 {data.summary.byModel.map((b) => {
@@ -373,8 +413,8 @@ export function UsagePanel({
             </Section>
           )}
 
-          {/* 日粒度走势：仅 Today / This month（All 用月度趋势，避免日柱过密）；悬停柱显示当日 tokens 与估算金额 */}
-          {range !== 'all' && data.summary.byDay.length > 1 && (
+          {/* 日粒度走势：仅 Today / Month（Year 用月度趋势，避免日柱过密）；悬停柱显示当日 tokens 与估算金额 */}
+          {range !== 'year' && data.summary.byDay.length > 1 && (
             <Section title="By day">
               <TooltipProvider delayDuration={120}>
                 <div className="flex h-24 items-end gap-1.5">
@@ -405,13 +445,13 @@ export function UsagePanel({
             </Section>
           )}
 
-          {/* All（阅读）视图：仅月度折线图，悬停圆点显示当月 Total tokens / Est. cost */}
-          {range === 'all' && data.summary.byMonth.length > 0 && (
+          {/* Year（阅读）视图：仅月度折线图，悬停圆点显示当月 Total tokens / Est. cost */}
+          {range === 'year' && data.summary.byMonth.length > 0 && (
             <MonthTrendChart buckets={data.summary.byMonth} currency={cur} />
           )}
 
-          {/* 最近任务（仅 Today / This month；All 阅读视图只留折线图） */}
-          {range !== 'all' && data.recent.length > 0 && (
+          {/* 最近任务（仅 Today / Month；Year 阅读视图只留折线图） */}
+          {range !== 'year' && data.recent.length > 0 && (
             <Section title="Recent tasks">
               <div className="flex flex-col">
                 {data.recent.map((r) => {
@@ -482,7 +522,7 @@ export function UsagePanel({
   );
 }
 
-/** All（阅读）视图：按月的 token 折线图；悬停圆点显示该月 Total tokens / Est. cost */
+/** Year（阅读）视图：按月的 token 折线图；悬停圆点显示该月 Total tokens / Est. cost */
 function MonthTrendChart({ buckets, currency }: { buckets: Bucket[]; currency: 'usd' | 'cny' }) {
   const [active, setActive] = useState<number | null>(null);
   const W = 600;
@@ -494,8 +534,13 @@ function MonthTrendChart({ buckets, currency }: { buckets: Bucket[]; currency: '
   const innerH = H - PADT - PADB;
   const max = Math.max(1, ...buckets.map((b) => b.totalTokens));
   const n = buckets.length;
+  // x 轴不再把首尾点顶到绘图区两端：月位等距，整组以中线为锚向两侧展开。
+  // 至少预留 6 个月位的宽度（innerW / 6 ≈ 85px），累积到 7 个月以上才铺满整幅宽度；
+  // 只有两个月时两点贴着中线相邻，而不是被拉到左右边缘（"由中间向两端散开"）。
+  const step = n > 1 ? innerW / Math.max(n - 1, 6) : 0;
+  const centerX = PADX + innerW / 2;
   const pts = buckets.map((b, i) => {
-    const x = n === 1 ? W / 2 : PADX + (i * innerW) / (n - 1);
+    const x = centerX + (i - (n - 1) / 2) * step;
     const y = PADT + innerH * (1 - b.totalTokens / max);
     return { x, y, b };
   });

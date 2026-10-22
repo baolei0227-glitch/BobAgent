@@ -115,11 +115,16 @@ export async function executeDeterministicRule(input: {
     endIso = new Date(startMs + 3_600_000).toISOString();
   }
 
-  // 落点：便签为项目私有 → 用当前激活项目（便签原语不接受全局落点）
+  // 落点：优先当前激活项目；未立项（无激活项目）→ 全局 Inbox（未立项的临时待办有处可去）
   const { resolveProjectWithFallback } = await import('@/lib/project/resolve-explicit-project');
-  const pr = await resolveProjectWithFallback(undefined);
-  if (!pr.ok || !pr.project) return { ok: false, message: '当前没有可写入的项目，待办无处可建。请先激活一个项目。' };
-  const { id: projectId, name: projectName, path: projectRoot } = pr.project;
+  const pr = await resolveProjectWithFallback(undefined, { allowGlobal: true });
+  if (!pr.ok) return { ok: false, message: '当前没有可写入的项目，待办无处可建。请先激活一个项目。' };
+  const isInbox = !pr.project;
+  const { GLOBAL_SCOPE_PROJECT_ID, TODO_INBOX_NAME } = await import('@/lib/project/sticky-scope');
+  const { resolveAppRoot } = await import('@/lib/app-root');
+  const projectId = isInbox ? GLOBAL_SCOPE_PROJECT_ID : pr.project!.id;
+  const projectName = isInbox ? TODO_INBOX_NAME : pr.project!.name || pr.project!.id;
+  const projectRoot = isInbox ? resolveAppRoot() : pr.project!.path;
 
   const { appendStickyTodoNote } = await import('./sticky-write');
   const appended = await appendStickyTodoNote({ projectRoot, projectName, content: item, title: actionStep.text || undefined });
@@ -159,11 +164,12 @@ export async function executeDeterministicRule(input: {
     }
   } catch { /* 入日历失败不阻断待办创建；producedRef 缺省 → hits 不带引用 */ }
 
+  const inboxNote = isInbox ? '（未立项，已记入 Todo Inbox，立项后可用 todo_update 归入项目）' : '';
   if (isScheduled) {
     const whenText = startIso ? new Date(startIso).toLocaleString('zh-CN', { hour12: false }) : '';
-    return { ok: true, producedRef, message: `已创建日程待办「${item}」${whenText ? `（${whenText}）` : ''}。` };
+    return { ok: true, producedRef, message: `已创建日程待办「${item}」${whenText ? `（${whenText}）` : ''}${inboxNote}。` };
   }
-  return { ok: true, producedRef, message: `已创建待办「${item}」。` };
+  return { ok: true, producedRef, message: `已创建待办「${item}」${inboxNote}。` };
 }
 
 // ==================== ② 候选 → ③ 裁决 → ④ 执行（宿主侧一次调用） ====================

@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, Search, LayoutGrid, List, Grid3x3, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText } from 'lucide-react';
+import type { CSSProperties } from 'react';
+import { FolderOpen, Search, LayoutGrid, List, Grid3x3, X, ExternalLink, Clock, ArchiveRestore, Archive, Trash, ListTodo, Plus, Check, Loader2, Save, Undo2, CalendarDays, AlarmClock, AlertCircle, MessageSquareText, ChevronDown } from 'lucide-react';
 import { PROJECT_CATEGORIES, PROJECT_TAG_LIMIT, PROJECT_NOTE_MAX } from '@/lib/types';
 import { showImageAiEditToast } from '@/lib/image-ai-edit-runtime';
 import { localDateTimeToIso } from '@/lib/utils';
@@ -35,6 +36,59 @@ interface MetaPayload {
   note: string;
 }
 
+/** 计划步骤（GET /api/projects/plans 返回，与 .butler/plans.json 结构一致） */
+interface PlanViewStep {
+  id: string;
+  title: string;
+  status: 'pending' | 'in_progress' | 'done' | 'blocked';
+  note?: string;
+  due?: string;
+  owner?: string;
+  artifact?: string;
+}
+
+/** 计划里程碑 */
+interface PlanViewMilestone {
+  id: string;
+  title: string;
+  status: 'active' | 'done';
+  steps: PlanViewStep[];
+}
+
+/** 单个计划的只读派生视图 */
+interface PlanView {
+  id: string;
+  title: string;
+  goal?: string | null;
+  status: 'active' | 'done' | 'abandoned';
+  progress: { steps: number; done: number; percent: number };
+  overdue: Array<{ step: string; stepId: string; milestone: string; due: string; daysOverdue: number }>;
+  nextDue: string | null;
+  stalled: boolean;
+  milestones: PlanViewMilestone[];
+}
+
+/** 项目计划面板响应（只读） */
+interface PlansView {
+  plans: PlanView[];
+  totals: {
+    plans: number;
+    openPlans: number;
+    shown: number;
+    steps: number;
+    doneSteps: number;
+    overdueSteps: number;
+  };
+}
+
+/** 步骤状态指示（只读）：done 打勾 / in_progress 实心点 / blocked 叹号 / pending 空心点 */
+function PlanStepDot({ status }: { status: PlanViewStep['status'] }) {
+  if (status === 'done') return <Check className="mt-0.5 h-3 w-3 shrink-0" style={{ color: 'var(--success, #22a06b)' }} />;
+  if (status === 'blocked') return <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" style={{ color: 'var(--danger, #e8463a)' }} />;
+  if (status === 'in_progress') return <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--primary, #7c5cff)' }} />;
+  return <span className="mt-1 h-2 w-2 shrink-0 rounded-full border" style={{ borderColor: 'var(--ink-faint)' }} />;
+}
+
 /**
  * 备注落盘前清洗：仅由空编号行（如 "1. "）/空行组成的备注视为空（不落盘）；
  * 去掉结尾的空行与空编号行，避免聚焦空备注时自动插入的 "1. " 前缀被当作内容保存。
@@ -64,6 +118,8 @@ interface TodoPageData {
   lineEventIds?: string[][];
   /** 行级日历布尔标记（旧字段兼容） */
   lineCalendared?: boolean[];
+  /** 行级计划来源标记（与 content 行序对齐）：系统「计划待办」便签的行锚点 `${planId}/${stepId}` */
+  linePlanRefs?: string[][];
 }
 
 /** 待办便签（从 /api/sticky-notes GET 全量解析） */
@@ -789,6 +845,11 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     try { localStorage.setItem(BOARD_VIEW_KEY, v); } catch { /* ignore */ }
   };
   const [selected, setSelected] = useState<BoardProject | null>(null);
+  // 计划面板（只读）：随选中项目拉取 GET /api/projects/plans，失败静默降级（不阻塞看板）
+  const [plans, setPlans] = useState<PlansView | null>(null);
+  const [plansLoading, setPlansLoading] = useState(false);
+  // 展开的计划 id（手风琴：一次一个，默认收起，避免刷屏）
+  const [expandedPlanId, setExpandedPlanId] = useState<string | null>(null);
   const [editCategory, setEditCategory] = useState('');
   // 编辑项目：两个独立标签输入框（最多 2 个）
   const [editTag1, setEditTag1] = useState('');
@@ -910,6 +971,33 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     selectedRef.current = selected;
   }, [selected]);
 
+  // 计划面板（只读）：选中项目变化时拉取其 .butler/plans.json 派生视图；
+  // 加载失败 / 无计划一律降级为空（不打断看板主流程，也不弹错）。
+  useEffect(() => {
+    // 切项目时收起已展开的计划（避免沿用上一项目的展开态）
+    setExpandedPlanId(null);
+    if (!open || !selected) {
+      setPlans(null);
+      return undefined;
+    }
+    let alive = true;
+    setPlansLoading(true);
+    fetch(`/api/projects/plans?project_id=${encodeURIComponent(selected.id)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: PlansView | null) => {
+        if (alive) setPlans(data && Array.isArray(data.plans) ? data : null);
+      })
+      .catch(() => {
+        if (alive) setPlans(null);
+      })
+      .finally(() => {
+        if (alive) setPlansLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, selected]);
+
   /** 组装元信息保存载荷（分类/标签 trim，备注清洗） */
   const buildMetaPayload = (): MetaPayload => {
     const sel = selectedRef.current;
@@ -1027,6 +1115,22 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
     );
   }, []);
 
+  /** 按当前状态视图（Active/Archived/Trash）过滤，与列表 filtered 使用同一状态口径 */
+  const filterByView = useCallback((list: BoardProject[], f: BoardFilter): BoardProject[] => {
+    return list.filter((p) => {
+      if (f === 'active' && (p.archived || p.trashed)) return false;
+      if (f === 'archived' && !p.archived) return false;
+      if (f === 'trash' && !p.trashed) return false;
+      return true;
+    });
+  }, []);
+
+  /** 视图内默认选中：只在当前状态视图内挑默认项；视图为空则返回 undefined（详情侧栏置空） */
+  const pickViewDefault = useCallback(
+    (list: BoardProject[], f: BoardFilter): BoardProject | undefined => pickDefaultProject(filterByView(list, f)),
+    [pickDefaultProject, filterByView],
+  );
+
   useEffect(() => {
     if (!open) return;
     setQuery('');
@@ -1063,28 +1167,18 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return projects.filter((p) => {
-      if (filter === 'active' && (p.archived || p.trashed)) return false;
-      if (filter === 'archived' && !p.archived) return false;
-      if (filter === 'trash' && !p.trashed) return false;
+    return filterByView(projects, filter).filter((p) => {
       if (catFilter && (p.category || '') !== catFilter) return false;
       if (tagFilter && !(p.tags || []).includes(tagFilter)) return false;
       if (!q) return true;
       const haystack = [p.name, p.category || '', ...(p.tags || []), p.note || '', p.path].join(' ').toLowerCase();
       return haystack.includes(q);
     });
-  }, [projects, query, filter, tagFilter, catFilter]);
+  }, [projects, query, filter, tagFilter, catFilter, filterByView]);
 
   // 当前视图下的项目（仅按 active/archived/trash 状态过滤，不含搜索/标签筛选）：
   // 标签/分类统计跟随当前视图，切换视图时标签栏数字同步变化
-  const viewProjects = useMemo(() => {
-    return projects.filter((p) => {
-      if (filter === 'active' && (p.archived || p.trashed)) return false;
-      if (filter === 'archived' && !p.archived) return false;
-      if (filter === 'trash' && !p.trashed) return false;
-      return true;
-    });
-  }, [projects, filter]);
+  const viewProjects = useMemo(() => filterByView(projects, filter), [projects, filter, filterByView]);
 
   // 图标 KPI 条：当前状态视图（Active/Archived/Trash）下的规模与到期压力，全部由已有字段推导
   const kpis = useMemo(() => {
@@ -1278,8 +1372,9 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         const data = await resp.json();
         if (data.success) {
           const refreshed = await load();
-          // 详情侧栏常驻：操作成功后选中默认项目（列表为空才置空）
-          const next = pickDefaultProject(refreshed || []);
+          // 详情侧栏常驻：操作成功后只在当前视图内选默认项——当前视图为空（如清空 Trash）时置空，
+          // 避免 Trash 等视图已无项目却把活跃项目显示在右侧详情侧栏里（跨视图选中）
+          const next = pickViewDefault(refreshed || [], filter);
           if (next) openDetail(next);
           else setSelected(null);
           // 取消归档后若看板仍处于 archived 筛选，重拉的数据里该项目的筛选态由 load() 保持
@@ -1292,7 +1387,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         setMutating(false);
       }
     },
-     [load, pickDefaultProject, openDetail],
+     [load, pickViewDefault, openDetail, filter],
    );
 
   /** 打开 TODO 弹窗：加载该项目全部便签（含已完成和未完成待办） */
@@ -1327,25 +1422,31 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                 ? (pg.lineEventIds as unknown[][]).map((x) => (Array.isArray(x) ? x.map(String) : []))
                 : undefined;
               let lineCalendared = Array.isArray(pg.lineCalendared) ? pg.lineCalendared.map(Boolean) : undefined;
+              let linePlanRefs = Array.isArray(pg.linePlanRefs)
+                ? (pg.linePlanRefs as unknown[][]).map((x) => (Array.isArray(x) ? x.map(String) : []))
+                : undefined;
               // 空行不是待办：解析即剔除空待办行，并同步对齐行级日历元数据，
               // 避免脏空行进入本地数据 / 撤销栈（回撤后"冒出空白待办"的根源）
               if (lines.some((l) => !l.text.trim())) {
                 const keptLines: TodoLine[] = [];
                 const keptEv: string[][] = [];
                 const keptCal: boolean[] = [];
+                const keptPlan: string[][] = [];
                 for (let i = 0; i < lines.length; i++) {
                   if (!lines[i].text.trim()) continue;
                   keptLines.push(lines[i]);
                   if (lineEventIds) keptEv.push(lineEventIds[i] ?? []);
                   if (lineCalendared) keptCal.push(lineCalendared[i] ?? false);
+                  if (linePlanRefs) keptPlan.push(linePlanRefs[i] ?? []);
                 }
                 lines = keptLines;
                 if (lineEventIds) lineEventIds = keptEv;
                 if (lineCalendared) lineCalendared = keptCal;
+                if (linePlanRefs) linePlanRefs = keptPlan;
               }
               // 空待办页也保留在弹窗里（新建后无事项 / 事项被清空时仍可在此添加、编辑）
               if (pageId) {
-                pages.push({ pageId, pageTitle, lines, ...(lineEventIds ? { lineEventIds } : {}), ...(lineCalendared ? { lineCalendared } : {}) });
+                pages.push({ pageId, pageTitle, lines, ...(lineEventIds ? { lineEventIds } : {}), ...(lineCalendared ? { lineCalendared } : {}), ...(linePlanRefs ? { linePlanRefs } : {}) });
               }
             }
             // 兼容老数据 content → P1（同样保留空内容页以便继续编辑；剔除空行，语义同上）
@@ -1379,10 +1480,17 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
    * 保存便签页 content 到后端并同步画布。
    * projectId/noteId/pageId 定位目标页；newLines 为修改后的完整行列表。
    * newMeta.lineEventIds 可选：行数变化（增/删）时同步写回行级日历标记，避免错位。
+   * newMeta.linePlanRefs 同理：行数变化时同步写回行级计划标记（系统「计划待办」便签）。
    * 写盘成功后广播 sticky-notes-changed 事件 → 画布便签实时刷新。
    */
   const saveTodoPage = useCallback(
-    async (projectId: string, noteId: string, pageId: string, newLines: TodoLine[], newMeta?: { lineEventIds?: string[][] }) => {
+    async (
+      projectId: string,
+      noteId: string,
+      pageId: string,
+      newLines: TodoLine[],
+      newMeta?: { lineEventIds?: string[][]; linePlanRefs?: string[][] },
+    ) => {
       setTodoSaving(true);
       try {
         // 先读取该便签完整数据以获取 pages 数组（避免覆盖其他页）
@@ -1394,7 +1502,12 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         const rawPages = Array.isArray(note.pages) ? note.pages : [];
         const pages = rawPages.map((pg: Record<string, unknown>) =>
           pg.id === pageId
-            ? { ...pg, content: serializeTodoLines(newLines), ...(newMeta?.lineEventIds ? { lineEventIds: newMeta.lineEventIds } : {}) }
+            ? {
+                ...pg,
+                content: serializeTodoLines(newLines),
+                ...(newMeta?.lineEventIds ? { lineEventIds: newMeta.lineEventIds } : {}),
+                ...(newMeta?.linePlanRefs ? { linePlanRefs: newMeta.linePlanRefs } : {}),
+              }
             : pg,
         );
         await fetch('/api/sticky-notes', {
@@ -1414,7 +1527,12 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                       ...n,
                       pages: n.pages.map((pg) =>
                         pg.pageId === pageId
-                          ? { ...pg, lines: newLines, ...(newMeta?.lineEventIds ? { lineEventIds: newMeta.lineEventIds } : {}) }
+                          ? {
+                              ...pg,
+                              lines: newLines,
+                              ...(newMeta?.lineEventIds ? { lineEventIds: newMeta.lineEventIds } : {}),
+                              ...(newMeta?.linePlanRefs ? { linePlanRefs: newMeta.linePlanRefs } : {}),
+                            }
                           : pg,
                       ),
                     }
@@ -1479,7 +1597,11 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
       const newLines = [...page.lines, { done: false, text: text.trim() }];
       // 新行无日历标记，补齐数组长度保持与行对齐
       const newEventIds = page.lineEventIds ? [...page.lineEventIds.map((x) => [...x]), []] : undefined;
-      return saveTodoPage(projectId, noteId, pageId, newLines, newEventIds ? { lineEventIds: newEventIds } : undefined);
+      const newPlanRefs = page.linePlanRefs ? [...page.linePlanRefs.map((x) => [...x]), []] : undefined;
+      return saveTodoPage(projectId, noteId, pageId, newLines, {
+        ...(newEventIds ? { lineEventIds: newEventIds } : {}),
+        ...(newPlanRefs ? { linePlanRefs: newPlanRefs } : {}),
+      });
     },
     [todoData, saveTodoPage, pushTodoUndo],
   );
@@ -1495,7 +1617,11 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
       const newLines = page.lines.filter((_, i) => i !== lineIndex);
       // 同步删掉对应行的日历标记，避免后续行错位
       const newEventIds = page.lineEventIds ? page.lineEventIds.filter((_, i) => i !== lineIndex) : undefined;
-      void saveTodoPage(projectId, noteId, pageId, newLines, newEventIds ? { lineEventIds: newEventIds } : undefined);
+      const newPlanRefs = page.linePlanRefs ? page.linePlanRefs.filter((_, i) => i !== lineIndex) : undefined;
+      void saveTodoPage(projectId, noteId, pageId, newLines, {
+        ...(newEventIds ? { lineEventIds: newEventIds } : {}),
+        ...(newPlanRefs ? { linePlanRefs: newPlanRefs } : {}),
+      });
     },
     [todoData, saveTodoPage, pushTodoUndo],
   );
@@ -1697,7 +1823,12 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
         // 内联兜底：确保看板内文字可划选复制（不依赖外部 CSS，打包/缓存异常也生效）
         WebkitUserSelect: 'text',
         userSelect: 'text',
-      }}
+        // 全屏覆盖层必须显式 no-drag：窗口顶部存在 drag 拖拽热区
+        // （CanvasFlow 顶部拖拽条 + 左栏窗口控制区），Electron 的 app-region 命中不遵循普通
+        // z-index —— 上层未声明 no-drag 时，下层 drag 区仍会吃掉点击。缺了这行，面板顶部
+        // （含 Open on launch 开关）点不动，只有靠下、越出 drag 区的部分才能触发。
+        WebkitAppRegion: 'no-drag',
+      } as CSSProperties}
     >
       {/* 打开项目过渡层：等待目标项目画布重载完成期间全屏提示，切换即刻有反馈 */}
       {switching && (
@@ -1721,7 +1852,10 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
           <span className="text-15 font-semibold" style={{ color: 'var(--ink)' }}>
             Projects
           </span>
-          {/* 标题栏开关：打开 BobWork 时自动进入项目面板（每次启动一次）；关闭则直接进入上次项目 */}
+          {/* 标题栏开关：打开 BobWork 时自动进入项目面板（每次启动一次）；关闭则直接进入上次项目。
+              命中热区用对称的 ::before 从开关四周向外扩 10px（48×36，严格居中于开关），
+              开关尺寸与工具栏布局不变；文案不参与点击，避免热区重心偏离开关
+              （表现为「触发位置没有正对按钮」）。 */}
           <div
             className="ml-3 flex shrink-0 items-center gap-1.5"
             title="Open this panel every time BobWork launches"
@@ -1731,7 +1865,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
               role="switch"
               aria-checked={openOnLaunch}
               onClick={() => setOpenOnLaunchPersist(!openOnLaunch)}
-              className="relative h-4 w-7 shrink-0 rounded-full transition-colors"
+              className="relative h-4 w-7 shrink-0 cursor-pointer rounded-full transition-colors before:absolute before:-inset-2.5 before:content-['']"
               style={{ background: openOnLaunch ? 'var(--primary-strong, #5b48d8)' : 'var(--border)' }}
             >
               <span
@@ -2537,7 +2671,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                         mutateProject(
                           selected.id,
                           'delete',
-                          `Move "${selected.name}" to trash?\n\nYou can restore it later from the trash.`,
+                          `Move "${selected.name}" to trash?`,
                         )
                       }
                       disabled={mutating}
@@ -2696,6 +2830,131 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
               </label>
             </div>
 
+            {/* 计划面板（只读）：该项目进行中的计划进度 / 逾期 / 下一到期 */}
+            <div className="mt-4 flex flex-col gap-2 border-t pt-4" style={{ borderColor: 'var(--border)' }}>
+              <div className="flex items-center justify-between text-xs font-semibold" style={{ color: 'var(--ink)' }}>
+                <span className="flex items-center gap-1.5">
+                  <ListTodo className="h-3.5 w-3.5" />
+                  Plans
+                </span>
+                {plans && plans.totals.overdueSteps > 0 && (
+                  <span
+                    className="rounded-full px-2 py-0.5 text-10 font-semibold"
+                    style={{ color: 'var(--danger, #e8463a)', background: 'color-mix(in oklab, var(--danger, #e8463a) 10%, transparent)' }}
+                  >
+                    {plans.totals.overdueSteps} overdue
+                  </span>
+                )}
+              </div>
+              {plansLoading ? (
+                <div className="flex items-center gap-1.5 text-11" style={{ color: 'var(--ink-faint)' }}>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Loading…
+                </div>
+              ) : !plans || plans.plans.length === 0 ? (
+                <div className="text-11" style={{ color: 'var(--ink-faint)' }}>
+                  No active plans
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {plans.plans.map((p) => {
+                    const overdueIds = new Set(p.overdue.map((o) => o.stepId));
+                    const expanded = expandedPlanId === p.id;
+                    return (
+                      <div
+                        key={p.id}
+                        className="rounded-lg border px-2.5 py-2"
+                        style={{ borderColor: 'var(--border)', background: 'var(--paper, #fff)' }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setExpandedPlanId(expanded ? null : p.id)}
+                          className="flex w-full items-center gap-1.5 text-left"
+                        >
+                          <ChevronDown
+                            className={`h-3 w-3 shrink-0 transition-transform ${expanded ? '' : '-rotate-90'}`}
+                            style={{ color: 'var(--ink-faint)' }}
+                          />
+                          <span
+                            className="min-w-0 flex-1 truncate text-xs font-semibold"
+                            style={{ color: 'var(--ink)' }}
+                            title={p.title}
+                          >
+                            {p.title}
+                          </span>
+                          <span className="shrink-0 text-10 font-medium" style={{ color: 'var(--ink-faint)' }}>
+                            {p.progress.done}/{p.progress.steps}
+                          </span>
+                        </button>
+                        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full" style={{ background: 'var(--paper-hover, #f0f0f3)' }}>
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{ width: `${p.progress.percent}%`, background: 'var(--primary, #7c5cff)' }}
+                          />
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-10" style={{ color: 'var(--ink-muted)' }}>
+                          <span>{p.progress.percent}%</span>
+                          {p.overdue.length > 0 && (
+                            <span className="flex items-center gap-1" style={{ color: 'var(--danger, #e8463a)' }}>
+                              <AlarmClock className="h-3 w-3" />
+                              {p.overdue.length} overdue
+                            </span>
+                          )}
+                          {p.nextDue && (
+                            <span className="flex items-center gap-1">
+                              <CalendarDays className="h-3 w-3" />
+                              due {absDate(p.nextDue)}
+                            </span>
+                          )}
+                          {p.stalled && <span>stalled</span>}
+                        </div>
+                        {/* 计划树（只读）：里程碑 → 步骤；默认收起 */}
+                        {expanded && (
+                          <div className="mt-2 flex flex-col gap-2 border-t pt-2" style={{ borderColor: 'var(--border)' }}>
+                            {p.goal && (
+                              <div className="text-10 italic" style={{ color: 'var(--ink-faint)' }}>
+                                {p.goal}
+                              </div>
+                            )}
+                            {p.milestones.map((m) => (
+                              <div key={m.id} className="flex flex-col gap-1">
+                                <div className="flex items-center gap-1 text-10 font-semibold" style={{ color: 'var(--ink-muted)' }}>
+                                  <span
+                                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                                    style={{ background: m.status === 'done' ? 'var(--success, #22a06b)' : 'var(--ink-faint)' }}
+                                  />
+                                  <span className="truncate" title={m.title}>{m.title}</span>
+                                </div>
+                                {m.steps.map((s) => (
+                                  <div key={s.id} className="flex items-start gap-1.5 pl-2.5 text-11">
+                                    <PlanStepDot status={s.status} />
+                                    <span
+                                      className={`min-w-0 flex-1 ${s.status === 'done' ? 'line-through' : ''}`}
+                                      style={{ color: s.status === 'done' ? 'var(--ink-faint)' : 'var(--ink)' }}
+                                    >
+                                      {s.title}
+                                    </span>
+                                    {s.due && (
+                                      <span
+                                        className="shrink-0 tabular-nums"
+                                        style={{ color: overdueIds.has(s.id) ? 'var(--danger, #e8463a)' : 'var(--ink-faint)' }}
+                                      >
+                                        {absDate(s.due)}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {/* 打开项目 */}
             <div className="mt-auto border-t pt-3" style={{ borderColor: 'var(--border)' }}>
               {error && (
@@ -2733,7 +2992,7 @@ export function ProjectBoardView({ open, onClose }: ProjectBoardViewProps) {
                       mutateProject(
                         selected.id,
                         'purge',
-                        `Permanently delete "${selected.name}"?\n\nThis deletes the project folder and ALL its data (nodes, files, edges). This action CANNOT be undone.`,
+                        `Permanently delete "${selected.name}"? This cannot be undone.`,
                       )
                     }
                     disabled={mutating}

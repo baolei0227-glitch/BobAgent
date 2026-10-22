@@ -13,7 +13,7 @@
  * 不依赖打包资源，dev/打包一致。
  */
 
-import { WebContentsView, BrowserWindow, Menu, screen, session, ipcMain, shell, clipboard, nativeImage, app, dialog, type MenuItemConstructorOptions } from 'electron';
+import { WebContentsView, BrowserWindow, Menu, screen, session, ipcMain, shell, clipboard, nativeImage, app, type MenuItemConstructorOptions } from 'electron';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync } from '
 import { join, basename, extname } from 'path';
 import { homedir } from 'os';
 import { HIPPO_TOOLBAR_HEIGHT } from '../src/lib/hippo-browser/layout';
-import { execBrowserTool, type ExecHost } from './hippo-cdp';
+import { execBrowserTool, type BrowserDownloadRecord, type ExecHost } from './hippo-cdp';
 
 /** 独立浏览器窗口默认尺寸 */
 const WIN_MIN_WIDTH = 560;
@@ -103,24 +103,22 @@ function pushChatState(): void {
   win.webContents.send('hippo-browser:menu-cmd', chatPrefs.visible ? 'chatOn' : 'chatOff');
 }
 
-/** 一个下载项（工具栏下载面板据此渲染） */
-interface HippoDownload {
-  id: number;
-  fileName: string;
-  url: string;
-  totalBytes: number;
-  receivedBytes: number;
-  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted';
-  savePath: string;
-  startedAt: number;
-}
+/** 下载项（工具栏下载面板据此渲染；结构与工具层的 BrowserDownloadRecord 一致） */
+type HippoDownload = BrowserDownloadRecord;
 /** 全部下载记录（含已完成，供面板展示与"清除已结束"） */
-const downloadMap = new Map<number, HippoDownload>();
+const downloadMap = new Map<number, BrowserDownloadRecord>();
 /** 进行中的下载项句柄（结束后移除），用于取消 */
 const downloadItems = new Map<number, Electron.DownloadItem>();
 let nextDownloadId = 1;
 /** will-download 钩子是否已挂载（会话级，仅挂一次） */
 let downloadHookReady = false;
+/** 正在等「下一条下载」的调用（browser_download / 桥 /download 用） */
+interface DownloadWaiter {
+  since: number;
+  resolve: (rec: BrowserDownloadRecord | null) => void;
+  timer: NodeJS.Timeout;
+}
+const downloadWaiters: DownloadWaiter[] = [];
 
 /** Next.js 服务地址（与 main.ts 一致）：AI HTML 编辑走主进程代理，避免渲染页 CORS */
 const aiServerPort = existsSync(join(process.resourcesPath, 'next-standalone'))
@@ -143,6 +141,8 @@ export interface HippoBrowserState {
   capsule: boolean;
   /** 是否固定在前端（always-on-top，工具栏置顶按钮） */
   alwaysOnTop: boolean;
+  /** 地址栏默认搜索模式：AI 检索 / Bing（由地址栏内搜索图标切换） */
+  searchMode: 'defaultAi' | 'defaultBing';
 }
 
 export interface HippoExtractResult {
@@ -164,7 +164,7 @@ export interface HippoExtractResult {
 function currentState(): HippoBrowserState {
   const wc = view?.webContents;
   if (!win || win.isDestroyed() || !wc || wc.isDestroyed()) {
-    return { visible: false, url: '', title: '', loading: false, canGoBack: false, canGoForward: false, sidebarWidth: 0, capsule: capsuleMode, alwaysOnTop: false };
+    return { visible: false, url: '', title: '', loading: false, canGoBack: false, canGoForward: false, sidebarWidth: 0, capsule: capsuleMode, alwaysOnTop: false, searchMode };
   }
   const nh = wc.navigationHistory;
   return {
@@ -177,6 +177,7 @@ function currentState(): HippoBrowserState {
     sidebarWidth: 0,
     capsule: capsuleMode,
     alwaysOnTop: win.isAlwaysOnTop(),
+    searchMode,
   };
 }
 
@@ -312,6 +313,7 @@ function ensureDownloadHook(): void {
     rec.savePath = item.getSavePath() || rec.savePath;
     downloadMap.set(id, rec);
     downloadItems.set(id, item);
+    resolveDownloadWaiters(rec);
     broadcastDownloads();
     // 进度节流：至少间隔 400ms 广播一次，避免高频 IPC
     let lastAt = 0;
@@ -334,6 +336,83 @@ function ensureDownloadHook(): void {
       logHippo(`Download ${rec.state}: ${rec.fileName} → ${rec.savePath}`);
     });
   });
+}
+
+/** will-download 落记录后唤醒等待者（since 之前开始的下载不算） */
+function resolveDownloadWaiters(rec: BrowserDownloadRecord): void {
+  for (let i = downloadWaiters.length - 1; i >= 0; i--) {
+    const waiter = downloadWaiters[i];
+    if (rec.startedAt < waiter.since) continue;
+    clearTimeout(waiter.timer);
+    downloadWaiters.splice(i, 1);
+    waiter.resolve(rec);
+  }
+}
+
+/** since 之后开始的最新一条下载；没有返回 null */
+function recentDownloadSince(since: number): BrowserDownloadRecord | null {
+  let best: BrowserDownloadRecord | null = null;
+  for (const rec of downloadMap.values()) {
+    if (rec.startedAt < since) continue;
+    if (!best || rec.startedAt > best.startedAt) best = rec;
+  }
+  return best;
+}
+
+/** 等 since 之后开始的下一条下载；超时返回 null */
+function waitForDownloadSince(since: number, timeoutMs: number): Promise<BrowserDownloadRecord | null> {
+  const existing = recentDownloadSince(since);
+  if (existing) return Promise.resolve(existing);
+  return new Promise((resolve) => {
+    const waiter: DownloadWaiter = {
+      since,
+      resolve,
+      timer: setTimeout(() => {
+        const i = downloadWaiters.indexOf(waiter);
+        if (i >= 0) downloadWaiters.splice(i, 1);
+        resolve(null);
+      }, timeoutMs),
+    };
+    downloadWaiters.push(waiter);
+  });
+}
+
+/** 等指定下载结束（completed / cancelled / interrupted）或超时；返回最新快照 */
+async function waitForDownloadDone(id: number, timeoutMs: number): Promise<BrowserDownloadRecord | null> {
+  const deadline = Date.now() + Math.min(30000, Math.max(0, timeoutMs));
+  for (;;) {
+    const rec = downloadMap.get(id);
+    if (!rec) return null;
+    if (rec.state !== 'progressing') return rec;
+    if (Date.now() >= deadline) return rec;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/** 在 Finder 中显示某次下载（只在 completed 且文件路径存在时生效） */
+function revealDownload(id: number): boolean {
+  const rec = downloadMap.get(id);
+  if (!rec || rec.state !== 'completed' || !rec.savePath) return false;
+  try {
+    shell.showItemInFolder(rec.savePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 触发一个 URL 下载并等待 will-download 记录出现（只等开始，不等传输完成） */
+async function startDownload(url: string, timeoutMs = 15000): Promise<BrowserDownloadRecord | null> {
+  if (!isAllowedUrl(url)) return null;
+  ensureDownloadHook();
+  const wc = requireView();
+  const since = Date.now();
+  try {
+    wc.downloadURL(url);
+  } catch {
+    return null;
+  }
+  return waitForDownloadSince(since, timeoutMs);
 }
 
 // ================= 广告 / 跟踪脚本拦截 =================
@@ -662,9 +741,15 @@ const EXTRACT_SCRIPT = `
   return new Promise(async (resolve) => {
     const deadline = Date.now() + 6000;
     let ready = document.readyState === 'complete';
+    let textSeenAt = 0;
     while (Date.now() < deadline) {
-      if (document.readyState === 'complete') {
-        if ((pickMain().innerText || '').trim().length > 100) { ready = true; break; }
+      const hasText = (pickMain().innerText || '').trim().length > 100;
+      if (hasText) {
+        if (document.readyState === 'complete') { ready = true; break; }
+        if (!textSeenAt) textSeenAt = Date.now();
+        // 正文已出现、但页面还在等广告/长连接：再给 600ms 收尾就返回，
+        // 不再为了 readyState=complete 死等满 6s（重页面上这是实测的额外数秒）
+        if (Date.now() - textSeenAt >= 600) break;
       }
       await wait(200);
     }
@@ -1147,6 +1232,12 @@ const execHost: ExecHost = {
     }
     return { ok: true, id: t.id };
   },
+  startDownload: (url, timeoutMs) => startDownload(url, timeoutMs),
+  recentDownloadSince: (since) => recentDownloadSince(since),
+  waitForDownloadSince: (since, timeoutMs) => waitForDownloadSince(since, timeoutMs),
+  waitForDownloadDone: (id, timeoutMs) => waitForDownloadDone(id, timeoutMs),
+  listDownloads: () => downloadsToJson(),
+  revealDownload: (id) => revealDownload(id),
 };
 
 function bridgeStart(): void {
@@ -1209,6 +1300,27 @@ function bridgeStart(): void {
         } finally {
           aiToolEnd();
         }
+        return;
+      }
+      if (p === '/download') {
+        const target = typeof body.url === 'string' ? body.url.trim() : '';
+        if (!target || !isAllowedUrl(target)) {
+          await bridgeSend(res, 400, { ok: false, error: 'Only http/https/file links are supported' });
+          return;
+        }
+        const rec = await startDownload(target, 15000);
+        if (!rec) {
+          await bridgeSend(res, 200, { ok: false, error: '未捕获到下载（该地址可能不是直接文件）' });
+          return;
+        }
+        await bridgeSend(res, 200, { ok: true, download: rec });
+        return;
+      }
+      if (p === '/downloads') {
+        const id = Number(body.id);
+        const list = downloadsToJson();
+        const filtered = Number.isFinite(id) && id > 0 ? list.filter((d) => d.id === id) : list;
+        await bridgeSend(res, 200, { ok: true, downloads: filtered });
         return;
       }
       if (p === '/back') { back(); await bridgeSend(res, 200, { ok: true }); return; }
@@ -1562,6 +1674,46 @@ function collapseToCapsule(): void {
   }
 }
 
+/**
+ * Hippo 里「Open as Markdown」的收编（本机 `/markdown-view?path=…`）。
+ *
+ * 为什么需要它：音频编辑器是 Hippo 全页（guest 无 preload），发不出画布的 `file.open` 事件，
+ * 所以它的「Open as Markdown」过去只能 `window.open` 出一个浏览器标签 —— 里面复用是同一个
+ * MdViewer / DocEditor，但拿不到画布面板宿主（Find / Format / Print / Share 那排工具条不渲染），
+ * 看起来就像「Hippo 自带的另一个简易 md 编辑器」。
+ * 这里把这条 URL 拦下：不开标签，转发给 BobWork 主窗口，由画布按本地文件打开（落在右侧预览面板）。
+ * 同时收起 Hippo —— 它是独立顶层窗口，不收起来会正好盖住刚打开的面板。
+ *
+ * 只认本机 aiServer 源上的 /markdown-view，避免误伤外部站点上的同名路径。
+ * 返回 true = 已消费（调用方应 deny 这次 window.open）。
+ */
+function handoffMarkdownToCanvas(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.pathname !== '/markdown-view') return false;
+  try {
+    if (u.origin !== new URL(aiServerUrl).origin) return false;
+  } catch {
+    return false;
+  }
+  const filePath = (u.searchParams.get('path') || '').trim();
+  if (!filePath) return false;
+  const name = (u.searchParams.get('name') || '').trim() || basename(filePath);
+  const main = mainWindowProvider?.() ?? null;
+  if (!main || main.isDestroyed()) return false;
+  collapseToCapsule();
+  if (main.isMinimized()) main.restore();
+  main.show();
+  main.focus();
+  main.webContents.send('hippo-browser:open-local-file', { path: filePath, name });
+  logHippo(`Markdown handed off to the canvas panel: ${name}`);
+  return true;
+}
+
 /** 主窗口渲染层胶囊态通知（main.ts 注入） */
 export function setMainWindowCapsuleListener(fn: ((capsule: boolean) => void) | null): void {
   mainWindowCapsuleListener = fn;
@@ -1628,8 +1780,15 @@ function toolbarHtml(): string {
   .tl .g { background: linear-gradient(#3dd860, #22c23a); }
   /* ===== 地址框（书签星内嵌） ===== */
   .addrbox { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; -webkit-app-region: no-drag; }
-  .addrbox .addr { flex: 1; padding: 0 62px 0 14px; }
+  .addrbox .addr { flex: 1; padding: 0 62px 0 38px; }
   .addrbox .addr:focus { border-color: #7c6cf0; }
+  /* 地址框左侧内嵌搜索模式按钮（Safari 式）：点击切换 AI 检索 / Bing */
+  .engineBtn { position: absolute; left: 5px; top: 50%; transform: translateY(-50%); width: 24px; height: 24px;
+    border: none; background: transparent; border-radius: 6px; padding: 0; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; -webkit-app-region: no-drag; }
+  .engineBtn:hover { background: #ececf4; color: #6b5cf0; }
+  .engIco { color: #8a8a9c; display: block; }
+  .engineBtn:hover .engIco { color: #6b5cf0; }
   /* 地址框右侧两个内嵌按钮：★ 网址书签（最右）、⬇ 收藏当前页到 BobWork（其左） */
   .addrStar, .addrClip { position: absolute; top: 50%; transform: translateY(-50%); width: 26px; height: 26px; border: none;
     background: transparent; color: #b9b9c8; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
@@ -1764,7 +1923,8 @@ function toolbarHtml(): string {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2v6h-6"></path><path d="M21 13A9 9 0 1 1 3 13a9 9 0 0 1 15-6.2L21 8"></path></svg>
   </button>
   <span class="addrbox">
-    <input class="addr" id="addr" placeholder="Search or enter address" spellcheck="false" />
+    <button class="engineBtn" id="engineBtn" title="Search engine: Bing — click to change" aria-label="Change search engine"><svg class="engIco" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg></button>
+    <input class="addr" id="addr" placeholder="Search Bing or enter address" spellcheck="false" />
     <button class="addrClip" id="clip" title="Save this page — to the current project, or to Bob Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path><line x1="12" y1="7" x2="12" y2="13"></line><line x1="9" y1="10" x2="15" y2="10"></line></svg></button>
     <button class="addrStar" id="bm" title="Bookmark this page"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2.9 6.3 6.9.6-5.2 4.6 1.5 6.8L12 16.9 5.9 20.3l1.5-6.8L2.2 8.9l6.9-.6z"></path></svg></button>
   </span>
@@ -1862,6 +2022,11 @@ function toolbarHtml(): string {
   $('pinBtn').onclick = () => BAPI && BAPI.toggleTop();
   // 对话栏开关：主进程翻转展开态后经 menu-cmd 广播回来，这里只负责发起
   $('chatBtn').onclick = () => BAPI && BAPI.chatToggle();
+  // 地址栏左侧搜索图标：主进程弹原生菜单，切换 AI 检索 / Bing（Safari 式）
+  $('engineBtn').onclick = (e) => {
+    e.stopPropagation();
+    if (BAPI && BAPI.searchMenu) BAPI.searchMenu();
+  };
   $('back').onclick = () => BAPI && BAPI.back();
   $('fwd').onclick = () => BAPI && BAPI.forward();
   $('reload').onclick = () => { const st = current; if (st && st.loading) BAPI.stop(); else BAPI.reload(); };
@@ -1901,7 +2066,12 @@ function toolbarHtml(): string {
       // 本地路径：主进程 navigate 负责补全 file:// 前缀（含 ~ 展开）
       BAPI && BAPI.navigate(raw);
     } else {
-      BAPI && BAPI.navigate('https://www.bing.com/search?q=' + encodeURIComponent(raw) + '&mkt=zh-CN');
+      // 非 URL 输入按地址栏左侧图标选定的模式走：AI 检索（带引用作答）或 Bing
+      if (current && current.searchMode === 'defaultBing') {
+        BAPI && BAPI.navigate('https://www.bing.com/search?q=' + encodeURIComponent(raw) + '&mkt=zh-CN');
+      } else {
+        BAPI && BAPI.navigate('${aiServerUrl}/hippo-search?q=' + encodeURIComponent(raw));
+      }
     }
   }
   /* ===== 顶部加载进度条（由主进程广播的 loading 状态驱动） ===== */
@@ -1932,8 +2102,21 @@ function toolbarHtml(): string {
   let current = null;
   let curFavicon = ''; // 当前激活标签的 favicon，收藏时随书签一起落盘
   let lastStateUrl = null;
+  // 地址栏左侧固定显示放大镜图标，只在模式变化时更新 tooltip / placeholder
+  let curSearchMode = '';
+  function applySearchMode(mode) {
+    const bing = mode === 'defaultBing';
+    const next = bing ? 'defaultBing' : 'defaultAi';
+    if (next === curSearchMode) return;
+    curSearchMode = next;
+    const btn = $('engineBtn');
+    const addr = $('addr');
+    if (btn) btn.title = bing ? 'Search engine: Bing — click to change' : 'Search engine: Hippo AI — click to change';
+    if (addr) addr.placeholder = bing ? 'Search Bing or enter address' : 'Ask anything, or enter address';
+  }
   const applyState = (s) => {
     current = s;
+    applySearchMode(s.searchMode);
     if (s.loading) progStart(); else progDone();
     $('back').disabled = !s.canGoBack;
     $('fwd').disabled = !s.canGoForward;
@@ -2318,10 +2501,17 @@ function newTabDataUrl(): string {
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     background:linear-gradient(160deg,#f7f7fb 0%,#eeeeff 100%); display:flex; align-items:center; justify-content:center; }
-  .bg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
-  .bg img { width:min(40vw,320px); height:auto; opacity:.94; pointer-events:none; }
+  .bg { position:absolute; inset:0; display:flex; flex-direction:column; gap:26px; align-items:center; justify-content:center; }
+  .hippo { position:relative; width:min(40vw,320px); aspect-ratio:1/1; opacity:.94; pointer-events:none; }
+  .hippo img { width:100%; height:100%; display:block; }
+  /* 眨眼：用与脸部同色的椭圆盖住两只眼睛，周期性快速开合 */
+  .lid { position:absolute; width:4.9%; height:5.6%; border-radius:50%; background:#fff;
+    transform:scaleY(0); transform-origin:50% 50%; animation:blink 4.8s ease-in-out infinite; }
+  .lid.l { left:21.4%; top:28.2%; }
+  .lid.r { left:38.0%; top:28.2%; }
+  @keyframes blink { 0%,91%,100% { transform:scaleY(0); } 93.5%,95.5% { transform:scaleY(1); } }
 </style></head>
-<body><div class="bg"><img src="${hippo}" alt="" /></div></body></html>`;
+<body><div class="bg"><div class="hippo"><img src="${hippo}" alt="" /><span class="lid l"></span><span class="lid r"></span></div></div></body></html>`;
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
 }
 
@@ -2331,6 +2521,51 @@ function newTabDataUrl(): string {
  *  全窗口只有一份提示实现，侧边栏不再自建浮层 */
 ipcMain.handle('hippo-browser:toast', (_e, text: string) => {
   if (win && !win.isDestroyed()) win.webContents.send('hippo-browser:menu-cmd', `saveMsg:${String(text ?? '')}`);
+  return { ok: true };
+});
+
+// ============ 地址栏默认搜索模式（AI 检索 / 网页搜索） ============
+type SearchMode = 'defaultAi' | 'defaultBing';
+const searchModes: Array<{ id: SearchMode; label: string }> = [
+  { id: 'defaultBing', label: 'Bing (web search)' },
+  { id: 'defaultAi', label: 'Hippo AI (cited answers)' },
+];
+// 默认走 Bing 网页搜索；用户上次的选择优先
+let searchMode: SearchMode = 'defaultBing';
+function searchPrefsFile(): string {
+  return join(app.getPath('userData'), 'hippo-search-prefs.json');
+}
+function searchPrefsLoad(): void {
+  try {
+    if (!existsSync(searchPrefsFile())) return;
+    const raw = JSON.parse(readFileSync(searchPrefsFile(), 'utf8')) as { v?: number; mode?: SearchMode };
+    // 旧版本偏好（v1，默认 AI）忽略一次，保证升级后默认引擎为 Bing
+    if (raw.v !== 2) return;
+    if (raw.mode === 'defaultAi' || raw.mode === 'defaultBing') searchMode = raw.mode;
+  } catch { /* 读失败回退默认 */ }
+}
+function searchPrefsSave(): void {
+  try {
+    writeFileSync(searchPrefsFile(), JSON.stringify({ v: 2, mode: searchMode }), 'utf8');
+  } catch { /* 忽略持久化失败 */ }
+}
+/** 原生菜单只能由主进程弹；动作经 menu-cmd 回传工具栏刷新图标 */
+ipcMain.handle('hippo-browser:search-menu', (e) => {
+  const menu = Menu.buildFromTemplate(
+    searchModes.map((m) => ({
+      label: m.label,
+      type: 'radio' as const,
+      checked: searchMode === m.id,
+      click: () => {
+        searchMode = m.id;
+        searchPrefsSave();
+        if (win && !win.isDestroyed()) broadcastState();
+      },
+    })),
+  );
+  // 工具栏属于 WebContentsView，fromWebContents 可能拿不到宿主窗口，优先用模块级 win
+  const hostWin = win && !win.isDestroyed() ? win : (BrowserWindow.fromWebContents(e.sender) ?? undefined);
+  menu.popup({ window: hostWin });
   return { ok: true };
 });
 ipcMain.handle('hippo-browser:get-state', () => currentState());
@@ -2345,24 +2580,11 @@ ipcMain.handle('hippo-browser:open-url-new-tab', (_e, url: string) => {
   return { ok: true };
 });
 // 关闭 = 关闭全部已打开页面（区别于「缩小为胶囊」：胶囊保留页面，可随时恢复）。
-// 关掉全部标签会丢失用户正在浏览的内容，故先弹确认框；确认后逐个关闭标签并隐藏窗口。
-ipcMain.handle('hippo-browser:close', async () => {
+// 点击关闭按钮直接关闭，不再弹确认框。
+ipcMain.handle('hippo-browser:close', () => {
   if (!win || win.isDestroyed()) return currentState();
-  const pages = countOpenPages();
-  const { response } = await dialog.showMessageBox(win, {
-    type: 'warning',
-    buttons: ['Close All Pages', 'Cancel'],
-    defaultId: 1,
-    cancelId: 1,
-    noLink: true,
-    title: 'Close Hippo Browser',
-    message: pages > 1 ? `Close all ${pages} open pages?` : 'Close all open pages?',
-    detail: 'All open pages will be closed. To keep them, use Minimize to capsule instead.',
-  });
-  if (response === 0) {
-    closeAllTabs();
-    hideWindow();
-  }
+  closeAllTabs();
+  hideWindow();
   return currentState();
 });
 ipcMain.handle('hippo-browser:capsule-toggle', () => {
@@ -2752,7 +2974,10 @@ ipcMain.handle('hippo-browser:download-open', async (_e, id: number) => {
 });
 ipcMain.handle('hippo-browser:download-reveal', (_e, id: number) => {
   const rec = downloadMap.get(id);
-  if (rec && rec.savePath) shell.showItemInFolder(rec.savePath);
+  if (!rec || !rec.savePath) return { ok: false, error: 'Download not found' };
+  if (rec.state !== 'completed') return { ok: false, error: 'Download has not finished yet' };
+  if (!existsSync(rec.savePath)) return { ok: false, error: 'File not found on disk' };
+  shell.showItemInFolder(rec.savePath);
   return { ok: true };
 });
 ipcMain.handle('hippo-browser:download-clear', () => {
@@ -3394,12 +3619,22 @@ async function applyInlineEdit(newHtml: string, mode: string, selector: string |
   }
 }
 
-/** 创建独立浏览器窗口 */
-export function setupHippoBrowser(): void {
-  teardownHippoBrowser();
+/** Hippo 的 ipcMain handler 是否已注册（幂等保护，见 registerHippoIpcHandlers 说明） */
+let hippoHandlersRegistered = false;
+
+/**
+ * 注册 Hippo 全部 ipcMain handler（幂等：仅首次生效）。
+ * ⚠️ setupHippoBrowser 会在「应用启动」以及「主窗口关闭后重新唤起（activate /
+ * second-instance，含自动更新后的重启）」时被多次调用；而 teardownHippoBrowser 只销毁窗口、
+ * 不注销 ipcMain handler，重复 ipcMain.handle 会抛
+ * "Attempted to register a second handler for 'hippo-browser:bm-list'"。
+ * 该异常会中断 openMainWindow 里后续的 loadURL / show，导致窗口永远不显示
+ * —— 表现为「更新后应用半天打不开，必须强制退出才恢复」。
+ */
+function registerHippoIpcHandlers(): void {
+  if (hippoHandlersRegistered) return;
+  hippoHandlersRegistered = true;
   registerBookmarkHandlers();
-  // 对话栏偏好（展开态 / 宽度）在窗口创建前读入，relayoutView 首次调用即可用
-  chatPrefsLoad();
   // 对话栏开关：主进程单一真相源，翻转后重排 + 回推按钮态
   ipcMain.handle('hippo-browser:chat-toggle', () => {
     chatPrefs.visible = !chatPrefs.visible;
@@ -3465,6 +3700,15 @@ export function setupHippoBrowser(): void {
     if (win && !win.isDestroyed()) { if (win.isMaximized()) win.unmaximize(); else win.maximize(); }
     return true;
   });
+}
+
+/** 创建独立浏览器窗口 */
+export function setupHippoBrowser(): void {
+  teardownHippoBrowser();
+  registerHippoIpcHandlers();
+  // 对话栏偏好（展开态 / 宽度）在窗口创建前读入，relayoutView 首次调用即可用
+  chatPrefsLoad();
+  searchPrefsLoad();
 
   const ses = session.fromPartition('persist:hippo-browser');
   ses.setPermissionRequestHandler((_wc, permission, callback) => {
@@ -3568,6 +3812,8 @@ function spawnTab(): BrowserTab {
   v.webContents.setWindowOpenHandler(({ url }) => {
     // 划词浮层的哨兵回传（Copy / Ask Bob / Page text）：先于打开方式判定消费掉，不开新窗口
     if (handleSelectionBubbleAction(url)) return { action: 'deny' };
+    // Hippo 里导出的音频稿 Markdown（/markdown-view）：改由画布预览面板打开，不开浏览器标签
+    if (handoffMarkdownToCanvas(url)) return { action: 'deny' };
     const target = localFileToViewerUrl(url) || (isAllowedUrl(url) ? url : '');
     if (!target) return { action: 'deny' };
     if (openLinkInNewTab) openInNewTab(target);
@@ -3882,18 +4128,6 @@ async function copyExtractedMarkdown(): Promise<void> {
     const r = await extractContent();
     if (r.markdown) clipboard.writeText(r.markdown);
   } catch { /* 忽略 */ }
-}
-
-/** 统计真正在浏览的页面数（排除初始空白新标签页），供关闭确认文案使用 */
-function countOpenPages(): number {
-  return tabs.filter((t) => {
-    try {
-      const u = t.view.webContents.getURL();
-      return !!u && !u.startsWith('data:text/html');
-    } catch {
-      return false;
-    }
-  }).length;
 }
 
 /** 关闭全部标签页：逐个走 closeTabById —— 关掉最后一个时会自动补建一个空白标签，

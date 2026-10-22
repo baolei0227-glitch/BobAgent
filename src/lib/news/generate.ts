@@ -2,10 +2,12 @@
  * Daily News —— 采集 + 归纳 + 缓存 + 降级（server-only）
  *
  * 管线（四段；两头复用、中间两段为本模块）：
- *   ① 采集：主题有策展新闻源（RSS）时优先 `searchNewsRss` 拉最新条目，无源 / 无结果则回退
- *      `searchLocalProviders`（web.ts 的多源降级搜索）；正文一律 `fetchReadableText` 抓取
- *   ② 归纳：把**抓到的正文**喂给任务模型，产出「今日看点」+ 每条的一句话总结 / why
- *      —— 禁止只拿 search snippet 脑补；标题 / 链接 / 来源一律由代码从检索结果带过来，
+ *   ① 采集（三级降级）：主题有策展源（RSS）时优先 `searchNewsRss`；无源 / 无结果则按权威站表
+ *      走 `site:` 定向检索（`searchTopicSites`，多个站按 query 长度上限合并成一次检索）；
+ *      仍无结果才回退裸关键词搜索 `webService.search`。**正文由 Search 的 `need_content` 一并返回**
+ *      （不再逐条 Fetch），检索次数直接决定成本
+ *   ② 归纳：把抓到的正文喂给任务模型，产出「今日看点」+ 每条的一句话总结 / why ——
+ *      正文缺失时回退检索摘要（snippet）；标题 / 链接 / 来源一律由代码从检索结果带过来，
  *      模型只回 id + summary + why，**不产生 URL**（防幻觉链接）。
  *      **方案 A（2026-10-04）**：读者长期记忆（`butler/preferences.md`）只喂给这一步，用来在
  *      **既定主题范围内**挑更贴读者的条目并说明 why；**不参与检索** —— 候选集合仍完全由 topics
@@ -21,12 +23,14 @@
 import { resolveTaskModel, type ResolvedModel } from '@/lib/core/task-model';
 import { listPreferences } from '@/lib/core/preferences';
 import { dateStamp } from '@/lib/butler/storage';
-import { searchLocalProviders, fetchReadableText } from '@/app/api/chat/tools/web';
+import { webService } from '@/lib/web';
+import type { WebSearchSource } from '@/lib/web/types';
 import { readNewsBriefing, readNewsConfig, writeNewsBriefing } from './store';
 import { searchNewsRss } from './feed';
 import {
   NEWS_ITEM_CAP,
   feedsForTopic,
+  sitesForTopic,
   type NewsBriefing,
   type NewsItem,
   type NewsTopic,
@@ -34,10 +38,16 @@ import {
 
 /** 模型调用超时：新闻是后台每日任务，宁可用链接列表兜底也不要挂住 */
 const MODEL_TIMEOUT_MS = 40_000;
-/** 全局抓正文数量上限（每主题 limit 条，合计仍可能很多；抓取是外部网络，必须封顶） */
-const MAX_FETCH_TOTAL = 14;
-/** 抓正文并发度 */
-const FETCH_CONCURRENCY = 4;
+/** 权威站定向检索并发度（站点合并后通常每主题 1–2 次；QPS 由 DeepSeek 客户端统一排队） */
+const SITE_SEARCH_CONCURRENCY = 3;
+/**
+ * DeepSeek Search 的 query 上限是 128 个字符；这里留 8 字符余量。
+ * 多个 `site:` 用 `OR` 合并进一次检索——把「每站一次」压成「每 1–2 次」，
+ * 配合 need_content 免掉逐条 Fetch，是 Daily News 成本从 ~6 元/月降到 ~1–2 元/月的主要手段。
+ * 成本口径（Search 0.005 元/次）：默认 3 主题（tech/finance 有 RSS）约 0.15 元/月；
+ * 8 个全检索主题约 1.2–2.4 元/月。
+ */
+const DEEPSEEK_QUERY_MAX = 120;
 /** 单条喂给模型的正文摘录长度 */
 const BODY_EXCERPT = 900;
 /** 降级时 summary 用检索摘要的截断长度 */
@@ -46,7 +56,7 @@ const SNIPPET_EXCERPT = 160;
 const MEMORY_MAX = 30;
 const MEMORY_EXCERPT = 120;
 
-/** 一个候选（检索结果 + 抓到的正文） */
+/** 一个候选（检索结果 + Search 一并带回的正文） */
 interface Candidate {
   id: string;
   topicId: string;
@@ -55,7 +65,7 @@ interface Candidate {
   url: string;
   source: string;
   snippet: string;
-  /** 抓到的正文；抓取失败 / 未抓为空串 */
+  /** Search 返回的正文；目标站不提供正文 / 检索未带回时为空串（归纳会回退 snippet） */
   body: string;
 }
 
@@ -83,14 +93,6 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: nu
   return out;
 }
 
-/** 抓到的正文是否可用（fetchReadableText 失败返回 `Error: …`） */
-function usableBody(text: string): string {
-  if (!text || /^\s*Error:/i.test(text)) return '';
-  // 去掉 `URL: …\n标题: …\n\n` 头部，只留正文
-  const idx = text.indexOf('\n\n');
-  return (idx >= 0 ? text.slice(idx + 2) : text).trim();
-}
-
 /** 单行截断（记忆摘录用；不引 advice-ai 的 snippet，避免跨模块拉入它的依赖） */
 function clip(text: string, max: number): string {
   const t = text.replace(/\s+/g, ' ').trim();
@@ -115,24 +117,125 @@ async function readMemoryLines(): Promise<string[]> {
   }
 }
 
-/** 采集命中（RSS 命中与搜索命中的结构一致，可互换） */
-type TopicHit = { title: string; url: string; snippet: string };
+/** 采集命中（RSS 命中与搜索命中的结构一致，可互换）；导出供单测断言三级降级顺序 */
+export type TopicHit = { title: string; url: string; snippet: string; body?: string };
+
+/** Web 搜索结果 → 采集命中（snippet 是前端短摘要；正文由 Search 的 content 一并带回） */
+function toTopicHits(results: WebSearchSource[]): TopicHit[] {
+  return results.map((r) => ({
+    title: r.title,
+    url: r.url,
+    snippet: r.snippet || r.summary,
+    body: r.content.slice(0, 6000),
+  }));
+}
+
+/** 按注册域把命中分组，供源间轮转合并时保证「每个站都有发言权」 */
+function groupByHost(hits: TopicHit[]): TopicHit[][] {
+  const groups = new Map<string, TopicHit[]>();
+  for (const hit of hits) {
+    const host = hostOf(hit.url) || '';
+    const group = groups.get(host);
+    if (group) group.push(hit);
+    else groups.set(host, [hit]);
+  }
+  return [...groups.values()];
+}
+
+/** 各站命中的源间轮转合并（与 feed.ts 的 interleaveFeeds 同策略：每个可用站都有发言权，按 URL 去重） */
+function interleaveHits(perSite: TopicHit[][], maxResults: number): TopicHit[] {
+  const queues = perSite.map((hits) => [...hits]);
+  const seen = new Set<string>();
+  const out: TopicHit[] = [];
+  let drained = false;
+  while (out.length < maxResults && !drained) {
+    drained = true;
+    for (const q of queues) {
+      if (out.length >= maxResults) break;
+      const it = q.shift();
+      if (!it) continue;
+      drained = false;
+      if (!it.url || seen.has(it.url)) continue;
+      seen.add(it.url);
+      out.push(it);
+    }
+  }
+  return out;
+}
+
+/** 一组站点的定向检索式：`site:a OR site:b <query>`（DeepSeek 原生支持 OR） */
+function buildSiteQuery(sites: string[], query: string): string {
+  return `${sites.map((site) => `site:${site}`).join(' OR ')} ${query}`.trim();
+}
 
 /**
- * 采集单个主题：优先走策展新闻源（RSS，`feedsForTopic` 决定有没有源），
- * 无源 / RSS 无结果时回退关键词搜索 —— 法律类主题没有可用 feed，就自然走这条回退。
+ * 把站点按 query 长度上限切块，尽量少发请求。
+ * 例：legal 的 4 个域名通常合成 1 次；tech 的 6 个长域名会拆成 2 次。
  */
-async function collectTopicHits(topic: NewsTopic): Promise<TopicHit[]> {
+export function chunkSiteQueries(sites: string[], query: string): string[] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  for (const site of sites) {
+    const candidate = [...current, site];
+    if (current.length > 0 && buildSiteQuery(candidate, query).length > DEEPSEEK_QUERY_MAX) {
+      chunks.push(current);
+      current = [site];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks.map((chunk) => buildSiteQuery(chunk, query));
+}
+
+/**
+ * 按权威站表定向检索：把多个站合并成 1–2 次 `site:A OR site:B` 检索（受 128 字符 query 上限约束），
+ * 有界并发，再按站轮转合并，保证每个权威站都有发言权。
+ *
+ * 单块失败只丢该块，不影响其余；全部失败返回空数组，由调用方继续往下一级降级。
+ */
+async function searchTopicSites(sites: string[], query: string, maxResults: number): Promise<TopicHit[]> {
+  const queries = chunkSiteQueries(sites, query);
+  const perChunk = await mapLimit(queries, SITE_SEARCH_CONCURRENCY, async (q): Promise<TopicHit[]> => {
+    try {
+      const res = await webService.search({ query: q, count: maxResults, needContent: true });
+      return toTopicHits(res.sources);
+    } catch {
+      return [];
+    }
+  });
+  return interleaveHits(groupByHost(perChunk.flat()), maxResults);
+}
+
+/**
+ * 采集单个主题（三级降级）：
+ *   ① 策展新闻源（RSS，`feedsForTopic` 决定有没有源）；
+ *   ② 权威站定向检索（`sitesForTopic`，多为无 RSS 的领域权威渠道 —— 法律类主题靠这一级）；
+ *   ③ 裸关键词搜索（兜底：任何白名单为空时都必须能落到这里，**不得因白名单为空而返回空**）。
+ * 每一级「有结果即返回」；全空则返回空数组（调用方记为采集失败主题）。
+ *
+ * 导出以便单测断言这条顺序（含「无权威站时不得空转」的负对照）。
+ */
+export async function collectTopicHits(topic: NewsTopic): Promise<TopicHit[]> {
   const feeds = feedsForTopic(topic);
   if (feeds.length > 0) {
     const { hits } = await searchNewsRss(feeds, topic.limit);
     if (hits.length > 0) return hits;
   }
-  const { hits } = await searchLocalProviders(topic.query, topic.limit);
-  return hits;
+  const sites = sitesForTopic(topic);
+  if (sites.length > 0) {
+    const hits = await searchTopicSites(sites, topic.query, topic.limit);
+    if (hits.length > 0) return hits;
+  }
+  try {
+    const res = await webService.search({ query: topic.query, count: topic.limit, needContent: true });
+    return toTopicHits(res.sources);
+  } catch {
+    return [];
+  }
 }
 
-/** 采集：每个主题取 topic.limit 条（RSS 优先 / 关键词回退），再抓正文（全局封顶 + 有界并发） */
+/** 采集：每个主题取 topic.limit 条（RSS 优先 / 关键词回退），正文随 Search 一并带回 */
 async function collect(topics: NewsTopic[]): Promise<{ candidates: Candidate[]; failed: string[] }> {
   const failed: string[] = [];
   const perTopic = await Promise.all(
@@ -151,7 +254,7 @@ async function collect(topics: NewsTopic[]): Promise<{ candidates: Candidate[]; 
           url: h.url,
           source: hostOf(h.url),
           snippet: h.snippet || '',
-          body: '',
+          body: h.body || '',
         }));
       } catch {
         failed.push(t.label);
@@ -160,18 +263,7 @@ async function collect(topics: NewsTopic[]): Promise<{ candidates: Candidate[]; 
     }),
   );
 
-  // 展平后按顺序抓正文，全局封顶 MAX_FETCH_TOTAL —— 封顶之外的候选保持无正文（只会进降级链路）
-  const flat = perTopic.flat();
-  const toFetch = flat.slice(0, MAX_FETCH_TOTAL);
-  await mapLimit(toFetch, FETCH_CONCURRENCY, async (c) => {
-    try {
-      c.body = usableBody(await fetchReadableText(c.url));
-    } catch {
-      c.body = '';
-    }
-  });
-
-  return { candidates: flat, failed };
+  return { candidates: perTopic.flat(), failed };
 }
 
 /**
@@ -351,7 +443,7 @@ export async function generateNewsBriefing(opts?: { force?: boolean }): Promise<
 
   let briefing: NewsBriefing;
   let result: ModelResult | null = null;
-  // 只有「有正文」的候选才配得上归纳；一条正文都没抓到 → 直接降级
+  // 只有「有正文」的候选才配得上归纳；一条正文都没拿到 → 直接降级
   if (withBody.length > 0) {
     try {
       const model = await resolveTaskModel();

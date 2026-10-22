@@ -72,6 +72,7 @@ import {
   Table as TableIcon,
   AlertTriangle,
   AlignLeft,
+  FileDiff,
 } from 'lucide-react';
 import { AnnotationBubble, mdSelTempKey } from './extensions/AnnotationBubble';
 import { Button } from '@/components/ui/button';
@@ -184,6 +185,22 @@ function buildTextPosMap(doc: PMNode): { text: string; posOf: number[] } {
   return { text, posOf };
 }
 
+/** 按 doc 位置取 quote 前后的上下文（32 字）。
+ *  必须用 buildTextPosMap 的文本偏移：把 `from - 1` 直接当文本下标会被块边界累计偏移
+ *  （每个块在位置里占 2、在文本里只占 1），长文档/列表里会取到相邻段落的上下文 ——
+ *  批注锚点的 prefix/suffix 一旦错位，后续 AI 改写导致 from/to 漂移时就再也定位不回来。 */
+function contextAtDocPos(doc: PMNode, from: number, quote: string, ctxLen = 32): { prefix: string; suffix: string } {
+  const { text, posOf } = buildTextPosMap(doc);
+  let i = posOf.findIndex((p) => p >= 0 && p >= from);
+  if (i < 0) return { prefix: '', suffix: '' };
+  while (i < posOf.length && posOf[i] < 0) i++;
+  if (i >= posOf.length) return { prefix: '', suffix: '' };
+  return {
+    prefix: text.slice(Math.max(0, i - ctxLen), i),
+    suffix: text.slice(i + quote.length, i + quote.length + ctxLen),
+  };
+}
+
 /** 统一批注定位（W3C TextQuoteSelector 思路，Hypothesis 同款）：
  *  ① from/to 精确位置（有效且该处文本与 quote 匹配）→ 直接用；
  *  ② 失效/无位置 → quote + prefix/suffix 上下文锚定（只匹配一处，杜绝重复文本跳错）；
@@ -217,6 +234,14 @@ function findQuoteWithContext(doc: PMNode, quote: string, prefix?: string, suffi
       if (r) return r;
     }
     idx = fullText.indexOf(quote, idx + 1);
+  }
+  // 上下文没命中，但 quote 在全文只出现一次 → 仍可安全定位。
+  // 旧批注的 prefix/suffix 可能是按 `from - 1` 的旧口径算的（被块边界偏移过），
+  // 唯一匹配时不应因为上下文过期而整条批注定位失败（表现为「改完批注消失」）。
+  const firstIdx = fullText.indexOf(quote);
+  if (firstIdx >= 0 && fullText.indexOf(quote, firstIdx + 1) < 0) {
+    const r = toDocRange(firstIdx);
+    if (r) return r;
   }
   // 无上下文约束（旧批注无 prefix/suffix）→ 返回首个匹配作为兜底（保持原有行为）
   if (!prefix && !suffix) {
@@ -256,6 +281,24 @@ function resolveAnnotationPos(editor: Editor, a: MdAnnotation): { from: number; 
     }
   }
   return findQuoteWithContext(doc, a.quote, a.prefix, a.suffix);
+}
+
+/** AI 改写专用严格定位：只接受「当前位置仍与 quote 一致」的选区。
+ *  气泡直改没有 prefix/suffix，若文档在 AI 请求期间被整篇重建/外部重载，from/to 会漂移；
+ *  此时绝不能回退到「全文第一处重复文本」——否则改写会落到另一个重复段落上，
+ *  表现为「视图跳到别的行、原来的选却没变」。宁可不改并报错，让用户重新选择。 */
+function resolveAnnotationPosStrict(editor: Editor, a: MdAnnotation): { from: number; to: number } | null {
+  const doc = editor.state.doc;
+  const docSize = doc.content.size;
+  if (typeof a.from === 'number' && typeof a.to === 'number' && a.from >= 1 && a.to <= docSize && a.from < a.to) {
+    const atQuote = doc.textBetween(a.from, a.to, '\n');
+    if (atQuote === a.quote || atQuote.trim() === a.quote || atQuote.includes(a.quote)) {
+      return { from: a.from, to: a.to };
+    }
+  }
+  // 批注卡片（带 prefix/suffix 上下文）仍允许按上下文唯一锚定；气泡直改（无上下文）不允许
+  if (a.prefix || a.suffix) return findQuoteWithContext(doc, a.quote, a.prefix, a.suffix);
+  return null;
 }
 
 const mdAnnotationSelPlugin = new Plugin<DecorationSet>({
@@ -408,6 +451,18 @@ function locateRevision(
 ): { from: number; to: number } | null {
   const doc = editor.state.doc;
   const fullText = doc.textBetween(0, doc.content.size, '\n');
+  // 优先用渲染态纯文本指纹定位：oldText/newText 是 markdown 源码（含 ##/**/表格），
+  // 在渲染纯文本里匹配不到，只有纯文本指纹才能精确命中（含语法的改动也适用）
+  const plainNew = round?.patch?.plainNew;
+  const plainOld = round?.patch?.plainOld;
+  if (plainNew) {
+    const i = fullText.indexOf(plainNew);
+    if (i >= 0) return { from: i + 1, to: i + 1 + plainNew.length };
+  }
+  if (plainOld) {
+    const i = fullText.indexOf(plainOld);
+    if (i >= 0) return { from: i + 1, to: i + 1 + plainOld.length };
+  }
   let idx = newText ? fullText.indexOf(newText) : -1;
   if (idx >= 0) return { from: idx + 1, to: idx + 1 + newText.length };
   idx = oldText ? fullText.indexOf(oldText) : -1;
@@ -736,6 +791,10 @@ function revisionDrifted(text: string, quote: string): boolean {
   const q = quote.trim().replace(/\s+/g, '');
   if (!q || !t) return false;
   if (t === q) return false;
+  // 短句改写（< 12 字，如对话稿里的单行）字符重合度天然偏低，覆盖率判据会误伤：
+  // 例如「没屁，我分心。」被改写后不含原字符 → coverage 0 + lenRatio>1.5 → 被误判「跑偏」而还原，
+  // 表现为「点了 AI 修订、转圈结束、正文毫无变化」。故只对足够长的原文做跑偏校验。
+  if (q.length < 12) return false;
   const qChars = new Set(q.split(''));
   let hits = 0;
   for (const c of qChars) if (t.includes(c)) hits++;
@@ -1021,9 +1080,15 @@ export function DocEditor({
   /** 一致性检查结果（仅当前文档）；null = 尚未跑过。文档变更后自动清空（避免展示过期结论） */
   const [consistencyItems, setConsistencyItems] = useState<ConsistencyItem[] | null>(null);
   const [checking, setChecking] = useState(false);
+  /** 人工修订模式 = 右侧修订侧边栏（批注 + 修订栏）是否打开（annotationPanelOpen）：
+   *  面板打开时把用户自己的手工编辑也记入修订轮次；面板关闭则只保留 AI 产生的修订。无独立开关。 */
+
   // 修订历史：每次「按批注修订」生成一轮，按轮次保留；activeRoundId 指向当前文档内容对应的轮
   const [revisionRounds, setRevisionRounds] = useState<RevisionRound[]>([]);
   const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
+  /** 加载期新产生的最近一轮 id（AI / 人工）：sidecar 异步返回时若已有新轮次，
+   *  只补历史、不把 activeRoundId 抢回旧轮——否则会把刚应用的改动重建回旧内容。 */
+  const latestRoundIdRef = useRef<string | null>(null);
   /** 当前聚焦的修订（修订视图点击定位）：切换轮次/接受拒绝后跟随重新定位高亮 */
   const [focusedRevision, setFocusedRevision] = useState<{ roundId: string; oldText: string; newText: string } | null>(null);
   /** 聚焦定位需要滚动一次的标记（跨轮切换时，文档重建完成后再滚动） */
@@ -1031,6 +1096,30 @@ export function DocEditor({
   /** 刚刚就地应用的改动文字（AI 修订/重写成功）→ 全文重建后据此把视口停回改动处，
    *  否则整篇 setContent 重置选区会让视图漂到别处（"AI 修订完成后跳到别的段落"） */
   const justAppliedAnchorRef = useRef('');
+  /** 刚刚就地应用的改动起点（文档坐标）：优先用它做滚动锚点，不依赖文本匹配，
+   *  含 markdown 语法（##、**、表格）的改动也能精确命中 */
+  const justAppliedPosRef = useRef<number | null>(null);
+  /** 刚就地应用的那一轮 id：setRevisionRounds 与 setActiveRoundId 的生效时序若让重建 effect
+   *  先以旧 activeRoundId 跑一次，此处用于识别「新轮次已产生、activeRoundId 尚未跟上」并先不重建 */
+  const justAppliedRoundRef = useRef<string | null>(null);
+  /** 就地应用改动【之前】的滚动位置（AI 重写是就地替换、不整篇重建，视口本不该移动）：
+   *  浏览器「选区跟随」若把视图滚偏，据此恢复到改动前的滚动位置，避免「修订后页面滑走」 */
+  const justAppliedScrollRef = useRef<number | null>(null);
+  /** AI 改写请求进行中：暂停「外部变更轮询」的静默重载。
+   *  否则请求期间磁盘 mtime 一变（自动保存 / 其他进程 / 同步）就会整篇 setContent，
+   *  选区 from/to 随之失效，改写可能被定位到另一个重复段落（视图跳走、原处没变）。 */
+  const aiEditInFlightRef = useRef(false);
+  /** ===== 人工修订模式：把用户手工编辑按「burst」合并成修订轮次 =====
+   *  manualPrevMdRef = 上一次内容（burst 的 before 来源）；manualBaseRef = 当前 burst 起始内容（null=无进行中 burst）；
+   *  manualTimerRef = 900ms 空闲计时；programmaticEditRef = 程序性 dispatch 抑制标记 */
+  const manualPrevMdRef = useRef<string | null>(null);
+  const manualBaseRef = useRef<string | null>(null);
+  const manualTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const programmaticEditRef = useRef(false);
+  /** onUpdate → 人工轮捕获实现（在 addPatchRound 定义后赋值，经 ref 转接避免 useEditor 闭包冻结） */
+  const manualCaptureRef = useRef<((md: string) => void) | null>(null);
+  /** 空闲/失焦/关闭开关时落轮的实现引用（同样在 addPatchRound 定义后赋值） */
+  const flushManualRoundRef = useRef<() => void>(() => {});
   /** 定位提示（修订文字未在文档中找到时给可见反馈，避免"点了没反应"） */
   const [locateHint, setLocateHint] = useState('');
   useEffect(() => {
@@ -1464,6 +1553,8 @@ export function DocEditor({
     },
     onUpdate: ({ editor }) => {
       const md = getMarkdown(editor);
+      // 人工修订模式：把手工编辑按 burst 捕获为修订轮次（程序性改动由 markProgrammatic 抑制）
+      manualCaptureRef.current?.(md);
       setSaveStatus('unsaved');
       // 内容变化回调：防抖 500ms
       if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
@@ -1482,8 +1573,12 @@ export function DocEditor({
   });
 
   /** 记录一次局部替换为修订轮次（逐条 AI 修改也进修订面板，可审阅/回退）。
-   *  intent 用于生成「改了什么」的回报文案（note）；返回新轮次 id（未产生轮次时 null），供调用方回报。 */
-  const addPatchRound = useCallback((before: string, after: string, annotationId?: string, intent?: string): string | null => {
+   *  intent 用于生成「改了什么」的回报文案（note）；appliedFrom = 改动在文档中的起点（用于滚动停回改动处）；
+   *  plainOld/plainNew = 改动前后的渲染态纯文本指纹（修订卡片点击定位用，规避 markdown 源码与渲染文本错配）。
+   *  author = 'user'（人工修订模式的手工编辑）；缺省 = AI 修订；
+   *  annotationBefore = 改写前的批注锚点（拒绝该轮时回滚用）。
+   *  返回新轮次 id（未产生轮次时 null），供调用方回报。 */
+  const addPatchRound = useCallback((before: string, after: string, annotationId?: string, intent?: string, appliedFrom?: number, plainOld?: string, plainNew?: string, author?: 'ai' | 'user', annotationBefore?: RevisionRound['annotationBefore']): string | null => {
     if (!before || before === after) return null;
     const { oldText, newText, preLen } = diffPatch(before, after);
     if (!oldText && !newText) return null;
@@ -1497,22 +1592,82 @@ export function DocEditor({
       createdAt: new Date().toISOString(),
       segments: [],
       revisions: revs,
-      patch: { baseMd: before, oldText, newText, preContext },
+      patch: { baseMd: before, oldText, newText, preContext, ...(plainOld ? { plainOld } : {}), ...(plainNew ? { plainNew } : {}) },
       ...(annotationId ? { annotationId } : {}),
+      ...(annotationBefore ? { annotationBefore } : {}),
+      ...(author ? { author } : {}),
       note: describePatch(oldText, newText, intent),
     };
     setRevisionRounds((prev) => [...prev, round]);
-    // 标记"刚就地应用的改动"：该轮设为活动轮会触发整篇重建，重建后据此把视口停回改动处
+    latestRoundIdRef.current = round.id;
+    // 标记"刚就地应用的改动"：该轮内容已是文档现值，重建 effect 会比较内容后跳过整篇重建
+    //（避免重置选区/视口），并用改动起点坐标把视口停回改动处（不依赖文本匹配，含 markdown 语法的改动也能命中）
     justAppliedAnchorRef.current = newText || oldText;
+    justAppliedPosRef.current = typeof appliedFrom === 'number' ? appliedFrom : null;
+    justAppliedRoundRef.current = round.id;
     setActiveRoundId(round.id);
     return round.id;
   }, []);
+
+  // ===== 人工修订模式：手工编辑 → 修订轮次 =====
+  /** 程序性 dispatch 标记：置 true 后本调用栈内的 onUpdate 视作「非人工」，queueMicrotask 复位 */
+  const markProgrammatic = useCallback(() => {
+    programmaticEditRef.current = true;
+    queueMicrotask(() => {
+      programmaticEditRef.current = false;
+    });
+  }, []);
+  /** 丢弃当前 burst（空闲计时器 + 起始快照） */
+  const cancelManualBurst = useCallback(() => {
+    if (manualTimerRef.current) {
+      clearTimeout(manualTimerRef.current);
+      manualTimerRef.current = null;
+    }
+    manualBaseRef.current = null;
+  }, []);
+  /** 把一段人工改动落为修订轮次（base→after 无差异则只终止 burst） */
+  const commitManualRound = useCallback((base: string, after: string) => {
+    cancelManualBurst();
+    if (!base || base === after) return;
+    addPatchRound(base, after, undefined, undefined, undefined, undefined, undefined, 'user');
+  }, [addPatchRound, cancelManualBurst]);
+  /** 空闲/失焦/关闭开关时落轮：读最新内容作为 after（IME 组合中顺延，避免记入半个拼音） */
+  const flushManualRound = useCallback(() => {
+    const base = manualBaseRef.current;
+    if (base === null) return;
+    if (editor?.view.composing) {
+      if (manualTimerRef.current) clearTimeout(manualTimerRef.current);
+      manualTimerRef.current = setTimeout(() => flushManualRoundRef.current(), 400);
+      return;
+    }
+    commitManualRound(base, editor ? getMarkdown(editor) : base);
+  }, [editor, commitManualRound]);
+  flushManualRoundRef.current = flushManualRound;
+  /** 人工轮捕获（onUpdate 经 ref 调用）：程序性改动先落下进行中的 burst 再终止，避免把 AI 改动并进人工轮 */
+  manualCaptureRef.current = (md: string) => {
+    const prev = manualPrevMdRef.current;
+    manualPrevMdRef.current = md;
+    if (programmaticEditRef.current) {
+      if (manualBaseRef.current !== null && prev != null) commitManualRound(manualBaseRef.current, prev);
+      else cancelManualBurst();
+      return;
+    }
+    // 修订侧边栏打开期间才捕获人工改动（面板关闭 = 只有 AI 修订）
+    if (!annotationPanelOpen || prev == null || prev === md) return;
+    if (manualBaseRef.current === null) manualBaseRef.current = prev;
+    if (manualTimerRef.current) clearTimeout(manualTimerRef.current);
+    manualTimerRef.current = setTimeout(() => flushManualRoundRef.current(), 900);
+  };
 
   // ===== 批注 + 修订 sidecar 读写 =====
   // 加载批注列表 + 修订历史（修订恢复到最后一次修订轮，文档内容随之切换到该轮状态）
   // 若 key 变化（文档改名/移动）且新 key 无数据，自动从旧 key 迁移批注与修订后删除旧 sidecar
   useEffect(() => {
     if (!annotationKey) return;
+    // key 变化（切文档/改名）：加载完成前锁定落盘 —— 否则下方 persist effect 会抢先以「上一个文档」
+    // 的内存状态覆盖本文档的 sidecar（清空本文档的修订历史，表现为「AI 修订不显示」）
+    revisionRoundsLoadedRef.current = false;
+    latestRoundIdRef.current = null;
     const prevKey = prevAnnotationKeyRef.current;
     prevAnnotationKeyRef.current = annotationKey;
     let alive = true;
@@ -1545,8 +1700,18 @@ export function DocEditor({
         if (!alive) return;
         setAnnotations(annotationsToLoad);
         if (roundsToLoad.length > 0) {
-          setRevisionRounds(roundsToLoad);
-          setActiveRoundId(roundsToLoad[roundsToLoad.length - 1].id);
+          if (latestRoundIdRef.current) {
+            // 加载期间已经产生新轮次（AI 改写 / 人工编辑）：只补齐历史轮，不抢活动轮。
+            // 若仍 setActiveRoundId(旧轮)，重建 effect 会把刚应用的改动还原回旧内容。
+            setRevisionRounds((prev) => {
+              const ids = new Set(prev.map((r) => r.id));
+              const history = roundsToLoad.filter((r: RevisionRound) => !ids.has(r.id));
+              return history.length ? [...history, ...prev] : prev;
+            });
+          } else {
+            setRevisionRounds(roundsToLoad);
+            setActiveRoundId(roundsToLoad[roundsToLoad.length - 1].id);
+          }
         }
       } catch { /* ignore */ }
       finally {
@@ -1592,10 +1757,10 @@ export function DocEditor({
     let prefix: string | undefined;
     let suffix: string | undefined;
     if (editor && typeof from === 'number' && typeof to === 'number' && from >= 1 && to <= editor.state.doc.content.size) {
-      const fullText = editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n');
-      const ctxLen = 32;
-      prefix = fullText.slice(Math.max(0, from - 1 - ctxLen), from - 1);
-      suffix = fullText.slice(to - 1, to - 1 + ctxLen);
+      // 用文本偏移映射取上下文，不能用 from/to 直接当文本下标（块边界会造成累计偏移）
+      const ctx = contextAtDocPos(editor.state.doc, from, quote);
+      prefix = ctx.prefix;
+      suffix = ctx.suffix;
     }
     const a: MdAnnotation = {
       id: `ann-${Date.now().toString(36)}`,
@@ -1737,17 +1902,28 @@ export function DocEditor({
       : intentDef?.prefix
         ? `【${intentDef.prefix}】${a.content}`
         : a.content;
+    // 请求期间暂停外部变更轮询（见 aiEditInFlightRef）：避免整篇静默重载把选区坐标冲掉
+    aiEditInFlightRef.current = true;
     const res = await fetchAiEditSse({
       md: before,
       instruction,
       mode: 'inline',
       selection: { text: a.quote },
+    }).finally(() => {
+      aiEditInFlightRef.current = false;
     });
     const text = res.text;
-    if (!text || !text.trim()) return { ok: false, reason: res.error || 'AI 未返回改写结果' };
-    // 定位批注文字：统一锚定（from/to 优先 + quote/prefix/suffix 上下文兜底）
-    const pos = resolveAnnotationPos(editor, a);
-    if (!pos) return { ok: false, reason: '无法定位选中的文字（可能已被改动）' };
+    if (!text || !text.trim()) {
+      console.warn('[ai-revise] empty result', res.error);
+      return { ok: false, reason: res.error || 'AI 未返回改写结果' };
+    }
+    // 严格定位：只接受仍与 quote 一致的选区。文档在请求期间被重建/重载过时，
+    // 宁可报错让用户重选，也不回退到全文第一处重复文本（否则会改到别的行、原处看似没变）。
+    const pos = resolveAnnotationPosStrict(editor, a);
+    if (!pos) {
+      console.warn('[ai-revise] selection shifted during request', { quote: a.quote.slice(0, 40), from: a.from, to: a.to });
+      return { ok: false, reason: '文档在 AI 改写期间发生了变化（选区已失效），请重新选择文字后再试' };
+    }
     const from = pos.from;
     const to = pos.to;
     // 输出含块级 markdown（代码块/表格/标题/引用/列表）→ 用 markdown parser 解析为块级内容插入，
@@ -1760,44 +1936,84 @@ export function DocEditor({
       /^\s*>\s+/m.test(text) || // 引用
       /^\s*[-*+]\s+/m.test(text) || // 无序列表
       /^\s*\d+[.)]\s+/m.test(text); // 有序列表
-    const content = hasBlockMd && mdStorage?.parser
-      ? mdStorage.parser.parse(text.trim()).toJSON()
-      : inlineMdToHtml(text.trim());
+    // parser.parse(text) 返回的是「doc」包装节点：把整份 doc 插进段落区间属于非法内容
+    // （ProseMirror 会拒绝该切片，结果就是「正文没有任何变化」），所以只取它的顶层块级子节点
+    // 数组（段落/标题/表格/列表），交给 insertContentAt 按块插入。
+    const parsedDoc = hasBlockMd && mdStorage?.parser ? mdStorage.parser.parse(text.trim()).toJSON() : undefined;
+    const content = parsedDoc?.content?.length ? parsedDoc.content : inlineMdToHtml(text.trim());
+    const plainOld = editor.state.doc.textBetween(from, to, '\n').trim();
     const beforeSize = editor.state.doc.content.size;
+    // 程序性改动：抑制人工轮捕获（否则这次 AI 替换会被误记为人工编辑）
+    markProgrammatic();
+    // 记录就地替换前的滚动位置：本次不整篇重建，视口不应移动（还原时用）
+    justAppliedScrollRef.current = editor.view.dom.parentElement?.scrollTop ?? null;
     editor.chain().focus().insertContentAt({ from, to }, content).run();
     const afterSize = editor.state.doc.content.size;
     // 跑偏/意图未达成校验：AI 输出应与批注引用文字相关；且按意图（精简/扩写）验证长度方向。
     // 不满足 → 还原为修改前，不记录修订（用户可重试）
     const after = getMarkdown(editor);
-    if (revisionDrifted(text, a.quote) || intentUnmet(a.intent, text, a.quote)) {
+    const drifted = revisionDrifted(text, a.quote);
+    const unmet = intentUnmet(a.intent, text, a.quote);
+    if (drifted || unmet) {
+      markProgrammatic();
+      // 还原为修改前：同时把视口放回改动前的滚动位置，否则 setContent 重置选区会让视图跳走
+      const revertScrollTop = justAppliedScrollRef.current;
+      const scroller = editor.view.dom.parentElement;
       editor.commands.setContent(before);
-      return { ok: false, reason: 'AI 改写结果偏离原文 / 未达成意图，已还原（请调整指令后重试）' };
+      justAppliedScrollRef.current = null;
+      if (revertScrollTop !== null && scroller) {
+        requestAnimationFrame(() => { scroller.scrollTop = revertScrollTop; });
+      }
+      // 报出判据的实测值：否则「已还原」只是一句无从复核的结论，分不清是误伤还是真跑偏
+      const brief = (s: string) => s.trim().replace(/\s+/g, '').slice(0, 20);
+      console.warn('[ai-revise] reverted', { drifted, unmet, qLen: a.quote.trim().length, tLen: text.trim().length, quote: a.quote, text });
+      return {
+        ok: false,
+        reason: `AI 改写已被还原（${drifted ? '偏离原文' : '未达成意图'}）：选文 ${a.quote.trim().length} 字「${brief(a.quote)}」→ 改写 ${text.trim().length} 字「${brief(text)}」`,
+      };
     }
-    // 逐条重写也记录为修订轮次（进修订面板可审阅/回退），并关联来源批注（接受修订时自动标记批注已解决）
-    const roundId = addPatchRound(before, after, a.id, a.intent);
-    // 重写成功：把批注锚更新到新文本处（quote=替换后文本、from/to=新区间、prefix/suffix 重算）——
-    // 否则锚停留在被替换的旧文本，后续定位/高亮失效（"修改卡片无法定位"的残留根因）
+    // 改动后的纯文本（渲染态）：作为修订定位指纹 —— oldText/newText 是 markdown 源码，
+    // 在渲染纯文本里匹配不到（##/**/表格），用纯文本指纹才能让卡片点击精确跳转
     const newLen = afterSize - beforeSize + (to - from);
     const newTo = from + newLen;
     const newQuote = editor.state.doc.textBetween(from, newTo, '\n').trim();
+    // 逐条重写也记录为修订轮次（进修订面板可审阅/回退），并关联来源批注（接受修订时自动标记批注已解决）
+    // 记录改写前的批注锚点：拒绝该轮修订时把批注锚回旧文本，避免「拒绝后批注消失」
+    const roundId = addPatchRound(before, after, a.id, a.intent, from, plainOld, newQuote, undefined, {
+      quote: a.quote,
+      from: a.from,
+      to: a.to,
+      prefix: a.prefix,
+      suffix: a.suffix,
+    });
+    // 无差异 = AI 返回与原文等价 → 这是「空操作」而不是成功：必须给出可见反馈，
+    // 否则气泡静默收起、用户只看到「转圈结束、正文没有任何变化」
+    if (!roundId) {
+      console.warn('[ai-revise] no-op（结果与原文等价）', { before, after, text });
+      return { ok: false, reason: 'AI 未产生改动（结果与原文相同），请把意见写得更具体后重试' };
+    }
+    // 重写成功：把批注锚更新到新文本处（quote=替换后文本、from/to=新区间、prefix/suffix 重算）——
+    // 否则锚停留在被替换的旧文本，后续定位/高亮失效（"修改卡片无法定位"的残留根因）
     if (newQuote) {
-      const fullNew = editor.state.doc.textBetween(0, editor.state.doc.content.size, '\n');
-      const ctxLen = 32;
-      await persistAnnotations(annotations.map((x) =>
+      // 新上下文同样按文本偏移取（不能用 newTo - 1 当文本下标）
+      const ctx = contextAtDocPos(editor.state.doc, from, newQuote);
+      // 用函数式更新：批量逐条修订时，外层闭包里的 annotations 是整批开始前的快照，
+      // 用它 map 会把前一条刚更新好的 quote/from/to 又写回旧值（表现为「改完批注消失」）。
+      setAnnotations((prev) => prev.map((x) =>
         x.id === a.id
           ? {
               ...x,
               quote: newQuote,
               from,
               to: newTo,
-              prefix: fullNew.slice(Math.max(0, from - 1 - ctxLen), from - 1),
-              suffix: fullNew.slice(newTo - 1, newTo - 1 + ctxLen),
+              prefix: ctx.prefix,
+              suffix: ctx.suffix,
             }
           : x,
       ));
     }
     return { ok: true, roundId: roundId ?? undefined };
-  }, [editor, addPatchRound, annotations, persistAnnotations]);
+  }, [editor, addPatchRound, markProgrammatic]);
 
   /** 单条批注 AI 重写（卡片按钮）：进行中在卡片上显示进度 */
   const rewriteAnnotation = useCallback(async (a: MdAnnotation) => {
@@ -1828,7 +2044,17 @@ export function DocEditor({
       to,
       createdAt: new Date().toISOString(),
     };
-    const r = await rewriteSingle(a);
+    // 兜底捕获：rewriteSingle 内任何未预期异常一旦逃逸，Promise 会静默 reject ——
+    // 表现就是「气泡转圈结束、没有任何提示、正文毫无变化」。必须把异常转成可见原因。
+    let r: { ok: boolean; reason?: string; roundId?: string };
+    try {
+      r = await rewriteSingle(a);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[ai-revise] rewriteSingle threw', e);
+      return `AI 编辑异常：${msg}`;
+    }
+    if (!r.ok) console.warn('[ai-revise] failed:', r.reason);
     return r.ok ? null : (r.reason ?? 'AI 修订失败');
   }, [rewriteSingle]);
 
@@ -1858,14 +2084,12 @@ export function DocEditor({
     setRevising(true);
     setReviseReport(null);
     try {
-      const doneIds: string[] = [];
       const revised: ReviseReport['revised'] = [];
       const failed: ReviseReport['failed'] = [];
       for (const a of unresolved) {
         setRewritingId(a.id);
         const r = await rewriteSingle(a);
         if (r.ok) {
-          doneIds.push(a.id);
           if (r.roundId) revised.push({ annotationId: a.id, roundId: r.roundId });
         } else {
           failed.push({ annotationId: a.id, quote: a.quote, reason: r.reason ?? 'AI 修订失败' });
@@ -1873,18 +2097,15 @@ export function DocEditor({
       }
       setRewritingId(null);
       setReviseReport({ total: unresolved.length, revised, failed, at: new Date().toISOString() });
-      // 修改成功的批注标记为已解决
-      if (doneIds.length > 0) {
-        const done = new Set(doneIds);
-        const nextAnnotations = annotations.map((x) => done.has(x.id) ? { ...x, resolved: true } : x);
-        await persistAnnotations(nextAnnotations);
-      }
+      // 不在这里把批注标记为已解决：修订此时只是 pending，用户还没接受。
+      // 提前 resolved 会让黄色高亮淡到几乎看不见、批注图标消失（表现为「AI 修订后批注没了」），
+      // 且用户点「拒绝」后批注仍停留在 resolved。已解决统一由 acceptRevision 触发。
     } catch (e) {
       console.error('[revise] 修订失败:', e);
     } finally {
       setRevising(false);
     }
-  }, [editor, revising, annotations, rewriteSingle, persistAnnotations]);
+  }, [editor, revising, annotations, rewriteSingle]);
 
   // ===== 修订接受 / 拒绝（作用于当前活动轮） =====
   /** 标记批注已解决（由"接受修订"触发：该轮来自某条批注的 AI 修改，接受即视为批注意见被采纳） */
@@ -1906,6 +2127,16 @@ export function DocEditor({
       prev.map((round) => (round.id === activeRoundId ? { ...round, revisions: round.revisions.map(updater) } : round)),
     );
   }, [activeRoundId]);
+  /** 拒绝某轮 AI 改写的批注修订 → 把批注锚回改写前的旧文本并重绘高亮。
+   *  否则批注 quote 停在被还原掉的新文本上，定位失败（看起来「批注消失」）。
+   *  rAF 里重绘：等状态更新触发的「整篇重建回旧内容」先落定，再用旧锚点找位置。 */
+  const restoreAnnotationAnchor = useCallback((round: RevisionRound) => {
+    const before = round.annotationBefore;
+    if (!before || !round.annotationId) return;
+    const next = annotations.map((x) => (x.id === round.annotationId ? { ...x, ...before, resolved: false } : x));
+    setAnnotations(next);
+    requestAnimationFrame(() => applyAnnotationHighlights(next));
+  }, [annotations, applyAnnotationHighlights]);
   /** 接受/拒绝一条改动：mark 轮次走原生命令（mark 立即应用/还原）+ ops 状态；patch/旧 segments 轮次走状态 + 重渲染 */
   const applyChangeStatus = useCallback((changeId: string, status: 'accepted' | 'rejected') => {
     if (!editor) return;
@@ -1923,7 +2154,12 @@ export function DocEditor({
     }
   }, [editor, revisionRounds, activeRoundId, updateActiveRoundOps, updateActiveRoundRevisions, resolveAnnotation]);
   const acceptRevision = useCallback((id: string) => applyChangeStatus(id, 'accepted'), [applyChangeStatus]);
-  const rejectRevision = useCallback((id: string) => applyChangeStatus(id, 'rejected'), [applyChangeStatus]);
+  const rejectRevision = useCallback((id: string) => {
+    applyChangeStatus(id, 'rejected');
+    // 该轮的批注锚点跟着回滚（pair 的 delete/insert 会各调一次，重复恢复是幂等的）
+    const round = revisionRounds.find((r) => r.id === activeRoundId);
+    if (round) restoreAnnotationAnchor(round);
+  }, [applyChangeStatus, revisionRounds, activeRoundId, restoreAnnotationAnchor]);
   const acceptAllRevisions = useCallback(() => {
     if (!editor) return;
     const round = revisionRounds.find((r) => r.id === activeRoundId);
@@ -1945,51 +2181,97 @@ export function DocEditor({
     } else {
       updateActiveRoundRevisions((rev) => ({ ...rev, status: 'rejected' as const }));
     }
-  }, [editor, revisionRounds, activeRoundId, updateActiveRoundOps, updateActiveRoundRevisions]);
+    // 整轮回滚：批注锚点也回到改写前，否则拒绝后批注定位不到（看起来消失）
+    if (round) restoreAnnotationAnchor(round);
+  }, [editor, revisionRounds, activeRoundId, updateActiveRoundOps, updateActiveRoundRevisions, restoreAnnotationAnchor]);
 
   /** 切换活动轮：点击历史轮次 → 文档内容切换到该轮应用后的状态（并清除上一轮残留的修订聚焦） */
   const selectRevisionRound = useCallback((id: string) => {
     setFocusedRevision(null);
+    // 切轮会整篇重建 → 丢弃进行中的人工 burst（其 base 快照已失效）
+    cancelManualBurst();
     setActiveRoundId(id);
-  }, []);
+  }, [cancelManualBurst]);
 
   // 活动轮变化 → 重建编辑器内容（mark 轮次按 baseMd+ops 重放；patch 轮次按 diff 渲染；旧 segments 轮次按状态渲染）。
   // 整篇 setContent 会把编辑器选区重置到重建后的落点（文首附近），视图随之漂移 —— 这就是
-  // 「AI 修改完成后跳到文档别的段落」的根因。这里：重建前记住视口 + 刚就地应用的改动锚点，
-  // 重建后优先滚回改动处，无锚点时还原原视口；跨轮聚焦由下方聚焦 effect 负责滚动，此处不插手。
+  // 「AI 修改完成后跳到文档别的段落」的根因。这里改为「按内容判等」：目标内容与当前内容一致就跳过重建
+  // （刚就地应用的轮次即如此，选区/视口原样保留），不一致才重建。用内容判等而非「一次性跳过标记」，
+  // 是因为 setRevisionRounds 与 setActiveRoundId 的生效时序不确定：若 effect 先以旧 activeRoundId 跑一次，
+  // 判等会照常重建、下一次（activeRoundId 已更新）再核对回来，最终内容必然收敛到正确轮次，不会丢改动。
   useEffect(() => {
     if (!editor) return;
     const round = revisionRounds.find((r) => r.id === activeRoundId);
     if (!round) return;
+    // 时序防护：addPatchRound 同帧内同时 setRevisionRounds + setActiveRoundId，两者生效时序不保证一致。
+    // 若本 effect 先以「旧 activeRoundId」跑一次，此时已有新就地应用轮次 —— 直接返回不重建，
+    // 否则会用旧轮内容把刚应用的改动打回（表现为「AI 编辑没有效果」），等下一轮 activeRoundId 跟上再处理。
+    const justApplied = justAppliedRoundRef.current;
+    if (justApplied && justApplied !== activeRoundId) return;
     const scroller = editor.view.dom.parentElement;
     const prevScrollTop = scroller?.scrollTop ?? 0;
-    const anchor = justAppliedAnchorRef.current;
-    justAppliedAnchorRef.current = '';
+    const isJustApplied = justApplied === activeRoundId;
+    const anchor = isJustApplied ? justAppliedAnchorRef.current : '';
+    const appliedPos = isJustApplied ? justAppliedPosRef.current : null;
+    const prevAppliedScrollTop = isJustApplied ? justAppliedScrollRef.current : null;
+    if (isJustApplied) {
+      justAppliedRoundRef.current = null;
+      justAppliedAnchorRef.current = '';
+      justAppliedPosRef.current = null;
+      justAppliedScrollRef.current = null;
+    }
     const focusScrollPending = pendingRevisionScrollRef.current;
+    let rebuilt = false;
     if (round.ops && round.baseMd !== undefined) {
+      // mark 轮次：需重放注入修订 mark，无法判等跳过
+      markProgrammatic();
       replayOps(editor, round.baseMd, round.ops);
+      rebuilt = true;
     } else {
       const md = round.patch ? renderPatchRound(round) : renderRevisedMd(round.segments, round.revisions);
-      editor.chain().setContent(md).run();
+      // 仅当内容确实不同才整篇重建：刚就地应用的轮次内容已一致 → 跳过，保住选区与视口
+      if (md !== getMarkdown(editor)) {
+        markProgrammatic();
+        editor.chain().setContent(md).run();
+        rebuilt = true;
+      }
     }
+    // 重建过 → 文档内容被整体替换，进行中的人工 burst base 已失效，丢弃
+    if (rebuilt) cancelManualBurst();
     if (focusScrollPending) return;
     // rAF：等重建后的布局与浏览器自身的滚动补偿落定再恢复视口，避免被覆盖
     requestAnimationFrame(() => {
       const el = editor.view.dom.parentElement;
       if (!el) return;
-      // 锚点取改动文字的首个非空行（单行锚点才能与无分隔符的纯文本对齐做精确索引）
-      const needle = anchor.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-      const flat = editor.state.doc.textBetween(0, editor.state.doc.content.size, '');
-      const idx = needle ? flat.indexOf(needle) : -1;
-      const pos = idx >= 0 ? posAtTextIndex(editor.state.doc, idx) : null;
-      if (pos == null) {
-        el.scrollTop = prevScrollTop;
+      const scrollToPos = (from: number) => {
+        const coords = editor.view.coordsAtPos(from);
+        el.scrollTo({ top: coords.top - el.getBoundingClientRect().top + el.scrollTop - 80 });
+      };
+      // 未重建（内容原样）：编辑器没有整篇重建，视口本不该移动。若浏览器「选区跟随」把视图
+      // 滚偏了，就恢复到改动前的滚动位置（而不是把改动强行停到视口顶部 —— 那会让整页滑走）
+      if (!rebuilt && typeof appliedPos === 'number') {
+        if (prevAppliedScrollTop !== null) {
+          el.scrollTop = prevAppliedScrollTop;
+          return;
+        }
+        const docSize = editor.state.doc.content.size;
+        scrollToPos(Math.min(Math.max(appliedPos, 1), Math.max(1, docSize - 1)));
         return;
       }
-      const coords = editor.view.coordsAtPos(pos);
-      el.scrollTo({ top: coords.top - el.getBoundingClientRect().top + el.scrollTop - 80 });
+      if (rebuilt) {
+        // 重建过：原坐标已失效，退回文本锚点定位
+        const needle = anchor.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+        const flat = editor.state.doc.textBetween(0, editor.state.doc.content.size, '');
+        const idx = needle ? flat.indexOf(needle) : -1;
+        const pos = idx >= 0 ? posAtTextIndex(editor.state.doc, idx) : null;
+        if (pos == null) {
+          el.scrollTop = prevScrollTop;
+          return;
+        }
+        scrollToPos(pos);
+      }
     });
-  }, [revisionRounds, activeRoundId, editor]);
+  }, [revisionRounds, activeRoundId, editor, markProgrammatic, cancelManualBurst]);
 
   /** 滚动编辑器到指定位置（视图中部） */
   const scrollEditorTo = useCallback((from: number) => {
@@ -2144,21 +2426,47 @@ export function DocEditor({
     if (qResult.editorContent !== currentMd) {
       // emitUpdate: false 不触发 onUpdate，避免循环
       editor.commands.setContent(qResult.editorContent, { emitUpdate: false });
+      // 外部内容替换：丢弃进行中的人工 burst 并同步「上一次内容」基准
+      cancelManualBurst();
+      manualPrevMdRef.current = getMarkdown(editor);
     }
     lastContentRef.current = qResult.editorContent;
-  }, [qResult.editorContent, editor]);
+  }, [qResult.editorContent, editor, cancelManualBurst]);
+
+  // 人工修订模式：渲染就绪/切换文档时同步「上一次内容」基准（保证首次编辑也能算出 before）
+  useEffect(() => {
+    if (!editor) return;
+    manualPrevMdRef.current = getMarkdown(editor);
+  }, [editor]);
+
+  // 人工修订模式：失焦即落轮（用户切走焦点时把未落轮的 burst 记入修订）
+  useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom;
+    const onBlur = () => flushManualRoundRef.current();
+    dom.addEventListener('blur', onBlur);
+    return () => dom.removeEventListener('blur', onBlur);
+  }, [editor]);
+
+  // 修订侧边栏关闭：立即把进行中的人工 burst 落成一轮，避免待审改动丢失
+  useEffect(() => {
+    if (!annotationPanelOpen) flushManualRoundRef.current();
+  }, [annotationPanelOpen]);
 
   // ===== 外部变更冲突：编辑期轮询检测 + 三选一动作 =====
   // 采纳外部版本（丢弃本地）：用冲突时拉到的磁盘正文重载编辑器并同步令牌
   const reloadExternal = useCallback(() => {
     if (conflict) {
       editor?.commands.setContent(extractQuestionnaires(conflict.current_content).editorContent, { emitUpdate: false });
+      // 丢弃进行中的人工 burst 并同步基准（外部正文替换后旧 base 失效）
+      cancelManualBurst();
+      if (editor) manualPrevMdRef.current = getMarkdown(editor);
       baseVersionRef.current = conflict.current_version;
       setSaveStatus('saved');
     }
     setConflict(null);
     setShowConflictDiff(false);
-  }, [conflict, editor]);
+  }, [conflict, editor, cancelManualBurst]);
 
   // 保留我的版本（覆盖外部）：不带令牌强制落盘，服务端跳过比对
   const forceSaveLocal = useCallback(() => {
@@ -2180,6 +2488,9 @@ export function DocEditor({
 
     const tick = async () => {
       if (cancelled || saveStatusRef.current === 'saving') return;
+      // AI 改写请求在飞：本轮跳过外部重载。否则静默 setContent 会让选区 from/to 漂移，
+      // 改写可能落到全文第一处重复文本上（表现为「视图跳走、原处没变」）
+      if (aiEditInFlightRef.current) return;
       const v = await fetchVersion();
       if (cancelled || v === null) return;
       if (baseVersionRef.current === null) {
@@ -2193,6 +2504,9 @@ export function DocEditor({
         const body = await fetchFullBody();
         if (cancelled || body === null) return;
         editor?.commands.setContent(extractQuestionnaires(body).editorContent, { emitUpdate: false });
+        // 静默重载：丢弃进行中的人工 burst 并同步基准
+        cancelManualBurst();
+        if (editor) manualPrevMdRef.current = getMarkdown(editor);
         baseVersionRef.current = v;
         setSaveStatus('saved');
       } else {
@@ -2210,13 +2524,14 @@ export function DocEditor({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [nodeMdId, filePath, projectId, source, editable, editor, fetchVersion, fetchFullBody]);
+  }, [nodeMdId, filePath, projectId, source, editable, editor, fetchVersion, fetchFullBody, cancelManualBurst]);
 
   // 卸载时清理计时器
   useEffect(() => {
     return () => {
       if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      if (manualTimerRef.current) clearTimeout(manualTimerRef.current);
     };
   }, []);
 
@@ -2500,8 +2815,8 @@ export function DocEditor({
     if (!editor) return [];
     const cmds: PaletteCommand[] = [];
     // 注意：push 顺序决定右键菜单各行的排列顺序（下方 ctxRows 按此顺序过滤挑选）
-    const push = (group: string, id: string, label: string, hint: string | undefined, run: () => void) =>
-      cmds.push({ id: `${group}:${id}`, group, label, hint, run });
+    const push = (group: string, id: string, label: string, hint: string | undefined, run: () => void, active?: boolean) =>
+      cmds.push({ id: `${group}:${id}`, group, label, hint, run, ...(active ? { active } : {}) });
     // 历史
     push('Format', 'undo', 'Undo', '⌘Z', () => editor.chain().focus().undo().run());
     push('Format', 'redo', 'Redo', '⇧⌘Z', () => editor.chain().focus().redo().run());
@@ -2516,14 +2831,25 @@ export function DocEditor({
     // 工具
     push('Tools', 'find', 'Find', '⌘⇧F', openFind);
     push('Tools', 'format', 'Format', '', handleFormatMarkdown);
-    push('Tools', 'annotations', 'Annotations', '', () => setAnnotationPanelOpen((v) => !v));
+    // 修订侧边栏入口（批注 + 修订）：打开面板即进入人工修订模式（面板内的手工编辑记入修订轮次）；
+    // 面板关闭则只保留 AI 修订。两个入口都只是把面板切到对应视图，再次点击则关闭面板。
+    const openPanelTo = (target: 'annotations' | 'revisions') => {
+      const active = annotationPanelOpen && annotationView === target;
+      if (active) setAnnotationPanelOpen(false);
+      else {
+        setAnnotationView(target);
+        setAnnotationPanelOpen(true);
+      }
+    };
+    push('Tools', 'annotations', 'Annotations', '', () => openPanelTo('annotations'), annotationPanelOpen && annotationView === 'annotations');
+    push('Tools', 'revisions', 'Revisions', '', () => openPanelTo('revisions'), annotationPanelOpen && annotationView === 'revisions');
     push('Tools', 'export', 'Export', 'Card/Poster/Article/HTML', () => setShowExportMenu(true));
     // DOCX 从导出菜单里提出来单独成键（少一层弹窗）；PDF 不设条目，用系统打印面板另存
     push('Tools', 'docx', 'Word', '.docx', () => setShowExportDialog(true));
     push('Tools', 'print', 'Print', '', handlePrint);
     push('Tools', 'share', 'Share', '', handleShareDocument);
     return cmds;
-  }, [editor, handleFormatMarkdown, handlePrint, handleShareDocument, openFind]);
+  }, [editor, handleFormatMarkdown, handlePrint, handleShareDocument, openFind, annotationPanelOpen, annotationView]);
 
 
   /** 从当前选区向上查找所在表格节点，返回其文档位置（不在表格内则 null） */
@@ -3118,20 +3444,8 @@ export function DocEditor({
 
         {!hideToc && (
           <div ref={tocRef} className="absolute right-2 top-2 z-30 flex flex-col items-end">
-            {/* 文档工具图标（同排）：查找替换 + 目录 */}
+            {/* 文档工具图标：目录 */}
             <div className="flex items-center gap-1">
-              {editable && (
-                <button
-                  type="button"
-                  onClick={() => { setShowToc(false); openFind(); }}
-                  title="Find and replace (⌘⇧F)"
-                  aria-label="Find and replace"
-                  className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-[color-mix(in_oklab,var(--ink)_10%,transparent)]"
-                  style={{ color: 'var(--ink-muted)' }}
-                >
-                  <Search className="h-3.5 w-3.5" />
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => setShowToc((v) => !v)}
@@ -4337,12 +4651,15 @@ export function DocEditor({
                   onClick={() => runPaletteCommand(cmd)}
                   onMouseDown={(e) => e.preventDefault()}
                   className="group flex h-7 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-[var(--paper-hover)]"
-                  style={{ color: 'var(--ink)' }}
+                  style={{ color: cmd.active ? 'var(--primary)' : 'var(--ink)' }}
                 >
-                  <span className="flex w-4 shrink-0 items-center justify-center text-[var(--ink-muted)] transition-colors group-hover:text-[var(--ink)]">
+                  <span className="flex w-4 shrink-0 items-center justify-center text-[var(--ink-muted)] transition-colors group-hover:text-[var(--ink)]" style={cmd.active ? { color: 'var(--primary)' } : undefined}>
                     {commandGlyph(cmd.id)}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-12">{cmd.label}</span>
+                  {cmd.active && (
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: 'var(--primary)' }} />
+                  )}
                   {cmd.hint && SHORTCUT_HINT_RE.test(cmd.hint) && (
                     <span className="shrink-0 text-11" style={{ color: 'var(--ink-faint)' }}>{cmd.hint}</span>
                   )}
@@ -4454,6 +4771,8 @@ interface PaletteCommand {
   label: string;
   hint?: string;
   run: () => void;
+  /** 开关型命令的激活态（右键菜单竖向条目高亮 + 圆点指示） */
+  active?: boolean;
 }
 
 /** 命令按钮图标：命令 id → lucide 图标（右键菜单与工具栏同款）
@@ -4486,6 +4805,7 @@ function commandGlyph(id: string): React.ReactNode {
     case 'find': return <Search className="h-4 w-4" />;
     case 'format': return <Wand2 className="h-4 w-4" />;
     case 'annotations': return <MessageSquare className="h-4 w-4" />;
+    case 'revisions': return <FileDiff className="h-4 w-4" />;
     case 'toc': return <ListTree className="h-4 w-4" />;
     case 'export': return <Package className="h-4 w-4" />;
     case 'docx': return <FileText className="h-4 w-4" />;

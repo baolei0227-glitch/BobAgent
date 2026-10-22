@@ -26,6 +26,7 @@ import {
 } from '@/app/api/chat/tools';
 import type { ToolDefinition, ToolScene } from '@/app/api/chat/tools';
 import type { AgentProfile } from '@/lib/agents/profiles';
+import type { VisionModelConfig } from '@/lib/providers/vision-model';
 import { NODE_MCP_TOOL_IDS, type McpServerConfig } from '@/lib/mcp/types';
 import { resolveAppRoot } from '@/lib/app-root';
 import type { AppSettings } from '@/lib/settings';
@@ -69,6 +70,13 @@ export const SANDBOX_BLOCKED_TOOLS = new Set([
   'create_sticky_note',
   // 新建项目（应用结构写动作：落目录 + 改全局项目配置）
   'create_project',
+  // 项目治理（2026-10-18 补）：改分类/标签/备注、重命名、归档/取消归档——都写全局项目配置
+  // （归档还会改变"当前项目"指针），与 create_project / switch_project 同属应用结构写动作。
+  // 注：计划树族（project_plan_*）按既有口径不列入本名单（其写的是项目私有的 .butler/plans.json）。
+  'project_update_meta',
+  'project_rename',
+  'project_archive',
+  'project_unarchive',
   // 打开/切换当前项目 + 新建会话（2026-10-05，同属应用结构写动作）：
   //   switch_project 改的是"当前项目"这一应用级状态（不落数据，但会移动用户眼前的画布）；
   //   create_session 会在画布里派生一个会话、并可能让它在后台自动跑任务（节点由前端建，
@@ -410,6 +418,8 @@ export interface ToolRuntimeOptions {
   sandbox: boolean;
   /** 节点"强制使用"MCP（复选框）：仅对 Store 中全局 enabled 的 server 生效；缺省/空 = 跟随全局 */
   enabledMcpIds?: string[];
+  /** 当前请求模型若声明 vision：截图自检优先用它原生看图（OCR 兜底）。 */
+  visionModel?: VisionModelConfig;
 }
 
 /**
@@ -423,6 +433,8 @@ export class ToolRuntime {
   private readonly settings: AppSettings;
   private readonly profile: AgentProfile;
   private readonly sandbox: boolean;
+  /** 当前请求模型的原生视觉配置（缺省 = 截图自检走 OCR 兜底） */
+  private readonly visionModel?: VisionModelConfig;
   /** 节点"强制使用"MCP 解析结果：仅对全局 enabled 的 server 生效，语义=无视场景/画像过滤保留 */
   private readonly mcpForceIds: Set<string>;
 
@@ -430,6 +442,7 @@ export class ToolRuntime {
     this.settings = opts.settings;
     this.profile = opts.profile;
     this.sandbox = opts.sandbox;
+    this.visionModel = opts.visionModel;
     // 节点"强制勾选"MCP（复选框）：仅对 Store 中全局 enabled 的 server 生效，语义=无视场景/画像过滤保留。
     // 再与 NODE_MCP_TOOL_IDS 交叉校验：节点下拉只列 MCP 类服务，Plugins 类（Teams/Notes/Preview/Browser/Bobby）
     // 不在其中——勾选不得成为绕过场景门控的旁路（如 team 会绕开「Multi-agent mode」开关直接拉起多智能体）。
@@ -484,6 +497,7 @@ export class ToolRuntime {
       excludeServerIds: excludedMcpIds,
       excludeToolNames: excludedMcpToolNames,
       expectedServerIds: expectedMcpIds,
+      ...(this.visionModel ? { visionModel: this.visionModel } : {}),
     }).catch((e) => console.error('[MCP] 工具注册失败:', e));
   }
 
@@ -531,7 +545,21 @@ export class ToolRuntime {
           return !excluded.has(n);
         })
       : valid;
+    // 浏览器侧栏「核心档」工具白名单：只约束 browser_* / hippo_browser_*，其余内核工具原样保留。
+    // 设置 → Hippo Browser 切 Full（browserToolset='full'）时绕过，恢复全部浏览器工具。
+    const allow = this.profile.toolAllowlist;
+    const bypassAllow =
+      this.profile.toolAllowlistBypassOnFull === true && this.settings.browserToolset === 'full';
+    const allowed = allow && allow.length > 0 && !bypassAllow ? new Set(allow) : null;
+    const browserTrimmed = allowed
+      ? trimmed.filter((t) => {
+          const n = (t as { function?: { name?: string }; name?: string })?.function?.name ?? (t as { name?: string })?.name ?? '';
+          // 只裁浏览器工具：web_search / ledger / ocr 等非浏览器能力不受白名单影响
+          if (!/^(hippo_)?browser_/.test(n)) return true;
+          return allowed.has(n);
+        })
+      : trimmed;
     // 节点"强制使用"MCP：无视场景/画像过滤，把勾选的 MCP server 工具恒定并入本轮
-    return this.mcpForceIds.size > 0 ? mergeForcedMcpToolDefs(trimmed, Array.from(this.mcpForceIds)) : trimmed;
+    return this.mcpForceIds.size > 0 ? mergeForcedMcpToolDefs(browserTrimmed, Array.from(this.mcpForceIds)) : browserTrimmed;
   }
 }

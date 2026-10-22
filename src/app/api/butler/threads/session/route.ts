@@ -11,8 +11,8 @@
  *
  * 人设与线程**同行**存储（`.state/threads/<id>.json`）→ 删除线程（DELETE /api/butler/threads?threadId=）
  * 会连带删除人设，不需要任何跨表联动。模型 / 思考档位同理（会话级选型）。
- * 常驻「Recorder」是系统身份：不可改人设（它同时也不可删）；「通知助理」允许设人设
- * （首次打开该联系人时引导用户设定）。但**置已读与选型不受此限**——「我看过了」「我要用哪个模型」
+ * 常驻「通知助理」允许设人设（首次打开该联系人时引导用户设定）。
+ * 但**置已读与选型不受此限**——「我看过了」「我要用哪个模型」
  * 是读者行为，不是改它的身份。
  */
 import { NextRequest, NextResponse } from 'next/server';
@@ -26,9 +26,10 @@ import {
   setThreadWorkspace,
   type ButlerPersona,
 } from '@/lib/butler/threads';
-import { parseModelTag, parseThinkingLevel, parseWorkspaceFolder } from '@/lib/butler/threads-shared';
+import { isPersonaAvatarId } from '@/lib/butler/avatar';
+import { isInButlerRoot } from '@/lib/butler/storage';
+import { AVATAR_IMAGE_PATH_MAX, parseModelTag, parseThinkingLevel, parseWorkspaceFolder } from '@/lib/butler/threads-shared';
 import type { ThinkingLevel } from '@/lib/types';
-import { RECORDER_THREAD_ID } from '@/lib/core/butler-recorder';
 
 /** 字段长度上限：人设是要进系统提示的，别让一屏文本把上下文吃掉 */
 const FIELD_MAX = 200;
@@ -43,6 +44,18 @@ function sanitizePersona(raw: unknown): ButlerPersona | null {
   };
   const name = str('name');
   if (!name) return null;
+  // 头像（2026-10-18）：内置 id 只认 10 张性格原型（与渲染侧同源枚举）；
+  // 自定义图必须是**绝对路径、不超长、且落在 butler/ 内**——这里先挡掉明显不该存的路径，
+  // 读回时的目录越界由 /api/butler/avatar 再拦一道（两道都不可省：一处防写脏、一处防读越界）。
+  // 注意不能复用上面的 str()：它按 FIELD_MAX 截断，正常路径比 200 长，会被截成废路径。
+  const avatarImageRaw = typeof o.avatarImage === 'string' ? (o.avatarImage as string).trim() : '';
+  const avatarImage =
+    avatarImageRaw &&
+    avatarImageRaw.startsWith('/') &&
+    avatarImageRaw.length <= AVATAR_IMAGE_PATH_MAX &&
+    isInButlerRoot(avatarImageRaw)
+      ? avatarImageRaw
+      : undefined;
   return {
     name,
     personality: str('personality'),
@@ -50,6 +63,8 @@ function sanitizePersona(raw: unknown): ButlerPersona | null {
     style: str('style'),
     addressUser: str('addressUser'),
     template: str('template'),
+    avatar: isPersonaAvatarId(o.avatar) ? o.avatar : undefined,
+    avatarImage,
   };
 }
 
@@ -87,7 +102,7 @@ export async function PATCH(request: NextRequest) {
       workspace?: unknown;
     };
 
-    // 置已读：任何线程都可以（含常驻通知助理 / Recorder）——「我看过了」不改它的身份与人设
+    // 置已读：任何线程都可以（含常驻通知助理）——「我看过了」不改它的身份与人设
     if (body.read === true) {
       if (!(await readThread(threadId))) {
         return NextResponse.json({ success: false, error: 'thread not found' }, { status: 404 });
@@ -97,7 +112,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     // 只改会话级选型（模型 / 思考档位）：选型器改动即存，不等下一条消息。
-    // 与置已读同属「读者行为」→ 任何线程都可改（含 Recorder / 通知助理）。
+    // 与置已读同属「读者行为」→ 任何线程都可改（含通知助理 / 小微）。
     if (body.model !== undefined) {
       if (!(await readThread(threadId))) {
         return NextResponse.json({ success: false, error: 'thread not found' }, { status: 404 });
@@ -108,7 +123,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     // 只改会话级**工作区**（用户指定 · 锁定操作范围）：选/清目录即存，不等下一条消息。
-    // 与选型同属「读者行为」→ 任何线程都可改（含 Recorder / 通知助理）。
+    // 与选型同属「读者行为」→ 任何线程都可改（含通知助理 / 小微）。
     // 传 workspace:null = 清除；非法对象（非绝对路径等）由 parseWorkspaceFolder 归一成 null。
     if (body.workspace !== undefined) {
       if (!(await readThread(threadId))) {
@@ -118,11 +133,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ success: true, threadId });
     }
 
-    // 以下走改人设：常驻「Recorder」是系统身份，不可改（它同时也都不可删）。
-    // 常驻「通知助理」自 2026-09-28 起允许用户设定人设 —— 首次打开该联系人时引导设置。
-    if (threadId === RECORDER_THREAD_ID) {
-      return NextResponse.json({ success: false, error: 'system-owned persona' }, { status: 400 });
-    }
+    // 以下走改人设：常驻「通知助理」自 2026-09-28 起允许用户设定人设 —— 首次打开该联系人时引导设置。
     // 先确认线程存在：否则会静默 no-op，前端以为存上了其实没写（人设比消息更怕这种错觉）
     if (!(await readThread(threadId))) {
       return NextResponse.json({ success: false, error: 'thread not found' }, { status: 404 });

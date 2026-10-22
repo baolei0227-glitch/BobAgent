@@ -32,6 +32,12 @@ export interface SessionRequestPayload {
   prompt: string;
   /** 是否后台自动执行（prompt 非空时恒为 true） */
   auto: boolean;
+  /** 绑定的 Bob Sandbox app id（Butler 把已有/新建小程序交给 coding 会话时带上；节点据此注入小程序上下文） */
+  sandbox_app_id?: string;
+  /** 产物落点模式：'outbox' = 先落暂存区（**管家派发的默认**，不污染当前项目）、'project' = 直接落当前项目 homework/ */
+  output_mode?: 'outbox' | 'project';
+  /** 产物暂存区批次 id（output_mode='outbox' 时由服务端生成并随本契约下发，供节点带回 chat 请求） */
+  batch_id?: string;
 }
 
 const projectsListeners = new Set<Listener>();

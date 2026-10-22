@@ -1,4 +1,4 @@
-import type { ParseApi, UpdateApi, SettingsApi, ScreenOcrApi, HippoBrowserApi } from '../../electron/preload';
+import type { ParseApi, UpdateApi, SettingsApi, ScreenOcrApi, HippoBrowserApi, ButlerOrbApi } from '../../electron/preload';
 import type { MessageAttachment } from '../../lib/types';
 
 declare global {
@@ -9,6 +9,8 @@ declare global {
       settings: SettingsApi;
       screenOcr: ScreenOcrApi;
       hippoBrowser: HippoBrowserApi;
+      /** Butler 悬浮球：主窗口内那颗 + 最小化后的独立置顶球窗（见 electron/butler-orb.ts） */
+      butlerOrb: ButlerOrbApi;
       getPathForFile: (file: File) => string;
       openDevTools: () => Promise<void>;
       openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
@@ -24,6 +26,6 @@ declare global {
     /** "发送到新建节点"缓冲：暂存待发送的选中文字，新节点挂载后消费为引用标签 */
     __pendingNodeReference?: Record<string, string>;
     /** "一键安装等任务"缓冲：新建节点挂载后直接自动发送执行（无需用户确认） */
-    __pendingNodeTasks?: Record<string, string>;
+    __pendingNodeTasks?: Record<string, string | { text: string; attachments?: MessageAttachment[] }>;
   }
 }

@@ -15,7 +15,8 @@
  */
 
 import { PROVIDER_PRESETS, type ProviderType } from '@/lib/types';
-import type { SandboxChatPermission } from '@/lib/settings';
+import { resolveSandboxChatPermission } from '@/lib/settings';
+import { appExists } from './apps';
 
 export interface SandboxChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -25,8 +26,8 @@ export interface SandboxChatMessage {
 export interface SandboxChatParams {
   /** 发起调用的小程序 appId（客户端脚本自动注入，服务端据此鉴权） */
   appId: string;
-  /** 模型标识，格式 provider:modelId（如 deepseek:deepseek-flash）；
-   *  缺省时走 Auto 模式：系统自动从已配置厂商的勾选模型池里选可用模型 */
+  /** 模型标识，格式 provider:modelId（如 deepseek:deepseek-flash）；新代码应显式传入，
+   *  缺省或传 'auto' 时宿主静默回落到第一个已配置模型（仅为兼容存量小程序，无用户可见 Auto 选项） */
   model?: string;
   messages: SandboxChatMessage[];
   temperature?: number;
@@ -58,27 +59,21 @@ export const BRIDGE_CHAT_MAX_OUTPUT_TOKENS = 32768;
 export const BRIDGE_CHAT_SOFT_INPUT_CHARS = 128_000;
 
 /**
- * Auto 模式：从已配置厂商列表里选第一个有 API Key 的厂商，
- * 优先用该厂商首个「已勾选模型」作默认，没有勾选时退回 provider type 对应的 preset defaultModel。
- * 小程序是亲儿子，不再严格依赖「已勾选模型池」——只要 provider 有 apiKey，就能用任意模型。
+ * 静默兜底（仅宿主内部使用，不向用户暴露 Auto 选项）：
+ * 小程序未指定模型、或显式传 'auto' 时，取第一个已配置 API Key 的厂商的首个「已勾选模型」；
+ * 该厂商未勾选模型时退回其 preset 的首个模型。仅用于兼容存量小程序，新代码必须显式传具体模型。
  */
-function pickAutoModel(
+function pickDefaultModel(
   providerConfigs: Array<{ type: string; apiKey?: string; selectedModels?: Array<string | { modelId: string }>; defaultModel?: string }>,
 ): { provider: string; modelId: string } | null {
   for (const cfg of providerConfigs) {
     if (!cfg.apiKey?.trim()) continue;
-    const selected = (cfg.selectedModels ?? []).map((s) => (typeof s === 'string' ? s : s.modelId));
-    if (selected.length > 0) {
-      return { provider: cfg.type, modelId: selected[0] };
-    }
-    // 没有勾选模型时，退回 provider preset 的首个模型（亲儿子兜底：不被 selectedModels 卡死）
+    const selected = (cfg.selectedModels ?? [])
+      .map((s) => (typeof s === 'string' ? s : s.modelId))
+      .filter(Boolean);
     const preset = PROVIDER_PRESETS.find((p) => p.type === cfg.type);
-    const fallback = cfg.defaultModel || preset?.models?.[0]?.modelId;
-    if (fallback) {
-      return { provider: cfg.type, modelId: String(fallback) };
-    }
-    // 最后兜底：仍返回第一个可用 provider（哪怕暂时没有 modelId，稍后 resolve 层会报错）
-    return { provider: cfg.type, modelId: '' };
+    const modelId = selected[0] || cfg.defaultModel || preset?.models?.[0]?.modelId;
+    if (modelId) return { provider: cfg.type, modelId: String(modelId) };
   }
   return null;
 }
@@ -102,21 +97,27 @@ interface ResolvedSandboxChat {
 async function resolveSandboxChatConfig(
   params: SandboxChatParams,
 ): Promise<ResolvedSandboxChat> {
-  // ── 0. appId 必须存在 ──
+  // ── 0. appId 必须存在且该小程序仍然存在（2026-10-10：删除后禁止继续调用）──
   if (!params.appId) {
     throw new Error('chat denied: cannot identify mini-program (appId missing)');
+  }
+  if (!(await appExists(params.appId))) {
+    throw new Error('chat denied: mini-program not found or deleted');
   }
 
   // ── 1. 读取服务端设置文件（权限闸共用） ──
   const { readSettingsFromFile } = await import('@/lib/settings-server');
   const settings = await readSettingsFromFile();
 
-  // ── 2. 权限闸：保留（让 BobWork 知情并授权） ──
-  const rawPerm = settings.sandboxChatPermissions?.[params.appId] as unknown as SandboxChatPermission | boolean | undefined;
-  const permGranted = rawPerm === true || rawPerm === 'permanent' || rawPerm === 'per_call';
-  if (!permGranted) {
+  // ── 2. 权限闸：保留（让 BobWork 知情并授权）。
+  //     2026-10-10 放开小程序权限：无显式表项时按全局「完全信任」开关放行（默认放开）；
+  //     仅用户在 Bob Sandbox 商城（Butler → Mini Apps → Browse store）点过 Revoke（显式 none）才拒绝。
+  const permLevel = resolveSandboxChatPermission(settings, params.appId);
+  if (permLevel === 'none') {
     throw new Error(
-      'chat denied: model-call permission not granted. Call BobWork.request("chatRequestPermission") first.',
+      'chat denied: model-call permission revoked for this mini-program (explicit deny in settings). '
+      + `To re-enable: set sandboxChatPermissions["${params.appId}"] = "permanent" in ~/BobWork/.settings.json `
+      + '(or delete that entry), then restart the app. There is no in-app switch for this.',
     );
   }
 
@@ -137,24 +138,27 @@ async function resolveSandboxChatConfig(
     } catch { /* ignore */ }
   }
 
-  // ── 4. 模型解析：亲儿子模式 —— 取消「必须命中 selectedModels」的限制 ──
-  //    只要求：provider 已配置且存在 apiKey。modelId 由小程序自由指定，未指定时走 Auto 兜底。
+  // ── 4. 模型解析：优先使用小程序显式传入的 provider:modelId ──
+  //    兼容存量小程序：model 缺省或为 'auto' 时静默回落到第一个已配置模型（不向用户暴露 Auto 选项）。
   const providerConfigs = settings.providers ?? [];
   const presetByType = new Map(PROVIDER_PRESETS.map((p) => [p.type, p]));
 
   let provider: string;
   let modelId: string;
-  if (params.model && params.model.includes(':')) {
-    const [p, m] = params.model.split(':', 2);
-    provider = p;
-    modelId = m;
-  } else {
-    const picked = pickAutoModel(providerConfigs);
+  const modelRef = typeof params.model === 'string' ? params.model.trim() : '';
+  if (!modelRef || modelRef.toLowerCase() === 'auto') {
+    const picked = pickDefaultModel(providerConfigs);
     if (!picked) {
       throw new Error('chat: no model available. Configure at least one provider with an API key.');
     }
     provider = picked.provider;
     modelId = picked.modelId;
+  } else if (modelRef.includes(':')) {
+    const [p, m] = modelRef.split(':', 2);
+    provider = p;
+    modelId = m;
+  } else {
+    throw new Error(`chat: invalid model "${modelRef}". Expected "provider:modelId".`);
   }
   if (!modelId) {
     throw new Error(`chat: no model selected for provider "${provider}". Pass a model like "provider:modelId".`);

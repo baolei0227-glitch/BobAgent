@@ -41,7 +41,7 @@ describe('OutputFile 行解析', () => {
       expect(extractOutputFiles(`OutputFile: ${raw}`).files, raw).toEqual([]);
     }
     // 反例对照：这些才是可交付形态
-    for (const raw of ['homework/a.md', 'materials/a.pdf', 'attachments/a.docx', '.sandbox/apps/x/index.html', '~/a.md', '/abs/a.pdf']) {
+    for (const raw of ['homework/a.md', 'materials/a.pdf', 'attachments/a.docx', '.sandbox/apps/x/index.html', 'outbox/otb_1/homework/a.md', '~/a.md', '/abs/a.pdf']) {
       expect(isDeliverablePath(raw), raw).toBe(true);
     }
   });

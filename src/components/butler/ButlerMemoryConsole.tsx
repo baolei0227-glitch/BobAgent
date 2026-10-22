@@ -158,7 +158,7 @@ interface ThreadSummaryLite {
   title: string;
   updatedAt: number;
   pinned?: boolean;
-  systemRole?: 'notify' | 'recorder' | 'search';
+  systemRole?: 'notify' | 'search';
   /** 会话级常驻工作区（真源类型 ButlerWorkspaceFolder：path 必填、name 为展示名） */
   workspaceFolder?: { path: string; name?: string } | null;
 }
@@ -519,8 +519,12 @@ function BrainMap({ onPick }: { onPick: (s: Section) => void }) {
   const [tilt, setTilt] = useState({ rx: 12, ry: 0 });
   const [hover, setHover] = useState<Section | null>(null);
 
-  /** 鼠标位置驱动轻微视差：只是 2.5D 观感，不参与几何计算 */
+  /** 鼠标位置驱动轻微视差：只是 2.5D 观感，不参与几何计算。
+   *  指针落在某张入口卡上时**冻结视差**（2026-10-10）：整张脑图随鼠标反向位移，
+   *  卡片会从指针底下滑走再滑回，命中判定在「卡片（手形）/ 脑图空白（箭头）」之间反复切换，
+   *  表现为光标不停闪烁。悬停期间停更 tilt 即可消除。 */
   const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (hover) return;
     const b = e.currentTarget.getBoundingClientRect();
     setTilt({
       rx: 12 - ((e.clientY - b.top) / b.height - 0.5) * 7,
@@ -1178,28 +1182,31 @@ export function ButlerMemoryConsole({ onClose, embedded, initialSection }: Butle
 
   return (
     <aside style={panelStyle(embedded)} role="dialog" aria-label="Memories panel">
-      <header style={{ padding: 14, borderBottom: '1px solid var(--border)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            {!landing && (
-              <button
-                type="button"
-                onClick={() => setLanding(true)}
-                style={{ ...smallBtn, border: 'none', background: 'transparent', padding: '2px 4px' }}
-                aria-label="Back to map"
-              >
-                ← All
+      {/* 标题条已由外层提供（抽屉顶栏 / 移动分区栈都写 Memories），这里不再重复一遍标题；
+          本栏只留「← All 回脑图」与浮窗模式的关闭键，两者都没有时整条不出。 */}
+      {(!landing || onClose) && (
+        <header style={{ padding: 14, borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {!landing && (
+                <button
+                  type="button"
+                  onClick={() => setLanding(true)}
+                  style={{ ...smallBtn, border: 'none', background: 'transparent', padding: '2px 4px' }}
+                  aria-label="Back to map"
+                >
+                  ← All
+                </button>
+              )}
+            </div>
+            {onClose && (
+              <button type="button" onClick={onClose} style={{ ...smallBtn, border: 'none', background: 'transparent' }} aria-label="Close">
+                ✕
               </button>
             )}
-            <div style={{ fontSize: 14, fontWeight: 500 }}>Memory</div>
           </div>
-          {onClose && (
-            <button type="button" onClick={onClose} style={{ ...smallBtn, border: 'none', background: 'transparent' }} aria-label="Close">
-              ✕
-            </button>
-          )}
-        </div>
-      </header>
+        </header>
+      )}
 
       {/* 首屏：脑图落点（下方常驻「最近记忆活动 + 真源路径」）；点节点才进分区页
           （页面内不再有横向标签，靠左上角 ← All 返回） */}

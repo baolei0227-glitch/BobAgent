@@ -29,7 +29,6 @@ import {
 } from '@/lib/butler/threads';
 import { messageTimeAt, parseThinkingLevel } from '@/lib/butler/threads-shared';
 import { buildNotifySummary, NOTIFY_THREAD_ID } from '@/lib/core/butler-notify';
-import { buildRecorderSummary, RECORDER_THREAD_ID } from '@/lib/core/butler-recorder';
 import { buildSearchSummary, SEARCH_THREAD_ID } from '@/lib/core/butler-search';
 
 export async function POST(request: NextRequest) {
@@ -108,7 +107,7 @@ export async function POST(request: NextRequest) {
 /**
  * GET /api/butler/threads — 线程历史（Butler 抽屉联系人列 + 当前联系人时间线）。
  *   ?threadId=xxx → 该线程的消息 + 与之平行的逐条时间戳数组（times，剥 system 后仍对齐）
- *   无参数        → 线程列表摘要；**常驻「通知助理」/「Recorder」合成摘要永远置顶**（pinned: true，
+ *   无参数        → 线程列表摘要；**常驻「通知助理」/「小微」合成摘要永远置顶**（pinned: true，
  *                   各带 systemRole 身份标记供前端区分）
  */
 export async function GET(request: NextRequest) {
@@ -146,11 +145,10 @@ export async function GET(request: NextRequest) {
         indexes: rows.map((r) => r.i),
       });
     }
-    // 置顶合成「通知助理」+「Recorder」+「小微」+ 其余线程（listThreads 本身不动，这里按 threadId 把它们滤掉，
+    // 置顶合成「通知助理」+「小微」+ 其余线程（listThreads 本身不动，这里按 threadId 把它们滤掉，
     // 否则用户在这些常驻线程里追问过之后，它们会以普通线程的身份再出现在列表里）。
-    const [notify, recorder, search, threads] = await Promise.all([
+    const [notify, search, threads] = await Promise.all([
       buildNotifySummary(),
-      buildRecorderSummary(),
       buildSearchSummary(),
       listThreads(),
     ]);
@@ -158,12 +156,10 @@ export async function GET(request: NextRequest) {
       success: true,
       sessions: [
         notify,
-        recorder,
         search,
         ...threads.filter(
           (s) =>
             s.threadId !== NOTIFY_THREAD_ID &&
-            s.threadId !== RECORDER_THREAD_ID &&
             s.threadId !== SEARCH_THREAD_ID,
         ),
       ],
@@ -177,7 +173,7 @@ export async function GET(request: NextRequest) {
 
 /**
  * DELETE /api/butler/threads
- *   ?threadId=xxx → 删除该线程（联系人列里删单条）；常驻「通知助理」/「Recorder」不可删（400）
+ *   ?threadId=xxx → 删除该线程（联系人列里删单条）；常驻「通知助理」/「小微」不可删（400）
  *   无参数        → 兼容旧调用：只清理过期线程
  * 生命周期：
  *   - 过期清理：startThreadSweeper 每 60s 扫过期线程
@@ -187,8 +183,8 @@ export async function DELETE(request: NextRequest) {
   try {
     const threadId = new URL(request.url).searchParams.get('threadId');
     if (threadId) {
-      // 常驻联系人（通知助理 / Recorder / 小微）：删掉它就再没有归属入口，一律拒绝
-      if (threadId === NOTIFY_THREAD_ID || threadId === RECORDER_THREAD_ID || threadId === SEARCH_THREAD_ID) {
+      // 常驻联系人（通知助理 / 小微）：删掉它就再没有归属入口，一律拒绝
+      if (threadId === NOTIFY_THREAD_ID || threadId === SEARCH_THREAD_ID) {
         return NextResponse.json({ success: false, error: 'resident thread cannot be deleted' }, { status: 400 });
       }
       await deleteThread(threadId);

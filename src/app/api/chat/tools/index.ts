@@ -13,16 +13,19 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { readFile, writeFile, rename, unlink, readdir, stat, mkdir } from 'fs/promises';
 import { join, resolve, relative, isAbsolute, sep, basename } from 'path';
-import { homedir } from 'os';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import type { CustomToolDef } from '@/lib/settings';
 import { mcpManager, sanitizeToolName } from '@/lib/mcp/manager';
 import type { McpToolInfo } from '@/lib/mcp/types';
 import type { OcrProgressEvent } from '@/lib/mcp/ocr-client';
-import { resolveAppRoot, SANDBOX_DIRNAME, BOB_SANDBOX_DIRNAME } from '@/lib/app-root';
+import { resolveAppRoot, SANDBOX_DIRNAME, BOB_SANDBOX_DIRNAME, resolveOutboxRoot } from '@/lib/app-root';
+import { resolvePython, resolvePowershell, IS_WIN } from '@/lib/platform';
+import { checkDangerousCommand, findPersonalDirReference } from '@/lib/shell/command-guard';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 import { renameFileTags, removeFileTags } from '@/lib/files/tags';
 import { writeAppFileAtomic } from '@/lib/sandbox/apps';
+import { renderCodingDoc } from '@/lib/sandbox/coding-docs';
+import { describeImageWithVisionModel, PREVIEW_VISION_PROMPT, type VisionModelConfig } from '@/lib/providers/vision-model';
 import type { TeamRunDraft, TeamRunProgress } from '@/lib/chat/team-run';
 /** 多智能体「群聊流」事件（形态 A 呈现层）：与 team_run 的进度快照同帧下发 */
 import type { TeamChatEvent } from '@/lib/types';
@@ -37,7 +40,6 @@ import { audioToolDefs } from './audio';
 import { adminToolDefs } from './admin';
 import { notebookToolDefs } from './notebook';
 import { meetingToolDefs } from './meeting';
-import { meetingArchiveToolDefs } from './meeting-archive';
 import { ledgerToolDefs } from './ledger';
 import { materialsToolDefs } from './materials';
 import { nodeToolDefs } from './node';
@@ -53,6 +55,28 @@ export type { CardItem } from './cards';
 export { buildCardListHtml } from './cards';
 export { getLocalAuthorizedRoots } from './shared';
 const execAsync = promisify(exec);
+
+/**
+ * 平台相关的工具描述片段（阶段 D）。
+ *
+ * 为什么描述也要平台化：描述是**模型唯一能看到的接口文档**。在 Windows 上仍告诉它
+ * 示例是 `ls -la`、超时原因是「find / 全盘搜」，它就会照抄，得到一屏
+ * 「不是内部或外部命令」——而错误看起来像环境坏了，没人会想到是描述写错了。
+ */
+const PLATFORM_CMD_EXAMPLES = IS_WIN
+  ? '示例："dir /b"、"git status"、"npm test"、"python script.py"。命令由 cmd.exe 执行。'
+  : '示例："ls -la"、"git status"、"npm test"、"python script.py"。';
+
+const PLATFORM_SEARCH_HINT = IS_WIN
+  ? '搜索请限定范围：全盘搜索（dir /s C:\\、Get-ChildItem -Recurse C:\\、findstr /s）必然 30s 超时，改用项目内定向路径 / ls / glob 工具。'
+  : '搜索请限定范围：全盘搜索（find /、find ~、grep -r /）必然 30s 超时，改用项目内定向路径 / ls / glob 工具，find 必须加 -maxdepth 并限定具体目录。';
+
+/** shell 脚本在 Windows 上是 PowerShell（无 bash），扩展名也随之变 .ps1 */
+const SHELL_LANGUAGE_DESC = IS_WIN
+  ? 'Script language: python=Python3, shell=PowerShell（Windows 上没有 bash；输出用 Write-Output，不要写 bash 语法）。'
+  : 'Script language: python=Python3, shell=Bash.';
+
+const SHELL_ENV_HINT = IS_WIN ? '$env:BOB_PROJECT_HOMEWORK' : '"$BOB_PROJECT_HOMEWORK"';
 
 /**
  * describeToolCall — 服务端在工具「开始执行」时生成一句该步在做什么的中文动作描述，
@@ -132,6 +156,9 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   if (has('extract_text', 'get_text', 'read_page')) return '提取页面文本';
   if (has('get_html')) return '获取页面 HTML';
   if (has('wait_for_text')) return `等待文本 ${text() ?? ''}`;
+  if (has('find_downloads')) return '扫描下载入口';
+  if (has('downloads')) return '查询下载进度';
+  if (has('download')) return `下载文件 ${url() ?? path() ?? selector() ?? ''}`;
   if (has('upload_file')) return `上传文件 ${path() ?? ''}`;
   if (has('export_pdf')) return '导出 PDF';
   if (has('login')) return `登录 ${take(['site_name', 'site', 'url']) ?? '站点'}`;
@@ -155,6 +182,14 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   if (has('project_plan_add_steps')) return '追加计划步骤';
   if (has('project_plan_step_status')) return '更新计划步骤状态';
   if (has('project_plan_view')) return '查看计划';
+  if (has('project_plan_close')) return '收尾计划';
+  if (has('project_plan_delete')) return '删除计划';
+  if (has('project_plans_overview')) return '总览各项目计划';
+  // 项目治理（2026-10-18）：分类/标签/备注、改名、归档/取消归档
+  if (has('project_update_meta')) return `整理项目信息：${text() ?? ''}`;
+  if (has('project_rename')) return `重命名项目：${text() ?? ''}`;
+  if (has('project_archive')) return `归档项目：${text() ?? ''}`;
+  if (has('project_unarchive')) return `恢复项目：${text() ?? ''}`;
 
   // 技能 / 上下文 / 系统
   if (has('load_skill')) return `加载技能 ${take(['skill_name', 'skill', 'name', 'id']) ?? ''}`;
@@ -219,12 +254,13 @@ async function getLocalWritableRoots(): Promise<string[]> {
   }
 }
 
-/** 检查路径是否在可写范围内（当前项目 homework/ 工作区 + 技能 + Bob Sandbox 小程序 + 用户授权可写目录） */
+/** 检查路径是否在可写范围内（当前项目 homework/ 工作区 + 技能 + Bob Sandbox 小程序 + Outbox 暂存区 + 用户授权可写目录） */
 async function isWritablePath(resolvedPath: string): Promise<boolean> {
   const [ws, projectRoot] = await Promise.all([getWorkspacePath(), getProjectRootPath()]);
   const homework = join(projectRoot, 'homework');
   const sandboxApps = join(resolveAppRoot(), BOB_SANDBOX_DIRNAME, 'apps');
-  if ([ws, homework, SKILLS_DIR, sandboxApps].some(root => resolvedPath === root || resolvedPath.startsWith(root + sep))) {
+  const outboxRoot = resolveOutboxRoot();
+  if ([ws, homework, SKILLS_DIR, sandboxApps, outboxRoot].some(root => resolvedPath === root || resolvedPath.startsWith(root + sep))) {
     return true;
   }
   const writableRoots = await getLocalWritableRoots();
@@ -257,34 +293,15 @@ async function readableError(inputPath: string, resolvedPath: string, opLabel = 
 【规则】禁止猜测或遍历用户个人目录（如文稿/Documents、下载/Downloads、桌面/Desktop、相册/Pictures 等常见目录）来寻找文件，禁止对未授权目录反复尝试。若确认确实需要访问某个未授权的具体目录，可在回复末尾一次性声明 AUTH_REQ:/完整绝对路径（每行一条，用途在正文说明），前端会向用户展示授权请求卡片，用户批准后该目录即加入可读白名单；严禁对整个家目录/个人目录根/系统目录等超大范围发起，严禁逐个索要，严禁对无关目录发起。若用户未提供路径且当前无需访问，直接结束文件操作，向用户说明需要提供文件完整路径或放入项目目录后继续。`;
 }
 
-/** 危险命令模式：匹配即拦截（防止不可恢复的破坏性操作） */
-const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
-  // 删根 / 删家目录 / 全盘递归删除
-  /\brm\s+(-[rfRvfi]{2,}|--recursive|--force)\s+(\/|~|\/\*|~\*|\/\.\*|~\/\.\*)\b/,
-  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+-[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*\s+-[a-zA-Z]*r[a-zA-Z]*|--[a-z-]*recursive[a-z-]*\s+--[a-z-]*force[a-z-]*)\s+(\/|~|\/home|\/Users|\/System|\/Library|\/private\/etc)\b/,
-  /\brm\s+-[a-zA-Z]*[rfR][a-zA-Z]*\s+\/\s*$/,
-  // 覆写磁盘 / 原始设备
-  /\bdd\s+(if=|of=)\/dev\/(sd|hd|nvme|disk|rdisk|mem|kmem|random|urandom)\b/,
-  // 格式化 / 擦除磁盘
-  /\b(mkfs|newfs|fdisk|diskutil\s+erase|wipefs|blkdiscard|shred)\b/,
-  // 关闭系统 / 杀所有进程
-  /\b(shutdown|halt|poweroff|reboot|killall\s+(-[a-zA-Z]+\s+)?(init|launchd|systemd|Finder|Dock))\b/,
-  // 直接 curl|bash 下载即执行（常见供应链攻击向量）
-  /\b(curl|wget)\s+[^;&|`$()]*\|\s*(bash|sh|zsh|sudo|su)\b/,
-  /\b(curl|wget)\s+[^;&|`$()]*>\s*\/tmp\/[A-Za-z0-9_.-]+\.(sh|py|rb|js)\s*;\s*(bash|sh|zsh|python|python3|node)\s+\/tmp\//,
-  // 注入 sudo 提权（本地无 sudo 密码提示流程，直接失败即可）
-  /\bsudo\s+(-S\s+)?(su|rm|chmod|chown|mount|umount|visudo|apt|yum|dnf|brew)\b/,
-];
+/**
+ * 危险命令判定与个人目录守卫已下沉到 `lib/shell/command-guard.ts`（阶段 D）。
+ *
+ * 原因：原实现内联在本文件，规则**整套只对 POSIX 成立** —— `rm -rf /` 拦得住，
+ * 但 `del /f /s /q C:\*`、`Remove-Item -Recurse -Force C:\`、`format C:` 全放行；
+ * 个人目录守卫只认 `~` 与 `/Users/`，`C:\Users\x\Desktop` 完全不匹配。
+ * 下沉后是纯函数、可传 platform 单测，且本文件不必再承载安全规则。
+ */
 
-/** 对命令字符串做危险检查，返回 null=安全，字符串=拦截原因 */
-function checkDangerousCommand(cmd: string): string | null {
-  for (const re of DANGEROUS_COMMAND_PATTERNS) {
-    if (re.test(cmd)) {
-      return `匹配危险模式 ${re.toString()}`;
-    }
-  }
-  return null;
-}
 
 // ============================================================
 // 类型定义
@@ -307,10 +324,8 @@ export type ToolCategory = '文件' | '系统' | '网络' | '技能' | '配置' 
  *  - ledger-keeper: 账本维护者（档案员 Archivist）专属——账本写工具只给 keeper，其他 agent 只读
  *  - mind:      思维导图/灵感（BobMind）——Bob-Mind MCP 工具只给 Buzan（mind）画像，
  *               普通 chat/其他 agent 不再随 general 常驻注入
- *  - meeting:   会议记录员（Recorder）专属——过往会议检索与按需出总结（meeting_search / meeting_summarize），
- *               只给 recorder 画像，管家与画布主对话都拿不到
  */
-export type ToolScene = 'general' | 'coding' | 'legal' | 'node' | 'audio' | 'skill' | 'design' | 'ocr' | 'admin' | 'office' | 'browser' | 'company' | 'team' | 'local' | 'notebook' | 'butler' | 'ledger' | 'ledger-keeper' | 'mind' | 'console' | 'meeting';
+export type ToolScene = 'general' | 'coding' | 'legal' | 'node' | 'audio' | 'skill' | 'design' | 'ocr' | 'admin' | 'office' | 'browser' | 'company' | 'team' | 'local' | 'notebook' | 'butler' | 'ledger' | 'ledger-keeper' | 'mind' | 'console';
 
 /** OpenAI function calling 格式的工具定义 */
 export interface ToolDefinition {
@@ -358,6 +373,8 @@ export interface ToolExecContext {
   teamQuestionText?: string;
   /** 当前项目 id（透传给队长会话的 /api/chat，用于项目上下文） */
   projectId?: string;
+  /** 当前项目根目录（route 注入）：web_search / web_fetch 等按次计费工具据此把费用记到项目 */
+  projectRoot?: string;
   /**
    * Butler 会话线程 id（2026-10-02 新增，仅 Butler 链路注入）。
    * 用途：记忆类工具把「这条记忆是哪次对话记下的」写进 `source`（`chat:<threadId>`）——
@@ -491,6 +508,27 @@ function sandboxAppTarget(filePath: string): { appId: string; filename: string }
 function nodeSandboxAppId(args: Record<string, unknown>): string | undefined {
   const v = args.node_sandbox_app_id;
   return typeof v === 'string' && v ? v : undefined;
+}
+
+/** 读取工具参数中的 Outbox 批次 id（route.ts 工具循环注入 node_outbox_batch_id）。
+ *  管家派发的会话带此标识：交付物改道落 <appRoot>/outbox/<批次>/homework/，不写当前项目。 */
+function nodeOutboxBatchId(args: Record<string, unknown>): string | undefined {
+  const v = args.node_outbox_batch_id;
+  return typeof v === 'string' && /^otb_[A-Za-z0-9_-]{1,64}$/.test(v) ? v : undefined;
+}
+
+/** Outbox 批次交付物目录绝对路径：<appRoot>/outbox/<批次>/homework */
+function outboxBatchHomeDir(batchId: string): string {
+  return join(resolveOutboxRoot(), batchId, 'homework');
+}
+
+/**
+ * 是否项目相对写法（交付物）：绝对路径 / ~ 路径不算——技能、用户授权目录、bob-sandbox
+ * 这类全局落点不能被 Outbox 改道，否则管家建技能会写进暂存区。
+ */
+function isProjectRelativeDeliverable(path: string): boolean {
+  const p = String(path ?? '').replace(/\\/g, '/');
+  return !!p && !p.startsWith('/') && !p.startsWith('~');
 }
 
 /** Coding 节点的 app 目录绝对路径（强制重定向 / 读取 fallback 用） */
@@ -842,22 +880,16 @@ async function toolSearchFiles(args: Record<string, unknown>): Promise<string> {
  * ~/Pictures、~/Library 等个人目录（读取侧会触发 macOS TCC 系统弹窗，且违背
  * "禁读个人目录"规则）。用户授权目录内的路径放行；其余命中直接拦截，
  * 避免 AI 用 shell 绕过 read_file 的权限门控。
+ *
+ * 判定本身是纯函数（`findPersonalDirReference`），这里只负责取「用户已授权目录」。
+ * Windows 的等价目录（`C:\Users\<名>\Desktop`、`%USERPROFILE%\Documents`、
+ * `AppData\Roaming`…）由同一函数按平台分派覆盖（`AppData\Local\Temp` 例外放行）；
+ * 同时修掉了历史实现的一个漏拦：它用 `split('/')[1]` 取首段，
+ * 对 `~/Desktop` 恰好正确，对绝对路径 `/Users/x/Desktop` 取到的是 `Users` ⇒ 一直没拦住。
  */
 async function checkPersonalDirRead(cmd: string): Promise<string | null> {
-  const PERSONAL_MARKERS = ['Downloads', 'Desktop', 'Documents', 'Pictures', 'Movies', 'Library', '.ssh', '.aws', '.gnupg', 'Keychains'];
-  const matches = cmd.match(/(?:~|\/Users\/[^\/\s"']+)\/([^\/\s"']+)/g);
-  if (!matches) return null;
-  const home = homedir();
   const localRoots = await getLocalAuthorizedRoots();
-  const authorized = localRoots.map((r) => resolve(r));
-  for (const tok of matches) {
-    const cleaned = tok.replace(/^[\s;|&()"'`]+/, '');
-    const resolved = cleaned.startsWith('~') ? join(home, cleaned.slice(1)) : cleaned;
-    if (authorized.some((r) => resolved === r || resolved.startsWith(r + sep))) continue;
-    const firstSeg = cleaned.split('/')[1] ?? '';
-    if (PERSONAL_MARKERS.some((m) => firstSeg === m)) return resolved;
-  }
-  return null;
+  return findPersonalDirReference(cmd, { authorizedRoots: localRoots.map((r) => resolve(r)) });
 }
 
 async function toolRunCommand(args: Record<string, unknown>): Promise<string> {
@@ -918,7 +950,9 @@ async function toolRunCommand(args: Record<string, unknown>): Promise<string> {
     if (err.killed) {
       return isInstall
         ? `Command timed out (${timeout / 1000}s)。安装类命令超时多为网络慢或包体积大：可重试一次，或换镜像源（如 pip -i https://pypi.tuna.tsinghua.edu.cn/simple）。`
-        : `Command timed out (${timeout / 1000}s)。请缩小范围后重试：全盘搜索（find /、find ~、grep -r /）必然超时，请改用项目内定向路径、ls/glob，或给 find 加 -maxdepth 并限定具体目录；同一命令不要原样重试。`;
+        : IS_WIN
+          ? `Command timed out (${timeout / 1000}s)。请缩小范围后重试：全盘搜索（dir /s C:\\、Get-ChildItem -Recurse C:\\、findstr /s）必然超时，请改用项目内定向路径、ls/glob，或给 Get-ChildItem 加 -Depth 并限定具体目录；同一命令不要原样重试。`
+          : `Command timed out (${timeout / 1000}s)。请缩小范围后重试：全盘搜索（find /、find ~、grep -r /）必然超时，请改用项目内定向路径、ls/glob，或给 find 加 -maxdepth 并限定具体目录；同一命令不要原样重试。`;
     }
 
     let output = err.stdout || '';
@@ -954,8 +988,22 @@ async function toolExecuteScript(args: Record<string, unknown>): Promise<string>
 
   // 选择解释器和文件扩展名
   const isPython = language === 'python' || language === 'py';
-  const ext = isPython ? '.py' : '.sh';
-  const interpreter = isPython ? 'python3' : 'bash';
+  // Windows 上没有 bash（除非用户装了 git-bash），shell 脚本一律走 PowerShell：
+  // 扩展名必须是 .ps1 —— 用 .sh 交给 powershell -File 会得到一个与真因无关的解析错误。
+  const isWinShell = !isPython && IS_WIN;
+  const ext = isPython ? '.py' : isWinShell ? '.ps1' : '.sh';
+  let interpreter: string;
+  if (isPython) {
+    const py = resolvePython();
+    if (!py) return 'Error: 未找到 Python 解释器，无法执行脚本。Windows 版需随包内置嵌入式 Python（含 python-docx / Pillow）。';
+    interpreter = py;
+  } else if (isWinShell) {
+    const ps = resolvePowershell();
+    if (!ps) return 'Error: 未找到 PowerShell（Windows 上 shell 脚本的解释器）。预期位置：%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    interpreter = ps;
+  } else {
+    interpreter = 'bash';
+  }
   const tmpFileName = `.bobwork_script_${Date.now()}${ext}`;
   const tmpPath = join(await getWorkspacePath(), tmpFileName);
   const SCRIPT_TIMEOUT = 30_000;
@@ -980,11 +1028,16 @@ async function toolExecuteScript(args: Record<string, unknown>): Promise<string>
   try {
     // 写入脚本文件
     await writeFile(tmpPath, scriptBody, 'utf-8');
-    if (isPython) {
+    // chmod +x 只对 POSIX 有意义（Windows 没有执行位，chmod 命令也不存在）
+    if (isPython && !IS_WIN) {
       try { await execAsync(`chmod +x "${tmpPath}"`); } catch { /* ignore */ }
     }
 
-    const cmd = `${interpreter} "${tmpPath}"`;
+    // PowerShell 必须带 -ExecutionPolicy Bypass：默认策略 Restricted 会直接拒绝执行 .ps1，
+    // 报「无法加载文件…因为在此系统上禁止运行脚本」——与脚本内容无关，极易误判。
+    const cmd = isWinShell
+      ? `"${interpreter}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpPath}"`
+      : `${interpreter} "${tmpPath}"`;
 
     // 注入项目真实 homework 绝对路径：脚本 CWD 是 .ai-workspace（见 getWorkspacePath），
     // 脚本内若用相对路径 "homework/xxx" 写交付文件会错落到 .ai-workspace/homework/xxx
@@ -1054,6 +1107,16 @@ async function toolWriteFile(args: Record<string, unknown>): Promise<string> {
       }
       return `Written: bob-sandbox/apps/${sandboxTarget.appId}/${sandboxTarget.filename} (${content.length} chars)`;
     }
+    // 管家派发会话（node_outbox_batch_id）：交付物改道落 <appRoot>/outbox/<批次>/homework/，
+    // 不写入当前项目 homework/（用户要求：管家产物不污染当前项目，待用户归口后再搬入目标项目）。
+    const outboxBatchId = nodeOutboxBatchId(args);
+    if (outboxBatchId && isProjectRelativeDeliverable(path)) {
+      const relOut = codingFallbackFilename(path);
+      const target = join(outboxBatchHomeDir(outboxBatchId), relOut);
+      await mkdir(target.substring(0, target.lastIndexOf(sep)), { recursive: true });
+      await writeFile(target, content, 'utf-8');
+      return `Written: outbox/${outboxBatchId}/homework/${relOut} (${content.length} chars)`;
+    }
     // 普通节点：产物写 homework/，根级文件由 resolvePath 自动路由到 <kind>/ 子目录，归属由 .ownership.json 清册追踪。
     const currentNodeId = args.current_node_id as string | undefined;
     let relForManifest: string | null = null;
@@ -1097,11 +1160,17 @@ async function toolEditCode(args: Record<string, unknown>): Promise<string> {
       return `Error: 路径 "${path}" 不在可写范围内。允许写入：${await describeWritableRoots()}`;
     }
     const codingAppId = nodeSandboxAppId(args);
+    const outboxBatchIdEdit = nodeOutboxBatchId(args);
     // 读取：优先原路径；Coding 节点用裸文件名时 fallback 到 app 目录同名文件
     let current = await readFile(filePath, 'utf-8').catch(() => null);
     if (current === null && codingAppId) {
       const appFile = join(sandboxAppDir(codingAppId), codingFallbackFilename(path));
       current = await readFile(appFile, 'utf-8').catch(() => null);
+    }
+    // 管家派发会话：文件实际落在 Outbox 暂存区（write_file 已改道），读取对齐到同一处
+    if (current === null && outboxBatchIdEdit && isProjectRelativeDeliverable(path)) {
+      const outFile = join(outboxBatchHomeDir(outboxBatchIdEdit), codingFallbackFilename(path));
+      current = await readFile(outFile, 'utf-8').catch(() => null);
     }
     if (current === null) return `Error: 文件不存在：${path}（如需新建请用 write_file）`;
     const idx = current.indexOf(search);
@@ -1117,6 +1186,12 @@ async function toolEditCode(args: Record<string, unknown>): Promise<string> {
     if (sandboxTarget) {
       const ok = await writeAppFileAtomic(sandboxTarget.appId, sandboxTarget.filename, updated);
       if (!ok) return `Edit failed: 原子写入小程序文件失败（appId=${sandboxTarget.appId}）`;
+    } else if (outboxBatchIdEdit && isProjectRelativeDeliverable(path)) {
+      // 管家派发会话：确认改道到 Outbox 暂存区，不写当前项目 homework/
+      const relOut = codingFallbackFilename(path);
+      const target = join(outboxBatchHomeDir(outboxBatchIdEdit), relOut);
+      await mkdir(target.substring(0, target.lastIndexOf(sep)), { recursive: true });
+      await writeFile(target, updated, 'utf-8');
     } else {
       const dir = filePath.substring(0, filePath.lastIndexOf(sep));
       await mkdir(dir, { recursive: true });
@@ -1364,6 +1439,26 @@ const toolDefs: Tool[] = [
     execute: toolEditCode,
     maxOutput: 800,
   },
+  {
+    name: 'read_bridge_docs',
+    description:
+      'Read the full BobWork Host Bridge API docs for this mini-app on demand. Call BEFORE writing code that uses persistence, host resources, canvas graph, AI chat, or hostTool. Sections: storage (BobStorage set/get/save/load/deleteKey + local vs disk), host (Butler todo/notes/preferences, nodes, models, projects, calendar + full runtime action list), graph (canvas GraphGateway), chat (AI integration policy + chat/chatStream + model picker flow), hostTool (call any host tool; high privilege). Do not call it for simple apps that need none of these.',
+    parameters: {
+      type: 'object',
+      properties: {
+        section: {
+          type: 'string',
+          enum: ['storage', 'host', 'graph', 'chat', 'hostTool'],
+          description: 'Which API section to read.',
+        },
+      },
+      required: ['section'],
+    },
+    category: '系统',
+    scenes: ['coding'],
+    execute: async (args) => renderCodingDoc(typeof args.section === 'string' ? args.section : undefined),
+    maxOutput: 16000,
+  },
   ...adminToolDefs,
   {
     name: 'list_directory',
@@ -1443,13 +1538,13 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'run_command',
-    description: 'Execute a shell command and return output (tests, builds, git, process inspection). Runs in the workspace root. Timeout: install commands (pip/npm/brew/cargo…) get 180s, others 30s. Files generated land in the workspace root unless the path is absolute or "homework/"-prefixed (project deliverables should use "homework/…"). 搜索请限定范围：全盘搜索（find /、find ~、grep -r /）必然 30s 超时，改用项目内定向路径 / ls / glob 工具，find 必须加 -maxdepth 并限定具体目录。',
+    description: `Execute a shell command and return output (tests, builds, git, process inspection). Runs in the workspace root. Timeout: install commands (pip/npm/brew/cargo…) get 180s, others 30s. Files generated land in the workspace root unless the path is absolute or "homework/"-prefixed (project deliverables should use "homework/…"). ${PLATFORM_SEARCH_HINT}`,
     parameters: {
       type: 'object',
       properties: {
         cmd: {
           type: 'string',
-          description: 'Command to execute. e.g. "ls -la", "git status", "npm test", "python script.py"',
+          description: `Command to execute. ${PLATFORM_CMD_EXAMPLES}`,
         },
       },
       required: ['cmd'],
@@ -1461,18 +1556,20 @@ const toolDefs: Tool[] = [
   },
   {
     name: 'execute_script',
-    description: 'Write and execute a Python/Shell script (30s timeout) for data processing / automation / analysis that single tools cannot do. IMPORTANT PATH RULE: script CWD = homework/.ai-workspace/ (hidden temp area, NOT the project root) — a relative "homework/xxx" path inside the script lands there and is invisible to the UI. To write a visible deliverable or read project homework files, use the absolute env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: "$BOB_PROJECT_HOMEWORK") and print "OutputFile: homework/<filename>" so the file is shown to the user. Python: 脚本按 UTF-8 落盘并自动补 `# -*- coding: utf-8 -*-`，中文等非 ASCII 文本直接原样书写即可，不要手拼 \\x/\\u 转义（易产生损坏字符，解释器会报 Non-UTF-8 错误而整轮白跑）。',
+    description: `Write and execute a Python/Shell script (30s timeout) for data processing / automation / analysis that single tools cannot do. IMPORTANT PATH RULE: script CWD = homework/.ai-workspace/ (hidden temp area, NOT the project root) — a relative "homework/xxx" path inside the script lands there and is invisible to the UI. To write a visible deliverable or read project homework files, use the absolute env BOB_PROJECT_HOMEWORK (Python: os.environ["BOB_PROJECT_HOMEWORK"]; Shell: ${SHELL_ENV_HINT}) and print "OutputFile: homework/<filename>" so the file is shown to the user. Python: 脚本按 UTF-8 落盘并自动补 \`# -*- coding: utf-8 -*-\`，中文等非 ASCII 文本直接原样书写即可，不要手拼 \\x/\\u 转义（易产生损坏字符，解释器会报 Non-UTF-8 错误而整轮白跑）。${SHELL_LANGUAGE_DESC}`,
     parameters: {
       type: 'object',
       properties: {
         language: {
           type: 'string',
           enum: ['python', 'shell'],
-          description: 'Script language: python=Python3, shell=Bash.',
+          description: SHELL_LANGUAGE_DESC,
         },
         script: {
           type: 'string',
-          description: 'Full script content to execute. Python: use print() for output. Shell: use echo or stdout.',
+          description: IS_WIN
+            ? 'Full script content to execute. Python: use print() for output. Shell(PowerShell): use Write-Output.'
+            : 'Full script content to execute. Python: use print() for output. Shell: use echo or stdout.',
         },
       },
       required: ['language', 'script'],
@@ -1552,7 +1649,6 @@ const toolDefs: Tool[] = [
   },
   ...butlerToolDefs,
   ...meetingToolDefs,
-  ...meetingArchiveToolDefs,
   ...agentPackageToolDefs,
   {
     name: 'team_run',
@@ -1654,6 +1750,8 @@ const BUILTIN_LAYER: Record<string, ToolLayer> = {
   // 否则按「未列出默认 core」落入常驻锚点段——开关切换时增减会作废 core 段前缀缓存，
   // 并被 CacheGuard 误报为异常漂移（与 2026-09-09 SCENED_TOOLS 修复同一动机）。
   team_run: 'ondemand',
+  // read_bridge_docs 自带 scenes:['coding'] 门控；显式标 ondemand，避免落入 core 锚点段。
+  read_bridge_docs: 'ondemand',
 };
 
 /** 查询内置工具分层（供排序/过滤用）：
@@ -1664,6 +1762,15 @@ const BUILTIN_LAYER: Record<string, ToolLayer> = {
  *  落入「常驻锚点段」——它们随画像/场景切换增减时既破坏 core 段前缀连续性（缓存整段失效），
  *  又被 CacheGuard 豁免判定误判为异常漂移。现按「场景门控即动态」统一归 ondemand：core 段
  *  只剩真正每轮常驻的通用工具，锚点字节更稳；场景工具增减只影响尾段。 */
+/** 工具结果「失败」前缀表（2026-10-10 评估 B2）：
+ *  MCP 服务端错误原文是 `Error from server: …`，原来只认 `Error:` → 渲染失败/Chrome 缺失
+ *  都被判 success=true，停滞保护（依赖 t.success）永不触发，长任务可无限重试烧 token。 */
+export const TOOL_ERROR_PREFIXES: readonly string[] = [
+  'Error:', 'Error from server', 'Read failed:', 'Write failed:', 'Directory read failed:',
+  'Search failed:', 'Execution failed:', 'Argument', 'Unknown tool:',
+  'Command timed out', 'File not found', 'Directory not found', 'Path is', 'BLOCKED:',
+];
+
 export function getToolLayer(name: string): ToolLayer {
   const explicit = BUILTIN_LAYER[name];
   if (explicit) return explicit;
@@ -1775,6 +1882,20 @@ const MCP_SNAPSHOT_MAX_STREAK = 10;
  * 把描述附到结果、并剥离巨大的 base64 文本（避免撑爆上下文与 MCP 输出限制）。
  * 截图"即拍即懂"——读图不依赖落盘文件。视觉配置缺失/失败时保留原结果并注明。
  */
+/**
+ * 图片 payload 脱敏（2026-10-10 评估 B1）。
+ *
+ * 背景：`capture_preview` 的返回值含完整 PNG base64（一张截图轻松 100KB+），而工具的 maxOutput
+ * 只有 10000 字符、截断只保留**前 N 字符** —— 视觉描述被追加在 base64 之后，永远被截掉，
+ * 于是"每轮必做视觉自检"退化成模型凭空声称"已自检通过"。
+ * 统一在返回前把图片本体替换为占位标记，并把描述前置（见两个 describe* 函数）。
+ */
+export function redactImagePayload(raw: string): string {
+  return String(raw ?? '')
+    .replace(/["']?pngBase64["']?\s*:\s*"[^"]*"/g, '"pngBase64": "(omitted — saved to disk)"')
+    .replace(/["']?dataUrl["']?\s*:\s*"[^"]*"/g, '"dataUrl": "(omitted — translated by vision model)"');
+}
+
 async function describeScreenshotResult(raw: string): Promise<string> {
   // 提取结果 JSON 里的 dataUrl（兼容带/不带空格、单双引号变体）
   const dataUrlMatch = raw.match(/["']?dataUrl["']?\s*:\s*["'](data:image\/[^"']+)["']/);
@@ -1805,15 +1926,15 @@ async function describeScreenshotResult(raw: string): Promise<string> {
       await writeFile(tmpPath, Buffer.from(base64, 'base64'));
       const r = await ocrImageUnderstandViaMcp(tmpPath, { mode: 'screenshot' });
       if (r) {
-        const trimmed = raw.replace(/"dataUrl"\s*:\s*"[^"]*"/, '"dataUrl": "(omitted — translated by vision model)"');
-        return `${trimmed}\n\n[截图视觉解读] ${r.understanding}\n[vision] model=${r.model} (bob-ocr-mcp)`;
+        // 描述前置 + 图片本体脱敏：避免描述被 maxOutput 截断吃掉
+        return `[截图视觉解读] ${r.understanding}\n[vision] model=${r.model} (bob-ocr-mcp)\n\n${redactImagePayload(raw)}`;
       }
     } finally {
       await unlink(tmpPath).catch(() => {});
     }
-    return raw + '\n\n[vision] bob-ocr-mcp 视觉模型不可用，截图未翻译（请确认 OCR 插件常驻服务在线且已配置 vision）。';
+    return `[vision] bob-ocr-mcp 视觉模型不可用，截图未翻译（请确认 OCR 插件常驻服务在线且已配置 vision）。\n\n${redactImagePayload(raw)}`;
   } catch (e) {
-    return raw + `\n\n[vision] 截图视觉解读失败：${e instanceof Error ? e.message : String(e)}`;
+    return `[vision] 截图视觉解读失败：${e instanceof Error ? e.message : String(e)}`.concat(`\n\n${redactImagePayload(raw)}`);
   }
 }
 
@@ -1823,7 +1944,7 @@ async function describeScreenshotResult(raw: string): Promise<string> {
  *      → 经 bob-ocr-mcp 视觉模型描述渲染效果 → 返回文本带存盘路径 + 描述，供主模型自检。
  * 视觉模型不可用/失败时仍返回存盘路径（截图本身已产出），不阻断。
  */
-async function describePreviewCapture(raw: string): Promise<string> {
+async function describePreviewCapture(raw: string, vision?: VisionModelConfig): Promise<string> {
   // 提取结果 JSON 里的 pngBase64 字段（data URL 或裸 base64）
   let pngBase64 = '';
   try {
@@ -1846,21 +1967,31 @@ async function describePreviewCapture(raw: string): Promise<string> {
   try {
     await writeFile(savePath, Buffer.from(base64, 'base64'));
   } catch (e) {
-    return raw + `\n\n[preview] 截图存盘失败：${e instanceof Error ? e.message : String(e)}`;
+    return `[preview] 截图存盘失败：${e instanceof Error ? e.message : String(e)}`.concat(`\n\n${redactImagePayload(raw)}`);
   }
   // 存盘后顺带清理历史截图（保留最近 20 张，超过 7 天的删除），避免 captures 目录无限堆积
   await pruneCaptureDir(capturesDir).catch(() => {});
+
+  // 原生视觉优先：当前 coding 模型声明了 vision 时，直接用同一模型看截图（少一次插件往还、少一个失败点）。
+  // 失败/不支持 image_url 时静默回退 bob-ocr-mcp，不阻断自检。
+  if (vision) {
+    const native = await describeImageWithVisionModel(dataUrl, PREVIEW_VISION_PROMPT, vision);
+    if (native) {
+      return `[视觉描述] ${native}\n[截图已保存] ${savePath}\n[vision] model=${vision.providerModelId} (native coding model)\n\n${redactImagePayload(raw)}`;
+    }
+  }
 
   // 视觉描述（复用 bob-ocr-mcp vision 配置）；失败不阻断，附存盘路径即可
   try {
     const { ocrImageUnderstandViaMcp } = await import('@/lib/mcp/ocr-client');
     const r = await ocrImageUnderstandViaMcp(savePath, { mode: 'screenshot' });
     if (r) {
-      return `${raw}\n\n[截图已保存] ${savePath}\n[视觉描述] ${r.understanding}\n[vision] model=${r.model} (bob-ocr-mcp)`;
+      // 视觉描述必须放在**最前面**，且图片本体脱敏：否则 100KB+ 的 base64 会把描述挤出 maxOutput
+      return `[视觉描述] ${r.understanding}\n[截图已保存] ${savePath}\n[vision] model=${r.model} (bob-ocr-mcp)\n\n${redactImagePayload(raw)}`;
     }
-    return `${raw}\n\n[截图已保存] ${savePath}\n[vision] bob-ocr-mcp 视觉模型不可用，截图未自动描述（请确认 OCR 插件常驻服务在线且已配置 vision）。`;
+    return `[截图已保存] ${savePath}\n[vision] bob-ocr-mcp 视觉模型不可用，截图未自动描述（请确认 OCR 插件常驻服务在线且已配置 vision）。\n\n${redactImagePayload(raw)}`;
   } catch (e) {
-    return `${raw}\n\n[截图已保存] ${savePath}\n[vision] 视觉描述失败：${e instanceof Error ? e.message : String(e)}`;
+    return `[截图已保存] ${savePath}\n[vision] 视觉描述失败：${e instanceof Error ? e.message : String(e)}`.concat(`\n\n${redactImagePayload(raw)}`);
   }
 }
 
@@ -1956,6 +2087,8 @@ export async function registerMcpTools(opts?: {
   excludeServerIds?: Set<string>;
   excludeToolNames?: Set<string>;
   expectedServerIds?: Set<string>;
+  /** 当前请求模型若声明 vision：capture_preview 截图优先用它原生看图（OCR 兜底） */
+  visionModel?: VisionModelConfig;
 }): Promise<number> {
   // 清除上一次的 MCP 工具
   for (const name of registeredMcpNames) {
@@ -2051,7 +2184,7 @@ export async function registerMcpTools(opts?: {
         }
         // bob-preview-mcp：截图闭环 → 存盘 .sandbox/captures/ + 视觉描述渲染效果
         if (mcpTool.serverId === 'bob-preview-mcp' && /^(capture_preview|interact_preview)$/.test(mcpTool.name)) {
-          return describePreviewCapture(raw);
+          return describePreviewCapture(raw, opts?.visionModel);
         }
         // browser.detect_login 命中登录墙 → 结果追加强制指令，引导模型立即调用 browser.login
         // （BobWork 会在应用内弹出登录窗，用户输入账号密码后自动代填），避免模型停在检测结果上
@@ -2187,12 +2320,7 @@ export async function executeTool(
     const durationMs = Date.now() - start;
 
     // 成功判断：不以错误前缀开头
-    const errorPrefixes = [
-      'Error:', 'Read failed:', 'Write failed:', 'Directory read failed:',
-      'Search failed:', 'Execution failed:', 'Argument', 'Unknown tool:',
-      'Command timed out', 'File not found', 'Directory not found', 'Path is',
-    ];
-    const success = !errorPrefixes.some((p) => result.startsWith(p));
+    const success = !TOOL_ERROR_PREFIXES.some((p) => result.startsWith(p));
 
     return { result, durationMs, success, cardHtml };
   } catch (e) {

@@ -30,7 +30,7 @@ import { mcpEntryIcon } from './ext-icons';
 import { ToggleSwitch } from './ToggleSwitch';
 import { Button } from '@/components/ui/button';
 import { loadSettings, updateSettingsFields } from '@/lib/settings';
-import { desktop } from '@/lib/desktop-adapter';
+import { desktop, isDesktop } from '@/lib/desktop-adapter';
 
 interface McpAuthDetail {
   placeholder: string;
@@ -61,6 +61,12 @@ interface McpStoreEntry {
   config?: boolean;
   /** 条目需额外装配（Bob Browser 扩展下载/绑定）：Installed 卡显示 Setup 展开块 */
   setup?: boolean;
+  /**
+   * 宿主 origin 下的稳定网页路径（如 /api/plugin-web/bob-video-shot-mcp）。
+   * 由 /api/mcp/store 从 MCP_PRESETS 的 panel.hostPath 派生 ⇒ Installed 卡显示
+   * "Open in Hippo"（加书签 + 在 Hippo 新标签打开）。
+   */
+  hostPath?: string;
   installed: boolean;
   enabled: boolean;
   authDetail: McpAuthDetail | null;
@@ -368,6 +374,38 @@ export function McpStorePanel() {
     }
   };
 
+  /**
+   * 「在 Hippo 中打开」：先幂等加书签，再新标签打开。
+   *
+   * 两条顺序/幂等约束（都来自主进程实现，改这里前先看 electron/hippo-browser.ts）：
+   *  ① 书签 URL 必须由 window.location.origin 拼（**不得硬编码端口**）——dev 是 3000/5000、
+   *     打包版是常量 8321（electron/main.ts:34-36），写死会让另一半环境集体失效。
+   *  ② 必须先加书签**再**导航：书签栏只在 URL 变化时重建（hippo-browser.ts:1950），
+   *     顺序反了会出现「书签加了但栏里没出现」，用户以为失败。
+   * 另外 bmToggle 是切换语义 ⇒ 必须先用 bmList 查重，否则第二次点击会删掉书签。
+   */
+  const handleOpenPluginWeb = async (e: McpStoreEntry) => {
+    if (!e.hostPath) return;
+    const url = `${window.location.origin}${e.hostPath}`;
+    setNotice(null);
+    // 非桌面环境（纯浏览器跑 dev）：没有 Hippo，退化为系统浏览器新标签
+    if (!isDesktop()) {
+      window.open(url, '_blank', 'noopener');
+      return;
+    }
+    try {
+      const list = await desktop.hippoBrowser.bmList();
+      if (!list.list.some((b) => b.url === url)) {
+        await desktop.hippoBrowser.bmToggle({ url, title: e.name });
+      }
+      const opened = await desktop.hippoBrowser.openUrlInNewTab(url);
+      if (opened && opened.ok === false) throw new Error(opened.error || 'Hippo refused to open the URL');
+      flash('ok', `Opened ${e.name} in Hippo · bookmarked`);
+    } catch (err) {
+      flash('err', err instanceof Error ? err.message : 'Failed to open in Hippo');
+    }
+  };
+
   /** Installed 卡更换 API Key（updateKey：按预置 authScheme 写回 env/headers，保留其余配置并重连） */
   const handleUpdateKey = async (e: McpStoreEntry) => {
     const key = editKey.trim();
@@ -397,10 +435,12 @@ export function McpStorePanel() {
       if (res.ok && data.mcpOnline && data.settingsUrl) {
         window.open(data.settingsUrl, '_blank', 'noopener,noreferrer');
       } else {
-        flash('err', data.error || 'Bob OCR plugin is offline or not configured. Start it with: bob-ocr-mcp --install-daemon');
+        // 2026-10-12：桥随包分发并由宿主托管拉起，不再引导用户自己装 daemon；
+        // 失败时服务端给出宿主侧原因（入口缺失 / 端口被占 / 进程退出码 / 日志路径）。
+        flash('err', data.error || 'Bob OCR bridge is offline and BobWork could not start it automatically. Check the OCR plugin log, or run: bob-ocr-mcp --serve');
       }
     } catch (err) {
-      flash('err', err instanceof Error ? err.message : 'Failed to reach Bob OCR plugin. Is it running? (bob-ocr-mcp --serve)');
+      flash('err', err instanceof Error ? err.message : 'Failed to reach the Bob OCR bridge (127.0.0.1:9478).');
     } finally {
       setBusyId(null);
     }
@@ -750,6 +790,20 @@ export function McpStorePanel() {
               >
                 <Settings2 className="h-3 w-3" />
                 Configure
+              </Button>
+            )}
+            {/* 稳定网页入口：加书签 + 在 Hippo 新标签打开（hostPath 由预置 panel 派生） */}
+            {e.hostPath && e.enabled && (
+              <Button
+                type="button"
+                onClick={() => void handleOpenPluginWeb(e)}
+                variant="ghost"
+                tone="neutral"
+                size="sm"
+                title="Bookmark this plugin on the Hippo bookmark bar and open it in a new tab"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Open in Hippo
               </Button>
             )}
             {e.auth && (

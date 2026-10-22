@@ -27,7 +27,7 @@
 import { promises as fs } from 'fs';
 import { existsSync } from 'fs';
 import { atomicWriteFile, createLock } from './fs-atomic';
-import { join } from 'path';
+import { join, resolve, sep } from 'path';
 import { INBOX_DB_FILENAME, resolveAppRoot } from '@/lib/app-root';
 
 /** 常驻通知助理的会话线程 ID（真源；butler-notify.ts 从这里再导出） */
@@ -50,19 +50,25 @@ export const NOTIFY_THREAD_ID = 'butler-notify';
  */
 export const NOTIFY_TITLE = 'Bobby';
 
-/** 常驻「Recorder」会话线程 ID（会议记录员；真源，butler-recorder.ts 从这里再导出） */
-export const RECORDER_THREAD_ID = 'butler-recorder';
-/** 常驻会议记录员的**显示名** / 其角色目录名（显示名走英文，与 Bobby 一致）。 */
-export const RECORDER_TITLE = 'Recorder';
-
 /** 常驻「小微」会话线程 ID（搜索与资料整理助手；真源，butler-search.ts 从这里再导出） */
 export const SEARCH_THREAD_ID = 'butler-search';
-/** 常驻搜索助手的**显示名** / 其角色目录名。中文名，与 Bobby / Recorder 区分开。 */
+/** 常驻搜索助手的**显示名** / 其角色目录名。中文名，与 Bobby 区分开。 */
 export const SEARCH_TITLE = '小微';
 
 /** Butler 根目录：<APP_ROOT>/butler */
 export function butlerRoot(): string {
   return join(resolveAppRoot(), 'butler');
+}
+
+/**
+ * 该绝对路径是否落在 Butler 根目录内（含根目录自身）。
+ * 用途：只允许读自家目录的接口（如自定义头像 GET /api/butler/avatar）做**越界校验**——
+ * 先 resolve 归一掉 `..` / 相对段再比前缀，字符串前缀比较才可靠（否则 `/butler-evil` 会冒充命中）。
+ */
+export function isInButlerRoot(p: string): boolean {
+  const root = resolve(butlerRoot());
+  const abs = resolve(p);
+  return abs === root || abs.startsWith(root + sep);
 }
 
 /** 内部状态根（与用户可见的角色目录分离）：<APP_ROOT>/butler/.state */
@@ -129,7 +135,7 @@ export async function ensureDir(p: string): Promise<string> {
  *
  * 清理判据：**线程文件不存在** ⇒ 该条目已无实体可指（联系人列也渲染不出它）。
  * 三条豁免（不清理）：
- *   - 三个常驻 id（Bobby / Recorder / 小微）：线程可能只是还没被首次创建（`ensure*Session` 才落盘）；
+ *   - 两个常驻 id（Bobby / 小微）：线程可能只是还没被首次创建（`ensure*Session` 才落盘）；
  *   - 有线程文件的条目；
  *   - 非法 id（不是本模块能判定的形态）。
  * **绝不删除角色目录**：那里面有用户的附件与文档，清条目只是清指针。
@@ -137,7 +143,7 @@ export async function ensureDir(p: string): Promise<string> {
  * 幂等、可重复调用；返回被清掉的 threadId 列表（供日志/测试）。
  */
 export async function pruneOrphanRoles(): Promise<string[]> {
-  const RESIDENT = new Set<string>([NOTIFY_THREAD_ID, RECORDER_THREAD_ID, SEARCH_THREAD_ID]);
+  const RESIDENT = new Set<string>([NOTIFY_THREAD_ID, SEARCH_THREAD_ID]);
   const roles = await readRoles();
   const ids = Object.keys(roles.threads);
   if (ids.length === 0) return [];
@@ -258,7 +264,6 @@ function disambiguateRoleDir(base: string, threadId: string, taken: Set<string>)
  *
  * - threadId 缺失        → 未分类
  * - 通知助理线程（notify）→ 固定「Bobby」（微信入站消息也归这里，见 wechat-bridge.ts）
- * - 会议记录员（recorder）→ 固定「Recorder」
  * - 其余                 → 读 chat_sessions.persona.name，清洗后作目录名
  *
  * 检测到改名（同 threadId 的 dir 变化）时把旧目录整体 rename 到新目录名（不丢已有附件/文档/记录）；
@@ -275,10 +280,6 @@ export async function resolveRole(threadId: string | null | undefined): Promise<
   if (id === NOTIFY_THREAD_ID) {
     name = NOTIFY_TITLE;
     dir = sanitizeRoleName(NOTIFY_TITLE);
-  } else if (id === RECORDER_THREAD_ID) {
-    // 会议记录员常驻联系人：显示名固定「Recorder」，目录固定，保证其附件/产物落点稳定
-    name = RECORDER_TITLE;
-    dir = sanitizeRoleName(RECORDER_TITLE);
   } else if (id === SEARCH_THREAD_ID) {
     // 搜索助手常驻联系人：显示名固定「小微」，目录固定，保证其附件/产物落点稳定
     name = SEARCH_TITLE;

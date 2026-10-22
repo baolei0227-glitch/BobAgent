@@ -40,7 +40,7 @@ export async function ensureSearchThread(): Promise<void> {
 }
 
 /**
- * 常驻联系人摘要（联系人列置顶行，紧随「Recorder」）。
+ * 常驻联系人摘要（联系人列置顶行，紧随「Bobby」）。
  * 标题固定「小微」；副标题取最新一条 assistant 回复（剥 think 后截断），没聊过给一句说明。
  */
 export async function buildSearchSummary(): Promise<ButlerThreadSummary & { pinned: true; systemRole: 'search' }> {

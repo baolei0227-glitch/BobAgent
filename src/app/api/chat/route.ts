@@ -26,7 +26,7 @@ import { getSessionTracker, recordCacheCall } from '@/lib/runtime/cache-telemetr
 // 项目级后台调度：用户对话 > 成果块提炼 > 账本编译（本轮请求是最高优先级，持有期间后台让位）
 import { enterUserTurn } from '@/lib/runtime/project-scheduler';
 import type { AgentId } from '@/lib/agents/profiles';
-import { codingPhaseForTool, skillExclusionsFor } from '@/lib/agents/profiles';
+import { codingPhaseForTool, skillExclusionsFor, supportsTeamCollab } from '@/lib/agents/profiles';
 import { resolveAgentProfile } from '@/lib/agents/store';
 import { loadInstalledAgentProfiles } from '@/lib/agents/market-server';
 import { MCP_PRESETS } from '@/lib/mcp/types';
@@ -573,7 +573,7 @@ import { deriveCompactionTurnsFromLogs } from '@/lib/nodes/compact-source';
 import { readManifest, extractKeywords } from '@/lib/nodes/manifest';
 import { internSearchNode } from '@/lib/nodes/intern';
 import { matchTerms } from '@/lib/legal/synonyms';
-import { SANDBOX_DIRNAME, resolveAppRoot } from '@/lib/app-root';
+import { SANDBOX_DIRNAME, resolveAppRoot, resolveOutboxRoot } from '@/lib/app-root';
 import { resolveProviderModel, resolveTaskModel, resolveAgentRoleModel, resolveVisionChatModel } from '@/lib/core/task-model';
 import type { ButlerPersona } from '@/lib/butler/threads-shared';
 import { EventLog, genSpanId, genTaskId, persistEventLog, CORE_EVENT } from '@/lib/trajectory/event-log';
@@ -635,14 +635,18 @@ function classifySystemChange(
 /**
  * 从 allToolCalls 中提取本次交互产生的输出文件（写文件/重命名/脚本产物），
  * 仅保留位于项目 homework/ 或 materials/ 目录下的文件（历史附件在 attachments/ 下，同样兼容）。
+ * outboxBatchId：本会话产物改道到 Outbox 时，把 homework/ 相对路径解析到批次目录，
+ *   并按暂存区真实路径出卡片（否则文件不在项目内，stat 不中、卡片打不开）。
  */
 function extractOutputFiles(
   allToolCalls: Array<{ toolName: string; arguments: Record<string, unknown>; result: string; success: boolean }>,
   projectRoot: string,
   workspacePath: string,
+  outboxBatchId?: string,
 ): OutputFileItem[] {
   const seen = new Set<string>();
   const out: OutputFileItem[] = [];
+  const outboxHome = outboxBatchId ? join(resolveOutboxRoot(), outboxBatchId, 'homework') : null;
 
   const pushIfValid = (rawPath: string | undefined, source: string) => {
     if (!rawPath) return;
@@ -656,9 +660,12 @@ function extractOutputFiles(
         if (np.startsWith('homework/') || np === 'homework') {
           // 存储平铺：产物直接落在 homework/ 根目录，不生成 kind 子文件夹；
           // 与 tools.ts resolvePath 写入逻辑一致，确保 stat 命中真实落盘路径。
+          // Outbox 会话：写入已改道到批次目录，这里同样解析到暂存区，否则 stat 不中、卡片消失。
           const relInHomework = np === 'homework' ? '' : np.slice('homework/'.length);
-          abs = relInHomework ? resolve(projectRoot, 'homework', relInHomework) : resolve(projectRoot, 'homework');
+          const base = outboxHome ?? resolve(projectRoot, 'homework');
+          abs = relInHomework ? resolve(base, relInHomework) : base;
         }
+        else if (np.startsWith('outbox/') || np === 'outbox') abs = resolve(resolveAppRoot(), np);
         else if (np.startsWith('materials/') || np === 'materials' || np.startsWith('attachments/') || np === 'attachments') abs = resolve(projectRoot, rawPath);
         else if (np.startsWith('.sandbox/') || np === '.sandbox' || np.startsWith('bob-sandbox/') || np === 'bob-sandbox') abs = resolve(resolveAppRoot(), rawPath);
         else abs = resolve(workspacePath, rawPath);
@@ -682,6 +689,10 @@ function extractOutputFiles(
 
       // 过滤：只展示 homework/、materials/ 开头（含历史 attachments/；或用户根目录下的 homework/.sandbox）
       const normalized = rel.replace(/\\/g, '/');
+      // Outbox 暂存区产物不进当前项目输出卡片——它们在 Outbox 面板呈现，归口后才进项目；
+      // 但本会话**自己的**批次除外：产物真实落点就在那里，卡片要能打开（否则等于没产出）。
+      const inOwnOutbox = !!outboxBatchId && normalized.includes(`/outbox/${outboxBatchId}/`);
+      if (!inOwnOutbox && (normalized.startsWith('outbox/') || normalized.includes('/outbox/'))) return;
       const isInHomework = normalized.startsWith('homework/') || normalized.startsWith('.sandbox/') || normalized.startsWith('bob-sandbox/') || normalized.includes('/homework/') || normalized.includes('BobWork/.sandbox') || normalized.includes('BobWork/bob-sandbox') || normalized.includes('.sandbox/apps') || normalized.includes('bob-sandbox/apps');
       const isInAttachments = normalized.startsWith('materials/') || normalized.startsWith('attachments/');
       const isInWorkspaceTmp = normalized.includes('.ai-workspace/') && !isInHomework;
@@ -837,10 +848,14 @@ async function diffHomeworkFiles(
   before: Map<string, number>,
   root: string,
   currentNodeId?: string,
+  outboxBatchId?: string,
 ): Promise<OutputFileItem[]> {
   salvageMisplacedScriptOutputs(root); // 先移正脚本误落 .ai-workspace/homework/ 的产物，再扫描
   const after = listHomeworkFiles(root);
   const out: OutputFileItem[] = [];
+  // Outbox 会话：脚本绕过 write_file 直写项目 homework/ 的产物要搬去暂存区，
+  // 而不是进当前项目的输出卡片（否则等于没改道）。目标目录随批次已由 createBatch 建好。
+  const outboxHome = outboxBatchId ? join(resolveOutboxRoot(), outboxBatchId, 'homework') : null;
   let manifest: Record<string, string> = {};
   if (currentNodeId) {
     manifest = readOwnershipManifestSync(root);
@@ -851,16 +866,29 @@ async function diffHomeworkFiles(
     if (rel.split('/').some((seg) => seg.startsWith('.'))) continue;
     const unchanged = before.has(rel) && before.get(rel) === mtime;
     if (unchanged) continue;
+    const mkey = rel.replace(/^homework\//, '');
     if (currentNodeId) {
       // manifest key 是相对 homework/ 根的路径（tools.ts getHomeworkRelativePath 口径），
       // rel 是相对项目根路径，先去前缀再查归属，避免 key 不一致导致归属误判
-      const mkey = rel.replace(/^homework\//, '');
       const owner = manifest[mkey];
       if (owner) {
         if (owner !== currentNodeId) continue; // 其他并行节点的产物不得串入当前节点卡片
-      } else {
+      } else if (!outboxHome) {
+        // Outbox 会话的无归属产物不认领到清册——文件马上被搬去暂存区，清册条目会变 stale
         claim.push(mkey);
       }
+    }
+    // Outbox 会话：本轮新写入的产物一律搬去暂存区（改名进 <batch>/homework/），不进当前项目输出卡片
+    if (outboxHome) {
+      const src = join(root, rel);
+      const dest = join(outboxHome, basename(rel));
+      try {
+        if (!existsSync(dest)) {
+          mkdirSync(outboxHome, { recursive: true });
+          renameSync(src, dest);
+        }
+      } catch { /* 单个文件搬迁失败不阻断整体扫描（残留文件留待人工处理） */ }
+      continue;
     }
     let size = 0;
     try {
@@ -986,6 +1014,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 通用工具原则：
 - **脚本化执行优先（PTC）**：当任务需要连续做多步操作时（读→处理→写、批量文件处理、多文件统计/分析、数据清洗/转换、循环/条件/管道逻辑、串联多条命令），优先用 execute_script 写一个脚本一次性完成，或用 run_command 串成一条命令链，不要一个工具一个工具地串行循环——减少工具轮次与上下文膨胀，更快更省。
   边界：① 单步简单操作（读一个文件/搜一次网/查一个目录/单次写文件）仍用对应专用工具，不强行脚本化；② 浏览器交互、附件 OCR/视觉识别、MCP 专属能力不能用脚本替代；③ 脚本 CWD 是 homework/.ai-workspace/，读写项目文件/交付物必须用 $BOB_PROJECT_HOMEWORK 拼绝对路径并打印 OutputFile: 行（见 execute_script schema），禁止相对路径；④ 触发危险命令/个人目录拦截即停止，禁止绕过；脚本超时 30s。
+- **交付物落点（管家派发会话）**：若本会话由管家（Butler）派发，产物默认落「Outbox 暂存区」而非当前项目——write_file / edit_code 对 homework/ 的写入会被自动改道到 outbox 批次的 homework/ 目录，脚本产物也由系统搬正。你无需改变写法，照常写 homework/xxx 并打印 OutputFile 行即可；收尾时明确告诉用户"产物已暂存在 Outbox，可让管家归口到某个项目（或直接在 Outbox 面板指定）"。
 - 需要读文件/查目录/搜文件/执行命令/搜网/读附件时，主动调对应工具取真实数据，不猜测内容或输出
 - 结果足够即答，不再多调工具；文件/附件/资料/上游节点只读一次（read_upstream_node 每节点 ≤1 次；intern_search 每祖先 ≤2 次，返回恒标 [原始对话·未认定]，引用须标 [存疑]/pending；web_search 每问题 ≤1-2 次）
 - 读取项目内文件（homework/ 各产出、homework/template/ 下生成的文档）一律用 read_file（homework/ 前缀自动解析到项目根），不要用 execute_script 相对路径去读
@@ -1006,7 +1035,7 @@ const BASE_SYSTEM_PROMPT = `你是一个能使用工具的智能助手，正在�
 - **存储平铺**：homework/ 所有产物直接落在根目录，不生成类别子文件夹；侧边栏按文件类别标签（doc/sheet/slide/pdf/image/text/code/other）分组展示。**平铺仅适用于用户直接查看的最终交付物**：结构化证据归档（homework/.evidence/）与临时执行空间（homework/.ai-workspace/）按专属目录结构留存、不受平铺限制，且证据层（.evidence/）绝不静默删除
 - 文件名 1~6 个简短关键词（中文或英文 kebab-case）、≤30 字符，禁完整句子/冗余词（例：homework/q3-sales-analysis.md）
 - 创建技能 → ~/BobWork/skills/<技能名>/SKILL.md（自动被系统加载）
-- Bob Sandbox 小程序 → bob-sandbox/apps/<appId>/（路径不加 homework/ 前缀）；改后调 capture_preview 截图核对渲染（真实 Chromium 渲染，支持 appId 预览地址），完成后提示用户左侧面板打开
+- Bob Sandbox 小程序 → bob-sandbox/apps/<appId>/（路径不加 homework/ 前缀）；改后调 capture_preview 截图核对渲染（真实 Chromium 渲染，支持 appId 预览地址），完成后提示用户：用节点 ▶ 预览，或到 Butler 左栏「Mini Apps」查看/打开已标星的小程序（商城入口在 Mini Apps 的 Browse store）
 - 处理文件：告知用户放入工作区 → read_file；可用 list_directory 确认存在
 - 答案不在训练知识/上下文/附件 → 直接承认"不确定"/"超出能力范围"，禁止遍历本地文件找线索
 - 需读项目外目录但未授权 → 回复末尾一次性列 AUTH_REQ:/完整绝对路径，每行一条（用途在正文说明）；前端会弹出授权请求卡片，用户批准后才生效；严禁逐个索要、严禁混排、严禁对超大范围（整个家目录/个人目录根/系统目录）发起
@@ -1056,6 +1085,8 @@ const BROWSER_RULES_HIPPO = `
 - **标准闭环**：\`browser_navigate\` 打开页面 → \`browser_snapshot\` 拿可交互元素（带 ref）→ \`browser_click\` / \`browser_type\` / \`browser_fill_form\` / \`browser_press_key\` 操作（用 ref 定位）→ \`browser_extract_text\` 读正文 / \`browser_screenshot\` 留证。页面跳转或 DOM 大改后 ref 失效，**重新 snapshot 再操作**
 - **ref 命名空间（shadow DOM / 子帧已打通）**：ref 可能是 \`e3\`（主文档）、\`s1-e2\`（页面里 web component 的 shadow root 内）、\`f1-e4\`（页面内 iframe 的子帧）、\`f1-s2-e5\`（子帧内的 shadow root）—— 前缀即作用域路径，直接原样传回 \`browser_click\` / \`browser_type\` 即可，**不要**试图去掉前缀或自己拼选择器。子帧元素由宿主在帧内执行（返回里带 \`frame\` 与 \`via: 'in-frame'\`）；页内脚本 \`bb.$\` 跨不到子帧，这些元素只能用工具层操作。返回里的 \`frames\` 一节列出本次扫到的子帧及其元素数，是「有 iframe 但没内容」时的判断依据
 - **常用增强**：页面是异步渲染时用 \`browser_wait_for\`（等元素）/ \`browser_wait_for_text\`（等文本）/ \`browser_wait_network_idle\`（等请求静默）；多标签用 \`browser_list_tabs\` / \`browser_switch_tab\` / \`browser_open_tab\` / \`browser_close_tab\`；需要归档页面用 \`browser_export_pdf\`（落盘 homework/.evidence/），读已打开的 PDF 用 \`browser_read_pdf\`
+- **等待语义（重要）**：\`browser_snapshot\` 只等约 1.5s、\`browser_open_tab\` 只等约 3s、\`browser_extract_text\` 正文一出现就返回 —— 返回 \`ready:false\` / 新标签标题为空 / \`[!] 页面可能未加载完\` 都是正常信号，**继续用 \`browser_wait_for_text\` / \`browser_wait_network_idle\` 或下一次 snapshot**，不要重复打开标签、也不要连续重发同一个 snapshot
+- **下载网页上的文件（重要）**：入口明显（能直接看到下载链接/按钮）就直接 \`browser_download\`（传 \`url\` 直链或相对 href，或传 \`ref\` / \`selector\`；宿主会真实点击，登录态与 JS 处理器都生效）；入口不明显（图标按钮、列表很长、整页元素很多）先 \`browser_find_downloads\`（只扫下载入口，比整页 snapshot 便宜；返回空或入口在 iframe/shadow 里时再 \`browser_snapshot\`），拿到 \`selector\` / \`href\` 再 \`browser_download\`。它默认在「开始」后再等 2s（\`waitMs\` 可调到 30s，传 0 立即返回），返回 \`{ download: { id, fileName, savePath, state, totalBytes } }\`；小文件此时就是 \`completed\`，仍是 \`progressing\` 时用 \`browser_downloads\` 传 \`id\` + \`waitMs=5000\` 再等一次（最多查 2–3 次，不要连续空转）；用户要求打开下载所在文件夹时传 \`reveal:true\`（completed 才生效）；需要把文件放进项目 \`materials/\` 时，再用 \`browser_save_download\` 传 \`download.id\`（默认 \`materials/downloads\`，可用 \`folder\` 指定子目录）。**不要**用 \`browser_export_pdf\` 代替下载（那是把页面打印成 PDF），**不要**用 \`browser_read_pdf\` 取原文件（它只返回文本、原件留在临时目录），**不要**用 \`browser_run_js\` 把二进制读成 base64，**不要**用 \`browser_wait\` 盲等下载完成 —— 有 \`browser_downloads\` 就查状态
 - **PDF 页换工具，不要判空（重要）**：当前页是 PDF（地址以 \`.pdf\` 结尾，或落在内置 pdf-viewer 查看页）时 \`browser_extract_text\` 拿不到正文 —— 直接调 \`browser_read_pdf\` 取文本（无需参数＝读当前页，长文件传 \`maxChars\`），**不要因为提取为空就断言"页面没有内容"**
 - **扫描件 PDF 走 OCR（重要）**：\`browser_read_pdf\` 返回的文本为空或只有零星几个字符（扫描件没有文字层），把该返回里的 \`path\` 直接交给 \`ocr_document\` 做识别，拿逐页文本 + \`qualityScore\`；质量低时它默认自动升级视觉模型。手写字段（姓名 / 日期 / 印章 / 签名）识别结果波动属正常，**不要整页反复重试** —— 改用 \`crop_image\` 裁出可疑区域单独复核，并在答复里标注【需人工复核】。远程 PDF 拿不到本地 \`path\` 时，先 \`browser_export_pdf\` 落盘，再对返回的落盘路径做 OCR
 - **\`browser_extract_text\` 带 \`note\` 时按它执行**：返回里的 \`[PDF]\` / \`[LOGIN]\` / \`[EMPTY]\` 前缀即成因分类 —— \`PDF\` → 改用 \`browser_read_pdf\`；\`LOGIN\` → 登录墙，按上面凭据红线如实告知用户手动登录；\`EMPTY\` → 页面可能尚未渲染完，先 \`browser_wait_for_text\` / \`browser_wait_network_idle\` 再重试。\`note\` 是成因提示，**不要把它当成页面正文写进答复**
@@ -1066,7 +1097,7 @@ const BROWSER_RULES_HIPPO = `
 - 抓取网页正文优先用 web_fetch；遇强反爬站点（百度系/知乎/小红书等）被 403/风控拦截时，改用 \`browser_navigate\` + \`browser_extract_text\` / \`browser_snapshot\` 走真实浏览器会话，不要反复重试 web_fetch
 - **失败纪律**：\`browser_navigate\` 已内置加载等待；报 inject（元素不存在/不可交互）时不要盲目重试同一 ref，先重新 snapshot 确认；报 driver（桥不可用）时如实告知用户"Hippo Browser 未运行，请打开 BobWork 的 Hippo Browser 窗口"，不要假装成功
 - **凭据红线**：禁止用 \`browser_run_js\` 读取或回显密码、验证码等敏感输入框的值；遇登录墙时如实告知用户"请在 Hippo Browser 窗口内完成登录后告诉我继续"，不要索要凭据、不要臆造自动登录能力
-- **能力边界（如实告知，不臆造）**：本通道提供浏览器操作的全部常规能力（导航 / 等待 / 元素交互 / 内容提取 / 脚本 / 截图与 PDF 导出 / 标签页 / cookie 与 storage / 网络与 console 监控 / 阅读）。**本通道不提供**：站内搜索与 research 宏、笔记沉淀、应用内登录弹窗（detect_login / login / login_fill）、操作录播（record_start / record_stop / playback）、视频字幕提取（extract_video_text）——这是两个通道的分工（Hippo 免装扩展、Bob Browser 操作用户真实 Chrome），不是临时缺失。遇到这类需求如实说明"该能力由 Bob Browser 通道提供"，不要假装调用不存在的工具、也不要把缺失说成待修问题
+- **能力边界（如实告知，不臆造）**：浏览器对话栏默认 **Core 档**，提供导航 / 等待 / 元素交互 / 内容提取 / 脚本 / 截图与 PDF 导出 / 文件下载与进度查询 / 标签页 / 阅读；cookie/storage、网络/console、拖拽/坐标/视口/前进后退等高级工具在 **Full 档**（设置 → Hippo Browser → Browse toolset 切换）。**若某工具不在本轮工具列表，不要假装调用**：如实说明该工具未启用（侧栏 Core 档可在设置切 Full），或改用现有工具完成。**本通道不提供**：站内搜索与 research 宏、笔记沉淀、应用内登录弹窗（detect_login / login / login_fill）、操作录播（record_start / record_stop / playback）、视频字幕提取（extract_video_text）——这是两个通道的分工（Hippo 免装扩展、Bob Browser 操作用户真实 Chrome），不是临时缺失。遇到这类需求如实说明"该能力由 Bob Browser 通道提供"，不要假装调用不存在的工具、也不要把缺失说成待修问题
 - **收尾**：页面保留在 Hippo Browser 窗口内供用户查看，无需 disconnect 之类收尾调用
 `;
 
@@ -1106,7 +1137,9 @@ const BROWSER_SIDEBAR_RULES = `
   不要中途停下等一个不存在的写入能力。
 - 需要留档时走本档既有通道：读过的来源自动汇总成答复下方的 **Sources Read** 卡片（用户勾选即导入
   项目 \`materials/\`）；整页归档用 \`browser_export_pdf\`（落盘 homework/.evidence/）。
-- 用户明确要的产物是文件（Word / Excel / 图片 / 独立 HTML 等）时，如实说明"本对话栏只做浏览器任务、
+- **网页上已有的文件（附件/下载链接）不算「产出文件」**：直接用 \`browser_download\` 下载（存到系统下载目录，
+  返回 id / savePath），再用 \`browser_downloads\` 确认完成；用户要把文件放进项目时，用 \`browser_save_download\` 传 id（落 \`materials/\`，同样不算产出文件）。这不是本档缺失的落盘能力，不要拒绝或让用户去画布会话。
+- 用户明确要的产物是**新生成**的文件（Word / Excel / 图片 / 独立 HTML 等）时，如实说明"本对话栏只做浏览器任务、
   不产出文件，请到画布会话中处理"，不要假装已生成。
 
 ## 输出风格（窄栏阅读）
@@ -1412,6 +1445,7 @@ const NODE_PARAM_INJECT_TOOLS = new Set([
   'intern_search',
   'read_file',
   'write_file',
+  'edit_code',
   'rename_file',
   'delete_file',
   'list_directory',
@@ -1431,6 +1465,8 @@ registerTakeover({
       parsed.current_node_id = ctx.currentNodeId;
       // Coding 节点标识：工具据此强制所有写操作落 bob-sandbox/apps/<appId>/（不落 homework）
       if (ctx.sandboxAppId) parsed.node_sandbox_app_id = ctx.sandboxAppId;
+      // 管家派发会话的批次标识：工具据此把交付物改道到 outbox（不写当前项目 homework/）
+      if (ctx.outboxBatchId) parsed.node_outbox_batch_id = ctx.outboxBatchId;
       return JSON.stringify(parsed);
     } catch {
       // 参数解析/回写失败时原样传递（与原 if 内联 try/catch 一致）
@@ -2317,6 +2353,13 @@ async function buildMindChangesInjection(agentId: string): Promise<string> {
  * - MAX_DUPLICATE_CALLS：同一工具+相同参数的重复次数限制（防模型原地打转）
  */
 const STALL_LIMIT = 3;
+
+/** AI Coding（绑定小程序）任务硬预算（2026-10-10 评估 B4）：
+ *  小程序迭代是"改码 → 预览截图 → 再改"的**交替调用**，单工具收敛/停滞保护都难触发，
+ *  叠加"失败被误判成功"时可无限烧 token。这里给 coding 任务加轮数 + 墙钟双阈值，
+ *  超限即注入收尾说明并进入强制收尾轮（只触发一次，见 kctx.taskBudgetExceeded）。 */
+const CODING_TASK_MAX_ROUNDS = 25;
+const CODING_TASK_MAX_MS = 10 * 60 * 1000;
 /** 同一工具+相同参数的最大重复次数 */
 const MAX_DUPLICATE_CALLS = 2;
 /** 页面状态已变（同参数调用之后发生过页面交互）时的放宽上限。
@@ -3639,6 +3682,11 @@ function isPageStateTool(toolName: string): boolean {
   return toolName.includes('browser_');
 }
 
+/** 轮询型工具：相同参数重复调用是正常用法（查询下载进度），不参与去重 */
+function isPollingTool(toolName: string): boolean {
+  return toolName === 'browser_downloads' || toolName.endsWith('__browser_downloads');
+}
+
 /** 会改变当前页面内容的交互工具（DOM 写操作 / 会话跳转 / 视口变化）。
  *  这些操作多数不改 URL，但会让上一次的内容读取结果失效——URL 指纹抓不到这种变化。
  *  MCP 通道为 `mcp__<server>__browser_xxx` 下划线形式，故按后缀匹配。 */
@@ -3647,6 +3695,7 @@ const PAGE_INTERACTION_TOOLS = [
   'browser_press_key', 'browser_submit', 'browser_check', 'browser_uncheck',
   'browser_select_option', 'browser_hover', 'browser_drag', 'browser_scroll',
   'browser_mouse_wheel', 'browser_run_js', 'browser_page_script', 'browser_upload_file',
+  'browser_download',
   'browser_handle_dialog', 'browser_back', 'browser_forward', 'browser_reload',
   'browser_switch_tab', 'browser_close_tab', 'browser_resize_viewport',
 ];
@@ -3774,6 +3823,8 @@ interface KernelContext {
   convergenceRounds: number;
   /** 收敛护栏门控：已触发后不再重复注入「停止穷举」指令 */
   toolConvergenceExceeded: boolean;
+  /** AI Coding 任务硬预算门控：已触发后不再重复注入收尾说明（与 forceFinalRound 解耦，避免互相打架） */
+  taskBudgetExceeded: boolean;
   /** 工具循环思考降级遥测：执行轮降级计数（对照 done hitRate 判断 thinking 降级是否影响缓存命中） */
   thinkingDowngradedRounds: number;
   /** 思考决策可见性（方向 D）：每轮实际模式/降级/C1 命中记录，done 帧带出供前端展示 */
@@ -3823,7 +3874,9 @@ export async function POST(request: NextRequest) {
        *  写类，其它通道只读）；缺省 = 桌面流式通道，行为不变 */
       channel?: 'wechat' | 'feishu' | 'panel';
       /** 多智能体协作模式（chat 界面开关）：激活 team 场景并注入「用户代理」规则，主 agent 用 team_run 交
-       *  goal，宿主拉起队长（captain）会话做规划与整合 */
+       *  goal，宿主拉起队长（captain）会话做规划与整合。
+       *  能力门控：仅 supportsTeamCollab(profile) 的画像生效（dynamic 画像或 fixedScenes 含 team）；
+       *  coding / 市场 agent 等 fixed 画像即使传 true 也忽略，不注入规则、不激活 team 场景。 */
       multiAgentMode?: boolean;
       /** 本次执行的成员名单（Multi-agent mode 弹窗选定的已安装 agent id）：不落盘，仅本轮生效；
        *  服务端把它交给队长（captain）规划时参考，并在队长补充名单外成员时强制弹卡请用户批准 */
@@ -4220,21 +4273,48 @@ export async function POST(request: NextRequest) {
     let sandboxCodingInjection = '';
     // 供工具循环注入：当前节点关联的 bob-sandbox appId（Coding 节点所有写入强制落 bob-sandbox/apps/，不落 homework）
     let toolLoopSandboxAppId: string | undefined;
+    // 供工具循环注入：管家派发会话的 Outbox 批次 id（交付物改道落暂存区，不写当前项目 homework/）
+    let toolLoopOutboxBatchId: string | undefined;
     if (nodeId) {
       try {
         const project = await resolveNodeProject(nodeId, projectId);
         const node = project ? await loadNodeById(nodeId, project.path) : null;
         const sandboxAppId = node?.frontmatter?.sandbox_app_id;
         if (sandboxAppId && typeof sandboxAppId === 'string') toolLoopSandboxAppId = sandboxAppId;
+        const outboxBatchId = node?.frontmatter?.outbox_batch_id;
+        if (outboxBatchId && typeof outboxBatchId === 'string') toolLoopOutboxBatchId = outboxBatchId;
         sandboxCodingInjection = await contextRuntime.buildCodingSandboxInjection({ node });
       } catch (e) {
         console.warn('AI Coding 上下文注入失败:', e instanceof Error ? e.message : String(e));
+      }
+    }
+    // ===== 路径 A：管家在自己的会话里直接回复（无派发节点/批次）=====
+    // 与派发会话同口径：交付物一律先落 Outbox 暂存区，不写当前项目 homework/。
+    // 批次按 threadId 稳定复用（同一会话多轮写入归入同一批），用户归口后才进目标项目。
+    const isButlerChatOutbox = !toolLoopOutboxBatchId && identity === 'butler' && !!butlerThreadId;
+    if (isButlerChatOutbox && butlerThreadId) {
+      try {
+        const { ensureChatBatch } = await import('@/lib/outbox/store');
+        const batch = await ensureChatBatch(butlerThreadId, {
+          originProjectId: projectId || null,
+          originLabel: 'Butler',
+        });
+        toolLoopOutboxBatchId = batch.batch_id;
+      } catch (e) {
+        console.warn('Outbox 批次创建失败（管家产物仍写当前项目）:', e instanceof Error ? e.message : String(e));
       }
     }
     // 缓存前缀稳定化（C8）：AI Coding 上下文属「低频变化」动态内容（同一节点内字节稳定），
     // prepend 到当前轮 user 消息而非 system（缓存头），system 保持字节稳定
     if (sandboxCodingInjection) {
       finalMessages = prependDynamicContext(finalMessages, sandboxCodingInjection);
+    }
+    // 管家对话 + Outbox：告知真实落点与产物声明写法（卡片要指向暂存区真实路径，否则点不开）
+    if (isButlerChatOutbox && toolLoopOutboxBatchId) {
+      finalMessages = prependDynamicContext(
+        finalMessages,
+        `【产物落点】本会话由你直接应答：write_file / edit_code 的交付物会被系统自动改道到 Outbox 暂存区（批次 ${toolLoopOutboxBatchId}），不会写入当前项目。照常写 homework/xxx 即可；正文末尾的产物声明请写 \`OutputFile: outbox/${toolLoopOutboxBatchId}/homework/<文件名>\`（工具返回的 Written 路径同此口径），这样文件卡片能直接打开。收尾时告诉用户"文档已暂存到 Outbox，可在 Butler 左栏 Outbox 指定归口项目"。`,
+      );
     }
 
     // ===== Bob-Mind 面板改动回看注入（仅 mind agent） =====
@@ -4281,7 +4361,16 @@ export async function POST(request: NextRequest) {
               : {}),
           }
         : profile;
-      const toolRuntime = new ToolRuntime({ settings: settingsForTools, profile: toolProfile, sandbox: !!sandbox, enabledMcpIds });
+      const toolRuntime = new ToolRuntime({
+        settings: settingsForTools,
+        profile: toolProfile,
+        sandbox: !!sandbox,
+        enabledMcpIds,
+        // 截图自检优先用当前模型的原生 vision（仅当模型声明支持时）；否则工具内回退 bob-ocr-mcp。
+        ...(providerModelId && apiKey && baseUrl && chatModelSupportsVision(providerModelId)
+          ? { visionModel: { providerModelId, apiKey, baseUrl } }
+          : {}),
+      });
       await toolRuntime.register();
 
       // mcpManager 宿主侧调用（bobby 急停清除 / 浏览器当前页 URL 指纹）仍留在 route 原位
@@ -4382,15 +4471,20 @@ export async function POST(request: NextRequest) {
       // 节点「强制使用」勾选均不产出 team。多智能体是重操作（每成员一条独立 /api/chat 会话，
       // 成本 ≈ N 倍），必须由用户显式开关开启，不接受任何自动触发路径。
       // 注意：本段在 sticky 合并之后 —— 开关是 per-request 语义，不写入会话 sticky，关掉即恢复单 agent。
+      // 多智能体能力门控：team_run 只在 team 场景注入，而 fixed 画像（coding / 市场 agent）
+      // 的 fixedScenes 不含 team（见 CODING_PROFILE 注释）→ 必须忽略 multiAgentMode。
+      // 护栏点：旧节点 frontmatter 里可能仍遗留 multi_agent_mode=true，或直接调 API 传 true；
+      // 否则会走成「注入 MULTI_AGENT_RULES 要求调 team_run，工具面里却没有 team_run」的反向错位。
+      const teamModeOn = supportsTeamCollab(profile) && multiAgentMode === true;
       // 本次成员名单（chat 节点「Multi-agent mode」弹窗选定的已安装 agent id）：不落盘、仅本轮生效。
       // 两处消费：① 队长规划消息（优先用名单内成员）；② team_run 的执行上下文（名单外补充成员强制弹卡）。
-      const presetAgentIds = multiAgentMode && Array.isArray(body.presetAgentIds)
+      const presetAgentIds = teamModeOn && Array.isArray(body.presetAgentIds)
         ? body.presetAgentIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
         : [];
       // 队长（captain）规划时参考的成员名单段：**只交给队长**（经 team_run 的执行上下文注入，
       // 见下方 ctx.teamRosterSection），不进主 agent 的 user 消息——主 agent 已退化为纯用户代理。
       let teamRosterSection = '';
-      if (multiAgentMode) {
+      if (teamModeOn) {
         activeScenes.add('team');
         // 注入「用户代理」规则（队长规则由宿主在 captain 会话里注入，主 agent 不参与编排）
         finalMessages = prependDynamicContext(finalMessages, MULTI_AGENT_RULES);
@@ -4697,6 +4791,8 @@ export async function POST(request: NextRequest) {
               convergenceTool: null,
               convergenceRounds: 0,
               toolConvergenceExceeded: false,
+              // AI Coding 任务预算门控（2026-10-10 B4）：
+              taskBudgetExceeded: false,
               // 工具循环思考降级遥测（item 4 验证）：执行轮降级轮数（对照 done 日志 hitRate）
               thinkingDowngradedRounds: 0,
               // 思考决策可见性（方向 D）：每轮实际模式入账
@@ -4824,6 +4920,24 @@ export async function POST(request: NextRequest) {
             for (let round = 0; ; round++) {
               // 客户端已断开（前端看门狗 abort / 用户点停止）→ 不再发起新一轮模型调用
               if (request.signal.aborted) throw new Error('客户端已断开连接，本轮已中止。');
+
+              // ===== AI Coding 任务硬预算（2026-10-10 评估 B4）=====
+              // 绑定小程序的 coding 节点：轮数 或 墙钟超限 → 注入收尾说明 + 强制收尾轮。
+              // 只触发一次（taskBudgetExceeded），避免与"收尾轮解除"逻辑互相打架导致反复注入。
+              if (
+                !kctx.taskBudgetExceeded &&
+                !!toolLoopSandboxAppId &&
+                (round >= CODING_TASK_MAX_ROUNDS || Date.now() - kctx.taskStartMs > CODING_TASK_MAX_MS)
+              ) {
+                kctx.taskBudgetExceeded = true;
+                kctx.conversationMessages.push({
+                  role: 'user',
+                  content: `已达到本任务预算上限（${CODING_TASK_MAX_ROUNDS} 轮或 ${Math.round(CODING_TASK_MAX_MS / 60000)} 分钟）。请立即停止一切工具调用，基于已完成的修改给出最终回答，并在末尾用【未完成项】如实列出还没做完的部分；不要声称已完成未经预览验证的改动。`,
+                });
+                send({ task_budget_exceeded: true, rounds: round, nodeId });
+                kctx.forceFinalRound = true;
+                continue;
+              }
               // 场景中途激活（search_capabilities / load_skill 法律技能）→ 用最新 activeScenes
               // 重算 toolDefs 再重建 loopToolDefs，下一轮模型请求携带新工具集；
               // 重建后本会话场景已 sticky，后续轮次字节稳定。
@@ -4907,6 +5021,20 @@ export async function POST(request: NextRequest) {
                 ? executionDowngrade(round, isFinalRound, level, thinkingPolicyConfig)
                 : null;
               let roundEffort = downgradeDecision?.reasoningEffort ?? baseEffort;
+              // 浏览器侧栏专用例外：执行轮几乎都是机械动作（snapshot / click / download），
+              // 在 harnessPure 固定档下也定向降一档，避免每轮都按 high 思考烧时间。
+              // 规划轮（round 0）与收尾轮保持原档；用户关闭 downgradeOnExecution 即恢复纯固定档。
+              if (
+                !downgradeDecision &&
+                profile.id === 'browser' &&
+                modelSupportsThinking &&
+                round > 0 &&
+                !isFinalRound &&
+                baseEffort !== 'none' &&
+                thinkingPolicyConfig.downgradeOnExecution
+              ) {
+                roundEffort = downgradeEffortOnce(roundEffort);
+              }
               // 截断重试第 2 次起：连输出预算翻倍都还撞顶 → 定向再降一档思考（harnessPure=true 下也生效：
               // 这是对本任务**已观测故障**（finish_reason=length 空轮）的纠偏，不是常态执行轮降级）。
               if (kctx.truncationRetries >= 2 && modelSupportsThinking && baseEffort !== 'none') {
@@ -5388,7 +5516,7 @@ export async function POST(request: NextRequest) {
 
                 // 检查是否重复调用同一工具+相同参数
                 // 浏览器工具额外感知页面状态：页面已跳转（kctx.lastPageUrl 变化）→ 参数相同但结果不同，不视为重复
-                let skipDuplicate = isDuplicateCall(toolName, parsedArgs, kctx.allToolCalls);
+                let skipDuplicate = !isPollingTool(toolName) && isDuplicateCall(toolName, parsedArgs, kctx.allToolCalls);
                 if (skipDuplicate && isPageStateTool(toolName) && kctx.lastPageUrl) {
                   const argKey = JSON.stringify(parsedArgs);
                   for (let i = kctx.allToolCalls.length - 1; i >= 0; i--) {
@@ -5747,6 +5875,7 @@ export async function POST(request: NextRequest) {
                 const injectedExecArgs = nodeParamTakeover?.transformArgs?.(toolName, execArgs, {
                   currentNodeId: nodeId,
                   sandboxAppId: toolLoopSandboxAppId,
+                  outboxBatchId: toolLoopOutboxBatchId,
                   agentId: profile.id,
                 });
                 if (injectedExecArgs !== null && injectedExecArgs !== undefined) {
@@ -5865,6 +5994,8 @@ export async function POST(request: NextRequest) {
                     teamQuestionText: initialUserInput || undefined,
                     // 当前项目上下文：透传给队长会话的 /api/chat
                     projectId,
+                    // web_search / web_fetch 按次计费时把费用记到当前项目（无项目则记全局）
+                    projectRoot: projectRoot || undefined,
                   });
                 } finally {
                   clearInterval(keepalive);
@@ -6152,7 +6283,13 @@ export async function POST(request: NextRequest) {
                 ? join(projectRoot, 'homework', '.ai-workspace')
                 : join(homedir(), 'BobWork', SANDBOX_DIRNAME);
               const _pr = projectRoot || join(homedir(), 'BobWork', SANDBOX_DIRNAME);
-              const outputFiles = extractOutputFiles(kctx.allToolCalls, _pr, workspacePath);
+              // 仅管家直聊要把自己的 Outbox 批次产物做成卡片；派发会话仍只在 Outbox 面板呈现
+              const outputFiles = extractOutputFiles(
+                kctx.allToolCalls,
+                _pr,
+                workspacePath,
+                isButlerChatOutbox ? toolLoopOutboxBatchId : undefined,
+              );
               // 合并续写请求携带的初始产物（如模板填充面板生成的文件）：
               // 仅接受项目内 homework/、materials/ 相对路径（含历史 attachments/），拒绝路径穿越
               if (Array.isArray(initialOutputFiles)) {
@@ -6176,7 +6313,7 @@ export async function POST(request: NextRequest) {
               // 兜底：比对 homework/ 目录快照，把本轮任何新写入的成果文件（含脚本产物）补进输出卡片
               // （按 .ownership.json 归属过滤，并行节点的产物不入本卡片）
               if (projectRoot && kctx.homeworkSnapshot) {
-                for (const f of await diffHomeworkFiles(kctx.homeworkSnapshot, projectRoot, nodeId)) {
+                for (const f of await diffHomeworkFiles(kctx.homeworkSnapshot, projectRoot, nodeId, toolLoopOutboxBatchId)) {
                   if (!outputFiles.some((o) => o.path === f.path)) outputFiles.push(f);
                 }
               }

@@ -33,7 +33,6 @@ import {
   type ButlerThreadSource,
 } from './threads';
 import { parseModelTag, parseThinkingLevel, trimThreadMessages } from './threads-shared';
-import { RECORDER_THREAD_ID } from './storage';
 import type { ChatMessage } from '@/lib/bus';
 
 /** 占位 nodeId（仅满足 /api/chat 的参数要求，非实际落盘节点） */
@@ -365,8 +364,7 @@ export async function streamButlerTurn(
       // 会话身份（2026-10-02）：同上——记忆来源归因与规则预算都靠它，nodeId 只是占位符
       threadId,
       thinkingLevel: level,
-      // 常驻「Recorder」线程走专属身份（工具面收口到会议场景）；其余抽屉/微信会话恒为管家身份
-      identity: threadId === RECORDER_THREAD_ID ? 'recorder' : 'butler',
+      identity: 'butler',
       // 会话级人设（该线程建过才带）：route 在 Butler 通道里以「覆盖」语义注入系统提示
       ...(thread?.persona ? { persona: thread.persona } : {}),
       ...(projectId ? { projectId } : {}),

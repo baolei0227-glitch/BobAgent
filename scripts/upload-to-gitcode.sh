@@ -47,17 +47,24 @@ err()  { echo "${C_RED}❌ $*${C_RESET}"; }
 # ---------- 1. 检查产物文件 ----------
 log "检查构建产物 ..."
 FILES=()
+OUTPUT_DIR_MAC="$OUTPUT_DIR"
+# Windows 产物由 pack-win.sh 直接落在 release/（mac 仍走 release-dist）。
+# 两者都扫，但**互不要求**：只发 mac 或只发 win 都能跑。
+WIN_OUTPUT_DIR="$PROJECT_DIR/release"
 for f in \
-  "$OUTPUT_DIR/BobWork-${VERSION}-macos-arm64.dmg" \
-  "$OUTPUT_DIR/BobWork-${VERSION}-macos-arm64.zip" \
-  "$OUTPUT_DIR/latest-mac-arm64.yml" \
-  "$OUTPUT_DIR/latest-mac.yml"; do
+  "$OUTPUT_DIR_MAC/BobWork-${VERSION}-macos-arm64.dmg" \
+  "$OUTPUT_DIR_MAC/BobWork-${VERSION}-macos-arm64.zip" \
+  "$OUTPUT_DIR_MAC/latest-mac-arm64.yml" \
+  "$OUTPUT_DIR_MAC/latest-mac.yml" \
+  "$WIN_OUTPUT_DIR/BobWork-${VERSION}-win-x64.exe" \
+  "$WIN_OUTPUT_DIR/BobWork-${VERSION}-win-x64.exe.blockmap" \
+  "$WIN_OUTPUT_DIR/latest.yml"; do
   [ -f "$f" ] && FILES+=("$f")
 done
 
 if [ ${#FILES[@]} -eq 0 ]; then
-  err "未找到任何构建产物（在 $OUTPUT_DIR）"
-  err "请先执行 package-release.sh 生成产物"
+  err "未找到任何构建产物（mac: $OUTPUT_DIR / win: $WIN_OUTPUT_DIR）"
+  err "请先执行 package-release.sh（mac）或 pack-win.sh（Windows）生成产物"
   exit 1
 fi
 
@@ -179,15 +186,19 @@ for f in "${FILES[@]}"; do
   fi
 done
 
-# ---------- 6. 验证 latest-mac.yml 可访问 ----------
-log "验证 latest-mac.yml 下载地址 ..."
-YML_CHECK=$(curl -s -o /dev/null -w "%{http_code}" -L \
-  "${DOWNLOAD_BASE}/latest/latest-mac.yml")
-if [ "$YML_CHECK" = "200" ]; then
-  ok "latest-mac.yml 可访问: ${DOWNLOAD_BASE}/latest/latest-mac.yml"
-else
-  warn "latest-mac.yml 暂不可访问 (HTTP $YML_CHECK)，可能需要等待 CDN 缓存刷新"
-fi
+# ---------- 6. 验证自动更新清单可访问 ----------
+# Windows 的 latest.yml 与 mac 的 latest-mac.yml 是**同一目录下的两个不同文件**，
+# 必须都验：只验 mac 时，Windows 用户「检查更新」会静默停在旧版本（HTTP 404 被 updater 吞掉）。
+for yml in latest-mac.yml latest.yml; do
+  log "验证 ${yml} 下载地址 ..."
+  YML_CHECK=$(curl -s -o /dev/null -w "%{http_code}" -L \
+    "${DOWNLOAD_BASE}/latest/${yml}")
+  if [ "$YML_CHECK" = "200" ]; then
+    ok "${yml} 可访问: ${DOWNLOAD_BASE}/latest/${yml}"
+  else
+    warn "${yml} 暂不可访问 (HTTP $YML_CHECK)，可能需要等待 CDN 缓存刷新"
+  fi
+done
 
 # ---------- 7. 输出下载地址 ----------
 echo ""
@@ -201,8 +212,9 @@ echo ""
 echo "📦 GitCode 下载地址（国内推荐）:"
 echo "   ${DOWNLOAD_BASE}/${TAG}/"
 echo ""
-echo "🔗 latest-mac.yml（自动更新清单）:"
-echo "   ${DOWNLOAD_BASE}/latest/latest-mac.yml"
+echo "🔗 自动更新清单:"
+echo "   macOS  ${DOWNLOAD_BASE}/latest/latest-mac.yml"
+echo "   Windows ${DOWNLOAD_BASE}/latest/latest.yml"
 echo ""
 echo "🌐 Release 页面:"
 echo "   https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}/releases/${TAG}"

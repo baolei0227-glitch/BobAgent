@@ -45,3 +45,31 @@ describe('docx 分发', () => {
     expect(matchRenderer('bin', bin('a.bin'))?.id).toBe('binary');
   });
 });
+
+/**
+ * 视频分发回归（2026-10-18 新增 VideoViewer）
+ *
+ * 三条不变量：① mp4/m4v/mov 命中 video 而非 binary 兜底；② 不可解码容器（mkv/avi）不注册；
+ * ③ `.webm` 仍归 audio（音频编辑器入口不能被无声挪走）。
+ */
+describe('视频分发', () => {
+  it('mp4/m4v/mov 命中 video 渲染器，而不是 binary 兜底', () => {
+    expect(matchRenderer('mp4', bin('a.mp4'))?.id).toBe('video');
+    expect(matchRenderer('m4v', bin('a.m4v'))?.id).toBe('video');
+    expect(matchRenderer('mov', bin('a.mov'))?.id).toBe('video');
+  });
+
+  it('Chromium 无法解复用的容器不注册（仍回落 binary）', () => {
+    expect(matchRenderer('mkv', bin('a.mkv'))?.id).toBe('binary');
+    expect(matchRenderer('avi', bin('a.avi'))?.id).toBe('binary');
+  });
+
+  it('.webm 仍归 audio（音频编辑器入口不因视频注册而消失）', () => {
+    expect(matchRenderer('webm', bin('a.webm'))?.id).toBe('audio');
+  });
+
+  it('视频不进 Hippo 白名单（仍在预览面板内播）', () => {
+    expect(isBrowserDoc('a.mp4')).toBe(false);
+    expect(isBrowserDoc('a.mov')).toBe(false);
+  });
+});

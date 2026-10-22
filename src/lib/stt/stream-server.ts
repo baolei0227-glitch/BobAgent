@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
 import { createResidentManager, type ResidentInstance } from '@/lib/stt/resident-process';
+import { sharedLibEnv } from '../platform';
 
 /** 空闲多久自动回收常驻服务端：每次 start 续期，避免录音结束后进程长期驻留 */
 const STREAM_IDLE_MS = 3 * 60 * 1000;
@@ -102,7 +103,7 @@ const resident = createResidentManager<StreamServerSpec & { key: string }, Strea
       {
         env: {
           ...process.env,
-          DYLD_LIBRARY_PATH: [spec.libDir, process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+          ...sharedLibEnv(spec.libDir),
         },
         // 服务端把启动/连接日志写到 stderr，stdout 无内容
         stdio: ['ignore', 'ignore', 'pipe'],

@@ -29,9 +29,22 @@ import { resolveAppRoot } from '@/lib/app-root';
 import { downloadFile, downloadProgress, extractTarBz2, fileSize } from '@/lib/net/download';
 import { startStreamServer, stopStreamServer } from '@/lib/stt/stream-server';
 import { punctuateViaServer, stopPunctServer } from '@/lib/stt/punct-server';
+import { ARCH, IS_WIN, PLATFORM, exeName, sharedLibEnv } from '../platform';
 
 const BINARY_VERSION = 'v1.13.8';
-const BINARY_BYTES: Record<string, number> = { arm64: 20_314_448, x64: 22_846_038 };
+/**
+ * 官方 shared 包体积，按 `${平台}-${架构}` 分键。
+ *
+ * 为什么必须带平台：arm64 与 x64 在 mac 上是两个数，而 mac-x64 与 win-x64 是**同名不同包**；
+ * 只按架构分键会让 Windows 复用 macOS 的体积去校验，结果不是「下载中断」就是「装了个半包」。
+ * 没有登记的键 ⇒ 该平台不受支持（Windows 只出 x64，与安装包 target 一致）。
+ */
+const BINARY_BYTES: Record<string, number> = {
+  'darwin-arm64': 20_314_448,
+  'darwin-x64': 22_846_038,
+  'win32-x64': 24_805_859,
+};
+const engineKey = (): string => `${PLATFORM}-${ARCH}`;
 const BINARY_ARCHIVE = 'sherpa-onnx-offline.tar.bz2';
 const LOCAL_STT_TIMEOUT_MS = 120_000;
 
@@ -51,23 +64,23 @@ function libDir(): string {
   return path.join(sttRoot(), 'lib');
 }
 function binaryPath(): string {
-  return path.join(binDir(), 'sherpa-onnx-offline');
+  return path.join(binDir(), exeName('sherpa-onnx-offline'));
 }
 /** 同一 shared 包内的流式 WS 服务端（renderer 直连它做边说边出字） */
 function streamServerBinaryPath(): string {
-  return path.join(binDir(), 'sherpa-onnx-online-websocket-server');
+  return path.join(binDir(), exeName('sherpa-onnx-online-websocket-server'));
 }
 /** 同包内的 TTS CLI（与 STT CLI 同处 bin/，装一次两者都有）——供 lib/tts/sherpa-local 复用 */
 export function sherpaTtsBinaryPath(): string {
-  return path.join(binDir(), 'sherpa-onnx-offline-tts');
+  return path.join(binDir(), exeName('sherpa-onnx-offline-tts'));
 }
 /** 同包内的离线说话人分离 CLI（与 STT CLI 同处 bin/，装一次引擎就有）——供 lib/stt/diarize 复用 */
 export function sherpaDiarizationBinaryPath(): string {
-  return path.join(binDir(), 'sherpa-onnx-offline-speaker-diarization');
+  return path.join(binDir(), exeName('sherpa-onnx-offline-speaker-diarization'));
 }
 /** 按需编译的声纹提取 CLI（本项目 native/spk_embed.c 用 clang 现场编译而来）——供 lib/stt/speaker-embed 复用 */
 export function sherpaSpkEmbedBinaryPath(): string {
-  return path.join(binDir(), 'spk-embed');
+  return path.join(binDir(), exeName('spk-embed'));
 }
 /** shared 包的 lib 目录（子进程运行时靠 DYLD_LIBRARY_PATH 找 dylib）——供 lib/tts/sherpa-local 复用 */
 export function sherpaLibDir(): string {
@@ -132,6 +145,18 @@ const CAP_DIARIZE = { batch: false, realtime: false, punctuates: false, diarizes
 
 export interface OfflineSttModelDef extends LocalSttModelBase {
   capabilities: typeof CAP_BATCH;
+  /**
+   * 该模型只出裸字、需要外部补标点（如 Zipformer CTC）。
+   * 批量链路会在每段转写后调 `punctuateText`（CT-Transformer）补句读；
+   * SenseVoice 自带标点/ITN，故不设该位。
+   */
+  needsPunctuation?: boolean;
+  /**
+   * CLI 是否支持**一次传多个 wav**（批量转写）。
+   * 默认 true；Zipformer CTC 实测传多个会报 `input x Got:3 Expected:1`，故显式 false ⇒
+   * parseAudio 直接走逐段转写，不做一次注定失败的批量尝试（也避免留下误导性的错误日志）。
+   */
+  supportsBatchFiles?: boolean;
   /** 构造 sherpa-onnx-offline 的模型参数（dir = 该模型落盘目录） */
   buildArgs: (dir: string) => string[];
 }
@@ -177,6 +202,9 @@ export function isDiarizationModel(def: LocalSttModelDef): def is DiarizationStt
 }
 
 const SENSE_BASE = `${HF}/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main`;
+// 中文专用、2025-07-03 的 Zipformer CTC（int8）：WER 1.74 / 5.92 / 7.75（aishell / wenetspeech net / meeting），
+// 实测 RTF 0.062。模型只出裸字，标点由 CT-Transformer 补（见 needsPunctuation）。
+const ZIPFORMER_CTC_ZH_BASE = `${HF}/csukuangfj/sherpa-onnx-zipformer-ctc-zh-int8-2025-07-03/resolve/main`;
 const ZIPFORMER_STREAM_BASE = `${HF}/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main`;
 // 标点 CT-Transformer（中英）：GitHub 官方 int8 包本机带宽拉不动，改用 hf-mirror 上的等价 int8 镜像
 const PUNCT_CT_BASE = `${HF}/ranger810/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/resolve/main`;
@@ -203,6 +231,27 @@ export const LOCAL_STT_MODELS: LocalSttModelDef[] = [
       '--sense-voice-use-itn=true',
       // 语言默认 auto，短音频/带口音时会把中文误判成韩/日文（实测输出过 "그."），故锁定中文
       '--sense-voice-language=zh',
+    ],
+  },
+  {
+    // 2025-07-03 中文专用 Zipformer CTC：榜单 WER 1.74 / 5.92 / 7.75（aishell / wenetspeech net / meeting），
+    // 速度很快；代价是**只出裸字**（批量链路补标点，见 needsPunctuation）。
+    // 注意：8k 电话录音的 10 段 A/B 与 SenseVoice 互有胜负（会漏词/多出幻觉），故只作可选引擎，不设默认。
+    id: 'zipformer-ctc-zh-2025-07-03',
+    capabilities: CAP_BATCH,
+    label: 'Zipformer CTC (zh, 2025)',
+    languages: 'zh',
+    description: 'Chinese-only, fast; punctuation added separately; phone-call A/B is mixed',
+    totalBytes: 367_074_356 + 13_366,
+    files: [
+      { name: 'model.int8.onnx', url: `${ZIPFORMER_CTC_ZH_BASE}/model.int8.onnx`, bytes: 367_074_356 },
+      { name: 'tokens.txt', url: `${ZIPFORMER_CTC_ZH_BASE}/tokens.txt`, bytes: 13_366 },
+    ],
+    needsPunctuation: true,
+    supportsBatchFiles: false,
+    buildArgs: (dir) => [
+      `--zipformer-ctc-model=${path.join(dir, 'model.int8.onnx')}`,
+      `--tokens=${path.join(dir, 'tokens.txt')}`,
     ],
   },
   {
@@ -297,13 +346,22 @@ export function speakerEmbeddingModelPath(): string | null {
 // 平台 / 安装状态
 // ============================================================
 
-/** 当前平台是否有可用的官方 CLI 包（仅 macOS arm64 / x64 提供 shared 版） */
+/** 当前平台是否有可用的官方 CLI 包（macOS arm64/x64、Windows x64 提供 shared 版） */
 export function isLocalSttSupported(): boolean {
-  return process.platform === 'darwin' && !!BINARY_BYTES[process.arch];
+  return !!BINARY_BYTES[engineKey()];
 }
 
 function binaryUrl(): string {
-  return `https://github.com/k2-fsa/sherpa-onnx/releases/download/${BINARY_VERSION}/sherpa-onnx-${BINARY_VERSION}-osx-${process.arch}-shared.tar.bz2`;
+  const base = `https://github.com/k2-fsa/sherpa-onnx/releases/download/${BINARY_VERSION}`;
+  // Windows 与 macOS 的归档命名完全不同：
+  //   osx: sherpa-onnx-v1.13.8-osx-arm64-shared.tar.bz2
+  //   win: sherpa-onnx-v1.13.8-win-x64-shared-MT-Release.tar.bz2
+  // 后者还有 MD/MT × Release/Debug 多种变体：选 MT-Release（静态 CRT），
+  // 免装 VC++ 运行库也能起；MD 版在干净的 Windows 上会缺 vcruntime140.dll。
+  if (IS_WIN) {
+    return `${base}/sherpa-onnx-${BINARY_VERSION}-win-${ARCH}-shared-MT-Release.tar.bz2`;
+  }
+  return `${base}/sherpa-onnx-${BINARY_VERSION}-osx-${ARCH}-shared.tar.bz2`;
 }
 
 export async function isLocalSttBinaryInstalled(): Promise<boolean> {
@@ -320,7 +378,7 @@ export async function getSherpaEngineStatus(): Promise<{
   totalBytes: number;
 }> {
   const installed = await isLocalSttBinaryInstalled();
-  const totalBytes = BINARY_BYTES[process.arch] ?? 0;
+  const totalBytes = BINARY_BYTES[engineKey()] ?? 0;
   const downloadedBytes = installed ? totalBytes : await downloadProgress(binaryArchivePath(), totalBytes);
   return { installed, path: binaryPath(), downloadedBytes, totalBytes };
 }
@@ -342,10 +400,10 @@ export async function isLocalSttModelReady(id: string): Promise<boolean> {
 /** 下载并安装 CLI（shared 包解压后保留 bin/ 与 lib/ 同级结构，二进制靠 @executable_path/../lib 找 dylib） */
 export async function installLocalSttBinary(): Promise<void> {
   if (!isLocalSttSupported()) {
-    throw new Error(`Local STT engine is not supported on this platform (official builds exist only for macOS arm64 / x64; current ${process.platform}-${process.arch}).`);
+    throw new Error(`Local STT engine is not supported on this platform (official builds exist for macOS arm64/x64 and Windows x64; current ${PLATFORM}-${ARCH}).`);
   }
   const archive = binaryArchivePath();
-  await downloadFile(binaryUrl(), archive, BINARY_BYTES[process.arch]);
+  await downloadFile(binaryUrl(), archive, BINARY_BYTES[engineKey()]);
 
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'bob-sherpa-'));
   try {
@@ -361,7 +419,8 @@ export async function installLocalSttBinary(): Promise<void> {
     await fs.mkdir(binDir(), { recursive: true });
     await fs.cp(srcBin, binDir(), { recursive: true });
     await fs.cp(srcLib, libDir(), { recursive: true });
-    await fs.chmod(binaryPath(), 0o755);
+    // Windows 没有可执行位概念（fs.chmod 只改只读位），跳过即可
+    if (!IS_WIN) await fs.chmod(binaryPath(), 0o755);
     if ((await fileSize(binaryPath())) === 0) throw new Error('sherpa-onnx-offline executable missing after extraction');
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
@@ -555,10 +614,11 @@ export function parseSherpaStdoutLines(stdout: string, expected?: number): strin
 function runSherpa(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath(), args, {
-      // shared 包运行时依赖同目录 dylib：@executable_path/../lib 之外再兜一层（保留调用方已有路径）
+      // shared 包运行时依赖同目录 dylib：@executable_path/../lib 之外再兜一层
+      // （macOS 走 DYLD_LIBRARY_PATH，Windows 走 PATH —— 见 sharedLibEnv）
       env: {
         ...process.env,
-        DYLD_LIBRARY_PATH: [libDir(), process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+        ...sharedLibEnv(libDir()),
       },
     });
     let stdout = '';
@@ -595,9 +655,13 @@ async function assertBatchModelReady(modelId: string): Promise<OfflineSttModelDe
   return def;
 }
 
-export async function sherpaTranscribe(wavPath: string, modelId: string): Promise<string> {
+export async function sherpaTranscribe(
+  wavPath: string,
+  modelId: string,
+  extraArgs: string[] = [],
+): Promise<string> {
   const def = await assertBatchModelReady(modelId);
-  const { stdout, stderr, code } = await runSherpa([...def.buildArgs(modelDir(modelId)), wavPath]);
+  const { stdout, stderr, code } = await runSherpa([...def.buildArgs(modelDir(modelId)), ...extraArgs, wavPath]);
   if (code !== 0) {
     const tail = stderr.trim().split('\n').slice(-6).join(' | ').slice(0, 400);
     throw new Error(`Local STT transcription failed (exit ${code}): ${tail}`);
@@ -619,13 +683,17 @@ const TRANSCRIBE_BATCH_SIZE = 32;
  * 返回与入参**一一对应**的文本数组（该段没识别出内容则为空串）；行数不符即抛错（见
  * parseSherpaStdoutLines），由调用方决定退回逐段转写。
  */
-export async function sherpaTranscribeMany(wavPaths: string[], modelId: string): Promise<string[]> {
+export async function sherpaTranscribeMany(
+  wavPaths: string[],
+  modelId: string,
+  extraArgs: string[] = [],
+): Promise<string[]> {
   if (wavPaths.length === 0) return [];
   const def = await assertBatchModelReady(modelId);
   const out: string[] = [];
   for (let i = 0; i < wavPaths.length; i += TRANSCRIBE_BATCH_SIZE) {
     const batch = wavPaths.slice(i, i + TRANSCRIBE_BATCH_SIZE);
-    const { stdout, stderr, code } = await runSherpa([...def.buildArgs(modelDir(modelId)), ...batch]);
+    const { stdout, stderr, code } = await runSherpa([...def.buildArgs(modelDir(modelId)), ...extraArgs, ...batch]);
     if (code !== 0) {
       const tail = stderr.trim().split('\n').slice(-6).join(' | ').slice(0, 400);
       throw new Error(`Local STT batch transcription failed (exit ${code}): ${tail}`);
@@ -724,12 +792,12 @@ export async function startLocalSttStreamServer(modelId: string): Promise<LocalS
 
 /** 标点 CLI：与 STT CLI 同处 shared 包的 bin/，装一次引擎就有（常驻服务不可用时的回退） */
 function punctuationBinaryPath(): string {
-  return path.join(binDir(), 'sherpa-onnx-offline-punctuation');
+  return path.join(binDir(), exeName('sherpa-onnx-offline-punctuation'));
 }
 
 /** 常驻标点服务可执行文件：对应 native/punct_server.c，首次使用时由 clang 按需编译落位 */
 function punctServerBinaryPath(): string {
-  return path.join(binDir(), 'punct-server');
+  return path.join(binDir(), exeName('punct-server'));
 }
 
 /** 当前可用的标点模型 id；无则 null（引擎未装 / 模型未下载齐） */
@@ -770,7 +838,7 @@ export async function punctuateText(text: string): Promise<string> {
         timeout: LOCAL_STT_TIMEOUT_MS,
         env: {
           ...process.env,
-          DYLD_LIBRARY_PATH: [libDir(), process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+          ...sharedLibEnv(libDir()),
         },
       },
     );

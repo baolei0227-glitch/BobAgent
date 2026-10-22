@@ -23,6 +23,13 @@ export const BUTLER_FOCUS_NOTICE_EVENT = 'butler:focus-notice';
  * 刻意不携带数字：角标真值由服务端 COUNT 决定，这里只负责「该去问一下了」。
  */
 export const BUTLER_UNREAD_CHANGED_EVENT = 'butler:unread-changed';
+/**
+ * 「把悬浮球送回原位」信号（无 detail）：
+ *   主窗口里点抽屉左轨红键「关闭」时派一次 —— 语义是「收起抽屉，并且球回到中栏（对话区）
+ *   左下角」，同时丢弃用户拖拽过的位置。
+ *   注意：这条**不动 BobWork 窗口本身**（要不要最小化窗口是用户的事，不替用户决定）。
+ */
+export const BUTLER_ORB_HOME_EVENT = 'butler:orb-home';
 
 /** 唤起 Today 页 */
 export function openButlerToday(): void {

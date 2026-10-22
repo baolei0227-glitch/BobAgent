@@ -105,7 +105,17 @@ export function pythonCandidates(
   if (platform === 'win32') {
     const local = env.LOCALAPPDATA || '';
     const programFiles = env.ProgramFiles || 'C:\\Program Files';
+    // 随包资源目录：安装版是 <resources>/python，由 scripts/assemble-win-python.mjs 组装。
+    // 主进程与 Next 服务子进程都要能解析它 —— 后者没有 process.resourcesPath，
+    // 故 main.ts 会显式注入 BOBWORK_RESOURCES，这里是同一套语义的第二入口。
+    const resources =
+      env.BOBWORK_RESOURCES ||
+      (process as unknown as { resourcesPath?: string }).resourcesPath ||
+      '';
     const bundled = [
+      // 主进程显式注入（打包版一定有）：直接命中随包解释器，省掉一次目录猜测
+      env.BOBWORK_PYTHON || '',
+      resources ? join(resources, 'python', 'python.exe') : '',
       local ? join(local, 'BobWork', 'python', 'python.exe') : '',
       join(programFiles, 'BobWork', 'python', 'python.exe'),
     ].filter(Boolean);
@@ -168,7 +178,7 @@ export function pythonBin(usedBy = 'Python 脚本'): string {
         '\n' +
         (IS_WIN
           ? 'Windows 版应随包内置嵌入式 Python（含 python-docx / Pillow / lxml）：' +
-            '%LOCALAPPDATA%\\BobWork\\python\\python.exe。若该目录不存在，说明安装不完整。'
+            '<应用目录>\\resources\\python\\python.exe。若该目录不存在，说明安装不完整。'
           : '请安装 Xcode Command Line Tools（xcode-select --install）或 python3。'),
     );
   }
@@ -216,8 +226,8 @@ export interface Capability {
 const HINTS: Record<CapabilityId, string> = {
   curl: IS_WIN ? 'Windows 10 1803+ 自带 curl.exe；缺失请检查 System32 是否在 PATH 中。' : 'macOS 自带 /usr/bin/curl。',
   tar: IS_WIN ? 'Windows 10 1803+ 自带 tar.exe（bsdtar）；缺失请检查 System32。' : 'macOS 自带 /usr/bin/tar。',
-  zip: IS_WIN ? 'Windows 无 zip 命令行；改用内置打包器（计划中）。' : 'macOS 自带 /usr/bin/zip。',
-  python: IS_WIN ? '需随包内置嵌入式 Python（含 python-docx / Pillow / lxml）。' : '需安装 Xcode Command Line Tools 或 python3。',
+  zip: '内置打包器（adm-zip）随应用分发，无需系统 zip 命令。',
+  python: IS_WIN ? '随包内置嵌入式 Python（<resources>/python，含 python-docx / Pillow / lxml）。缺失说明安装不完整。' : '需安装 Xcode Command Line Tools 或 python3。',
   ffmpeg: '随包分发（@ffmpeg-installer）—— 缺失说明依赖没装全：pnpm install 后重试。',
   clang: IS_WIN ? 'Windows 无 clang；标点/声纹的 C 源需改为预编译 DLL 或纯 JS/WASM。' : '需 Xcode Command Line Tools。',
   bash: IS_WIN ? 'Windows 无 bash；Agent 执行层需映射到 PowerShell。' : 'POSIX 自带。',
@@ -287,6 +297,11 @@ export function probeCapability(id: CapabilityId): Capability {
     case 'powershell': {
       const p = resolvePowershell();
       return { id, available: !!p, path: p ?? undefined, hint: HINTS[id] };
+    }
+    case 'zip': {
+      // 两平台都不依赖系统 zip：主进程用随包的 adm-zip（见 electron/main.ts saveImages）。
+      // 这里没有可解析的绝对路径，故不返回 path；需要打包时直接用内置实现。
+      return { id, available: true, hint: HINTS[id] };
     }
     case 'bash': {
       const p = pickFirstExisting(systemBinaryCandidates(id));

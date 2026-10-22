@@ -14,6 +14,1432 @@
 
 ***
 
+## v0.7.746 (2026-10-22)
+
+> 跨平台基础层落地：把散落在 20+ 文件的 `process.platform` 判断与 POSIX 路径假设收敛到 `lib/platform`，为 Windows 支持铺路；macOS 行为保持不变。
+
+### 修复与优化
+
+* **新增平台层**（[runtime.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/runtime.ts) · [binaries.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/binaries.ts) · [index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/index.ts)）：统一平台标识、PATH 分隔符与大小写语义、可执行文件候选探测（`.exe`）与共享库环境变量，缺能力时显式抛错而不是静默降级。
+* **本地语音引擎接入**：sherpa 转写、标点服务、流式服务、说话人嵌入与声纹分离（[src/lib/stt](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt) · [sherpa-local.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/tts/sherpa-local.ts)）统一按平台解析二进制与库路径；不支持的平台给出明确错误，不再出现"功能悄悄消失"。
+* **Electron 主进程**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts)）：ffmpeg 路径统一走 `exeName`，随包 Python 路径按平台解析。
+* **清理**：移除 `punct-server.ts` 未使用的导入，ESLint 零错误。
+
+***
+
+## v0.7.745 (2026-10-22)
+
+> Hippo 浏览器「胶囊态」交互补完：收起后的小胶囊现在可以拖到顺手的位置，并记住落点。
+
+### 修复与优化
+
+* **胶囊可拖拽、记忆位置**（[HippoCapsule.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/hippo-browser/HippoCapsule.tsx) · [globals.css](file:///Users/baolei/Desktop/BobWork/projects/src/app/globals.css)）：按住胶囊可拖动（相对默认顶部居中的偏移），松手落盘到 `localStorage`，下次收起回到同一处；位移超过阈值判定为拖拽并吞掉随后的 click，不会误触恢复窗口。拖到视口边缘保留 8px 内缩，避免贴边抓不住。
+* **主进程配合**（[hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts)）：切页自动收起的幂等处理仅在窗口可见、未收起且无焦点时生效，避免打断正在浏览器里输入的用户。
+* **视觉**：胶囊拖拽态去掉过渡与 hover 放大、切换抓取光标，呼吸灯与阴影细节同步。
+
+***
+
+## v0.7.744 (2026-10-22)
+
+> Audio 转写继续补完「可编辑时间轴」与「人与 AI 协作改稿」：插入断句的时间改为自由调整并按时间自动归位；润色视图也能调轮起点；每行新增行级 AI 润色，修改先以修订对照呈现，确认后才落盘。
+
+### 新增
+
+* **行级 AI 润色**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx) · [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：每行常驻半透明的 `✦`，只把**这一行此刻的文字**（含未落盘草稿）交给模型润色，不动时间轴与其他行。结果先以 Word 式修订对照展示（删除线 + 高亮），`Accept` 才落盘，`Discard` / `Esc` 原样退回。
+* **润色视图调时间**：轮首时间戳右侧新增时钟按钮，保存成功后直接把播放头 seek 到新时间（只定位，不改播放状态）。
+* **插入行默认时间取播放头**：新断句的时间默认取当前播放头（夹在本行起点与下一行起点之间），落盘后上一行的 `end` 自动收到新行起点。
+
+### 修复与优化
+
+* **插入断句时间自由调整**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts)）：可落在音频内任意位置，改完按时间**自动归位**（段序、正文与润色轮一起重排），不截短任何邻段；`activeSegmentIndex` 的二分始终依赖有序段列。
+* **测试**（[transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)）：新增插入行归位/重排、润色轮时间对齐等用例，单测共 124 条全绿。
+
+***
+
+## v0.7.743 (2026-10-21)
+
+> v0.7.742 的断句修复只对**新插入**的行生效：旧 sidecar 里没有 `inserted` 字段的老断句，升级后仍会被并进邻轮，表现为"改说话人还是连带整轮"。本版补上老数据兼容。
+
+### 修复与优化
+
+* **老断句自动识别**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts)）：新增 `isInsertedSegment`，按"与上一段时间区间完全一致"推断手工插入行（ASR 段首尾相接、严格递增，相邻同区间只可能是插入行）。读盘时直接固化成 `inserted` 标记，之后写回即持久。
+* **老润色稿同步识别**：插入轮紧随锚点轮且区间一致，按"时间 + 文字全等"与"同区间的后一轮"两条判据补标记；对不上不猜。
+* **前端分轮防御**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：轮分组与润色视图映射统一走 `isInsertedSegment`，不再只看字段。
+* **测试**（[transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)）：新增老 sidecar 兼容用例（读盘固化、无标记断轮、只改插入行、润色文字被改写时仍能识别），单测共 113 条全绿。
+
+***
+
+## v0.7.742 (2026-10-21)
+
+> 本轮聚焦 **Audio 转写的可编辑时间轴**：支持双击改句子起点时间，并修掉手工断句（插入行）在「改说话人 / 改时间」时牵连邻轮的两个持久化缺陷。共 **5 个文件改动**（含 1 个测试文件）。
+
+### 修复与优化
+
+* **转写时间戳可编辑**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx) · [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) · [audio/clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：双击时间戳即可改句子起点（支持 `mm:ss` 或纯秒数，Enter 保存 / Esc 取消），乐观上屏、串行落盘、失败精确回滚。改完后点击时间戳直接跳到新时刻；播放高亮与润色视图边界同步更新。
+* **修复手工断句改说话人连带整轮**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts)）：插入行新增持久标记 `inserted`，自成一轮且不并入邻段；润色视图改按「时间 + 文字」精确配对，只改它自己。标记随 sidecar 往返，重启后不再复发。
+* **修复改时间时的时间轴缩水**：改插入行起点不再截短上一段的 `end`；普通段改起点只同步最近一段普通行，并跳过同 `start` 的插入轮，避免误伤。
+* **测试**（[transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)）：新增断句隔离、时间跳转一致性、sidecar 往返等用例，单测共 109 条全绿。
+
+***
+
+## v0.7.741 (2026-10-21)
+
+> 承接 v0.7.740 之后继续完成的改动，仍在 **Audio 转写**链路上迭代：转写处理、片段接口、播放器与转写面板。共 **5 个文件改动**（含 1 个测试文件）。
+
+### 修复与优化
+
+* **转写文本处理**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts) · [transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)）：转写文本处理的又一轮修正，测试同步更新。
+* **音频片段接口**（[audio/clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：片段生成接口的后续调整。
+* **Audio 播放器**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：播放与转写联动的后续修正。
+* **转写面板**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：转写内容展示与操作的后续修正。
+
+***
+
+## v0.7.740 (2026-10-21)
+
+> 承接 v0.7.739 之后继续完成的改动，仍在 **Audio 转写**链路上迭代：转写处理、片段接口、播放器与转写面板。共 **5 个文件改动**（含 1 个测试文件）。
+
+### 修复与优化
+
+* **转写文本处理**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts) · [transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)）：转写文本处理的又一轮修正，测试同步更新。
+* **音频片段接口**（[audio/clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：片段生成接口的后续调整。
+* **Audio 播放器**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：播放与转写联动的后续修正。
+* **转写面板**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：转写内容展示与操作的后续修正。
+
+***
+
+## v0.7.739 (2026-10-21)
+
+> 承接 v0.7.738 之后完成的改动，集中在 **Audio 转写**链路：转写文本处理、音频片段接口、播放器与转写面板的联动。共 **5 个文件改动**（含 1 个测试文件）。
+
+### 修复与优化
+
+* **转写文本处理**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts) · [transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)）：转写文本的清洗与分段逻辑修正，并补充对应测试。
+* **音频片段接口**（[audio/clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：片段生成接口的配套调整。
+* **Audio 播放器**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：播放与转写联动的后续修正。
+* **转写面板**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：转写内容展示与操作的后续修正。
+
+***
+
+## v0.7.738 (2026-10-21)
+
+> 承接 v0.7.737 之后继续完成的改动：**Hippo 搜索**接口与页面的又一轮修正。共 **2 个源文件改动**。
+
+### 修复与优化
+
+* **Hippo 搜索**（[hippo-search/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/hippo-search/route.ts) · [hippo-search/page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/hippo-search/page.tsx)）：搜索接口与页面的后续修正。
+
+***
+
+## v0.7.737 (2026-10-20)
+
+> 承接 v0.7.736 之后继续完成的改动，仍集中在 **Hippo 搜索**与 **Outbox 面板**：搜索接口与页面、主进程浏览器模块的后续调整，并新增 Butler 侧的 Outbox 面板组件。共 **4 个源文件改动**。
+
+### 新增功能
+
+* **Butler Outbox 面板**（[ButlerOutboxPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerOutboxPanel.tsx)）：管家侧「产物暂存区」的展示与归口操作面板。
+
+### 修复与优化
+
+* **Hippo 搜索**（[hippo-search/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/hippo-search/route.ts) · [hippo-search/page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/hippo-search/page.tsx)）：搜索接口与页面的后续修正。
+* **Hippo 浏览器模块**（[hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts)）：主进程浏览器模块的配套调整。
+
+***
+
+## v0.7.736 (2026-10-20)
+
+> 承接 v0.7.735 之后继续完成的改动，集中在 **Hippo 搜索页**、**Butler 面板**与 **Outbox 产物映射**三块：新增/调整 Hippo 搜索路由与页面、Butler 面板页，preload 桥接同步扩面；Outbox 存储与 `/api/outbox` 路由、管家产物文件清单与 `files/sources` 一并调整，并补充对应测试。共 **14 个源文件改动**（含 2 个测试文件）。
+
+### 新增功能
+
+* **Hippo 搜索页**（[hippo-search/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/hippo-search/route.ts) · [hippo-search/page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/hippo-search/page.tsx)）：搜索接口与页面的后续建设。
+
+### 修复与优化
+
+* **Butler 面板与抽屉**（[butler-panel/page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler-panel/page.tsx) · [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：面板页与抽屉的配套调整。
+* **Outbox 产物映射**（[outbox/store.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/outbox/store.ts) · [outbox/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/outbox/route.ts) · [butler/output-files.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/output-files.ts) · [files/sources.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/files/sources.ts)）：批次存储、接口路由、管家产物文件清单与文件来源解析的一致性修正；新增 [output-files.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/output-files.test.ts) / [store.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/outbox/store.test.ts)。
+* **Hippo 浏览器与 preload 桥接**（[hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts) · [preload.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/preload.ts)）：主进程浏览器模块与渲染层桥接面的同步调整。
+* **会话路由与工具装配**（[chat/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts) · [tools/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/index.ts)）：对话路由与工具集合的配套调整。
+
+***
+
+## v0.7.735 (2026-10-20)
+
+> 承接 v0.7.734（Dock 多余 `exec` 图标热修）之后继续完成的改动。本版为 **Butler 抽屉与 AI 编码沙箱桥接**的收口：抽屉交互细节、sandbox 侧「对话桥 / 主桥 / 编码文档注入」三处的后续调整，以及管家 `admin` 工具与「更新重启」确认弹窗的文案精简。共 **6 个源文件改动**（`electron/main.ts`、`ButlerDrawer.tsx`、`sandbox/bridge.ts`、`sandbox/chat-bridge.ts`、`sandbox/coding-docs.ts`、`chat/tools/admin.ts`）。
+
+### 修复与优化
+
+* **更新重启弹窗精简**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L2427-L2440)）：文案压缩为一句 `BobWork will reopen automatically. Your data is safe.`，按钮保持 `Restart Now` / `Later`，减少更新完成时的信息量。
+* **Butler 抽屉交互调整**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：抽屉侧的后续交互细节修正。
+* **AI 编码沙箱桥接调整**（[bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/bridge.ts) · [chat-bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/chat-bridge.ts) · [coding-docs.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/coding-docs.ts)）：沙箱主桥、对话桥与编码文档注入三处的后续修正。
+* **管家 admin 工具调整**（[admin.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/admin.ts)）：管家管理类工具的后续调整。
+
+***
+
+## v0.7.734 (2026-10-20)
+
+> 热修：**消除 macOS Dock 里多出的无图标 `exec` 图标** —— Next.js 服务子进程原先用 App 包内的裸可执行文件（`Contents/MacOS/BobWork`）以 `ELECTRON_RUN_AS_NODE=1` 启动，从 GUI 主进程拉起时会被 macOS 登记成**第二个前台应用实例**；裸 Mach-O 没有应用图标，Dock 里于是多出一颗通用可执行图标（悬停名字即 `BobWork`），每次启动必现。现改由包内 Frameworks 下带 `LSUIElement=true` 的 helper 启动（与 Chromium 自家 GPU / Renderer / Plugin helper 同款，天生不进 Dock）；运行时仍是同一份 Electron，Node 版本 / ABI 与 `process.resourcesPath` 均与原先完全一致。
+
+### 修复与优化
+
+* **Dock 不再出现多余 `exec` 图标**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L193-L224) · [main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L296-L298)）：新增 `resolveNodeRuntimeExecPath()` —— macOS 打包版在 `Contents/Frameworks/*Helper.app` 中解析可用 helper 二进制（排除 GPU / Renderer / Plugin 专用壳），找不到则**回退 `process.execPath`**（服务照常启动，绝不因此起不来）；Windows / Linux 行为完全不变。
+
+
+***
+
+## v0.7.733 (2026-10-20)
+
+> 本版两条主线：**管家产物「Outbox 暂存区」** —— 管家派发会话的交付物不再默认污染「当前项目」，先落 `<appRoot>/outbox/<批次>/`（每批自包含一份 `manifest.json`，删目录即整批消失），再由新的 **Outbox 面板**（或管家 `outbox_assign`）指定归口项目后搬入（搬入**先写目标、校验后再删源**）；以及**插件启动层与平台边界的一致性收口** —— MCP 子进程的启动环境抽成共用件 [child-env.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/child-env.ts)（`buildChildPath` / `nodeRuntimeSpawn`，与主进程同口径），新增**平台边界探针** [check-platform-bounds.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/check-platform-bounds.mjs)（棘轮制，把平台嗅探焊死在 `lib/platform/**` 一层），机器指纹取值收进平台层 [platform/identity.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/identity.ts)。另含管家「防重复建项目」事故修复、Butler 抽屉交互调整、随包插件面板声明对齐出厂预置与中间产物定期清扫。共 **40 个文件改动**（新增 11，含 3 个测试文件）。
+
+### 新增功能
+
+* **Outbox 产物暂存区**（[store.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/outbox/store.ts) · [outbox/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/outbox/route.ts) · [OutboxPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/OutboxPanel.tsx) · [app-root.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/app-root.ts)）：管家 `create_session` 派发的会话默认 `output_mode='outbox'` —— 交付物写 `<appRoot>/outbox/<批次>/homework/`、中间产物写 `<批次>/.ai-workspace/`，**对项目目录零写入**。批次自包含（`manifest.json` + 文件清单 + 状态 `pending` / `assigned` / `kept` / `discarded`），单批写入失败不影响其他批，**删除目录即整批消失、不留孤儿索引**。
+* **改道对模型透明**（[chat/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts) · [tools/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/index.ts)）：会话带 `outbox_batch_id` 后，`write_file` / `edit_code` 对 `homework/` 的写入会被**自动改道**到批次目录，脚本直写项目的产物也由系统搬正；这些产物不进「当前项目输出卡片」，只在 Outbox 面板呈现。
+* **平台边界探针（棘轮）**（[check-platform-bounds.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/check-platform-bounds.mjs)）：`src/` 下**除 `lib/platform/**` 外**禁止出现 `process.platform` / `process.arch` / `os.platform()`；历史 3 处嗅探（secrets / sherpa / bridge）当天全部迁进平台层，故表已清空、此后一律零容忍。已接入 `pnpm validate` 与 CI。
+
+### 修复与优化
+
+* **MCP 子进程启动环境统一**（[child-env.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/child-env.ts#L24-L57)）：`buildChildPath()` 合并 Homebrew / nvm / volta / npm global 与当前 PATH；`nodeRuntimeSpawn()` 一律用 `process.execPath + ELECTRON_RUN_AS_NODE=1`，**不再 spawn 系统 PATH 里的 node** —— 用户机器可能没装 node、或装的是 x64 / 版本不符（历史事故：随包原生模块 ABI 不匹配 → SIGSEGV）。OCR 常驻桥（[ocr-bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/ocr-bridge.ts)）与 [manager.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/manager.ts) 一并改走该层。
+* **机器指纹取值收进平台层**（[platform/identity.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/identity.ts)）：macOS `IOPlatformUUID` / Windows 注册表 `MachineGuid` / Linux `/etc/machine-id`，**不退回主机名**（DHCP 把主机名改成 IP、或用户改名，都会让已落盘密文全部解不开）；拼接格式仍留在 [secrets.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/secrets.ts)（数据契约，动了老密文就解不开）。
+* **管家「防重复建项目」**（[butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts#L2486-L2490)）：管家在「往已存在项目写待办 / 便签」时误调 `create_project`，会凭空多出一个同名（仅日期后缀不同）的重复项目 —— 现在**已有同名项目必须拒绝并指回它**。
+* **Butler 抽屉交互**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx#L4354-L4356)）：点击抽屉外任意处**不再**收起（收起只保留用户手动「缩小至悬浮球」），避免误触丢失上下文。
+* **随包插件面板声明对齐出厂预置**（[settings-server.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/settings-server.ts#L221-L223)）：出厂升级迁移 —— 系统随包插件的面板声明与出厂预置对齐。
+* **中间产物定期清扫**（[intermediate-cleanup.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/cleanup/intermediate-cleanup.ts)）：`homework/.ai-workspace/` 超过保留期（7 天）的中间文件定期清理（每 6 小时 + 启动兜底一次），且**绝不触碰 `homework/` 其他目录**（交付物所在）。
+
+### 验证
+
+* 全仓 `pnpm test` **153 文件 / 1838 例全绿**（较 v0.7.732 的 151 / 1821 增加 2 文件 / 17 例）；`tsc -p tsconfig.json` 通过；`pnpm check:platform-bounds` 无越界。
+* 打包流程 5b-assert 必须打印 `✅ main.js 外部依赖齐全: adm-zip, electron-updater`；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致。
+* 内置插件完整性：构建日志须逐个出现「已内置」标记（bob-team / bob-preview / bob-notes / bob-mind / coze / bobby / bob-video-shot / bob-ocr 共 8 个），缺任一即为构建失败告警。
+
+
+## v0.7.732 (2026-10-19)
+
+> 紧急修复 **v0.7.731 的启动崩溃**：打包版双击后主进程直接弹 `A JavaScript error occurred in the main process — Cannot find module 'adm-zip'`，应用起不来。根因是 [electron/main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L19) 在上一批新增了**静态** `import AdmZip from 'adm-zip'`（tsup 会把它原样外置成 `require('adm-zip')`，在**主进程 load 期**就求值），而 [package-release.sh](file:///Users/baolei/Desktop/BobWork/projects/scripts/package-release.sh#L204-L226) 为 `Resources/app` 装依赖用的是一份**手抄清单**、只写了 `electron-updater` —— 于是随包 `app/node_modules` 里没有 `adm-zip`，启动即崩（Windows 侧早已吃过同一个亏，故其流水线里本就有一道 `adm-zip` / `electron-updater` 存在性断言，mac 侧此前只靠手抄清单）。共 **2 个文件改动**（0 新增文件，0 测试改动）。
+
+### 修复与优化
+
+* **补上主进程缺失的运行时依赖**（[package-release.sh](file:///Users/baolei/Desktop/BobWork/projects/scripts/package-release.sh#L204-L226)）：`app/` 的最小依赖清单加入 `adm-zip`（版本取自根 [package.json](file:///Users/baolei/Desktop/BobWork/projects/package.json) 的 `dependencies`，与 `electron-updater` 同一写法）。
+* **新增一道断言，杜绝同类回归**（[package-release.sh](file:///Users/baolei/Desktop/BobWork/projects/scripts/package-release.sh#L228-L251) 新增 5b-assert）：装完依赖后**扫描 `app/main.js` 里实际 `require` 的外部模块**（剔除相对路径、`node:` 内建与 `electron`），逐个断言能在 `app/node_modules` 解析到 `package.json`；缺任何一个即**构建失败**（脚本为 `set -Eeuo pipefail`）。手抄清单从此不再是唯一防线 —— 与 [windows-build.yml](file:///Users/baolei/Desktop/BobWork/projects/.github/workflows/windows-build.yml) 的同名断言同源。
+
+### 验证
+
+* 全仓 `pnpm test` **151 文件 / 1821 例全绿**；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 打包流程新增的 5b-assert 必须打印 `✅ main.js 外部依赖齐全: adm-zip, electron-updater`（否则构建中断，不放行上传）；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致。
+* 回归验证点：解包后 `BobWork.app/Contents/Resources/app/node_modules/adm-zip` 必须存在，且 `.../app/main.js` 中 `require("adm-zip")` 可解析。
+
+
+## v0.7.731 (2026-10-19)
+
+> 本版主线是**跨平台（Windows）底座**：新增**平台适配层 `lib/platform`** —— 把长期散落在 **21 个文件**里的 `process.platform` 分支与 POSIX 硬编码（`/usr/bin/python3`、`/usr/sbin/lsof`、`PATH.split(':')`、`SIGKILL`…）收拢到**唯一一层**；补齐 **Windows 命令安全边界**（`del` / `rd` / `Remove-Item` / `format` / `diskpart` / `bcdedit` / `shutdown` 等原先整片处在放行侧）；新增 **Python 失败诊断层**（把 `ModuleNotFoundError` / `'python' is not recognized` / GBK 编码错翻译成可照做的处置）；并落地 **Windows 打包流水线**（跨平台编译 / 包管理器守卫 / standalone 组装与自检 / NSIS x64 出包）。另有一组**插件面板稳定性**改造：**端口生命周期整改**（表项唯一删除入口 + 条件复用 + 可达性探针）与**宿主 origin 稳定反代**（`/api/plugin-web/` 前缀，让 Hippo 书签不再随端口变化失效）。共 **59 个文件改动**（src 45 / scripts 10 / assets 3 / electron 1，含 9 个测试文件）。
+
+### 新增功能
+
+* **平台适配层（唯一允许出现平台差异的地方）**（[runtime.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/runtime.ts) · [binaries.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/binaries.ts) · [process.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/process.ts) · [index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/platform/index.ts)）：`PLATFORM` / `IS_WIN` / `pathKey` / `fsPathKey` / `splitPathList` / `exeName` / `windowsBinDirs` 等平台语义；外部可执行文件（`curl` / `tar` / `python3` / `ffmpeg`）的**解析与能力探测**（`requireCapability` 让「缺能力」显式抛错而非静默降级，结果按进程缓存）；进程查询 / 终止的跨平台语义（`lsof` → `netstat` / CIM、`ps` → CIM、`process.kill(SIGKILL)` → `taskkill /T`、父 pid **三态**判定使「查不到」不再掩盖「通道坏了」）。约定：业务代码不得直接写 `process.platform`。
+* **Windows 命令安全边界**（[command-guard.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/shell/command-guard.ts)）：从 5500 行的 [tools/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/index.ts) 抽出为**可被单测直接打靶**的独立模块 —— POSIX 规则**一字不改**保留（保证 mac 行为零变更，同时挡住 Windows git-bash 里的 `rm -rf /`），Windows 侧改用「**破坏性动词 × 灾难目标**」两段式判定，把 `del /f /s /q C:\*`、`rd /s /q`、`Remove-Item -Recurse -Force`、`format`、`diskpart`、`bcdedit`、`shutdown /s`、`wevtutil cl` 全部从放行侧收回；个人目录守卫补上 `C:\Users\…`。
+* **Python 失败诊断层**（[diagnostics.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/python/diagnostics.ts)）：把三类「用户看到的原文与真因完全是两件事」的报错翻译成可照做的处置 —— `ModuleNotFoundError: No module named 'docx'`（BobWork 的 Python 依赖没装 / 装到了另一个解释器）、`'python' is not recognized…`（这台机器没有 Python）、`UnicodeEncodeError: 'gbk' codec…`（Windows 控制台代码页 936）。
+* **插件面板端口生命周期 + 宿主 origin 稳定反代**（[panel-ports.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/panel-ports.ts) · [plugin-web.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/plugin-web.ts) · [plugin-web-proxy.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/http/plugin-web-proxy.ts)）：表项增加**唯一删除入口** `releasePanelPort`（卸载 / 禁用时由 manager teardown 调用）、**条件复用**（端口当前无人监听才复用 —— 正常崩溃重启端口不变、面板 iframe 不换地址；仍被占则换新端口，不让子进程被交给一个 `EADDRINUSE` 的端口）、`isPortAcceptingConnections` 可达性探针（TTL 缓存）；新增 `/api/plugin-web/` 前缀**逐字透传**反代，挂在 [server.ts](file:///Users/baolei/Desktop/BobWork/projects/src/server.ts) 的原生 HTTP 层（负载是 GB 级大 body 双向流，故不用 route handler），Hippo 原生书签只记「宿主 origin + 固定前缀」即可长期有效。
+* **小程序 Bridge 文档按需读取**（[coding-docs.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/coding-docs.ts)）：原先整段注入的 Bridge API 文档拆成 `read_bridge_docs` 工具，核心 prompt 只留一页索引 + 接入策略，模型真正需要存储 / 宿主资源 / 画布 / AI / hostTool 时再读对应分区。
+
+### 修复与优化
+
+* **平台化迁移**（[office.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/office.ts) · [ocr.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/ocr.ts) · [tools/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/index.ts) · [admin.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/admin.ts) · [local-files/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/local-files/route.ts) · [docx/revise/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/docx/revise/route.ts) · [skills/templates/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/skills/templates/route.ts) · [skills/templates/fill/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/skills/templates/fill/route.ts) · [download.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/net/download.ts) · [secrets.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/secrets.ts) · [app-root.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/app-root.ts) · [plugin-panels-server.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/plugin-panels-server.ts) · [main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts)）：把硬编码 `/usr/bin/python3`（8 处）、`/usr/bin/curl`、`/usr/bin/tar`、`/usr/sbin/lsof`、拿不到 `.exe` 的 `ffmpeg`、`PATH.split(':')` 等 POSIX 假设改走平台层；`local-files` 路由改用 `fsPathKey` 与新的 `range` / `mime` 工具；`secrets.ts` 的机器指纹采集不再依赖 `sysctl`。
+* **Butler 写类工具的「项目归属」收口**（[resolve-explicit-project.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/resolve-explicit-project.ts)）：`create_scheduled_todo` / `create_sticky_note` / `project_plan_*` 改为「**显式优先 + 兜底可见**」—— 用户点名项目就按名解析，没点名则落当前激活项目但**必须在回执里回显 `project_source`**，模型与用户都能立刻看出写偏，不再静默猜测导致「建→撤→建」；便签作用域与待办归属迁移同步打磨（[sticky-scope.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/sticky-scope.ts) · [todo-move.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/todo-move.ts) · [ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx)）。
+* **工程化：Windows 打包流水线**（[compile-desktop.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/compile-desktop.mjs) · [check-pm.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/check-pm.mjs) · [stage-standalone.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/stage-standalone.mjs) · [assemble-win-resources.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/assemble-win-resources.mjs) · [fix-win-node-modules.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/fix-win-node-modules.mjs) · [verify-standalone-native.mjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/verify-standalone-native.mjs) · [pack-win.sh](file:///Users/baolei/Desktop/BobWork/projects/scripts/pack-win.sh) · [platform-doctor.ts](file:///Users/baolei/Desktop/BobWork/projects/scripts/platform-doctor.ts) · [platform-selftest.ts](file:///Users/baolei/Desktop/BobWork/projects/scripts/platform-selftest.ts) · [build-electron.sh](file:///Users/baolei/Desktop/BobWork/projects/scripts/build-electron.sh)）：编译改走跨平台脚本（去 bash / 去 npx，直接 `node node_modules/tsup/dist/cli-default.js`，避免联网取到非本仓库版本导致构建静默漂移）；`preinstall` 不再 `npx only-allow pnpm`（改为本地 `check-pm.mjs`）；standalone 组装统一换成**自定义 `server.js` 入口**（补回远程登录 Token 网关与 CalDAV，工单 W-4）并兼容 **Next 16 standalone 落在子目录**的情形；Windows 侧补齐 nft 追踪漏掉的包、把 `.pnpm` 扁平化以规避 260 字符路径上限；**实测推翻**「随包原生模块必须重建」的假设（`better-sqlite3` 走 N-API，ABI 稳定）；新增 `pnpm doctor:platform` 能力自检与真机断言脚本。
+* **模块拆分**：`tools/index.ts` 里的 admin / ocr / office / butler 场景工具抽成独立文件（依赖方向单向，仅以 `import type` 依赖 index.ts，不产生运行时循环依赖）。
+* **技能文档**（[legal-drafter/SKILL.md](file:///Users/baolei/Desktop/BobWork/projects/assets/skills/legal-drafter/SKILL.md) · [document-templates.md](file:///Users/baolei/Desktop/BobWork/projects/assets/skills/legal-drafter/references/document-templates.md) · [export-format-rules.md](file:///Users/baolei/Desktop/BobWork/projects/assets/skills/legal-drafter/references/export-format-rules.md)）：文书模板库 / 导出格式规范 / SKILL 正文更新（含「修改已有文书时改用 `read_file` + `edit_code` 精确替换」的例外规则）。
+
+### 新增单测
+
+* 本批改动触及 **9 个测试文件**：`command-guard` / `platform` / `process` / `diagnostics` / `panel-ports` / `plugin-web-proxy` 的模块级测试，以及 `resolve-explicit-project` / `sticky-scope` / `butler-project` 既有测试的更新；全仓测试规模由上一版 v0.7.730 的 **146 文件 / 1705 例** 增至 **151 文件 / 1821 例**（**+5 文件 / +116 例**）。平台层的单元测试全部由**手写 Windows 输出样例**驱动（可在 mac 上真实驱动 Windows 分支），另配 `platform-selftest.ts` 用真实进程取证。
+
+### 验证
+
+* 全仓 `pnpm test` **151 文件 / 1821 例全绿**（较上一版 v0.7.730 的 146 文件 / 1705 例 **+5 文件 / +116 例**）；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+* **对 macOS 用户的可见面**：插件面板端口复用 / 稳定反代（Hippo 书签不再失效）、Python 报错文案可照做、Butler 写类工具回显 `project_source`、便签作用域与待办迁移打磨、小程序 Bridge 文档按需读取；**平台层 / 命令守卫 / Windows 打包流水线对 mac 行为无影响**（POSIX 命令规则刻意「一字不改」冻结，`lib/platform` 在 mac 上退化为恒等映射）。
+
+
+## v0.7.730 (2026-10-19)
+
+> 本版在管家（Butler）左栏的**悬浮球下方新增一个「Chats」会话键**：无论当前在 Today / Memories / Calendar 哪个分区，点一下即可**收起右栏、露出联系人列并聚焦输入框**，一键回到「好友列表 + 对话」这个默认视图；该键在**正常聊天态点亮**，一旦打开某个分区即熄灭。共 **1 个文件改动**（0 新增文件，0 测试改动）。
+
+### 新增功能
+
+* **左栏「Chats」会话键**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx#L4440-L4454)）：位于助理标（悬浮球河马线稿）正下方、`Buddy` 键上方，图标 `MessagesSquare`（两只并排气泡 = 一场会话），与 `Buddy` 的 `UsersRound`（两人并排 = 一段关系）同属一套视觉语言。
+  * 点击行为 = **`closeRight()` 收起右栏** + **`setContactsOpen(true)` 露出联系人列**（窄窗下联系人列是覆盖层）+ **`inputRef.current?.focus()` 聚焦输入框**，等于从任何右栏分区一键回到聊天。
+  * 点亮条件 `active={!rightVisible}`：**右栏未开**（正常聊天态）时点亮；一旦点开 Today / Memories / Calendar 等分区即熄灭。
+
+### 验证
+
+* 全仓 `pnpm test` **146 文件 / 1705 例全绿**；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+* 本批新增 UI 文案仅 `Chats` 一处（v0.7.729 编译产物中该字面量命中 0 文件，v0.7.730 命中 2 文件），其余同批源内改动（头部注释精简等）为**注释级**、未进入产物，故不计为可见变更。
+
+
+## v0.7.729 (2026-10-19)
+
+> 本版是**管家（Butler）「计划树 + 待办归口」的一轮闭环**：计划可收尾 / 重开 / 删除 / 重命名 / 改分类标签备注 / 归档恢复，步骤支持 due / owner / artifact / note；新增**跨项目计划总览**、**只读计划树接口**与项目侧栏计划视图；Today 建议并入「计划逾期 / 停滞」信号；计划步骤可**单向镜像为系统「Plan Todos」便签**；并落地**待办归口方案 A（Todo Inbox）**——按「有无项目 × 有无时间」四类收口，全局日历事件用 `__global__`，另提供待办在项目与 Inbox 之间的迁移工具。共 **34 个文件改动**（含 9 个新增单测文件）。
+
+### 新增功能
+
+* **计划树闭环与项目治理**（[butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts) · [plans.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/plans.ts)）：管家工具可**收尾（`done`）/ 重开（`abandoned`→重开）计划、删除计划、重命名、改分类 / 标签 / 备注、归档 / 恢复**；计划步骤支持 `due` / `owner` / `artifact` / `note`；并支持**按名找到已归档项目**。
+* **跨项目计划总览**（[registry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/registry.ts) · [butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts)）：一处看清各项目**计划进度、逾期步骤、停滞天数**，支持「按项目 / 含终态 / 仅需关注 / 停滞阈值」过滤。
+* **计划树共享数据层 + 只读接口**（[plans.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/plans.ts) · [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/projects/plans/route.ts)）：计划类型 / 读写 / 派生统计收拢到 `plans.ts`（`summarizePlan`、`PLAN_STALLED_DAYS = 14`），新增只读 `GET /api/projects/plans`。
+* **项目详情侧栏「Plans」只读计划树**（[ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx)）：**手风琴折叠**，里程碑 → 步骤，含状态点、完成划线、`due` 逾期标红；无数据时静默显示 `No active plans`。
+* **Today 建议新增「计划」信号**（[advice.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/advice.ts) · [today-advice.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/today-advice.ts) · [ButlerTodayPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerTodayPanel.tsx)）：计划的**逾期 / 停滞**并入今日建议卡，面板展示并支持刷新 AI reason。
+* **计划步骤 → 系统「Plan Todos」便签单向同步**（[plan-todo-sync.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/plan-todo-sync.ts) · [sticky-calendar-sync.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sticky-calendar-sync.ts)）：带 `due` 的未完成步骤自动**镜像成蓝色系统便签**（`PLAN_TODOS_NOTE_TITLE`），行级幂等；勾选便签**不回写**计划、不自动入日历、豁免便签数量上限。
+
+### 修复与优化
+
+* **待办归口方案 A（Todo Inbox）**（[sticky-scope.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/sticky-scope.ts) · [sticky-notes/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sticky-notes/route.ts) · [sticky-todo.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sticky-todo.ts) · [inspect.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/inspect.ts) · [daily-tasks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/daily-tasks.ts)）：按「**有无项目 × 有无时间**」四类落点收口；无激活项目时临时待办落入 app root 的 **Todo Inbox**（`INBOX_PROJECT_ID='__inbox__'`、`TODO_INBOX_NAME='Todo Inbox'`），**不再报 `NO_PROJECT`**；全局日历事件统一用 `GLOBAL_SCOPE_PROJECT_ID='__global__'`。
+* **待办归属迁移**（[todo-move.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/todo-move.ts) · [rule-exec.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/rule-exec.ts)）：`todo_update.move_to_project` 可把待办（**事件 + 便签行**）在项目与 Inbox 之间迁移，保留文本 / 勾选状态 / 事件锚点。
+* **支撑性改动**（[StickyTodoDock.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/StickyTodoDock.tsx) · [CanvasStickyNotes.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasStickyNotes.tsx) · [db/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/db/index.ts) · [profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts) · [console.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/console.ts) · [VideoViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/VideoViewer.tsx)）为上述功能的配套编辑（events 增加 scope 列等）。
+
+### 新增单测
+
+* [butler-plan.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler-plan.test.ts) · [butler-project.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler-project.test.ts) · [route.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/projects/plans/route.test.ts) · [plan-todo-sync.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/plan-todo-sync.test.ts) · [sticky-scope.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/project/sticky-scope.test.ts) · [sticky-calendar-sync.inbox.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sticky-calendar-sync.inbox.test.ts) · [todo-move.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/todo-move.test.ts) · [advice.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/advice.test.ts) · [registry.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/registry.test.ts)
+
+### 验证
+
+* 全仓 `pnpm test` **146 文件 / 1705 例全绿**（较上一版 v0.7.728 的 140 文件 / 1644 例 **+6 文件 / +61 例**）；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+
+## v0.7.728 (2026-10-18)
+
+> 本版修复「对话稿」面板的两处滚动跟随问题：**列表滑到底不再被拽回当前播放行（消除下滑自动回弹）**，且**润色稿视图的自动跟随恢复可用**，并支持**点击任意一行重新接上跟随**。共 **1 个文件改动**（0 新增文件，0 测试改动）。
+
+### 修复与优化
+
+* **对话稿滚动跟随修复**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：
+  * 移除 `onListScroll` 中「滚到列表底部就重新接上自动跟随」的错误规则 —— 该规则会在播放时把用户刚翻到底的列表又拽回当前播放行，表现为「下滑后自动回弹到最上面」。
+  * 改用「列表到跟播目标的距离是否变大」区分**用户滚动**与**程序滚动**（程序滚动由跟随目标自身引起，距离不会变大），据此决定暂停 / 恢复跟随。
+  * 为**润色稿行**补齐 DOM `ref`（原先仅原文行挂了 ref），使润色稿视图的自动跟随能取到目标行、恢复生效。
+  * 支持**点击任意一行**重新接上自动跟随。
+  * 以打包版真机复现根因，并用 Playwright 验证：下滑回弹消失、润色稿自动跟随恢复。
+
+### 验证
+
+* 全仓 `pnpm test` **140 文件 / 1644 例全绿**；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+* 本批**未引入新的 UI 文案**（v0.7.727 / v0.7.728 编译产物字符串集等量，改动为滚动 / 跟随逻辑）。
+
+
+## v0.7.727 (2026-10-18)
+
+> 本版补完 Markdown「批注 + 修订」闭环的最后一环：**拒绝（单条 / 整轮）AI 修订后，来源批注自动回锚到改写前的旧文本**，不再出现「拒绝完批注就『消失』、点不回原文」。根因是批注的 `quote` / 选区仍停在被还原掉的新文本上；本版让每轮改写额外记一份「改写前的批注锚点」`annotationBefore`，拒绝时按旧锚点还原并重绘高亮。共 **2 个文件改动**（0 新增文件，0 测试改动）。
+
+### 修复与优化
+
+* **拒绝 AI 修订后批注回锚（不再「批注消失」）**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx) + [MdAnnotationPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/MdAnnotationPanel.tsx)）：
+  * `RevisionRound` 新增可选 **`annotationBefore`**（改写前的批注锚点，字段同 `MdAnnotation` 的 `quote` / `from` / `to` / `prefix` / `suffix`）；`addPatchRound` 新增第 9 个参数 `annotationBefore`，在生成补丁轮次时随 `patch` / `annotationId` 一并落盘（仅在存在时写入，避免多余字段）。
+  * **逐条 AI 改写（按批注）** 在调用 `addPatchRound` 时传入改写前的批注锚点快照（`{ quote, from, to, prefix, suffix }`）；拒绝该轮即可把批注锚回旧文本。
+  * 新增 **`restoreAnnotationAnchor(round)`**：按 `annotationBefore` 把来源批注还原（用旧锚点覆盖 `quote` / 选区 / 上下文）并置回 `resolved: false`，再在 **`requestAnimationFrame`** 里重绘批注高亮 —— 等「整篇重建回旧内容」的状态更新先落定，再用旧锚点找位置，规避时序错位。
+  * `rejectRevision`（单条拒绝）与 `rejectAllRevisions`（整轮拒绝）在回滚修订后**均调用** `restoreAnnotationAnchor`；配对 `delete + insert` 会各调一次，**重复恢复幂等**，不产生副作用。
+* **错误文案收敛（源内，未逐字确证）**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：`选中范围已失效（文档已变化），请重新选择文字后再试` 目前仅留在气泡侧 [AnnotationBubble.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/extensions/AnnotationBubble.tsx)；严格定位失败统一报 `文档在 AI 改写期间发生了变化（选区已失效），请重新选择文字后再试`。该两串字面量在 v0.7.726 / v0.7.727 编译产物中的命中文件数一致（均 2），**本文件内的增删无法逐字确证**，故仅在此说明为源内收敛。
+
+### 验证
+
+* 全仓 `pnpm test` **140 文件 / 1644 例全绿**；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+* 标记（本版新增，已比对编译产物）：`annotationBefore` 在 v0.7.727 命中 2 个 chunk、v0.7.726 命中 0 个；v0.7.727 的 DocEditor chunk 内含 `restoreAnnotationAnchor` 的压缩实现（`a.annotationBefore` → 覆盖批注 + `requestAnimationFrame` 重绘），`rejectRevision` / `rejectAllRevisions` 均调用之。本批**未引入任何新的英文 UI 字面量**（v0.7.726 vs v0.7.727 编译产物字符串集等量，差异仅为本处逻辑与压缩改名）。
+
+
+## v0.7.726 (2026-10-18)
+
+> 本版三块：① **小程序预览改为「内联」** —— 右侧预览面板里的 Mini App 不再盖住全屏（`fixed inset-0 z-[340]` 弹层），改为在面板内 `embedded` 铺满；配套一个**只在开发期生效的布局守卫**（包裹层高度 < 50px 就告警）。② **商店卡片 `Open` 直接开 Hippo** —— 商店 / 普通用户点 Open 走 Hippo 顶层页（最稳），Coding 节点调试仍走应用内 Preview。③ **AI 改写不再改错段落** —— 文档在 AI 请求期间被重建 / 外部重载时选区 `from/to` 会漂移，旧逻辑回退「全文第一处相同文本」⇒ 改写落到另一个重复段落（表现为「视图跳到别的行、原来的选却没变」）；现在改为严格定位 + 请求期间暂停外部变更轮询 + sidecar 异步返回时不抢活动轮。共 **7 个文件改动**（0 新增文件，0 测试改动）。
+
+### 新增功能
+
+* **小程序预览内联（`embedded`）**（[SandboxPreviewFrame.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPreviewFrame.tsx) + [CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：`SandboxPreviewFrame` 新增可选 `embedded?: boolean`（默认 `false`）—— 内联时外层由 `fixed inset-0 z-[340] flex items-center justify-center bg-black/40 p-4` 改为 `flex h-full w-full overflow-hidden`，内框由 `h-[86vh] w-[1100px] … rounded-xl border shadow-2xl` 改为 `flex h-full w-full flex-col overflow-hidden`，并且**不接管 Esc**（`if (embedded) return`，键盘关闭交给宿主）。`CanvasFlow` 的预览页签（`activePanelTab.type === 'preview'`）改为 `<SandboxPreviewFrame embedded … />`，于是预览落在右侧面板内、不再遮挡全屏。Coding 节点里的预览（`ChatNodeKernel`）**仍是旧的弹层行为**（其 `Preview inside BobWork (sandboxed)` 按钮与 `sandbox-preview-open` 事件都在上一版已存在）。
+
+* **商店卡片 `Open` 改开 Hippo**（[SandboxPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPanel.tsx)）：卡片主按钮文案仍是 `Open`，但行为改为 `openSandboxPreviewInHippo({ id, name })`，tooltip `Open this mini-app in the browser (Hippo)`（上一版为应用内预览）。代码注释写明口径：**商店 / 普通用户直接开 Hippo（顶层页，最稳）；Coding 节点调试仍走应用内 Preview**；点开时同时 `markAppOpened` 刷新「最近打开」。
+
+### 修复与优化
+
+* **AI 改写落到错误段落（重复文本时）**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)，+50/−6）—— 三处协作修掉同一个根因：**AI 请求期间文档被整篇重建 / 外部重载，选区坐标失效**。
+  * **严格定位** `resolveAnnotationPosStrict()`：只接受「当前位置取出的文字仍与 `quote` 一致」的选区（精确 / 去空白 / 包含三种判定）。批注卡片（带 `prefix` / `suffix` 上下文）仍允许按上下文唯一锚定；**气泡直改（无上下文）不再回退**到 `findQuoteWithContext` 的「全文第一处」—— 否则改写会落到另一个重复段落上。定位失败时明确报错：`文档在 AI 改写期间发生了变化（选区已失效），请重新选择文字后再试`，宁可不改也不改错地方。
+  * **请求期间暂停外部变更轮询** `aiEditInFlightRef`：`fetchAiEditSse` 前置真、`.finally` 清掉；轮询 `tick()` 见到该标记就跳过本轮 —— 否则请求期间磁盘 mtime 一变（自动保存 / 其他进程 / 同步）就会静默 `setContent` 整篇重载，把 `from/to` 冲掉。
+  * **sidecar 异步返回不再抢活动轮** `latestRoundIdRef`：加载期若已产生新轮次（AI 改写或人工编辑），只**补齐历史轮**、不 `setActiveRoundId(旧轮)` —— 否则重建 effect 会把刚应用的改动还原回旧内容。
+* **预览面板布局守卫（仅开发期）**（[CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：预览面板包裹层新增 `data-reader-panel-wrapper` 标记，并加一个 `NODE_ENV !== 'production'` 才跑的自检 —— 展开状态下面板高度 `< 50px` 时 `console.warn('[CanvasFlow] 预览面板高度异常 (<50px)，请检查 self-stretch / h-full 是否缺失')`。这是给「内联预览后布局塌陷」这一类问题提前报警，**生产构建不会执行**。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **140 文件 / 1644 例全绿**（与 v0.7.725 相同）；`tsc -p tsconfig.json` 通过（含 `electron/`）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `latest-mac.yml` 的 `version` / `sha512` 与本地一致后放行上传。
+
+### 已知待确认
+
+* **[ChatNodeKernel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ChatNodeKernel.tsx) / [CalendarPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CalendarPanel.tsx) / [global.d.ts](file:///Users/baolei/Desktop/BobWork/projects/src/types/global.d.ts) 本批也有改动，但无法逐字确证**：三者都没有新增的用户可见文案（探针显示 `appleid.apple.com`、`No mini programs match`、`Preview inside BobWork (sandboxed)`、`sandbox-preview-open` 等在上一版均已存在），推断为配套调整与类型补全（`global.d.ts` 是纯类型声明，无运行时影响）。若其中含行为变更，本版记录未覆盖。
+* **内联预览的滚动 / 尺寸**：预览改为面板内 `h-full` 后，其高度完全取决于宿主容器；本版只加了开发期告警，没有做「面板过窄时自动回退弹层」的兜底。
+* **商店 Open 与 Coding 节点预览口径不同**（一个走 Hippo、一个走应用内弹层），用户可能觉得两侧行为不一致；这是有意取舍（Coding 需要就地调试）。
+
+## v0.7.725 (2026-10-18)
+
+> 本版是一次**小程序（Mini App）预览体验整批打磨**：① **Layer-1 本地存储代理** —— 预览 iframe 是 opaque origin、`localStorage` 不可用，改为把 `BobStorage` 键值镜像到 app 私有的 `.state/local-storage.json`，刷新 / 重开预览不再丢数据；② **预览就绪握手 + 友好错误页** —— 预览失败不再甩 `{"success":false,…}` 与堆栈，而是给一句人话 + `Try again`；子页主动上报 `bob_ready`，宿主据此判定加载成功、并有超时兜底；③ **预览 console 错误胶囊** —— 右上角 `Issue` 面板可直接 `Ask AI to fix` / `Try stronger model`；④ 小程序卡片新增 **`Details & history`** 入口。共 **13 个文件改动**（含 3 个测试文件）。
+
+### 新增功能
+
+* **小程序预览的本地存储代理（Layer-1）**（[apps.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/apps.ts) + [bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/bridge.ts) + [iframe-bridge-host.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/iframe-bridge-host.ts) + [SandboxPreviewFrame.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPreviewFrame.tsx) + [preview/[id]/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/preview/[id]/route.ts) + [sandbox/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/route.ts)）：预览 iframe 带 `sandbox` 属性、不带 `allow-same-origin`，因此子页 `localStorage` 是 opaque origin、读写会被浏览器拒绝。现在把 `BobStorage.set/get` 的键值落到小程序自己的 `.state/local-storage.json`：预览路由把快照内联成 `window.__BOB_LOCAL_SNAPSHOT__`（`<script data-bob-local-storage>`）供子页同步读取；写入走 postMessage `bob_local_storage_set` 交宿主，宿主去抖后批量 `save_local_storage` 落盘。刷新 / 重开预览数据不丢。
+* **预览「就绪握手」+ 友好错误页**（新增 [preview-error.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/preview-error.ts) + [SandboxPreviewFrame.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPreviewFrame.tsx) + [preview/[id]/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/preview/[id]/route.ts)）：新增 `previewErrorHtml()` —— 预览失败时若请求 `accept: text/html`，返回一张**人话错误页**（带 `bob-preview-error` meta、`Try again` 重试链接、"If it keeps happening, go back and ask AI to check this mini-app."），不再把 JSON / 堆栈直接摊在 iframe 里给非程序员看。子页 bridge 会多次上报 `bob_ready`，宿主收到才判定「加载成功」，据此驱动加载态 / 错误态，并有超时兜底；宿主侧同步主动广播 `bob_host_ready`。
+* **预览 console 错误胶囊 → Fix with AI**（[SandboxPreviewFrame.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPreviewFrame.tsx)）：预览右上角新增 `Issue` 按钮与错误面板，把子页 console 错误聚合成卡片，可直接 `Ask AI to fix`（动作 `sandbox-fix-errors`）或 `Try stronger model`（动作 `sandbox-escalate-model`）交给 AI 修。（底层 console 采集是旧代码，本版新增的是这层 UI。）
+* **小程序卡片新增「Details & history」**（[SandboxPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPanel.tsx)）：卡片溢出菜单新增 `<Pencil/> Details & history`，打开元数据与版本历史弹窗。（历史弹窗本体是旧代码。）
+
+### 修复与优化
+
+* **预览静态 / 导出路由随之调整**（[preview/[id]/[...path]/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/preview/[id]/[...path]/route.ts) + [export/[id]/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/export/[id]/route.ts)）：配合上面的内联快照注入（`bob-local-storage`）与 `.state/.history` 目录排除做了复用 / 收敛。此两文件的特征字面量在上一版已存在、无计数差，**具体改动无法逐字确证**，故只在此说明为配套微调。
+
+### 新增单测
+
+* [preview-error.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/preview-error.test.ts)（**新文件，2 例**）：`renders a human page, never raw JSON`、`escapes title/message instead of injecting HTML`。
+* [apps.local-storage.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/apps.local-storage.test.ts)（**新文件，2 例**）：`writes, reads and removes keys that survive a reload`、`rejects invalid app ids / keys and drops oversized values`。
+* [iframe-bridge-host.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/iframe-bridge-host.test.ts)（**+2 例**）：`bob_ready → onReady（宿主用于加载态/错误态判定）`、`bob_local_storage_set → onLocalStorage（value=null 表示删除）`。
+
+### 验证
+
+* 全仓 `pnpm test` **140 文件 / 1644 例全绿**（本批前为 138 文件 / 1638 例）；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`，`.next/types` 本轮干净、无同名「 2」副本）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+* 标记（均已确认为本版新增）：服务端 / 桥接 `__BOB_LOCAL_SNAPSHOT__`、`HOST_LOCAL_SNAPSHOT`、`bob_local_storage_set`、`bob_ready`、`bob-preview-error`；客户端 `Try again`、`Ask AI to fix`、`Try stronger model`、`Details & history`。
+
+## v0.7.724 (2026-10-18)
+
+> 本版三处修复 + 一条来源闸加固：① **音频库按「入库时间」倒序** —— 新收录的录音排在最上面（此前按目录 mtime，写一次打点 / 存一个片段就把条目顶上去，越用越乱）；② **点击文稿对话只定位、不改播放状态** —— 暂停时点了就停在目标处，播放中则从目标处接着播，不再强行自动播放；③ **AI 直改不再静默失败** —— 选区坐标失效 / 定位失败 / 未预期异常都给可见错误文案，正文不再「转圈结束、毫无反应」；④ **沙箱预览路由接入来源闸**，新增 `allowCrossSiteRead` 只读跨站例外（只放开 GET/HEAD 的 iframe 入口导航，写操作仍 403）。共 **11 个文件改动**（含 2 个测试文件）。
+
+### 修复与优化
+
+* **音频库按入库时间倒序**（[library.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.ts) + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：`LibraryEntry` 新增 `mtimeMs`，`listLibrary()` 与库面板统一改按 `b.mtimeMs - a.mtimeMs || a.dir.localeCompare(b.dir)` 排序（时间相同以目录名兜底，避免刷新一次换个位置）。**取「源文件 mtime」而不是「目录 mtime」** —— 目录 mtime 会在写入打点 / 峰值 / 片段时被刷新，不代表「什么时候收进来的」；而 `source.<ext>` 只在入库那一刻写一次，后续产物都是另起 sidecar、不碰源文件，所以源 mtime 才是稳定的添加时间。
+* **点击文稿对话只定位、不改播放状态**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) + [TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：点某句 / 点轮首由「seek + play」改为**纯 `seek`**；`onSeek` 契约注释同步改为「**不改播放/暂停状态**：暂停则停在跳转处，播放中则从跳转处接着播」。`AudioMarkTrack` 的 `seekTo` 本就用 wavesurfer `setTime` 实现、不改播放状态，所以一处收敛即覆盖所有点击入口。
+* **AI 直改不再静默失败**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx) + [AnnotationBubble.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/extensions/AnnotationBubble.tsx)）：气泡侧为 `directRevise` 加 try/catch 兜底，并校验锁定选区坐标 —— 选区随文档变化失效时报 `选中范围已失效（文档已变化），请重新选择文字后再试`，未预期异常报 `AI 修订失败：…`（此前异常发生在 `addPatchRound` 之前，无 catch，表现为毫无反馈）；主流程侧定位失败打 `[ai-revise] locate failed` 并回显 `无法定位选中的文字（可能已被改动）`，改写抛错打 `[ai-revise] rewriteSingle threw`、回显 `AI 编辑异常：…`。失败原因一律回显到气泡，可复核、可重试。
+* **沙箱预览路由接入来源闸**（[loopback-guard.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/http/loopback-guard.ts) + [preview/[id]/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/preview/[id]/route.ts) + [preview/[id]/[...path]/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/preview/[id]/[...path]/route.ts) + [bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/bridge.ts)）：来源闸新增 `allowCrossSiteRead` —— 宿主 UI 与预览页故意用两个回环 hostname（`localhost` ↔ `127.0.0.1`）做存储隔离，浏览器会把该 iframe 的入口导航判成 `cross-site`；现在**只放开只读方法（GET/HEAD）**，写操作仍一律 403。两个预览路由均以 `guardRequestSource(request, { allowCrossSiteRead: true })` 接入。
+
+### 新增单测
+
+* [library.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.test.ts) **+1 例**（`按加入库时间从新到旧排序（新的在最上面）`）。
+* [source-guard.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/source-guard.test.ts) **+1 例**（`只读预览页例外：GET cross-site 允许，写操作仍拒绝`）。
+
+### 验证
+
+* 全仓 `pnpm test` **138 文件 / 1638 例全绿**（本批前为 1636 例）；`tsc -p tsconfig.json` 通过（`TSC_EXIT=0`）。
+* 前置修了一处**构建副产物**导致的假报错：`.next/types/` 下遗留了 `routes.d 2.ts` / `validator 2.ts`（同名「 2」副本，上一轮打包拷贝的副产物），会让 tsc 报 `Duplicate identifier 'LayoutProps'`；清掉后类型检查即通过（`.next` 每次打包都会全量重建，不影响产物）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记：`选中范围已失效`、`AI 修订失败：`、`Jump to `；服务端标记：`allowCrossSiteRead`、`guardRequestSource`。
+
+## v0.7.723 (2026-10-18)
+
+> 本版一个小功能 + 两处修复：① **音频库分组** —— 库浏览面板新增「用户自建文件夹」：可新建 / 重命名 / 删除分组，条目**整行拖拽**归组或拖回 `Ungrouped`；删组只解散组织、**不动音频文件**；状态落 `.audio-library/.groups.json`，服务端 5 个新 action。② **DocEditor AI 修订「空操作」体验** —— 短句跳过覆盖率校验、无差异时给可见错误文案、还原时恢复视口滚动位。共 **5 个文件改动**（2 个新增）。
+
+### 新增功能
+
+* **音频库分组（自建文件夹 + 拖拽归组）**（[groups.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/groups.ts) 新增 + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) + [clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：库面板从平铺列表升级为**分组视图** —— 仅当库里存在分组时才启用分区块，否则维持原平铺（不打扰旧用户）。用户可新建 / 重命名 / 删除分组；条目**整行拖拽**到区块头归组，拖到 `Ungrouped` 区块即移出。新 UI 文案 `New group` / `Ungrouped` / `Drag audio here` / `Empty` / `Group name`，新 `data-role` 值 `library-group` / `library-ungrouped`，伪组 id `__ungrouped__`；tooltip `Rename group` / `Delete group — the group is removed, your audio files stay`（**删组不动音频文件**）。新模块 `groups.ts` 导出 `AudioGroup{id,name}` / `GroupState{groups,assign}` 及 `readGroupState()`（读 `.groups.json`、脏数据规范化、绝不抛错）、`createGroup()` / `renameGroup()`（改名不改 id）/ `deleteGroup()`（删组并抹除指向它的归属）/ `assignEntry(dirAbs, groupId)`（空串 = 移出；护栏：须为正式库条目、目标组须存在，否则抛 `not a library entry`）/ `forgetEntry(dirAbs)`（条目删除时清归属）。归属键取目录 basename（`<源名>-<指纹>`），跨机器稳定；状态文件落在 `.audio-library/.groups.json`（hidden，随库存在、不进 workspace）。服务端新增 5 个 action `list_groups`（无参）/ `create_group`（`name`）/ `rename_group`（`id`,`name`）/ `delete_group`（`id`）/ `assign_group`（`dir`,`group`，`group` 空串 = 移出，缺 `dir` 报 `dir is required`），均返回**写盘后的完整状态**（`groups` + `assign`）；删除条目路径新增 `forgetEntry(abs)`。
+
+### 修复与优化
+
+* **DocEditor AI 修订「空操作」**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx)）：短句（< 12 字）**跳过「跑偏」覆盖率校验**，避免对话稿单行被误判还原（此前表现为「转圈结束、正文毫无变化」）；无差异时返回可见错误文案 `AI 未产生改动（结果与原文相同），请把意见写得更具体后重试`，不再静默收起；还原时恢复视口滚动位置，避免视图跳走。
+
+### 验证
+
+* 本批**含测试改动**：[groups.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/groups.test.ts) 新增 **10 例**（读状态含空 / 脏数据规范化、建 / 改名 / 删组含空名与未知组抛错、`assignEntry` 移入移出与非库条目 / 缺组护栏、`forgetEntry`；用 `BOBWORK_HOME` 指向临时目录隔离）；全仓 `pnpm test` **138 文件 / 1636 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记：`library-group`、`library-ungrouped`、`New group`、`Drag audio here`、`__ungrouped__`、`AI 未产生改动（结果与原文相同）`；服务端标记：`list_groups`、`assign_group`、`.groups.json`、`not a library entry`。
+
+## v0.7.722 (2026-10-18)
+
+> 本版两块：① **长音频说话人分离** —— 整段 pyannote 在 1 小时以上会逼近 30 分钟超时且没有中间进度，现在 **>20 分钟自动按 10 分钟分段、段间用声纹质心对齐到同一套全局 speaker id**；配套新增 **`re_diarize`：只重跑分离、不重跑 ASR**（62 分钟录音点「Retry as 2 people」不再重跑一遍转写），前端另开 `diarize_status` 轮询显示百分比。② **小程序图标** —— 12 个模板各带默认 emoji（新建即写入 manifest），App details 弹窗新增 30 个 emoji 快选与 **AI 一键生成**（名称+描述 → 一个最贴切的 emoji）。另：修掉「连续两个新建会话排序颠倒」、把一批确认弹窗的吓人长句精简、Butler Report 页分区头改静态。共 **19 个文件改动**（1 个新增路由，19 个里含 1 个测试文件改动）。
+
+### 新增功能
+
+* **长音频分段说话人分离**（[diarize.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt/diarize.ts)，+290 行）：超过 `LONG_DIAR_THRESHOLD_SEC = 20min` 就按 `LONG_DIAR_CHUNK_SEC = 10min` 切开，**4 段并行、每段 2 线程**（`LONG_DIAR_CONCURRENCY = 4` / `LONG_DIAR_THREADS = 2` —— 注释说明 4 段 × 2 线程比 2 段 × 4 线程更快）；段内照常聚类，**段间用声纹质心对齐**（`LONG_DIAR_MATCH_SIM = 0.5`）到同一套全局 speaker id，再合并成一份 turns。`auto` 模式跨段人数上限 `LONG_DIAR_MAX_SPEAKERS = 8`；**duo 有 2 人硬上限** —— 已存在两个全局人时直接比较「直配 / 交换」两种分配取相似度和更大的，段内多出的簇归到最像的那个而**不新增第三个人**。短音频仍整段跑一次（更稳、少一次切段开销）。
+  * 为什么必须这样：整段 pyannote 在 1 小时以上会逼近 30 分钟超时且无中间进度；但各段**独立编号**会让「第 2 段的说话人 1」与「第 1 段的说话人 1」变成两个人 —— 故段内聚类 + 跨段质心对齐。
+  * 配套：`runDiarization` 新增 `threadsOverride`；缓存键新增区间后缀 `-r{start}-{end}`；新增导出 **`speakerForRange(chunks, start, end)`**（取与区间重叠最长的切块说话人，完全没重叠返回 `null`，不硬塞说话人）。
+* **`re_diarize`：只重跑说话人分离，不重跑 STT**（[clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts) +115 + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) +48）：旧实现点 `Retry as 2 people` 是 `refresh` 整段转写 —— 62 分钟录音要重新跑一遍 ASR。现在复用已有 `segments`，只把 duo/group 分离结果按时间重叠回填 `speaker`，**成本只剩分离本身**；并且**只分离「稿子实际覆盖的区间」**（3.6 小时录音若只转了前 62 分钟，不必分离整段）。进度写 `.cache/diar-jobs/<jobId>.json`（`pct`/`stage`，按整数百分比去抖），另开 **`diarize_status`** 轮询（因为 `re_diarize` 的 HTTP 请求会阻塞）；前端每 1.5s 轮询显示 `Separating speakers… N%`，成功后提示 `Separated N speakers without re-transcribing. Polishing…` 并自动重新润色。`maxDuration` 由 1800 提到 **3600**。
+  * 说话人变了 ⇒ 旧润色稿的 speaker 不再可信，写回时 `delete polished`（保留原文，让用户重新润色）。
+  * 错误口径：`no transcript for this audio — transcribe it first`（绝不凭空重建）、`ffmpeg is unavailable`、`Speaker separation produced no segments — the audio may be too noisy or overlapped`、`Still one speaker after separation — the recording may be a single voice, or the voices overlap too much`（分离后仍只有 1 人则明确报错，不糊弄成「已修复」）。
+* **模板默认图标**（[templates.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/templates.ts) +18 + [apps.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/apps.ts)）：新增 `SANDBOX_TEMPLATE_ICONS`，12 个模板各有默认 emoji（`blank` ✨ / `ai-chat` 🤖 / `calculator` 🧮 / `todo` ✅ / `habit` 🌱 / `pomodoro` 🍅 / `contact-form` 📋 / `data-table` 📊 / `portfolio` 👤 / `landing` 🚀 / `reader` 📖 / `converter` 🔁），`createApp` 直接写进 manifest —— 商店卡片与侧栏不再退回通用图标或名称首字母。
+* **AI 一键生成小程序图标**（[icon-suggest/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/icon-suggest/route.ts) **新增** + [SandboxPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPanel.tsx) +95）：新路由把「名称 + 描述」交给任务模型挑**一个** emoji（`TIMEOUT_MS = 10000`，非流式单轮）。清洗严格：去掉代码围栏/引号/空白 → 用 `Intl.Segmenter('zh')` 取**第一个字素**（无该 API 时退化按码点）→ **只接受 emoji / 图形符号**（`\p{Extended_Pictographic}` 或 `\u{2600}-\u{27BF}`），模型若回普通文字则视为无效、由前端兜底。弹窗侧新增 `ICON_CHOICES` 30 个常见 emoji 快选（点一下填入、仍可手改）+ `Sparkles` 生成按钮（生成中禁用、失败就地内联报错不弹窗、可反复重生成）。
+
+### 修复与优化
+
+* **连续两个新建会话排序颠倒**（[CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：本次运行内新建的节点还没有 `createdAt`（frontmatter 未重载），原先统一按 `+∞` 处理 ⇒ 比较时 `∞ - ∞ = NaN`，稳定排序保留数组顺序 ⇒ **先建的反而排在后面**。现额外记录数组下标 `orderIndex`（新节点恒追加在末尾），时间无结论（`NaN` 或 `0`）时改用下标倒序，保证新建会话仍即时置顶。
+* **确认弹窗去掉吓人长句**（[CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx) + [Sidebar.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/Sidebar.tsx) + [ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx) + [BobbyNode.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/BobbyNode.tsx) + [UsagePanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/UsagePanel.tsx) + [StickyTodoDock.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/StickyTodoDock.tsx) + [LocalTtsPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/LocalTtsPanel.tsx) + [LocalSttPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/LocalSttPanel.tsx) + [LocalFileExplorer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/LocalFileExplorer.tsx)）：删除节点的弹窗从「会永久删除 .md 文档、附件、homework/ 输出文件、N 条连线…此操作不可撤销」精简为 `Its files and connections will be removed.` + 必要时的 `Breaks links to N downstream node(s).`；删批注改为 `Cards inside are not affected.`；删分组 / 文件 / 待办 / 本地模型 / 清空用量等一律去掉 `\nThis cannot be undone.` / `This frees disk space.` 这类冗句；标题统一句式（`Delete node?` / `Delete "${title}"?`）。信息量保留在必要处，重复的「不可撤销」不再占三行。
+* **Butler Report 页分区头改静态**（[ButlerTodayPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerTodayPanel.tsx)）：`SectionHead` 新增 `variant: 'sticky' | 'static'`；Report 页的 `Yesterday` 与 `Today's advice` 用 `static` —— 因为 `Today's advice` 是该页最后一个分区，吸顶头后面没有别的分区头顶走它，会一路钉在滚动区顶部干扰阅读（其余负边距/内边距/底色与吸顶版完全一致，排版口径不变）。
+* **测试夹具：三处「首次重加载」移入 `beforeAll`**（[edit-round-trip.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/docx-editor/edit-round-trip.test.ts) + [app-lifecycle.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/app-lifecycle.test.ts) + [app-token.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/app-token.test.ts)）：这三个用例都在 `it()` 体内做一次性重初始化（docx 引擎加载约 5.5s；沙盒 `bridge` 导入约 6.8–7.7s），稳定撞上默认 5s 预算而超时 —— **功能本身是通的**（给足超时 15/15 全绿），属测试夹具成本。现预热到 `beforeAll`（显式 60s，既给冷启动留余量、又能抓住真挂死），断言仍受默认 5s 约束。
+
+### 界面细节
+
+* **App details 的图标区**：由「Name 与 Icon 并排、Icon 只有 88px 输入框」改为「Name 整行 + 图标专属一块」——48px 居中输入框 + emoji 快选 30 格 + AI 生成按钮，错误就地显示在 `Icon` 标签旁。
+* **`Retry as 2 people` 的 title**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：由 `Re-transcribe with two speaker clusters (runs separation again; may take a few minutes)` 改为 `Separate the existing transcript again as 2 people (no re-transcription; may take a few minutes)` —— 与新行为一致。
+
+### 新增单测
+
+* [diarize.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt/diarize.test.ts) **+2 例**（`speakerForRange`：取重叠最长的切块 / 完全没重叠返回 `null`）。
+* 全仓 `pnpm test` **137 文件 / 1626 例全绿**（本批前为 1624 例）；`tsc -p tsconfig.json` 通过（含 `electron/`）。
+
+### 验证
+
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `latest-mac.yml` 的 `version` / `sha512` 与本地一致后放行上传。
+* 本批**首次用上了真正的源码基线**：`.next/standalone/src` 恰好是 0.7.721 构建（12:40）的快照，19 个文件逐一做了 `diff -u`（合计 +642 / −81），不再是字符串探针反推。
+
+### 已知待确认
+
+* **分段分离的段边界**：10 分钟硬切，若一段对话恰好跨在切点上，两个半段的声纹质心会略有差异；`LONG_DIAR_MATCH_SIM = 0.5` 是否足够稳，还需要更多真实长录音验证。
+* **`re_diarize` 只覆盖「稿子实际覆盖的区间」**：若稿子只转了前 62 分钟，后段分离结果不会回填（这是有意的省算力取舍），用户看到的是「未覆盖区间仍无标签」。
+* **`diarize_status` 依赖项目内 `.cache/diar-jobs/`**：换项目/切项目时 jobId 不复用，属于「进度只是体验层」的取舍（写失败不影响分离）。
+* **图标生成依赖任务模型**：未配置模型或调用失败时前端只给内联错误，不会自动退回模板图标（需用户手点快选或自己输入）。
+* **三处测试夹具改动**未改变任何产品行为，但把「慢初始化」从断言预算里摘出去了；若以后 `beforeAll` 也逼近 60s，说明该模块的导入链需要单独治理。
+
+## v0.7.721 (2026-10-18)
+
+> 本版围绕**音频转写的人工纠错闭环**与**几处界面精简**：① **说话人可手工纠正** —— 转写稿新增「改归属 / 改名字 / 批量改名单」三类入口（侧车新增 `speakerNames`，只影响显示、不动 `segments`），配合服务端 3 个新 action。② **AI 精选建议可手动落成音轨点**（`Mark {n}`），自动打点改青色空心环，并删掉旧的整稿 `Generate marks`。③ **Hippo 的 `Open as Markdown` 收编回画布** —— 不再开浏览器标签，直接转发主窗口在右侧预览面板打开。④ **DocEditor 修订侧栏重构**：上一版的 `Track-Changes` 右键开关被移除，人工修订模式改为「打开修订侧栏即记录」。⑤ **AI Coding 创建对话框精简**（默认只留愿望框 + 两个 Build 按钮，其余收进 `More options`）。⑥ **Butler 今日面板改为固定页签头 + 独立滚动区**。共 **20 个文件改动**（含 3 个测试文件）。
+
+### 新增功能
+
+* **转写「说话人手工纠正」**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts) + [TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx) + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) + [markdown.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/markdown.ts) + [clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：侧车新增 `speakerNames`（**只影响显示，不改动 `segments`**），新增纯函数 `speakerLabel()`（显示名单一真源）、`normalizeSpeakerName()`、`updateSegmentSpeakers()`、`updateSpeakerName()`、`updateSpeakerNames()`，常量 `MAX_SPEAKER_ID = 99` / `MAX_SPEAKER_NAMES = 20`。面板三处入口：轮首 hover 小箭头→就地展开一排人**改整轮归属**；点轮首名字→就地输入框**改名**（Enter 保存 / Esc 取消 / 失焦保存）；⋯ 菜单新增 **`Rename speakers`**（`Users` 图标）批量面板（`data-role="speaker-names-editor"`、标题 `Speaker names`、`Save N` / `Saving…`）。`AudioViewer` 接上 `onUpdateSpeaker` / `onRenameSpeaker` / `onRenameSpeakers`（乐观上屏 + 失败精确回滚）；`markdown.ts` 导出件标题改用显示名。服务端新增 3 个 action：`assign_speaker`（`indexes[]` + `speaker`，上限 `MAX_TURN_SEGMENTS = 2000`）、`rename_speaker`（`id` + `name`）、`rename_speakers`（`entries[]`，一次读改写）。
+* **AI 精选建议「手动落点」**（[mark-ops.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.ts) + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) + [globals.css](file:///Users/baolei/Desktop/BobWork/projects/src/app/globals.css) + [AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：`marksFromSegments` → `marksFromRanges`（入参改为 `{start,label}`）；`AudioViewer` 新增 `Bookmark` 图标按钮 **`Mark {n}`**（把勾选的 AI 精选建议落成音轨打点）。`globals.css` 新增 `--mark-line-ai: #0f8a7c` / `--mark-line-ai-soft`（青绿），自动打点改画**青色空心环**；同时**删除**旧的整稿 `Generate marks` 动作及其 `onGenerateMarks` prop。
+* **Hippo「Open as Markdown」收编回画布**（[hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts) + [preload.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/preload.ts) + [desktop-adapter.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/desktop-adapter.ts) + [CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：新增 `handoffMarkdownToCanvas(url)` 拦截本机 `/markdown-view` 地址 —— 不再开浏览器标签，而是收编 Hippo 并转发主窗口；新增 IPC 通道 `hippo-browser:open-local-file` 与 `onOpenLocalFile`，`CanvasFlow` 新增 `useEffect` 调 `openFileTab('local', …)` 落在右侧预览面板。
+
+### 修复与优化
+
+* **DocEditor 修订侧栏重构**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx) + [MdAnnotationPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/MdAnnotationPanel.tsx)）：移除上一版的 `manualReviseMode` 状态、`Track-Changes` 右键开关与工具栏指示按钮 —— **人工修订模式 = 打开修订侧边栏**（`annotationPanelOpen`）；右键菜单项由 `annotations` + `revise` 改为 **`Annotations` / `Revisions`**（`openPanelTo`）。新增 `justAppliedScrollRef`（就地应用修订后**恢复原视口滚动位**，防「改完页面滑走」）与 `revisionRoundsLoadedRef` 锁（切文档不再覆盖 sidecar）。
+* **AI Coding 创建对话框精简**（[AICodingCreateDialog.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/AICodingCreateDialog.tsx)）：默认视图只留愿望输入 + **`Build (Fast)`** / `Build Mini App` 两个按钮；预设、名称、参考文件、Fast build 开关收进可折叠 **`More options`**（副标题 `preset · name · file · Fast build`）；预设改为下拉且默认 **Blank**；删除灵感卡片网格与可编辑 Fast build 简报（`BriefDraft` / `INSPIRATIONS` / `buildBriefDraft`）。
+* **Butler 今日面板布局**（[ButlerTodayPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerTodayPanel.tsx)）：改为「固定页签头 `tabHeader` + 独立内容滚动区 `contentScroll`」（面板不再自带滚动与 padding，滚动只发生在内容区）；页签顺序调整为 Report / Schedule / Sticky / **News（末位）**；一行式今日概览（`Today N · Overdue N · N suggestion(s)`）从「页签之上」移入 **Report 页内**；数据源降级提示固定在内容区外底部。
+
+### 验证
+
+* 本批**含测试改动**：`transcript.test.ts` 新增约 **25 例**（改归属 8 / 改名单条 5 / 批量 6 / `speakerLabel` 2 / sidecar 4）、`markdown.test.ts` 新增 2 例（导出用显示名、未归属措辞区分）、`mark-ops.test.ts` 重命名 describe 并新增约 2 例（无标题不落点、标签按 `AUTO_MARK_LABEL_MAX` 截断）；全仓 `pnpm test` **137 文件 / 1624 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记：`Rename speakers`、`Speaker names`、`speaker-names-editor`、`--mark-line-ai`、`More options`、`Build (Fast)`、`Revisions`；Electron 标记：`hippo-browser:open-local-file`、`handoffMarkdownToCanvas`；服务端标记：`assign_speaker`、`rename_speaker`、`rename_speakers`。
+
+## v0.7.720 (2026-10-18)
+
+> 本版两条主线：① **Butler 可换头像** —— 联系人（persona）新增「Auto / 10 张内置原型 / 上传自定义图」三档，系统身份（Bobby / 小微）钉死不可覆盖；自定义图经附件接口落盘、由新 `GET /api/butler/avatar` 回读（仅限 `<APP_ROOT>/butler/` 内图片）。② **文档「人工修订模式」Track-Changes** —— [DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx) 右键菜单新增开关，开启后用户**手工编辑**按 900ms 空闲 burst 合并成修订轮次，配合批注面板的 `You` 徽标。另有：音频打点配色（琥珀色，与播放头 / 选区区分）+ 放大时打点溢出边框的修复、音频片段行动作收进 `⋮` 菜单、Butler Today 面板概览行与 Yesterday 默认折叠、Mini Apps 面板改为 iOS 桌面式图标网格（可拖拽排序 + 星标 badge）。共 **15 个文件改动 + 1 个新增**（新增 `GET /api/butler/avatar` 路由）。
+
+### 新增功能
+
+* **Butler 可换头像**（[PersonaDialog.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/PersonaDialog.tsx) + [avatar.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/avatar.ts) + [avatar/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/avatar/route.ts) 新增 + [threads-shared.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/threads-shared.ts) + [storage.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/storage.ts) + [session/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/threads/session/route.ts) + [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：新增 `resolveAvatarId`（优先级 = **系统身份钉死 > 用户选定 > 按性格 / 名字派生**）与 `isPersonaAvatarId`；`fixedName`（Bobby / 小微）时整块头像选择器不渲染，保证系统身份永不被覆盖。persona 新增字段 `avatar` / `avatarImage`（路径上限 `AVATAR_IMAGE_PATH_MAX = 1024`）；`storage.ts` 新增 `isInButlerRoot` 防目录越界；`session/route.ts` 的 POST body 新增 `avatar` / `avatarImage` 清洗。自定义图先经 `/api/butler/attachments` 落盘取得绝对路径，再由新接口回读：`GET /api/butler/avatar?path=<绝对路径>`，**只服务 `<APP_ROOT>/butler/` 内图片**，仅允许 png/jpg/jpeg/webp/gif/bmp/avif/ico（**拒 svg**），上限 8MB，响应 `Cache-Control: private, max-age=31536000, immutable`；错误文案 `invalid path` / `unsupported image type` / `image too large` / `not found`。渲染侧 `ButlerDrawer` 的 `ContactAvatar` 由只传 `personality` 改为传整份 `persona`，头像覆盖据此生效。
+* **文档「人工修订模式」Track-Changes**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx) + [MdAnnotationPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/MdAnnotationPanel.tsx)）：右键菜单新增开关 `Track-Changes`（`FileDiff` 图标）；开启后把用户的**手工编辑**按 900ms 空闲「burst」合并成修订轮次（与 AI 修订同轨），工具栏出现可点击指示 `Track-Changes: on — click to turn off`，并自动切到修订视图；批注面板给人工轮次打 `You` 徽标（`UserRound` 图标），空态文案改为 `No revisions yet. Turn on Track-Changes…`。
+
+### 修复与优化
+
+* **音频打点配色 + 放大溢出修复**（[globals.css](file:///Users/baolei/Desktop/BobWork/projects/src/app/globals.css) + [AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：新增 CSS 变量 `--mark-line: #b06a06`（琥珀色，与播放头 / 选区的紫色区分）与 `--mark-line-auto`；打点圆点与波形竖线改用打点色，悬停「吸附到打点」时同步切换。修复**音轨放大时打点溢出边框** —— 新增 `visibleMarks` 按当前窗口百分比过滤（`<0` / `>100` 的点不渲染）。
+* **音频片段行动作收进 `⋮` 菜单**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：片段行原先平铺的 7 个图标（播放 / 视图 / 文稿 / 改名 / 导出 / fork / 删除）收进一个 `⋮`（`MoreVertical`）菜单（`ClipMenuAction`，`fixed` 定位、视口夹取 / 上翻），菜单项 `Play excerpt` / `Zoom to clip` / `Transcript` / `Rename` / `Export` / `Make separate audio` / `Delete`，`aria-label` 为 `{name} actions`。
+* **Butler Today 面板信息密度**（[ButlerTodayPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerTodayPanel.tsx)）：News 页签移到末位；页签上方新增一行式概览 `Today N · Overdue N · N suggestion(s)`；Yesterday 复盘默认折叠约 6 行并加 `Show full digest` / `Show less`；日期改用 `en-US`；字号与吸顶分区头等视觉调整。
+* **Mini Apps 面板改为图标网格**（[ButlerMiniAppsPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerMiniAppsPanel.tsx) + [sandbox-starred.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox-starred.ts) + [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：由列表改为 iOS 桌面式图标网格，支持**拖拽排序**（`sandbox-starred.ts` 新增 `reorderStarredApps`）；图标右上角星标 badge 承接「取消标星」（`Unstar`）；顶部 `Starred mini-apps · N` + `Browse store`；空态 `No starred mini-apps yet…`。仍挂在 Butler 右栏 rail 项 `Mini Apps`（`section === 'miniapps'`）。
+
+### 验证
+
+* 本批**含测试改动**（[avatar.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/avatar.test.ts)：新增 `resolveAvatarId` 优先级 / `isPersonaAvatarId` 用例组）；全仓 `pnpm test` **137 文件 / 1596 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记：`--mark-line`、`Play excerpt`、`Make separate audio`、`Track-Changes`、`Starred mini-apps · `、`Show full digest`；服务端标记：`unsupported image type`、`image too large`、`/api/butler/avatar`。
+
+## v0.7.719 (2026-10-18)
+
+> 本版是一次较大的功能版本，四条主线：① **小程序 / AI Coding** 从「先建模板、再答 6 问」改成**先许愿（可选 Fast build 简报）**，并补上生成之后的运维闭环 —— 改码即刷新、Console 错误一键 / 自动修复、失败切强模型、详情弹窗改名 / 复制 / 版本回滚；同时把 Bridge 文档改为**按需读取**（`read_bridge_docs`）、新增 **AI Chat 模板**与统一 `smoke-test.js`、coding **遥测 JSONL** 与**质量基准 CLI**。② **音频编辑器搬到 Hippo 全页 `/audio-editor`**（左波形 / 右对话稿两栏），片段重构为「**命名区间**」（拖两端只改清单、导出才现渲染，要独立编辑须 **fork 成新主音频**），转写后**自动 DeepSeek 润色**、可**逐句原地改字**、可导出 **Markdown** 并在新 **`/markdown-view`** 阅读器打开；本地 STT 新增 **Zipformer CTC**，说话人分离修掉「同性别两人被并成一个」。③ **Web 检索改为 provider seam**（新增 DeepSeek Search/Fetch 直连 provider + 本地 http 兜底带 SSRF 防护），结果结构化带**来源 / 日期 / 权威性**；用量接入**按次计费**与 **Year 视图**；Daily News 检索降本。④ **Hippo 浏览器能真正把网页文件拿下来**（下载四件套 + 落进项目 `materials/`），浏览器工具面收窄成 **Core / Full 档位**，子 Agent 创建独立成框，标星小程序入口迁到 **Butler 左栏 Mini Apps**。共 **97 个文件改动**（29 个新增：19 个源码 / 组件 + 10 个测试文件）。
+
+### 新增功能
+
+* **许愿编程（wish-first）+ Fast build 简报**（[AICodingCreateDialog.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/AICodingCreateDialog.tsx) + [context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts)）：新建小程序首屏改为 `What do you want to build?` 愿望框（`⌘/Ctrl + Enter` 直接建、计数器 `/800`、写入 `sandbox_spec.wish` 时截 600 字）；名称可空（`deriveAppName` 取愿望首行、超 24 字加 `…`）；模板可空；12 张灵感卡新增 `AI Chat`。**Fast build 默认关**，开启后进入可编辑简报（Function / Audience / Interaction / Persistence / Style / AI 六项，空字段交 AI 推断）。服务端判定 `specReady = fast_build === true && (wish || category || interaction || persistence)`：**6 问仍是默认质量门禁**，Fast build 只跳过「用户显式确认过简报」的场景；已有实现的新节点直接进修改模式。
+* **小程序详情弹窗：改名 / 图标 / 描述 / 复制 / 版本回滚**（[SandboxPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPanel.tsx) + [apps.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/apps.ts) + [sandbox/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/sandbox/route.ts)）：商城卡片新增铅笔按钮，弹窗 `App details` 提供 Name（80）/ Icon（8）/ Description（300）与 `Save` / `Duplicate` / `Version history`。新 action `update_meta` / `duplicate` / `history` / `restore_version`。`duplicateApp` 在**根层**跳过 `data/`、`.history/`、`.trash/`、`manifest.json`（子目录同名资源保留）、**保留 `origin`**（imported 不因复制洗白）、缺 `smoke-test.js` 时补一份；`restoreAppHistory` 先校验 stamp（`^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$`）与 `safeChildPath`，写回走 `writeAppFileAtomic`，且**回滚前再备份当前版本**。
+* **预览 Console 捕获 + Fix with AI + Stronger model（有界自动修复）**（[iframe-bridge-host.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/iframe-bridge-host.ts) + [SandboxPreviewFrame.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPreviewFrame.tsx) + [ChatNodeKernel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ChatNodeKernel.tsx)）：宿主桥新增 `bob_console` 分支（只归一化不执行：`level` 截 20 字、`text` 截 500 字、最多 50 条）；预览浮层新增 Console 面板（`Fix with AI` / `Stronger model` / `Clear`），`error` 级去抖 300ms 派发 `sandbox-console-errors`。**自动修复预算 1 次 / 每用户轮**（只保留最近一次待修错误、最多 8 条、收尾后 80ms 尝试发送并另设 1200ms 兜底；若正在流式 / 持久化 / 输入框非空则跳过，避免抢用户下一句）。`Stronger model` 按 `deepseek + pro` → 任意 `pro` 选择本会话模型后重发。
+* **`read_bridge_docs`：Bridge 文档按需读取**（[coding-docs.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/coding-docs.ts) 新增 + [context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts)）：原先每轮整段注入的 Bridge API 文档拆成 `storage` / `host` / `graph` / `chat` / `hostTool` 五个分区，core prompt 只留一页索引 + AI 接入策略（A 用户明确要求 → 直接接；B 功能天然依赖 → 先问一句；C 纯工具 → 不接不问；D 用户明确禁止 → 绝不接）；工具 `scenes:['coding']`、`maxOutput: 16000`、标 `ondemand`（避免落入常驻段作废前缀缓存）。这同时消掉了「为了亲儿子主动加集成」的诱导。
+* **AI Chat 模板 + 统一冒烟脚本**（[templates.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/templates.ts) + [apps.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/apps.ts)）：新增第 12 个模板 `ai-chat`（流式 AI 对话 + 模型选择 + 错误兜底：`#model` 下拉、`listConfiguredModels` 填充、`BobStorage` 记住选择、`BobWork.chatStream` 逐字输出）；新增通用 `SMOKE_TEST_JS`（写 `window.__testResult`，步骤 `body-rendered` + `primary-interaction`，按 `steps.every(ok)` 汇总），`createApp` / `duplicateApp` 在模板未自带时自动补一份。
+* **Butler 左栏「Mini Apps」+ 小程序工具**（[ButlerMiniAppsPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerMiniAppsPanel.tsx) 新增 + [butler.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/butler.ts)）：新增右栏面板（数据源为标星小程序，与商城同一份 localStorage；同时拉 `GET /api/sandbox` 补名称 / 描述 / 更新时间，并回收已删 app 的死标星），点卡片在 Hippo 打开、可取消标星、`Browse store` 收抽屉进商城。Butler 新增 `list_mini_apps`（只读）与 `create_mini_app`（模板 12 选 1，可带 task；创建后派发 `session-request`、agent 固定 `coding`）；`create_session` 新增 `sandbox_app_id`（正则 + 存在性校验 + **强制 agent=coding**）。
+* **Coding 遥测 JSONL**（[telemetry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/telemetry.ts) 新增 + [api/telemetry/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/telemetry/route.ts) 新增）：每轮 coding 会话收尾追加一行到 `{appRoot}/bob-sandbox/telemetry.jsonl`，字段固定 `at / appId / modelId / durationMs / firstCodeMs / firstPreviewMs / toolCalls / toolErrors / autoRepair / consoleErrors` —— **只收数值与短 id，不记愿望、代码、模型输出或个人信息**；单行 ≤2048 字符，写盘失败静默（不影响主流程）。端点走 `guardRequestSource` 回环校验。
+* **Coding 质量基准 CLI**（[benchmark.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/sandbox/benchmark.ts) 新增 + [coding-benchmark.ts](file:///Users/baolei/Desktop/BobWork/projects/scripts/coding-benchmark.ts) 新增）：7 个 case（`todo` / `calculator` / `form` / `dashboard` / `ai-chat` / `graph` / `host-tool`），通用门禁 4 项（入口非空、`<!DOCTYPE html>`、viewport meta、无 `alert()`）+ 可要求 smoke 含 `__testResult`；`pnpm coding:benchmark --list` / `--app <appId> --case <caseId>`，退出码 0 通过 / 1 失败 / 2 参数错误，可直接接 CI。
+* **音频编辑器搬到 Hippo 全页 `/audio-editor`**（[page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/audio-editor/page.tsx) 新增 + [audio-editor-url.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/hippo-browser/audio-editor-url.ts) 新增 + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：画布预览只有 ~600px，波形与对话稿堆叠后都不够用；新路由给满宽两栏（`wide`：左波形 + `Excerpts` 常驻清单，右 `Transcript` / `Suggested`，窄屏回落单列）。`audioEditorUrl()` 集中拼 `?path=&name=&size=` 并**刻意把 `127.0.0.1` 换成 `localhost`** —— 服务端会把预览 origin 302 回 localhost，而 302 会丢 query（实测 `/audio-editor?path=…` 会变成 `/audio-editor`）。
+* **音频预览改为 Hippo 启动卡**（[AudioHippoLauncher.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioHippoLauncher.tsx) 新增 + [registry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/registry.ts)）：打开音频文件即在 Hippo **自动**打开一次（同路径去重），失败保留手动入口；音频扩展名补 `webm`。
+* **片段重构为「命名区间」：`update_clip_range`**（[clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts) + [AudioClipTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioClipTrack.tsx)）：拖两端**只写 `.clips.json` 的 start/end**，不跑 ffmpeg、不覆写文件（`reclip` 收窄为「导出前现渲染」，导出时再 `&v=timestamp` 绕缓存）；`onExtend` 改名 `onRangeChange(clip, start, end)`；术语全面改称 `Excerpt`（`Save excerpt` / `Excerpts` 页签 / `Excerpt name`）。
+* **`fork_clip`：把片段复制成独立主音频**（[clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts) + [origin.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/origin.ts) 新增）：从源音频 + 当前区间渲到同卷 `.fork-XXXXXX` 临时目录 → 走 `importFileToLibrary()`（流式 sha1 前 10 位作目录后缀、同内容复用）→ 写 `.origin.json`（`AudioOrigin{source, sourcePath, sourceName, start, end, createdAt}`）。前端出面包屑 `‹ 原录音 · from mm:ss–mm:ss · [separate copy]` 与标题徽标 `Source audio` / `Excerpt copy`。
+* **转写后自动 DeepSeek 润色对话稿**（[ai.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/ai.ts) + [ai/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/ai/route.ts) + [transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts)）：新 action `polish_turns`（每批 ≤40 轮、40s 超时、`temperature 0.3`、抠 JSON、防御性剥掉模型自加的 `[说话人 N]` 前缀）与 `save_polished`（≤500 轮）；前端按每批 20 轮、最多 240 轮分批跑，进度 `Polishing {done}/{total}`；转写成功且非半截稿即**自动**润色（状态条 `Transcribed in Ns. Polishing…`）。sidecar 新增 `polished?: TranscriptPolish{at, model, turns}`，脏块丢弃但原文仍可读。
+* **转写稿逐句原地编辑**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts) + [clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts) + [TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：纯函数 `updateSegmentText` 只改 `text`；服务端 `save_transcript` 要求 sidecar **存在且与当前音频指纹相符**（绝不凭空新建）、单句 ≤5000 字、回传整份 transcript。前端行内 `textarea`（Enter 保存 / Shift+Enter 换行 / Esc 取消 / 失焦保存、**IME 守卫**、写入串行化防「读-改-写回」互相覆盖、乐观上屏且失败只回滚这一句）。
+* **对话稿导出 Markdown + 独立阅读器 `/markdown-view`**（[markdown.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/markdown.ts) 新增 + [page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/markdown-view/page.tsx) 新增）：`transcriptToMarkdown` 支持 `raw`（ASR 原文）/ `polished`（润色对话轮，无润色块时自动退回 raw）；新 action `export_markdown` 优先落 `项目/materials/`，无项目落 `~/BobWork/.cache/transcripts`；`/markdown-view` 用 `/api/local-files` 读文件后复用 `MdViewer`。片段稿只保留区间内句子（跨边界整句保留、时间改相对区间）；区间内无句子时导出前挡住（`No transcript text in this clip`）。
+* **本地 STT 新增 Zipformer CTC（中文 2025-07-03）**（[sherpa.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt/sherpa.ts) + [audio-parser.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/parse/audio-parser.ts)）：新模型 `zipformer-ctc-zh-2025-07-03`，**只作可选引擎、不设默认**（与 SenseVoice 在电话录音上互有胜负）；新增能力位 `needsPunctuation`（只出裸字 ⇒ 逐段补标点，失败原样返回不阻断）与 `supportsBatchFiles`（CTC 传多文件会报错 ⇒ 直接逐段跑）。
+* **「没有分出说话人」提示 + 二人重试**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx) + [transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts)）：sidecar 新增 `diarize` 字段（老 sidecar 从 `engine` 文案推断）；「请求过分离却一段标签都没有」时出提示 + `Retry as 2 people`（强制 duo、`refresh:true`，并**沿用原 `range`**，不会把整段长音频重跑一遍）。
+* **Web 检索 provider seam**（[web/service.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/web/service.ts) 新增 + [web/types.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/web/types.ts) 新增 + [web/index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/web/index.ts) 新增）：`WebService` 只做选择 / 执行 / 错误归一；`registerSearchProvider` / `registerFetchProvider` 重复 id 抛错；13 个 `WEB_*` 错误码；选择规则 = 显式 id（缺失 / 不可用分别报）→ 未配置走默认 → `auto` 先默认再唯一可用（多个可用报 AMBIGUOUS）；`WebError` 原样透传，`formatWebError` 渲染 `Error: [CODE] msg`。**检索不再绑定聊天模型。**
+* **DeepSeek Search / Fetch 直连 provider**（[deepseek-api.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/web/providers/deepseek-api.ts) 新增）：`POST {base}/v1/tools/search|fetch`，一次操作一次请求、不消耗辅助模型轮次；Search 可一次带回摘要 / 正文（`need_content`）；Key 取设置里 DeepSeek 厂商同一把，回退 `DEEPSEEK_API_KEY`；25s 超时；Search / Fetch 两条独立队列 210ms（≈5 QPS）；`count` 夹取 1–50（默认 5）；**按成功计费**（Search 结果非空一次、Fetch 正文非空一次；失败 / 空 / 超时 / 429 不计费）。
+* **本地 http 抓取 provider（无 Key 兜底）**（[http-fetch.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/web/providers/http-fetch.ts) 新增）：`assertPublicUrl` / `isPublicIp` 防 SSRF（禁内嵌凭据、URL ≤2048、拒 localhost / `.local` / `.internal`、DNS 全部地址须公网；IPv4 私网 / CGNAT / 链路本地 / TEST-NET / 组播，IPv6 ULA / LL / NAT64 / `::ffff:` 一律拒）；manual 跟随 5 跳且**每跳复验**；20s、响应 ≤5MB 流式累计、正文 ≤100k 标 truncated；charset 按 BOM → header → meta，GB2312 / GB18030 归到 GBK；HTML 经 `extractHtmlText` 转 Markdown；**不计费**。
+* **Daily News 采集降本**（[generate.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/generate.ts)）：权威站从「每站一次检索」压成 `site:a OR site:B` 的 1–2 次（按 120 字符切块，DeepSeek 上限 128），正文由 Search 的 `need_content` 带回，**删掉「候选 14 条 × 逐条 Fetch」**；新增站点公平性（`groupByHost` + `interleaveHits`，URL 去重）。注释口径：约 ¥6/月 → ¥1–2/月。
+* **Hippo 下载四件套**（[specs.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/browser-tools/specs.ts) + [hippo-cdp.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-cdp.ts) + [hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts) + [browser.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/browser.ts)）：新增 `browser_find_downloads` / `browser_download` / `browser_downloads` / `browser_save_download`（工具规格 48 → 52 条）。CDP 侧新增 `FIND_DOWNLOADS_SCRIPT`（扫链接 / 按钮、扩展名白名单、文案与 class/id 命中 `下载|附件|导出|保存|download|export|save`、可见性校验、最多 20 个候选）；主进程补齐 `DownloadWaiter` 队列、桥 `/download` `/downloads`、`revealDownload` 三态报错（`Download not found` / `has not finished yet` / `File not found on disk`）；`browser_save_download` **要求有激活项目**否则明确报错，落 `materials/<folder>`（文件夹名净化、重名递增 `stem (n).ext`）。
+* **侧栏工具面 Core / Full 档位**（[profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts) + [settings.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/settings.ts)）：`AgentProfile` 新增 `toolAllowlist` / `toolAllowlistBypassOnFull`；新增 `BROWSER_CORE_TOOLS`（**31 条**，全量 52 条中被挡在 Core 外 21 条，如 cookies / storage / network / console / drag / coordinate / resize 等），默认只注入 Core，设置 `browserToolset: 'core' | 'full'` 可切 Full（`undefined` = core）—— 目的就是**缩小上下文、加快首 token**。
+* **专属子 Agent 创建框独立**（[AgentCreateDialog.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/AgentCreateDialog.tsx) 新增）：`＋ Add session → New Agent…` 打开 520px 弹窗（`New Agent` / `Existing Agent` 两档）；新建走 `create_agent_package`、改造走 `update_agent_package`，首轮消息要求模型先用 `ask_user_questions` 确认 scenes / exclusions / skillPool。
+* **截图自检「原生视觉优先」**（[vision-model.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/providers/vision-model.ts) 新增）：当前 coding 模型声明 vision 时**直接看图**（OpenAI 兼容 `chat.completions` + `image_url`，`max_tokens 800`、60s、`maxRetries 0`），失败静默回退 `bob-ocr-mcp`；自带五条视觉检查清单（布局 / 间距溢出 / 颜色排版 / 可见控件状态 / 渲染缺陷）。
+
+### 修复与优化
+
+* **AI 改码后预览不再停在旧版本**（[SandboxPreviewFrame.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SandboxPreviewFrame.tsx) + [ChatNodeKernel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ChatNodeKernel.tsx)）：预览订阅 `sandbox-changed`（按 `appId` 过滤、150ms 去抖、刷新时清空 console 消息）；变更广播正则由 `write_file|delete_file|rename_file` 扩到含 **`edit_code`** 与 `sandbox_rollback` —— 此前 `edit_code` 不广播，预览会长期停留在旧版本。
+* **说话人分离把同性别两人并成一个**（[diarize.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt/diarize.ts)）：`DIAR_VERSION` **4 → 5**；`planClusterMerge` 只在 `mode === 'auto'` 时调用 —— **duo / group 不再做声纹合并**（0.5 余弦阈值会把同性别 / 同电话音色的两位真人并成一个，用户选了「2 人」却仍拿到无标签稿）。
+* **播放收束到选中片段**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx) + [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：播放边界优先级改为**选区 > 聚光区间 > 播到底**；选中时出 `Excerpt · mm:ss–mm:ss` 芯片（可一键清除），并新增句柄 `playRange` / `zoomToRange`（片段一键放大到界面宽度）。
+* **转写入口收敛为「一次点击 = 对话稿」**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：`transcribe()` 固定带 `diarize:'auto'`（`Separate speakers` 勾选移除），失败时接管服务端已落盘的**半截稿**、转写中每 4s 轮询 `load_transcript` 显示逐窗进度。
+* **图片放大后没有明显变大**（[ImagePreviewLightbox.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ImagePreviewLightbox.tsx) 新增 + [HtmlRenderer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/HtmlRenderer.tsx)）：抽成共享组件，用 `carousel.imageProps` 覆盖 yarl 的「最小(自然尺寸, 视口)」内联尺寸（`width/height:100%` + `objectFit:contain`）⇒ 小图等比放大 2–3 倍、大图仍 contain 不裁切；`HtmlRenderer` 由内联 `Lightbox + Zoom` 改为复用该组件。
+* **Butler 线程裁剪改为滞回**（[threads-shared.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/threads-shared.ts)）：新增 `THREAD_KEEP_ROUNDS = 14`，`trimThreadMessages` 由「超 40 条裁到 40」改为「超 40 条裁到 `14*2 = 28` 条」（向偶数对齐、开头是 assistant 再前进一步、保留末尾未答复的单条 user）。注释带缓存回测：`butler-notify` 卡在 40 条时 prompt ≈100k tokens、逐轮命中率仅 22–27%，「>90k 上下文的管家首调」占全部 miss 的 16.7%；滞回后窗口在 14↔20 轮阶梯变化、裁剪后连续约 6 轮可复用前缀，预估该类 miss 降约 5 倍。顺带把「未读条数」抽成可测的 `countUnreadAssistant()`。
+* **浏览器等待语义收敛**（[hippo-cdp.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-cdp.ts) + [hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts)）：`browser_snapshot` 由等满 15s 改为只等 **1.5s 落定**；`browser_open_tab` 由等满 20s 改为 **3s**；`browser_read_article` 在「正文已出现（`innerText > 100`）但 `readyState` 未 complete」时再给 **600ms** 就返回，不再死等 6s。
+* **下载不被误判重复调用 + 计入页面交互**（[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts)）：新增 `isPollingTool()`（`browser_downloads` 同参重复调用属正常轮询，跳过去重）；`PAGE_INTERACTION_TOOLS` 补 `browser_download`（下载会改变页面状态，需重置内容读取缓存）。
+* **团队模式按画像门控**（[profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts) + [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/route.ts)）：新增 `supportsTeamCollab(profile)`，`teamModeOn = supportsTeamCollab(profile) && multiAgentMode === true` —— 修复 fixed 画像（coding / 市场 agent）因旧节点残留 `multi_agent_mode=true` 被注入 `MULTI_AGENT_RULES` 却没有 `team_run`。
+* **审批层把下载算作写类**（[approval.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/chat/approval.ts)）：`BROWSER_WRITE_ACTIONS` 增 `download` / `save_download`（`ask` 档弹确认、`never` 档直接拒）；写类判定抽成导出的 `isWriteKindTool(name)`，兼容 `mcp__{server}__browser_click` / `browser.click` / 裸 `browser_click` 三种形态。
+* **模型拉取报错可操作化**（[SettingsModal.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SettingsModal.tsx)）：401/403 按厂商给出具体出路（火山方舟 / 百炼 / OpenAI / 硅基流动…），兜底 `Check that the API Key is correct…`；Base URL 含非 ASCII 直接拦下；30s 超时给明确文案。
+* **空账本判定**（[usage/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/usage/route.ts)）：`meta.empty` 改为 `tasks === 0 && webTools.length === 0`；**小额成本不再抹零**（`fmtCost` 按量级 2–5 位小数去尾随 0，¥0.005 不再显示成 ¥0.01）；裸关键词检索失败不再抛（与单级失败只丢该级口径一致）；Daily News 站点公平性（`interleaveHits`）。
+
+### 改进
+
+* **用量接入按次计费 + Year 视图**（[usage.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/usage.ts) + [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/usage/route.ts) + [UsagePanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/UsagePanel.tsx)）：新增 `source='web'` 与 `WEB_TOOL_UNIT_PRICE_CNY = { search: 0.005, fetch: 0.005 }`（¥5/千次），`recordWebToolUsage` 写 0 token / 1 call；`UsageSummary` 增 `webTools`、`UsageWindow` 增 `sources` / `excludeSources`；面板新增 **Web tools** 区块（`N calls · billed per successful request`）与 **Year** 视图（当月 + 往前 11 个自然月，只留月度折线）。
+* **`web_search` / `web_fetch` 切新 seam**（[web.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/web.ts)）：`web_search` 结果结构化 —— `Search results (DeepSeek):` + 每条 `来源: 站点 · YYYY-MM-DD · 权威性 N/4` + 摘要 ≤700（旧实现是 Bing / 百度 / DDG 抓取 + Readability + Volcengine 兜底、`Summary:` 整段）；`web_fetch` 默认 DeepSeek Fetch、正文上限 6000 → **7600**，非 200 会带 `HTTP: n`；权威性 ≥3 的条目出卡片。
+* **工具面收窄的配套提示词与设置**：浏览器提示词补「等待语义」与「下载文件」两段（明确 `ready:false` / 空标题 / `[!] 页面可能未加载完` 都是正常信号，应改用 `browser_wait_for_text` / `wait_network_idle` 而不是重复 snapshot；下载给出完整闭环与四个「不要」）；设置新增 `Web Search` 段（Search / Fetch provider 下拉，`DeepSeek providers reuse the DeepSeek key from Models. Changes apply from the next tool call.`）与 `Browse toolset` Core / Full 开关。
+* **crawler 提示词与纪律**（[context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts)）：coding prompt 新增【范围纪律】（只实现愿望需要的集成，不为「亲儿子」主动加 AI / 日历 / 项目集成）、【高权限】（hostTool 与 graph 只在功能需要时用，破坏性命令先说明）、【交付底线】（`<!DOCTYPE html>`、viewport meta、无 `alert()`、空态不显示 NaN/undefined/0、复杂交互写 smoke-test）。
+* **用户指南同步**（[SKILL.md](file:///Users/baolei/Desktop/BobWork/assets/skills/user-guide/SKILL.md)）：新增 Mini Apps 入口、Coding 章节（AI Chat 模板、`smoke-test.js`、铅笔按钮三项能力、Console 修复链路、Butler `list_mini_apps` / `create_mini_app`、`telemetry.jsonl`），以及 Bob OCR 随包内置说明。
+
+### 界面细节
+
+* **许愿编程首屏**：愿望框（占位示例「加班费计算器」）、`⌘/Ctrl + Enter to build · clearer wish = fewer questions`、`/800` 计数；名称标 `(optional — auto from your wish)`；模板下拉 + 12 张灵感卡；Fast build 开关 `skip the 6 questions and confirm a short build brief instead. Off by default`；简报标题 `Build brief — edit anything the AI should not guess`；主按钮在 Fast build 下为 `Build with brief`、否则 `Build Mini App`；支持附参考图 / 文件（`image/*,.pdf`）。
+* **App details 弹窗**：`No versions yet — a version is saved automatically before each AI write.`、`Duplicate copies code only (no private data or version history).`；每条版本 `stamp · N KB` + `Restore`；`Version history` 加载后变 `Refresh versions`。
+* **预览 Console 面板**：`Console {n} err` 按钮、`Console · captured from the preview (latest N)`、`Clear` / `Fix with AI` / `Stronger model`（无错误时后两者 disabled）、空态 `No console messages.`。
+* **Mini Apps 面板**：`Starred mini-apps · N`、`Browse store`、空态 `No starred mini-apps yet. Star apps in the Mini Programs store, then they show up here.`；卡片 `Unstar` / `Open in Hippo`。⌘F 面板**删除**了标星小程序前 5 个图标与 `+N` 入口（入口迁到 Butler 左栏）。
+* **音频 `excerpt` 化与 fork 来源**：`Excerpts · N` + `ranges of this recording`、锁图标说明 `Excerpts are ranges of this recording. The master audio is never modified.`；面包屑 `‹ {sourceName} · from mm:ss–mm:ss · [separate copy]`；标题徽标 `Source audio` / `Excerpt copy`；转写面板头部动作收进 `⋯`（`Transcribe selection` / `Polish with DeepSeek` / `View polished` / `Open as Markdown`）。
+* **润色与编辑态**：`Polishing {done}/{total}`；polished 视图每轮一条说话人色竖条 + `Speaker N` + 时间范围；编辑行用 `--surface` 底 + 左侧主色竖条（与选区同口径），`Enter to save · Esc to cancel` / `Saving…`。
+* **下载卡片与提示**：`ai-card ai-card-download`（标题 `已下载：<name>`、`<进度> · 保存到系统下载目录`、正文 `savePath`，列表最多 3 张）；侧栏提示统一走窗口工具栏 toast（`bob-hippo-toast`），面板不再自建浮层。
+* **设置项**：`Web Search` 导航段（Globe 图标，关键词含 `联网 / 搜索 / 抓取 / 网页`）；`Browse toolset` 行（仅 Hippo 通道开启时出现，`Core` / `Full` + ToggleSwitch，说明随档位切换）；`＋ Add session` 菜单在市场画像列表后新增分隔线 + `New Agent…`（Bot 图标）。
+
+### 新增单测
+
+* 新增 10 个测试文件（**共 44 例**）：`sandbox/benchmark.test.ts`（4）、`sandbox/coding-docs.test.ts`（3）、`sandbox/telemetry.test.ts`（2）、`audio/markdown.test.ts`（6）、`web/service.test.ts`（10）、`web/providers/http-fetch.test.ts`（9，含 IP 白名单 14 行 `it.each`）、`chat/tools/web.deepseek.test.ts`（6）、`news/generate.test.ts`（8）、`agents/profiles.test.ts`（5）、`providers/vision-model.test.ts`（3）。
+* 扩展：`audio/transcript.test.ts` **+13 例**（polished sidecar 3 / `updateSegmentText` 7 / `groupSegmentTurns` 3，文件共 39 例）；`__tests__/node-markdown.test.ts` **+2 例**（`sandbox_spec` 限长与只认严格 `fast_build:true`、YAML 往返）；`sandbox/iframe-bridge-host.test.ts` **+1 例**（`bob_console` 归一化且不执行业务请求，共 13 例）；`sandbox/prompt-consistency.test.ts` 增 `read_bridge_docs` 分流断言（共 6 例）；`butler/threads.test.ts` 29 例（新增未读 3 例 + 滞回 2 例）；`chat/approval.test.ts` 10 个 it 块 / 86 例（新增 `isWriteKindTool` 三组）。
+* 全仓 `pnpm test` **137 文件 / 1591 例全绿**；`tsc -p tsconfig.json` 通过（含 `electron/`）。
+
+### 已知待确认 / 迁移缺口
+
+* **改一行即丢整份润色稿**：`save_transcript` 写回前会 `delete next.polished`（有意避免过期对话），但**无提示、不保留旧结果** ⇒ 用户编辑任意一句后必须重新润色（多一次模型调用）。
+* **`DIAR_VERSION` 4→5 使分离缓存全部失效**：缓存键带版本，项目 `.cache/diar/` 里旧条目**不命中也不会被清理**；旧录音首次打开会重跑一次分离（分钟级）。
+* **片段文件与区间短暂不一致**：拖两端只改 `.clips.json`，磁盘片段文件仍是旧区间内容，直到导出时现渲染 —— 有意设计（不悄悄替换用户已导出/分享的文件），但「文件是缓存、区间是真源」对用户不可见。
+* **Markdown 导出无项目时落缓存目录**（`~/BobWork/.cache/transcripts`，不进项目 / 资料索引），且文件名时间戳取 `toISOString()` ⇒ **UTC 而非本地时间**；同名同秒两次导出可能覆盖。
+* **Year 视图在「只有 Web 调用」时可能整块空白**（`byMonth` 排除 web，而 Year 又隐藏 Web tools）。
+* **Daily News 检索未传 billing** ⇒ 这部分费用 `project_id` 为 NULL，Project 作用域看不到。
+* **Core 档位挡掉 21 个浏览器工具**（cookies / storage / network / console / 拖拽 / 坐标 / 视口等）：需要这些能力时必须到设置切 Full，否则模型会「看不到」这些工具。
+* **`chunkSiteQueries` 注释与测试不一致**：注释说 tech 会拆 2 次，实测 115 字符、测试断言 1 次（以测试为准，注释待改）。
+* **`transcript` 编辑与润色均为「单份 sidecar」**：按选区转写会整份覆盖局部稿（v0.7.697 起的既有语义），本版未改。
+* **`audio-editor` 页面在 Hippo 里没有 preload** ⇒ 全部能力走同源 HTTP；`CanvasFlow` 里旧的 `LazyAudioViewer` 空态是否已成死路径待确认。
+
+## v0.7.718 (2026-10-17)
+
+> 本版三块：① **Butler 录音导入改「NDJSON 流式进度」** —— 说话人分离（diarize）过程中实时回传百分比，前端显示 `Analyzing speakers… N%`，不再是一次性等待。② **OCR 批注气泡可单独拖动** —— 新增 `dragMode 'textMove'`，气泡独立于标记本体拖动（clamp 到画布），并抽出 `markTextPos` / `markTextBubbleRect` 统一「命中 / 拖气泡 / 选中框」三处口径。③ **音频片段轨「点空白退出选中」** —— 点空白既跳转又清除选中，新增 `onClearSelect` 回调。另：说话人分离线程数按 CPU 自适应。共 7 个文件改动（0 新增文件，1 测试改动）。
+
+### 新增功能
+
+* **Butler 录音导入流式进度**（[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/meeting/route.ts) + [MeetingStart.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/MeetingStart.tsx)）：`import_probe` 由一次性 JSON 改为 **NDJSON 流**（响应头 `Content-Type: application/x-ndjson; charset=utf-8`、`Cache-Control: no-store`），每行 `{t:'progress', phase:'diarize', pct}`、收尾 `{t:'done', durationSec}` 或 `{t:'error', error}`；`ensureDiarization` 新增 `onProgress` 回调（按整数百分比变化才发，`lastPct` 去抖）。前端新增 `probeImport(audioPath, onProgress)` 读流，映射为 `{done, total:100, phase:'speakers'}`，文案 `Analyzing speakers… N%`（无 total 时回退 `Analyzing speakers…`）。错误文案 `Could not read the recording (HTTP ${resp.status})`。
+* **OCR 批注气泡可单独拖动**（[ScreenOcrEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/screen-ocr/ScreenOcrEditor.tsx)）：新增 **export** `markTextPos(ctx, m)` 与内部 `markTextBubbleRect(ctx, m)`（命中 / 拖气泡 / 选中框三处共用）；`dragMode` 新增 `'textMove'`，拖拽状态新增 `textFrom`；拖动分支新增 `textMove`（**仅改 `textX` / `textY`**，clamp 到画布）；新增 `overLabel` hover 光标提示。非 mosaic 工具下气泡均可单独拖动，本体拖动仍限 `select` / `text` / `underline`。
+* **片段轨「点空白退出选中」**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) + [AudioClipTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioClipTrack.tsx)）：新增 `clearClipSelection` / `handleSelectionChange`（选区变化镜像 `highlightRange`，`sel === null` 时 `setActiveClipPath(null)`）；`AudioClipTrack` 新增可选 prop `onClearSelect`，点空白处与 `onSeek` 同时调用。
+
+### 修复与优化
+
+* **说话人分离线程数自适应**（[diarize.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt/diarize.ts)）：`runDiarization` 新增 `onProgress?` 形参；线程数由硬编码 2 改为 `Math.max(2, Math.min(4, (os.cpus()?.length ?? 4) - 1))`，CLI 参数改为 `--segmentation.num-threads=` / `--embedding.num-threads=`；新增行缓冲 `errBuf` + `noteProgress`，用正则 `/progress\s+(\d+(?:\.\d+)?)%/` 从 stderr 解析进度并透传到 `ensureDiarization`。
+
+### 验证
+
+* 本批**含测试改动**（`rect-geometry.test.ts` 新增「批注气泡：可点中 + 可单独拖动」用例组：缺省位置 / 气泡命中 / 空白不命中 / `textX`·`textY` 锚点 / 无批注无气泡）；全仓 `pnpm test` **127 文件 / 1502 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记：`textMove`、`Analyzing speakers`、`并退出选中`；服务端标记：`application/x-ndjson`、`audioPath is required`、`--segmentation.num-threads=`。
+
+## v0.7.717 (2026-10-17)
+
+> 本版把扫描 OCR 的**框选矩形**升级为**可带文字批注**的一等标注（与下划线 / 箭头同构）：矩形新增可选 `value` / `textX` / `textY`，落定后在框**左下角外侧**挂「+ 添加批注」按钮，补虚线引线（引线起点 = 框边界最近点）、支持气泡拖拽与 Delete / 撤销重建，命中测试改为同时计入气泡框。新增测试块钉住引线锚点语义。共 2 个文件改动（0 新增文件，1 测试改动）。
+
+### 新增功能
+
+* **矩形标注可带文字批注**（[ScreenOcrEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/screen-ocr/ScreenOcrEditor.tsx)）：`Mark` 的 `rect` 变体新增可选 `value?` / `textX?` / `textY?`（空 = 纯框）；`Draft` 新增 `rect?` / `rectId?`，`AnchorPending.kind` 增 `'rect'`。新增 **export** `leaderAnchorOnRect(x, y, w, h, box)`（**引线起点 = 框边界最近点**，气泡中心落在框内时取最近边的垂足，避免退化成 0 长引线）与内部 helper `rectTextY()` / `rectTextX()`（缺省气泡在框下方外侧、贴底时翻上方、与框左边对齐且过长左移防出图）。复用既有批注路径：命中测试同时算气泡框、绘制补虚线引线、拖框时同步偏移 `textX` / `textY`、删除误删后按 `rect` 几何重建、落定后在框左下角外侧挂「+ 添加批注」按钮。
+
+### 修复与优化
+
+* **Rect 工具按钮 title 扩写**（[ScreenOcrEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/screen-ocr/ScreenOcrEditor.tsx)）：由 *Rect: drag to box a region* 改为 *Rect: drag to box a region, then drag the + button to add a note*，交代「框选后可加批注」的第二段操作。
+
+### 验证
+
+* 本批**含测试改动**（扩展 `rect-geometry.test.ts`，新增 `leaderAnchorOnRect` 引线锚点用例：气泡在框外 → clamp 到边界 / 正右 / 正上 / 对角到框角；气泡中心在框内 → 取最近边垂足）；全仓 `pnpm test` **127 文件 / 1497 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记校验：`then drag the + button to add a note`、`data-screen-ocr-editor="true"`。
+
+## v0.7.716 (2026-10-17)
+
+> 本版三块：① **扫描 OCR 新增「框选矩形」标注** —— 一等对象（可选中 / 拖动 / Delete / 撤销），矩形**只命中四条边**（内部不拦截点击，便于圈住文字；容差 8px），马赛克笔刷档位收敛为 `[0.25, 0.5, 1]`。② **音频详情区页签回到 3 个**（`Transcript` / `Suggested` / `Clips`，`Clips` 与下轨为同源两视图），**说话人分离默认开启**；`TranscriptPanel` 由「逐行操作面」改造为**纯阅读的对话稿**（连续同一 speaker 并为「轮」，点轮首跳转）。③ **说话人分离加「声纹簇合并」**（`planClusterMerge`，质心相似度 ≥0.5 的簇合并，减少假说话人；`DIAR_VERSION` 3→4）；片段轨引入**分层错位**解决重叠遮挡。共 8 个文件改动（1 新增，2 测试改动）。
+
+### 新增功能
+
+* **扫描 OCR 框选矩形标注**（[ScreenOcrEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/screen-ocr/ScreenOcrEditor.tsx)）：新增一等工具 `Tool='rect'` 与标注类型 `{kind:'rect'; x; y; w; h}`、`MIN_RECT=12`、`drawRectMark()`、`dragMode 'rect'`，工具栏新增 `Square` 图标（title *Rect: drag to box a region*）。几何口径收敛为两个 **export** 函数：`rectFromDrag(sx, sy, cx, cy, cw?, ch?)`（两端各自钳进 `[0, 边界]`，`w`/`h` 恒正，正反向拖拽归一化结果一致）与 `hitTestMark`（矩形**只命中四条边**、容差 8px，内部不拦截 —— 保证「空心框能圈住内部文字而不抢点击」）。`Mark` 同步 export 供单测。另：马赛克档位常量 `MOSAIC_BRUSH_STEPS` 由 `[0.5, 1, 1.8]` 收敛为 `[0.25, 0.5, 1]`（圆点直径同比缩放），工具栏宽 `TOOLBAR_W` 236→268，箭头气泡锚点语义改为**箭尾（起点）外侧**。
+* **音频详情区 3 页签 + `Clips` 视图回归**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：`DetailTab` 增加 `'clips'`（`tabAvailable.clips=true`，`data-role="clips-section"`；页签 `Clips` / `Clips · {n}`），导出片段后自动 `setDetailTab('clips')`；`diarize` 默认值 `false`→`true`（说话人分离默认开）；`TranscriptPanel` 不再接收 `onAddMark/onClipLine/onClipBatch`，改传 `defaultOpen`。空态文案 *No clips yet — drag a range and press Clip*。
+* **说话人分离「声纹簇合并」**（[diarize.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/stt/diarize.ts)）：新增 export `planClusterMerge(clusters, allSpeakers, durationOf, threshold=0.5): ClusterMergePlan`（`{ remap: Map<number, number>; clusters: ClusterCentroid[]; merged: boolean }`）与常量 `VOICEPRINT_MERGE_SIM=0.5`；分离流程内先算质心 → `planClusterMerge` → 若 `merged` 则重映射 speaker、重建 chunks 并过滤幽灵簇。`DIAR_VERSION` 3→4，`THRESHOLD_AUTO` 0.9→0.95。
+
+### 修复与优化
+
+* **`TranscriptPanel` 改造为纯阅读对话稿**（[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：撤掉勾选框 / `toggleSelect` / `selectedRanges` / 顶部 `Clip N` / 逐行 `＋``✂` / `TEXT_LINES` 行截断；新增 `turns` useMemo（连续同一 speaker 并成一「轮」，仅多说话人时启用）、`renderRow()`（整行可点按钮）、`mmss()`。轮首显示 `Unassigned` / `Speaker {n}`（title *Jump to where this speaker starts*），整行 title `Jump to {mmss}`。
+* **片段轨分层错位**（[AudioClipTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioClipTrack.tsx)）：新增 `LANE_H=40` / `BLOCK_H=32` / `LANE_GAP=4`、`laneTop()` / `laneTrackHeight()` / `assignLanes(clips)`（贪心最少层，按**已提交**区间计算，拖拽中不跳层），解决重叠片段互相遮挡。属性：`data-lanes={laneCount}`、`data-clip-lane={lane}`。
+* **`AudioMarkTrack` 移除「按句截取」句柄**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：删除 `requestClip()` 及 `suggestRef` 兜底逻辑，仅保留 `getSelection()`（该路径已由详情区页签 + 片段轨取代）。
+
+### 验证
+
+* 本批**含测试改动**（新增 `rect-geometry.test.ts` 覆盖 `rectFromDrag` / `hitTestMark` 边命中语义；扩展 `diarize.test.ts` 覆盖 `parseDiarizationOutput` / `buildSpeakerChunks` / `clipChunks` / `diarModeOf` / `planClusterMerge`）；全仓 `pnpm test` **127 文件 / 1490 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记校验：`data-role="clips-section"`、`data-clip-lane`、`Rect: drag to box a region`、`Jump to where this speaker starts`；服务端标记：`[diarize] 声纹合并后：簇 `。
+
+## v0.7.715 (2026-10-17)
+
+> 本版是 **音频「双轨编辑器」的可视化打磨（纯视觉层）**：把上轨（波形打点）与下轨（片段）包进同一条 `relative` 时间轴容器，新增一条**贯穿两轨的虚线引导线** —— 拖动片段轨两端手柄时，把草稿区间**实时投影**到上方波形；上轨同时对选中 / 拖拽区间**聚光**、其余整段压暗。无新文案、无服务端改动。共 3 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **双轨容器 + 跨轨拖拽引导线**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：把 `AudioMarkTrack` / `AudioClipTrack` 包进 `<div className="relative flex flex-col gap-2" data-role="tracks">`；新增 `clipDrag` 状态接住下轨拖拽草稿（`ClipDragReport`），派生 `spotlight`（草稿区间 ?? 选中片段区间 ?? null）、`guideTime`、`guideX`（复用 `trackView.view.start/sec`，与两轨同源映射）；当 `guideX != null` 渲染贯穿虚线 `data-role="drag-guide"`（`data-guide-t={guideTime ?? ''}`，`pointer-events-none absolute inset-y-0 border-l border-dashed`）。
+* **波形聚光高亮**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：新增可选 prop `spotlight?: { start: number; end: number } | null`；给定区间时用两片 `data-role="spotlight"` 底色遮罩把区间外压暗（`color-mix(in oklab, var(--surface-muted) 68%, transparent)`）、区间内保持高亮；`b <= a` 或时长未知时不绘制，未传 prop 时观感与旧版一致。
+* **片段轨上报拖拽草稿**（[AudioClipTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioClipTrack.tsx)）：`DragState` 导出为 `ClipDragReport`（内部保留 `type DragState = ClipDragReport` 别名）；新增 `onDragGuide?: (d: ClipDragReport | null) => void`，按下 / 移动即上报草稿、松手上报 `null`；`endDrag(commit)` 区分提交与取消，事件改为 `onPointerUp={() => endDrag(true)}` / `onPointerCancel={() => endDrag(false)}`（两端手柄各一处）。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记校验：`data-role="tracks"`、`data-role="drag-guide"`、`data-role="spotlight"`。
+
+## v0.7.714 (2026-10-17)
+
+> 本版是 **音频「双轨编辑器」第一步 + OCR 箭头批注可带文字**：① 音频详情区由「分区堆叠」改为**页签**（仅 `Transcript` / `Suggested`），撤掉 `Source` / `Clips` 分区，新增底部**片段轨**（新组件 `AudioClipTrack`）—— 已导出的片段按其在源音频里的区间，与上轨**同一时间轴、同一播放头**摆放，选中后**拖两端即改 start / end**（拖拽期只画本地草稿，松手才调一次 ffmpeg）。② 服务端 `POST /api/audio/clip` 新增 **`reclip`** 动作，专做「就地重切已存在的片段」，与 `clip`（新建）分工。③ 扫描 OCR 的**箭头标注也能带文字批注**（与下划线批注同构）。④ 波形微调按钮**不再显示 `0.3` 数字**。共 5 个文件改动（1 新增，0 测试改动）。
+
+### 新增功能
+
+* **音频片段轨 `AudioClipTrack`（新增组件）**（[AudioClipTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioClipTrack.tsx)）：双轨编辑器的下轨。把 `clips` 按**相对源音频的区间**摆在与上轨**同一条时间轴**（同时间窗、同播放头）上，渲染为可点选块（`data-role="clip-track"` / `data-clip-block`）；选中块两端出拖拽手柄（`data-clip-handle="start"|"end"`，title *Drag to change where this clip starts / ends*）；**拖拽期用本地草稿区间绘制**（不每帧请求服务端），松手回调 `onExtend` → 父级调 `reclip` —— **只在松手时花一次 ffmpeg**。props：`clips / durationSec / view / playhead / activePath / onSelect / onSeek / onExtend / busy`。空态文案 *No clips yet — drag a range and press Clip*。仅被 `AudioViewer.tsx` 引用。
+* **`reclip`：就地重切已存在的片段**（[route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：POST 体 `action:"reclip" | source | path | clipPath | startSec | endSec`。流程：校验参数 → `resolveAudio` 取 `sourceDir`（**限定在该音频库目录内**，防越权覆写）→ `probeAudioDurationSec` + `validRange`（≥0.1s，越界报错）→ `clipAudio` **覆写同一路径** → `upsertClipRef` / `writeClips` 更新 `.clips.json` 的 start / end。与既有 `clip` 的分工：`clip` **新建**片段，`reclip` **就地重切**一个已存在的片段（双轨编辑器里「拖两端改长度」的落地点）。**路由路径未变**，仅扩展 POST 分支。
+* **音频详情区改页签 + 接入片段轨**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：详情区由「分区堆叠」改为**页签**（`data-role="detail-tabs"`，仅 `Transcript` / `Suggested`），撤掉 `Source` 与 `Clips` 两分区；底部挂上 `AudioClipTrack`，新增 `activeClipPath` 选中态与 `reclipClip`（调 `reclip`）接线；重切成功 toast *Updated ${clip.name} · …*。
+* **OCR 箭头标注可带文字批注**（[ScreenOcrEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/screen-ocr/ScreenOcrEditor.tsx)）：`arrow` mark 新增 `value` / `textX` / `textY`，与下划线批注**同构**；「+ 添加批注」的待定状态由 `UnderlinePending` 泛化为 `AnchorPending`（带 `kind: 'underline' | 'arrow'`）；引线锚点统一到 `leaderAnchorOnSegment`（**线段最近点投影**），并新增 `arrowDefaultTextAnchor` / `arrowTextX` / `arrowTextY`。
+
+### 修复与优化
+
+* **波形微调按钮去掉数字徽标**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：撤掉 `↺` / `↻` 按钮上的 `0.3` 徽标（仅留图标），步长改由 `title` / `aria-label` 交代（`Back 0.3 seconds` / `Forward 0.3 seconds`）。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。客户端标记校验：`data-role="clip-track"`、`data-clip-handle`、`data-role="detail-tabs"`；服务端标记：`'reclip'`。
+
+## v0.7.713 (2026-10-16)
+
+> 本版两块：① **找到并修掉「项目面板顶部点不动」的真正根因** —— 不是热区大小问题，而是全屏覆盖层**没有声明 `no-drag`**：Electron 的 `app-region` 命中**不遵循普通 `z-index`**，上层未声明 `no-drag` 时，下层（CanvasFlow 顶部拖拽条 + 左栏窗口控制区）的 drag 区仍会吃掉点击，于是面板顶部（含 `Open on launch` 开关）**只有越出 drag 区、靠下的部分能点到**。② **Butler 气泡支持 widget 可视化** —— 此前气泡正文只走 `StreamingMarkdown`，` ```widget:* ` 围栏会退化成裸代码块；现改走 widget 感知渲染（与画布对话节点同源），含 widget 的气泡不套气泡壳、满宽展示。共 2 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **项目面板顶部点不动：全屏覆盖层补 `no-drag`**（[ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx)）：给项目面板的全屏覆盖层 style 补 `WebkitAppRegion: 'no-drag'`（并把内联对象断言为 `CSSProperties`，新增 `import type { CSSProperties } from 'react'` 支持 `WebkitAppRegion` 这类非标准属性）。**根因说明**：窗口顶部有 drag 拖拽热区（`CanvasFlow` 顶部拖拽条 + 左栏窗口控制区），而 Electron 的 `app-region` 命中**不按普通 `z-index` 走层级** —— 上层不显式声明 `no-drag`，下层的 drag 区照样吃掉点击。这解释了 v0.7.710 / v0.7.711 两轮「改热区大小」都治不好：真正被吃掉的不是开关的命中面积，而是**面板顶部整条被 drag 区覆盖**。
+* **Butler 气泡支持 widget 可视化**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：新增 `ButlerMarkdown` —— 无 widget 时保持原行为（整段交给 `StreamingMarkdown`），有 widget 时按 `parseWidgetBlocks` 分块，`kind === 'text'` 走 `StreamingMarkdown`、其余交 `WidgetRenderer`；流式期间未闭合围栏（`hasOpenWidgetFence`）用 `WidgetSkeleton` 占位。`hasWidgetBlocks(bodyContent)` 为真时**不套气泡壳**、外层 `max-w-[80%]` 放宽为 `flex-1`（与画布对话节点 `ChatNodeKernel` 同口径），并同步应用到「批注详情」（`selectedNotice.body`）的渲染。导入 `WidgetRenderer` / `WidgetSkeleton` 与 `@/lib/widget-blocks` 的 `hasWidgetBlocks` / `hasOpenWidgetFence` / `parseWidgetBlocks`。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.712 (2026-10-16)
+
+> 本版修 **v0.7.710 引入的「等待三点一直闪」回归**，并把 `Open on launch` 的命中热区改为**以开关为中心对称外扩**：① v0.7.710 的折叠补追用「服务端条数 ≥ 折叠快照条数」判本轮是否落库，但服务端 `trimThreadMessages` 只保留最近 N 轮 ⇒ 返回的列表可能比折叠快照还短，`len >= baseline` **恒假**，轮询永不采纳、界面停在「只有提问、等待点一直闪」；改为按「线程 `updatedAt` > 发出时刻 + 末尾是助手气泡 + 末尾那轮的 user 正文对得上本轮提问」**三条同时成立**才认落地。② `Open on launch` 热区不再用「整行可点」，改为开关自身 `::before` 向四周对称扩 10px（48×36），**文案不参与点击**，避免命中重心偏离按钮。③ 修 **OCR 文字批注框「真失焦时草稿既不落定也不清理」** 与 **中文输入法「上屏」回车提前提交**。共 3 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **`turnLanded` 判定重做：不再用条数比大小**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：`DialogState` 新增 `updatedAt`（服务端线程最后写入时刻，来自 `threads.ts` 的 `upsertThread`；置已读刻意不写它）；`pendingTurn` 增加 `baselineAt`。判定三条：① `updatedAt > baselineAt` —— 且 `baselineAt` 取**本轮发出时刻**（`turnSentAtRef`）而非折叠时刻，以覆盖「服务端在折叠前就已写完这轮」的情形；② 服务端末条是助手（`entry.ts` 的 `finally` 恒按「提问 + 回复」成对落库）；③ 末条之前的最后一条 user 正文与本轮提问**互含**（挡掉别的轮次稍后落库被误认；纯附件轮正文被 `stripInjectedBlocks` 剥空时认它落地，否则永远判不落地）。轮询到**上限仍未落地**则作罢并**清掉还在闪的空白占位气泡**（保留提问气泡、停掉流式光标）——这轮服务端确实没写库（上游整轮失败时 `entry.ts` 只在 `combined.trim()` 非空才写），别留一个空气泡一直闪。
+* **`Open on launch` 命中热区对称外扩**（[ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx)）：外层恢复为布局 `div`；开关自身用 `before:absolute before:-inset-2.5 before:content-['']` 生成**以开关为中心对称**的热区（四周各扩 10px ⇒ 48×36），加 `cursor-pointer`；开关尺寸与工具栏布局均不变，`Open on launch` 文案**不参与点击** —— 整行热区会让命中重心偏离按钮本身，表现为「触发的落点没有正对开关」。
+* **OCR 文字批注框：真失焦时草稿不落定 / 中文输入法回车提前提交**（[ScreenOcrEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/screen-ocr/ScreenOcrEditor.tsx)）：① 文字框的 `ref` 由内联箭头函数改为**稳定引用** `focusTextInput`（`useCallback`）—— 内联箭头每次重渲染都换身份，React 会重新调用它，`textMountTs` 被持续刷新，导致 `onBlur` 里 `Date.now() - textMountTs < 400` 的「挂载初期防误失焦」保护**恒为真** ⇒ 真正的失焦既不落定草稿也不清理，表现为「点走之后草稿还在飘」；② `onKeyDown` 补 IME 守卫（`e.nativeEvent.isComposing || e.keyCode === 229`）—— 中文输入法「上屏」那一下也会发 Enter，不拦会在成文之前就提交半截甚至空草稿（本仓库其他 Enter 提交点均有此守卫）；③ 提交改为从 `textDraftRef.current ?? textDraft` 取草稿，避免 state 滞后于输入框 DOM 的实际内容。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.711 (2026-10-16)
+
+> 本版是 **上一版「`Open on launch` 热区」的手感微调**：把「整行可点」附带的多余视觉干预去掉 —— 不再给按钮加 `hover` 底色与圆角（会在鼠标掠过时「莫名亮一下」），只保留 `cursor-pointer` 与更大的命中范围，点击区域依旧覆盖「轨道 + 文案」。**无任何底色，仅扩大光标命中范围**。1 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **`Open on launch` 热区去掉底色、只留命中范围**（[ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx)）：`className` 由 `ml-1 -my-1 … rounded-md px-2 py-1 transition-colors hover:bg-[var(--paper-hover)]` 改为 `ml-1 -my-1.5 … px-2 py-1.5` —— 去掉 `hover` 底色、圆角与过渡，内边距略放大（`py-1.5`）补偿去掉的视觉反馈，`-my-1.5` 同步负外边距保持工具栏高度不变；`<button role="switch">` 包住轨道 + 文案的结构不变，命中面积仍为整行。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.710 (2026-10-16)
+
+> 本版修两处**交互可用性**问题：① **「正在回答的时候缩小会丢失会话」** —— Butler 抽屉在流式中途折叠后重开，服务端要到流结束才**整轮落库**，此前的实现会直接回填「还没有本轮提问」的旧状态，把整轮问答抹掉；现在折叠瞬间留一份气泡快照，重开先用它显示对话，再轮询到回复落地才切回服务端状态。② **项目面板 `Open on launch` 开关「点不动」** —— 原先只有 28×16 的轨道可点（命中面积过小、无指针提示），现在**整行（轨道 + 文案）都是点击热区**并带 hover 反馈。共 2 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **正在回答时折叠不再丢会话**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：新增模块级 `pendingTurn = { threadId, messages }`（跨「卸载 → 重挂载」存活）。折叠 cleanup 里，`messagesRef` 取当下最新气泡存入快照（cleanup 闭包拿不到最新 `messages`，故用 ref 保真）——因为服务端要等流结束（`entry.ts` 的 `finally`）才整轮写库，abort 之后服务端状态里**还没有本轮提问**。重开同一会话时（`openChatSession`）：若 `turnLanded()`（服务端条数 ≥ 快照条数且末条为助理）判否，则**先用折叠快照把对话显示出来**，并启动 `startLandingPoll` 轮询（5s 一次、最多 180s）到回复落地才切回服务端状态、顺带标记已读；否则走原正常回填。配套：`send` 发出新一轮时作废同会话的补追标记（否则补追采纳落地回复会盖掉刚发的这轮）、`destroySession` 清空标记、会话列表兜底改为**优先保留「尚未落库」的 `pendingTurn` 会话**（原实现会退到 `list[0]` 切到别的会话，用户就以为会话丢了）、`stopLandingPoll` 保证同一时刻只有一条轮询。
+* **`Open on launch` 开关命中面积**（[ProjectBoardView.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/ProjectBoardView.tsx)）：原先 28×16 的开关轨道单独成按钮，外围 `div` 只做布局 ⇒ 点到文案/空隙无效、无指针提示，表现为「经常点不动」。改为外层 `<button role="switch" aria-checked>` 包住轨道 + `Open on launch` 文案，整行都可点；加 `cursor-pointer`、`hover:bg-[var(--paper-hover)]`、`rounded-md` 与 `-my-1 px-2 py-1`（负外边距保证工具栏高度不变）。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.709 (2026-10-15)
+
+> 本版是 **试听进度可视化 + 一处图标语义修正版**：① 试听选区（点浮条 `Play` / 带选区按空格）时，波形上铺一层主色**轨道播放进度**，一眼看出试听走到哪了；② 画布顶部工具栏「添加」按钮的图标由 `MessageCircle` 换成 `MessageCirclePlus`（表达「新建对话」而非「一个对话」）。共 2 个文件改动（0 新增，0 测试改动）。
+
+### 新增功能
+
+* **试听选区的轨道播放进度**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：`sel && playing && now ∈ [sel.start, sel.end]` 时渲染 `data-role="sel-progress"` 覆盖层 —— 从选区起点铺到当前时刻，底色 `color-mix(in oklab, var(--primary-strong) 22%, transparent)`，让「试听走到哪了」在波形上直接可见。层次刻意安排：`z-10` 高于选区插件自身的高亮层（其内部用 `z-index` 2 / 5）、低于打点名字层（`z-20`）与浮条（`z-40`）；`pointer-events-none` 保证仍可在波形上悬停 / 拖拽；用 `pctOf` 定位（与打点竖线、投影标签同一套映射），窗口外的部分夹到 0 / 100 —— 缩放跑到选区外也不画出界。播到终点由 `playUntilRef` 自动停、`playing` 转 false，这层随之消失。
+
+### 修复与优化
+
+* **「添加」按钮图标语义**（[CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：`lucide-react` 的 `MessageCircle` 改为 `MessageCirclePlus`（import 与使用处同步），让「新建对话」这一动作的图标带上 `+`。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.708 (2026-10-15)
+
+> 本版是 **音频编辑器「精修 + 选区联动」版**：① 前进/后退步长由 3 秒改为 **0.3 秒**（`Shift` + `←`/`→` 走 3 秒粗调）；② 修掉**波形选区两端拖不动** —— 拖拽收尾的归位会把用户刚调好的选区整体覆盖回「锚点 → 松手点」；③ 波形选区**实时联动转写面板**：落在选区内的句子（时间上有交叠）高亮；④ `Library` / `Transcript` 等六个分区小标签字重由 `font-medium` 加粗为 `font-semibold`。共 3 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **波形选区两端拖不动**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：选区插件把两端渲染成 `ew-resize` 拖拽手柄、并允许整体平移，但它**不拦 pointerdown** ⇒ 按下事件冒泡到波形容器触发 `seekFromPointer`，把选择锚点钉在这一刻；拖拽收尾的 `onUpCapture` 再按「锚点 → 松手点」重写选区，于是用户刚调好的大小/位置被**整体覆盖** —— 表现就是「选区两端根本拖不动」。新增 `pressInSelection()`（含两端各 6px 的手柄带，与插件 `addResizeHandles` 宽度一致）：按在已有选区上时**不钉锚、不跳播放头**，并压掉随后 300ms 的 click（否则插件「点击即清除」会把选区一并删掉，误触手柄也会中招），把手势整体让给插件。
+* **前进/后退步长 3s → 0.3s**（同上）：`NUDGE_SEC` 由 `3` 改为 `0.3`（控制行按钮随之显示 `↺0.3` / `↻0.3`），新增 `NUDGE_COARSE_SEC = 3` 供 `Shift` + `←`/`→` 粗调；两个定位按钮的 `title` 与波形区提示 `title` 同步补上 `Shift for 3s`。理由：这一屏的主要工作是**卡选区边界 / 找打点落点**，3 秒一步会跳过句内的气口；0.3 秒是「一个字的量级」，够精修又不至于连点十几次。跨句/跨段交给粗调与打点跳转 `[` / `]`。
+
+### 新增功能
+
+* **波形选区实时联动转写面板高亮**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)、[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)、[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：波形轨道新增 `onSelectionChange` —— 拖拽中随 `region-updated` **实时**上报绝对秒选区（`null` = 无选区），接线方式与既有 `onViewChange` 同款（放 `cbRef`、`?.` 短路、不接则组件行为逐字节不变）；`AudioViewer` 新增 `selRange` 镜像把选区转给 `TranscriptPanel` 的新 prop `highlightRange`。转写面板按**时间交叠**判定（`1e-6` 容差：正好贴边/零长不算，免得「挨着」也被点亮）：落在选区内的句子底色用 `color-mix(in oklab, var(--primary-strong) 12%, transparent)`，另加一条 `inset 2px 0 0 var(--primary-strong)` 的**左侧竖条**。与「正在播放」档**刻意分开**：播放高亮表达「当前读到这里」、选区高亮表达「你圈定的范围」；两者同时命中同一行时底色随播放档、竖条仍标出选区。
+* **分区标签字重加粗**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：`Library` / `Unmanaged artifacts` / `Transcript` / `Suggested clips` / `Source` / `Clips` 六处小号大写分区标签由 `font-medium` 改为 `font-semibold`。
+
+### 验证
+
+* 本批**无测试改动**（`timeline.test.ts` 等保持 1474 例）；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（EXIT=0）。
+* 打包以「构建新鲜度守卫」确认编译 / 组装期间无源文件改动；产物核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.707 (2026-10-12)
+
+> 本版是 **v0.7.706 之后的小修 + 打点编辑补齐版**：① 修掉「更新后出现白色置顶小方块 / 白屏」—— 安装更新走 `app.exit(0)`，它**不触发** `before-quit`，而 `disposeButlerOrb()` 只写在 `before-quit` 里，于是退出时主窗 `closed` 又把球窗显示出来，而那一刻服务已被杀 ⇒ 球窗加载 `/butler-orb` 失败，在桌面上留下一块 **54×54 白色置顶小方块**；现在安装路径补上与 `before-quit` 同款的收尾（先 `disposeButlerOrb()`、再让主窗消失、最后才杀服务）。② 打点支持**直接改时刻**。③ 新增**「每个打点停一下」**播放开关。④ 新增**从片段 / 转写填充打点标签**。共 3 个文件改动（0 新增，0 测试改动）。
+
+### 修复与优化
+
+* **更新安装后出现白色置顶小方块 / 白屏**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts)）：安装路径的收尾顺序改为 `appQuitting = true` → `disposeButlerOrb()` → `mainWindow.hide()` → `killNextServer()` → 500ms 后 `app.exit(0)`。
+  * **根因**：`before-quit`（同文件 2950-2954 行）里本来就有这段，注释原文写着「销毁 Butler 独立球窗：否则退出时主窗 closed → 又会把球窗显示出来」—— 这个缺陷早已被认识到并在**正常退出**路径上处理过；但安装路径走的是 `app.exit(0)`，它**不触发 `before-quit`**（2331 行注释也点明了这点），所以那个 `disposeButlerOrb()` 在安装时从未执行。`killNextServer()` 之所以没事，正是因为它在安装路径上被**显式补调**过，`disposeButlerOrb()` 漏了同一份待遇。
+  * **实测证据**（主进程日志，UTC）：`13:07:25.188Z Next.js server exited: signal=SIGTERM` → `13:07:25.749Z [butler-orb] 独立球窗已创建（54×54，置顶 / 全桌面可见）` —— 服务被杀 **0.56 秒后**球窗才被创建，它去加载已经死掉的服务，于是渲染成白块；同时主窗仍在屏幕上等 `app.exit(0)`，渲染层所有 API 都取不到（渲染日志里 **139 次** `加载项目列表失败: TypeError: Failed to fetch`），表现为整片白。
+  * **顺序约束**（已写进注释）：必须在 `hide()` **之前** `dispose` —— `hide` 会触发 `win.on('hide')` → `showOrbFree()`。
+  * ⚠️ **这条修复只对「从 v0.7.707 起」的更新生效**：白方块是**旧版本**执行安装时产生的，因此从 0.7.706 升到 0.7.707 这一次仍会看到一次白方块，之后再更新就不会了。
+
+### 新增功能
+
+* **打点可直接改时刻**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：打点编辑器里新增 56px 宽的时刻输入框（`title="Mark time — mm:ss(.d) or seconds"`、`aria-label="Mark time"`），吃 `mm:ss(.d)` 或纯秒，失焦/回车提交（`applyMarkTime`）。名字框仍是 `autoFocus` 目标，并保留「焦点在编辑器内部搬家不提交」的守卫（否则点名字框会立刻提交时刻、把编辑器关掉，名字就改不了）。
+
+* **「每个打点停一下」播放开关**（同上）：新增 `stopAtMarks`（默认关）。语义是三条收口 —— 只在**连续推进**时判定（`prev < markT ≤ abs` 且步长 < 2s）、必须正在播放、且不在「只播选区」（`playUntilRef` 为空）时；浮点噪声按 `1e-6` 容差排除。**拖动播放头 / 跳转不算**（一次会跨过好几个打点，那种情况不该「啪」地停住）。文案按状态给：`Stop at each mark` / 无打点时禁用并提示 `add a mark first` / 悬浮说明 `playback pauses on every mark` / 开启后 `Stopping at each mark (click to turn off)`。
+
+* **从片段 / 转写填充打点标签**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：对**没有标签**的打点（`auto` 的不动），依次尝试 ① 该时刻导出过的**片段名**、② 覆盖该时刻的**转写段**（取不到则退到起点落在 `[t-0.2, t+6]` 内的最近一段），经 `markLabelFromText` 生成标签后整批 `applyMarks`；结果报 `Filled N mark label(s)`。一处都填不出来时给明确指引：`Nothing to fill from — transcribe this audio or export a clip at that mark first.`
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过（含 `electron/`）。
+* 安装路径改动另做了打包级验证：tsup 打包 `electron/main.ts` 成功，并从产物里确认调用顺序为 `disposeButlerOrb() → hide() → killNextServer() → app.exit(0)`。
+
+## v0.7.706 (2026-10-12)
+
+> 本版是 **v0.7.705 之后的音频查看器版式版**：给画布音频查看器做一次分区（方案 A）—— 把**常驻**的播放器部分（波形 / 状态条 / 打点工具）收进一张带描边的卡片（`data-role="player-stage"`），转写区独立成 `data-role="transcript-section"` 并配一个小号大写 `Transcript` 标签，排在舞台之后、紧贴卡片下边缘（不另加分隔线，卡片描边就是那条边界）；同时把 `mm:ss` 格式化从组件下沉到 [timeline.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/timeline.ts)（`mmss()`），让播放器与查看器共用同一实现，并给播放键补上 `title` / `aria-label`。共 3 个文件改动（0 新增，0 测试改动）。
+
+### 改进
+
+* **音频查看器分区（方案 A）：播放器舞台卡片 + TRANSCRIPT 分区**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：播放器部分（`AudioMarkTrack` + 状态条 + 打点工具）包进 `flex flex-col gap-2 rounded-lg px-1.5 py-2` + `data-role="player-stage"` + `1px solid var(--line)` 描边的卡片；转写区改为 `flex flex-col gap-1` + `data-role="transcript-section"` + 小号大写 `Transcript` 标签（`px-2.5 text-11 font-medium uppercase tracking-wide`），排在舞台之后并紧贴卡片下边缘 —— 不再另加分隔线，卡片的描边就是那条边界。**位移口径不变**：卡片只包住**常驻**行（波形 / 状态条 / 打点工具）；后两类（选区 / 命名态 / 打点草稿）本来就是「出现 / 消失允许推动」的那批。
+* **`mm:ss` 格式化下沉到 `timeline.ts`**（[timeline.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/timeline.ts) 新增 `mmss()`）：原先播放器与查看器各写一份，现在共用一处；`sec` 非有限数或为负时回 `--:--`（绝不显示 `NaN`）。`AudioViewer.tsx` 与 `AudioMarkTrack.tsx` 均改为从 timeline 引入。与 `mmss2()`（厘秒，只用于时间刻度与悬停投影标签）分工不变；组件内的 `mmssPrecise()`（可编辑输入框用）保留。
+* **播放键补可访问性标签**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：`title` 按状态给出 `Pause` / `Play selection only (mm:ss–mm:ss) · Space` / `Play (Space)`，并补 `aria-label="Play or pause"`。
+
+### 验证
+
+* 本批**无测试改动**；全仓 `pnpm test` **126 文件 / 1474 例全绿**（与 v0.7.705 相同）；`tsc -p tsconfig.json` 通过。
+
+## v0.7.705 (2026-10-12)
+
+> 本版是 **v0.7.704 之后的小修版**，两条都是画布音频编辑器上「看得见却点不到 / 定位越界」这类手感缺陷：① 打点带缺一个 `z-index`，悬浮气泡被波形容器整个盖住 —— 点 ✕/✎ 实际落在波形上（还会把播放头跳走），用户根本删不掉打点；② 播放头定位（←/→ 的 ±3 秒、句柄 `seek`）新增纯函数 `clampSeekTime()`，把越界值挡在播放库之外（`NaN` 绝不交给库，否则整条播放轴坏掉）。共 3 个文件改动（0 新增；`timeline.test.ts` 21 → 24 例）。
+
+### 修复与优化
+
+* **打点删不掉：悬浮气泡被波形容器盖住**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：圆点外层那个 `-translate-x-1/2`（`transform`）会**创建层叠上下文**，于是气泡里的 `z-20` 只在那只小盒子里生效 —— 气泡虽然画在波形之上（覆在波形上），却被后面的兄弟 `[data-role="wave-wrap"]`（`z-index: auto` 的定位元素）整个盖住：`elementFromPoint` 命中的是波形容器，点 ✕/✎ 实际落到波形上（顺带把播放头跳走），表现就是用户问的「打点支持删除吗？」。现给打点带加 `relative z-30`（`data-role="mark-band"`），把它变成层叠上下文，整棵子树（圆点 + 气泡 + 名字）一起抬到波形之上。**⚠️ 刻意不加 `overflow-hidden`**：气泡必须能溢出到带外（它挂在圆点下方、覆在波形上）。同时按标签行数动态给带高（`data-lanes` + `calc(1.5rem + (lanes-1) × MARK_LABEL_LANE_PITCH_PX)`）。
+* **播放头定位新增夹取纯函数**（[timeline.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/timeline.ts) 新增 `clampSeekTime()`；`AudioMarkTrack.tsx` 的定位路径改用它）：夹进 `[0, 总时长]`，**可以**走到 `total` 本身（与 `clampViewStart` 的 `[0, total − sec]` 语义不同）；总时长未知（波形未就绪，`0`/`NaN`）时**只保证非负** —— 不把「前进 3 秒」夹成 0（否则未就绪时按 → 会原地不动）；`t` 非法（`NaN`/`±Infinity`）恒回 `0`，**绝不把 `NaN` 交给播放库**（否则播放轴整条坏掉）。
+
+### 新增单测
+
+* [timeline.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/timeline.test.ts) **21 → 24 例（+3）**：新增 `describe('clampSeekTime（播放头定位夹取：←/→ 的 ±3 秒、句柄 seek）')` —— 常规夹取且可走到 `total` 本身 / 总时长未知时只保证非负（不把前进夹成 0）/ `NaN` 与 `±Infinity` 恒回 `0`。
+* 全仓 `pnpm test` **126 文件 / 1474 例全绿**；`tsc -p tsconfig.json` 通过。
+
+## v0.7.704 (2026-10-12)
+
+> 本版修的是**普通用户装完 BobWork 用不了 Bob OCR**：Extensions Store 的 Bob OCR 卡片只会弹「Bob OCR plugin is offline or not configured. Start it with: bob-ocr-mcp --install-daemon」——识别能力在独立常驻桥（`bob-ocr-mcp --serve`，127.0.0.1:9478）里，而发布包**没有**随包分发它，那句终端命令对没装 node、不会 launchd 的用户等于死路。现在桥随包分发（`next-standalone/bob-ocr-mcp`），由宿主 [ocr-bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/ocr-bridge.ts) 托管拉起：已有在线桥（用户自装 daemon / 另一宿主）**直接复用不抢进程**，未在线则用随包副本以 **Electron 内置 Node 运行时** `--serve`（用户机器不需要装 node）并注入端口/数据根；Bob OCR 同时进入 `SYSTEM_MCP_IDS` 出厂默认启用。共 17 个文件（新增 3）。
+
+### 新增
+
+- **宿主托管 Bob OCR 常驻桥**（[ocr-bridge.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/ocr-bridge.ts)，新增）：探测 `/setup/status` → 在线即复用；未在线则用随包副本 spawn `--serve`（`process.execPath` + `ELECTRON_RUN_AS_NODE=1`，见新增的 [child-env.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/child-env.ts)）；就绪轮询（默认 8s、MCP 装配路径 3s，防拖慢首个请求）＋ 拉起冷却 15s ＋ 失败冷却 30s（秒退的桥不再让每次 OCR 调用白等一轮）＋ 并发合流；子进程日志落 `<数据根>/host-bridge.log`；`exit` 收尾 + `SIGINT/SIGTERM` 收尾后**重发信号交回默认语义**（不吞掉 SIGTERM、不改宿主既有退出时序），且只 kill 自己拉起的子进程，不碰用户自装 daemon。
+- **随包分发 bob-ocr-mcp**（[package-release.sh](file:///Users/baolei/Desktop/BobWork/projects/scripts/package-release.sh)）：tsc + esbuild 构建 → 复制 `dist/` + `assets/` + `package.json` → `npm install --omit=dev`（`pdf-parse` / `@modelcontextprotocol/sdk` / `openai` 是 external，必须自带 node_modules）→ **安装后校验依赖真的落地**（npm 缓存权限异常会让 install 静默失败，缺 node_modules 的随包副本在用户机器上直接 MODULE_NOT_FOUND）。
+- **首启自动导入识别配置**（bob-ocr-mcp `--import-if-empty`，[cli.ts](file:///Users/baolei/Desktop/BobWork/bob-ocr-mcp/src/cli.ts)）：桥自身 vision / OCR 两模块**全空**时，从 BobWork `.settings.json` 导入一次模型与 Key（已有任一配置则跳过，绝不覆盖）；有 Xcode CLT 的机器本地 Vision 直接可用，没装的机器走导入来的线上引擎。
+- `--serve [port]` 端口参数真正生效（等价 `BOB_OCR_MCP_PORT`），文档与实现对齐。
+
+### 修复与优化
+
+- **Bob OCR 出厂默认启用**（[types.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/types.ts) `SYSTEM_MCP_IDS` + [registry.json](file:///Users/baolei/Desktop/BobWork/projects/assets/mcp/registry.json) `group: download → bundled`）：既有用户升级后由 settings 读取路径自动补齐缺失的系统插件条目（不覆盖已有配置），市场卡片从「需自行安装 daemon」变成系统内置（Installed · Plugins，带 Configure）。
+- **失败原因可诊断**（[ocr-client.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/ocr-client.ts) `getOcrSetupStatus` + [McpStorePanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/McpStorePanel.tsx)）：离线时返回宿主侧原因（条目被禁用 / 随包入口缺失 / 进程退出码 / 端口被占 / 日志路径），不再只丢一句终端命令。
+- **MCP 装配先确保桥在线**（[manager.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/manager.ts) `syncServers`）：桥刚拉起时强制刷新一次 token 探测，避免首个 sync 拿占位 token 连接 401；托管失败只记日志、不阻塞主流程。
+- **OCR 不可用文案统一**（[ocr-service.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/pdf/core/ocr-service.ts) / [attachment.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/attachment.ts) / [capture.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/screen-ocr/capture.ts)）：改为「确认 Bob OCR 已启用 + 查看 host-bridge.log」，不再引导 `--install-daemon`。
+- 数据根登记（[bundled-data-home.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/extensions/bundled-data-home.ts)）：`bob-ocr-mcp → BOB_OCR_MCP_HOME`，与用户自装 daemon 的既有数据（`~/BobWork/extensions/bob-ocr-mcp`）无缝复用。
+
+### 同批：音频编辑器收尾与用户指南
+
+- **打点标签多行排布，避免「后打的点把先打的名字顶掉」**（[AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：新增全高覆盖层（`pointer-events-none absolute inset-x-0 top-0 z-20 h-full`）承载打点标签；同一行放不下的名字由判定 effect **换到下一行**（`labelLanes`，最多 `MARK_LABEL_MAX_LANES` 行 —— 第 0 行在带内、其余覆在波形顶部），只有超出行数上限的才由 `hiddenLabels` 只藏视觉（`MARK_LABEL_MIN_GAP_PX`）；被藏的点仍有圆点 + 悬浮气泡（气泡含 ✎/✕），功能不丢。
+- **自动打点默认不显名字**（同上，P2-4）：AI 一次能生成 30+ 个点，全显名字时打点带会被占满、碰撞逻辑只能靠「藏」，结果是「谁的名字都看不全」；现在只有**正在编辑**的那个自动点例外，手打点（用户真正反复看的锚点）照常显示，自动点的名字仍可悬浮圆点得到。
+- **厘秒时间输入与读数**（同上）：新增 `mmssPrecise()`（`mm:ss.d`）与配套解析（接受 `mm:ss(.d)` / `hh:mm:ss` / 纯秒，非法输入回退原值）；选区起止输入框与跨度读数（`x.x s`）改用它。
+- **吸附规则只写一份**（[mark-ops.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.ts)）：`snapToMark` 改为**转发到** `snapToRefs`（marks-only），把「打点优先 / 边界含容差」的规则收敛到一处（两处各写一遍必然漂移）；[mark-ops.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.test.ts) 同步。
+- **用户指南补一句**（[SKILL.md](file:///Users/baolei/Desktop/BobWork/projects/assets/skills/user-guide/SKILL.md)，+2 行）：Bob OCR（图片 / 扫描件转文字）随 BobWork 内置，**不需要单独安装** —— 设置 → Extensions Store → Plugins → Bob OCR 保持启用即可，本地常驻桥由应用自动拉起，首次启动会自动从已有配置导入视觉 / OCR 模型；要换视觉模型或 OCR 引擎，点卡片上的 **Configure** 维护。
+
+### 验证
+
+- 新增 [ocr-bridge.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/ocr-bridge.test.ts)（6 例）：在线探测 / 离线 / HTTP 503 判定；**已有在线桥必须复用且不抢进程**（假桥仍在服务）；无在线桥时用随包副本拉起→`/setup/status` 就绪→`stopOcrBridge()` 后确实下线（不留孤儿进程）；端口被占导致子进程秒退时**及时识别退出**（不白等满就绪超时，实测由 6.1s 降到 <0.6s）并进入失败冷却，第二次调用不再重复 spawn（<1s 返回）。
+- **打包布局实跑**（临时数据根 + 临时端口）：按打包脚本复制 `dist/`+`assets/`+`package.json` 并安装依赖 → `dist/cli.js --serve --import-if-empty` 启动 → `/setup/status` 在线 → `ocr.diagnose` 四个脚本全部命中（assets 与 dist 同级）→ `ocr.recognize` 真识别成功（`method=vision-ocr`，1.2s）→ 空配置下从假 `.settings.json` 导入 `vision, glmOcr, providers(1)` 且 `configImported=true`（第二次启动跳过导入）。
+- **真桥复用**：本机 9478 已有 launchd daemon 时 `getOcrSetupStatus()` 返回 `{ mcpOnline: true, settingsUrl: …9478/settings?token=… }`，且未另起进程。
+- **退出时序未被改变**（实跑）：宿主进程收到 SIGTERM 后 **0.15s** 退出（信号处理收尾子进程后重发信号，交回默认动作 —— 不会吞掉 SIGTERM 触发 Electron 的 800ms SIGKILL 兜底），且桥子进程随之退出、端口释放（无孤儿）。
+- `tsc -p tsconfig.json --noEmit` → EXIT=0；`vitest run` → 126 文件 / 1471 例全部通过。
+
+## v0.7.703 (2026-10-12)
+
+> 本版是 **自动更新「安装 → 替换 → 重启」链路的加固**：修复旧实例在升级时**不退出**、从而一直占着单实例锁把新版本挡在门外的问题 —— 用户现场表现为「更新后还是打不开新版 / 无法升级」，以及「右键 Dock Quit 没反应、⌘Q 退不掉」。安装脚本改为 **SIGKILL + 轮询确认旧进程真的消失** 之后再替换 app；退出流程在杀 Next.js 服务前先置 `appQuitting`，防看门狗复活服务；启动失败错误页的日志路径改为运行时动态拼接。仅 [main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts) 一处改动（3 处编辑）。
+
+### 修复与优化
+
+- **安装脚本先 SIGKILL 再确认进程退出**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L2301-L2310)）：原脚本只发一次 `pkill`（SIGTERM）就 `rm -rf` + `ditto` 替换 app。旧主进程若不退，macOS 的 `open` 只会「激活」这个仍在运行的旧实例，新版被 `requestSingleInstanceLock` 挡下（日志 `Another BobWork instance is already running — quitting this instance`），用户表现为「升级后仍是旧版」。改为 `pkill -9`，并在替换 app 前用 `for` 轮询（最多 10s）确认旧主进程真的消失再 `rm/ditto/open`。（用户现场实测：v0.7.700 实例运行 3 小时未退出，两次安装均未生效。）
+- **退出前先置 `appQuitting`**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L2330-L2336)）：`update:install` 在 `killNextServer()` 之前置 `appQuitting = true`，防止 `server-watchdog` 在退出过程中把刚被杀掉的 Next.js 服务又拉起来（实测日志：`[server-watchdog] …restarting Next.js server…` → `Next.js server up in 883ms`）。
+- **错误页日志路径动态化**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L2924)）：启动失败页原先写死 `~/Library/Logs/BobWork/bob-work.log`，实际日志（`app.getPath('logs')`，取自打包后 `app/package.json` 的 `name`）位于 `~/Library/Logs/bob-desktop-runtime/bob-work.log`，用户照错误页找不到文件。改为运行时 `${app.getPath('logs')}/bob-work.log`。
+
+### 验证
+
+- 仅 [main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts) 一处改动（3 处编辑），无新增单测。
+- 执行验证：`tsc --noEmit -p tsconfig.json` → EXIT=0；安装脚本片段 `bash -n` → 语法通过。
+- 打包时以「构建新鲜度守卫」确保编译 / 组装期间无源文件改动；产物内核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.702 (2026-10-12)
+
+> 本版是 **Markdown 批注 / 修订工作流的一轮打磨 + 用户说明书更新**：修订面板文案英文化，并把「待处理」条数改为按**逻辑条数**计（一次替换的 `delete + insert` 合并为 1 条）；修订卡片点击定位改用**渲染态纯文本指纹**、就地应用后**跳过整篇重建**（不再重置选区 / 视口）并把视口停回改动处；Settings 空间站布局扩容（Command Core 加宽、新增 Buzan / Archivist 乘员与 Meeting Deck / Media Bay 舱段）；用户说明书同步到新版 Butler 抽屉与音频 / 会议 / AI 修图等新能力。共 4 个文件。
+
+### 修复与优化
+
+- **修订面板文案英文化**（[MdAnnotationPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/MdAnnotationPanel.tsx)）：修订意图标签与按钮 / 提示统一为英文（Auto / Polish / Shorten / Expand / Translate / Fix facts / Format / Custom；Annotations / Revisions；Accept all / Reject all / Locate / Before / After…），与项目「界面文案一律英文」的口径一致。
+- **「待处理」条数按逻辑条数计**（[MdAnnotationPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/MdAnnotationPanel.tsx#L201-L213)）：新增 `changeCount` / `pendingChangeCount`，把**相邻的 `delete + insert`（同一次替换）合并为 1 条**，避免一次改写被计成 2；修订 tab 徽章与每轮「N pending」均改用它，计数不再虚高。
+- **修订卡片定位改用渲染态纯文本指纹**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx#L411-L422)）：`patch` 新增 `plainOld` / `plainNew`（改动前 / 后的**渲染态纯文本**指纹）。原实现拿 `oldText/newText`（markdown 源码，含 `##` / `**` / 表格语法）到渲染纯文本里 `indexOf`，含语法的改动**匹配不到** → 点击卡片定位失败；现优先用纯文本指纹，源码文本作兜底。
+- **就地应用后跳过整篇重建**（[DocEditor.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/DocEditor.tsx#L1046-L1051)）：新增 `skipRebuildRoundRef`（刚就地应用的那一轮内容已是文档现值 → 激活时跳过整篇重建，避免重建重置选区 / 视口）与 `justAppliedPosRef`（以改动起点文档坐标为滚动锚点，不依赖文本匹配），`addPatchRound` 相应新增 `appliedFrom / plainOld / plainNew` 参数。
+- **Settings 空间站布局扩容**（[SettingsModal.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SettingsModal.tsx#L2201-L2245)）：画布 920 → 1100 宽、Command Core 舱段随之加宽（`x:66/w:788` → `x:30/w:1040`），乘员间距 150 → 180；新增乘员 **Buzan**、**Archivist**，新增舱段 **Meeting Deck**、**Media Bay**，既有舱段重排为更宽的网格。
+- **用户说明书更新**（[SKILL.md](file:///Users/baolei/Desktop/BobWork/projects/assets/skills/user-guide/SKILL.md)）：`BobMail 通知中心` 章节改写为 `Butler 抽屉（通知中心 / 助理）`（含微信式布局、已读与角标、Today 日报、Memories 记忆台、Calendar / Meeting、报告类回执、自动送达的通知）；新增「音频查看器与音频编辑器（Audio Editor）」「视频截图工具（bob-video-shot 插件）」「会议记录（Meeting）」「图像 AI 编辑（AI 修图）」四章；FAQ 补充 BobMail 去向、消息 / 会话删除、Today 面板、Templates、音频打点截取、视频多图、会议记录回放、AI 修图、微信 / 飞书绑定、邮箱感知、手机远程等条目。
+
+### 验证
+
+- 本轮为 UI 文案 / 交互定位打磨与文档更新，无新增单测。
+- 执行验证：`tsc --noEmit -p tsconfig.json` → EXIT=0；`vitest run` → 全量通过。
+- 打包时以「构建新鲜度守卫」确保编译 / 组装期间无源文件改动；产物内核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.701 (2026-10-12)
+
+> 本版是 **Next.js 服务启动的运行时修复**：服务进程不再依赖用户机器上系统 `PATH` 里的 `node`，改用 **Electron 自带的 Node 运行时**（`process.execPath` + `ELECTRON_RUN_AS_NODE=1`）启动。修复其他用户安装后应用起不来、报 `Next.js server failed to start after 2 attempts (last exit code=null, signal=SIGSEGV)` 的问题。仅 [main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts) 一处改动。
+
+### 修复与优化
+
+- **服务进程改用 Electron 内置 Node 运行时**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts#L236-L258)）：原实现 `spawn('node', ['--max-old-space-size=1024', serverPath], …)` 会在用户机器上按 `PATH` 找系统 `node` —— 用户可能根本没装 node、或装的是 x64 / 版本不符的 node。安装包内只随包分发**一份 arm64** 的原生模块（`better-sqlite3` 的 `prebuilds/darwin-arm64.node`、`@img/sharp-darwin-arm64` 等），用架构/ABI 不匹配的外部 node 加载时会直接崩溃（用户现场实测 `signal=SIGSEGV`，进程还没进入 Node 事件循环就被杀）。现改为 `spawn(process.execPath, ['--max-old-space-size=1024', serverPath], { env: { …, ELECTRON_RUN_AS_NODE: '1' } })`：Electron 主可执行文件以「Node 模式」运行服务入口，其内置运行时与随包发布的原生模块架构 / ABI **必然一致**，从根上消除 「用户 node 环境」 这一外部变量。
+- **新增一行运行时可诊断日志**：`Next.js server runtime: <path> (Electron as node)`，服务启动日志中可一眼确认实际使用的运行时，便于后续排障。
+- `--max-old-space-size=1024` 堆上限与既有 jetsam 防护保持不变（历史崩溃：长时间运行后 Footprint 膨胀到 1.49GB+ 触发 macOS jetsam 杀进程）。
+
+### 验证
+
+- 仅一处 `spawn` 目标与一处 `env` 注入 + 一行日志，无新增单测。
+- 执行验证：`tsc --noEmit -p tsconfig.json` → EXIT=0；`vitest run` → 全量通过。
+- 打包时以「构建新鲜度守卫」确保编译/组装期间无源文件改动；产物内核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.700 (2026-10-12)
+
+> 本版是 **v0.7.699 之后的一处左栏入口收敛**：把 Video Shot（`bob-video-shot-mcp`）从左侧导航的插件快捷工具条中移除。它的网页入口已由 MCP 市场的「Open in Hippo」承载（宿主反代 `/api/plugin-web/<id>` + Hippo 书签），侧边栏再挂一条只是同一页面的第二个入口。插件本身仍在注册表内、`panel` 声明保留，经市场 / 预览面板打开的运行路径逐字不变。仅 1 个文件改动。
+
+### 修复与优化
+
+- **左栏插件工具条不再重复展示 Video Shot**（[CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx)）：`pluginQuickTools` 的过滤条件在原有的 `bob-notes-mcp` 之外再排除 `bob-video-shot-mcp`（`pluginPanels.filter(p => p.pluginId !== 'bob-notes-mcp' && p.pluginId !== 'bob-video-shot-mcp')`）。二者不进侧边栏的原因不同 —— `bob-notes` 经侧栏 `Bob Notes` 打开；`bob-video-shot` 的网页入口由 MCP 市场「Open in Hippo」承载（宿主反代 + Hippo 书签），侧边栏再放一条只是同一页面的第二个入口。该过滤只作用于**侧栏快捷入口**这一条渲染路径，`pluginPanels` 注册表、预览面板标签页、Hippo 反代入口均不受影响（插件未从 `MCP_PRESETS` / `registry.json` 中删除，仍是默认 `enabled:false` 的可选项）。
+
+### 验证
+
+- 本轮为纯 UI 接线（一处过滤条件 + 注释），无新增单测。
+- 执行验证：`tsc --noEmit -p tsconfig.json` → EXIT=0；`vitest run` → 125 文件 / 1457 例全部通过。
+- 打包时以「构建新鲜度守卫」确保编译/组装期间无源文件改动；产物内核对 `Info.plist` 版本号与 `latest-mac.yml` 的 sha512 / size 一致后放行上传。
+
+## v0.7.699 (2026-10-12)
+
+> 本版是「左栏音频编辑器入口」版：在 v0.7.698 的波形时间轴与音频库之上，把画布音频编辑器**从「必须先在文件里打开一个音频」解放出来** —— 左侧导航 Bob-Mind 之下新增 `Audio Editor` 入口，点开即在右侧预览面板得到一个**空态**音频编辑器，导入本地音频或从应用音频库选一条即可开始编辑（波形 / 打点 / 截取 / 转写）。实现上不新造载体：预览面板新增一种**非文件型单例标签**（对齐既有 Templates 单例），空态直接复用查看器自身已具备的 `Import` / `Library` 分支，仅补一条「无源音频」守卫，避免旧实现在空路径下的永久转圈与误报失败。
+
+### 新增功能
+
+- **左栏 `Audio Editor` 入口**。真源是左栏快捷工具清单 `quickTools`（展开态与折叠窄栏共用同一份），入口被显式插在 **Bob-Mind 条目之后**（而非整个插件列表末尾）—— Bob-Mind 之后可能还有别的插件，追加到末尾会让本入口离它越来越远，与「Bob-Mind 下方」不符。见 [CanvasFlow.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/CanvasFlow.tsx) 的 `AUDIO_QUICK_TOOL` / `pluginQuickTools` / `mindIdx`，点击派发 `open-audio-editor` 事件。
+- **预览面板新增非文件型单例标签 `type:'audio'`**。面板标签联合类型扩展 `'audio'`，标签栏置顶组加入 `Audio Editor`；挂载策略与 Templates / 插件面板同款（**惰性挂载 + `display` 显隐切换**），切走标签不卸载、已导入的音频与打点不丢；关闭走 `closeAudioTab`（切回最后一个文件/会话标签，无则收起面板）。
+- **空态音频编辑器**。以**无 `full_path` 的占位 FileInfo** 复用画布音频查看器（`source: 'local'`），落其自身空态：`Import audio`（复制进应用音频库 `<APP_ROOT>/.audio-library/` 并立即载入编辑）与 `Library`（库内音频浏览 / 载入）。**音频与产物一律不落 workspace 的 materials / homework**，与既有口径一致。
+- **查看器惰性加载**。单例标签里的 `AudioViewer` 走 `React.lazy` + `Suspense` 动态 import，WaveSurfer 依赖**不进画布主包**（与 `viewerRegistry` 同一策略）。
+
+### 修复与优化
+
+- **空路径不再永久转圈 / 误报失败**。加载 effect 顶部补守卫 `if (!key) { setPlayUrl(''); setPrecomputed(null); setLoading(false); return; }`。旧实现在 `target.path === ''` 时会先把 `loading` 置真，随后异步分支要么在「等代理就绪」处**直接早退而不落 `loading=false`**（界面永远停在 `Loading audio…`），要么拿空路径去请求而抛错、误报 `Playback failed` —— 空态因此根本渲染不到。见 [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)。
+- **空态文案分流**。`!playUrl` 分支按 `target.path` 分流：无源音频时标题显示 `Audio Editor` + 引导语（「Import an audio file, or pick one from your library, to start editing.」），不再显示占位名与 `0 B`；**两行结构与失败态严格一致 ⇒ 切换时高度不漂**。有文件但加载失败的旧行为（文件名 + 大小 + `Open with default program`）不变。
+- **传入查看器的 `onError` 必须是模块级常量**（`IGNORE_AUDIO_VIEWER_ERROR`），不得写成内联箭头：该回调在加载 effect 的依赖数组里（`AudioViewer.tsx` 加载 effect 末尾），内联箭头每次渲染换身份 ⇒ 父级任何一次重渲染都会重跑该 effect，而 effect 顶部会 `setMarks([])` / `setNote(null)` ⇒ **打点与状态条被反复清空**。
+
+### 新增与增补的单测
+
+- **本轮无新增单测**，原因如实说明：改动为纯 UI 接线（一处入口清单 + 一种单例标签 + 一条空态守卫 + 一句文案分流），而仓库现有测试**全部是无 DOM 的纯函数用例**（`src/**/*.test.ts`，无任何 `.test.tsx`）。为一条三元判断引入 jsdom / testing-library 测试栈不划算，故不新造基础设施。
+- **本轮实际执行的验证**（可回溯）：① `tsc -p tsconfig.typecheck.json` → **EXIT=0**，日志 0 字节；② 以**临时故意类型错误**做负对照（`EXIT=2` + `error TS2322`，探针用后即删）⇒ 确认该判据**非平凡**；③ 构建产物内 grep 新代码独有串 `open-audio-editor`，**命中后才放行打包与部署**（未命中即中止，避免再产出「源码改了但包里没变」的包）。
+
+## v0.7.698 (2026-10-11)
+
+> 本版是「音频时间轴缩放 + 插件自带网页反代 + Daily News 权威站」版：在 v0.7.697 的窗口化转写与断点续跑之上，把画布音频编辑器的波形从「整段一屏」升级为**可缩放/可平移的时间轴**（新增 peaks v2 细分辨率 + 按窗口取切片，刻度细化到厘秒），为 MCP 插件自带的网页面板补上一条**稳定反代**（`/api/plugin-web/<id>`，解决 Hippo 书签端口漂移），并让 Daily News 支持按主题配置**权威站域名**（RSS → 定向站点检索 → 裸关键词的三级采集降级）。共 30 个文件改动（6 新增：源码 + 测试；其余为修改），测试净增 +79 例。
+
+### 新增功能
+
+- **波形时间轴缩放与平移**。此前画布音频查看器只能「整段塞进一屏」：长录音缩成一团、秒级细节根本看不清，且引用了 peaks 后 WaveSurfer 的缩放能力并未被启用。本轮把真源放回库自身（`zoom(minPxPerSec)` + `setScroll/getScroll`），组件只用一条几何式 `pxOf(t) = t × minPxPerSec − scroll` 把绝对秒映射到像素，覆盖层（打点、选区、刻度、悬停线）全部复用同一坐标，彻底避免「整段坐标系 vs 窗口坐标系打架」（实测坑：按下 50% 曾落到 16.98%，拖选得到「整段 20–60% + 窗口偏移」）。交互上支持滚轮以指针为锚点缩放、`+`/`−` 按钮按中心缩放、`◂`/`▸` 半窗平移、`⤢` 缩放到选区、点窗口时长按钮一键 `fitAll`、`✛` 跟随播放头；小文件（非 peaks 路径）不显示这簇控件。实现见 [AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)（`zoomAt` / `panBy` / `zoomToSelection` / `fitAll` / `visibleWindow`）。
+- **peaks v2：细分辨率峰值编码**。粗桶（2000 点）放大后全是马赛克，故新增 20ms 分辨率（50Hz）的 `fine` 通道。为控体积，微桶以 int8（-127..127）+ base64 量化，误差 ≤ 1/127；另有 10ms「微桶」两两合并取 abs-max 保号的降采样。编解码纯函数落在新增的 [peaks-codec.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/peaks-codec.ts)（`FINE_HZ=50`、`MICRO_SAMPLES_10MS=80`、`encodeFine`/`decodeFine`、`mergeMicrosPairs`、`sliceFineWindow`）。
+- **按窗口取峰值切片**。整段细分辨率点数太多（传不动），改为按可见窗口请求。`peaks` 路由新增 `action: 'peaks_window'`，返回窗口内 `sliceFineWindow` 的结果，请求点数上限从 4000 放宽到 **200000**；查看器侧 [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) 的 `requestWindowPeaks` 只声明「我需要窗口峰值」，API 口径（source/path）留在组件层，取不到即返回 null 让本次缩放降级、保持旧波形。版本升级见 [peaks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/peaks.ts)（`PEAKS_VERSION` 1→2，保留 `PEAKS_VERSION_COARSE_ONLY=1` 兼容旧缓存，新增 `ensureFinePeaks()` 在 v1 缓存或缺 fine 时重生成补齐）。
+- **插件自带网页反代（`/api/plugin-web/<id>`）**。插件（如 Video Shot）自带的网页面板此前要用「运行时端口」直连，而端口会漂移，Hippo 里存的书签随之失效。本轮在原生 HTTP 层 [server.ts](file:///Users/baolei/Desktop/BobWork/projects/src/server.ts) 挂载反代中间件，把 `/api/plugin-web/<id>/**` 逐字透传到插件运行时端口：大 body 用 `req.pipe` 双向流、SSE 用 `flushHeaders` 逐帧下发，跨包不变量「`hostPath` 必须逐字等于前缀 + id」由 `isDeclaredPluginWebPanel` 校验。核心在新增的 [plugin-web-proxy.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/http/plugin-web-proxy.ts)（`PLUGIN_WEB_PREFIX`、`HOP_BY_HOP` 过滤、`pluginNotRunningHtml` 503 空态页、`handlePluginWebProxy`），插件「是否在跑」由新增的 [plugin-web.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/plugin-web.ts) 的 `resolvePluginWebPanel()` 用 `getPanelPort` 有无判定。
+- **市场条目「Open in Hippo」与 Video Shot 插件**。[MCP_PRESETS](file:///Users/baolei/Desktop/BobWork/projects/src/lib/mcp/types.ts) 新增 `bob-video-shot-mcp`（`{BUNDLED}:.../cli.js --serve`，panel 端口 9484，`hostPath: /api/plugin-web/bob-video-shot-mcp`，默认 `enabled:false`），`PluginPanelDecl` 增加 `hostPath?`；市场清单 [registry.json](file:///Users/baolei/Desktop/BobWork/projects/assets/mcp/registry.json) 补登该条目（group `download`）；[store/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/mcp/store/route.ts) 的 GET 从预置**派生** `hostPath`（不写进 registry.json，避免两处漂移）；[McpStorePanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/McpStorePanel.tsx) 的 Installed 卡据此渲染「Open in Hippo」按钮——先 `bmList` 查重再 `bmToggle` 加书签（`bm-toggle` 是**切换**语义，不查重会误删已有书签），随后在 Hippo 新标签打开该地址。桌面适配层 [desktop-adapter.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/desktop-adapter.ts) 相应补出 `hippoBrowser.bmList()` / `bmToggle(payload)`；[bundled-data-home.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/extensions/bundled-data-home.ts) 登记该插件的数据根注入。
+- **Daily News 权威站（三级采集降级）**。[news/types.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/types.ts) 给 `NewsTopic` 增加 `sites?: string[]`，并提供内置的 `CURATED_TOPIC_SITES`（tech/finance/legal 各数条权威域名）、`sitesForTopic()`、`TOPIC_SOURCE_MAX=6`、`normalizeSites()`（剥协议/路径/`www.` 成裸域名）。[news/generate.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/generate.ts) 的采集改为**三级降级**：`feeds`（RSS）有结果即返回 → 否则对 `sites` 逐站做 `site:<domain> <query>` 定向检索（`SITE_SEARCH_CONCURRENCY=3` 并发、`interleaveHits` 交错合并）→ 再兜到裸关键词 `searchLocalProviders`。用户可在 Butler 的 Today 面板按主题编辑这三项（见下条修复）。
+- **音频库「未管理产物」入口**。当音频在库外被编辑时，会在影子目录（`.audio-library/<源名>-<路径指纹>`）留下转写/片段产物，此前界面上无从清理。新增 [library.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.ts) 的 `ShadowEntry`、`SOURCE_REF_NAME='.source-ref.json'`、`rememberSourceRef()`、`listShadowDirs()`、`deleteShadowDir()`（两条护栏：路径须在库根内、不得删正式条目），并在 `sourceDir(srcAbs, true)` 时写来源 ref。路由新增 `list_shadows` / `delete_shadow`，[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) 在库面板底部列出这些产物，逐条标注源是否仍在（`source present` / `source gone` / `unknown`），删除前二次确认且明示「绝不动你的音频文件」。
+
+### 修复与优化
+
+- **厘秒刻度进位越界**。时间刻度从 `mm:ss` 细化到 `mm:ss.cc`（秒后两位）后，用 `toFixed(2)` 在 `59.995` 这类值上会进位成非法的 `00:60.00`。新增 [timeline.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/timeline.ts) 的 `mmss2()`：先 `Math.round(s*100)` 再拆分秒/厘秒，保证合法；同文件下沉了刻度纯函数（`TICK_STEPS`、`tickStops`、`tickStopsForWindow`、`tickLabelRightAligned`、`VIEW_MIN_SEC=2`、`clampViewStart`）。
+- **刻度标签过密/溢出**。标签从 `mm:ss`（5 字符）变成 `mm:ss.cc`（8 字符）后，原先 6–12 个标签会糊成一团、且靠右的标签会伸出面板被裁。故标签个数目标下调到 4–6（`TICK_MAX_LABELS`），并**按容器宽度反推**（`tickLabelsForWidth`，272px 面板→3、420px→6，极窄保底 2）；右缘标签自动右对齐防溢出。刻度宽度还做了**实测回灌**（`tickLabelPx` 用 `ResizeObserver`/字号档变化后实测），避免估算偏小。
+- **打点磁吸新增「播放头」参照**。原吸附只在打点与刻度间选，用户直觉常是「从播放头所在的那一刻拉」。`SnapKind` 增加 `'playhead'`，`SnapRefsOptions` 增加 `playhead`，`snapToRefs` 优先级定为 **打点 > 播放头 > 刻度**（含 1e-9 浮点容差），见 [mark-ops.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.ts)。
+- **拖拽选区锚定端**。选区插件按指针裸坐标 + 3px 阈值算边界，导致「起点最多偏几个像素」。新增 `anchorSelectionEdge(sel, anchor, minSpan)`：按下时把**吸附结果**记作固定锚点，拖拽过程中该端不动、另一端跟手；含幂等守卫避免重复写入。AudioMarkTrack 侧配套 `pressAnchorRef` 与「用户定位序号」`seekSeqRef`——切窗 `load()` 会复位播放头，恢复动作必须比对序号，若期间用户已重新定位就放弃恢复（实测坑：缩放后按下落点被拉回旧位置差 67s）。
+- **波形柱对比度不足**。波形柱原先复用 `--line-soft`，实测对比度仅 1.83:1，低于 3:1 的可读下限。新增专用色 `--wave-bar`（`color-mix(in oklab, var(--ink) 55%, transparent)`）；同时新增 `.thumb-scroll` 纯滑块滚动条（轨道/按钮/角落全透明），见 [globals.css](file:///Users/baolei/Desktop/BobWork/projects/src/app/globals.css)。
+- **转写面板默认折叠 + 半截稿明示**。[TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx) 改为 `defaultOpen=false`——窄面板（最小 272px）下自动展开会把片段清单挤出首屏；折叠态只留一行 `▸ Transcript (N)`。跟随播放改为手算 `scrollTop` 只滚本面板内部列表（`scrollIntoView` 会连带滚动祖先，而画布面板壳是 `overflow:hidden`，会把内容顶走）。抬头额外显式标注 `partial coveredUntilSec/durationSec min`：长音频走窗口化转写，半截稿是常态中间态，不明说会让用户把这半份当完整稿。区间终点 `clampEnd` 钳到 `transcript.durationSec`——ffprobe 与播放器对同一文件时长读数差几十毫秒，不钳则「截最后一句」可能被服务端越界判据拒掉。
+- **Butler Today 面板按主题编辑源**。[ButlerTodayPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerTodayPanel.tsx) 的主题 chip 改为可点，点开就地展开「源编辑」面板：`Query` 单行输入、`RSS sources` 与 `Authoritative sites` 两组标签（回车新增、`×` 移除）。前端只做「非空 + 去重 + 条数封顶（`TOPIC_SOURCE_MAX`）」三道显式校验，**格式归一化交给后端**（`normalizeFeeds`/`normalizeSites` 剥协议/路径/`www.`），保存后 `setNewsConfig(d.config)` 把归一化结果回填，前端随即与后端对齐。清空源后仍落空数组——后端归一化时摘掉该键，语义即「回到内置默认源」。
+- **多文件并行编辑一致性**（工程侧）：本批对同文件的相邻改动严格串行落盘，避免基于旧快照互相覆盖（历史教训：`mcp-server.ts` 的 import 行曾被并行编辑覆盖）。
+
+### 新增与增补的单测
+
+- **[timeline.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/timeline.test.ts)**（新增）：`mmss2` 厘秒进位/边界、`tickStops` 步长选择、`tickStopsForWindow` 防漂移、`tickLabelsForWidth` 宽度反推、`tickLabelRightAligned` 右缘判定 —— **21 例**（新增）。
+- **[peaks-codec.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/peaks-codec.test.ts)**（新增）：`encodeFine`/`decodeFine` 往返误差 ≤ 1/127、`mergeMicrosPairs` 保号、`sliceFineWindow` 越界夹取 —— **14 例**（新增）。
+- **[plugin-web-proxy.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/http/plugin-web-proxy.test.ts)**（新增）：逐字透传含前缀、SSE 逐帧到达（含缓冲版负对照）、2MB body 流式、插件未运行时 503 空态、非面板路径放行、上游 502 透传 —— **16 例**（新增）。
+- **[news/generate.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/generate.test.ts)**（新增）：用 `vi.mock` 覆盖三级采集降级的先后与负对照 —— **4 例**（新增）。
+- **[mark-ops.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.test.ts)**：**34 → 45 例，+11**（新增播放头吸附优先级、`anchorSelectionEdge` 锚定与幂等）。
+- **[library.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.test.ts)**：**37 → 43 例，+6**（影子目录列举、来源 ref 读写、删除护栏）。
+- **[news/types.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/news/types.test.ts)**：**9 → 16 例，+7**（新增「topic sites（权威站）」describe：`normalizeSites`、`sitesForTopic`、空值不落键）。
+- 其余：`peaks.integration.test.ts` 维持 1 例（无变化）。
+
+测试净增合计 **+79 例**（新增文件 21+14+16+4=55；既有文件 +11+6+7=24）。
+
+## v0.7.697 (2026-10-11)
+
+> 本版是 **v0.7.696 之后的「长录音也能整段转写」版**：v0.7.696 把「听得懂」接进了画布音频编辑器，但只覆盖 ≤30 分钟、或「只转选区」——整段超 30 分钟的录音会被 `parseAudio` 直接拒绝（`MAX_DURATION_SEC = 30*60`），界面上等于「这段音频转不了」。本版补上这条缺口：新增 [windowed.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/windowed.ts)（纯逻辑 + 注入式调用，可单测），把整段按默认 20 分钟切成**无缝无重叠**的窗口逐窗跑；把 `AudioTranscript` 扩成可承载**中间态**（`partial` + `coveredUntilSec`），`transcribe` action 每完成一窗就**增量写 sidecar**，请求被平台掐断也能从断点续跑（已转窗口命中 parse 层内容哈希缓存，**不重复付费**）；并把「某一窗没语音」类型化为 `NoSpeechError` 后由窗口化路径吞掉继续下一窗（长录音里整段静音是常态，否则会在同一静音窗上永远卡住）。用户实际那一例 3401s（57 分钟）⇒ 3 窗。顺带把波形吸附统一成 `snapToRefs`（打点 + 刻度格线，打点优先），并修掉 `parseProjectRoot()` 兜底写死 `~/BobWork` 导致隔离 dev 把缓存写进真实根的 EPERM 事故。共 12 个文件改动（2 新增：1 源码 + 1 测试；10 修改：8 源码 + 2 测试），测试净增 **+26 例**。
+
+### 新增功能
+
+* **长音频窗口化转写骨架**（新增 [windowed.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/windowed.ts)，149 行）：纯逻辑、注入式（无 `node:fs` / 无 ffmpeg / 无网络 ⇒ 可单测）。常量 `DEFAULT_WINDOW_SEC = 20*60`（对上 parse 层 30 分钟上限留 10 分钟余量）、`MIN_WINDOW_SEC = 60`、`MAX_WINDOW_SEC = 25*60`（刻意留 5 分钟余量）、`TAIL_MERGE_SEC = 2*60`。
+  * `clampWindowSec(sec)`：夹到 `[MIN, MAX]`，非法输入取默认。
+  * `planWindows(durationSec, windowSec?, startSec = 0)`：把 `[start, duration)` 切成**无缝无重叠**的窗口；总长 ≤ 一窗 → 单个窗口（**短音频与引入窗口化之前逐字节一致**，不引入额外行为）；末窗不足阈值 → 并入前一窗（不为几秒尾巴多付一次 STT）；`startSec` 即**断点续跑**入口（已覆盖到哪就从哪继续，窗口边界与上次不同也无妨 —— 段戳来自 parse 层写的全局 `[mm:ss]`，与怎么切窗口无关）。
+  * `mergeSegments(a, b)`：按 `t` 升序合并两批；`t` 相同（0.1s 精度）只留一条（续跑重叠 / 重复窗口的幂等保护），并丢弃正文为空的段。
+  * `runWindows({ plan, existing?, transcribeWindow, onProgress? })`：**串行**逐窗跑（云端 STT 按段计费限流，并发更易触发限流且进度算不清）；每完成一窗回调 `onProgress`（由调用方落盘）；**空窗口照常推进** `coveredUntilSec`；真错误**立即抛出**，但已完成窗口的进度在 `onProgress` 里**已经落盘** —— 这就是「断点续跑」的全部依据。返回值刻意**不含** `complete` 布尔（那种「恒为 true」的字段最容易让判据退化成平凡为真）。
+* **`AudioTranscript` 承载中间态：`partial` + `coveredUntilSec`**（[transcript.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.ts)）：`partial?: boolean`（**尚未转完**，语义是「可用但不完整」，UI 要如实标注）、`coveredUntilSec?: number`（已覆盖到的秒数，断点续跑的**唯一依据**）。`parseTranscriptSidecar` 读 / 写这两个字段：**只在 `partial === true` 时写**（`false` 不写字段 ⇒ 老 sidecar 的字段形状不变，向前兼容），`coveredUntilSec` 有限且 ≥0 才写。
+* **`transcribe` action 编排窗口化 + 断点续跑，`maxDuration = 1800`**（[clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：这是路由里唯一的**分钟级**动作，窗口化后更久（57 分钟 ⇒ 3 窗，云端 STT 逐个跑），故给 1800s。流程：算指纹 → 读 sidecar（完整稿直接返回 `cached:true`；`partial` 且**同一次请求的形状**〈范围一致〉才谈续跑，否则从头）→ 探总时长 → 按 `planWindows` 切窗。**单窗路径**（短音频 / 选区）走一次调用、`swallowNoSpeech:false`，与窗口化引入之前逐字节等价；**长音频路径**走 `runWindows`，`onProgress` 里把 `{ partial, coveredUntilSec }` 写进 sidecar（`done < total` 才带 `partial`）；完成回传 `windows: 1 | N`。半途失败的 catch 会读出已落盘的半截稿，如实回 `已保存 N/M 分钟的转写，再点一次「继续转写」会从断点接着跑`。`windowSec = clampWindowSec(body.windowSec)`（仅测试 / 调优用）。任何失败（未配引擎 / 静音 / 超限 / 网络）仍是 **200 + `{success:false,error}`**。
+* **`NoSpeechError`：把「这段范围没有可转写语音」类型化**（[audio-parser.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/parse/audio-parser.ts)）：新增 `export class NoSpeechError extends Error`（`name='NoSpeechError'`，`message` 与历史抛出的**逐字一致**），在静音（`'No speech detected — the recording is silent (input level too low).'`）与空稿（`'Empty transcript — no speech detected.'`）两处抛出。有类型之后窗口化路径才能明确地「跳过这一窗、继续下一窗」—— 否则调用方只能靠 `message` 字符串分辨，会把「某窗静音」当成致命错误、整段卡在这一窗反复失败、永远到不了后面。
+* **画布音频编辑器的长音频进度 UI**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) / [TranscriptPanel.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/TranscriptPanel.tsx)）：转写按钮按状态切换 —— 半截稿 ⇒ `Continue transcribing`（不传 `refresh`，服务端从 `coveredUntilSec` 续跑，`title` 明说「已完成部分有缓存、不额外花钱」）；完整稿 ⇒ `Re-transcribe`（`refresh:true`）。长音频首跑的 `title` 预告 `This recording is N min — it will be transcribed in M parts and may take several minutes`。转写中每 4s 轮询 `load_transcript` 把**逐窗落盘**的真实进度显示出来（请求被掐断时已转部分**不回退**）；完成后状态条报 `Transcribed in N parts in Ns.`。转写面板与工具行都显示 `· partial X/Y min` / `X/Y min transcribed`（读数不可点，`text-10`）。
+
+### 修复与优化
+
+* **`parseProjectRoot()` 兜底写死 `~/BobWork` 会把隔离环境的缓存写进真实数据根**（[project-root.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/parse/project-root.ts)）：改用 `resolveAppRoot()`（认 `BOBWORK_HOME`）+ `SANDBOX_DIRNAME`。实测（2026-10-11 长音频端到端探针）：用 `BOBWORK_HOME=/tmp/…` 起隔离 dev 时 `getCurrentProject()` 抛错 ⇒ 兜底落到**用户的真实数据根** `~/BobWork/.sandbox/.cache/parse/…`，被文件沙盒拒绝（`EPERM: operation not permitted, open '/Users/…/BobWork/.sandbox/…'`）。症状极具误导性：**转写把 20 个分片都跑完了**（STT 调用数可证），最后一步存缓存时 EPERM，用户看到的是「转写失败」，而根因是缓存路径不属于当前环境。
+* **窗口化末窗合并阈值必须随窗口缩放**（[windowed.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/windowed.ts)）：首版把 `TAIL_MERGE_SEC`(120s) 写死，窗口被调到 100s（测试 / 将来更细切分）时「不足 120s 就合并」会把**每个**末窗都并掉、甚至改掉已经合法的窗口结构（首版正是这里被单测抓到：预期 3 窗实得 2 窗）⇒ 语义统一成「末窗不足**半窗**就并进前一窗」（`Math.min(TAIL_MERGE_SEC, win/2)`）。
+* **单窗路径刻意不吞 `NoSpeechError`**（[clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：`runWindow` 的 `swallowNoSpeech` 默认 `true`（窗口化必须吞），但单窗路径（整段短音频 / 选区）显式传 `false` —— 那里「没语音」就是要原样报给用户的原因，「录音是静音 / 输入电平太低」比笼统的 `Empty transcript` 可操作得多，不能因引入窗口化而回退。
+* **文件大小上限改按「要转的范围」判定**（[audio-parser.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/parse/audio-parser.ts)）：`MAX_FILE_BYTES = 100MB` 的整文件判据加 `!range` 前置 ⇒ 108MB 的 57 分钟录音不再被整份大小拦下（真正的成本上界是**范围时长**，由 `duration > MAX_DURATION_SEC` 单独把关）；这也正是长音频能走窗口化的**必要条件**（每条注释已写明）。
+* **波形吸附规则收敛成 `snapToRefs`（打点 + 刻度格线）**（[mark-ops.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.ts) / [AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：新增 `snapToRefs(t, { marks?, ticks?, tolSec }) → { t, snapped: SnapKind|null }`，语义三条 —— 只在阈值内吸附（含边界，带 `1e-9` 容差，防浮点边界两侧行为不一致）、**打点优先于刻度**（用户数据 > 系统网格）、`t` 非法原样返回（绝不把 `NaN` 变成某个点的时刻）。`snapToMark()` 改为转发 `snapToRefs` 的 marks-only 分支，吸附规则只留一处实现；`AudioMarkTrack` 的 `snapPoint()` 用「像素阈值 `SNAP_PX = 6` 换算成秒」（`px/宽度 × 时长`）吸附到打点或刻度格线，并用 `data-snap={hover.snapped ?? 'free'}` + tooltip（`Snapped to a mark` / `Snapped to a tick`）给出「吸到了什么」的视觉提示。
+
+### 新增与增补的单测
+
+* 新增 [windowed.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/windowed.test.ts)（**15 例** / 4 describe）：短音频 = 单窗（与老路径逐字一致）/ 🔴 用户实际那一例 3401s 全落在合法窗口内且无缝无重叠 / 末窗合并（且随窗口缩放：100s 窗口不再被全部并掉）/ 断点续跑从 `coveredUntilSec` 续 / `mergeSegments` 0.1s 精度幂等去重 / `runWindows` 串行逐窗落盘 / 🔴 **空窗口照常推进** / 🔴 **中途真错误抛出但进度已落盘** / 续跑结果与一次跑完等价。
+* 增补 [mark-ops.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/mark-ops.test.ts)（**26 → 34 例，+8**）：`snapToRefs` 阈值两侧 / 🔴 **打点优先于刻度（即使刻度更近）** / 🔴 边界 `1e-9` 容差两侧各测一次 / 非法输入与脏候选（`NaN` / `undefined`）被跳过 / `snapToMark` 转发后行为不变。
+* 增补 [transcript.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/transcript.test.ts)（**23 → 26 例，+3**）：`partial` / `coveredUntilSec` 往返不丢 / 🔴 **完整稿不写 `partial` 字段**（老 sidecar 形状不变）/ `partial` 只认严格的 `true`（脏值当完整稿）。
+* 计数口径 `grep -cE "^\s*(it|test)\("`，这三个文件里 `it.each` / `it.skip` / `it.only` 均为 0 ⇒ 无少算。本批测试净增 **+26 例**。
+
+## v0.7.696 (2026-10-11)
+
+> 本版是 **v0.7.695 之后的「音频编辑器看懂内容」版**：v0.7.695 解决的是「长录音放得动」，本版解决「听得懂」—— 给画布音频查看器接上**转写（STT）**，再围绕它把**打点与截取**做成按内容操作的流程。链路是一条：`Understand this audio` → 转写 sidecar `<主名>.transcript.json` → 转写面板（点句跳转 / 播放高亮 / 行内打点与按句截取）→ ① `Generate marks` 按段生成打点（追加、幂等、带 `auto` 位，可一键只清自动点）；② 行内 `✂` 按句截取；③ 多选 / `Split at N marks` / AI 精选统一汇到新 action `clip_many`（一次请求导出多个、逐条回执不静默）；④ 片段默认名取区间转写文本前 12 字，`✦` 可让模型给 ≤12 字标题。新增 `/api/audio/ai` 独立路由（模型任务与文件操作的失败语义、超时量级都不同），AI 只给建议（越界即丢弃、勾选后才落盘），**没配模型时自动降级为纯规则切分**并如实说明。同时把「编辑器侧转写」做成**派生数据**：与打点 / 波形同落在应用自有音频库（含库外音频的影子目录），**绝不进 workspace**。共 18 个文件改动（9 新增：6 源码 + 3 测试；9 修改：7 源码 + 2 测试），测试净增 **+78 例**。
+
+### ⚠️ 迁移缺口与新增暴露（请先读这条）
+
+* **新增的付费 / AI 动作都没有来源闸**（安全与成本，建议尽快补）：`/api/audio/clip` 的 `transcribe`（花 STT 费用）、`clip_many`（写 `.audio-library`）、`save_marks`，以及新增的 `/api/audio/ai`（消耗用户模型额度）**都没有** `guardRequestSource()`；而 `/api/audio/*` **不在** v0.7.692 的 preview-origin denylist 12 项内（`src/lib/http/preview-host.ts:21-34`）。从预览 origin 的 Hippo **全窗口**路径（同源、无预检）小程序可发起。沙盒 iframe 承载时因 opaque origin 会触发预检，风险面较小。denylist 的设计口径是「拿到就等于控制整机 / 密钥的 crown jewels」，音频这些属**付费**而非控权，是否纳入待你决定。
+* **片段改名不迁移转写 sidecar**（`src/lib/audio/library.ts` 的 `renameClip()`）：只同步同名 `.marks.json`（`library.ts:290-292`），本版新增的 `<base>.transcript.json` **原地不动** ⇒ 改过名的片段转写**读不回来**，旧文件成为孤儿（`listLibrary` 只认 `source.<音频扩展名>`，不会列出也不会报错）。
+* **片段删除不清理转写（和 peaks）sidecar**（`deleteClip()`）：只删片段文件 + `.marks.json`（`library.ts:315-318`）⇒ `<base>.transcript.json` / `<base>.peaks.json` 残留为孤儿。**转写是花了 STT 钱与时间的结果**，比 peaks 缓存残留更值得知道；`deleteEntry()` 是整目录删，无此问题。
+* **`Selection only` 会命中旧 sidecar（实际没跑选区转写）**：`AudioViewer.transcribeSelection()` → `transcribe({ range: sel })` **不带 `refresh`**（`AudioViewer.tsx:688`），而 `transcribe` action 在 `body.refresh !== true` 时**先查 sidecar 且不比对 range 是否一致** ⇒ 只要该音频已有转写，点 `Selection only` 会直接返回旧稿，界面却显示 `Transcribed the selection in Ns.`。要真跑选区，目前只能先让 sidecar 失效。
+* **转写 sidecar 是单一文件、按选区转写整份覆盖**：没有多份 / 合并机制；`range` 会持久化并在面板标注 `· 30–60s`，但下一次整段 `refresh` 会直接覆盖局部稿（反之亦然）——「只转这一截」是临时入口，不是多稿管理。
+* **多选超过 20 句会被整批拒绝**：`TranscriptPanel` 的 `Clip N` 不设上限，而路由 `MAX_CLIP_BATCH = 20` 直接返回 `too many ranges (max 20 per request)`，**整批一条都不导出**，且无前置提示。
+* **确定性文件名 + `clipAudio` 用 `-y` ⇒ 重复执行会静默覆盖**：`Split at N marks` 命名 `<标题> - 01/02…`、AI 精选用 `h.title`（`normalizeHighlights` 只按 `start` 去重，**同名标题不排除**）、多选截取用段文本前 12 字 —— 同名时后一次覆盖前一次（`.clips.json` 按 path 去重，不留两条，所以覆盖得毫无痕迹）。
+* **指纹失效是静默的**：音频被替换 / `touch` / 改名后 `load_transcript` 返回 `null`，界面按「没转过」处理（设计如此，避免展示过期文稿），但用户会以为转写丢了。另外库外音频影子目录的 key = `sha1(绝对路径)[:12]` ⇒ 移动 / 改名源文件时打点与转写一起失联（既有设计，加上转写后代价变大）。
+
+### 新增功能
+
+* **转写 sidecar：`<主名>.transcript.json` + 指纹对账**（`src/lib/audio/library.ts`，+63 行）：新增 `transcriptFileFor()`（库内音频就地放、库外音频进影子目录，与打点 / peaks 同处）、`readTranscriptFile(transcriptAbs, current)`、`writeTranscriptFile()`。失效判据 = sidecar 记的 `{size, mtimeMs}` 与当前音频指纹**逐字段不等** ⇒ 返回 `null`（宁可不展示，也不让用户拿旧稿去打点）；sidecar **没记**指纹（手工放进来的）则放行。`writeTranscriptFile` 自己 `mkdir -p`（库外影子目录此前不存在，直接 write 会 ENOENT —— `writeMarksFile` 踩过的同一个坑），且写失败**抛出**（转写是花钱的结果，与 peaks 的「失败静默」相反）。
+* **转写纯函数层（客户端也能值引入，无 `node:fs`）**（新增 `src/lib/audio/transcript.ts`，250 行）：`AudioTranscript = { version, segments, plainText, durationSec, engine, range, at, source }`、`TranscriptSegment = { t, end, speaker|null, text }`、`TRANSCRIPT_VERSION = 1`（版本不符即丢弃旧 sidecar，不让旧数据把 UI 带崩）。
+  * `segmentsForEditor(plainText, { endSec, fallbackSpanSec })`：逐段补 `end`（= 下一段 `t`；末段取 `endSec` 或兜底 `DEFAULT_LAST_SPAN_SEC = 30`），最短段 `MIN_SEGMENT_SPAN_SEC = 0.1`，0.1s 取整。**无戳兜底**：`parseAudio` 只在 `segCount > 1` 时写 `[mm:ss]`，短音频（<60s 单块）会被解析成空数组 ⇒ 无戳但有正文时兜底成**单段**，否则界面会把「转写成功」显示成「没有内容」。
+  * **刻意不做范围偏移**：段戳已是全局时间轴（`baseOffset = range.start` 已并入），本文件不提供 offset 参数，并留了回归用例守卫（早期设计稿那句「offsetSec = range.start」会造成按选区转写时双重偏移）。
+  * `activeSegmentIndex(segments, time)`：语义 = 最后一段 `t ≤ time` 的二分（用推算的 `end` 做右开区间会在段间隔里把高亮闪掉），`-1` = 还没到第一段；入参只要求 `{ t: number }`（会议回放的段没有 `end` 字段）。
+  * `validRange(start, end, durationSec, minSpanSec = 1, endToleranceSec = 0.5)`：**严格拒绝、不做边界钳位**（倒置 / 负起点 / NaN / 越界一律 `null`）；上界留 **0.5s 测量容差**（ffprobe 与浏览器解码是两个测法，同一文件差几十毫秒是常态，严格判据会把「按播放器时长截到结尾」误判成越界）。
+  * `parseTranscriptSidecar(raw)`：宽松解析，脏段逐条丢弃（`t` 非有限数 / 负、正文为空、非对象），`end` 非法回退 `t + 0.1`，无有效段 → `null`。
+* **`/api/audio/clip` 三个新 action + `maxDuration = 300`**（`src/app/api/audio/clip/route.ts`，+236/−13）：这是该路由里唯一的分钟级动作，不给显式上限长音频会被平台掐断而客户端只看到一个没有原因的失败。
+  * `transcribe`：请求 `{ source, path, refresh?, rangeStartSec?, rangeEndSec?, diarize? }`，`diarize ∈ {auto, duo, group}`；不带 `refresh` 且指纹相符 → `{ success:true, transcript, cached:true }`（**不重复花钱**）；`refresh:true` 忽略 sidecar 重跑。引擎抬头用 `/^音频转写（([^）]*)）/` 从 `extracted_text` 抠出（唯一真源在 `audio-parser.ts:822` 的抬头行）。整段 >30 分钟由 `parseAudio` 拦下（`MAX_DURATION_SEC = 30*60`），**按范围转写只校验所选范围的长度** ⇒ 长音频的正解是带 range 分段。任何失败（未配引擎 / 静音 / 超限 / 网络）都转成 **200 + `{success:false,error}`**，且失败**不留半截 sidecar**。
+  * `load_transcript`：三态 —— 有稿且指纹相符 / `null`（没转过、已失效、数据损坏）/ `success:false`（路径非法）。组件挂载即可直接问，不必先猜「转过没有」。
+  * `clip_many`：请求 `{ source, path, ranges: [{ startSec, endSec, name }] }`，`MAX_CLIP_BATCH = 20`、`MIN_CLIP_SPAN_SEC = 0.1`；**逐条 ffmpeg、逐条回执** `results: [{ ok, name?, start?, end?, error? }]`，响应 `{ success, exported, failed, clips, results }`，只有全部失败才 `success:false`（越界 / 倒置直接拒绝并带原因，**绝不静默跳过**）。边界校验与 AI 精选**共用同一个纯函数** `validRange`。抽 `exportOneClip()` 供 `clip` / `clip_many` 共用（批量导出不再变成 N 次读改写同一份 `.clips.json`，清单只在末尾写一次）；单条 `clip` 的响应也补了 `clips`（少一次往返）。
+* **AI 路由 `/api/audio/ai`（`maxDuration = 60`）**（新增 `src/app/api/audio/ai/route.ts` + `src/lib/audio/ai.ts`，81 + 281 行）：`action: 'highlights' | 'suggest_clip_name'`，模型侧一切失败一律 **200 + `{success:false,error}`**（没配模型 / 超时 / 返回不可解析都不该是 500）。独立成路由而非并进 `clip`：那里是「文件操作」（I/O 或参数失败）、这里是「模型任务」，两类失败与两个超时量级不该纠缠。路由侧 `sanitizeSegments()` 把脏段逐条丢弃（不假设调用方是自家 UI，避免 `s.text.replace` 抛 TypeError 变 500）。
+  * 常量：`MAX_HIGHLIGHTS = 8`、`MIN_HIGHLIGHT_SPAN_SEC = 1`、`MAX_PROMPT_CHARS = 12000`、`MAX_CLIP_NAME_CHARS = 12`（比 `suggest-title` 的 20 短：文件名要能一眼扫过）、精选超时 20s、命名超时 10s、`temperature 0.3`；请求 `max` 用 `Math.min(max, MAX_HIGHLIGHTS)` 封顶。
+  * 可单测的纯函数：`extractJsonArray()`（剥 ``` 围栏、取首个 `[` 到末个 `]`、退一步支持 `{highlights|items|segments|clips|result:[...]}` 包一层；抠不出来返回 `null`）、`cleanClipName()`（取第一行、剥文件名非法字符 `/ \ : * ? " < > |`、**交替剥首尾引号与结尾标点最多 3 轮直到稳定**、压空白、按码点截 12 字）、`normalizeHighlights()`（逐条走 `validRange` 硬校验，越界 / 倒置 / NaN 丢弃、同 `start` 去重、标题为空时用理由前 12 字兜底）、`transcriptForPrompt()`（`[mm:ss] [说话人 N] 正文`，超 12000 字截断并插入「…（转写过长，后续内容已省略）」）。
+  * 未配模型文案：`尚未配置任何模型，请在【设置 → Models】中配置后再使用智能精选。`。`generateHighlights()` 在转写为空 / 拿不到时长时也返回 `{ok:false,error}`，调用方据此回退纯规则路径。
+* **`AudioMark.auto` 位 + 两侧序列化收敛**（`src/lib/audio/marks.ts`，+51/−31）：`auto?: true` 只表示「按转写自动生成」，用途是让「清除自动生成的点」只删自动点、手打点毫发无伤，并给「生成打点」这个动作一个原子撤销粒度。**手打点恒不写该字段 ⇒ 旧数据（无该字段）语义正好等于手打点，无需迁移**。同时把原先在 md 注释行与 sidecar JSON 两条路径里**各自展开写**的遍历收敛成 `serializeMark()` / `normalizeMarks()` 各一份 —— 可选字段漏读一处就是「写进去、读出来没了」的静默丢字段，tsc 与 eslint 都抓不到。字段顺序固定 `t → label → auto`，`label` 为空不写该键（有逐字节断言保护）。
+* **打点纯操作层**（新增 `src/lib/audio/mark-ops.ts`，263 行）：与 `marks.ts` 的分工是「运算 vs 持久化」，全部纯函数（仓库无 jsdom，组件测不了，放 lib 层才能单测）。
+  * `marksFromSegments(segments, existing, { speakerPrefix?, minGapSec? })`：**追加**语义 —— 原样保留传入的手打点（含标签）只往里加；与 `existing`（以及本次已生成的）距离 < `AUTO_MARK_MIN_GAP_SEC = 0.5` 的段跳过 ⇒ **幂等**，反复点「生成打点」第二次 `added = 0`（界面会说出来）；生成的点一律 `auto: true`；标签 = 段正文压平空白后按码点截 `AUTO_MARK_LABEL_MAX = 24` 字（空正文返回 `undefined`，不写空标签），并**仅当转写里出现 ≥2 位说话人**才加 `Speaker N · ` 前缀（否则同一人录音逐段标「说话人 1」纯属噪音）。返回 `{ marks, added, skipped }`，不改传入数组。
+  * `dropAutoMarks()` = `filter(m => !m.auto)`；`snapToMark(t, marks, tol = SNAP_TOLERANCE_SEC = 0.3)` 把当前时刻吸到最近打点（**含边界**，故带 `1e-9` 容差：实测 `|30 − 29.7| = 0.30000000000000027 > 0.3`，不加容差会出现「恰好 0.3s 时吸、换个等价写法就不吸」；阈值外原样返回并按 0.1s 取整，`NaN` 绝不变成某个点的时刻）。
+  * `splitRangesAtMarks(marks, durationSec, minSpanSec = 0.1)`：按打点把 `[0, duration]` 切成 N+1 段，相邻切点间距不足的后者丢弃、首尾补齐 `0` 与 `duration`、尾部不足一段并入前一段、`duration` 未知返回 `[]`（宁可什么都不做，也不生成「到 0 秒」的空片段）。
+  * `ruleHighlights(segments, durationSec, max = 8)`：**不调模型**的确定性降级路径。说话人切换处必切（仅 ≥2 人）、否则每跨过 `RULE_BLOCK_TARGET_SEC = 60` 收一块、短于下限的块丢弃（`RULE_BLOCK_MIN_SEC = 20`；**多人录音一律用更短的 `RULE_SPEAKER_MIN_SEC = 5`** —— 访谈一问一答常只有 5~10s，用 20s 会把轮次块全丢光；音频本身很短时再按 `total/2` 放宽），标题取块内首段正文前 12 字，**最后还有一道「绝不返回空」的兜底**（退化成整段一条）。
+* **转写面板 `TranscriptPanel`**（新增 `src/components/audio/TranscriptPanel.tsx`，283 行）：定位是「为打点与截取服务的操作面，不是阅读器」。`defaultOpen = false`（折叠态只留 `▸ Transcript (42)`，占位与普通行等高 —— 窄面板最小 272px 下自动展开会把片段清单挤出首屏）；点行 = 跳转并播放，行内 `＋` 在该段起点落手打点（标签 = 段文本前 24 字），`✂` 按句截取（进 `AudioMarkTrack` 的**命名态**，与手动拖选同一条路）；多选后 `Clip N` 批量导出（默认名取段文本前 12 字，跨度 < 0.1s 的丢弃）；8 色说话人色板、正文 `line-clamp: 2`、列表 `max-h-56` 自带滚动；播放高亮 + 自动跟随**手算 `scrollTop` 只滚本面板**（`scrollIntoView` 会连带滚动祖先容器，而画布面板壳是 `overflow:hidden`，会把内容莫名顶走），用户上滑（距底 > 40px）即解除跟随；`onHighlights` 不传则不渲染按钮。
+* **`parseProjectRoot()` 抽取**（新增 `src/lib/parse/project-root.ts`，27 行，只导出这一个函数）：解析类任务的缓存根 = `<projectPath>/.cache/parse/` 的第二个入参。有激活项目用项目根，否则回退 `<home>/BobWork/.sandbox`。两份实现各写一遍的后果很隐蔽：同一份音频的转写会落到两个缓存目录，缓存命中率凭空腰斩，而症状只是「有时候快、有时候慢」。⚠️ 仅用于缓存目录，不参与任何路径安全判断。
+
+### 修复与优化
+
+* **波形刻度出现成对重复标签**（`src/components/audio/AudioMarkTrack.tsx`）：`TICK_STEPS` 去掉 `< 1s` 的步长（`[0.5,1,2,…]` → `[1,2,5,10,15,30,60,120,300,600,900,1800]`）。标签走 `mmss()` 只印到秒 ⇒ 0.5s 步长会把每个整秒印两遍，实测 4s 音频刻度行 = `00:00 00:00 00:01 00:01 00:02 00:02 00:03 00:03`。影响面只有 ≤6s 的音频会因此变稀疏；文件里同时写下约束：将来若要亚秒刻度，必须把标签一起换成带小数的 `mmssPrecise`。
+* **一键生成打点会撑爆首屏**：新增 `MARK_CHIP_LIMIT = 6`，`marks.length > 6` 时只渲染前 6 片 + `+N more`，展开后是 `max-h-20 overflow-y-auto` 定高容器（`Show less` 收起）。原由：按转写一键生成动辄 30+ 个点，chips 行本就 `flex-wrap`，窄面板 320px / 默认档下每行只放得下 2 片 ⇒ 30 个点 = 15 行 ≈ 470px，会把转写面板与片段清单整块挤出首屏。取 6 是**为了让默认场景逐字节不变**（≤6 时渲染路径与加这个特性之前完全一致）。折叠用 `slice(0, n)` 而非过滤 / 排序 ⇒ 下标与 `marks` 对齐，不会删错点。
+* **窄面板下波形控制行被面板壳裁掉（按钮点不到）**：控制行加 `flex-wrap`。实测（面板 320，两个独立见证：几何在裁剪区内 + 中心点 `elementFromPoint`）：m 档 `Play range` 可见宽 45.22/75.36（中心仍在内 ⇒ 可点）；L 档可见宽 **8.62/85.41**（中心已在裁剪区外 ⇒ 实际点不到）；XL 档可见宽 **0**（完全不可见），`Clip` 也被裁到 38.54/57.06。溢出量还随时长增长（读数变长），折行是唯一不随数据恶化的解；折行后最坏只多占一行（≈63px @ L）。
+* **交互会把打点列表整块推走**：行序口径定为 **`{marks}` → `{sel}` → `{clipDraft}` → `{draft}`**。`{sel}` 的 0↔1 完全跟随一次拖选手势 ⇒ 属临时编辑面；原先排在 `{marks}` 之前，拖选会把打点列表 + 下方状态条 / 片段清单整块下推 **30.38 / 33.62 / 36.87px @ m/l/xl**（XL 档 + 面板最小宽 272px 时折两行 ⇒ **63.00px**）。四类行行高相同、列间距 `0.375rem` ⇒ 换位不产生额外几何差异，只改变哪个块在动。
+* **打点改动只有一个落盘口 + 可撤销**（`src/components/canvas/viewers/AudioViewer.tsx`）：手打点 / 删点 / 改批注 / 按转写生成 / 一键清自动点全部改走 `applyMarks(next, { history })` —— ① 乐观上屏（交互不等网络）；② 压一份完整快照进撤销栈（`markHistory`，`slice(-19)` 保留最近 20 步；**基线删点是「立即落盘且不可撤销」的破坏性操作**）；③ await 落盘结果并**说出来**（基线 `void postAudio(…)` 发完不管，失败时打点看着已存、刷新后消失）。新增 `Undo marks`（整份回写，撤销自身不压栈）。生成打点的结果也必须讲清楚「新增 N 个、跳过 M 个」。
+* **批量截取绝不静默跳过**：`clipMany()` 把「成功几条 / 失败几条 / 第一条失败原因」如实写进状态条（`Saved 3 clips — 2 failed`）。逐条 ffmpeg、逐条回执，只要有一条成功就算成功。
+* **实现期被单测抓到的两个真 bug（新代码内部，已修）**：① `snapToMark` 阈值边界浮点问题（加 `1e-9`）；② `cleanClipName` 对模型输出 `“预算分配方案”。` 只剥一遍会先去掉句号、留下孤立的右引号（得到 `预算分配方案”`）⇒ 改为交替剥首尾引号 / 括号与结尾标点、反复到稳定（最多 3 轮，必然收敛）。
+
+### 改进
+
+* **会议回放与音频编辑器共用同一个「当前段」二分**（`src/components/butler/MeetingReplay.tsx`）：`onPlaybackTime` 里内联的二分换成 `lib/audio/transcript.ts` 的 `activeSegmentIndex`（两处各写一份的结果必然是「一处改了另一处没改」）。唯一语义差异是 `t` 早于首段起点时由「高亮首段」变「不高亮」（`-1`）。
+* **模型侧与文件侧共用一个响应契约**（`AudioViewer.tsx`）：新增 `postAi()`（走 `/api/audio/ai`），与 `postAudio()` 完全一致（永不抛、永不返回 `null`，都过 `readApiResult`）⇒ 调用点不必区分两套错误形态。
+* **AI 只给建议，且模型不可用时不把用户堵死**（`AudioViewer.tsx`）：`runHighlights()` 拿到建议后**默认全选、勾选后点 `Export N` 才落盘**（绝不自动导出），导出后清空卡片；失败时自动落到 `ruleHighlights()` 并如实说明这批是规则给的（`AI unavailable (<原因>) Showing N rule-based suggestions.`）。`✦` 智能命名失败时**保持用户手上的草稿不动** —— 输入框绝不能被一次失败的模型调用清空。
+* **实时时长 / 播放时刻回调改成 `useCallback`**：`handleDuration` / `handleTimeUpdate` 会被 `AudioMarkTrack` 收进 `cbRef`，内联箭头每次换身份会让那个 effect 空转。
+* **`requestClip` / `getSelection` 两个新句柄**（`AudioMarkTrack.tsx`）：按句截取复用组件自己的选区与命名态（不长出第二条导出路径），「只转写这一截」从组件问出选区（不为它单开回调）；命名相关 props 放 `suggestRef`，让 `useImperativeHandle` 依赖数组保持 `[]`（句柄身份必须稳定，直接闭包 props 会永远读到首次渲染的值）。
+* **片段命名默认名改为内容相关**：`suggestClipName(start, end)` 由父级从转写文本里取（取不到回退既有的 `片段 - 标题 - 时间戳`，即「没有转写也照常能用」）；`✦` 的 `onRequestClipName` 只在拿到非空结果时覆盖草稿。
+* **片段清单区显示条件放宽**：`clips.length > 0 || !atRoot || marks.length >= 2` ⇒ 只有打点、还没导出过片段时也能看到 `Split at N marks`。
+
+### 界面细节
+
+* **转写入口整行常驻**（`AudioViewer.tsx`）：`Understand this audio` / 转写中 `Transcribing…`（`Loader2` 转圈）/ 已有稿时 `Re-transcribe`（`refresh:true`）；`Selection only`（只转选区，长音频入口）；`Separate speakers` 勾选框**默认关**（它要对整段音频跑一次声纹，很慢，不替用户决定）。文案：`Drag on the waveform to select a range first.` / `Transcribed in Ns.` / `Transcribed the selection in Ns.`
+* **打点工具行只在有东西可操作时出现**：`Undo marks`（有撤销栈时）、`Clear N auto`（有自动点时才出现，`title` 明说手打点会保留），其余时候零占用；刻意排在 `{marks}` 之后。
+* **AI 精选建议卡片**：标题 `Suggested clips` + `Export N` + `Dismiss`；每条一个勾选框、时间 `mm:ss–mm:ss` 可点跳转、标题一行截断（完整理由在 `title` 里）。
+* **`Split at N marks` 放在片段区标题行**（`title` 说明会导出 `N+1` 个片段），不放波形控制行 —— 那里在窄面板下已经会折行，再塞按钮只会更早折行；放片段区语义也更贴。
+* **纪律写进文件头**：新 UI 一律排在 `{marks}` 之后且自带滚动或高度有界，否则会重现「持久列表被交互推走」的老缺陷。
+
+### 新增与增补的单测
+
+* 新增 `src/lib/audio/transcript.test.ts`（**23 例** / 4 describe）：无戳兜底单段 / 末段兜底 30s / 🔴 **不做范围偏移的回归闸门** / `activeSegmentIndex` 段间隙不闪断 / `validRange` 越界拒绝但留 0.5s 容差 / 版本不符与脏 sidecar → `null`。
+* 新增 `src/lib/audio/mark-ops.test.ts`（**26 例** / 6 describe）：🔴 绝不改动手打点 / 🔴 幂等第二次 `added=0` / 去重阈值 0.5s 与 0.4s 两侧 / `snapToMark` 边界 / `splitRangesAtMarks` 尾部并入 / 🔴 **12s 短音频必须给得出建议**。
+* 新增 `src/lib/audio/ai.test.ts`（**17 例** / 4 describe）：``` 代码块与 `{"highlights":[…]}` 两种包裹 / 🔴 不可解析返回 `null` / 剥文件名非法字符 / 🔴 越界·倒置·NaN 一律丢弃 / 同 `start` 去重截上限 / prompt 超长截断留痕。
+* 增补 `src/lib/audio/library.test.ts`（**29 → 37 例，+8**）：转写 sidecar 的落点（库内就地 / 库外影子目录）/ 父目录不存在也能写 / 🔴 **指纹不符 → `null`** / 没记指纹放行 / 非法 JSON → `null`。
+* 增补 `src/lib/audio/marks.test.ts`（**21 → 25 例，+4**）：`auto` 仅在 `true` 时写出且排在 `label` 之后；md 与 sidecar **两条路径各测一次**往返；手打点恒不写 `auto`。
+* 计数口径 `grep -cE "^\s*(it|test)\("`，这 5 个文件里 `it.each` / `it.skip` / `it.only` 均为 0 ⇒ 无少算。本批测试净增 **+78 例**；全仓 `pnpm test` **120 文件 / 1352 例全绿**，`tsc -p tsconfig.json` 通过。
+
+### 无实质变化 / 待确认（单列）
+
+* **`src/app/api/transcribe/route.ts` —— 纯重构，行为不变**（净 −10 行）：删掉本地 `projectRootPath()`，改用 `@/lib/parse/project-root` 的 `parseProjectRoot()`；`maxDuration = 120`、入出参与 422 `No speech recognized` 口径均未动。
+* **`src/lib/audio/marks.ts` —— 对旧数据逐字节等价**：`serializeMark` 字段顺序与「`label` 空不写键」保持不变，无 `auto` 字段的旧 marks 读写往返不变 ⇒ **不需要迁移**。
+* **本批没有新增或改动任何 localStorage 键**（18 个文件全量 grep：0 命中）。
+* **`src/app/api/ocr/route.ts` 里仍有一份同款 `projectRootPath()`**（`route.ts:21-28`，`homedir()/BobWork/.sandbox` 回退）—— 本批只抽了 `/api/transcribe` 与音频侧，OCR 这份未纳入；是否合并待定。
+* **`listLibrary` 的 `durationSec` / `marksCount` / `hasTranscript` 字段未实现**：库浏览面板仍没有「这份音频转过没有」的线索。
+* **会显著改变行为的候选后续**：长音频**窗口化全量转写**（本轮只做「转写当前选区」；真实 STT 调用刻意未跑，避免花用户 API Key 的钱）。
+
+## v0.7.695 (2026-10-11)
+
+> 本版是 **v0.7.694 之后的音频回放链路提速版**：v0.7.692–0.7.694 的主题都在悬浮球 / 面板窗，本版转回音频 —— 对长录音做一次**彻底的省内存改造**。核心是**服务端预计算波形峰值（peaks）**：新增 `lib/audio/peaks.ts`（用 ffmpeg 解码成 8kHz 单声道 PCM，流式按桶取绝对值最大，落 `.peaks.json` sidecar 缓存），并在 `/api/audio/clip` 新增 `peaks` action；前端拿到 `peaks + duration` 后，WaveSurfer **既不整份 fetch 也不 `decodeAudioData` 全量解码**，播放交给 `<audio src=代理URL>` 走 **HTTP Range 按需分段拉取** —— 实测 3401s 的录音原先要解码出 ≈600MB PCM（常驻原生内存、`performance.memory` 看不到），现在只剩硬盘上一个几 KB 的缓存。为此给两个 `file_proxy` 路由（`/api/local-files`、`/api/projects`）接入 **HTTP Range（206 / 416）**，并把两处逐字重复的 mimeMap 抽成共用的 `lib/files/mime.ts`（顺带补齐音视频类型）。同时新增 `readApiResult` 统一 `/api/audio/*` 的响应解析（响应体不是 JSON 时不再静默丢数据），并修掉给库外音频打第一个点时的 sidecar ENOENT。共 17 个源文件改动（3 改 + 14 新增）。
+
+### 新增功能
+
+* **波形峰值（peaks）服务端预计算 + sidecar 缓存**（[peaks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/peaks.ts) / [clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts) / [library.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.ts)）：为什么必须做 —— WaveSurfer 在「没有 peaks」时有两条昂贵隐藏路径（`:471` 把整份音频 fetch 成 Blob；`:539-548` 用 `decodeAudioData` **全量解码**成 AudioBuffer，常驻原生内存），只要喂上 `peaks + duration` 两条路径**同时消失**（`:147-151` 播放改走 `<audio src>` 的 HTTP Range；`:536-538` 有 channelData 就直接建 buffer、不再解码）。做法：`PEAKS_SAMPLE_RATE=8000`（单声道 s16le，流量可预测 16KB/s）、`PEAKS_BUCKETS=2000`、`PEAKS_MIN_BYTES=1MB`（更小的文件走 Blob 更划算）、`PEAKS_VERSION=1`；`PeaksAccumulator` 流式吃 PCM，先按 **10ms 微桶**取 abs-max（**保号**，与 WaveSurfer `exportPeaks` 同口径，10ms 让最短的大文件也能凑满桶数），**收尾再按总样本数合并成 2000 个等宽桶**（单趟、恒定小内存，且与等宽切分等价），并**接住跨块的半样本**（管道分块边界任意）。`generatePeaks()` 以 `-vn -map a:0 -ac 1 -ar 8000 -f s16le -` 拉 stdout，失败一律返回 null（降级不报错）。缓存判据 = `v + srcMtimeMs + srcSize + buckets`，任一不符即当未命中重算；`peaksFileFor()`（library.ts 新增）把缓存与打点同款就地/影子落盘。新 action `peaks` **三态返回**：`{peaks,duration}`（走 Range 直连）/ `{small:true}`（太小，退 Blob）/ `{success:false}`（分析不出来，退 Blob）。
+* **HTTP Range 分段响应 + MIME 统一**（[range.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/files/range.ts) / [mime.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/files/mime.ts) / [local-files/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/local-files/route.ts) / [projects/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/projects/route.ts)）：两个 `file_proxy` 原先**整份 `fs.readFile` 进内存**，长音频无法按需拉取。现在接入只支持**单区间**的 `parseRange()` 纯函数（RFC 9110 §14.2 口径）：畸形 / 非 `bytes` 单位 / 多区间 → **忽略退 200**（不误报 416）；合法但越界 → **416**（`Content-Range: bytes */size`）；合法 → **206** 并用 `createReadStream({start,end})` 只送该区间（suffix 区间 `bytes=-N`、开区间 `bytes=N-` 均支持）。200 / 206 / 416 三分支共用 `baseHeaders`（`Content-Type` 取自 `fileMime`、`X-File-Mtime` 哨兵、`Accept-Ranges: bytes`、`Cache-Control`）。`mime.ts` 消掉两处逐字相同的 mimeMap 并补齐音频 / 视频（旧表完全没有音视频，`.m4a` 一律以 `application/octet-stream` 下发）；文件头记录实测口径：Chromium 播放**只靠内容嗅探、忽略 Content-Type**，本文件的价值是**消重 + 语义正确 + 代理 URL 被直接打开时按类型渲染**，不是修播放；`.webm` 按容器口径归 `video/webm`。
+* **`readApiResult` 统一 `/api/audio/*` 响应解析**（[api-result.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/api-result.ts)）：旧写法 `return await resp.json()` 在响应体**不是 JSON**（框架 / 代理级错误的 HTML 错误页、`204` 空体、连接被截断）时抛 → 被外层 catch 吞成 `null` ⇒ 调用方 `d?.error` 永远拿不到原因 ⇒ 失败对用户完全不可见（打点已乐观写进组件 state、刷新后消失 = **静默丢数据**）。`readApiResult(resp)` 保证**无论响应体是什么形态都返回对象**，失败时带可读 `error`（`HTTP <status> <statusText>`）；AudioViewer 的 `postAudio` 已改用它（网络层不可达仍单独兜）。服务端侧 `/api/audio/clip` 的 `POST` 也补了统一 try/catch（写入类 I/O 错误不再冒到框架层变成 HTML 错误页）。
+
+### 修复与优化
+
+* **给库外音频打第一个点不再 ENOENT**（[marks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/marks.ts)）：`writeMarksFile` 现在自己 `mkdir -p` 父目录（放在空数组分支**之后**，删除语义不产生建目录副作用）。库外音频（项目 materials / 任意本地路径）的打点落在**影子目录**里，而该目录只有「导出过片段」或「算过波形缓存」才会被创建 ⇒ 给这种音频打第一个点必然 `fs.writeFile` ENOENT ⇒ 路由 500。症状的不对称：**删光打点不报错（unlink 包了 try/catch）、加一个打点才 500**。理由与 `writePeaksCache` 完全相同，那处已修、这里补上。注意与波形缓存不同 —— 打点是**用户数据**，建目录 / 写盘失败必须抛出。
+* **画布音频查看器：加载态 / 试听选区 / 打点落盘失败可见**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) / [AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：① 新增 **Loading audio…** 加载态（大文件首次打开要先算波形峰值、可能几秒，此前看不出在加载，会误显示成失败 / 空态）；② 波形选区新增 **Play range** 试听（跳到起点播放、播到终点由 `timeupdate` 自动停，`playUntilRef` 只停这一档）；③ 打点写入由「`void postAudio` 发完不管」改为 **await 结果**：失败 → 状态条显示原因（与 clip / rename / delete 同款口径），成功 → 清残留提示；④ 波形走 `precomputed` 快路径时不再整份下载 / 全量解码（见上），加载结果按 path 缓存，切换 Source↔片段不重复拉取。
+
+### 新增单测
+
+* [range.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/files/range.test.ts)：`parseRange` / `rangeHeaders` / `unsatisfiableHeaders` 全覆盖 —— 无 Range / 非 bytes 单位 / 畸形 / 倒置 / 多区间 → null（200）；开区间、后缀区间、终点钳位；`start >= size` 与空文件 → `'unsatisfiable'`（416）；206 头 `Content-Range` / `Content-Length` 口径一致。
+* [mime.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/files/mime.test.ts)：音频全部有正确 MIME（不落默认值）、大小写 / 带点与否均可取、`.webm` 按容器归 `video/webm`、未收录 / 空输入回退 `application/octet-stream`、原有条目（html / pdf / png / svg）回归保护。
+* [api-result.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/api-result.test.ts)：合法 JSON 成功 / 失败体原样透传；**HTML 错误页、空体、标量 JSON、截断 JSON** 一律转成 `{success:false, error}`；不变式断言 —— 一切失败形态都满足「非 null + `success===false` + `error` 为非空字符串」，且**不把整页 HTML 当文案**丢给界面。
+* [peaks.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/peaks.test.ts)：`PeaksAccumulator` 的流式正确性 —— 块边界切在样本中间（奇数块长）结果不变（跨块半样本拼回）、桶内取**保号** abs-max、全静音 → 全 0 / 满量程 → ±1、无样本 → null、时长由总样本数换算与桶数无关、桶数符合请求且覆盖到最后一个样本、短音频桶数超微桶时按实际数量产出。
+* [peaks.integration.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/peaks.integration.test.ts)：**真值对照** —— ffmpeg 合成已知包络（300Hz 载波 × 23s 调幅）的 FLAC，字节数钉死「单声道 / 8kHz / s16le」口径，再用「整份 PCM 落盘后朴素全量分桶」作**第二见证**与流式微桶合并逐桶对账，并贴合已知包络公式。
+* [marks.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/marks.test.ts)：`parseMarks` / `serializeMarks` / `upsertMarkHint` / `MARK_HINT_RE` / `parseClips` / `serializeClips` / `upsertClipRef` 的容错与往返；以及 `writeMarksFile` 的落盘 —— **父目录不存在时也能写成功**（先断言父目录确实不存在，避免退化成平凡为真）、空数组不抛错且**不建目录**、目录已存在时正常覆盖写。
+
+## v0.7.694 (2026-10-10)
+
+> 本版是 v0.7.693 之后的**面板窗与悬浮球收尾版**：上一版把面板窗内容换成桌面版 Butler 抽屉、并让抽屉左栏的黄 / 红键去「最小化整个 BobWork」，本版把这条语义**收回** —— 抽屉的三色键**不再动 BobWork 窗口本身**（最小化窗口是用户的事）：红键 = 收起抽屉 + 把悬浮球送回中栏左下角，黄键 = 收起抽屉（球留在原地），并**删掉 `butler-orb:minimize-app` IPC 与 `skipOrbOnNextMinimize` 标志**（`ButlerOrbApi` 由 7 键回退到 6 键），改用渲染层事件 `BUTLER_ORB_HOME_EVENT`。同时把面板窗从「灰底 + 30px 标题条」整改为**纯透明的一整张抽屉卡**（撤掉与抽屉三色键重复的标题条按钮），拖动改由左轨 / 顶部隐形拖动带承担；并修掉 Hippo 重复注册 ipcMain handler 导致主窗口不显示的问题。共 9 个源文件改动（7 改 + 2 新增）。
+
+### 修复与优化
+
+* **面板窗整改成「纯卡片」**（[butler-panel/page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler-panel/page.tsx) / [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：撤掉上一版给窗口铺的 `--background` 灰底与 30px 白色标题条 —— 那张标题条上「缩小 / 关闭」两颗按钮与抽屉左轨三色键**完全重复**，灰底还会在卡片四周露出一整圈「背景面板」。现在窗口全透明（`html/body` 也 `background: transparent`），只留抽屉那一张卡，窗口比卡片大一圈仅是为卡片的 CSS 投影留出空间。拖动改由两处抓手承担：左轨 `nav`（拖轨即拖窗，轨上按钮与链接 `no-drag`）与顶部一条 14px 隐形拖动带 `.bwp-drag`；抽屉的**联系人列首 / 对话框标题栏也兼作拖动抓手**（按住空白处拖整个抽屉）。三个出口全部走抽屉自己的三色键，页面不改抽屉实现：黄键 / 点卡片外空白 → `panelMinimize()`（收成球，球停在面板当前所在位置）；红键 → `panelClose()`（球与面板一起从桌面消失）。
+* **抽屉三色键不再动 BobWork 窗口**（[ButlerHost.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerHost.tsx) / [butlerEvents.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/butlerEvents.ts) / [preload.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/preload.ts) / [butler-orb.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/butler-orb.ts)）：新增 `BUTLER_ORB_HOME_EVENT`（`butler:orb-home`，无 detail）。BobWork 里打开的抽屉：**红键** = 收起抽屉 + 派一次 orb-home（球回中栏左下角、丢弃用户拖拽过的位置，等价于「点抽屉外空白 + 归位」，并清 `activeThreadId`）；**黄键** = 只收起抽屉（球留在原地，不清 `activeThreadId`）；两者都**不再最小化窗口**。主进程侧**删除** `butler-orb:minimize-app` 通道与 `skipOrbOnNextMinimize` 标志（0.7.693 用它把「红键关闭」做成「连同 BobWork 一起收走且不留球」），`preload.ts` 的 `ButlerOrbApi` 由 7 键回退到 6 键（`onWindowState` / `onOpenInbox` / `dragStart` / `dragEnd` / `panelMinimize` / `panelClose`）。桌面板窗的两个出口不变。
+* **球的「归位」信号在渲染层统一**（[ButlerOrb.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerOrb.tsx)）：主窗口内的悬浮球原先只监听主进程的 `butler-orb:window-state`（最大化 / 还原 / 进出全屏 → 偏移清零、弹回中栏左下角）；现新增一条 `BUTLER_ORB_HOME_EVENT` 监听 —— 抽屉红键「关闭」时同样把偏移清零并落盘。两条路径共用同一句处理，球无论在哪种触发下都回到「家」（中栏对话区左下角内缩 `ORB_EDGE_GAP`）。
+* **Hippo 重复注册 ipcMain handler 导致主窗口不显示**（[hippo-browser.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/hippo-browser.ts) / [main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts)）：`setupHippoBrowser()` 会在应用启动、以及主窗口关闭后重新唤起（`activate` / `second-instance`，含自动更新后的重启）时被**多次调用**，而 `teardownHippoBrowser()` 只销毁窗口、**不注销** `ipcMain.handle`，重复注册会抛 `Attempted to register a second handler for 'hippo-browser:bm-list'` —— 该异常会中断 `openMainWindow` 里后续的 `loadURL` / `show`，**窗口永远不显示**。现把 handler 注册抽成幂等的 `registerHippoIpcHandlers()`（一次性标志，仅首次生效），`setupHippoBrowser()` 先 `teardown` 再注册；`main.ts` 另把 Hippo 初始化包进 `try/catch` + 记日志，Hippo 起不来也不再阻断主窗口显示。
+
+## v0.7.693 (2026-10-10)
+
+> 本版是 **v0.7.692 之后的悬浮球面板重做版**：把桌面悬浮球就地展开的那块「Butler 面板窗」从**复用移动端单栏 Butler 页**（420×640）换成**与 BobWork 里点球打开完全一致的桌面版 Butler 抽屉**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)，1020×880、最小 560×420），面板几何随之改写；并把面板窗与抽屉左栏打通成一条 IPC —— 新增 `butler-orb:minimize-app`（黄键「缩小到球」`keepOrb=true` / 红键「关闭并彻底收起」`keepOrb=false`，主进程据此**精确吃掉一次落球**），`ButlerOrbApi` 由 6 键增至 7 键。音频侧补齐**片段删除**。共 11 个源文件改动（4 改 + 7 新增）。
+
+### 新增功能
+
+* **桌面 Butler 面板改用桌面版抽屉**（[butler-panel/page.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/app/butler-panel/page.tsx)）：原先「复用移动端单栏 Butler 页」的做法**废弃**（功能齐但形态不同），面板内容改为**同一个 `ButlerDrawer`**（左轨功能键 / 好友栏 / 中栏会话 / 右栏详情三栏布局），真正做到「和在 BobWork 中打开一致」。该页只补抽屉给不了的三件事：① 自己的 **30px 标题条**（整条 `-webkit-app-region: drag` 拖动区 + 「缩小」「关闭」两键，`z-index` 抬到抽屉透明挡板 1299 与面板本体 1320 之上，否则点击会被挡板当成「点空白收起」）；② **主题 / 字号跟随桌面端设置**（这个窗口没有主窗那套 Sidebar bootstrap，不自己拉一次会退回默认主题）；③ **收件箱保鲜**（30s 只读重拉 `/api/butler/inbox`，消费型轮询仍归主窗 ButlerNoticeHost，避免双消费竞态）。抽屉在 `mounted` 后再渲染 —— 抽屉按窗口尺寸算窄窗档位，SSR 首帧属性与客户端不一致会报 hydration mismatch（实测）。
+* **面板几何按抽屉三栏反推改写**（[orb-geometry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/orb-geometry.ts)）：`PANEL_DEFAULT_SIZE {420,640} → {1020,880}`、`PANEL_MIN_SIZE {320,380} → {560,420}` —— 取值由桌面抽屉三栏合计（左轨 84 + 联系人 168 + 中栏 560 + 右栏 280 ≈ 1092）与其自适应高（`min(760, 86vh)`）反推，低于 1020 宽抽屉会切成窄窗版。`panelBoundsForOrb()` 签名泛化为 `(ballPoint, preferred, workArea, minSize, margin)`：仍**面板底边贴球底边**（看起来从球里长出来），可用区装不下首选尺寸先压到 `minSize`、连 `minSize` 都装不下退化为贴左上；`orbPointFromPanel(panelBoundsForOrb(p)) === p` 在未被钳制时仍严格成立（「缩小回原位」据此）。
+* **左栏三色键 + `butler-orb:minimize-app`**（[preload.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/preload.ts) / [butler-orb.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/butler-orb.ts) / [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) / [ButlerHost.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerHost.tsx)）：抽屉左栏窗口键由「红关闭 + 绿缩放」补回**黄键「缩小」**，与 macOS 三色键同序同色 —— 红 = 收起抽屉 + 把 BobWork 一起收走、桌面**不留球**（`onCloseAll`，并清 `activeThreadId`）；黄 = 收起抽屉 + 收走 BobWork、桌面**留**球（`onMinimizeToOrb`，**不清** `activeThreadId`，回头点球仍回原会话）；绿 = 放大 / 还原。宿主各自实现（BobWork 侧 / 桌面面板窗），未接新语义的宿主黄键不渲染、红键维持「只收起抽屉」。新 IPC `butler-orb:minimize-app { keepOrb }`：`keepOrb=false` 时主进程立 `skipOrbOnNextMinimize` 标志，把**紧接着那一次 minimize 事件的落球吃掉**（用「标志 + 事件消费」而非直接 `hideOrb`，后者会被随后的 minimize 事件立刻覆盖、球又出来）；`keepOrb=true` 走常规最小化照常落球。`ButlerOrbApi` 由 6 键增至 7 键（+ `minimizeApp`），通道 `butler-orb:minimize-app`。桌面板窗的标题条两键仍映射到 `panelMinimize`（收成球，球停在面板当前所在位置）/ `panelClose`（球与面板一起从桌面消失）。
+* **音频片段删除**（[library.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.ts) / [clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts) / [AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx)）：新增 `deleteClip(srcAbs, clipAbs)` 与新 action `delete_clip` —— 删磁盘文件 + 它的 marks sidecar + 从 `.clips.json` 移除该条（源音频本身不在此删，那走 `deleteEntry`）；两道闸：片段必须落在**当前源目录内**、必须**在该源清单里**（防借一个路径删任意文件）。画布音频查看器的片段行补上一颗 Trash 删除键（源音频行不提供删除）。
+
+### 新增单测
+
+* [orb-geometry.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/orb-geometry.test.ts) 的面板用例随新尺寸改写：新增「首尺寸按桌面抽屉三栏反推」断言（宽 ≥ 1000 —— 低于此抽屉会切成窄窗版；高 `× 0.86` ≥ 750，贴近抽屉上限 760），并把往返 / 钳制用例改用 1020×880 首尺寸与 560×420 最小尺寸重算（含「可用区 873 高放不下 880 → 压到 857、缩回时球落面板左下角、偏移在个位数像素」一档）。
+* [library.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.test.ts) 新增 `deleteClip` 系列用例：删文件并从清单移除、连同它的 marks sidecar 一起删、只删指定片段（同源其它片段保留）、片段不在源目录 / 不在清单里 → 抛错。
+
+## v0.7.692 (2026-10-10)
+
+> 本版是 **v0.7.691 之后的安全加固版**：v0.7.691 放开了小程序权限（完全信任默认开 + `hostTool` 直通宿主全部工具），本版把由此引入的**两个严重暴露**逐一关闭 —— ① 沙盒相关路由原本**没有任何来源校验**、而服务监听在 `*:8321`，`bridge` 直通 `run_command`，等于**「未开启远程访问的安装」在局域网内可被无鉴权 RCE**；② `_appId` 由页面脚本自报，**导入的第三方小程序把 `_appId` 填成任意 built 小程序的 id 即可重新拿到 `run_command` 全量工具，还能写别人的私有数据目录**。同时修掉三个 P0（`DELETE /api/sandbox` 的 id 直传可 `../../` 递归删 `~/BobWork`、`manifest.entry` 未校验可越界读写、删除小程序后已打开的预览页仍可执行并把目录复活成幽灵目录），并把小程序预览搬进**站内 sandbox iframe**（不给 `allow-same-origin`）与**同源隔离**（宿主 `localhost` vs 预览 `127.0.0.1`）。此外悬浮球升级为**就地展开独立 Butler 面板窗**、音频片段支持**改名**、AI Coding 任务加**硬预算**。共 59 个文件改动（44 改 + 15 新增，含 7 个新增测试文件）。
+
+### ⚠️ 安全：本版关闭的暴露，以及一处权限入口回退
+
+* **① 同网段无鉴权 RCE → 新增本机来源闸**（新增 `src/lib/http/loopback-guard.ts`，`checkRequestSource()` / `guardRequestSource()` / `hostnameOf()`）：`/api/sandbox/bridge`、`/api/sandbox/chat-stream`、`/api/sandbox`、`/api/sandbox/import`、`/api/sandbox/export` 此前**自身没有任何来源校验**，而 dev/packaged 服务监听在所有网卡（`*:8321`）；只有 `/api/settings` 做了 loopback Host 闸。放开小程序权限后 `bridge` 直通 `run_command`，于是「默认未启用远程访问的安装 = 同网段任何设备可无鉴权 RCE」。三条规则：`Sec-Fetch-Site: cross-site` 一律拒；`Origin` 必须本机（远程访问开启时才额外放行 `Origin === Host`，供 Tailscale / Cloudflare 隧道域名）；Host 非本机时必须已启用远程访问（此时网关已要求 Bearer/Cookie）。**二轮封 DNS-rebind**：非本机 Host 一律**在路由层复验** Bearer / 会话 Cookie（rebind 时 `remoteAddress` 是 loopback，网关会豁免它，只能在这里验）。已接入 8 个沙盒路由（source-guard.test.ts 有 16 例断言）。
+* **② 自报 `_appId` 提权 → 改为 HMAC 签名令牌**（新增 `src/lib/sandbox/app-token.ts`）：令牌格式 `v1.<appId>.<exp>.<sig>`，`sig = HMAC-SHA256('v1|<appId>|<exp>')` 的 base64url，密钥取 `settings.json` 的 `sandboxBridgeSecret`（缺失则随机生成 32 字节并写回）；有效期 `APP_TOKEN_TTL_MS = 12 小时`。预览路由签发并注入 `<meta name="bob-app-token">`，桥对每个请求带 `data._appToken`。校验用 `timingSafeEqual`，失败原因可区分（`malformed token` / `token expired (reload the preview page)` / `bad token signature` / `missing app token`）。**权威身份永远取自令牌**，自报值只在与之不符时记为冒充信号（`mismatch`）并写审计。
+  * 桥 / 流式路由加**身份闸 + 存在性闸**：无令牌或无效 → **401**；令牌有效但 manifest 读不到 → **410** `mini-program not found or deleted`。`saveAppData` 等全部改用令牌解出的 appId —— **冒充者写不进被冒充者的私有 `data/` 目录**。
+* **③ 权限入口回退（与 v0.7.691 的说明相反，请以此为准）**：v0.7.691 说「可在 Bob Sandbox 面板把完全信任关掉」，本版**移除了面板上的 `Full trust: ON/OFF` 开关**（`handleToggleFullTrust`、`ShieldCheck` 按钮、三级授权弹窗、`updateSandboxFullTrust` 写入口全部删除，`fullTrust` 变只读）。**现在撤回模型调用授权只能改 `settings.json`**（`sandboxChatPermissions["<appId>"] = "none"`，或删该表项配合 `sandboxFullTrust: false`），面板 tooltip 与错误文案都指明了这一点。
+* **④ 站内预览与宿主不同 origin**（新增 `src/lib/http/preview-host.ts`）：宿主 UI 固定跑 `http://localhost:PORT`，小程序预览固定跑 `http://127.0.0.1:PORT` —— 两者是**不同 origin**，预览页（第三方 / AI 生成代码）再也读不到宿主的 localStorage / sessionStorage / Cookie；预览 origin 上再叠一层路由限制：**denylist 12 项**（`/api/settings`、`/api/local-files`、`/api/chat`、`/api/bobby`、`/api/mcp`、`/api/extensions`、`/api/plugin-panel`、`/api/plugin-panels`、`/api/remote-access`、`/api/agents`、`/api/skills`、`/api/setup`）拒；用 `127.0.0.1` 打开 UI 的 HTML 导航 302 回 `localhost`；`/api/sandbox/**`、`/api/dav/**`、静态资源放行。**CalDAV 在预览 origin 上只读**（`DAV_READ_METHODS = { GET, HEAD, OPTIONS, PROPFIND, REPORT }`）。
+  * 注意：`previewOriginFor()` 对**非回环主机**（Tailscale IP / 隧道域名）原样返回 —— 这些场景没有这层同源隔离，只由来源闸 + 令牌兜底（测试已锁该行为）。
+
+### 新增功能
+
+* **应用内 sandbox iframe 预览（方案 B）**（新增 `src/lib/sandbox/iframe-bridge-host.ts`、新增 `src/components/canvas/SandboxPreviewFrame.tsx`）：iframe 用 `sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads"`，**刻意不给 `allow-same-origin`** —— 文档 origin 变 opaque，读不到宿主存储、跨源 fetch 需预检，小程序的一切宿主调用只能走 postMessage，**宿主成为唯一裁判**。
+  * 宿主桥只接受 `event.source === iframe.contentWindow`（sandbox iframe 的 origin 是 `'null'`，source 才是可靠判据），只处理 `bob_` 前缀消息；`bob_request` → `bob_response`、`bob_chat_stream` → `bob_chat_delta`* + `bob_chat_done`/`bob_chat_error`、`bob_chat_cancel` → `abort()`；并发流上限 `MAX_STREAMS = 4`。
+  * `graph*` 动作**不走 HTTP 中继**：由注入的执行器在宿主渲染进程内跑（画布状态在渲染进程）；未注入时给出明确指引（`open this mini-program via "Preview" inside BobWork (not the Hippo window)`）。这条同时解释了 `executeGraphBridgeAction` 此前**一直没有调用方**。
+  * 接线上 Preview 按钮派 `sandbox-preview-open`，由 `CanvasFlow.tsx` 监听并渲染 `SandboxPreviewFrame`；`CanvasFlow.tsx` 新增 `previewApp` state 与 `graphExecutor`（`requestPermission` 在 `resolveSandboxGraphPermission(...)==='control'` 时直接落盘，显式收紧后走 `confirmAsk` 确认框）。
+* **导入包信任分级 + 宿主工具白名单**（`src/lib/sandbox/host-tools.ts`、`apps.ts`、`import/route.ts`）：`SandboxApp.origin?: 'built' | 'imported'`。`evaluateHostToolAccess()`（纯函数）：**NEVER 名单 9 个工具两种来源都禁**（`team_run` / `finish_task` / `todo_write` / `ask_user_questions` / `search_capabilities` / `update_provider_config` / `manage_mcp_server` / `manage_quick_launch` / `set_app_icon`）；`built` 其余全放行；**`imported` 只放行 `read_file` / `list_directory` / `search_files`，且路径归一后必须落在 `bob-sandbox/apps/<appId>` 自身或其后代内**。`SELF_ONLY_APPID_TOOLS = ['sandbox_rollback','sandbox_export']` 只能指向自己；并发闸 `MAX_CONCURRENT_PER_APP = 4`；所有拒绝都是 `success:false` + `BLOCKED: ` 前缀（不抛错）。manifest 缺 `origin` 一律按 `'built'`，只有 import 路由写死 `'imported'`。
+* **删除级联 + 回收站**（新增 `src/lib/sandbox/app-lifecycle.ts`）：删除不再是 `rm -rf`，而是移入 `bob-sandbox/.trash/<appId>__<ts36>/` 并写 sidecar `trash-meta.json`；`deleteAppCascade()` = 入回收站 + 清该 app 的授权表项 + **解绑所有项目（含归档/回收站）`notes-memory/*.md` 里的 `sandbox_app_id:` 行（节点本体保留）**；`restoreApp()` 同名已存在则拒绝（不覆盖），`purgeTrashItem()` 彻底删；`listGhostAppDirs()` 巡出幽灵目录（只提示、**不自动删**）。
+* **小程序文件配额与 `schemaVersion`**（`apps.ts`）：`APP_FILE_MAX_BYTES = 10MB`、`APP_TOTAL_QUOTA_BYTES = 50MB`、`APP_SCHEMA_VERSION = 1`；`checkAppQuota()` **覆盖写按 delta 计算**（不是简单累加）。此前只有 BobStorage 的 `data/` 有配额，入口 HTML / 资产可写满磁盘。
+* **远程访问会话抽成共享模块**（新增 `src/lib/http/remote-session.ts`）：`REMOTE_COOKIE = 'bw_remote'`，Cookie 值 = `HMAC-SHA256(key=token, 'bw-remote-session-v1')`（httpOnly，token 本体不进浏览器 JS 可读范围），另有 `Authorization: Bearer <token>` 供 Expo 壳 / curl / strict 模式。原先这三段内联在 `src/server.ts`，因路由侧现在也要复验身份，抽成 `server.ts` 与 `loopback-guard.ts` 共用的同一份实现（避免参数漂移）—— **纯重构，行为不变**。
+* **悬浮球就地展开独立 Butler 面板窗**（`electron/butler-orb.ts` / 新增 `src/app/butler-panel/page.tsx` / `electron/preload.ts`）：点桌面球不再把主窗从后台拽回来开收件箱，而是**就地长出一块 420×640 的独立面板窗**（新路由 `/butler-panel`，复用移动端完整 Butler 页），`BobWork` 保持最小化。
+  * 新 IPC：`butler-orb:panel-minimize`（缩小 → 球回到**面板当前所在位置**）/ `butler-orb:panel-close`（关闭 → 球与面板一起从桌面消失，`dismissed` 期间不再出球，直到主窗回到前台）；`preload.ts` 的 `ButlerOrbApi` 由 4 键增到 6 键。⌘W / 系统关面板按「缩小」处理。
+  * 面板窗只 `hide` 不 `destroy`（移动端页的会议控制台常驻挂载，卸载即停录）；面板刻意不预热（`prewarmButlerOrb()` 只预热球窗）。
+  * **位置语义（以代码为准）**：球与面板**都不做贴边吸附、都不落盘**；球只在模块级 `freePoint`（内存态，按落点所在屏 `getDisplayNearestPoint` 钳制以支持跨屏），面板只在 `lastPanelBounds`（内存态），`collapseDesktop()`（`show`/`focus`/`restore`/`maximize` 触发）一并作废。`hideOrbWindow()` 不再清 `freePoint`（否则「缩小回原位」无从谈起）。
+* **面板几何抽进纯函数**（`src/lib/butler/orb-geometry.ts`）：新增 `PANEL_DEFAULT_SIZE = {420, 640}`、`PANEL_MIN_SIZE = {320, 380}`、`panelBoundsForOrb()`（**面板底边 = 球底边**，按 workArea 压到最小尺寸后取整）、`orbPointFromPanel()`；`orbPointFromPanel(panelBoundsForOrb(p)) === p` 严格成立。
+* **音频片段改名**（`src/lib/audio/library.ts` 的 `renameClip()`、`api/audio/clip/route.ts` 新 action `rename_clip`、`AudioViewer.tsx` 内联输入框）：磁盘文件名 + `.clips.json` + 打点 sidecar **三处同步**；扩展名沿用原片段；四道闸（必须在源目录 / 必须在清单里 / 名字非空 / 目标名不得已存在，不覆盖）。
+* **Butler 抽屉栏宽可拖拽**（`ButlerDrawer.tsx`）：好友栏与对话栏右缘各加一条隐形热区（`cursor:ew-resize`），`CONTACTS_MIN_W = 140` / `CONTACTS_MAX_W = 320` / `CHAT_MIN_W = 300`，过 `DRAG_THRESHOLD` 才冻结基准、真拖过才落盘；新增落盘键 `butler.drawer.contactsW.v1`。拖好友栏只加在好友栏、对话栏宽度不变（基准取「实测宽 − rightWidth」，右栏是增量）。
+
+### 修复与优化
+
+* **P0 · `DELETE /api/sandbox` 的 id 直传 = 一条请求删掉 `~/BobWork`**（`apps.ts` 新增 `sanitizeAppId`，`route.ts` 三处接入）：基线把 `body.id` 直接交给 `join(appsRoot, id)` + `rm(recursive, force)`，`id:"../../"` 即用户全部数据。现在只放行 `^[A-Za-z0-9_-]+$` 且长度 ≤ 64，非法返 400；白名单铺到 `removeApp` / `readAppEntry` / `readAppFile` / `updateAppEntry` / `touchAppUpdatedAt` / `hasAppImplementation` / `writeAppFile`。
+* **P0 · `manifest.entry` 是不可信字段 → 任意文件读 + 任意文本覆写**（`apps.ts` 新增 `safeChildPath`）：用 `resolve` 做包含性判定（必须等于 base 或在 `base + sep` 之下），拒空值 / `\0`；无论绝对路径、`..` 还是 Windows 分隔符都出不去。`readAppEntry` / `hasAppImplementation` / `updateAppEntry` / `readAppFile` / `writeAppFile` 全改走它。导入侧追加：entry 必须指向目录内**真实存在**的文件，否则回滚 + 400。
+* **P0 · 删除后已打开的预览页仍能执行（还复活幽灵目录）**（`bridge.ts` 在 **schema 解析之前**加 `appExists`，`chat-bridge.ts` 第 0 步同步）：读不到 manifest 即抛 `mini-program not found or deleted`，`saveAppData` 不再把已删目录重建出来。
+* **`_appId` 一整类隐藏故障被通用化修掉**（`bridge.ts`）：v0.7.691 只给 4 个 appData schema 补了 `_appId`，而客户端对**每个**请求都注入它，`.strict()` 下 `listNodes` / `getTheme` 这类「零字段」schema 仍不可用。现在在解析前显式剥离（`const { _appId, _appToken, ...payloadForSchema } = data` → `safeParse(payloadForSchema)` → 回填 `_appId: requestAppId` 让 handler 仍可按老写法读）。**这一步同时关掉了 v0.7.691 发布说明里「已知待确认」的整类问题**（当时列了 `readNode` / `writeWanted` / `searchSkills` / `listNodes` 等十余个未声明 `_appId` 的 `.strict()` schema）。
+* **画布音频的打点不再落进 workspace**（`audio/library.ts` / `audio/marks.ts` / `clip/route.ts`）：v0.7.691 会在 `materials/` 里的音频旁就地生成 `materials/录音.marks.json`，等于应用产物污染资料树。现在 `sidecarPath()` 退化为纯命名函数、读写改为接绝对路径的 `readMarksFile` / `writeMarksFile`，并新增 `marksFileFor()`：**库内音频就地、库外音频进 `.audio-library/<源名>-<路径指纹>/` 影子目录**。
+* **小程序路径判据 `.sandbox/` → `bob-sandbox/`（旧判据从不命中）**（`ChatNodeKernel.tsx` 三处）：真实目录是 `bob-sandbox/apps/`，所以「小程序文件改动后商城自动刷新」与文件卡的 `isSandboxApp` 此前**从来没生效过**。
+* **AI Coding（绑定小程序）任务加硬预算**（`api/chat/route.ts`）：`CODING_TASK_MAX_ROUNDS = 25`、`CODING_TASK_MAX_MS = 10 分钟`；超限时注入一条收尾指令（要求用【未完成项】如实列出，不得声称完成未经预览验证的改动）、发 `task_budget_exceeded` 帧、置 `forceFinalRound`，**只触发一次**。动机：小程序迭代是「改码 → 预览截图 → 再改」的交替调用，单工具收敛/停滞保护难触发，叠加「失败被误判成功」可无限烧 token。
+* **工具「失败」判定补上 MCP 原文前缀**（`api/chat/tools/index.ts` 抽出 `TOOL_ERROR_PREFIXES`，14 项，新增 `'Error from server'` 与 `'BLOCKED:'`）：MCP 服务端错误原文 `Error from server: …` 此前被判 `success=true`，依赖 `t.success` 的停滞保护永不触发。
+* **截图结果：视觉描述前置 + base64 脱敏**（同上，新增 `redactImagePayload()`）：`capture_preview` 返回的完整 PNG base64（100KB+）会让 `maxOutput` 只保留前 N 字符，**描述追加在 base64 之后永远被截掉**，「每轮必做视觉自检」退化成模型凭空声称已自检。现在 `[截图视觉解读]` / `[视觉描述]` **挪到返回值最前面**，base64 替换为 `(omitted — saved to disk)`。
+* **`sandbox_export` 相对资源内联判据修掉字符类陷阱**（`api/chat/tools/admin.ts`，新增 `isRelativeAssetPath()`）：原 `[^"'http]` 会把 `theme.css` / `print.css` / `tailwind.css` 这类**以 h/t/p 开头**的相对文件名一并跳过 → 导出页缺样式。现先宽松捕获 `href`/`src` 再判定（非 `//`、非 `/` 开头、非 `scheme:` 才内联）。
+* **`sandbox_rollback` 的历史版本匹配与写回**（`admin.ts`）：`endsWith(basename)` → `parseHistoryName()`（同目录 `my-app.js` 的备份不再被算成 `app.js` 的版本）；写回改用 `writeAppFileAtomic()`（回滚前内容也进 `.history`、同步 `updatedAt`，失败时明确报错）。
+* **审计日志从「单文件覆盖式裁剪」改为「按天 + 保留期」**（`bridge.ts`）：改到 `<APP_ROOT>/.logs/sandbox/audit-YYYY-MM-DD.jsonl`（原来在 `bob-sandbox/audit.log`，与小程序自己的目录混在一起、可被 `run_command` 顺手删掉，且 5MB 覆盖式裁剪会丢前半段历史），目录 `mode 0700`、文件 `0600`，按 `AUDIT_KEEP_DAYS = 30` 删过期文件。危险命令拦截表也补上抹日志的模式（`rm|mv|truncate|shred … .logs`、`> … .logs/`）。
+* **`chat` 的超时预算不再落回 10s / 30s**（`bridge.ts` 新增 `CHAT_TIMEOUT = 120000`）：一次正常生成本就 20–60s，此前会被误判失败。
+* **原子写的临时文件撞名与残留**（`apps.ts`）：原来 tmp 落在 app 根、只用 pid，并发写 `css/style.css` 与 `js/style.css` 会撞名互相覆盖，写失败还残留 tmp（被静态路由当资源返回、并被打进导出包）。现在 tmp 放**目标同目录** + `randomUUID().slice(0,8)`，`try/finally` 无条件清理。
+* **导入 ZIP 的边界与半成品回滚**（`import/route.ts`）：`MAX_ZIP_BYTES = 50MB`、`MAX_ENTRIES = 5000`、`MAX_UNCOMPRESSED_BYTES = 200MB`；条目落盘改走 `safeChildPath`（原来只查 `includes('..')`）；解包失败即删目录并回 400（原来只返 500，留下不可见、白占磁盘的半成品）。
+* **来源闸补齐到两个预览路由**：基线这两处**没有** `guardRequestSource`（注释写「此前这一处漏了」）。
+* **导出包排除 `.history`**；**小程序列表 DTO 瘦身**（模板只回 `{id,label,description,entry}` —— 完整模板含源码与 `promptSeed`，实测每次列表 51KB）。
+* **`chat-stream` 权限闸错误文案改为可执行指引**（`chat-bridge.ts`）：明说「无应用内开关，改 `settings.json` 的 `sandboxChatPermissions` 后重启」。
+* **预览页 AI 徽标整段撤除**（`preview/[id]/route.ts` −155 行）：删掉 `buildAiBadgeInjection()` 与 `injectIntoBodyStart()`；`SandboxApp.aiBadge` 标 `@deprecated`。
+* **预览页缺 `<title>`**：无自带 title 时注入 `<title>${app.name} · BobWork</title>`（做 HTML 转义），Hippo 标签栏可辨。
+* **标星表死图标回收**（`sandbox-starred.ts` 新增 `pruneStarredApps()`）：删除/改名后按当前清单过滤，有变化才写盘并派事件。
+* **权限 chip 的起点与持久化语义**（`SandboxPanel.tsx`）：基线点击从 `?? 'none'` 起算、显示却按 `?? (fullTrust ? 'control' : 'none')` —— 会把显示为 Control 的项一键降成 Read、且 None 永不可见；现起点与显示一致，并改**显式写入**（含 `'none'`），不再 `delete permissions[appId]`。
+* **Esc 分层**（`SandboxPanel.tsx`）：原来子弹窗里按 Esc 会直接关掉整个商城、填了一半的表单全丢；现在按 `starDialog → confirmDelete → trashOpen → apiDocsOpen → createOpen → onClose` 只关最上层。
+
+### 改进
+
+* **iframe 模式下的 `targetOrigin` 与消息来源判定**（`bridge.ts`）：新增 `IN_IFRAME` 与 `HOST_TARGET_ORIGIN = IN_IFRAME ? '*' : resolveTargetOrigin()` —— sandbox iframe 读不到 `parent.location.origin`，对父窗口只能用 `'*'`，安全性由「宿主校验 `event.source === iframe.contentWindow`」+「入口页 CSP 不允许第三方嵌入」两侧共同保证。接收侧新增 `isFromParent(event)`，桥响应与 `chatStream` 两个监听都先过这层。
+* **opaque origin 下的存储退路**（`bridge.ts` 新增 `LS` 门面 + `memoryStore`）：sandbox iframe 里访问 `localStorage` 会抛 `SecurityError`，`LS.*` 捕获后退化为**内存存储**；`BobStorage.*` 与软刷新快照全部改走 `LS`。
+* **审计可定位「谁写了什么 / 跑了什么」**（`bridge.ts` 新增导出 `summarizeHostToolCall()`）：产出如 `read_file path=homework/a.md`、`run_command cmd=ls -la`、`write_file path=… (12B content)` —— 路径截 160 字符、命令截 120 字符，`content`/`script` **只记字节数、绝不记正文**；`AuditEntry` 新增 `detail` / `claimedAppId` / `spoofSuspected`。
+* **预览路由的 CSP 与 iframe 准入**：`frame-ancestors 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*`，并**移除 `X-Frame-Options: SAMEORIGIN`**（它会把跨 origin 的宿主内嵌一并拦掉，`frame-ancestors` 已能做同样的事且能精确到回环白名单）。
+* **波形打点从「零宽 region 小旗标」改为波形上方圆点**（`AudioMarkTrack.tsx`）：圆点由 `marks` + `duration` 直接派生（悬浮显示标签或 `mm:ss`、点击跳转）；选区补两个出口（零宽 region 自动移除、点空白退出、旁加 ✕ 清除），并用 `suppressClickUntilRef`（+300ms）抑制拖拽收尾的 click。
+* **`sandbox_rollback` / `sandbox_export` 对 coding agent 开放**（`tools/registry.ts`）：`['admin']` → `['admin','coding']` —— 唯一会写坏小程序的 agent 必须能回滚/导出。
+* **小程序运行时提示词大面积改写**（`lib/runtime/context.ts` 6 处）：`aiBadge` 标为已废弃（宿主不再注入任何 AI 状态徽章）；`BobStorage` 补第 3 层 `writeWanted` 与「`set` 超 500KB 或序列化失败**静默返回 false**，写入前应判返回值」；`graph*` 改为**运行位置决定能力**；`hostTool` 把 `rollback_sandbox_file` 换成 `sandbox_rollback { appId, file, action }`，并把护栏细化为「只保护 `butler/` 下 `preferences.md`、`roles.json`、`notify-state.json` 等**根文件**，不是全局安全边界」；模型调用段改「`chatStream` 一律优先（`chat` 非流式、客户端 120s 超时）」；CSS 变量 44 → **61 个**。
+* **小程序查看入口说明改到 ⌘F 面板**（`api/chat/route.ts`）：入口已不在左侧边栏。
+* **画布 Coding 节点 ▶ 改为站内沙箱预览**（`ChatNodeKernel.tsx`）：**Alt 或 Shift+点击**才走 Hippo 全窗口。
+
+### 界面细节
+
+* **商城可用性**（`SandboxPanel.tsx`）：新增搜索框（匹配 `name + description + id`，不区分大小写）与排序下拉（`Recently updated` / `Recently opened` / `Name`，名称用 `localeCompare('zh-Hans-CN')`）；「最近打开」持久化在 `localStorage['bobwork.recent-sandbox-apps']`，卡片显示 `· Opened <时间>`；无匹配时给出 `No mini programs match "<query>"` + `Clear search`（与「一个小程序都没有」的空态区分）。
+* **回收站弹窗 + 内联操作提示**：标题栏 `Trash (n)`（仅有内容时出现）打开 `Recycle Bin`，逐条 `Restore` / `Delete forever`，并提示「另有 n 个无 manifest 的孤儿目录…需要时手动删除」（**不自动删**）；操作结果用顶部可关闭的内联提示呈现（基线是静默 `catch {}`）。
+* **`Imported` 徽章与 AI 权限 chip 降为只读**：`origin === 'imported'` 加徽章（tooltip 说明「三方代码：宿主工具只读且限自己目录」）；模型调用 chip 从按钮变 `<span>`，只有 `AI: on` / `AI: off`，tooltip 指明改 `settings.json`。
+* **预览入口一分为二**：新增 `Preview`（品牌色 `Play`，站内 sandboxed iframe），`Hippo` 降为 `outline` + `Globe`（全窗口、走 HTTP 中继）。
+* **顶部去掉「完全信任」开关**：`fullTrust` 变只读，API 文档区文案改为 `Full trust is ON/OFF (global, set via settings.json → sandboxFullTrust; no in-app switch)`。
+* **预览浮层带标题栏与自证来源**（新增 `SandboxPreviewFrame.tsx`）：`h-[86vh] w-[1100px]` 模态卡片，标题栏显示 app 名 + `sandboxed preview` 徽章 + `<appId> · <预览 origin>`，右侧 `Reload` / `Hippo` / 关闭（Esc 可关）；未拿到 origin 前先渲染 `Loading…`（避免 iframe 用宿主 origin 起跳）。
+* **面板窗标题条**（`butler-panel/page.tsx`）：30px 高、整条可拖（`-webkit-app-region: drag`），两个 26×22 按钮（`Minus` 缩小 / `X` 关闭，关闭键 hover 用 `--danger` 底色），均带中文 `title`/`aria-label`。
+* **纯滑块滚动条 `.thumb-scroll`**（`globals.css`）：`scrollbar-width: thin` + `color-mix(...)` 半透明滑块、轨道/按钮全透明；当前应用点是 Butler 对话消息区。
+* **日历面板改为悬浮圆角卡片**（`CalendarPanel.tsx`）：`top-0 h-full` → `top-2 bottom-2` + `rounded-2xl` + 四边描边，`maxWidth` 收到 `calc(100vw - 16px)`。
+
+### 新增单测
+
+* 新增 **7 个测试文件 / 60 例**：`src/lib/sandbox/source-guard.test.ts`（16 例，来源闸 + 信任分级 + 同源隔离 + 脱敏）、`iframe-bridge-host.test.ts`（12 例，含**源码级守卫**：`sandbox` 属性含 `allow-scripts`、**不含** `allow-same-origin`/`allow-top-navigation`）、`security-hardening.test.ts`（7 例，DNS-rebind + 远程会话助手 + 设置脱敏）、`app-token.test.ts`（7 例，含「imported 冒充 built 时 `run_command` 仍 BLOCKED、`saveAppData` 写进真实调用者目录」）、`data-hygiene.test.ts`（6 例，配额 delta / 历史文件名 / 审计不记正文）、`prompt-consistency.test.ts`（6 例，提示词与实现一致性）、`app-lifecycle.test.ts`（6 例，`sanitizeAppId` / `safeChildPath` / 级联删除与恢复全链路）。
+* 已有测试文件增补：`audio/library.test.ts`（+7 例：`marksFileFor`、`renameClip`）、`butler/orb-geometry.test.ts`（+8 例：面板展开/缩小往返与副屏偏移）、`sandbox/full-trust.test.ts`（用例数不变，补齐存在性闸所需的前置目录）。
+* 全仓 `pnpm test` **112 文件 / 1235 例全绿**（较 v0.7.691 的 1160 例 **+75 例**）；`tsc -p tsconfig.json` 通过。
+
+### 已知待确认（不在本版修复范围）
+
+* **`sandboxBridgeSecret` 未被脱敏**（`settings-server.ts`）：`SECRET_FIELD_RE = /^(apikey|password|token|accesstoken|apisecret|clientsecret|secret)$/i` 是**整名匹配**，实测 `sandboxBridgeSecret` **不命中**，因此 `GET /api/settings` 仍会**明文返回这个 appId 令牌签名密钥** —— 而设置文件本身是加密落盘的，等于绕过了磁盘密文那层。预览 origin 已被 denylist 挡住 `/api/settings`，风险面限于本机其他进程 / 回环客户端。
+* **已配置密钥无法再通过 API/UI 清空**（`preserveStoredSecrets()`）：提交空串会保留旧值，只能手改 `settings.json`。
+* **`rotateSandboxBridgeSecret()` 全仓无调用点、无 UI**：用户无法主动使已签发令牌失效。另外 `settings.json` 的两个新字段（`sandboxBridgeSecret` / `calendarDavWritableOnPreviewHost`）**都没有设置面板入口**。
+* **打点 sidecar 无迁移**：v0.7.690/691 期间写在项目里的 `*.marks.json`（旧位置）升级后**读不回来**，也没有清理逻辑。
+* **`butler-orb:open-inbox` 已无发送方**（v0.7.691 由被删的 `activateFromOrb()` 发），但 `ButlerHost.tsx` 的监听仍在。
+* **`NEVER_BRIDGE_TOOLS` 头注释漏列一项**：注释写成 4+4=8 个，数组实际 9 个（多 `search_capabilities`），行为以数组为准。
+* **配额口径**：`writeAppFile` 的 `dirSizeBytes()` 递归整个小程序目录，**包含 `data/` 与 `.history`** —— 文件写入配额与存储/历史快照共用同一份 50MB 预算。
+* **非回环主机没有同源隔离**（`previewOriginFor` 对 Tailscale / 隧道域名原样返回），只由来源闸 + 令牌兜底（测试已锁该行为）。
+* **`task_budget_exceeded` 帧在 `src/` 内无消费方**（与既有 `tool_convergence` 同款）。
+* v0.7.691「已知待确认」里的 **graph 权限读取**（`getSandboxGraphPermissionServer()` 无调用点、仍走 `lib/graph/graph-bridge.ts`）本版**未闭环**。
+
+## v0.7.691 (2026-10-10)
+
+> 本版是 **v0.7.690 之后的增量**，两条主线：其一，**小程序（沙盒）权限放开** —— 新增「完全信任」开关并**默认开启**，小程序由此可直接调用宿主工具注册表里的**全部工具**（新增 `hostTool` / `listHostTools`，与画布 AI Agent 同权），模型调用 / 画布对接 / 写盘确认**都不再弹窗**（要收回权限必须显式关闭开关或逐项 Revoke）；其二，**Butler 悬浮球独立成真窗口** —— 主窗口最小化 / 关闭后球仍留在桌面（新增 `electron/butler-orb.ts` + `/butler-orb` 页），主窗口内那颗球的位置语义也从「视口绝对坐标」改为「相对中栏左下角的偏移」。顺带修掉三处隐蔽故障：BobStorage 磁盘层全量失败（历史 203 次 `loadAppData` / 36 次 `saveAppData`）、`chatRequestPermission` 服务端**根本没实现**、预览页 AI 徽标恒显「已授权」。共 23 个文件改动（15 改 + 8 新增）。
+
+### ⚠️ 权限姿态变化（请先读这条）
+
+* **小程序默认获得宿主工具的全量能力**（`src/lib/settings.ts` 新增 `sandboxFullTrust`，`DEFAULT_SANDBOX_FULL_TRUST = true`）：`undefined` 视作**开启**，即新装 / 未配置的用户**默认处于完全信任**。开启时小程序可 `BobWork.host(name, args)` 调用**任意**宿主工具 —— `read_file` / `write_file` / `list_directory` / `run_command` / `execute_script` / `butler_*` / `create_project` / `notes_*` / `mcp__*` 等，与画布里的 AI Agent **同一注册表、同一权限**；画布对接解析为 `'control'`（可读可写画布）、模型调用解析为 `'permanent'`。
+* **确认框被跳过**（`src/lib/sandbox/bridge.ts`）：桥脚本收到 `buildBridgeClientScript(id, { fullTrust: true })` 后 `manual = !FULL_TRUST && …` 恒为假，`MANUAL_CONFIRM_ACTIONS` 里的人工确认型动作（写盘、执行命令等）**不再弹确认**。代码注释明确保留的边界是「服务端仍有写盘护栏与审计」。
+* **只认显式拒绝**：`isSandboxFullTrust()` 的实现是 `settings.sandboxFullTrust !== false`；逐项授权表里的**显式表项优先**（含显式 `'none'` = 用户在面板点过 Revoke），无表项才回落到完全信任开关。因此**要收回权限必须显式关闭开关或逐项 Revoke**，「没配过」= 放开。
+* 配套：逐项拒绝不再靠删键 —— `updateSandboxChatPermission(appId,'none')` / `updateSandboxGraphPermission(appId,'none')` 由 `delete permissions[appId]` 改为写入**显式 `'none'`**（默认放开下「删键 = 回到默认 permanent/control」，面板 Revoke 会形同虚设）。
+* 若不希望默认放开，发布后应在 Bob Sandbox 面板把完全信任关掉（写入 `sandboxFullTrust: false`）。
+
+### 新增功能
+
+* **小程序「完全信任」开关（默认开）+ 权限解析纯函数**（`src/lib/settings.ts` / `src/lib/settings-server.ts`）：新增 `AppSettings.sandboxFullTrust?: boolean`、`DEFAULT_SANDBOX_FULL_TRUST = true`、`isSandboxFullTrust(settings) = settings.sandboxFullTrust !== false`（`undefined` = 开）。
+  * 新增 `resolveSandboxChatPermission()` / `resolveSandboxGraphPermission()`：**显式表项优先**（含显式 `'none'`），无表项才回落开关 → `'permanent'` / `'control'`；旧版 boolean 兼容（`true` → `'permanent'`，`false` → `'none'`）。`SandboxChatPermission = 'none' | 'per_call' | 'permanent'`。
+  * 服务端侧新增 `getSandboxChatPermissionServer()` / `getSandboxGraphPermissionServer()` / `isSandboxFullTrustServer()`（均走 `readSettingsFromFile()`）；客户端侧新增 `getSandboxFullTrust()` / `updateSandboxFullTrust()`。
+  * 设置入口在 `src/components/canvas/SandboxPanel.tsx`（`ShieldCheck` + `Full trust: ON/OFF`）；每张应用卡的有效级别改为 `permissions[id] ?? (fullTrust ? 'control' : 'none')` / `chatPermissions[id] ?? (fullTrust ? 'permanent' : 'none')`，并新增 `AI Full` 标签区分「无显式表项、由完全信任授予」与旧 `AI On`（显式 permanent）。
+
+* **小程序直通宿主工具：`hostTool` / `listHostTools`**（新增 `src/lib/sandbox/host-tools.ts`）：`runHostTool(name, args)` 调 `executeTool()`、`listHostTools()` 调 `listAllToolDefs()`（name / description / category / scenes），返回 `{ success, result, durationMs }`；未知工具名走注册表自身的失败返回，**不抛错**。桥客户端新增 `window.BobWork.host(name, args)` 与 `BobWork.listHostTools()`；`hostTool` 走独立的 `HOST_TOOL_TIMEOUT = 600000`（10 分钟，`run_command` / `execute_script` 可能跑很久），其余动作仍是页内 10s / 中继 30s / 人工确认型 `MANUAL_CONFIRM_TIMEOUT = 120000`。
+  * 该落地层**必须静态 import** 工具注册表（原因写在文件头注释）：最初在路由处理函数里 `await import('@/app/api/chat/tools')`，实测会让 dev server 整体挂死 —— hostTool 请求永不返回，随后同进程**所有**路由（含 `/api/sandbox`、`/api/tools`）一起超时；改为静态 import 后与 `/api/tools` 同款依赖图，编译一次、请求正常。
+
+* **Butler 悬浮球独立置顶窗**（新增 `electron/butler-orb.ts` / `src/app/butler-orb/page.tsx` / `src/components/butler/ButlerOrbVisual.tsx`）：
+  * 主窗口 `minimize` / `hide` / `closed`（macOS 关窗不退出）→ 显示球窗，落在**主窗所在屏幕 `workArea` 左下角**；`restore` / `show` / `focus` / `maximize` → 收球。`⌘H`（`app.isHidden()`）**不出球**（「全藏」不等于「最小化」）。
+  * 窗口：`frame:false` + `transparent:true` + `alwaysOnTop('floating')`、`showInactive()` 显示；`focusable:false` + `acceptFirstMouse:true`（不偷主窗输入焦点、首击仍可收）；`setVisibleOnAllWorkspaces(true, { visibleOnFullScreen:true, skipTransformProcessType:true })`（不带 `skipTransformProcessType` 会把进程转成 UIElement、**Dock 图标消失**）；刻意不用 `parent: mainWindow`（macOS 子窗会跟父窗一起最小化）。
+  * 拖拽在主进程做：`butler-orb:drag-start` 收到指针在窗内的抓取偏移后，每 `DRAG_INTERVAL_MS = 16`（≈60fps）用 `screen.getCursorScreenPoint()` + `setBounds()` 跟手，并按**光标所在屏** `workArea` 用 `clampOrbPointInRect()` 钳制（可跨屏、不会拖丢）。**独立球窗不做贴边吸附，也不落盘记忆位置** —— 拖动只记在模块级 `freePoint`（内存态），收球时（`hideOrb()`）即作废，下次最小化重新落回桌面左下角。
+  * `butler-orb:drag-end` 的 `moved=false` 视作点击 → `ensureMainWindow()` 恢复 / 重建并聚焦主窗，再发 `butler-orb:open-inbox`；主窗内容未加载完时按 `did-finish-load` + 600ms + 1600ms 补发三次。点击球经 `ButlerHost.tsx` 新增的 `window.api.butlerOrb.onOpenInbox` 派 `BUTLER_INBOX_EVENT`（`detail.toggle=false` = **幂等打开**收件箱，不 toggle 关闭）。
+  * `/butler-orb` 页的未读角标自己轮询（`REFRESH_MS = 30_000`），因为该路由刻意不挂宿主。球窗尺寸 `ORB_WINDOW_SIZE = ORB_SIZE(34) + ORB_WINDOW_PAD(10) × 2 = 54`。
+
+* **球的几何算术抽成零依赖纯模块**（新增 `src/lib/butler/orb-geometry.ts`）：`ORB_SIZE = 34`、`ORB_EDGE_GAP = 16`、`ORB_MIN_MARGIN = 8`、`ORB_WINDOW_PAD = 10`、`ORB_WINDOW_SIZE = 54`；导出 `clamp` / `clampOrbPoint` / `clampOrbPointInRect` / `orbPointFromOffset` / `orbOffsetFromPoint` / `orbPointAtRectBottomLeft` / `orbWindowBounds` / `canHostOrb(rect)`（`width/height > ORB_SIZE * 3` 才算可用锚点）。渲染层、主进程球窗、单测三处共用一份，避免各写一遍漂移。
+
+* **应用级宿主收拢到 `AppHosts`**（新增 `src/components/AppHosts.tsx`，`src/app/layout.tsx` 改为挂它）：根 layout 原直接挂 `ScreenOcrHost` / `BobbyAuthHost` / `ButlerHost`，而根 layout 是所有窗口共用的 —— 独立球窗也会继承，于是 54px 球窗里会重复跑通知轮询（主窗最小化期间重复弹桌面通知）、在球上渲染截图编辑蒙版。现收进 `AppHosts`，`BARE_ROUTES = ['/butler-orb']` 直接 `return null`。
+
+### 修复与优化
+
+* **BobStorage 磁盘层全量失败（历史 203 次 `loadAppData` / 36 次 `saveAppData`）**（`src/lib/sandbox/bridge.ts`）：客户端桥对**每个**请求都自动注入 `data._appId = APP_ID`，而 `ActionSchemas` 里 `saveAppData` / `loadAppData` / `listAppDataKeys` / `deleteAppData` 都是 `.strict()` 且未声明 `_appId` → 每次被判 `Unrecognized key`。四个 schema 现补 `_appId: z.string().max(64).optional()`。
+* **`chatRequestPermission` 从「Unknown action」补成真实现**（`src/lib/sandbox/bridge.ts`）：基线里它只出现在 `BRIDGE_ACTIONS` 元数据、zod schema 与 `MANUAL_CONFIRM_ACTIONS`，`switch` 里**没有 case**；现返回 `{ granted: level !== 'none', level }`，完全信任下 `granted:true / level:'permanent'`，不弹任何确认框。
+* **预览页 AI 徽标恒显「已授权」**（`src/app/api/sandbox/preview/[id]/route.ts`）：旧代码对**字符串**取布尔（`!!g`，`'none'` 也是真值）→ `data-granted` 永远 `"true"`（绿点 + tooltip "granted"），点徽标只提示 "AI on · toggle off in left panel"，无法用来申请授权。现改为 `g !== 'none'`。
+* **服务端权限读取退化为空配置（「每次都要问一次」的根因之一）**（`src/lib/settings-server.ts` / `src/lib/sandbox/chat-bridge.ts` / `bridge.ts` / 两个 preview 路由）：`lib/settings.ts` 的 `loadSettings()` 在 Node 端没有 window / Electron IPC，会退化为 `defaultSettings()`，于是桥里 `chatGetPermission`、预览页徽标永远读到「未授权」。现新增 `getSandboxChatPermissionServer()` 走 `readSettingsFromFile()`，`handleBridgeRequest` 的 `chatGetPermission` / `chatRequestPermission`、两个 preview 路由、`executeSandboxChat` 的权限闸全部改走服务端读取。
+* **模型调用权限闸改为「显式拒绝才拦」**（`src/lib/sandbox/chat-bridge.ts`）：`permGranted`（要求显式 `true` / `permanent` / `per_call`）改为 `resolveSandboxChatPermission(settings, appId) === 'none'`；错误文案从「请先调用 chatRequestPermission」改为「该小程序被显式撤销（explicit deny），请在 Bob Sandbox 面板重新开启或设 `sandboxFullTrust=true`」。
+* **主窗口内悬浮球的两处行为缺陷**（`src/components/butler/ButlerOrb.tsx`）：① 拖拽 / 点击判定旧代码用「新旧位置之差 > 0」（依赖异步 state，判定不可靠），改用按下点位移 `Math.hypot(...) > DRAG_THRESHOLD(4)`，并补 `pointercancel` 收尾；② 位置键语义作废 —— `butler.orb.pos.v2`（视口绝对坐标）→ `butler.orb.offset.v1`（相对中栏左下角的偏移），并加 `Number.isFinite` 校验（旧值当偏移用会把球直接甩到视口外）。
+
+### 改进
+
+* **球的位置改为「锚点 + 偏移」，锚点一动球跟着动**（`src/components/butler/ButlerOrb.tsx`）：旧实现存视口绝对坐标，左侧栏 / 导航折叠、右栏显隐、窗口缩放时球杵在原地。现在 `measureAnchor()` 测 `[data-host-canvas]` 的 `{ left, bottom }`（`canHostOrb` 不满足则退回视口左下角），落盘的是偏移，刷新后能还原。三层锚点跟踪：`ResizeObserver` 观察中栏**及其父元素**（并覆盖「切项目整块重挂」，观察对象变了换绑）+ `ANCHOR_RECONCILE_MS = 500` 兜底重测 + `resize`；中栏未挂载时 rAF 等，上限 `HOST_WAIT_FRAMES = 120` 帧（≈2s）。亚像素抖动（< 0.5px）不触发重渲染。未测到锚点前不渲染（避免先落在视口角上跳一次）；渲染点 = 家 + 偏移后再 `clampOrbPoint` 钳回视口。主进程在 `maximize / unmaximize / enter-full-screen / leave-full-screen / restore` 派 `butler-orb:window-state`，渲染层收到即**清零偏移并落盘**（弹回中栏左下角）；`SKIP_ROUTES = ['/browser-chat', '/butler', '/butler-orb']` 上不显示。
+* **主窗口生命周期收口，三处唤起共用一条路径**（`electron/main.ts`）：新增 `createMainWindow()`（= `createWindow()` + `bindButlerOrbMainWindow(win)`）与 `openMainWindow()`（存在则 `restore + show + focus`，不存在则重建 + `loadURL` + `ready-to-show` 后 show）。`second-instance`、`activate`、点击桌面球三处统一走 `openMainWindow()`；`app.isReady()` 未就绪时等 `whenReady` 再走一遍。每次重建主窗都重新绑球窗监听（否则重建后最小化不再出球）。
+* **球窗预热与退出销毁**（`electron/main.ts` / `electron/butler-orb.ts`）：服务就绪后 `prewarmButlerOrb()` 提前建窗加载 `/butler-orb` 并保持隐藏（消除首次最小化「先空窗再出球」的迟滞）；`before-quit` 调 `disposeButlerOrb()`，否则退出时主窗 `closed` 又会把球窗显示出来。`setupButlerOrb({ enabled: process.platform === 'darwin' })`，非 macOS 整个模块退化为空操作。
+* **两个 preview 路由把信任级别透传给桥脚本**（`src/app/api/sandbox/preview/[id]/route.ts` + `[id]/[...path]/route.ts`）：改为 `buildBridgeClientScript(id, { fullTrust: await isSandboxFullTrustServer().catch(() => true) })` —— 读取设置失败时 `catch(() => true)` 按**信任**兜底，避免一次读配置异常把小程序打回「处处要授权」。`buildBridgeClientScript(appId, opts?)` 签名扩参，缺省 `fullTrust = opts?.fullTrust !== false`（不传即开）。
+* **切换完全信任后广播权限变更**（`src/components/canvas/SandboxPanel.tsx`）：派 `sandbox-chat-permission-changed`（`appId:'__global__'`、`level: permanent|none`），写盘失败则回滚开关状态。
+* **小程序提示词随权限模型改写**（`src/lib/runtime/context.ts`）：「画布对接 API」标题去掉「需要对接画布时主动申请授权」；原「使用前调用 `graphRequestPermission` 申请授权、未授权会 reject」改为「**完全信任模式下默认已授权**（`graphGetPermission` 返回 `level:'control'`，不再弹确认框），可直接调用」；并新增「宿主全能力直通（hostTool）」整段（发现能力 / 调用写法 / 常用工具名 / 硬护栏：`butler/` 真源不可覆盖、破坏性命令先说明、每次调用落 `bob-sandbox/audit.log`）。
+
+### 界面细节
+
+* **设置弹窗底部条只在有保存反馈时出现**（`src/components/canvas/SettingsModal.tsx`，**与沙盒设置无关**）：底部 `border-t` 条整体包进 `{(saveError || saveStatus === 'saved' || saveStatus === 'saving') && …}`，正常浏览时不再占一条横向栏位；同时删掉条内的 `Close` 按钮（标题栏已有 X）、`mr-auto` / `justify-end` 一并去掉。右侧面板容器加 `hide-scrollbar`(容器仍可滚动、不显示滚动条)。
+* **Sandbox 面板的完全信任入口与文案**（`src/components/canvas/SandboxPanel.tsx`）：标题栏加 `ShieldCheck` + `Full trust: ON/OFF`（tooltip 说明开关语义）；`BRIDGE_ACTIONS` 补 `hostTool` / `listHostTools`，`chatRequestPermission` 描述改为「不再弹窗（显式撤销才拒）」、returns 补 `level`；帮助文本追加 `BobWork.host(name, args)` 与 `listHostTools` / `read_file` / `write_file` / `list_directory` / `run_command` / `create_project` 示例；给已 Revoke 的小程序追加「全局完全信任已开，下面选择只对该应用生效」。
+* **独立球窗的皮肤加厚与透明底**（`src/components/butler/ButlerOrbVisual.tsx` / `src/app/butler-orb/page.tsx`）：透明 BrowserWindow 的 `backdrop-filter` 拿不到窗口背后的桌面像素 → 独立态 `.butler-orb.standalone .ball` 去掉无效的 `backdrop-filter`、加重中心晕与边缘暗化补回体积；投影换成小半径（窗外框只有 `ORB_WINDOW_PAD = 10px` 内边距，主窗那套 `0 9px 24px` 会被窗口边缘切出直边）；该内边距同时要容下未读角标（溢出球体 2px）与 hover `scale(1.05)`。页面用 `<style>` + 内联样式双保险抹掉 `globals.css` 给 `body` 上的底色（否则透明窗糊一层灰底），并加 `user-select:none`。
+* **球体外观抽成一份，两个宿主共用**（`src/components/butler/ButlerOrbVisual.tsx`）：`OrbGlassStyle()`（玻璃皮肤 / `has-unread` 暖琥珀变量 / 河马脸 `inset:13.25%`）与 `OrbFace({ unread, tiltDeg, dragging })`；`ButlerOrb.tsx` 里原来内联的整段 `<style>` 与角标 JSX 全部搬走 —— 交互两边各自实现，外观只留一份。
+* **IPC / 类型面**（`electron/preload.ts` / `src/types/global.d.ts`）：`ButlerOrbWindowState = 'maximize' | 'unmaximize' | 'enter-full-screen' | 'leave-full-screen' | 'restore'`，`ButlerOrbApi { onWindowState, onOpenInbox, dragStart, dragEnd }`，通道名 `butler-orb:window-state` / `butler-orb:open-inbox` / `butler-orb:drag-start` / `butler-orb:drag-end`。
+
+### 新增单测
+
+* 新增 `src/lib/butler/orb-geometry.test.ts`（6 个 describe / **13 例**）：`clamp` 的区间与 NaN / ±Infinity 边界、「视口比球还窄时 min > max 取 min」、偏移 ↔ 落点互逆（拖拽落盘再读回不漂移）、侧栏折叠时同一偏移跟着锚点平移、`clampOrbPoint` 四向贴边保留 `ORB_MIN_MARGIN`、主窗内容区与屏幕 `workArea`（含 Dock / 菜单栏 / 副屏正偏移）左下角落点、独立态在 `workArea` 内钳制、`orbWindowBounds` 取整与内边距、`canHostOrb` 的 3 倍尺寸门槛。
+* 新增 `src/lib/sandbox/full-trust.test.ts`（3 个 describe / **10 例**）：默认完全信任（`undefined` = 放开）与显式 `false` 回落、无表项 = `permanent` / `control`、显式 `'none'` 压过开关且不波及其他 appId、显式 `per_call` / `read` 照常生效；桥脚本含 `var FULL_TRUST = true;` / `!FULL_TRUST && MANUAL_CONFIRM_ACTIONS` / `HOST_TOOL_TIMEOUT` 且暴露 `host: function(name, args)`、`request('hostTool'`、`request('listHostTools'`；服务端侧用 `BOBWORK_HOME` 指向 `mkdtempSync` 临时根隔离，断言 `chatRequestPermission` 返回 `granted:true / level:'permanent'`，appData 四动作接受自动注入的 `_appId`。
+* 全仓 `pnpm test` **105 文件 / 1160 例全绿**；`tsc -p tsconfig.json` 通过。
+
+### 已知待确认（不在本版修复范围）
+
+* `src/lib/sandbox/bridge.ts` 里仍有若干 `.strict()` schema 未声明自动注入的 `_appId`（`readNode` / `writeWanted` / `searchSkills`，以及 `listNodes` / `getProjectInfo` / `getTheme` / `listActions` / `readWanted*` / `getNodeAncestorChain` / `getNodeManifest` / `listConfiguredModels` / `listProjects` / `getAppConfig` / `listCalendarEvents`）。客户端对**每个**请求都注入 `_appId`，这些动作可能仍被判 `Unrecognized key`（本版只修了 4 个 appData schema），待实测确认。
+* `getSandboxGraphPermissionServer()` 目前**无调用点**（graph 权限仍走 `src/lib/graph/graph-bridge.ts` → `lib/settings.getSandboxGraphPermission()`，其在 Node 端是否同样退化未验证）；因默认 `fullTrust=true` 解析为 `'control'`，默认行为不受影响，**关闭开关后**的表现待确认。
+
+## v0.7.690 (2026-10-10)
+
+> 本版是 **v0.7.689 之后的增量**，两条主线：其一，把**音频编辑**做进应用 —— 会议回放与画布音频查看器统一换成一套**波形打点轨**（在真实播放时刻打点 / 拖拽选区用 ffmpeg 截片段），并新增一份**不进 workspace 的应用自有音频库**（导入、浏览、删除、片段血缘）；其二，**File Organizer 分类智能化整改**（提取管线、目录与主题稳定、内容指纹幂等、设置里的 Activity 面板）。此外修了联系人列表预览的 **Markdown 外露**、给悬浮球河马补上**扇耳 / 拖拽歪头**、主窗口改为**铺满屏幕**。共 28 个源文件改动（16 改 + 12 新增），并在 package.json 引入 wavesurfer.js。
+
+### 新增功能
+
+* **波形打点轨：一套组件，会议与画布共用**（新增 [AudioMarkTrack.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/audio/AudioMarkTrack.tsx)）：基于 wavesurfer.js 的波形播放器，把**打点**（Add mark 先**冻结**当前播放时刻再展开批注框，Enter / 失焦确认后才入库，批注可空）与**片段选取**（波形上拖出区间 → Clip 先展开命名输入、确认才导出；刻意不绑 `onBlur` —— 误触发一次 ffmpeg 导出太贵）合成一条轨。放在中性的 `components/audio/`，谁先接谁后接都不落进某一方目录。只认 **Blob URL**（项目文件代理不支持 HTTP Range，回放链路统一先抓成 Blob 再播，天然可任意 seek）；波形解码失败时退回原生 `<audio controls>` —— 打点用不了，但**播放不丢**，绝不让回放整屏报错。
+
+* **会议回放：打点与截取进 History**（[MeetingReplay.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/MeetingReplay.tsx) + [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/meeting/route.ts)）：老播放器（原生 `<audio>` + 越界 seek 逼算时长）整条换成波形轨，MediaRecorder 产物「无时长元数据」的老问题在解码层自然解决。打点**挂在转写 md 的一行注释** `<!-- bob-marks: … -->` 上（`upsertMarkHint` 只动这一行、其余一字不改，脏数据容忍见 [marks.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/marks.ts)），新增 `save_marks` / `clip_audio` 两个 action；片段产物落**录音同目录**（`片段 - <标题> - <起-止>.<ext>`），与会议产物同一套 History 口径，可直接点开回放。
+
+* **应用自有音频库：导入 / 浏览 / 删除**（新增 [import/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/import/route.ts) + [library.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.ts)）：从本地选中的音频**复制**进 `<APP_ROOT>/.audio-library/<源名>-<内容指纹>/`（点前缀隐藏目录，与 `.stt` / `.tts` 同款，**不进** workspace 的 materials / homework）。指纹 = `sha1(文件内容) 前 10 位` —— 同一份音频重复导入**命中同一个目录**，既不堆重复副本，也让此前在它上面打的点 / 截的片段自动接上。库浏览（`list_library`）、删除（`delete_library`，收口为只能删库内目录）一并提供。
+
+* **片段截取：输出容器跟随源**（新增 [clip.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/clip.ts) + [clip/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/audio/clip/route.ts)）：与会议路由的 concat 同款「**流拷贝优先、失败才重编码**」，但输出扩展名**跟随源容器** —— 此前一律写 `.webm`，mp3 / m4a 源往 webm 容器 copy 必失败、每次都落到 opus 重编码（把已有损的音频再压一遍，更慢更糊），现在 copy 直接成功。片段**不进 workspace**，与源音频同居一处，归属靠源目录的 `.clips.json`（lineage）而非文件名前缀 —— 片段可自由改名，改名也不丢归属；打点则存同名 `.marks.json` sidecar；命名（[naming.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/naming.ts)）是**纯字符串**，服务端导出与客户端预填共用一份，故与带 `node:fs` 的持久化层分开。
+
+* **画布音频查看器重做**（[AudioViewer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/AudioViewer.tsx) + [registry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/viewers/registry.ts)）：从「代理 URL 直接播放」升级为**波形 + 打点 + 截取 + 导入 + 库浏览**一体的编辑器；打开源音频即在波形下方列出它的全部片段（首行固定「Source audio」用于切回），点某条进「二次编辑」、每条可**下载**另存到用户自己的位置。registry 把 **webm** 也纳入音频白名单（截出来的片段就是 webm，否则会被当成 binary）。
+
+### 修复与优化
+
+* **File Organizer · PDF 提取不再自建渲染链路，改走项目既有管线**（[extract.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/extract.ts)）：旧实现直接用 `pdf-parse` 的 `getScreenshot()` 渲染扫描件首页，而 `pdf-parse` 未列入 `serverExternalPackages`，打包版把**浏览器构建**整份 bundle 进 chunk，里面靠运行时 `require("@napi-rs/canvas")` 打 `DOMMatrix` 补丁 —— standalone 里既没有该包也没有任何原生 `.node`，补丁静默失败后渲染必抛 `DOMMatrix is not defined`，**所有扫描件与无文字层 PDF 全部落 `_待处理`、从不进模型**（历史日志 91 条记录有 63 条即 69% 落待处理）。现改为：Python（pypdf/pdfplumber，打包版随包 `scripts/pdf_extractor.py`）取第 1 页 → 首页稀疏再看 3 页 → 扫不出字或质量分 < 0.35 交 `bob-ocr-mcp` 识别 → OCR 也不可用才返回明确失败原因。实测「开庭通知 / 上诉表决票 / 仲裁费预缴通知书」三份旧实现必失败的扫描件现在都能出字并正确判定为「法律文书」。
+
+* **File Organizer · 图片/扫描件优先走 OCR 取字**（同上）：旧实现把图片直接交视觉模型，而视觉模型是靠模型名正则 `VISION_HINT` 猜的，本机已配的 deepseek-flash / glm-5.3 / kimi-k3 全部未命中，实际落回**纯文本任务模型**。现在先 `bob-ocr-mcp` 取文字（可判类型），取不到才退回原图 + 视觉模型。实测两张真实 PNG 均能正确分类与命名。
+
+* **File Organizer · 新增旧版 `.doc` 支持**（同上）：走系统 `textutil -convert txt`（macOS 自带），不再直接判「暂不支持的格式」。实测「办公设备购销合同.doc」现在能正确归入既有「合同协议」。
+
+* **File Organizer · 思考额度 2000 → 6000，截断自动重试一次**（[model.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/model.ts)）：思考型模型的 reasoning 也吃 `max_tokens`，实测同一输入 2000 时 `finish_reason=length`、正文 0 字，4000/6000 正常，**失败是概率性的**（同文件重跑又能过）。现在被思考占满时改用「紧凑提示词 + 12000 额度」再试一次，两次都截断才算失败，并把 token 用量与重试次数写进整理日志与状态。
+
+* **File Organizer · 既有目录与已用主题注入提示词**（[model.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/model.ts) + [core.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/core.ts)）：旧提示词只给内置枚举，模型看不到投递箱里**已经建好的归档结构**，也不知自己上次怎么判，于是每次重新发明分类体系。现在把「既有目录」列为最高优先级、要求沿用其措辞且不得新建同义目录，并把各分类目录里**已用过的主题**一并列出要求逐字沿用。
+
+* **File Organizer · 自创分类加同义合并闸门**（[model.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/model.ts)）：新增 `matchExistingCategory`，归一后（剥掉「文件/文档/资料/材料」等尾部通用词）互相包含即复用既有目录，避免长出「法律文书 / 法律文件 / 法律资料」。
+
+* **File Organizer · 主题稳定化与版本累加归一**（[naming.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/naming.ts)）：实测同一份 docx 两次判定给出「主播合作保密协议」与「商业秘密保密协议」，而版本累加依赖主题**逐字相等**，于是每份都从 v01 起算。现在分三层：提示词注入已用主题 → 落盘前 `reuseExistingTopic` 在目标目录做近似匹配（互为前缀或 LCS ≥ 0.85 即沿用既有措辞）→ `resolveVersionIndex` 在精确匹配落空时退一步按近似主题取最大版本号。
+
+* **File Organizer · 内容指纹幂等 + 失败短路**（新增 [state.ts](file:///Users/baolei/Desktop/BobWork/projects/tools/organize/state.ts)）：新增 `<投递箱>/.整理状态.json`（隐藏），按「文件大小 + 头部 512KB 哈希」记账。同一份内容再次投递直接复用上次的分类/主题/版本，**不调模型**（实测改个文件名重投，得到同主题 v02 而非重新判定）；判定失败且**提取方式未变**时连模型都不调（提取能力升级后旧失败会自动失效）。watcher 每轮全量扫描不再反复重判同一个文件。
+
+* **File Organizer · 设置面板新增 Activity 分区**（[SettingsModal.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SettingsModal.tsx) + 新增 [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/core/file-organizer/route.ts)）：`_待处理` 清单直接列出**失败原因 / 判过几次 / 提取方式**，支持单项 Retry 与 Retry all（把文件搬回投递箱根部并清掉失败指纹，下一轮重新判定）；下方列出最近整理记录（时间 / 分类 / 主题 / 重试标记 / token），并在顶部展示「Categories in use」让用户一眼看出是否在长同义目录。
+
+* **联系人列表预览去 Markdown**（[threads-shared.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/threads-shared.ts)）：联系人列的标题与副标题只有一行、渲染不了 Markdown，原来的 `**`、`-`、`|`、`![](…)` 会原样露出来。改为复用 TTS 的净化器 `toSpeakableText`（同一套「**只去格式、不丢正文**」口径）再压行截断，不另写一份 Markdown 剥离逻辑，免得两处口径漂移。
+
+* **悬浮球河马：扇耳 + 拖拽歪头**（[HippoFace.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/HippoFace.tsx) + [ButlerOrb.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerOrb.tsx)）：在眨眼之外再补两层只动 `transform` 的动效 —— **扇耳**（JS 随机 3.5~8s 三拍「外扇 → 回正 → 内收」，耳根以弦中点钉轴、外扇 ≤ 8°，免得耳根露缝）与**拖拽歪头**（拖球速度经 rAF 按半衰期 110ms 衰减映射成倾斜角，松手弹簧回正；拖动中呼吸 / 摇铃暂停，免得各动效打架）。未读时玻璃球整体换**暖琥珀色**（`has-unread` 变量染色边缘与内晕，高光弧保持纯白 —— 真玻璃的高光永远是光源色）。
+
+* **Memory 台两处收口**（[ButlerMemoryConsole.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerMemoryConsole.tsx)）：脑图指针落在入口卡上时**冻结视差** —— 整张图随鼠标反向位移会让卡片从指针底下滑走再滑回，命中判定在「卡片（手形）/ 空白（箭头）」之间反复切换，表现为光标不停闪烁；标题条**去重**（抽屉顶栏 / 移动分区栈已写 Memories，本栏不再重复标题，只在有「← All」或浮窗关闭键时才出）。
+
+* **便利贴删除键图标更明确**（[StickyTodoDock.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/StickyTodoDock.tsx)）：卡片右上角删除键由 `X` 换成 `Trash2`。
+
+* **主窗口铺满主屏**（[main.ts](file:///Users/baolei/Desktop/BobWork/projects/electron/main.ts)）：默认窗口从固定 width 1400 / height 900 改为**铺满主屏可用区域**（x / y / width / height 全取 `screen.getPrimaryDisplay().workArea`），宽屏上不再左右留白、底部不满。
+
+### 新增单测
+
+* 新增 [naming.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/naming.test.ts) / [marks.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/marks.test.ts) / [library.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/audio/library.test.ts)：锁命名纯字符串的三条不变式（文件名不含冒号等非法字符、用户改名不产生 `x.mp3.mp3`、起止都进名）、打点的**脏数据完全免疫**与「只动一行、其余不动」的往返、以及库目录结构（指纹幂等 / 外部源影子目录 / 空清单删文件 / 删除整目录）。
+
+* [threads.test.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/threads.test.ts) 补一条：标题与副标题都去 Markdown（`##` / `-` / `**` / 链接只留文字）。
+
+***
+
+## v0.7.689 (2026-10-10)
+
+> 本版是 **v0.7.688 之后的增量**：Butler 补齐**感知面的第一块 —— 邮箱**（通用 IMAP 只读接入，把「别人主动来找你」这一最大集合接进助理视野），同时落下**事件驱动主动性的骨架**（把「从事件到出站」收敛到一处折叠层），并把**当日收件箱增量**接进今日视图与晚间回顾；另有一条，管家悬浮球里的河马补上**呼吸 / 摇铃**两层动效、玻璃质感加强。共 19 个源文件改动（12 改 + 7 新增），并在 package.json 引入 imapflow。
+
+### 新增功能
+
+* **邮箱感知：通用 IMAP 只读接入**（感知面 ①，[mail-poll.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/bridge/mail-poll.ts) + [mail-adapter.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/bridge/mail-adapter.ts) + [route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/mail/route.ts) + [MailBindModal.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/MailBindModal.tsx)）：任何支持 IMAP 的邮箱都能接（手填凭证，**不锁厂商、不走 OAuth**）；后台每 120s 增量拉未读、复用同一条 IMAP 连接（163 / QQ 等对频繁登录会限流），过滤掉营销 / 退信 / 自动回复后写入 Butler 收件箱。设置里新增 **Email Inbox** 分区（[SettingsModal.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/canvas/SettingsModal.tsx)），只保留地址 / 密码（应用专用密码）/ IMAP 主机三项必填，端口默认 993 不进表单；密码在 [secrets.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/secrets.ts) 按敏感项脱敏。
+
+* **隐私边界：只读、只看信封**（[mail-poll.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/bridge/mail-poll.ts)）：只取**信封级字段**（发件人 / 主题 / 时间 / 三个判定用头），**不下载正文、不写回邮箱、不设置 `\Seen`**；本期不含 SMTP（对外代发属「手」，产品定位未拍板前不做）。幂等与水位线两道保险：`dedupeKey = mail:<Message-ID>` 保证重复投递不产生第二条；状态文件 `butler/.state/mail-poll.json` 记 `{ uidValidity, lastUid }` 水位线，避免同一封未读邮件每轮重复外发。**首次运行 / UIDVALIDITY 变化只做基线**（记下当前最大 UID、不播报存量），防止把邮箱里几百封历史未读一次性倒给用户。未配置凭证时每轮静默 idle（不建连、不报错），用户填好即自动开始工作，无需重启（由 [instrumentation.ts](file:///Users/baolei/Desktop/BobWork/projects/src/instrumentation.ts) 启动调度）。
+
+* **邮箱接入状态进入可见源**（[sources.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/sources.ts) + [context.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/runtime/context.ts)）：与微信 / 飞书同款口径 —— 未接入提示「可引导用户去设置填写」，已接入则报运行态与最近一轮未读数，让 Butler 清楚自己「有没有眼睛、看到了什么」。
+
+* **事件驱动主动性骨架：事件折叠 → 统一出站**（② 神经，[push-policy.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/push-policy.ts)）：生产者只描述「发生了什么」（`ButlerEvent`），**不自己决定推不推、推几条**；同组事件在 60s 窗口内折叠成**一条**带计数的 digest，再经唯一出站口 `push-out.ts` 投递（避免「一秒来 10 封邮件 → 手机震 10 下」）。三条硬约束：**折叠而非丢内容**（细节仍留在各自收件箱条目里）、**fail-open**（折叠层自身抛错时退化为逐行原文照推，策略故障绝不吞推送）、**窗口内合并**。免打扰窗口 / 单日上限仍只在出站口一处裁决，本层绝不绕开它直投桥。
+
+* **当日收件箱增量接入今日视图与晚间回顾**（[today-advice.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/today-advice.ts) + [evening-report.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/evening-report.ts)）：今日视图装载当日 `kind='mail'` 的收件箱增量；晚间回顾的「闭嘴」判据从「今天 / 逾期两项皆 0」扩为「**今天 / 逾期 / 当日收件箱增量三者皆 0**」，有感知增量时在汇总里追加一段「📧 Noticed today」。
+
+### 修复与优化
+
+* **悬浮球河马动效分层 + 玻璃质感加强**（[HippoFace.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/HippoFace.tsx) + [ButlerOrb.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerOrb.tsx)）：在原有**眨眼**之外补两层只动 `transform` 的动效 —— **呼吸**（整只河马 3.6s 上下浮 + 微缩放，常驻，像在水里悬浮）与**摇铃**（悬浮球有未读时左右轻摇 1.8s 一轮，像在喊人看消息）；`prefers-reduced-motion` 下全部停用。球径从 28px 放回 **34px** —— 河马改矢量版后要看眨眼，28px 下眼睛只有约 1.6 CSS px、眨眼读不出来。液态玻璃加强：`saturate` 提到 230%（透过球看到的画布更浓、玻璃感立现且几乎零开销），并补一道**下缘反射亮弧**，一主一反两道镜面弧是玻璃球（而非水珠 / 气泡）最经典的视觉特征。
+
+
+## v0.7.688 (2026-10-09)
+
+> 本版是 **v0.7.687 之后的增量**：一条线是**移除「Recorder」会议记录员常驻联系人**（连同它专属的两枚会议工具与整条专用链路），另一条线是**管家抽屉的中栏宽度恒定** —— 打开右侧预览不再把中间对话框挤窄、关掉也不再弹回。共 23 个源文件改动（21 改 + 2 删）。
+
+### 移除与清理
+
+* **移除常驻联系人「Recorder」（会议记录员）**：这个身份 2026-09-27 上线，钉在 Butler 抽屉联系人列「Bobby」下方，靠专属画像 [profiles.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/agents/profiles.ts) 把工具面收口到会议场景（`meeting_search` / `meeting_summarize`），实现见 [butler-recorder.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/core/butler-recorder.ts)（已删）。它与 Bobby / 小微在能力上高度重叠，且占着一整条 `meeting` 场景与专属系统提示，维护成本高于收益 —— 本次整条撤掉：删除常驻会话模块与画像、`meeting` 场景（[index.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/index.ts) / [registry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/registry.ts)）、两枚专属工具（[meeting-archive.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/chat/tools/meeting-archive.ts) 已删）、会议归档检索/阅读两个 action（[butler/meeting/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/meeting/route.ts)）、系统身份头像与角色目录映射（[avatar.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/avatar.ts) / [storage.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/storage.ts)）。
+
+* **联系人列与权限口径同步收口**：列表接口不再合成置顶摘要，「常驻线程不可删」与「系统身份不可改人设」两条守卫去掉 recorder 分支（只留 Bobby / 小微），会话身份分支 [entry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/entry.ts) 恒为 `butler`（不再是 `threadId === 'butler-recorder' ? 'recorder' : 'butler'`），前端 [ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) 去掉「Recorder 不显示人设入口」的特例。
+
+* **升级后清掉历史残留线程**（[threads.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/threads.ts) + [instrumentation.ts](file:///Users/baolei/Desktop/BobWork/projects/src/instrumentation.ts)）：旧线程 `butler-recorder` 曾被列表接口在每次读取时幂等创建，升级后几乎必然存在；不清掉它会以「未命名角色」的幽灵联系人重新出现在联系人列。故新增一次性、幂等的退役清理 `purgeRetiredRecorderThread()`，启动时执行。**角色目录 `butler/Recorder/` 刻意不删** —— 那里面是用户已生成的会议产物；被清掉的只是角色指针（`pruneOrphanRoles` 的两条常驻豁免也从三个 id 收回两个）。
+
+### 修复与优化
+
+* **管家抽屉：中栏宽度恒定，右栏改为纯增量**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx)）：此前右栏宽度是「先按中栏保持 560 反推余量」算出来的，于是**手动拖过抽屉**（本地存了几何）之后，打开右侧预览会把中栏压窄、关掉又弹回 —— 用户侧表现就是「打开右侧预览，关闭后中间对话框会展开」；安装版与 dev 版表现不一致也源于此（安装版 localStorage 背着旧几何，dev 是干净 origin）。改为：**中栏宽度与右栏显隐完全解耦**（有手动几何取拖定的中栏宽、从未拖动则用自适应宽），右栏只吃中栏之外的余量，余量不足最小可读宽度时退回**覆盖层**（宁可盖住中栏，也不改写中栏宽度），面板宽度在用户拖定的基础上叠加右栏增量、关掉即收回。
+
 
 ## v0.7.687 (2026-10-09)
 

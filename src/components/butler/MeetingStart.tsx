@@ -156,8 +156,8 @@ interface MeetingGroup {
 
 /**
  * 把扁平产物列表折叠成「会议」列表。
- * 为什么在客户端聚合而不动服务端 history 契约：记录员的 search 也走 listMeetingHistory，
- * 改契约会连带影响它；而聚拢纯属 History 列表的展示层事情。
+ * 为什么在客户端聚合而不动服务端 history 契约：聚合纯属 History 列表的展示层事情，
+ * 改契约会让服务端的产物列表与展示口径纠缠。
  * 只有一条产物的会议（如单独的播客、或「会后自动整理」关闭时只有转写）不聚合，
  * 仍是改动前的一行，避免为单文件凭空多一层展开。
  */
@@ -330,6 +330,57 @@ async function readPodcastStream(
     }
   }
   return outcome;
+}
+
+/**
+ * 读服务端 import_probe 的 **NDJSON 流**（读法与 readPodcastStream 一致）。
+ * 服务端在这一步对**整段**音频跑一次说话人分离，长录音要几分钟到二十几分钟。分离进度只有百分比、
+ * 没有「第几段/共几段」，故映射成 done=pct / total=100，走 phase='speakers' 那句进度文案。
+ * 返回时长；探不出（ffmpeg 不可用等）返回 null = 客户端退化为「单次整段转写」。
+ */
+async function probeImport(
+  audioPath: string,
+  onProgress: (p: { done: number; total: number; phase: 'speakers' }) => void,
+): Promise<number | null> {
+  const resp = await fetch('/api/butler/meeting', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'import_probe', audioPath }),
+  });
+  if (!resp.ok || !resp.body) throw new Error(`Could not read the recording (HTTP ${resp.status})`);
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let durationSec: number | null = null;
+  let failure: string | null = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() ?? '';
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s) continue;
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(s) as Record<string, unknown>;
+      } catch {
+        continue; // 坏行不致命：跳过，继续读后面的
+      }
+      if (msg.t === 'progress' && msg.phase === 'diarize') {
+        const pct = Number(msg.pct);
+        if (Number.isFinite(pct)) onProgress({ done: pct, total: 100, phase: 'speakers' });
+      } else if (msg.t === 'done') {
+        const d = Number(msg.durationSec);
+        durationSec = Number.isFinite(d) && d > 0 ? d : null;
+      } else if (msg.t === 'error') {
+        failure = String(msg.error || 'Could not read the recording');
+      }
+    }
+  }
+  if (failure) throw new Error(failure);
+  return durationSec;
 }
 
 export function MeetingStart({ onStarted }: { onStarted: () => void }) {
@@ -625,11 +676,10 @@ export function MeetingStart({ onStarted }: { onStarted: () => void }) {
     cancelRef.current = false;
     try {
       // 1) 探时长 → 切窗口；ffmpeg 不可用（null）时退化为「单次整段」，由引擎决定成败。
-      //    这一步服务端还会对整段音频跑一次说话人分离（结果缓存复用），长录音会明显耗时，故先给阶段提示。
+      //    这一步服务端还对**整段**音频跑一次说话人分离（结果缓存复用），长录音要跑几分钟到二十几分钟：
+      //    故走 NDJSON 流把分离百分比实时上报，界面才不是「一直转圈、看不出在动」。
       setProgress({ done: 0, total: 0, phase: 'speakers' });
-      const probe = await postMeeting({ action: 'import_probe', audioPath: option.rel });
-      if (!probe?.success) throw new Error(String(probe?.error || 'Could not read the recording'));
-      const durationSec = typeof probe.durationSec === 'number' && probe.durationSec > 0 ? probe.durationSec : null;
+      const durationSec = await probeImport(option.rel, setProgress);
       const windows: Array<{ start: number; end: number } | null> = [];
       if (durationSec) {
         for (let s = 0; s < durationSec; s += IMPORT_WINDOW_SEC) {
@@ -1390,7 +1440,9 @@ export function MeetingStart({ onStarted }: { onStarted: () => void }) {
           <div className="mt-4 flex items-center justify-center gap-1.5 text-10" style={{ color: 'var(--ink-muted)' }}>
             <Loader2 className="h-3 w-3 animate-spin" />
             {progress.phase === 'speakers'
-              ? 'Analyzing speakers…'
+              ? progress.total > 0
+                ? `Analyzing speakers… ${Math.round((progress.done / progress.total) * 100)}%`
+                : 'Analyzing speakers…'
               : progress.total > 0 && progress.done < progress.total
                 ? `Transcribing ${progress.done + 1}/${progress.total}…`
                 : 'Generating minutes…'}

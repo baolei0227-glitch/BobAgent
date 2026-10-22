@@ -14,7 +14,7 @@ import {
 
 export const runtime = 'nodejs';
 
-type RangeKey = 'today' | 'yesterday' | '7d' | '30d' | 'month' | 'all';
+type RangeKey = 'today' | 'yesterday' | '7d' | '30d' | 'month' | 'year' | 'all';
 type Scope = 'project' | 'all';
 
 function dayStartISO(offsetDays: number): string {
@@ -24,11 +24,13 @@ function dayStartISO(offsetDays: number): string {
   return d.toISOString();
 }
 
-/** 当前自然月起点（本地时区） */
-function monthStartISO(): string {
+/** 自然月起点（本地时区）；offsetMonths 为月份偏移，-11 = 含当月在内的 12 个月窗口起点 */
+function monthStartISO(offsetMonths = 0): string {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
+  // 先归到 1 号再偏移，避免 31 号在小月溢出到下个月
   d.setDate(1);
+  d.setMonth(d.getMonth() + offsetMonths);
   return d.toISOString();
 }
 
@@ -44,13 +46,16 @@ function rangeWindow(range: RangeKey): { from?: string; to?: string } {
       return { from: new Date(Date.now() - 30 * 86_400_000).toISOString() };
     case 'month':
       return { from: monthStartISO() };
+    // Year 视图：含当月在内的近 12 个自然月（月度趋势图的上限）
+    case 'year':
+      return { from: monthStartISO(-11) };
     default:
       return {};
   }
 }
 
 /**
- * GET /api/usage?range=today|yesterday|7d|30d|all&scope=project|all&projectId=xxx
+ * GET /api/usage?range=today|yesterday|7d|30d|month|year|all&scope=project|all&projectId=xxx
  *
  * 用量聚合（全局账本 .usage.db）：
  *  - scope=project（默认）：只统计指定/当前激活项目
@@ -85,7 +90,8 @@ export async function GET(request: NextRequest) {
   try {
     const db = await openUsageDb();
     const summary: UsageSummary = queryUsageSummary(db, window);
-    const recent: UsageLogRow[] = listRecentUsage(db, window, 8);
+    // 最近任务只列模型任务：Web 工具按次计费的流水单独在 webTools 里汇总
+    const recent: UsageLogRow[] = listRecentUsage(db, { ...window, excludeSources: ['web'] }, 8);
     // 窗口内币种一致时才给出统一成本符号（混币种无法合并展示 → 面板回落 $）
     const currencies = listCostCurrencies(db, window);
     const costCurrency = currencies.length === 1 ? currencies[0] : undefined;
@@ -106,7 +112,8 @@ export async function GET(request: NextRequest) {
 
     return Response.json({
       meta: {
-        empty: summary.totals.tasks === 0,
+        // 只有 Web 工具调用（无 token 任务）时不算空账本
+        empty: summary.totals.tasks === 0 && summary.webTools.length === 0,
         scope,
         projectId: project?.id ?? null,
         projectName: project ? basename(project.path) : undefined,

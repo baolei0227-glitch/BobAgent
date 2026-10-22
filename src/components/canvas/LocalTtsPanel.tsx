@@ -188,7 +188,7 @@ export function LocalTtsPanel({
   };
 
   const remove = async (modelId: string, label: string) => {
-    if (!window.confirm(`Delete ${label}?\nThis frees disk space. You can download it again later.`)) return;
+    if (!window.confirm(`Delete ${label}? You can re-download it later.`)) return;
     setError(null);
     try {
       const res = await fetch('/api/tts/local', {

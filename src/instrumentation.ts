@@ -24,7 +24,7 @@ export async function register() {
     // 不会执行，需在启动时兜底清理过期线程（wechat 24h TTL，只删过期行）。
     const { migrateLegacyThreads } = await import('@/lib/butler/threads-migrate');
     await migrateLegacyThreads();
-    const { startThreadSweeper, purgeRetiredWechatThread } = await import('@/lib/butler/threads');
+    const { startThreadSweeper, purgeRetiredWechatThread, purgeRetiredRecorderThread } = await import('@/lib/butler/threads');
     // 周期清理：进程存活期间，每 60s 删除过期线程（wechat 24h TTL）
     startThreadSweeper();
     // 一次性退役清理：删除旧「Bobby」微信桥常驻线程（2026-09-28 微信消息改并入通知助理线程）。
@@ -32,6 +32,15 @@ export async function register() {
     purgeRetiredWechatThread()
       .then((removed) => {
         if (removed) console.log('[butler/threads] 已清除退役的 Bobby 微信线程');
+      })
+      .catch((e) => {
+        console.error('[butler/threads] 退役线程清理失败:', e);
+      });
+    // 一次性退役清理：删除旧「Recorder」会议记录员常驻线程（2026-10-09 该常驻联系人已移除）。
+    // 幂等；失败只记日志，不影响启动。
+    purgeRetiredRecorderThread()
+      .then((removed) => {
+        if (removed) console.log('[butler/threads] 已清除退役的 Recorder 线程');
       })
       .catch((e) => {
         console.error('[butler/threads] 退役线程清理失败:', e);
@@ -76,6 +85,19 @@ export async function register() {
     }, 4000);
   } catch (e) {
     console.error('[event-reminder] 调度加载失败:', e);
+  }
+  try {
+    // 邮件感知（2026-10-10 感知面 ①）：读设置里的邮箱凭证 → 常驻 IMAP 增量拉未读 →
+    // 过滤营销/退信/自动回复后写 Butler 收件箱，并经 push-out 播报到微信/飞书。
+    // 未配置凭证时每轮静默 idle（不建连、不报错），用户在设置里填好即自动开始工作。
+    // 自带调度器而没挂进 [1]~[4] 的链路 —— 它静态依赖 lib/core/* 与 lib/butler/storage，
+    // 反向挂载会成 import 环（eslint import/no-cycle）。
+    const { startMailScheduler } = await import('@/lib/bridge/mail-poll');
+    setTimeout(() => {
+      startMailScheduler();
+    }, 4000);
+  } catch (e) {
+    console.error('[mail-poll] 调度加载失败:', e);
   }
   try {
     // 晚间回顾调度（20:00 起）：Butler 目前唯一会推外部通道（微信/飞书）的助理主动汇报。

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import { join, extname, basename } from 'path';
-import { homedir, tmpdir } from 'os';
-import { getCurrentProject } from '@/lib/project/project-manager';
-import { SANDBOX_DIRNAME } from '@/lib/app-root';
+import { tmpdir } from 'os';
+import { parseProjectRoot } from '@/lib/parse/project-root';
 
 /**
  * POST /api/transcribe — 语音转写（录音字节 → 纯文字）
@@ -18,16 +17,6 @@ import { SANDBOX_DIRNAME } from '@/lib/app-root';
  */
 
 export const maxDuration = 120;
-
-/** 当前项目根路径（无激活项目时回退 ~/BobWork/.sandbox；仅用于转写缓存目录） */
-async function projectRootPath(): Promise<string> {
-  try {
-    const project = await getCurrentProject();
-    return project.path;
-  } catch {
-    return join(homedir(), 'BobWork', SANDBOX_DIRNAME);
-  }
-}
 
 export async function POST(request: NextRequest) {
   let tmpPath = '';
@@ -51,7 +40,7 @@ export async function POST(request: NextRequest) {
     const { readSettingsFromFile } = await import('@/lib/settings-server');
     const { parseAudio } = await import('@/lib/parse/audio-parser');
     const settings = await readSettingsFromFile();
-    const result = await parseAudio(tmpPath, await projectRootPath(), { stt: settings.stt });
+    const result = await parseAudio(tmpPath, await parseProjectRoot(), { stt: settings.stt });
     const text = (result.plain_text ?? '').trim();
     if (!text) {
       return NextResponse.json({ success: false, error: 'No speech recognized' }, { status: 422 });

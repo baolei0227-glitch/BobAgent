@@ -5,6 +5,10 @@
  *
  * 上方播放器、下方带时间戳的转写：点一句跳到那一刻，播放时高亮当前句并自动跟随滚动（对标飞书妙记）。
  *
+ * 播放器是波形打点轨（AudioMarkTrack）：除了播放，还能在**真实播放时刻**打点（与段级 `[mm:ss]`
+ * 戳无关）与拖拽选取片段用 ffmpeg 截出来。打点存在转写 md 的一行注释里（见 lib/audio/marks），
+ * 增删都即时落盘；片段产物落在录音同目录，进 History 可直接回放。
+ *
  * 音频来源（按优先级降级，全程不依赖 HTTP Range —— 项目里的文件代理不支持 206）：
  *   1) 已合并件 `录音 - <标题>.webm` → 直接抓成 Blob 播；
  *   2) 多于一片 → 请服务端 ffmpeg 合并（快，且产物落盘下次直接复用）；
@@ -24,6 +28,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ExternalLink, Loader2, Users } from 'lucide-react';
 import { bus, BusEvents } from '@/lib/bus';
 import { parseTranscriptSegments } from '@/lib/core/meeting-transcript';
+import { activeSegmentIndex } from '@/lib/audio/transcript';
+import { AudioMarkTrack, type AudioMarkTrackHandle } from '@/components/audio/AudioMarkTrack';
+import type { AudioMark } from '@/lib/audio/marks';
 
 /** 与 MeetingStart / MeetingConsole 同款分割线 */
 const DIVIDER_SOFT = '1px solid color-mix(in oklab, var(--line-soft) 40%, transparent)';
@@ -58,6 +65,8 @@ interface ReplayData {
   audio: ReplayAudioRef[];
   merged: ReplayAudioRef | null;
   missing: boolean;
+  /** 打点（转写 md 注释行解析而来；老录音为空数组） */
+  marks?: AudioMark[];
   /** 说话人名单（只读分离缓存得来；老录音没有缓存时为空 → 显示 Identify speakers） */
   speakers?: SpeakerRosterEntry[];
 }
@@ -159,7 +168,11 @@ export function MeetingReplay({
   const [identifyTried, setIdentifyTried] = useState(false);
   /** 正在编辑、尚未提交的名字（按簇号存）；提交后清空，改回以 roster 为准 */
   const [draft, setDraft] = useState<Record<number, string>>({});
-  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  /** 打点（本地即时生效，落盘走 save_marks） */
+  const [marks, setMarks] = useState<AudioMark[]>([]);
+  /** 正在用 ffmpeg 截片段（按钮置灰，避免重复点） */
+  const [clipping, setClipping] = useState(false);
+  const playerRef = useRef<AudioMarkTrackHandle | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -186,6 +199,8 @@ export function MeetingReplay({
     setIdentifying(false);
     setIdentifyTried(false);
     setDraft({});
+    setMarks([]);
+    setClipping(false);
     void (async () => {
       try {
         const d = await postMeeting({ action: 'replay_audio', source, path });
@@ -194,6 +209,7 @@ export function MeetingReplay({
         const info = d as unknown as ReplayData;
         setData(info);
         setRoster(info.speakers ?? []);
+        setMarks(info.marks ?? []);
 
         let target: ReplayAudioRef | null = info.merged;
         if (!target && info.audio.length > 1) {
@@ -234,35 +250,20 @@ export function MeetingReplay({
     };
   }, [source, path]);
 
-  /** MediaRecorder 产物常无时长元数据：用一次越界 seek 逼浏览器算出真实时长（否则进度条不可拖） */
-  const onLoadedMetadata = useCallback(() => {
-    const el = audioElRef.current;
-    if (!el || el.duration !== Infinity) return;
-    const onSeeked = () => {
-      el.currentTime = 0;
-      el.removeEventListener('seeked', onSeeked);
-    };
-    el.addEventListener('seeked', onSeeked);
-    el.currentTime = 1e101;
-  }, []);
-
-  /** 播放推进 → 二分找当前段（最后一个 t ≤ currentTime 的段） */
-  const onTimeUpdate = useCallback(() => {
-    const el = audioElRef.current;
-    if (!el || segments.length === 0) return;
-    const t = el.currentTime;
-    let lo = 0;
-    let hi = segments.length - 1;
-    let idx = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (segments[mid].t <= t) {
-        idx = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
+  /**
+   * 播放推进 → 当前段下标。
+   *
+   * 二分本身已抽到 `lib/audio/transcript.ts` 的 `activeSegmentIndex`（画布音频编辑器的转写面板
+   * 用同一套），这里不再自己写一遍 —— 两处各写一份的结果必然是"一处改了另一处没改"。
+   * 语义差异只有一个且不可达：`t` 早于首段起点时新函数返回 `-1`（不高亮），
+   * 旧实现返回 `0`；而本场景首段起点恒为 `[00:00]` ⇒ 不可能出现 `t < 0`。
+   *
+   * 时刻由波形轨（AudioMarkTrack）给：它已按解码数据算好真实时长，MediaRecorder 产物
+   * 「无时长元数据」的老问题在那一层解决，这里不必再越界 seek。
+   */
+  const onPlaybackTime = useCallback((t: number) => {
+    const idx = activeSegmentIndex(segments, t);
+    if (idx < 0) return;
     setActive((prev) => (prev === idx ? prev : idx));
   }, [segments]);
 
@@ -282,13 +283,48 @@ export function MeetingReplay({
   /** 点一句 → 跳到那一刻并播放 */
   const seek = useCallback(
     (t: number) => {
-      const el = audioElRef.current;
-      if (!el || !audioUrl) return;
-      el.currentTime = t;
+      const p = playerRef.current;
+      if (!p || !audioUrl) return;
+      p.seek(t);
       setPinned(true);
-      void el.play().catch(() => undefined);
+      p.play();
     },
     [audioUrl],
+  );
+
+  /** 打点：在当前播放时刻加一个点（label = 可空批注），本地即时显示并落盘 */
+  const addMark = useCallback(
+    (t: number, label?: string) => {
+      const at = Math.round(t * 10) / 10;
+      const next = [...marks, label ? { t: at, label } : { t: at }].sort((a, b) => a.t - b.t);
+      setMarks(next);
+      void postMeeting({ action: 'save_marks', source, path, marks: next });
+    },
+    [marks, source, path],
+  );
+
+  /** 打点列表变化（删点）：同样即时落盘 */
+  const changeMarks = useCallback(
+    (next: AudioMark[]) => {
+      setMarks(next);
+      void postMeeting({ action: 'save_marks', source, path, marks: next });
+    },
+    [source, path],
+  );
+
+  /** 截取片段：服务端用 ffmpeg 导出，产物落录音同目录 → 提示文件名（进 History 可回放） */
+  const clip = useCallback(
+    async (start: number, end: number, name?: string) => {
+      setClipping(true);
+      try {
+        const d = await postMeeting({ action: 'clip_audio', source, path, startSec: start, endSec: end, name });
+        const c = d?.clip as ReplayAudioRef | undefined;
+        setNote(d?.success && c ? `Saved ${c.name}` : String(d?.error || 'Could not export this clip.'));
+      } finally {
+        setClipping(false);
+      }
+    },
+    [source, path],
   );
 
   /**
@@ -373,13 +409,16 @@ export function MeetingReplay({
             <Loader2 className="h-3 w-3 animate-spin" /> Preparing audio…
           </div>
         ) : audioUrl ? (
-          <audio
-            ref={audioElRef}
-            src={audioUrl}
-            controls
-            className="w-full"
-            onTimeUpdate={onTimeUpdate}
-            onLoadedMetadata={onLoadedMetadata}
+          <AudioMarkTrack
+            ref={playerRef}
+            srcUrl={audioUrl}
+            marks={marks}
+            clipTitle={data?.title || 'Meeting'}
+            busy={clipping}
+            onAddMark={addMark}
+            onMarksChange={changeMarks}
+            onClip={clip}
+            onTimeUpdate={onPlaybackTime}
           />
         ) : (
           <p className="text-10 leading-relaxed" style={{ color: 'var(--ink-muted)' }}>

@@ -39,6 +39,7 @@ import {
   sherpaLibDir,
   sherpaTtsBinaryPath,
 } from '@/lib/stt/sherpa';
+import { sharedLibEnv } from '../platform';
 
 /** 本地神经 TTS 厂商标识（无需 API Key / model） */
 export const SHERPA_LOCAL_PROVIDER = 'sherpa-local';
@@ -701,7 +702,7 @@ function runSherpaTts(args: string[]): Promise<{ stderr: string; code: number }>
       // 与 STT 同款：shared 包运行时依赖同目录 dylib
       env: {
         ...process.env,
-        DYLD_LIBRARY_PATH: [sherpaLibDir(), process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+        ...sharedLibEnv(sherpaLibDir()),
       },
     });
     let stderr = '';

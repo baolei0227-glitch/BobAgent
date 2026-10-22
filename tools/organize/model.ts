@@ -36,9 +36,13 @@ export function normalizeCategories(raw?: readonly string[]): string[] {
   return out.length > 0 ? out : [...CATEGORIES];
 }
 
-/** 单次调用的输出上限：思考型模型的 reasoning 也吃这个额度，
- *  给太小（如 300）会出现正文被挤空、JSON 解析失败而静默落 _待处理 */
-const MAX_TOKENS = 2000;
+/** 单次调用的输出上限：思考型模型的 reasoning 也吃这个额度。
+ *  实测 deepseek-flash 判定一份合同 reasoning 可达 1200+ tokens，
+ *  给 2000 会出现「思考占满 → 正文为空 → 静默落 _待处理」的概率性失败，
+ *  因此基线抬到 6000，并在 finish_reason=length 时用紧凑提示词再试一次。 */
+const MAX_TOKENS = 6000;
+/** 截断重试时给的上限（思考型模型偶发超长 reasoning，翻倍留余量） */
+const RETRY_MAX_TOKENS = 12000;
 
 /** 推荐放置目录：判定为「无法判断」或解析失败时的兜底 */
 export const PENDING_DIR = '_待处理';
@@ -82,6 +86,10 @@ export interface ClassifyOptions {
   autoCreate: boolean;
   /** 人工纠正 few-shot（最近若干条），缺省不注入 */
   corrections?: readonly CorrectionHint[];
+  /** 投递箱里已有的分类目录名：注入提示词，要求优先复用、不要为同一事物新建同义目录 */
+  existing?: readonly string[];
+  /** 各分类目录里已用过的主题：注入提示词，要求同类内容沿用既有措辞（主题稳定才能正确累加版本） */
+  topics?: readonly string[];
 }
 
 /** 系统提示词按当前分类清单、自创开关、人工纠正与「是否复核」动态拼装 */
@@ -90,14 +98,37 @@ function buildSystemPrompt(
   autoCreate: boolean,
   review: boolean,
   corrections: readonly CorrectionHint[],
+  existing: readonly string[] = [],
+  topics: readonly string[] = [],
 ): string {
+  // 归档目录是长期资产：先把「既有目录」摆出来并要求优先复用，
+  // 否则模型每次都从零发明分类体系，最终长出「法律文书/法律文件/法律资料」这类同义目录。
+  const existingBlock = existing.length > 0
+    ? `
+既有目录（这是历史上已经建好的归档结构，优先级最高）：
+${existing.map((e) => `- ${e}`).join('\n')}
+分类时先判断能否归入上面任一目录；能归入就必须沿用它的名字（哪怕措辞与你的习惯不同），
+绝不要为同一类事物新建同义目录（如已有「法律文书」就不要再建「法律文件」「法律资料」）。
+`
+    : '';
   const categoryRule = autoCreate
-    ? `分类优先从以下枚举中选择其一：
+    ? `上述既有目录都不匹配时，才从以下枚举中选择其一：
 ${categories.join(' / ')}
-若上述枚举都不合适，可自创一个分类名（2~6 字中文名词短语，不得与枚举重复，不含标点）。`
-    : `分类必须从以下枚举中严格选择其一（不得自创）：
+若枚举也不合适，就自创一个更贴切的分类名（2~6 字中文名词短语，不得与既有目录或枚举重复或同义，不含标点）。
+特别注意：像「法律文书 / 规章制度」这类专业类别，枚举里通常没有对口项 —— 此时**优先自创具体类别**，
+不要因为「拿不准」就退到兜底项（清单末位的那个泛化分类），那会让同类文件全挤在一起、看不出结构。`
+    : existing.length > 0
+      ? `分类只能从「既有目录 + 以下枚举」中择一（不得自创）：
+${categories.join(' / ')}`
+      : `分类必须从以下枚举中严格选择其一（不得自创）：
 ${categories.join(' / ')}`;
-  const categorySample = autoCreate ? '上述枚举之一，或自创的分类名' : '上述枚举之一';
+  const categorySample = autoCreate ? '既有目录名，或上述枚举之一，或自创的分类名' : '上述目录/枚举之一';
+  const topicBlock = topics.length > 0
+    ? `
+已用过的主题（若本次文件与其中某条是同类内容，topic 必须逐字沿用该条，不要换一种说法）：
+${topics.map((t) => `- ${t}`).join('\n')}
+`
+    : '';
   const correctionBlock = corrections.length > 0
     ? `
 历史人工纠正（同类内容当时落入了待处理，人工最终归入右边分类，请优先沿用）：
@@ -111,8 +142,8 @@ ${corrections.map((c) => `- 「${c.topic}」→ ${c.category}`).join('\n')}
 `
     : '';
   return `你是文件归档助手。根据文件首页内容和原文件名，输出归档所需的字段。
-
-${categoryRule}${correctionBlock}${reviewBlock}
+${existingBlock}
+${categoryRule}${topicBlock}${correctionBlock}${reviewBlock}
 只输出一个 JSON 对象，不要任何解释、不要 markdown 代码块：
 {
   "category": "${categorySample}",
@@ -126,6 +157,8 @@ ${categoryRule}${correctionBlock}${reviewBlock}
 规则：
 - topic 要能一眼看出这是什么文件，例如「房屋租赁合同」「7月差旅发票」「Q2销售报表」；
 - topic 使用中文，不写公司名后缀、不写"扫描件""副本""最终版"等噪音词；
+- topic 必须稳定：同类文件要用同一套措辞，不要这次写「律师函催办投诉」下次写「催办投诉处理律师函」，
+  因为文件名与版本号累加依赖主题逐字一致；
 - 不要输出扩展名，不要输出日期；
 - verdict 只用三档：confident = 有把握；unsure = 倾向某一类但没把握，此时必须给出 1~2 个次选分类；
   unknown = 内容太少或无法判断，此时 alternatives 给空数组；
@@ -194,8 +227,46 @@ export function normalizeVersionLabel(raw: unknown): string | null {
   return null;
 }
 
-/** 分类归一：清单内直接采纳；允许自创时清理非法字符后采纳，否则落清单末位（约定的兜底项） */
-function normalizeCategory(raw: string, categories: readonly string[], autoCreate: boolean): string {
+/** 分类名里不承载语义的尾部通用词：归一化时剥掉，用于同义判定（「法律文件」≈「法律」） */
+const CATEGORY_NOISE = /(文件|文档|资料|材料|信息|记录|相关|类|表)$/;
+
+/** 归一分类名用于比对：去空白/标点、去尾部通用词 */
+function categoryKey(name: string): string {
+  const s = name.replace(/[\s·・\-_（）()【】\[\]]/g, '');
+  const stripped = s.replace(CATEGORY_NOISE, '');
+  return stripped.length >= 2 ? stripped : s;
+}
+
+/**
+ * 在既有目录里找同义项：完全同名、或归一化后互相包含。
+ * 「法律文件」→「法律」，「法律文书」→「法律」，互为包含 → 复用既有目录，
+ * 避免模型每次换一个近义词就长出一个新目录。
+ */
+export function matchExistingCategory(raw: string, existing: readonly string[]): string | null {
+  if (!raw) return null;
+  if (existing.includes(raw)) return raw;
+  const key = categoryKey(raw);
+  if (key.length < 2) return null;
+  for (const dir of existing) {
+    const dirKey = categoryKey(dir);
+    if (dirKey.length < 2) continue;
+    if (dirKey === key || dirKey.includes(key) || key.includes(dirKey)) return dir;
+  }
+  return null;
+}
+
+/**
+ * 分类归一：既有目录优先（含同义合并）→ 清单 → 自创（允许时）。
+ * 既有目录的分量最重：它代表用户已经认可的归档结构。
+ */
+function normalizeCategory(
+  raw: string,
+  categories: readonly string[],
+  autoCreate: boolean,
+  existing: readonly string[] = [],
+): string {
+  const hit = matchExistingCategory(raw, existing);
+  if (hit) return hit;
   if (categories.includes(raw)) return raw;
   const fallback = categories[categories.length - 1] ?? '其他';
   if (!autoCreate || !raw) return fallback;
@@ -237,9 +308,10 @@ function normalizeInsight(
   obj: Record<string, unknown>,
   categories: readonly string[],
   autoCreate: boolean,
+  existing: readonly string[] = [],
 ): FileInsight {
   const rawCategory = typeof obj.category === 'string' ? obj.category.trim() : '';
-  const category = normalizeCategory(rawCategory, categories, autoCreate);
+  const category = normalizeCategory(rawCategory, categories, autoCreate, existing);
   const topic = (typeof obj.topic === 'string' ? obj.topic : '')
     .replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '') // 去掉文件名非法字符
     .replace(/\.(pdf|docx?|xlsx?|png|jpe?g|txt|md)$/i, '')
@@ -282,14 +354,56 @@ ${page.text}`;
   ];
 }
 
-/** 单轮调用：超时上限 30s */
-async function callModel(
+/** 一次判定的调用痕迹（写日志用：模型、token、是否重试过） */
+export interface ClassifyMeta {
+  /** 实际使用的模型名 */
+  model: string;
+  /** 累计 token（多轮相加） */
+  tokens: { prompt: number; completion: number; reasoning: number };
+  /** 因为截断而重试的次数 */
+  retries: number;
+  /** 过程说明（截断/重试等），写入整理日志的 note */
+  note: string;
+}
+
+/** 空痕迹工厂（调用方先备好，失败时也有模型名可记） */
+export function emptyMeta(model = ''): ClassifyMeta {
+  return { model, tokens: { prompt: 0, completion: 0, reasoning: 0 }, retries: 0, note: '' };
+}
+
+/**
+ * 紧凑提示词：截断重试时用。
+ * 首轮被 reasoning 吃满额度，往往是因为完整规则段落引发过度推理；
+ * 重试只留最必要的约束，缩短思考链路，同时保留 JSON 契约。
+ */
+function buildCompactPrompt(
+  categories: readonly string[],
+  autoCreate: boolean,
+  existing: readonly string[],
+  topics: readonly string[] = [],
+): string {
+  const list = existing.length > 0 ? `既有目录（优先复用，不要为同一事物新建同义目录）：${existing.join(' / ')}\n` : '';
+  const topicList = topics.length > 0 ? `已用主题（同类内容逐字沿用其中一条）：${topics.slice(0, 20).join(' / ')}\n` : '';
+  const rule = autoCreate
+    ? `分类优先用既有目录；其次用清单：${categories.join(' / ')}；确属新领域才自创（2~6 字中文名词）。`
+    : `分类必须从以下清单中严格择一：${categories.join(' / ')}。`;
+  return `归档判定。${list}${topicList}${rule}
+只输出一行 JSON，不要解释、不要 markdown：
+{"category":"...","topic":"6~20字中文主题，不含日期/版本/扩展名","version":"v01 或 null","verdict":"confident|unsure|unknown","reason":"不超过40字","alternatives":[]}`;
+}
+
+/** 单轮调用（内部）：逐次记录 usage，预算与超时可配 */
+async function callOnce(
   cfg: ResolvedModel,
   content: unknown,
-  opts: ClassifyOptions,
-  review = false,
-  timeoutMs = 30000,
-): Promise<FileInsight | null> {
+  system: string,
+  categories: readonly string[],
+  autoCreate: boolean,
+  existing: readonly string[],
+  maxTokens: number,
+  meta: ClassifyMeta,
+  timeoutMs: number,
+): Promise<{ insight: FileInsight | null; truncated: boolean }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -299,12 +413,9 @@ async function callModel(
       body: JSON.stringify({
         model: cfg.model,
         temperature: 0.2,
-        max_tokens: MAX_TOKENS,
+        max_tokens: maxTokens,
         messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt(opts.categories, opts.autoCreate, review, opts.corrections ?? []),
-          },
+          { role: 'system', content: system },
           { role: 'user', content },
         ],
       }),
@@ -316,28 +427,72 @@ async function callModel(
     }
     const data = (await resp.json()) as {
       choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        completion_tokens_details?: { reasoning_tokens?: number };
+      };
     };
-    const choice = data?.choices?.[0];
-    // 正文被思考过程挤空（额度用尽）→ 明确报错，避免静默落入 _待处理
-    if (choice?.finish_reason === 'length' && !choice.message?.content) {
-      throw new Error(`模型输出被截断（max_tokens=${MAX_TOKENS} 被思考过程占满）`);
+    const u = data.usage;
+    if (u) {
+      meta.tokens.prompt += u.prompt_tokens ?? 0;
+      meta.tokens.completion += u.completion_tokens ?? 0;
+      meta.tokens.reasoning += u.completion_tokens_details?.reasoning_tokens ?? 0;
     }
+    const choice = data?.choices?.[0];
     const raw = choice?.message?.content || '';
     const obj = extractJson(raw);
-    return obj ? normalizeInsight(obj, opts.categories, opts.autoCreate) : null;
+    // 正文被思考过程挤空（额度用尽）→ 标记截断，交上层决定重试
+    const truncated = choice?.finish_reason === 'length' && !obj;
+    return {
+      insight: obj ? normalizeInsight(obj, categories, autoCreate, existing) : null,
+      truncated,
+    };
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** 首轮判定：文本与图片同一入口 */
+/**
+ * 带重试的判定：正常额度跑一次；被思考挤空（finish_reason=length）时
+ * 用「紧凑提示词 + 更大额度」再跑一次。两次都截断才算失败。
+ */
+async function callWithRetry(
+  cfg: ResolvedModel,
+  content: unknown,
+  opts: ClassifyOptions,
+  existing: readonly string[],
+  meta: ClassifyMeta,
+  review: boolean,
+  timeoutMs = 45000,
+): Promise<FileInsight | null> {
+  const topics = opts.topics ?? [];
+  const full = buildSystemPrompt(opts.categories, opts.autoCreate, review, opts.corrections ?? [], existing, topics);
+  const first = await callOnce(cfg, content, full, opts.categories, opts.autoCreate, existing, MAX_TOKENS, meta, timeoutMs);
+  if (first.insight) return first.insight;
+  if (!first.truncated) return null;
+
+  meta.retries += 1;
+  meta.note = meta.note ? `${meta.note}；截断后重试成功` : '首轮被思考占满，重试';
+  const compact = buildCompactPrompt(opts.categories, opts.autoCreate, existing, topics);
+  const second = await callOnce(cfg, content, compact, opts.categories, opts.autoCreate, existing, RETRY_MAX_TOKENS, meta, timeoutMs);
+  if (second.insight) return second.insight;
+  if (second.truncated) {
+    meta.note = `两轮均被思考占满（max_tokens=${MAX_TOKENS}→${RETRY_MAX_TOKENS}）`;
+  }
+  return null;
+}
+
+/** 首轮判定：文本与图片同一入口。meta 用于回收 token/重试痕迹（写日志） */
 export function classifyPage(
   cfg: ResolvedModel,
   fileName: string,
   page: PageContent,
   opts: ClassifyOptions,
+  meta: ClassifyMeta = emptyMeta(cfg.model),
 ): Promise<FileInsight | null> {
-  return callModel(cfg, userContent(fileName, page), opts);
+  const existing = opts.existing ?? [];
+  return callWithRetry(cfg, userContent(fileName, page), opts, existing, meta, false);
 }
 
 /** 第二轮复核：仅在首轮 verdict === 'unsure' 时调用，带上首页内容与初判再判一次 */
@@ -347,6 +502,8 @@ export function reviewPage(
   page: PageContent,
   first: FileInsight,
   opts: ClassifyOptions,
+  meta: ClassifyMeta = emptyMeta(cfg.model),
 ): Promise<FileInsight | null> {
-  return callModel(cfg, userContent(fileName, page, first), opts, true);
+  const existing = opts.existing ?? [];
+  return callWithRetry(cfg, userContent(fileName, page, first), opts, existing, meta, true);
 }

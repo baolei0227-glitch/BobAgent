@@ -13,8 +13,8 @@
  * 与两个需要宿主侧落盘的工具（screenshot / export_pdf）和 read_pdf 的文本提取。
  */
 
-import { writeFile } from 'fs/promises';
-import { join } from 'path';
+import { copyFile, mkdir, stat, writeFile } from 'fs/promises';
+import { basename, join, relative } from 'path';
 import { downloadToTemp, pdfPathFromUrl } from '@/lib/pdf/page-source';
 import {
   BROWSER_TOOL_NAMES,
@@ -23,7 +23,7 @@ import {
   getHippoPageUrl,
 } from '@/lib/browser-tools';
 import type { Envelope } from '@/lib/browser-tools';
-import type { Tool } from './index';
+import type { EnhancedToolResult, Tool } from './index';
 
 /** 证据目录：<项目>/homework/.evidence/（与法律证据卡管线同目录，Finder 可见、可复核） */
 async function evidenceDir(): Promise<string> {
@@ -55,6 +55,63 @@ function renderElements(value: Record<string, unknown>): string {
   return `${head}\n${lines.join('\n')}\n\n用 ref 调用 browser_click / browser_type / browser_fill_form。`;
 }
 
+/** 字节数 → 人读大小（下载进度展示用） */
+function formatBytes(n: unknown): string {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '大小未知';
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** 下载记录 → 模型可读文本 */
+function renderDownload(rec: Record<string, unknown>): string {
+  const state = String(rec.state || 'progressing');
+  const got = Number(rec.receivedBytes) || 0;
+  const total = Number(rec.totalBytes) || 0;
+  const progress = total > 0 ? `${formatBytes(got)} / ${formatBytes(total)}` : formatBytes(got);
+  return `[${rec.id ?? '?'}] ${state} ${String(rec.fileName || '')}（${progress}）\n保存到: ${String(rec.savePath || '')}`;
+}
+
+/** 卡片文本转义（文件名 / 路径来自网页与系统，不能直接拼进 HTML） */
+function escapeCardText(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** 下载结果卡片（仅前端展示，不进模型上下文） */
+function renderDownloadCard(rec: Record<string, unknown>): string {
+  const state = String(rec.state || 'progressing');
+  const label = state === 'completed' ? '已下载'
+    : state === 'progressing' ? '下载中'
+      : state === 'cancelled' ? '已取消' : '已中断';
+  const got = Number(rec.receivedBytes) || 0;
+  const total = Number(rec.totalBytes) || 0;
+  const progress = total > 0 ? `${formatBytes(got)} / ${formatBytes(total)}` : formatBytes(got);
+  const name = escapeCardText(String(rec.fileName || '文件'));
+  const savePath = escapeCardText(String(rec.savePath || ''));
+  return `<div class="ai-card ai-card-download"><div class="ai-card-title">${label}：${name}</div>`
+    + `<div class="ai-card-meta">${progress} · 保存到系统下载目录</div>`
+    + `<div class="ai-card-body">${savePath}</div></div>`;
+}
+
+/** 工具结果里带下载记录时，给前端一张卡（文本仍保持原样，模型看不到 HTML） */
+function withDownloadCard(text: string, value: Record<string, unknown>): string | EnhancedToolResult {
+  const single = value.download as Record<string, unknown> | undefined;
+  if (single && typeof single === 'object') {
+    return { text, cardHtml: `<div class="ai-card-list">${renderDownloadCard(single)}</div>` };
+  }
+  const list = Array.isArray(value.downloads) ? (value.downloads as Array<Record<string, unknown>>) : [];
+  if (list.length) {
+    return { text, cardHtml: `<div class="ai-card-list">${list.slice(0, 3).map(renderDownloadCard).join('')}</div>` };
+  }
+  return text;
+}
+
 /** Envelope → 模型可读文本（统一返回面） */
 function renderEnvelope(name: string, env: Envelope): string {
   if (!env.ok) {
@@ -69,8 +126,36 @@ function renderEnvelope(name: string, env: Envelope): string {
       return `已打开: ${v.url || ''}${v.title ? `\n标题: ${v.title}` : ''}`;
     case 'browser_snapshot':
       return renderElements(v);
-    case 'browser_click':
-      return `已点击 ${v.clicked || ''}${v.redirected ? `\n页面已跳转: ${v.url || ''}` : `\n当前页面: ${v.url || ''}`}`;
+    case 'browser_click': {
+      const head = `已点击 ${v.clicked || ''}${v.redirected ? `\n页面已跳转: ${v.url || ''}` : `\n当前页面: ${v.url || ''}`}`;
+      const dl = v.download as Record<string, unknown> | undefined;
+      const revealed = v.revealed === true ? '\n已在 Finder 中显示' : '';
+      return dl ? `${head}\n下载已开始:\n${renderDownload(dl)}${revealed}\n用 browser_downloads 传 id=${dl.id} 查询进度/完成。` : head;
+    }
+    case 'browser_download': {
+      const dl = (v.download ?? {}) as Record<string, unknown>;
+      const revealed = v.revealed === true ? '\n已在 Finder 中显示' : '';
+      return `下载已开始:\n${renderDownload(dl)}${revealed}\n用 browser_downloads 传 id=${dl.id} 查询进度/完成。`;
+    }
+    case 'browser_find_downloads': {
+      const list = Array.isArray(v.candidates) ? (v.candidates as Array<Record<string, unknown>>) : [];
+      const pending = v.ready === false ? '\n[!] 页面可能未加载完，以下是当前 DOM 的扫描结果' : '';
+      if (!list.length) {
+        return `未找到明显的下载入口。${pending}\n可改用 browser_snapshot 查看全部可交互元素，或直接传已知的文件 url。`;
+      }
+      const lines = list.map((c, i) => {
+        const href = c.href ? `\n    href: ${c.href}` : '';
+        return `[${i + 1}] ${c.tag || ''} "${c.text || ''}"（${c.kind || 'download'}）\n    selector: ${c.selector || ''}${href}`;
+      });
+      return `找到 ${list.length} 个下载候选：${pending}\n${lines.join('\n')}\n\n用 browser_download 传 selector 或 url 下载。`;
+    }
+    case 'browser_downloads': {
+      const single = v.download as Record<string, unknown> | undefined;
+      if (single) return renderDownload(single);
+      const list = Array.isArray(v.downloads) ? (v.downloads as Array<Record<string, unknown>>) : [];
+      if (!list.length) return '本次会话还没有下载记录。';
+      return `共 ${list.length} 条下载（最新在前）:\n\n${list.map(renderDownload).join('\n\n')}`;
+    }
     case 'browser_type':
       return `已输入到 ${v.filled || ''}：${v.value ?? ''}`;
     case 'browser_fill_form': {
@@ -210,6 +295,68 @@ async function executeReadPdf(args: Record<string, unknown>): Promise<string> {
   }
 }
 
+/** 把已完成的下载复制到项目 materials/：侧栏没有 write_file，但仍需要「下载落到项目里」的通道。 */
+async function executeSaveDownload(args: Record<string, unknown>): Promise<string> {
+  const id = Number(args.id);
+  if (!Number.isFinite(id) || id <= 0) return 'Error: [syntax] id 必填（browser_download 返回的 download.id）';
+  const env = await getHippoDriver().exec('browser_downloads', { id }, {});
+  if (!env.ok) return renderEnvelope('browser_downloads', env);
+  const rec = ((env.value ?? {}) as { download?: Record<string, unknown> }).download;
+  if (!rec) return `Error: [download] 找不到下载 ${id}（可能已被清空）`;
+  const state = String(rec.state || '');
+  if (state !== 'completed') {
+    return `Error: [download] 下载尚未完成（state=${state || 'unknown'}），请先用 browser_downloads 等到 completed 再保存。`;
+  }
+  const src = String(rec.savePath || '');
+  if (!src) return 'Error: [download] 下载记录缺少保存路径';
+  try {
+    const s = await stat(src);
+    if (!s.isFile()) return 'Error: [download] 下载路径不是文件';
+  } catch {
+    return `Error: [download] 下载文件不存在：${src}`;
+  }
+  // 必须落到真实项目：getProjectRootPath 在无项目时会回退到 ~/BobWork/.sandbox，
+  // 那会把「保存到项目」写成沙箱文件，误导用户；这里显式要求激活项目。
+  const { getCurrentProject } = await import('@/lib/project/project-manager');
+  let projectRoot = '';
+  try {
+    const project = await getCurrentProject();
+    projectRoot = project?.path || '';
+  } catch {
+    projectRoot = '';
+  }
+  if (!projectRoot) return 'Error: [project] 当前没有激活项目，无法保存到 materials/；请先在画布顶部选择/创建项目。';
+  const rawFolder = String(args.folder ?? '').trim();
+  const folder = (rawFolder
+    ? rawFolder.replace(/[\\/]+/g, '-').replace(/[^0-9A-Za-z._\-\u4e00-\u9fa5]+/g, '-').replace(/^\.+/, '').slice(0, 60)
+    : '') || 'downloads';
+  const dir = join(projectRoot, 'materials', folder);
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (e) {
+    return `Error: [fs] 创建目录失败：${e instanceof Error ? e.message : String(e)}`;
+  }
+  const base = basename(String(rec.fileName || '')) || 'download';
+  const ext = base.includes('.') ? base.slice(base.lastIndexOf('.')) : '';
+  const stem = ext ? base.slice(0, -ext.length) : base;
+  let target = join(dir, base);
+  for (let n = 1; n < 1000; n++) {
+    try {
+      await stat(target);
+      target = join(dir, `${stem} (${n})${ext}`);
+    } catch {
+      break;
+    }
+  }
+  try {
+    await copyFile(src, target);
+  } catch (e) {
+    return `Error: [fs] 复制失败：${e instanceof Error ? e.message : String(e)}`;
+  }
+  const size = (await stat(target)).size;
+  return `已保存到项目：${relative(projectRoot, target)}\n来源: ${src}（${formatBytes(size)}）`;
+}
+
 /** 内置 browser_* 工具定义（规格层驱动；执行统一走 HippoDriver） */
 export const browserToolDefs: Tool[] = BROWSER_TOOL_SPECS.map((spec) => ({
   name: spec.name,
@@ -219,12 +366,15 @@ export const browserToolDefs: Tool[] = BROWSER_TOOL_SPECS.map((spec) => ({
   // 与 MCP 浏览器工具同场景门控：网页意图才注入（browser 场景见 route.ts detectSceneHints）
   scenes: ['browser'],
   maxOutput: spec.maxOutput,
-  execute: async (args: Record<string, unknown>): Promise<string> => {
+  execute: async (args: Record<string, unknown>): Promise<string | EnhancedToolResult> => {
+    if (spec.name === 'browser_save_download') return executeSaveDownload(args);
     if (spec.name === 'browser_screenshot') return executeScreenshot(args);
     if (spec.name === 'browser_export_pdf') return executeExportPdf(args);
     if (spec.name === 'browser_read_pdf') return executeReadPdf(args);
     const env = await getHippoDriver().exec(spec.name, args, {});
-    return renderEnvelope(spec.name, env);
+    const text = renderEnvelope(spec.name, env);
+    if (!env.ok) return text;
+    return withDownloadCard(text, (env.value ?? {}) as Record<string, unknown>);
   },
 }));
 

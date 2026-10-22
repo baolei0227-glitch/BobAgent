@@ -46,6 +46,55 @@ export function toggleStarredApp(app: { id: string; name: string }): boolean {
   return !exists;
 }
 
+/**
+ * 重排标星顺序（桌面图标拖拽排序，2026-10-18）：
+ * 按传入的 id 顺序落盘；未出现在 orderedIds 里的条目（竞态新增）保持原相对次序追加在后。
+ * 有变化才写盘并广播（与 toggle/prune 同一事件，订阅端据此刷新）。
+ */
+export function reorderStarredApps(orderedIds: string[]): StarredApp[] {
+  const cur = loadStarredApps();
+  const remaining = new Map(cur.map((a) => [a.id, a]));
+  const next: StarredApp[] = [];
+  for (const id of orderedIds) {
+    const hit = remaining.get(id);
+    if (hit) {
+      next.push(hit);
+      remaining.delete(id);
+    }
+  }
+  for (const a of cur) if (remaining.has(a.id)) next.push(a);
+  const changed = next.length !== cur.length || next.some((a, i) => a.id !== cur[i].id);
+  if (changed) {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(next));
+    } catch {
+      /* ignore quota */
+    }
+    window.dispatchEvent(new CustomEvent(STARRED_CHANGED_EVT, { detail: next }));
+  }
+  return next;
+}
+
+/**
+ * 按当前有效的小程序清单回收标星（2026-10-10 评估 P1-3）：
+ * 删除/改名后 localStorage 里会留下死图标，点开是 404。加载列表时调用一次即可。
+ * 有变化才写盘并广播（避免无谓刷新）。
+ */
+export function pruneStarredApps(validIds: Iterable<string>): StarredApp[] {
+  const valid = new Set(validIds);
+  const cur = loadStarredApps();
+  const next = cur.filter((a) => valid.has(a.id));
+  if (next.length !== cur.length) {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(next));
+    } catch {
+      /* ignore quota */
+    }
+    window.dispatchEvent(new CustomEvent(STARRED_CHANGED_EVT, { detail: next }));
+  }
+  return next;
+}
+
 /** 订阅标星集合变化；返回取消订阅函数 */
 export function subscribeStarred(listener: (apps: StarredApp[]) => void): () => void {
   const handler = () => listener(loadStarredApps());

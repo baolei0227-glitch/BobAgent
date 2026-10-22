@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readSettingsFromFile, writeSettingsToFile } from '@/lib/settings-server';
+import { readSettingsFromFile, writeSettingsToFile, maskSettingsSecrets, preserveStoredSecrets } from '@/lib/settings-server';
 import type { AppSettings } from '@/lib/settings';
 
 /**
@@ -34,7 +34,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'settings API is local-only' }, { status: 403 });
   }
   try {
-    return NextResponse.json({ success: true, settings: await readSettingsFromFile() });
+    // 出口脱敏：明文 apiKey / token / MCP env 不出服务端（2026-10-10 评估 P0-2）
+    return NextResponse.json({ success: true, settings: maskSettingsSecrets(await readSettingsFromFile()) });
   } catch (e) {
     return NextResponse.json(
       { success: false, error: e instanceof Error ? e.message : String(e) },
@@ -48,11 +49,13 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'settings API is local-only' }, { status: 403 });
   }
   try {
-    const settings = (await request.json()) as AppSettings;
-    if (!settings || typeof settings !== 'object') {
+    const incoming = (await request.json()) as AppSettings;
+    if (!incoming || typeof incoming !== 'object') {
       return NextResponse.json({ success: false, error: 'Invalid settings payload' }, { status: 400 });
     }
-    await writeSettingsToFile(settings);
+    // 写回保护：GET 已脱敏，UI 原样回传的掩码不能覆盖真 Key（2026-10-10 评估 P0-2）
+    const stored = await readSettingsFromFile();
+    await writeSettingsToFile(preserveStoredSecrets(incoming, stored));
     return NextResponse.json({ success: true });
   } catch (e) {
     // 防覆盖保护（version 缺失/为 0）或 I/O 失败：如实回报，客户端据此提示而非静默

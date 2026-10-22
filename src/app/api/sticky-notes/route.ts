@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { join } from 'path';
 import { promises as fs } from 'fs';
-import { getCurrentProject, getProjectById } from '@/lib/project/project-manager';
+import { resolveStickyScope } from '@/lib/project/sticky-scope';
 import { writeTodoIndexFile, readTodoIndexFile, buildTodoIndex, MAX_TODO_NOTES, pickTodoNoteColor, normalizeStickyNote } from '@/lib/sticky-todo';
 import { migrateStickyNotePages } from '@/lib/sticky-notes-migrate';
 import {
@@ -17,7 +17,8 @@ import {
  * 设计约束（与产品确认）：
  *  - 存 <项目根>/sticky-notes/sticky-notes.json（单文件存全部便签数组）
  *  - 不写入任何节点 .md，不接入 intern_search（AI 完全不可见）
- *  - 按项目隔离：project_id 指定项目，否则用当前激活项目
+ *  - 落点由 lib/project/sticky-scope 统一收口：project_id 指定项目，Inbox 哨兵 / 未指定
+ *    且无激活项目则落**全局 Inbox**（app root 的 sticky 文件，显示名 'Todo Inbox'）
  *  - 2026-08：便签 note 模式（kind='note' 带编号笔记页）已停用，
  *    存量 note 页内容迁移到统一笔记库 notes/（见 lib/sticky-notes-migrate.ts），
  *    便签只保留 todo 勾选清单。笔记与项目完全独立：删除项目前也会兜底迁移。
@@ -37,6 +38,9 @@ export type StickyNotePage = {
   lineCalendared?: boolean[];
   /** 每行待办已添加到日历的事件 id 列表（与 content 行序对齐；非空 = 已入日历，完成后按 id 精确标记完成） */
   lineEventIds?: string[][];
+  /** 每行的计划来源标记（与 content 行序对齐，语义同 lineEventIds）：`${planId}/${stepId}`；
+   *  仅系统「计划待办」便签（note.planTodos）使用，由 lib/project/plan-todo-sync 维护 */
+  linePlanRefs?: string[][];
 };
 
 export type StickyNote = {
@@ -58,38 +62,13 @@ export type StickyNote = {
   sidebarCollapsed?: boolean;
   /** 置顶层级（越大越靠上；右键置顶时递增并持久化） */
   z?: number;
+  /** 系统「计划待办」便签标记：每项目一张，由 plan → sticky 单向同步维护（lib/project/plan-todo-sync）；
+   *  豁免 MAX_TODO_NOTES 上限，且不参与自动入日历 */
+  planTodos?: boolean;
 };
 
 const STICKY_DIR = 'sticky-notes';
 const STICKY_FILE = 'sticky-notes.json';
-
-/** 解析目标项目目录：优先 project_id，其次当前激活项目 */
-async function resolveProjectDir(projectId?: string): Promise<string> {
-  if (projectId) {
-    try {
-      const p = await getProjectById(projectId);
-      return p.path;
-    } catch {
-      // fallback 到当前项目
-    }
-  }
-  const cur = await getCurrentProject();
-  return cur.path;
-}
-
-/** 解析项目名（用于默认标题） */
-async function resolveProjectName(projectId?: string): Promise<string> {
-  try {
-    if (projectId) {
-      const p = await getProjectById(projectId);
-      return p.name;
-    }
-    const cur = await getCurrentProject();
-    return cur.name;
-  } catch {
-    return 'Untitled';
-  }
-}
 
 /** 默认标题：项目名（不自动追加创建日期；项目名自带的后缀日期保持原样） */
 function defaultTitle(projectName: string): string {
@@ -282,7 +261,8 @@ export async function GET(req: NextRequest) {
   const projectId = req.nextUrl.searchParams.get('project_id') || undefined;
   const wantTodos = req.nextUrl.searchParams.get('todos') === '1';
   try {
-    const dir = await resolveProjectDir(projectId);
+    // 落点收口：project_id 有效 → 该项目；Inbox 哨兵 / 未指定且无激活项目 → 全局 Inbox
+    const dir = (await resolveStickyScope(projectId)).root;
     // 待办明细：读取该项目 Sticky 未完成待办索引（notes → pages → items 三级）
     if (wantTodos) {
       let index = await readTodoIndexFile(dir);
@@ -330,14 +310,18 @@ export async function POST(req: NextRequest) {
   const projectId = typeof body.project_id === 'string' ? body.project_id : undefined;
   const action = String(body.action || '');
   try {
-    const dir = await resolveProjectDir(projectId);
+    // 落点 + 归属收口：项目便签 或 全局 Inbox（未立项临时待办）；日历事件归属由 scope.calendarProjectId 决定
+    const scope = await resolveStickyScope(projectId);
+    const dir = scope.root;
     const notes = await readNotes(dir);
 
     if (action === 'create') {
       const note = (body.note ?? {}) as Partial<StickyNote>;
-      // 每项目最多三张待办便签：已满三张时不新建，返回已有便签由前端聚焦（limited=true）
-      if (notes.length >= MAX_TODO_NOTES) {
-        return NextResponse.json({ success: true, note: upgradeNotePages(notes[0]), limited: true, kind: 'todo' });
+      // 每项目最多三张「用户自己的」待办便签：已满三张时不新建，返回已有便签由前端聚焦（limited=true）。
+      // 系统「计划待办」便签（planTodos，由 plan→sticky 同步直写）不占用该配额，也不参与配色挑选。
+      const userNotes = notes.filter((n) => !n.planTodos);
+      if (userNotes.length >= MAX_TODO_NOTES) {
+        return NextResponse.json({ success: true, note: upgradeNotePages(userNotes[0]), limited: true, kind: 'todo' });
       }
       const initialContent = typeof note.content === 'string' && note.content.length > 0
         ? note.content
@@ -349,13 +333,13 @@ export async function POST(req: NextRequest) {
         content: initialContent,
         kind: 'todo',
       };
-      const projectName = await resolveProjectName(projectId);
+      const projectName = scope.projectName;
       const topZ = notes.reduce((m, n) => Math.max(m, n.z ?? 0), 0);
       const created: StickyNote = {
         id: newId(),
         x: typeof note.x === 'number' ? note.x : 0,
         y: typeof note.y === 'number' ? note.y : 0,
-        color: pickTodoNoteColor(notes, note.color),
+        color: pickTodoNoteColor(userNotes, note.color),
         kind: 'todo',
         title: typeof note.title === 'string' && note.title.trim() ? note.title : defaultTitle(projectName),
         pages: [firstPage],
@@ -397,7 +381,7 @@ export async function POST(req: NextRequest) {
       // 这里一并回传，供前端提示与排查「为什么这条排到了拥挤的时段」。
       let calendarConflicts: { count: number; titles: string[] } = { count: 0, titles: [] };
       try {
-        const effProjectId = projectId || (await getCurrentProject()).id;
+        const effProjectId = scope.calendarProjectId;
         persisted = await reconcileStickyNoteEvents(effProjectId, nextNote, prevNote);
         if (settleAuto) {
           const auto = await autoAddStickyLinesToCalendar(effProjectId, persisted);
@@ -447,7 +431,7 @@ export async function POST(req: NextRequest) {
       const merged = upgradeNotePages(
         mergeNotePatch(notes[idx], (body.note ?? {}) as Partial<StickyNote>),
       );
-      const effProjectId = projectId || (await getCurrentProject()).id;
+      const effProjectId = scope.calendarProjectId;
       const text = typeof body.text === 'string' ? body.text : undefined;
       const startTime = typeof body.start_time === 'string' && body.start_time.trim() ? body.start_time.trim() : null;
       const endTime = typeof body.end_time === 'string' && body.end_time.trim() ? body.end_time.trim() : null;
@@ -537,7 +521,7 @@ export async function POST(req: NextRequest) {
         ),
         updatedAt: new Date().toISOString(),
       };
-      const effProjectId = projectId || (await getCurrentProject()).id;
+      const effProjectId = scope.calendarProjectId;
       let persisted: StickyNote = nextNote;
       try {
         persisted = await reconcileStickyNoteEvents(effProjectId, nextNote, prevNote);

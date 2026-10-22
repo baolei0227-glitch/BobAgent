@@ -21,19 +21,41 @@
  */
 
 import { randomUUID } from 'crypto';
-import { readFile, writeFile, mkdir, rename } from 'fs/promises';
-import { getCurrentProject, createProject, switchProject } from '@/lib/project/project-manager';
+import {
+  getCurrentProject,
+  createProject,
+  switchProject,
+  listProjects,
+  updateProjectMeta,
+  renameProject,
+  archiveProject,
+  unarchiveProject,
+  type ProjectConfig,
+} from '@/lib/project/project-manager';
 import { resolveProjectWithFallback, resolveExplicitProject } from '@/lib/project/resolve-explicit-project';
+import {
+  readProjectPlans as readPlans,
+  writeProjectPlans as writePlans,
+  daysUntil,
+  summarizePlan,
+  type PlanStepStatus,
+  type PlanStep,
+  type PlanMilestone,
+  type PlanStatus,
+  type ProjectPlan,
+} from '@/lib/project/plans';
 import {
   emitProjectsChanged,
   emitProjectSwitched,
   emitSessionRequest,
   hasProjectsChangedListeners,
 } from '@/lib/project/project-events';
+import { syncPlanTodos } from '@/lib/project/plan-todo-sync';
 import { initDb } from '@/lib/db';
 import { join } from 'path';
 import { PROJECT_DB_FILENAME } from '@/lib/app-root';
-import type { ProviderConfig } from '@/lib/types';
+import type { SandboxTemplateId } from '@/lib/sandbox/templates';
+import { PROJECT_CATEGORIES, type ProviderConfig } from '@/lib/types';
 import type { ModelPriceOverride } from '@/lib/settings';
 import type { RecurrenceRule } from '@/lib/calendar/recurrence';
 import { parseRecurrence, recurrenceLabel } from '@/lib/calendar/recurrence';
@@ -862,6 +884,23 @@ async function toolTodoUpdate(args: Record<string, unknown>): Promise<string> {
     // 周期重复：'daily'/'weekly' 设置；'none' 明确取消（传 null 清库）；未提及则不动
     const rec = buildRecurrence(args);
     if (rec !== undefined) body.recurrence = rec;
+    // 归属迁移（move_to_project）：与字段改动互斥，走本地迁移管线（改事件归属 + 迁便签行），
+    // 不走 HTTP PATCH（PATCH 只改字段，无法迁便签行，也无法改 project_id / scope）
+    const moveRef = typeof args.move_to_project === 'string' ? args.move_to_project.trim() : '';
+    if (moveRef) {
+      if (Object.keys(body).length > 0) {
+        return JSON.stringify({
+          ok: false,
+          error: 'conflicting_args',
+          message: 'move_to_project 不能与其它字段改动同一次调用；请分两次调用（先改归属，再改字段）。',
+        });
+      }
+      const { moveTodoOwnership } = await import('@/lib/butler/todo-move');
+      const moved = await moveTodoOwnership({ eventId, target: moveRef });
+      return moved.ok
+        ? moved.message
+        : JSON.stringify({ ok: false, error: 'move_failed', message: moved.message });
+    }
     if (Object.keys(body).length === 0) return JSON.stringify({ ok: false, error: '没有要更新的字段' });
     const resp = await fetch(`${selfBaseUrl()}/api/calendar/events?event_id=${encodeURIComponent(eventId)}`, {
       method: 'PATCH',
@@ -1047,7 +1086,7 @@ async function toolCreateScheduledTodo(args: Record<string, unknown>): Promise<s
     // （scope='global'，仅建事件、不挂便签）。同名多命中 / 未找到原样返回，交模型澄清。
     // 历史教训（2026-09-27 余靖潘案）：省略 project 时静默兜底到当前项目，模型以为写进了新项目，
     // 于是反复「建→撤→建」。故落点来源（project_source）随回执回传，让模型能立刻发现写偏。
-    const pr = await resolveProjectWithFallback(args.project, { allowGlobal: true });
+    const pr = await resolveProjectWithFallback(args.project, { allowGlobal: true, allowInbox: true });
     if (!pr.ok) return pr.payload;
     const project = pr.project;
     const projectSource = pr.source;
@@ -1479,34 +1518,32 @@ async function toolQueryScheduleStatus(): Promise<string> {
 }
 
 /**
- * create_sticky_note 工具执行器：在画布上静默创建一张便签（项目私有）。
+ * create_sticky_note 工具执行器：在画布上静默创建一张便签。
  * 便签为用户私有数据（AI 不可读回），本工具仅负责写入，不返回内容、不触发确认弹窗。
- * 目标项目必须由 args.project 显式指定（未指定 → project_required，不回落当前项目）。
+ * 落点：显式 args.project 优先 → 未提及则当前激活项目 → 无激活项目则**全局 Todo Inbox**
+ * （未立项的临时待办有处可去，可在立项后用 todo_update 归入项目）。
  * 写入格式与 /api/sticky-notes 完全一致（pages/activePageId 结构）。
  */
 async function toolCreateStickyNote(args: Record<string, unknown>): Promise<string> {
   try {
-    // 落点解析：显式项目优先；未提及项目 → 自动落当前激活项目。
-    // 便签为项目私有（无全局便签库），应用无激活项目时直接返回结构化错误，不硬造落点。
-    const pr = await resolveProjectWithFallback(args.project);
+    // 落点解析：显式项目优先 → 未提及则当前激活项目 → 无激活项目则全局 Todo Inbox。
+    const pr = await resolveProjectWithFallback(args.project, { allowGlobal: true, allowInbox: true });
     if (!pr.ok) return pr.payload;
-    if (!pr.project) {
-      return JSON.stringify({
-        ok: false,
-        error: 'no_active_project',
-        message: '应用当前没有激活项目，便签无处可写。请让用户先在 BobWork 中激活或选择一个项目。',
-      });
-    }
-    const projectRoot = pr.project.path;
+    const isInbox = !pr.project;
+    const { resolveAppRoot } = await import('@/lib/app-root');
+    const { TODO_INBOX_NAME } = await import('@/lib/project/sticky-scope');
+    const projectRoot = isInbox ? resolveAppRoot() : pr.project!.path;
     const projectSource = pr.source;
-    const projectName = pr.project.name || 'Untitled';
+    const projectName = isInbox ? TODO_INBOX_NAME : pr.project!.name || 'Untitled';
     const content = String(args.content ?? '').trim();
     if (!content) return JSON.stringify({ ok: false, error: 'content 不能为空' });
-    // 未指定项目而兜底到当前项目时，把这件事显式说给模型听（防止"以为写进了别的项目"）
+    // 未指定项目而兜底时，把落点显式说给模型听（防止"以为写进了别的项目/项目"）
     const fallbackWarning =
       projectSource === 'current_fallback'
         ? `你这次没有传 project，便签落到了**当前项目**《${projectName}》。若用户其实指的是别的项目，请删除该便签后带显式 project 重调本工具——不要重复创建。`
-        : undefined;
+        : projectSource === 'global'
+          ? `你这次没有传 project，且应用当前没有激活项目，便签落到了**${TODO_INBOX_NAME}**（未立项的临时待办）。若用户其实指某个项目，请让用户先激活/创建该项目，再带显式 project 重调本工具——不要重复创建。`
+          : undefined;
 
     // 落盘原语与规则执行器（rule-exec.ts 的 create_todo）共用同一份，见 lib/butler/sticky-write.ts
     const { appendStickyTodoNote } = await import('@/lib/butler/sticky-write');
@@ -1546,7 +1583,7 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
       title: res.title,
       color: res.color,
       project: projectName,
-      project_id: pr.project.id,
+      project_id: pr.project?.id,
       project_root: projectRoot,
       project_source: projectSource,
       warning: fallbackWarning,
@@ -1557,27 +1594,7 @@ async function toolCreateStickyNote(args: Record<string, unknown>): Promise<stri
 }
 
 // ===== 计划树（.butler/plans.json）：里程碑 → 步骤 → 状态推进 =====
-
-type PlanStepStatus = 'pending' | 'in_progress' | 'done' | 'blocked';
-type PlanStep = { id: string; title: string; status: PlanStepStatus; note?: string };
-type PlanMilestone = {
-  id: string;
-  title: string;
-  status: 'active' | 'done';
-  steps: PlanStep[];
-};
-type ProjectPlan = {
-  id: string;
-  title: string;
-  goal?: string;
-  status: 'active' | 'done';
-  milestones: PlanMilestone[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-const BUTLER_DATA_DIR = '.butler';
-const BUTLER_DATA_FILE = 'plans.json';
+// 数据层（类型 / 落盘读写 / 派生视图）见 lib/project/plans.ts，本文件只留交互层（状态机 + 渲染）
 
 const ALLOWED_TRANSITIONS: Record<PlanStepStatus, PlanStepStatus[]> = {
   pending: ['in_progress', 'blocked'],
@@ -1590,22 +1607,16 @@ function newPlanId(prefix: string): string {
   return `${prefix}-${randomUUID().slice(0, 12)}`;
 }
 
-async function readPlans(root: string): Promise<ProjectPlan[]> {
-  try {
-    const raw = await readFile(join(root, BUTLER_DATA_DIR, BUTLER_DATA_FILE), 'utf-8');
-    const data = JSON.parse(raw);
-    return Array.isArray(data?.plans) ? (data.plans as ProjectPlan[]) : [];
-  } catch {
-    return [];
-  }
+/** 计划终态：关闭后不再由 recalcPlan 自动改回 active；要续做需 project_plan_close 以 active 重开 */
+const CLOSED_PLAN_STATUSES: PlanStatus[] = ['done', 'abandoned'];
+
+function isClosedPlan(p: ProjectPlan): boolean {
+  return CLOSED_PLAN_STATUSES.includes(p.status);
 }
 
-async function writePlans(root: string, plans: ProjectPlan[]): Promise<void> {
-  const dir = join(root, BUTLER_DATA_DIR);
-  await mkdir(dir, { recursive: true });
-  const tmp = join(dir, `.${BUTLER_DATA_FILE}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`);
-  await writeFile(tmp, JSON.stringify({ plans }, null, 2), 'utf-8');
-  await rename(tmp, join(dir, BUTLER_DATA_FILE));
+/** 计划状态标记：done ✅ / abandoned ⛔ / active ▶ */
+function planStatusMark(status: PlanStatus): string {
+  return status === 'done' ? '✅' : status === 'abandoned' ? '⛔' : '▶';
 }
 
 function recalcMilestone(m: PlanMilestone): void {
@@ -1614,22 +1625,44 @@ function recalcMilestone(m: PlanMilestone): void {
 
 function recalcPlan(p: ProjectPlan): void {
   p.milestones.forEach(recalcMilestone);
-  p.status = p.milestones.length > 0 && p.milestones.every((m) => m.status === 'done') ? 'done' : 'active';
+  // 终态计划不自动回退；active 计划按步骤现状定级（全做完 → done）
+  if (!isClosedPlan(p)) {
+    p.status = p.milestones.length > 0 && p.milestones.every((m) => m.status === 'done') ? 'done' : 'active';
+  }
   p.updatedAt = new Date().toISOString();
 }
 
-function buildMilestone(title: string, stepTitles: string[]): PlanMilestone {
+/** 归一化一个步骤输入：字符串 → 仅标题；对象 → 可带 due/owner/artifact/note */
+function buildStep(raw: unknown): PlanStep {
+  if (typeof raw === 'string') {
+    return { id: newPlanId('st'), title: raw.trim(), status: 'pending' };
+  }
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const step: PlanStep = {
+    id: newPlanId('st'),
+    title: String(o.title ?? '').trim() || 'Step',
+    status: 'pending',
+  };
+  if (typeof o.due === 'string' && o.due.trim()) step.due = o.due.trim();
+  if (typeof o.owner === 'string' && o.owner.trim()) step.owner = o.owner.trim();
+  if (typeof o.artifact === 'string' && o.artifact.trim()) step.artifact = o.artifact.trim();
+  if (typeof o.note === 'string' && o.note.trim()) step.note = o.note.trim();
+  return step;
+}
+
+function buildMilestone(title: string, rawSteps: unknown[]): PlanMilestone {
   return {
     id: newPlanId('ms'),
     title,
     status: 'active',
-    steps: stepTitles.map((t) => ({ id: newPlanId('st'), title: t, status: 'pending' })),
+    // 空标题（空串步骤）直接丢弃，避免 plans.json 里出现无名步骤
+    steps: rawSteps.map(buildStep).filter((s) => s.title.length > 0),
   };
 }
 
 function renderPlan(p: ProjectPlan): string {
   const lines: string[] = [];
-  lines.push(`# ${p.title} · ${p.status === 'done' ? '✅ done' : '▶ active'}`);
+  lines.push(`# ${p.title} · ${p.status === 'done' ? '✅ done' : p.status === 'abandoned' ? '⛔ abandoned' : '▶ active'}`);
   lines.push(`> id: ${p.id}${p.goal ? ` · goal: ${p.goal}` : ''}`);
   if (p.milestones.length === 0) {
     lines.push('');
@@ -1642,7 +1675,13 @@ function renderPlan(p: ProjectPlan): string {
     lines.push(`## ${m.title} ${m.status === 'done' ? '✅' : `(${doneCount}/${m.steps.length})`} · ms:${m.id}`);
     for (const s of m.steps) {
       const mark = s.status === 'done' ? '[x]' : s.status === 'in_progress' ? '[>]' : s.status === 'blocked' ? '[!]' : '[ ]';
-      lines.push(`- ${mark} ${s.title} · ${s.status}${s.note ? ` · ${s.note}` : ''} · st:${s.id}`);
+      const meta = [
+        s.due ? `due:${s.due}` : '',
+        s.owner ? `owner:${s.owner}` : '',
+        s.artifact ? `artifact:${s.artifact}` : '',
+        s.note ? s.note : '',
+      ].filter(Boolean).join(' · ');
+      lines.push(`- ${mark} ${s.title} · ${s.status}${meta ? ` · ${meta}` : ''} · st:${s.id}`);
     }
   }
   return lines.join('\n');
@@ -1676,6 +1715,19 @@ async function resolvePlanRoot(ref: unknown): Promise<
   return { ok: true, root: pr.project.path, notice };
 }
 
+/**
+ * 写计划树 + 单向同步到用户日常可见的「计划待办」便签（P0-1(a)）。
+ * 同步失败只记日志，绝不阻断计划本身的落盘（便签是派生视图，不能反过来拖垮主数据）。
+ */
+async function writePlansThenSync(root: string, plans: ProjectPlan[]): Promise<void> {
+  await writePlans(root, plans);
+  try {
+    await syncPlanTodos(root, plans);
+  } catch (e) {
+    console.error('[butler] plan→sticky 待办同步失败:', e);
+  }
+}
+
 /** 计划树：新建计划（含可选里程碑/步骤） */
 async function toolProjectPlanStart(args: Record<string, unknown>): Promise<string> {
   try {
@@ -1685,6 +1737,14 @@ async function toolProjectPlanStart(args: Record<string, unknown>): Promise<stri
     const title = String(args.title ?? '').trim();
     if (!title) return JSON.stringify({ ok: false, error: 'title 不能为空' });
     const goal = typeof args.goal === 'string' && args.goal.trim() ? args.goal.trim() : undefined;
+
+    // 去重：同项目下已有「同名且进行中」的计划 → 直接返回它，不重复创建
+    // （模型在同一件事上重复调用本工具时，避免 plans.json 里堆出一串同义计划）
+    const plans = await readPlans(root);
+    const existing = plans.find((x) => x.status === 'active' && x.title === title);
+    if (existing) {
+      return `Plan already exists (same title & active) — no new plan created. id: ${existing.id}\n\n${renderPlan(existing)}\n\n[同项目下已有同名进行中计划，未重复创建。要继续加步骤用 project_plan_add_steps；确实要另开一个，换个 title 或先关闭/删除旧计划。]${pr.notice}`;
+    }
 
     const now = new Date().toISOString();
     const plan: ProjectPlan = {
@@ -1701,22 +1761,17 @@ async function toolProjectPlanStart(args: Record<string, unknown>): Promise<stri
     if (Array.isArray(rawMs) && rawMs.length > 0) {
       for (const it of rawMs as Array<Record<string, unknown>>) {
         const msTitle = String(it.title ?? '').trim() || 'Milestone';
-        const stepTitles = (Array.isArray(it.steps) ? it.steps : [])
-          .map((s) => String(s).trim())
-          .filter(Boolean);
-        plan.milestones.push(buildMilestone(msTitle, stepTitles));
+        const stepInputs = Array.isArray(it.steps) ? it.steps : [];
+        plan.milestones.push(buildMilestone(msTitle, stepInputs));
       }
     } else {
-      const stepTitles = (Array.isArray(args.steps) ? args.steps : [])
-        .map((s) => String(s).trim())
-        .filter(Boolean);
-      plan.milestones.push(buildMilestone('执行', stepTitles));
+      const stepInputs = Array.isArray(args.steps) ? args.steps : [];
+      plan.milestones.push(buildMilestone('执行', stepInputs));
     }
 
-    const plans = await readPlans(root);
     plans.push(plan);
-    await writePlans(root, plans);
-    return `Plan created. id: ${plan.id}\n\n${renderPlan(plan)}\n\nTrack progress with project_plan_view / project_plan_step_status.${pr.notice}`;
+    await writePlansThenSync(root, plans);
+    return `Plan created. id: ${plan.id}\n\n${renderPlan(plan)}\n\nTrack progress with project_plan_view / project_plan_step_status; close it with project_plan_close.${pr.notice}`;
   } catch (e) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -1740,7 +1795,7 @@ async function toolProjectPlanView(args: Record<string, unknown>): Promise<strin
     for (const p of plans) {
       const steps = p.milestones.reduce((n, m) => n + m.steps.length, 0);
       const doneSteps = p.milestones.reduce((n, m) => n + m.steps.filter((s) => s.status === 'done').length, 0);
-      lines.push(`- ${p.status === 'done' ? '✅' : '▶'} ${p.title} · id:${p.id} · ${doneSteps}/${steps} steps done`);
+      lines.push(`- ${planStatusMark(p.status)} ${p.title} · id:${p.id} · ${doneSteps}/${steps} steps done · ${p.status}`);
     }
     lines.push('');
     lines.push('Pass plan_id to project_plan_view to see a full tree.');
@@ -1757,15 +1812,19 @@ async function toolProjectPlanAddSteps(args: Record<string, unknown>): Promise<s
     if (!pr.ok) return pr.payload;
     const root = pr.root;
     const planId = String(args.plan_id ?? '').trim();
-    const stepTitles = (Array.isArray(args.steps) ? args.steps : [])
-      .map((s) => String(s).trim())
-      .filter(Boolean);
+    // 步骤输入兼容两种形态：字符串（仅标题）或对象 { title, due?, owner?, artifact?, note? }
+    const newSteps = (Array.isArray(args.steps) ? args.steps : [])
+      .map(buildStep)
+      .filter((s) => s.title.length > 0);
     if (!planId) return JSON.stringify({ ok: false, error: 'plan_id 不能为空' });
-    if (stepTitles.length === 0) return JSON.stringify({ ok: false, error: 'steps 不能为空' });
+    if (newSteps.length === 0) return JSON.stringify({ ok: false, error: 'steps 不能为空' });
 
     const plans = await readPlans(root);
     const plan = plans.find((x) => x.id === planId);
     if (!plan) return JSON.stringify({ ok: false, error: `计划不存在: ${planId}` });
+    if (isClosedPlan(plan)) {
+      return JSON.stringify({ ok: false, error: `计划已关闭（${plan.status}），不能追加步骤。如需继续，先用 project_plan_close 以 status=active 重开。` });
+    }
 
     let milestone: PlanMilestone | undefined;
     const msId = typeof args.milestone_id === 'string' ? args.milestone_id : '';
@@ -1777,10 +1836,10 @@ async function toolProjectPlanAddSteps(args: Record<string, unknown>): Promise<s
       milestone = buildMilestone(msTitle || '执行', []);
       plan.milestones.push(milestone);
     }
-    for (const t of stepTitles) milestone.steps.push({ id: newPlanId('st'), title: t, status: 'pending' });
+    milestone.steps.push(...newSteps);
     recalcPlan(plan);
-    await writePlans(root, plans);
-    return `Added ${stepTitles.length} step(s) to "${milestone.title}".\n\n${renderPlan(plan)}${pr.notice}`;
+    await writePlansThenSync(root, plans);
+    return `Added ${newSteps.length} step(s) to "${milestone.title}".\n\n${renderPlan(plan)}${pr.notice}`;
   } catch (e) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -1804,6 +1863,9 @@ async function toolProjectPlanStepStatus(args: Record<string, unknown>): Promise
     const plans = await readPlans(root);
     const plan = plans.find((x) => x.id === planId);
     if (!plan) return JSON.stringify({ ok: false, error: `计划不存在: ${planId}` });
+    if (isClosedPlan(plan)) {
+      return JSON.stringify({ ok: false, error: `计划已关闭（${plan.status}），不能改步骤状态。如需继续，先用 project_plan_close 以 status=active 重开。` });
+    }
     const milestone = plan.milestones.find((m) => m.steps.some((s) => s.id === stepId));
     if (!milestone) return JSON.stringify({ ok: false, error: `步骤不存在: ${stepId}` });
     const step = milestone.steps.find((s) => s.id === stepId)!;
@@ -1817,9 +1879,377 @@ async function toolProjectPlanStepStatus(args: Record<string, unknown>): Promise
     step.status = want;
     if (note !== undefined) step.note = note;
     recalcPlan(plan);
-    await writePlans(root, plans);
+    await writePlansThenSync(root, plans);
     const prefix = want === 'done' ? '✅' : want === 'blocked' ? '⛔' : want === 'in_progress' ? '▶' : '◻';
     return `${prefix} Step "${step.title}" → ${want}${plan.status === 'done' ? ' · 🎉 计划全部完成' : ''}\n\n${renderPlan(plan)}${pr.notice}`;
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** 计划树：关闭 / 放弃 / 重开计划（done / abandoned 为终态；active 为重新打开） */
+async function toolProjectPlanClose(args: Record<string, unknown>): Promise<string> {
+  try {
+    const pr = await resolvePlanRoot(args.project);
+    if (!pr.ok) return pr.payload;
+    const root = pr.root;
+    const planId = String(args.plan_id ?? '').trim();
+    const status = String(args.status ?? '').trim();
+    if (!planId) return JSON.stringify({ ok: false, error: 'plan_id 不能为空' });
+    if (!['active', 'done', 'abandoned'].includes(status)) {
+      return JSON.stringify({ ok: false, error: `非法状态: ${status}（仅支持 active / done / abandoned）` });
+    }
+
+    const plans = await readPlans(root);
+    const plan = plans.find((x) => x.id === planId);
+    if (!plan) return JSON.stringify({ ok: false, error: `计划不存在: ${planId}` });
+
+    if (status === 'active') {
+      // 重开：清终态，再按步骤现状自动定级（全做完仍会回到 done）
+      plan.status = 'active';
+      recalcPlan(plan);
+      await writePlansThenSync(root, plans);
+      return `▶ Plan reopened: ${plan.title} (id: ${plan.id})\n\n${renderPlan(plan)}${pr.notice}`;
+    }
+
+    // 关闭/放弃：直接置终态；不重算各步（保留现状便于事后回看）
+    plan.status = status as PlanStatus;
+    plan.updatedAt = new Date().toISOString();
+    await writePlansThenSync(root, plans);
+    const mark = status === 'abandoned' ? '⛔' : '✅';
+    return `${mark} Plan closed as ${status}: ${plan.title} (id: ${plan.id})\n\n${renderPlan(plan)}\n\n[计划已置为 ${status}，不再随步骤自动变化；要续做用 project_plan_close 以 status=active 重开。]${pr.notice}`;
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** 计划树：删除计划（不可逆，从 plans.json 移除该条） */
+async function toolProjectPlanDelete(args: Record<string, unknown>): Promise<string> {
+  try {
+    const pr = await resolvePlanRoot(args.project);
+    if (!pr.ok) return pr.payload;
+    const root = pr.root;
+    const planId = String(args.plan_id ?? '').trim();
+    if (!planId) return JSON.stringify({ ok: false, error: 'plan_id 不能为空' });
+
+    const plans = await readPlans(root);
+    const idx = plans.findIndex((x) => x.id === planId);
+    if (idx === -1) return JSON.stringify({ ok: false, error: `计划不存在: ${planId}` });
+    const [removed] = plans.splice(idx, 1);
+    await writePlansThenSync(root, plans);
+    return `Deleted plan "${removed.title}" (id: ${removed.id}). Remaining plans in this project: ${plans.length}.${pr.notice}`;
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+// ===== 项目治理（管家）：分类/标签/备注、重命名、归档/取消归档 =====
+
+/**
+ * 项目治理工具的项目解析：在**全部非垃圾桶项目**（含已归档）中按 id / 名称 / 基名匹配。
+ * 刻意不复用 resolveExplicitProject —— 它只在活跃项目里找，而 unarchive 的目标恰恰是已归档项目。
+ * 命中多个同名 → 结构化 ambiguous（交模型澄清），绝不猜。
+ */
+async function resolveGovernanceProject(ref: unknown): Promise<
+  | { ok: true; project: ProjectConfig }
+  | { ok: false; payload: string }
+> {
+  const raw = typeof ref === 'string' ? ref.trim() : '';
+  if (!raw) {
+    return {
+      ok: false,
+      payload: JSON.stringify({ ok: false, error: 'project is required', hint: '要操作哪个项目还没说清：先向用户确认项目名/id，不要猜。' }, null, 2),
+    };
+  }
+  const { projects } = await listProjects();
+  const pool = projects.filter((p) => !p.trashed && !p.hidden);
+  const byId = pool.find((p) => p.id === raw);
+  if (byId) return { ok: true, project: byId };
+
+  const ambiguous = (hits: ProjectConfig[]) =>
+    JSON.stringify({
+      ok: false,
+      error: 'project_ambiguous',
+      message: `有多个项目匹配「${raw}」，无法确定操作哪一个。请让用户确认（或改用项目 ID）。`,
+      candidates: hits.map((p) => ({ id: p.id, name: p.name, archived: !!p.archived })),
+    }, null, 2);
+
+  const key = raw.toLowerCase();
+  const exact = pool.filter((p) => p.name.trim().toLowerCase() === key);
+  if (exact.length === 1) return { ok: true, project: exact[0] };
+  if (exact.length > 1) return { ok: false, payload: ambiguous(exact) };
+
+  // 基名兜底（仅当引用本身不带日期后缀）：匹配 `<基名>_YYYYMMDD`
+  if (!/[_-]\d{8}$/.test(raw)) {
+    const byBase = pool.filter((p) => p.name.trim().replace(/[_-]\d{8}$/, '').toLowerCase() === key);
+    if (byBase.length === 1) return { ok: true, project: byBase[0] };
+    if (byBase.length > 1) return { ok: false, payload: ambiguous(byBase) };
+  }
+
+  const available = pool.map((p) => `${p.name}${p.archived ? '（已归档）' : ''}`).join('、');
+  return {
+    ok: false,
+    payload: JSON.stringify({
+      ok: false,
+      error: 'project_not_found',
+      message: `未找到项目「${raw}」（不含垃圾桶）。可选：${available || '（当前没有项目）'}。`,
+      candidates: pool.map((p) => ({ id: p.id, name: p.name, archived: !!p.archived })),
+    }, null, 2),
+  };
+}
+
+/** 项目治理：更新分类 / 标签 / 备注（分类仅限预设六类；空串 = 清除该项） */
+async function toolProjectUpdateMeta(args: Record<string, unknown>): Promise<string> {
+  const resolved = await resolveGovernanceProject(args.project);
+  if (!resolved.ok) return resolved.payload;
+  const target = resolved.project;
+
+  const catRaw = typeof args.category === 'string' ? args.category.trim() : undefined;
+  if (catRaw !== undefined && catRaw !== '' && !(PROJECT_CATEGORIES as readonly string[]).includes(catRaw)) {
+    return JSON.stringify({
+      ok: false,
+      error: 'invalid_category',
+      message: `分类只能是：${PROJECT_CATEGORIES.join(' / ')}（传空串 = 清除分类）。请向用户确认后重试，不要自造分类。`,
+      candidates: PROJECT_CATEGORIES,
+    }, null, 2);
+  }
+  const tags = Array.isArray(args.tags) ? args.tags.map((t) => String(t ?? '')) : undefined;
+  const note = typeof args.note === 'string' ? args.note : undefined;
+  if (catRaw === undefined && tags === undefined && note === undefined) {
+    return JSON.stringify({ ok: false, error: 'nothing_to_update', message: '至少传 category / tags / note 之一。' }, null, 2);
+  }
+
+  try {
+    const project = await updateProjectMeta(target.id, { category: catRaw, tags, note });
+    emitProjectsChanged();
+    const uiSynced = hasProjectsChangedListeners();
+    return JSON.stringify({
+      ok: true,
+      id: project.id,
+      name: project.name,
+      category: project.category ?? null,
+      tags: project.tags ?? [],
+      note: project.note ?? null,
+      ui_synced: uiSynced,
+      message: `已更新项目「${project.name}」的元信息${uiSynced ? '，侧边栏已刷新' : '（BobWork 界面未打开，下次打开即为最新）'}。`,
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }, null, 2);
+  }
+}
+
+/** 项目治理：重命名项目（只改显示名，不改磁盘目录） */
+async function toolProjectRename(args: Record<string, unknown>): Promise<string> {
+  const newName = typeof args.new_name === 'string' ? args.new_name.trim() : '';
+  if (!newName) {
+    return JSON.stringify({ ok: false, error: 'new_name is required', hint: '新名称缺失：先向用户确认要改成什么，再调用本工具。' }, null, 2);
+  }
+  const resolved = await resolveGovernanceProject(args.project);
+  if (!resolved.ok) return resolved.payload;
+  const target = resolved.project;
+
+  try {
+    const project = await renameProject(target.id, newName);
+    emitProjectsChanged();
+    const uiSynced = hasProjectsChangedListeners();
+    return JSON.stringify({
+      ok: true,
+      id: project.id,
+      name: project.name,
+      previous_name: target.name,
+      path: project.path,
+      ui_synced: uiSynced,
+      message: `已把项目「${target.name}」重命名为「${project.name}」（目录路径不变：${project.path}）${uiSynced ? '，侧边栏已刷新' : ''}。`,
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }, null, 2);
+  }
+}
+
+/** 项目治理：归档项目（从侧边栏活跃列表隐藏，数据保留）；归档当前项目会自动切走 */
+async function toolProjectArchive(args: Record<string, unknown>): Promise<string> {
+  const resolved = await resolveGovernanceProject(args.project);
+  if (!resolved.ok) return resolved.payload;
+  const target = resolved.project;
+  if (target.archived) {
+    return JSON.stringify({ ok: true, id: target.id, name: target.name, already_archived: true, message: `项目「${target.name}」已经是归档状态。` }, null, 2);
+  }
+
+  try {
+    const before = await getCurrentProject().catch(() => null);
+    const project = await archiveProject(target.id);
+    emitProjectsChanged();
+    const switchedAway = before?.id === target.id;
+    let nextCurrent: { id: string; name: string } | null = null;
+    if (switchedAway) {
+      const now = await getCurrentProject().catch(() => null);
+      if (now) {
+        nextCurrent = { id: now.id, name: now.name };
+        // 当前项目被归档 → 服务端已切到别的项目，需补一次「无刷新切换」广播让画布跟上
+        emitProjectSwitched(now.id);
+      }
+    }
+    const uiSynced = hasProjectsChangedListeners();
+    return JSON.stringify({
+      ok: true,
+      id: project.id,
+      name: project.name,
+      archived: true,
+      switched_away: switchedAway,
+      current_project: nextCurrent,
+      ui_synced: uiSynced,
+      message: switchedAway
+        ? `已归档项目「${project.name}」。它此前是当前项目，已自动切换到${nextCurrent ? `「${nextCurrent.name}」` : '无项目状态'}${uiSynced ? '，界面已跟随' : ''}。数据仍在磁盘，可用 project_unarchive 恢复。`
+        : `已归档项目「${project.name}」（从侧边栏活跃列表隐藏，数据保留）。可用 project_unarchive 恢复。`,
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }, null, 2);
+  }
+}
+
+/** 项目治理：取消归档（恢复为活跃项目） */
+async function toolProjectUnarchive(args: Record<string, unknown>): Promise<string> {
+  const resolved = await resolveGovernanceProject(args.project);
+  if (!resolved.ok) return resolved.payload;
+  const target = resolved.project;
+  if (!target.archived) {
+    return JSON.stringify({ ok: true, id: target.id, name: target.name, already_active: true, message: `项目「${target.name}」当前并未归档，无需恢复。` }, null, 2);
+  }
+
+  try {
+    const project = await unarchiveProject(target.id);
+    emitProjectsChanged();
+    const uiSynced = hasProjectsChangedListeners();
+    return JSON.stringify({
+      ok: true,
+      id: project.id,
+      name: project.name,
+      archived: false,
+      ui_synced: uiSynced,
+      message: `已恢复项目「${project.name}」为活跃项目${uiSynced ? '，侧边栏已刷新' : ''}。`,
+    }, null, 2);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }, null, 2);
+  }
+}
+
+// ===== 跨项目计划总览（管家「项目管理」的读取面：一次看清各项目计划进度 / 到期未完成 / 停滞） =====
+
+/**
+ * 跨项目计划总览（只读）：遍历活跃项目（或点名项目）的 .butler/plans.json，
+ * 汇总每个计划的进度、到期/逾期未完成步骤、以及项目最近活动与停滞天数。
+ *
+ * 为什么需要它：项目计划此前只能在「某一项目内」按 plan_id 一步步看（project_plan_view），
+ * 管家回答不了「现在哪个项目的计划停滞了 / 哪些步骤已逾期」这类**跨项目**问题。
+ * 与 project_plan_view 的分工：本工具给全局视图与优先级判断，确认细节再进单个计划。
+ */
+async function toolProjectPlansOverview(args: Record<string, unknown>): Promise<string> {
+  try {
+    const includeClosed = args.includeClosed === true;
+    const onlyAttention = args.onlyAttention === true;
+    const stalledDays =
+      typeof args.stalledDays === 'number' && Number.isFinite(args.stalledDays)
+        ? Math.min(Math.max(Math.trunc(args.stalledDays), 1), 365)
+        : 14;
+    const projectRef = typeof args.project === 'string' ? args.project.trim() : '';
+    const { getProjectLastActivityAt } = await import('@/lib/project/activity');
+
+    let targets: ProjectConfig[];
+    if (projectRef) {
+      const resolved = await resolveGovernanceProject(projectRef);
+      if (!resolved.ok) return resolved.payload;
+      targets = [resolved.project];
+    } else {
+      const { active_projects } = await listProjects();
+      targets = active_projects;
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    interface PlanRow {
+      id: string;
+      title: string;
+      status: PlanStatus;
+      steps: number;
+      done: number;
+      overdue: Array<{ step: string; due: string; daysOverdue: number }>;
+      nextDue: string | null;
+      stalled: boolean;
+      updatedAt: string;
+    }
+    const rows: Array<Record<string, unknown>> = [];
+    let totalOpen = 0;
+    let totalOverdue = 0;
+    let attentionProjects = 0;
+
+    for (const p of targets) {
+      const plans = await readPlans(p.path);
+      const open = plans.filter((x) => x.status === 'active');
+      const shown = includeClosed ? plans : open;
+
+      const planRows: PlanRow[] = shown.map((plan) => {
+        const s = summarizePlan(plan);
+        return {
+          id: plan.id,
+          title: plan.title,
+          status: plan.status,
+          steps: s.steps,
+          done: s.done,
+          overdue: s.overdue.map((o) => ({ step: o.step, due: o.due, daysOverdue: o.daysOverdue })),
+          nextDue: s.nextDue,
+          stalled: plan.status === 'active' && s.updatedDaysAgo !== null && s.updatedDaysAgo >= stalledDays,
+          updatedAt: plan.updatedAt,
+        };
+      });
+
+      let lastActivityAt: string | null = null;
+      let stalled: number | null = null;
+      try {
+        const last = await getProjectLastActivityAt(p);
+        if (last) {
+          lastActivityAt = last.at;
+          const d = daysUntil(last.at);
+          stalled = d === null ? null : Math.max(0, -d);
+        }
+      } catch {
+        // 活动扫描失败不影响计划汇总
+      }
+
+      const overdueCount = planRows.reduce((n, r) => n + r.overdue.length, 0);
+      const openCount = open.length;
+      const needsAttention = overdueCount > 0 || (stalled !== null && stalled >= stalledDays);
+      totalOpen += openCount;
+      totalOverdue += overdueCount;
+      if (needsAttention) attentionProjects += 1;
+
+      if (onlyAttention && !needsAttention) continue;
+      rows.push({
+        id: p.id,
+        name: p.name,
+        planCount: plans.length,
+        openPlans: openCount,
+        overdueSteps: overdueCount,
+        lastActivityAt,
+        stalledDays: stalled,
+        needsAttention,
+        plans: planRows.length > 0 ? planRows : 'no-plans',
+      });
+    }
+
+    return JSON.stringify(
+      {
+        today,
+        stalledDaysThreshold: stalledDays,
+        totals: {
+          projects: targets.length,
+          projectsNeedingAttention: attentionProjects,
+          openPlans: totalOpen,
+          overdueSteps: totalOverdue,
+        },
+        projects: rows,
+      },
+      null,
+      2,
+    );
   } catch (e) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -2054,6 +2484,23 @@ async function toolCreateProject(args: Record<string, unknown>): Promise<string>
       hint: '项目名缺失：先向用户确认名称，再调用本工具（不要自行编造名称）。',
     }, null, 2);
   }
+  // 防重复新建（2026-10-19 事故）：管家在「往某个已存在的项目里写待办/便签」时误调本工具，
+  // 会在别的项目下凭空多出一个与该点名项目同名（仅日期后缀不同）的重复项目。
+  // 只要已存在同名（忽略 _YYYYMMDD 后缀）的非隐藏/非垃圾桶项目，就不新建，直接把既有项目指回去。
+  const baseKey = (s: string) => s.trim().replace(/[_-]\d{8}$/, '').toLowerCase();
+  const wantKey = baseKey(name);
+  const all = (await listProjects()).projects.filter((p) => !p.hidden && !p.trashed);
+  const dups = all.filter((p) => baseKey(p.name) === wantKey);
+  if (dups.length > 0) {
+    return JSON.stringify({
+      ok: false,
+      error: 'project_already_exists',
+      existing: dups.map((p) => ({ id: p.id, name: p.name, path: p.path })),
+      hint: `已存在同名项目${dups.map((p) => `「${p.name}」`).join('、')}，已阻止新建重复项目。`
+        + `若用户是要把待办/便签/计划写进该项目，请直接用写类工具并传 project=${dups[0].id}（或它的名字），不要再新建；`
+        + `只有用户明确要求创建一个「名字与现有项目不同」的新项目时才重新调用本工具。`,
+    }, null, 2);
+  }
   try {
     const makeCurrent = args.make_current === true;
     const project = await createProject(name, { makeCurrent });
@@ -2203,10 +2650,48 @@ async function toolCreateSession(args: Record<string, unknown>): Promise<string>
     }, null, 2);
   }
   const project = pr.project;
-  const agentRes = await resolveSessionAgent(typeof args.agent === 'string' ? args.agent.trim() : '');
+  const sandboxAppId = typeof args.sandbox_app_id === 'string' ? args.sandbox_app_id.trim() : '';
+  if (sandboxAppId) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(sandboxAppId)) {
+      return JSON.stringify({ ok: false, error: 'invalid_sandbox_app_id', message: 'sandbox_app_id 非法。' }, null, 2);
+    }
+    const { readAppEntry } = await import('@/lib/sandbox/apps');
+    const appEntry = await readAppEntry(sandboxAppId).catch(() => null);
+    if (!appEntry) {
+      return JSON.stringify({
+        ok: false,
+        error: 'sandbox_app_not_found',
+        message: `找不到小程序「${sandboxAppId}」。请先调用 list_mini_apps 确认 id。`,
+      }, null, 2);
+    }
+  }
+  const agentRes = await resolveSessionAgent(
+    typeof args.agent === 'string' && args.agent.trim()
+      ? args.agent.trim()
+      : sandboxAppId
+        ? 'coding'
+        : '',
+  );
   if (!agentRes.ok) return agentRes.payload;
+  if (sandboxAppId && agentRes.id !== 'coding') {
+    return JSON.stringify({
+      ok: false,
+      error: 'sandbox_app_requires_coding',
+      message: '绑定小程序（sandbox_app_id）的会话必须是 coding agent；请改用 agent="coding"。',
+    }, null, 2);
+  }
   const task = typeof args.task === 'string' ? args.task.trim() : '';
   const title = ((typeof args.title === 'string' ? args.title.trim() : '') || agentRes.label).slice(0, 40);
+  // 产物落点：管家派发的会话**默认先落 Outbox 暂存区**（<appRoot>/outbox/<批次>/），
+  // 不再污染「当前项目」的 homework/；显式 output_to_project=true 才按旧口径直落项目。
+  // 只对「带任务」的会话建批——空会话此刻没有产物，落点等用户真让它干活时再定。
+  const toProject = args.output_to_project === true;
+  let batchId: string | null = null;
+  if (task && !toProject) {
+    const { createBatch } = await import('@/lib/outbox/store');
+    const created = await createBatch({ originProjectId: project.id, originLabel: title });
+    batchId = created.batch.batch_id;
+  }
   // 目标项目不是当前项目 → 先切过去（等价于"打开该项目"）
   let switched = false;
   try {
@@ -2230,6 +2715,8 @@ async function toolCreateSession(args: Record<string, unknown>): Promise<string>
     agent: agentRes.id,
     prompt: task,
     auto: task.length > 0,
+    ...(sandboxAppId ? { sandbox_app_id: sandboxAppId } : {}),
+    ...(batchId ? { output_mode: 'outbox' as const, batch_id: batchId } : {}),
   });
   return JSON.stringify({
     ok: true,
@@ -2242,11 +2729,199 @@ async function toolCreateSession(args: Record<string, unknown>): Promise<string>
     title,
     task: task || null,
     auto: task.length > 0,
+    output_mode: batchId ? 'outbox' : 'project',
+    outbox_batch_id: batchId,
     message: `${switched ? `已打开项目「${project.name}」，` : ''}已在项目「${project.name}」新建 ${agentRes.label} 会话「${title}」${task
-      ? '，任务已下发，正在后台执行（画布会话列表会多出这一条）。'
+      ? `，任务已下发，正在后台执行（画布会话列表会多出这一条）。${batchId ? '产物会先落在 Outbox 暂存区（不写进当前项目）；如需归到某个项目，让用户说一声或用 Outbox 面板指定。' : ''}`
       : '（空会话，等用户输入）。'}`,
   }, null, 2);
 }
+
+/** 列出现有 Bob Sandbox 小程序（Butler 把它交给 coding 会话/回答“有哪些小程序”前用）。 */
+async function toolListMiniApps(): Promise<string> {
+  const { listApps } = await import('@/lib/sandbox/apps');
+  const apps = await listApps();
+  return JSON.stringify({
+    ok: true,
+    count: apps.length,
+    apps: apps.map((a) => ({
+      id: a.id,
+      name: a.name,
+      description: a.description,
+      updatedAt: a.updatedAt,
+      origin: a.origin ?? 'built',
+      entry: a.entry,
+    })),
+  }, null, 2);
+}
+
+/** 列出 Outbox 暂存区（管家派发会话的交付物）里待处理/已保留的批次。只读。
+ *  管家派发的会话产物默认不落当前项目，先落这里；用户要归口时先看这个清单。 */
+async function toolOutboxList(): Promise<string> {
+  const { listBatches } = await import('@/lib/outbox/store');
+  const { OUTBOX_MAX_AGE_DAYS, OUTBOX_WARN_BEFORE_DAYS } = await import('@/lib/cleanup/intermediate-cleanup');
+  const batches = (await listBatches()).filter((b) => b.status === 'pending' || b.status === 'kept');
+  const now = Date.now();
+  return JSON.stringify({
+    ok: true,
+    count: batches.length,
+    batches: batches.map((b) => {
+      const created = Date.parse(b.created_at);
+      const ageDays = Number.isFinite(created) ? Math.floor((now - created) / 86400000) : null;
+      const daysLeft = ageDays === null ? null : Math.max(0, OUTBOX_MAX_AGE_DAYS - ageDays);
+      return {
+        batch_id: b.batch_id,
+        status: b.status,
+        label: b.origin_label || '(未命名会话)',
+        created_at: b.created_at,
+        file_count: b.files.length,
+        files: b.files.map((f) => f.rel),
+        ...(daysLeft !== null && daysLeft <= OUTBOX_WARN_BEFORE_DAYS ? { expiring_in_days: daysLeft } : {}),
+      };
+    }),
+  }, null, 2);
+}
+
+/** 把一批暂存产物归口到目标项目（搬进 <项目>/homework/）。取 batch_id 于 outbox_list。 */
+async function toolOutboxAssign(args: Record<string, unknown>): Promise<string> {
+  const batchId = typeof args.batch_id === 'string' ? args.batch_id.trim() : '';
+  const project = typeof args.project === 'string' ? args.project.trim() : '';
+  if (!batchId) {
+    return JSON.stringify({ ok: false, error: 'batch_id_required', message: '缺少 batch_id：请先调用 outbox_list 取批次 id。' });
+  }
+  if (!project) {
+    return JSON.stringify({
+      ok: false,
+      error: 'project_required',
+      message: '未指定目标项目：请先向用户确认要归入哪个项目（项目名或 ID），不要猜测。',
+    });
+  }
+  const { assignBatch } = await import('@/lib/outbox/store');
+  const res = await assignBatch({ batchId, target: project });
+  return JSON.stringify(res, null, 2);
+}
+
+/** 丢弃一批暂存产物（整批删除，不可恢复）。仅在用户明确说不要时调用。 */
+async function toolOutboxDiscard(args: Record<string, unknown>): Promise<string> {
+  const batchId = typeof args.batch_id === 'string' ? args.batch_id.trim() : '';
+  if (!batchId) {
+    return JSON.stringify({ ok: false, error: 'batch_id_required', message: '缺少 batch_id：请先调用 outbox_list 取批次 id。' });
+  }
+  const { readBatch, discardBatch } = await import('@/lib/outbox/store');
+  const batch = await readBatch(batchId);
+  if (!batch) {
+    return JSON.stringify({ ok: false, error: 'batch_not_found', message: `未找到批次「${batchId}」（可能已被清理或已归口）。` });
+  }
+  const ok = await discardBatch(batchId);
+  return JSON.stringify({
+    ok,
+    message: ok
+      ? `已丢弃批次「${batch.origin_label || batchId}」及其 ${batch.files.length} 个暂存产物。`
+      : '丢弃失败（目录可能已被清理）。',
+  }, null, 2);
+}
+
+/** 新建 Bob Sandbox 小程序 + 打开绑定它的 coding 会话（Butler 的“做一个新小程序”入口）。 */
+async function toolCreateMiniApp(args: Record<string, unknown>): Promise<string> {
+  if (!hasProjectsChangedListeners()) {
+    return JSON.stringify({
+      ok: false,
+      error: 'ui_not_open',
+      message: 'BobWork 界面当前未打开，无法创建小程序会话。请让用户先打开 BobWork，再重试。',
+    }, null, 2);
+  }
+  const name = typeof args.name === 'string' ? args.name.trim() : '';
+  if (!name) {
+    return JSON.stringify({ ok: false, error: 'name_required', message: '请提供小程序名称（name）。' }, null, 2);
+  }
+  const pr = await resolveProjectWithFallback(args.project);
+  if (!pr.ok) return pr.payload;
+  if (!pr.project) {
+    return JSON.stringify({
+      ok: false,
+      error: 'no_active_project',
+      message: '应用当前没有激活项目，无法新建小程序会话。请让用户先新建或激活一个项目。',
+    }, null, 2);
+  }
+  const project = pr.project;
+  const { APP_TEMPLATES } = await import('@/lib/sandbox/templates');
+  const template = typeof args.template === 'string' && args.template.trim() ? args.template.trim() : 'blank';
+  if (!Object.prototype.hasOwnProperty.call(APP_TEMPLATES, template)) {
+    return JSON.stringify({
+      ok: false,
+      error: 'unknown_template',
+      message: `未知模板「${template}」。可用：${Object.keys(APP_TEMPLATES).join(', ')}`,
+    }, null, 2);
+  }
+  // 目标项目不是当前项目 → 先切过去（与 create_session 同一语义）
+  let switched = false;
+  try {
+    const current = await getCurrentProject().catch(() => null);
+    if (!current || current.id !== project.id) {
+      await switchProject(project.id);
+      emitProjectSwitched(project.id);
+      switched = true;
+    }
+  } catch (e) {
+    return JSON.stringify({
+      ok: false,
+      error: 'switch_failed',
+      message: `切换项目「${project.name}」失败，未创建小程序。`,
+      detail: e instanceof Error ? e.message : String(e),
+    }, null, 2);
+  }
+  let app: { id: string; name: string } | null = null;
+  try {
+    const { createApp } = await import('@/lib/sandbox/apps');
+    app = await createApp(name, template as SandboxTemplateId);
+  } catch (e) {
+    return JSON.stringify({
+      ok: false,
+      error: 'create_failed',
+      message: `创建小程序「${name}」失败。`,
+      detail: e instanceof Error ? e.message : String(e),
+    }, null, 2);
+  }
+  const task = typeof args.task === 'string' ? args.task.trim() : '';
+  const title = name.slice(0, 40);
+  emitSessionRequest({
+    project_id: project.id,
+    label: title,
+    agent: 'coding',
+    prompt: task,
+    auto: task.length > 0,
+    sandbox_app_id: app.id,
+  });
+  return JSON.stringify({
+    ok: true,
+    app_id: app.id,
+    app_name: app.name,
+    template,
+    project_id: project.id,
+    project_name: project.name,
+    project_source: pr.source,
+    switched,
+    task: task || null,
+    auto: task.length > 0,
+    message: `${switched ? `已打开项目「${project.name}」，` : ''}已创建${APP_TEMPLATES[template as SandboxTemplateId].label}小程序「${app.name}」，并打开绑定的 coding 会话${task
+      ? '，任务已下发，正在后台执行。'
+      : '（空会话，等用户输入；也可以继续让我操作它）。'}`,
+  }, null, 2);
+}
+
+/** 计划树步骤的 JSON Schema 片段（供 project_plan_start / project_plan_add_steps 复用：
+ *  步骤既可是纯标题字符串，也可是带登记项的对象） */
+const STEP_SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string', description: 'Step title (required inside the object form).' },
+    due: { type: 'string', description: 'Optional expected finish time (ISO date/datetime string).' },
+    owner: { type: 'string', description: 'Optional owner / responsible agent.' },
+    artifact: { type: 'string', description: 'Optional path or name of this step\'s deliverable.' },
+    note: { type: 'string', description: 'Optional note.' },
+  },
+  required: ['title'],
+} as const;
 
 /** butler 场景工具定义（由 tools/index.ts 聚合进 toolDefs） */
 export const butlerToolDefs: Tool[] = [
@@ -2463,7 +3138,7 @@ export const butlerToolDefs: Tool[] = [
   {
     name: 'create_scheduled_todo',
     description:
-      'Put a todo INTO the calendar at an explicit time. Note sticky rows already auto-enter the calendar when the note is settled, so this tool is for cases a) the row is still unscheduled (freshly written by create_sticky_note, not settled yet) or b) the user wants a precise time instead of the auto-assigned default slot. Writes a calendar event and links it to a `- [ ]` sticky line — if the project already has an identical unscheduled sticky line it binds that one (no duplicate); otherwise it appends one (calendar-only at the 3-todo-sticky cap). Ticking either side syncs. IMPORTANT: to MOVE an existing todo to a new time use todo_update (query_todos first for its event_id) — re-creating it here appends a duplicate line and a duplicate event; when the same-text row is already calendared this tool refuses and tells you to use todo_update. title/start_time/end_time/all_day/reminder_minutes define the event; description goes into its notes. TITLE vs NOTES: title is a SHORT action summary (it also becomes the sticky note line text) — the user\'s ORIGINAL wording, its source (who sent it / which message / what the image said) and background details go into `description`, verbatim; never append them to the title. REMINDERS: translate the lead time the user states literally into reminder_minutes ("提前5分钟提醒我" → [5], "提前半小时" → [30], "提前一天" → [1440]); A reminder is NEVER expressed by moving start_time earlier. TIME: when the user gave the time in words ("下周五下午3点" / "tomorrow 3pm" / "10分钟后"), call resolve_datetime FIRST and pass its start_time/date through — never compute or guess the date yourself. RECURRING: when the user wants a REPEATING reminder/schedule ("每天9点提醒我…"/"每周三…"), pass recurrence="daily"/"weekly" (start_time supplies the time-of-day / weekday; if that time already passed today, set start_time to the NEXT occurrence). RECURRENCE IS EXPANDED BY THE SCANNER AT RUNTIME — the stored start_time stays the first occurrence. start_time IS VALIDATED: omit it and nothing is written (need_more_info + a suggested slot) — ask the user for a time in one sentence instead of assuming one; an unparseable value → invalid_time; a time already in the past → past_time (use force=true only for back-filling history the user really wants). TARGET PROJECT: pass `project` whenever the conversation already points at a project — the user named one, or you created it yourself with create_project earlier in this same conversation (then pass its base name, e.g. "余靖潘案", or the id create_project returned). Pass "current" when the user explicitly said "current project"/"这个项目". Omit only when the conversation has no project context at all — the event then goes to the currently active project automatically (or to the global calendar when no project is active). Do NOT ask the user which project to use and never invent a project name; but a project you just created is not an invention — route the todo into it explicitly rather than letting it fall back to the current project. WRITE IS VERIFIED AND ECHOED: the result carries project_id / project_source, and the event is read back from the DB before returning — a mismatch fails with write_verification_failed (never ignore it). When project_source=current_fallback the event went to the CURRENT project because you passed no project, and a `warning` says so: if that is not where the user meant it, fix it with todo_update (query_todos first for event_id) instead of creating another event. CONFLICT CHECK IS BUILT IN: this tool itself scans the slot for overlaps (level=hard) and for potential clashes (level=potential: less than 15 min after the previous event ends, a neighbouring event at a different location needing travel, or an all-day event the same day) and returns conflict_level / conflicts / risks / alternatives BEFORE writing. So do not pre-report the plan: call it as soon as the user asked for the arrangement. level=none → written; reply in ONE short sentence (item + absolute time + target project) — do not restate the proposal and do not ask "shall I arrange it". level=hard or potential → nothing was written; state the clash and the free slots in one or two sentences and let the user pick; if the user explicitly insists on the same slot anyway, call again with force=true to write it. Keep every reply short — the point is to confirm rigorously before writing, not to write long prose.',
+      'Put a todo INTO the calendar at an explicit time. Note sticky rows already auto-enter the calendar when the note is settled, so this tool is for cases a) the row is still unscheduled (freshly written by create_sticky_note, not settled yet) or b) the user wants a precise time instead of the auto-assigned default slot. Writes a calendar event and links it to a `- [ ]` sticky line — if the project already has an identical unscheduled sticky line it binds that one (no duplicate); otherwise it appends one (calendar-only at the 3-todo-sticky cap). Ticking either side syncs. IMPORTANT: to MOVE an existing todo to a new time use todo_update (query_todos first for its event_id) — re-creating it here appends a duplicate line and a duplicate event; when the same-text row is already calendared this tool refuses and tells you to use todo_update. title/start_time/end_time/all_day/reminder_minutes define the event; description goes into its notes. TITLE vs NOTES: title is a SHORT action summary (it also becomes the sticky note line text) — the user\'s ORIGINAL wording, its source (who sent it / which message / what the image said) and background details go into `description`, verbatim; never append them to the title. REMINDERS: translate the lead time the user states literally into reminder_minutes ("提前5分钟提醒我" → [5], "提前半小时" → [30], "提前一天" → [1440]); A reminder is NEVER expressed by moving start_time earlier. TIME: when the user gave the time in words ("下周五下午3点" / "tomorrow 3pm" / "10分钟后"), call resolve_datetime FIRST and pass its start_time/date through — never compute or guess the date yourself. RECURRING: when the user wants a REPEATING reminder/schedule ("每天9点提醒我…"/"每周三…"), pass recurrence="daily"/"weekly" (start_time supplies the time-of-day / weekday; if that time already passed today, set start_time to the NEXT occurrence). RECURRENCE IS EXPANDED BY THE SCANNER AT RUNTIME — the stored start_time stays the first occurrence. start_time IS VALIDATED: omit it and nothing is written (need_more_info + a suggested slot) — ask the user for a time in one sentence instead of assuming one; an unparseable value → invalid_time; a time already in the past → past_time (use force=true only for back-filling history the user really wants). TARGET PROJECT: pass `project` whenever the conversation already points at a project — the user named one, or you created it yourself with create_project earlier in this same conversation (then pass its base name, e.g. "余靖潘案", or the id create_project returned). Pass "current" when the user explicitly said "current project"/"这个项目". Omit only when the conversation has no project context at all — the event then goes to the currently active project automatically (or to the global calendar when no project is active). Pass "inbox" when the item is NOT part of any project — the user said it is temporary / not yet filed / "先记一下" (do not park it in the current project): the event then goes to the global calendar as an unfiled temporary todo. Do NOT ask the user which project to use and never invent a project name; but a project you just created is not an invention — route the todo into it explicitly rather than letting it fall back to the current project. WRITE IS VERIFIED AND ECHOED: the result carries project_id / project_source, and the event is read back from the DB before returning — a mismatch fails with write_verification_failed (never ignore it). When project_source=current_fallback the event went to the CURRENT project because you passed no project, and a `warning` says so: if that is not where the user meant it, fix it with todo_update (query_todos first for event_id) instead of creating another event. CONFLICT CHECK IS BUILT IN: this tool itself scans the slot for overlaps (level=hard) and for potential clashes (level=potential: less than 15 min after the previous event ends, a neighbouring event at a different location needing travel, or an all-day event the same day) and returns conflict_level / conflicts / risks / alternatives BEFORE writing. So do not pre-report the plan: call it as soon as the user asked for the arrangement. level=none → written; reply in ONE short sentence (item + absolute time + target project) — do not restate the proposal and do not ask "shall I arrange it". level=hard or potential → nothing was written; state the clash and the free slots in one or two sentences and let the user pick; if the user explicitly insists on the same slot anyway, call again with force=true to write it. Keep every reply short — the point is to confirm rigorously before writing, not to write long prose.',
     parameters: {
       type: 'object',
       properties: {
@@ -2473,7 +3148,7 @@ export const butlerToolDefs: Tool[] = [
         },
         project: {
           type: 'string',
-          description: 'Target project: the project name or id. Pass it whenever the conversation already points at a project — the user named one, or YOU created it with create_project earlier in this same conversation (then pass its base name, e.g. "余靖潘案", or the id create_project returned). Pass "current" ONLY if the user explicitly said "current project"/"这个项目". Omit ONLY when the conversation has no project context at all — the event then goes to the currently active project automatically (or to the global calendar when no project is active). Never invent a project name; but a project you just created is not an invention — route the todo into it explicitly instead of silently defaulting.',
+          description: 'Target project: the project name or id. Pass it whenever the conversation already points at a project — the user named one, or YOU created it with create_project earlier in this same conversation (then pass its base name, e.g. "余靖潘案", or the id create_project returned). Pass "current" ONLY if the user explicitly said "current project"/"这个项目". Omit ONLY when the conversation has no project context at all — the event then goes to the currently active project automatically (or to the global calendar when no project is active). Pass "inbox" when the item is NOT part of any project — the user said it is temporary / not yet filed / "先记一下" (it then goes to the global calendar). Never invent a project name; but a project you just created is not an invention — route the todo into it explicitly instead of silently defaulting.',
         },
         start_time: {
           type: 'string',
@@ -2600,7 +3275,7 @@ export const butlerToolDefs: Tool[] = [
   {
     name: 'todo_update',
     description:
-      'Update an existing todo/event by its event_id (from query_todos): change title, start/end time, all_day, status (done/scheduled), priority, color, location, description, reminder_minutes, recurrence. When the new time was given in words, resolve it with resolve_datetime first and pass its start_time — never compute the date yourself. Changes propagate two-way: calendar updates; a sticky-note-sourced line syncs too. Use recurrence="daily"/"weekly" to make a todo repeat (e.g. turn an existing item into a daily reminder), or recurrence="none" to stop it repeating.',
+      'Update an existing todo/event by its event_id (from query_todos): change title, start/end time, all_day, status (done/scheduled), priority, color, location, description, reminder_minutes, recurrence, or RELOCATE its ownership with move_to_project. When the new time was given in words, resolve it with resolve_datetime first and pass its start_time — never compute the date yourself. Changes propagate two-way: calendar updates; a sticky-note-sourced line syncs too. Use recurrence="daily"/"weekly" to make a todo repeat (e.g. turn an existing item into a daily reminder), or recurrence="none" to stop it repeating. move_to_project relocates an unfiled temporary todo (Todo Inbox) into a project once the user has filed it (or back to "inbox"); it moves both the calendar event and its sticky-note line and CANNOT be combined with other field changes in the same call.',
     parameters: {
       type: 'object',
       properties: {
@@ -2640,6 +3315,10 @@ export const butlerToolDefs: Tool[] = [
           type: 'number',
           description: 'Total occurrences including the first. Omit for open-ended. Wins over recurrence_until when both are given.',
         },
+        move_to_project: {
+          type: 'string',
+          description: 'Relocate ownership of this todo: pass a project name or id, or "inbox" to move it back to the unfiled Todo Inbox. Moves both the calendar event and its sticky-note line, and preserves two-way sync. Use when the user files an unfiled temporary todo into a project (or un-files it). Must be called ALONE — do not combine with other fields.',
+        },
       },
       required: ['event_id'],
     },
@@ -2664,8 +3343,52 @@ export const butlerToolDefs: Tool[] = [
     maxOutput: 600,
   },
   {
+    name: 'outbox_list',
+    description:
+      'List the Outbox staging batches: deliverables produced by Butler-dispatched sessions that were NOT written into the current project (they wait in the Outbox staging area until assigned). Read-only. Use when the user asks “刚才那份报告/文件在哪”“管家产出的东西放哪了”, or before assigning a batch to a project with outbox_assign.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    category: '系统',
+    execute: toolOutboxList,
+    maxOutput: 3000,
+  },
+  {
+    name: 'outbox_assign',
+    description:
+      'File a staged Outbox batch into a project: moves its deliverables into that project’s homework/. Use when the user says the Butler-produced output should belong to a project (e.g. “把它归到 XX 项目”). batch_id comes from outbox_list. The target project must be named by the user — never guess. Files with a same-name conflict in the target are kept in the Outbox (never overwritten) and reported back.',
+    parameters: {
+      type: 'object',
+      properties: {
+        batch_id: { type: 'string', description: 'Outbox batch id from outbox_list (e.g. otb_20261020_ab12cd34).' },
+        project: { type: 'string', description: 'Target project name or id, as the user said it. Required — do not guess; ask the user first if unclear.' },
+      },
+      required: ['batch_id', 'project'],
+    },
+    category: '系统',
+    execute: toolOutboxAssign,
+    maxOutput: 1200,
+  },
+  {
+    name: 'outbox_discard',
+    description:
+      'Discard a whole staged Outbox batch (deletes its files, NOT recoverable). Only call it when the user explicitly says they do not want those deliverables. batch_id comes from outbox_list.',
+    parameters: {
+      type: 'object',
+      properties: {
+        batch_id: { type: 'string', description: 'Outbox batch id from outbox_list.' },
+      },
+      required: ['batch_id'],
+    },
+    category: '系统',
+    execute: toolOutboxDiscard,
+    maxOutput: 600,
+  },
+  {
     name: 'create_sticky_note',
-    description: 'Create a sticky note on the canvas (project-private). Use for a produced plan/checklist/reminder the user wants saved as a sticky (e.g. a legal work plan split into phases). Lines DO auto-enter the calendar once the user settles the note: a line with a concrete time is scheduled to that time, otherwise it takes a near-term default slot. Until that settlement they show up in to-do queries as "not scheduled" — which means "not settled yet", not "will never be scheduled". Written silently to the project sticky-notes.json; canvas refreshes automatically (no confirm dialog). Sticky notes are private — after creation never read back or modify them via file tools. Position is auto-assigned on a cascade; do not try to control it. Max 3 todo stickies per project: at the cap, creation is skipped and an existing note is returned. TARGET PROJECT: pass `project` when the user named a project in this conversation (name or id), or "current" when the user explicitly said "current project"/"这个项目". If the user did NOT mention any project, omit it — the tool falls back to the current active project and reports the landing point (project_source); only rely on that when the sticky is clearly meant for the active project, and never guess a different one.',
+    description: 'Create a sticky note on the canvas (project-private). Use for a produced plan/checklist/reminder the user wants saved as a sticky (e.g. a legal work plan split into phases). Lines DO auto-enter the calendar once the user settles the note: a line with a concrete time is scheduled to that time, otherwise it takes a near-term default slot. Until that settlement they show up in to-do queries as "not scheduled" — which means "not settled yet", not "will never be scheduled". Written silently to the project sticky-notes.json; canvas refreshes automatically (no confirm dialog). Sticky notes are private — after creation never read back or modify them via file tools. Position is auto-assigned on a cascade; do not try to control it. Max 3 todo stickies per project: at the cap, creation is skipped and an existing note is returned. TARGET PROJECT: pass `project` when the user named a project in this conversation (name or id), or "current" when the user explicitly said "current project"/"这个项目". If the user did NOT mention any project, omit it — the tool falls back to the current active project and reports the landing point (project_source); only rely on that when the sticky is clearly meant for the active project, and never guess a different one. Pass project="inbox" when the item does NOT belong to any project — the user said it is temporary / not yet filed / "先记一下" / "还没立项" (do not park such items in the current project): the sticky then lands in the global **Todo Inbox** (unfiled temporary todos). If NO project is active at all, the sticky lands there too. Either way report the landing point; an Inbox sticky can later be filed into a project with todo_update project=... .',
     parameters: {
       type: 'object',
       properties: {
@@ -2679,7 +3402,7 @@ export const butlerToolDefs: Tool[] = [
         },
         project: {
           type: 'string',
-          description: 'Target project: project name or id, exactly as named by the user, or "current" when the user explicitly said "current project"/"这个项目". Omit ONLY when the user did not mention any project — the tool then falls back to the CURRENT active project and reports where it landed (project_source); if that was not what the user meant, re-run with an explicit project instead of duplicating. Never guess a different project.',
+          description: 'Target project: project name or id, exactly as named by the user, or "current" when the user explicitly said "current project"/"这个项目". Pass "inbox" when the item is NOT part of any project — the user said it is temporary / not yet filed / "先记一下" (it then lands in the global Todo Inbox and can be filed later with todo_update). Omit ONLY when the user did not mention any project — the tool then falls back to the CURRENT active project and reports where it landed (project_source); if that was not what the user meant, re-run with an explicit project instead of duplicating. Never guess a different project.',
         },
         color: {
           type: 'string',
@@ -2695,7 +3418,7 @@ export const butlerToolDefs: Tool[] = [
   {
     name: 'create_project',
     description:
-      'Create a new BobWork project (folder + global project config) by name. The project shows up in the sidebar. By default the CURRENT project is NOT switched — then, if the same request also has to write into the new project (a todo, a sticky note, a plan), either create it with make_current=true so it becomes the active project, or pass `project` explicitly on the follow-up write tool (base name or the returned id). Use ONLY when the user clearly asks to create/start a new project; if the name is missing, ask for it first, never guess. Creating a project is a direct low-risk action: do NOT propose-then-wait-for-confirmation — just create it and report the result.',
+      'Create a new BobWork project (folder + global project config) by name. The project shows up in the sidebar. By default the CURRENT project is NOT switched — then, if the same request also has to write into the new project (a todo, a sticky note, a plan), either create it with make_current=true so it becomes the active project, or pass `project` explicitly on the follow-up write tool (base name or the returned id). Use ONLY when the user clearly asks to create/start a new project; if the name is missing, ask for it first, never guess. Creating a project is a direct low-risk action: do NOT propose-then-wait-for-confirmation — just create it and report the result. If a project with the same base name already exists (the server compares names ignoring the _YYYYMMDD suffix), creation is REFUSED with error=project_already_exists plus the existing project(s); do NOT retry with a tweaked name — instead use the existing project by passing its id/name as `project` to the write tool.',
     parameters: {
       type: 'object',
       properties: {
@@ -2735,7 +3458,7 @@ export const butlerToolDefs: Tool[] = [
   {
     name: 'create_session',
     description:
-      'Create a new session (a canvas chat node) in a project — with a chosen installed agent — and, when `task` is given, RUN that task in the new session right away in the background. TRIGGER (imperative, NOT context): when the user message STARTS with 新建会话 / 新建一个会话 / 新开一个会话 / 开个会话 / 建个新会话 followed by a job description, that IS the instruction to create the session and hand that job over — do NOT read it as background for this conversation, and do NOT do the job yourself in the butler thread. Use when the user asks to "新建一个会话/开个会话/让 X 干这件事/开个项目建个会话跑这个任务". Compose the three steps the user usually means in ONE call: pass `project` (opens it if it is not the current one), `agent` (default chat; e.g. coding / note (Kar) / archivist / legal-intern), `title`, and `task` (the work to execute). Notes: (1) The session is created by the OPEN canvas — if BobWork is not open the tool returns ui_not_open; tell the user to open it and retry, never claim the session was created. (2) A `task` runs unattended in the background with that agent\'s own tools — hand over a complete, self-contained task, and never pass a task the user did not ask for. (3) Without `task` it only opens an empty session. (4) This does not replace team_run: for multi-agent jobs use team_run instead of spawning a session.',
+      'Create a new session (a canvas chat node) in a project — with a chosen installed agent — and, when `task` is given, RUN that task in the new session right away in the background. TRIGGER (imperative, NOT context): when the user message STARTS with 新建会话 / 新建一个会话 / 新开一个会话 / 开个会话 / 建个新会话 followed by a job description, that IS the instruction to create the session and hand that job over — do NOT read it as background for this conversation, and do NOT do the job yourself in the butler thread. Use when the user asks to "新建一个会话/开个会话/让 X 干这件事/开个项目建个会话跑这个任务". Compose the three steps the user usually means in ONE call: pass `project` (opens it if it is not the current one), `agent` (default chat; e.g. coding / note (Kar) / archivist / legal-intern), `title`, and `task` (the work to execute). Notes: (1) The session is created by the OPEN canvas — if BobWork is not open the tool returns ui_not_open; tell the user to open it and retry, never claim the session was created. (2) A `task` runs unattended in the background with that agent\'s own tools — hand over a complete, self-contained task, and never pass a task the user did not ask for. (3) Without `task` it only opens an empty session. (4) This does not replace team_run: for multi-agent jobs use team_run instead of spawning a session. (5) To iterate an existing mini-app, pass `sandbox_app_id` (resolve it with list_mini_apps); the session is forced to agent=coding and the coding node gets the app context. (6) DELIVERABLE LOCATION: by default the session writes its deliverables into the Outbox staging area (out of the current project) — tell the user they can assign them to a project later; pass output_to_project=true only when the user explicitly asks for the output to land in this project.',
     parameters: {
       type: 'object',
       properties: {
@@ -2755,11 +3478,59 @@ export const butlerToolDefs: Tool[] = [
           type: 'string',
           description: 'The task to execute in the new session, self-contained (goal + deliverable + constraints + referenced materials) — it runs unattended in the background. Pass the user\'s own task verbatim in intent; omit for an empty session. Do NOT invent work the user did not ask for.',
         },
+        sandbox_app_id: {
+          type: 'string',
+          description: 'Optional Bob Sandbox mini-app id to bind this session to. When set, the session is forced to agent="coding" and the coding node gets the app context (files/manifest) so it can iterate that mini-app. Use list_mini_apps first to resolve the id; omit for ordinary sessions.',
+        },
+        output_to_project: {
+          type: 'boolean',
+          description: 'Set true ONLY when the user explicitly wants the session\'s deliverables written straight into the CURRENT project folder. Default (false/omitted) writes them into the Outbox staging area (<appRoot>/outbox/<batch>/) so the project folder is not polluted; the user can assign them to a project afterwards (in the Outbox panel, or by asking you to)。',
+        },
       },
       required: [],
     },
     category: '系统',
     execute: toolCreateSession,
+    maxOutput: 1200,
+  },
+  {
+    name: 'list_mini_apps',
+    description:
+      'List Bob Sandbox mini-apps (id, name, description, updatedAt, origin, entry). Use before handing a mini-app to a coding session, answering “有哪些小程序/那个 XX 小程序还在吗”, or choosing what to create/duplicate. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    category: '系统',
+    execute: toolListMiniApps,
+    maxOutput: 4000,
+  },
+  {
+    name: 'create_mini_app',
+    description:
+      'Create a NEW Bob Sandbox mini-app and open a coding session bound to it in the current/named project. Use when the user asks Butler to “做一个小程序/新建一个小程序/帮我做个工具”, or explicitly wants a new app before iterating. Pass `name`, an optional `template` (blank / ai-chat / todo / calculator / contact-form / data-table / portfolio / landing / reader / converter / habit / pomodoro), and an optional `task` (the user’s wish; when given the coding session runs it, otherwise it opens an empty bound session). The session is forced to coding and gets the app context; never claim it was created if the tool returns ui_not_open.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Mini-app name, max 80 chars, as the user said it.' },
+        template: {
+          type: 'string',
+          description: 'Starting template: blank (default), ai-chat, todo, calculator, contact-form, data-table, portfolio, landing, reader, converter, habit, pomodoro.',
+        },
+        task: {
+          type: 'string',
+          description: 'Optional first task/wish to run in the bound coding session (self-contained). Omit to just open the app + empty session.',
+        },
+        project: {
+          type: 'string',
+          description: 'Project to create/open the session in: name or id as the user said it, or "current" when they explicitly said “current project”/“这个项目”. Omit to fall back to the current active project and report project_source.',
+        },
+      },
+      required: ['name'],
+    },
+    category: '系统',
+    execute: toolCreateMiniApp,
     maxOutput: 1200,
   },
   {
@@ -2775,8 +3546,8 @@ export const butlerToolDefs: Tool[] = [
         },
         title: { type: 'string', description: 'Plan title, e.g. "借款纠纷诉讼计划".' },
         goal: { type: 'string', description: 'Optional one-line goal / deliverable statement.' },
-        steps: { type: 'array', items: { type: 'string' }, description: 'Optional flat step list (used when there are no milestones).' },
-        milestones: { type: 'array', description: 'Optional milestones; each { title: string, steps: string[] }.', items: { type: 'object', properties: { title: { type: 'string' }, steps: { type: 'array', items: { type: 'string' } } } } },
+        steps: { type: 'array', description: 'Optional flat step list (used when there are no milestones). Each item is a title string, or an object { title, due?, owner?, artifact?, note? } to register extra fields.', items: { anyOf: [{ type: 'string' }, STEP_SCHEMA] } },
+        milestones: { type: 'array', description: 'Optional milestones; each { title: string, steps: (string|{title,due?,owner?,artifact?,note?})[] }.', items: { type: 'object', properties: { title: { type: 'string' }, steps: { type: 'array', items: { anyOf: [{ type: 'string' }, STEP_SCHEMA] } } } } },
       },
       required: ['title'],
     },
@@ -2817,7 +3588,7 @@ export const butlerToolDefs: Tool[] = [
         plan_id: { type: 'string', description: 'Plan id.' },
         milestone_id: { type: 'string', description: 'Optional milestone id to append to.' },
         milestone_title: { type: 'string', description: 'Optional milestone title; if no milestone matches (and milestone_id empty), a milestone with this title is created.' },
-        steps: { type: 'array', items: { type: 'string' }, description: 'Steps to append.' },
+        steps: { type: 'array', items: { anyOf: [{ type: 'string' }, STEP_SCHEMA] }, description: 'Steps to append: each is a title string, or an object { title, due?, owner?, artifact?, note? }. Cannot append to a closed plan (done/abandoned) — reopen it with project_plan_close first.' },
       },
       required: ['plan_id', 'steps'],
     },
@@ -2846,6 +3617,126 @@ export const butlerToolDefs: Tool[] = [
     category: '系统',
     execute: toolProjectPlanStepStatus,
     maxOutput: 800,
+  },
+  {
+    name: 'project_plan_close',
+    description:
+      'Close or reopen a plan. status="done" marks it finished; status="abandoned" drops it (both are terminal — steps can no longer be changed until reopened). status="active" REOPENS a closed plan so steps can be advanced again. Use it when the user says the plan is finished / no longer needed / resume it, or to close a plan whose steps you no longer track. TARGET PROJECT: pass `project` when the user named a project (name or id), or "current" when they explicitly said "current project"/"这个项目"; omit only when no project was mentioned — it then falls back to the current active project and reports project_source.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Target project: project name or id, exactly as named by the user, or "current" when the user explicitly said "current project"/"这个项目". Omit ONLY when the user did not mention any project — the tool then falls back to the CURRENT active project and reports where it landed (project_source); if that was not what the user meant, re-run with an explicit project instead of duplicating. Never guess a different project.',
+        },
+        plan_id: { type: 'string', description: 'Plan id (from project_plan_view).' },
+        status: { type: 'string', enum: ['done', 'abandoned', 'active'], description: 'done = finished; abandoned = dropped; active = reopen a closed plan.' },
+      },
+      required: ['plan_id', 'status'],
+    },
+    category: '系统',
+    execute: toolProjectPlanClose,
+    maxOutput: 1200,
+  },
+  {
+    name: 'project_plan_delete',
+    description:
+      'Delete a plan from .butler/plans.json entirely (IRREVERSIBLE — the plan and all its steps/milestones are removed). Use ONLY when the user explicitly asks to delete/remove a plan and you have confirmed which one (get plan_id from project_plan_view). To merely stop tracking a plan, use project_plan_close (abandoned) instead. TARGET PROJECT: pass `project` when the user named a project (name or id), or "current" when they explicitly said "current project"/"这个项目"; omit only when no project was mentioned — it then falls back to the current active project and reports project_source.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Target project: project name or id, exactly as named by the user, or "current" when the user explicitly said "current project"/"这个项目". Omit ONLY when the user did not mention any project — the tool then falls back to the CURRENT active project and reports where it landed (project_source); if that was not what the user meant, re-run with an explicit project instead of duplicating. Never guess a different project.',
+        },
+        plan_id: { type: 'string', description: 'Plan id to delete (from project_plan_view).' },
+      },
+      required: ['plan_id'],
+    },
+    category: '系统',
+    execute: toolProjectPlanDelete,
+    maxOutput: 600,
+  },
+  {
+    name: 'project_update_meta',
+    description:
+      'Update an EXISTING project\'s organizing metadata: category, tags and note (shown in the sidebar / project board). Use when the user asks to categorise / tag / annotate a project ("把 X 项目改成诉讼类"、"给 X 加标签"、"给 X 项目加个备注"). Pass `project` (name or id, required — never guess) plus one or more of category / tags / note; pass an empty string for category/note or an empty array for tags to CLEAR that field. category must be one of the preset values (returned as `candidates` if invalid). Read-only alternatives do not exist — this writes the project config; the sidebar refreshes automatically (ui_synced says whether the UI was open).',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name or id, exactly as named by the user. Required — never guess a project the user did not name.' },
+        category: { type: 'string', description: `Project category. Allowed: ${PROJECT_CATEGORIES.join(' / ')}. Empty string clears it. Omit to leave unchanged.` },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Custom tags (max 2, each non-empty). Empty array clears them. Omit to leave unchanged.' },
+        note: { type: 'string', description: 'Short project note (max 100 chars). Empty string clears it. Omit to leave unchanged.' },
+      },
+      required: ['project'],
+    },
+    category: '系统',
+    execute: toolProjectUpdateMeta,
+    maxOutput: 800,
+  },
+  {
+    name: 'project_rename',
+    description:
+      'Rename an EXISTING project (display name only — the folder path on disk does NOT change). Use when the user asks to rename a project ("把 X 项目改名为 Y"). Pass `project` (current name or id) and `new_name`, both required. The sidebar refreshes automatically (ui_synced says whether the UI was open).',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Current project name or id, exactly as named by the user. Required — never guess.' },
+        new_name: { type: 'string', description: 'New display name. Required.' },
+      },
+      required: ['project', 'new_name'],
+    },
+    category: '系统',
+    execute: toolProjectRename,
+    maxOutput: 800,
+  },
+  {
+    name: 'project_archive',
+    description:
+      'Archive an EXISTING project: it is hidden from the sidebar\'s active list but ALL data stays on disk and it can be restored with project_unarchive. Use when the user asks to archive / shelve / 归档 a project. Pass `project` (name or id; archived projects are also matchable by name). If the archived project was the CURRENT one, the app switches to another active project — the result reports switched_away and current_project; the canvas follows automatically (ui_synced). Never guess the project.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name or id, exactly as named by the user (may be an already-archived project for this operation). Required — never guess.' },
+      },
+      required: ['project'],
+    },
+    category: '系统',
+    execute: toolProjectArchive,
+    maxOutput: 800,
+  },
+  {
+    name: 'project_unarchive',
+    description:
+      'Restore an ARCHIVED project back to the active list (inverse of project_archive). Use when the user asks to unarchive / restore / 恢复 an archived project. Pass `project` (name or id) — archived projects are matchable by name here (unlike the write tools that only see active projects). The sidebar refreshes automatically (ui_synced). Never guess the project.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Archived project name or id, exactly as named by the user. Required — never guess.' },
+      },
+      required: ['project'],
+    },
+    category: '系统',
+    execute: toolProjectUnarchive,
+    maxOutput: 600,
+  },
+  {
+    name: 'project_plans_overview',
+    description:
+      'Cross-project plan overview (READ-ONLY): scans every active project\'s plan tree (.butler/plans.json) and reports, per project, its plans with step progress, overdue unfinished steps (past due date), the next due date, whether the plan has stalled, and the project\'s last activity with stalled days. Use it to answer "哪个项目的计划停滞了 / 哪些步骤逾期了 / 现在该先推哪件事" in ONE call instead of walking project by project with project_plan_view. By default only OPEN (active) plans are counted; set includeClosed=true to also list done/abandoned ones. Set onlyAttention=true to return only projects with overdue steps or stalled beyond stalledDays (default 14). Pass `project` to scope to one project (name or id, archived ones matchable too); omit to scan ALL active projects — which is the whole point of this tool.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Optional: scope to a single project by name or id (archived projects are matchable). Omit to scan all active projects (the normal cross-project use).' },
+        includeClosed: { type: 'boolean', description: 'Also include done/abandoned plans. Default false (open plans only).' },
+        onlyAttention: { type: 'boolean', description: 'Return only projects that need attention (overdue steps, or no activity for >= stalledDays). Default false.' },
+        stalledDays: { type: 'number', description: 'Stall threshold in days (1-365, default 14). A plan is "stalled" when its updatedAt is at least this old; a project when its last activity is.' },
+      },
+    },
+    category: '系统',
+    execute: toolProjectPlansOverview,
+    maxOutput: 6000,
   },
   {
     name: 'get_model_price',

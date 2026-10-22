@@ -15,46 +15,14 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { homedir } from 'os';
 import { isAbsolute, join, resolve, sep } from 'path';
-import { existsSync, readdirSync } from 'fs';
 import { bundledDataHome } from '../extensions/bundled-data-home';
 import { MCP_PRESETS, type McpServerConfig, type McpToolInfo } from './types';
-import { allocateFreePort, ensurePanelPort } from './panel-ports';
+import { allocateFreePort, ensurePanelPort, releasePanelPort } from './panel-ports';
 import { PluginKernel, type PluginRuntime, type PluginSpec } from './plugin-kernel';
 import { getCurrentProjectRef } from '../project/project-config';
-
-/** 构建子进程 PATH（与 electron/main.ts 的 buildChildPath 一致） */
-function buildChildPath(): string {
-  const home = homedir();
-  const paths: string[] = [
-    '/usr/local/bin',
-    '/opt/homebrew/bin',
-    '/opt/homebrew/sbin',
-    '/usr/bin',
-    '/bin',
-    '/usr/sbin',
-    '/sbin',
-  ];
-  // nvm
-  try {
-    const nvmDir = join(home, '.nvm/versions/node');
-    if (existsSync(nvmDir)) {
-      for (const ver of readdirSync(nvmDir)) {
-        paths.push(join(nvmDir, ver, 'bin'));
-      }
-    }
-  } catch {}
-  // volta
-  paths.push(join(home, '.volta/bin'));
-  // npm global
-  paths.push(join(home, '.npm-global/bin'));
-  // 当前 process.env.PATH
-  if (process.env.PATH) {
-    paths.push(...process.env.PATH.split(':'));
-  }
-  return [...new Set(paths)].join(':');
-}
+import { buildChildPath, resolveStdioRuntime } from './child-env';
+import { OCR_BRIDGE_ID, ensureOcrBridge } from './ocr-bridge';
 
 /**
  * 清洗 MCP 工具名，使其符合 OpenAI 兼容 API 的 function.name 约束
@@ -88,6 +56,12 @@ interface McpConnectionState {
   timeout: number;
   /** 工具发现缓存：连接变化（重连/重启）后置空，下次 discoverTools 重新拉取 */
   toolsCache: McpToolInfo[] | null;
+  /**
+   * 主动关闭标志：置 true 后 onclose 不触发崩溃自愈。
+   * 卸载 teardown / 重连前置 close 属于主动行为，若不抑制会把「卸载」变成「复活」、
+   * 把重连变成递归自愈。崩溃（子进程死亡）时该标志为 false。
+   */
+  closed: boolean;
   /** 连续失败计数（健康检查 / 调用失败用，触发自愈） */
   failCount: number;
 }
@@ -97,10 +71,17 @@ function connServiceName(serverId: string): string {
   return `mcp:${serverId}`;
 }
 
-/** 该服务声明的自带面板（实例配置优先，缺省回退预置）；无声明返回 undefined */
+/**
+ * 该配置是否需要「活上游」＝插件进程须带 `--serve <端口>` 拉起。
+ *
+ * serve 面板由插件自起网页；static 面板的 **UI** 虽由宿主静态托管（零端口），
+ * 但它的 **API** 仍来自插件进程、且只能经宿主 origin 的 hostPath 稳定反代访问
+ * ⇒ 两类都必须分配并登记运行时端口。只认 mode=serve 会让 static 面板的接口永远打不通。
+ */
 function servePanelDecl(config: McpServerConfig) {
   const panel = config.panel ?? MCP_PRESETS.find((p) => p.id === config.id)?.panel;
-  return panel?.mode === 'serve' ? panel : undefined;
+  if (!panel) return undefined;
+  return panel.mode === 'serve' || panel.hostPath ? panel : undefined;
 }
 
 /**
@@ -131,8 +112,8 @@ async function createConnection(
     // 随包插件数据根统一：注入 BOB_*_MCP_HOME → ~/BobWork/extensions/<plugin>。
     // 仅登记过的随包插件注入；自定义/未登记 server 不注入；config.env 显式值优先。
     const dataHome = bundledDataHome(config.id);
-    // 自带 serve 面板的插件：端口由宿主按实例分配（面板地址随之走运行时表），
-    // 避免整机固定端口（9480/9482）被别的宿主实例占用后本实例面板永久打不开。
+    // 需要活上游的插件（serve 面板 / static 面板的 API 反代）：端口由宿主按实例分配并
+    // 登记，避免整机固定端口（9480/9482）被别的宿主实例占用后本实例面板/接口永久打不开。
     let args = [...(config.args || [])];
     if (servePanelDecl(config)) {
       const port = opts?.registerPanelPort
@@ -140,12 +121,16 @@ async function createConnection(
         : await allocateFreePort();
       args = withServePort(args, port);
     }
+    // 统一运行时出口：本机 JS 插件（command=node）改走 Electron 内置 Node，
+    // 不再依赖用户系统 PATH 的 node（真机「插件拉不起来」的主因，见 child-env.ts）。
+    const rt = resolveStdioRuntime(config.command);
     transport = new StdioClientTransport({
-      command: config.command || 'npx',
+      command: rt.command,
       args,
       env: {
         ...process.env,
         PATH: childPath,
+        ...rt.env,
         // 告知 MCP 子进程宿主 /api 服务端口（如 bob-team-mcp 成员执行回调 /api/chat）。
         // 不注入的话子进程会回退到默认端口 —— 5000 被 macOS AirPlay 占用会秒回 403
         ...(process.env.PORT ? { DEPLOY_RUN_PORT: String(process.env.PORT) } : {}),
@@ -188,13 +173,32 @@ async function createConnection(
 /** 建立/重建连接并刷新工具缓存；失败抛错 */
 async function ensureConnected(state: McpConnectionState, config: McpServerConfig): Promise<void> {
   if (state.client) {
+    state.closed = true; // 主动关闭：抑制 onclose 的崩溃自愈
     try { await state.client.close(); } catch { /* 忽略 */ }
     state.client = undefined;
   }
   const { client } = await createConnection(config, { registerPanelPort: true });
   state.client = client;
+  state.closed = false;
+  armCrashHeal(state, client, config);
   state.toolsCache = null; // 连接变化 → 工具发现缓存失效
   state.failCount = 0;
+}
+
+/**
+ * 崩溃即时自愈（工单《插件面板端口生命周期整改》P0-2）：
+ * stdio 子进程死亡（transport 关闭）时主动重连，而不是保持 active 假象、
+ * 等首次工具调用失败才自愈——崩溃期间面板与工具同时不可用的窗口由此收窄到秒级。
+ *
+ * - 主动关闭（teardown / 重连前置 close）通过 state.closed 抑制，避免「卸载即复活」与递归自愈；
+ * - 防并发由 reconnecting set 保证；触发节流见 requestSelfHeal（防「子进程秒死→无限复活」循环）。
+ */
+function armCrashHeal(state: McpConnectionState, client: Client, config: McpServerConfig): void {
+  client.onclose = () => {
+    if (state.closed) return;
+    console.warn(`[MCP] ${config.name} (${config.id}) 连接断开（子进程退出），触发自愈重连`);
+    void McpClientManager.getInstance().requestSelfHeal(config.id);
+  };
 }
 
 /** MCP 服务器 → 插件规格（setup 即插件的可逆副作用集合） */
@@ -208,6 +212,7 @@ function mcpServerPlugin(config: McpServerConfig): PluginSpec<McpServerConfig> {
         timeout: (cfg.timeout ?? 0) * 1000, // 秒 → 毫秒，0 表示不限制
         toolsCache: null,
         failCount: 0,
+        closed: false,
       };
       try {
         // 连接（失败 → setup 抛错 → 插件 error 状态，不产生孤儿连接）
@@ -236,14 +241,18 @@ function mcpServerPlugin(config: McpServerConfig): PluginSpec<McpServerConfig> {
           });
         }
 
-        // 卸载时断开连接（可逆）
+        // 卸载时断开连接（可逆）+ 清除端口登记：禁用/卸载即失效，
+        // 反代 resolve 立即从 ok 转 declared-not-running（503 引导页）
         return async () => {
+          state.closed = true; // 主动关闭：抑制 onclose 自愈，避免「卸载即复活」
           try { await state.client?.close(); } catch { /* 忽略 */ }
           state.client = undefined;
           state.toolsCache = null;
+          releasePanelPort(cfg.id);
         };
       } catch (e) {
         // 失败路径同样确保连接被回收（避免 setup 中断导致连接泄漏）
+        state.closed = true;
         try { await state.client?.close(); } catch { /* 忽略 */ }
         state.client = undefined;
         throw e;
@@ -302,6 +311,19 @@ class McpClientManager {
    * 挂载新增/缺失的、卸载已移除/禁用的、重启配置变更的；依赖不满足的进入 error 状态并记录原因。
    */
   async syncServers(configs: McpServerConfig[]): Promise<void> {
+    // Bob OCR 常驻桥：随包分发（next-standalone/bob-ocr-mcp）但需要有人拉起 ——
+    // 宿主在这里确保它在线（已有在线桥直接复用，未在线则用随包副本 --serve）。
+    // 必须先于下面的 token 刷新：桥刚拉起时落盘配置里还是占位 token，
+    // 由 ensure 报告 spawned 时强制刷新一次，避免首个 sync 拿占位 token 连接 401。
+    const ocrCfg = configs.find((c) => c.id === OCR_BRIDGE_ID);
+    if (ocrCfg && ocrCfg.enabled && !ocrCfg.builtin) {
+      const bridge = await ensureOcrBridge({ waitMs: 3000 });
+      if (bridge.spawned) this.localBridgeTokenProbeAt = 0;
+      if (!bridge.ok) {
+        console.warn(`[ocr-bridge] 宿主托管拉起失败：${bridge.error || 'unknown'}${bridge.logPath ? `（日志 ${bridge.logPath}）` : ''}`);
+      }
+    }
+
     // 本地常驻桥（bob-browser-mcp / bob-ocr-mcp）：桥重启会轮换 token，
     // 落盘配置里的旧 token 会让连接 401。同步前探测 /setup/status，
     // token 不一致则就地刷新（运行时，不写盘），使下方 configChanged 感知变更并触发一次重连。
@@ -635,6 +657,23 @@ class McpClientManager {
     } finally {
       this.reconnecting.delete(serverId);
     }
+  }
+
+  /** onclose 自愈的最近触发时间（节流用） */
+  private lastHealAt = new Map<string, number>();
+
+  /**
+   * 崩溃自愈入口（onclose 触发，工单 P0-2）：委托 reconnectServer。
+   * 节流：距上次触发 <10s 的重复 onclose 直接跳过——若插件二进制损坏导致子进程秒死，
+   * 不加节流会形成「死亡→复活→死亡」的无限循环；跳过后仍由既有的
+   * callTool 失败自愈 / sync 重试路径兜底。
+   */
+  requestSelfHeal(serverId: string): Promise<void> {
+    const now = Date.now();
+    const last = this.lastHealAt.get(serverId) ?? 0;
+    if (now - last < 10_000) return Promise.resolve();
+    this.lastHealAt.set(serverId, now);
+    return this.reconnectServer(serverId);
   }
 
   /** 断开所有连接（卸载全部 active 插件） */

@@ -15,6 +15,8 @@ import type { MessageAttachment, MessageReference, ThinkingLevel, ToolCallPhase,
 import { MODEL_BRAND_COLOR, MODEL_BRAND_PATHS, resolveModelBrand } from '@/lib/providers/brand-icons';
 import { formatFileSize } from './composer/useComposer';
 import { estimateProcessRows, finalizeToolCallPhase, formatDuration, openChipPath } from './chatNodeKernelUtils';
+import { HtmlRenderer } from './HtmlRenderer';
+import { desktop, isDesktop } from '@/lib/desktop-adapter';
 
 /** 消息渲染区错误边界：正文/StreamingMarkdown 等渲染异常时降级为可恢复提示，避免整节点空白。
  *  仅 widget 有自身兜底，正文区没有——渲染崩溃会直接清空整个节点，这里补上。 */
@@ -454,6 +456,27 @@ export function WaitingHint({
  * 只给过程感：思考收成小条、每个工具一行摘要、技能小药丸；
  * 点击 Think / 工具行就地展开明细（思考原文 / 参数 / 结果），不切换到 Trace 视图。
  */
+/** 从下载工具结果里取 download id（结果首行形如 `[12] completed …`） */
+function downloadIdOf(tc: ToolCallRecord): number | null {
+  const m = /^\[(\d+)\]\s/m.exec(tc.result || '');
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+/** 卡片上的 Open / Show in Finder：失败走侧栏 toolbar toast（BrowserChatPanel 监听 bob-hippo-toast） */
+async function runDownloadAction(action: 'open' | 'reveal', id: number): Promise<void> {
+  const res = action === 'open'
+    ? await desktop.hippoBrowser.downloadOpen(id)
+    : await desktop.hippoBrowser.downloadReveal(id);
+  if (res.ok || typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('bob-hippo-toast', {
+    detail: {
+      text: res.error || (action === 'open' ? 'Could not open the downloaded file' : 'Downloaded file not found'),
+    },
+  }));
+}
+
 export function TraceProcessSummary({
   thinkText,
   toolCalls,
@@ -477,6 +500,9 @@ export function TraceProcessSummary({
 }) {
   const [thinkOpen, setThinkOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState<number | null>(null);
+  /** 桌面壳判定放到挂载后：避免 SSR/首帧与客户端不一致导致 hydration 警告（按钮只在 Electron 显示） */
+  const [desktopReady, setDesktopReady] = useState(false);
+  useEffect(() => { setDesktopReady(isDesktop()); }, []);
   /** 结束态整体折叠：已完成且过程区超一行时默认折叠；流式中恒展开以便看实时进度 */
   const [groupFolded, setGroupFolded] = useState<boolean>(
     () => !isStreaming && estimateProcessRows(thinkText, toolCalls, skillNames) > 1,
@@ -502,6 +528,11 @@ export function TraceProcessSummary({
   const totalRows = estimateProcessRows(thinkText, toolCalls, skillNames);
   const showFoldHeader = compact || (!isStreaming && totalRows > 1);
   const showDetail = !compact && (isStreaming || !showFoldHeader || !groupFolded);
+  // 窄栏（浏览器侧边栏）compact 态不展开工具明细，但下载结果卡片必须露出来：
+  // 用户的诉求是「下载完能看见文件」，不能因为 compact 把卡也藏进 Trace。
+  const downloadCards = compact
+    ? calls.filter((tc) => !!tc.cardHtml && tc.cardHtml.includes('ai-card-download'))
+    : [];
   const failCount = visibleCalls.filter((tc) => tc.phase === 'error' || tc.success === false).length;
   const processSummary = [
     hasThink ? '1 thought' : null,
@@ -574,6 +605,40 @@ export function TraceProcessSummary({
           </button>
         );
       })()}
+      {downloadCards.length > 0 && (
+        <div className="mt-0.5 w-full min-w-0 space-y-1 px-1">
+          {downloadCards.map((tc, i) => {
+            const downloadId = downloadIdOf(tc);
+            return (
+              <div key={`${tc.spanId || tc.toolName}-${i}`} className="min-w-0">
+                <HtmlRenderer content={tc.cardHtml ?? ''} />
+                {downloadId && desktopReady && (
+                  <div className="mt-1 flex items-center gap-2 px-1">
+                    <button
+                      type="button"
+                      onClick={() => void runDownloadAction('open', downloadId)}
+                      title="Open with the default app"
+                      className="cursor-pointer rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_6%,transparent)]"
+                      style={{ borderColor: 'var(--line-soft)', color: 'var(--ink)' }}
+                    >
+                      Open
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runDownloadAction('reveal', downloadId)}
+                      title="Show in Finder"
+                      className="cursor-pointer rounded-md border px-2 py-0.5 text-11 transition-colors hover:bg-[color:color-mix(in_oklab,var(--primary)_6%,transparent)]"
+                      style={{ borderColor: 'var(--line-soft)', color: 'var(--ink)' }}
+                    >
+                      Show in Finder
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
       {showDetail && (
         <>
       {/* Think 小条：默认收起，点击就地展开思考原文 */}

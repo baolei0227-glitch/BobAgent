@@ -12,6 +12,7 @@ export {
   PLATFORM,
   IS_WIN,
   IS_DARWIN,
+  ARCH,
   PATH_DELIMITER,
   pathKey,
   fsPathKey,
@@ -20,6 +21,7 @@ export {
   splitPathList,
   dedupePaths,
   joinPathList,
+  sharedLibEnv,
   exeName,
   POSIX_TOOLCHAIN_DIRS,
   POSIX_SYSTEM_DIRS,
@@ -78,3 +80,10 @@ export {
   type CapabilityId,
   type ExistsFn,
 } from './binaries';
+
+export {
+  machineIds,
+  localHostName,
+  type MachineId,
+  type MachineIdKind,
+} from './identity';

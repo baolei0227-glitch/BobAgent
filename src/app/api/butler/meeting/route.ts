@@ -15,7 +15,9 @@
  *                                                 返回 **NDJSON 流**：{t:'progress'} … 收尾 {t:'done'} 或 {t:'skip',reason}
  *   - { action: 'settings_get' / 'settings_set' } → 读写会议专属设置（录音源 / 参会人数 / 会后自动整理）
  *   - { action: 'import_probe', audioPath }        → 导入录音：探测时长（ffmpeg 不可用返回 null），
- *                                                     并对整段音频跑一次说话人分离（结果缓存复用；未下载分离资产则跳过）
+ *                                                     并对整段音频跑一次说话人分离（结果缓存复用；未下载分离资产则跳过）。
+ *                                                     返回 **NDJSON 流**：{t:'progress',phase:'diarize',pct} … 收尾 {t:'done',durationSec}
+ *                                                     或 {t:'error',error}——分离在长录音上要跑十几分钟，不做成流界面就只是干转
  *   - { action: 'import_segment', audioPath, startSec?, endSec? } → 导入录音：转写一个时间窗（纯正文）
  *   - { action: 'import_finish', title, text }     → 导入录音：按会议设置出纪要（或只留档全文转写）
  *   - { action: 'podcast_generate', sourcePath, title?, form?, voiceA?, voiceB? } → 文本转播客：读 materials 下的 md/txt →
@@ -29,9 +31,6 @@
  *   - { action: 'podcast_voices' }                 → 文本转播客：列举当前 TTS 引擎下两位主播的可选音色
  *                                                     （TTS 配置与本地模型都在服务端，客户端只能从这里取清单）
  *   - { action: 'history' }                        → 过往会议产物（扫 butler 根 + 当前项目根，供面板 History 列表点开）
- *   - { action: 'search', query?, limit? }          → 会议归档检索（**记录员 Recorder 专用**）：无 query = 最近会议清单；
- *                                                     有 query = 跨会议正文检索（大小写不敏感子串，多词 AND）
- *   - { action: 'read', source, path }              → 会议归档阅读（**记录员 Recorder 专用**）：取某场全文（剥音频指针与时间戳）
  *   - { action: 'delete', source, path }           → 删除一条历史产物（只删这一份 md；路径须落在对应根内且为会议产物）
  *   - { action: 'replay_audio', source, path }     → 回放：取该产物的带戳转写 + 录音分片清单（+ 已合并件）
  *                                                     并附说话人名单 speakers（库里有名字就带上，见 speakerRoster）
@@ -39,6 +38,10 @@
  *   - { action: 'speaker_identify', source, path } → 回放：为「当年没算过声纹」的老录音补跑一次分离，回传新名单
  *                                                     （replay_audio 只读缓存，故旧录音要用户点一下才分析）
  *   - { action: 'concat_audio', source, path }     → 回放：把分片合并成一个 webm（ffmpeg；不可用则失败）
+ *   - { action: 'save_marks', source, path, marks } → 回放打点：整份替换该录音的打点（写进转写 md 的一行注释）
+ *   - { action: 'clip_audio', source, path, startSec, endSec, name? } → 回放截取：用 ffmpeg 导出 [start, end) 片段
+ *                                                     （产物落源音频同目录 `片段 - <标题> - <起-止>.<ext>`；
+ *                                                      name 为可选的自定义主名，扩展名跟随源容器）
  *
  * 说明：butler 目标的录音/纪要落盘走本路由的 'write'（服务端固定根 = butlerRoot，做穿越防护）；
  * 项目目标的落盘由客户端直接调 /api/projects?action=write_file 完成。
@@ -55,6 +58,9 @@ import { butlerRoot } from '@/lib/butler/storage';
 import { meetingSettingsOf, type TtsSettings } from '@/lib/settings';
 import { readSettingsFromFile, writeSettingsToFile } from '@/lib/settings-server';
 import { getCurrentProject } from '@/lib/project/project-manager';
+import { parseMarks, upsertMarkHint, type AudioMark } from '@/lib/audio/marks';
+import { clipBaseName, safeBaseName } from '@/lib/audio/naming';
+import { clipAudio } from '@/lib/audio/clip';
 
 /**
  * 导入录音模式的路径解析：只允许项目 `materials/` 下的相对路径。
@@ -178,41 +184,6 @@ function parseMeetingFileName(name: string): { kind: MeetingKind; title: string 
   if (!m) return null;
   return { kind: kindOfPrefix(m[1]), title: m[2] };
 }
-
-/** 转写正文里的相对时间戳 `[mm:ss]`（跨 100 分钟进位成三位，见 formatTimestampedTranscript） */
-const TRANSCRIPT_TS_RE = /\[\d{1,3}:\d{2}\]\n?/g;
-
-/**
- * 剥离「机器标记」→ 纯文本：首行音频指针 `<!-- bob-audio: … -->` + 转写时间戳 `[mm:ss]`。
- * 这两样只对回放器有意义；检索命中与送模型总结都必须是纯正文（时间戳喂进模型只会干扰行文）。
- */
-function stripMeetingMarkup(text: string): string {
-  return text.replace(AUDIO_HINT_RE, '').replace(TRANSCRIPT_TS_RE, '').trim();
-}
-
-/** 命中片段：正文压成单行后，取**最早命中词**前后各一段（上限 140 字符，够模型判断是不是它） */
-function makeSnippet(flat: string, terms: string[], max = 140): string {
-  const lower = flat.toLowerCase();
-  let best = -1;
-  for (const t of terms) {
-    const i = lower.indexOf(t);
-    if (i >= 0 && (best < 0 || i < best)) best = i;
-  }
-  if (best < 0) return '';
-  const start = Math.max(0, best - Math.floor(max / 2));
-  const end = Math.min(flat.length, start + max);
-  return (start > 0 ? '…' : '') + flat.slice(start, end) + (end < flat.length ? '…' : '');
-}
-
-/** 检索结果里的一条会议：只发检索需要的字段（name / hasAudio 与检索无关） */
-const briefEntry = (m: MeetingHistoryEntry) => ({
-  title: m.title,
-  kind: m.kind,
-  source: m.source,
-  path: m.path,
-  place: m.place,
-  time: m.time,
-});
 
 /**
  * 回放侧的根目录 + 「绝对路径 → 客户端可用路径」换算。
@@ -521,7 +492,8 @@ async function loadReplay(source: 'local' | 'project', rel: string, cache: DirCa
   }
   const transcript = transcriptAbs === abs ? mdText : await fs.readFile(transcriptAbs, 'utf-8');
   const { audio, merged } = await findReplayAudio(transcriptAbs, transcript, source, title, cache);
-  return { title, name: basename(abs), transcript, transcriptPath: toClient(transcriptAbs), audio, merged };
+  // transcriptAbs 是打点的落点（挂在转写 md 上；点开纪要时也要写回同目录那份转写）
+  return { title, name: basename(abs), transcript, transcriptAbs, transcriptPath: toClient(transcriptAbs), audio, merged };
 }
 
 /** 只发客户端需要的字段（abs 是服务端内部字段） */
@@ -703,11 +675,10 @@ export async function POST(request: NextRequest) {
       time?: number;
       /** 回放：产物所在侧（local = butler 根下相对路径；project = 项目内相对路径） */
       source?: 'local' | 'project';
-      /** 归档检索（search）：关键词（多词按 AND）+ 命中上限（默认 10，钳到 30） */
-      query?: string;
-      limit?: number;
       /** 批量补标点（punctuate）：待处理的正文数组，按序一一对应返回 */
       texts?: string[];
+      /** 打点（save_marks）：整份替换的打点数组（服务端序列化成 md 注释行） */
+      marks?: AudioMark[];
       /** 说话人命名（speaker_name）：0 基簇号（来自 replay_audio 的 speakers[].speaker）+ 新名字 */
       speaker?: number;
       name?: string;
@@ -728,66 +699,6 @@ export async function POST(request: NextRequest) {
     // 过往会议产物（面板 History 列表；打开时才拉，返回新→旧最多 30 条）
     if (action === 'history') {
       return NextResponse.json({ success: true, meetings: await listMeetingHistory() });
-    }
-
-    // 会议归档检索（**记录员 Recorder 专用**；面板 History 走上面的 history，不走这里）。
-    // 无 query = 最近会议清单；有 query = 跨会议正文检索。
-    // 检索是**确定性匹配**（大小写不敏感子串，多词按 AND）——会议量低频，为它单独建向量索引不划算；
-    // 性能靠 listMeetingHistory 自身的上限兜底（depth=4、新→旧 30 条），命中到 limit 即停。
-    if (action === 'search') {
-      const meetings = await listMeetingHistory();
-      const limit = Math.min(Math.max(Math.floor(Number(body.limit)) || 10, 1), 30);
-      const terms = String(body.query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
-      if (terms.length === 0) {
-        return NextResponse.json({
-          success: true,
-          total: meetings.length,
-          query: '',
-          hits: meetings.slice(0, limit).map((m) => ({ ...briefEntry(m), snippet: '' })),
-        });
-      }
-      const hits: Array<ReturnType<typeof briefEntry> & { snippet: string }> = [];
-      for (const m of meetings) {
-        if (hits.length >= limit) break;
-        let text: string;
-        try {
-          const { abs } = await resolveInSide(m.source, m.path);
-          text = stripMeetingMarkup(await fs.readFile(abs, 'utf-8'));
-        } catch {
-          continue; // 单条读不到（已删/无权限）不影响其余命中
-        }
-        const flat = text.replace(/\s+/g, ' ').trim();
-        const lower = flat.toLowerCase();
-        if (!terms.every((t) => lower.includes(t))) continue;
-        hits.push({ ...briefEntry(m), snippet: makeSnippet(flat, terms) });
-      }
-      return NextResponse.json({ success: true, total: meetings.length, query: String(body.query || '').trim(), hits });
-    }
-
-    // 会议归档阅读（**记录员 Recorder 专用**）：取某场全文，剥掉音频指针与时间戳。
-    // 收口与 delete / replay 同款：路径须落在对应根内（resolveInSide，越界即抛），且文件名必须是会议产物。
-    if (action === 'read') {
-      const source: 'local' | 'project' = body.source === 'project' ? 'project' : 'local';
-      const rel = String(body.path || '').trim();
-      if (!rel) return NextResponse.json({ success: false, error: 'path is required' });
-      const { abs } = await resolveInSide(source, rel);
-      if (!MEETING_FILE_RE.test(basename(abs))) {
-        return NextResponse.json({ success: false, error: 'not a meeting record' }, { status: 403 });
-      }
-      const info = parseMeetingFileName(basename(abs));
-      let time = 0;
-      try {
-        time = (await fs.stat(abs)).mtimeMs;
-      } catch { /* 取不到按 0 */ }
-      return NextResponse.json({
-        success: true,
-        title: info?.title ?? basename(abs).replace(/\.md$/i, ''),
-        kind: info?.kind ?? 'transcript',
-        source,
-        path: rel,
-        time,
-        text: stripMeetingMarkup(await fs.readFile(abs, 'utf-8')),
-      });
     }
 
     // 删除一条历史产物：删这一份 md，并回收它引用的本地音频（不留孤儿文件）。
@@ -825,8 +736,57 @@ export async function POST(request: NextRequest) {
         audio: r.audio.map(pubAudio),
         merged: r.merged ? pubAudio(r.merged) : null,
         missing: r.audio.length === 0 && !r.merged,
+        marks: parseMarks(r.transcript),
         speakers: await speakerRoster(source, r),
       });
+    }
+
+    // ---- 打点（回放时给录音打点/改点）----
+    // 打点挂在转写 md 上（一行 `<!-- bob-marks: … -->` 注释），全程只动这一行。
+    // path 仍是「点开的那份产物」——服务端按同一口径定位到它的转写 md（点开纪要也写回同目录转写）。
+    if (action === 'save_marks') {
+      const source: 'local' | 'project' = body.source === 'project' ? 'project' : 'local';
+      const rel = String(body.path || '').trim();
+      if (!rel) return NextResponse.json({ success: false, error: 'path is required' });
+      const r = await loadReplay(source, rel, new Map());
+      const next = upsertMarkHint(r.transcript, (body.marks ?? []) as AudioMark[]);
+      await fs.writeFile(r.transcriptAbs, next, 'utf-8');
+      return NextResponse.json({ success: true, marks: parseMarks(next) });
+    }
+
+    // ---- 截取片段（录音打点/截取工具的导出）----
+    // 从**单一音频**截 [startSec, endSec)：优先已合并件；只有分片时先合并（复用 concat_audio 的 mergeParts）。
+    // 产物落在源音频同目录（`片段 - <标题> - <起-止>.<ext>`，主名可自定义、扩展名跟随源容器），
+    // 与会议产物同一套 History 口径，可直接点开回放。
+    if (action === 'clip_audio') {
+      const source: 'local' | 'project' = body.source === 'project' ? 'project' : 'local';
+      const rel = String(body.path || '').trim();
+      if (!rel) return NextResponse.json({ success: false, error: 'path is required' });
+      const startSec = Number(body.startSec);
+      const endSec = Number(body.endSec);
+      if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec - startSec < 0.1) {
+        return NextResponse.json({ success: false, error: 'a clip needs a valid range (at least 0.1s)' });
+      }
+      const r = await loadReplay(source, rel, new Map());
+      const ffmpegPath = await (await import('@/lib/parse/audio-parser')).resolveFfmpegPath();
+      if (!ffmpegPath) return NextResponse.json({ success: false, error: 'ffmpeg is unavailable' });
+      if (r.audio.length === 0 && !r.merged) return NextResponse.json({ success: false, error: 'no audio parts found' });
+
+      // 单一来源：合并件优先，否则先合并分片（与 concat_audio 同一口径，产物可复用）
+      const side = r.merged?.source ?? r.audio[0].source;
+      const { toClient } = await replaySide(side);
+      const dir = dirname((r.merged ?? r.audio[0]).abs);
+      const srcAbs = r.merged ? r.merged.abs : await mergeParts(r.audio, r.title, ffmpegPath, dir);
+
+      // 用户在点 Clip 时可以先改名；空/非法回退默认名（扩展名由源容器决定，见 lib/audio/clip.ts）
+      const base = safeBaseName(String(body.name || '')) || clipBaseName(r.title, startSec, endSec);
+      let outAbs: string;
+      try {
+        outAbs = await clipAudio(ffmpegPath, srcAbs, startSec, endSec, join(dir, base));
+      } catch {
+        return NextResponse.json({ success: false, error: 'ffmpeg failed to export this clip' });
+      }
+      return NextResponse.json({ success: true, clip: pubAudio(await audioEntry(side, toClient, outAbs)) });
     }
 
     // ---- 给某场录音的某个说话人命名（身份层写口）----
@@ -1156,24 +1116,72 @@ export async function POST(request: NextRequest) {
     // ---- 导入录音模式（会议面板 Import）：选 materials 里的音频 → 分段转写 → 同一出口出纪要 ----
     // 为什么分段交给客户端驱动：长音频（>30 分钟）必须按窗口串行转写，
     // 一次请求跑完整场会既看不到进度、也无法取消（见 MeetingStart 的导入流程）。
+    //
+    // import_probe 的响应是 **NDJSON 流**（与 retranscribe 同款）：时长探测本身很快，但整段说话人
+    // 分离在长录音上要跑几分钟到二十几分钟，一次性 JSON 会让界面一直转圈、也说不清卡在哪。
+    // 每行一个对象：{t:'progress',phase:'diarize',pct} … 收尾 {t:'done',durationSec} 或 {t:'error',error}。
     if (action === 'import_probe') {
       const rel = String(body.audioPath || '').trim();
-      if (!rel) return NextResponse.json({ success: false, error: 'audioPath is required' });
-      const { abs, projectRoot } = await resolveMaterialsAudio(rel);
-      const { probeAudioDurationSec, resolveFfmpegPath } = await import('@/lib/parse/audio-parser');
-      // ffmpeg 不可用 → null，客户端退化为「单次整段转写」（>30 分钟会被引擎明确拒绝）
-      const durationSec = await probeAudioDurationSec(abs);
-      // 说话人分离在「探时长」这一步就对**整段**音频跑一次（结果缓存到 .cache/diar/，各窗口只从缓存切片）：
-      // ① 长等待集中在这里，后面的窗口转写不再重复分离；② 整段只聚一次类，编号跨窗口才一致。
-      // 失败/未下载资产时 ensureDiarization 自己吞错返回 null，这里不影响 durationSec 的返回。
-      const settings = meetingSettingsOf(await readSettingsFromFile());
-      const { diarModeOf, ensureDiarization } = await import('@/lib/stt/diarize');
-      const mode = diarModeOf(settings.speakers);
-      if (mode) {
-        const ffmpegPath = await resolveFfmpegPath();
-        if (ffmpegPath) await ensureDiarization(abs, projectRoot, mode, { ffmpegPath });
-      }
-      return NextResponse.json({ success: true, durationSec });
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (obj: Record<string, unknown>) => {
+            // 长流期间客户端可能已经走了（关面板/取消）：enqueue 会抛，吞掉即可，别让收尾逻辑崩
+            try {
+              controller.enqueue(encoder.encode(`${JSON.stringify(obj)}\n`));
+            } catch { /* 客户端已断开 */ }
+          };
+          try {
+            if (!rel) {
+              send({ t: 'error', error: 'audioPath is required' });
+              return;
+            }
+            const { abs, projectRoot } = await resolveMaterialsAudio(rel);
+            const { probeAudioDurationSec, resolveFfmpegPath } = await import('@/lib/parse/audio-parser');
+            // ffmpeg 不可用 → null，客户端退化为「单次整段转写」（>30 分钟会被引擎明确拒绝）
+            const durationSec = await probeAudioDurationSec(abs);
+            // 说话人分离在「探时长」这一步就对**整段**音频跑一次（结果缓存到 .cache/diar/，各窗口只从缓存切片）：
+            // ① 长等待集中在这里，后面的窗口转写不再重复分离；② 整段只聚一次类，编号跨窗口才一致。
+            // 失败/未下载资产时 ensureDiarization 自己吞错返回 null，这里不影响 durationSec 的返回。
+            const settings = meetingSettingsOf(await readSettingsFromFile());
+            const { diarModeOf, ensureDiarization } = await import('@/lib/stt/diarize');
+            const mode = diarModeOf(settings.speakers);
+            if (mode) {
+              const ffmpegPath = await resolveFfmpegPath();
+              if (ffmpegPath) {
+                // 先发一帧，让客户端立刻读到首字节（否则响应头可能一直等到分离跑完才刷出去）
+                send({ t: 'progress', phase: 'diarize', pct: 0 });
+                // CLI 大约每 0.8% 就报一次进度（75s 音频实测 130 行），照单转发会把客户端刷成高频重渲染：
+                // 只在整数百分比变化时才发，长录音下大约几秒一帧。
+                let lastPct = -1;
+                await ensureDiarization(abs, projectRoot, mode, {
+                  ffmpegPath,
+                  onProgress: (pct) => {
+                    const whole = Math.floor(pct);
+                    if (whole === lastPct) return;
+                    lastPct = whole;
+                    send({ t: 'progress', phase: 'diarize', pct: whole });
+                  },
+                });
+              }
+            }
+            send({ t: 'done', durationSec });
+          } catch (e) {
+            console.error('import_probe error:', e);
+            send({ t: 'error', error: e instanceof Error ? e.message : 'probe failed' });
+          } finally {
+            try {
+              controller.close();
+            } catch { /* 已关闭/已断开 */ }
+          }
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      });
     }
 
     if (action === 'import_segment') {

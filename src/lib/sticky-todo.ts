@@ -38,7 +38,7 @@ export function isBlankTodoRow(raw: string): boolean {
   return t.length === 0 || BLANK_ROW_RE.test(t);
 }
 
-/** 归一化某张便签的全部页：剔除空行并保持行级日历元数据对齐 */
+/** 归一化某张便签的全部页：剔除空行并保持行级日历/计划元数据对齐 */
 export function normalizeStickyPages(pages: unknown[] | null | undefined): Record<string, unknown>[] | null | undefined {
   if (!Array.isArray(pages)) return pages as null | undefined;
   return pages.map((rawP) => {
@@ -47,22 +47,29 @@ export function normalizeStickyPages(pages: unknown[] | null | undefined): Recor
     const rows = content.split('\n');
     const hasCal = Array.isArray(p.lineCalendared);
     const hasEv = Array.isArray(p.lineEventIds);
+    const hasPlan = Array.isArray(p.linePlanRefs);
     const cal = hasCal ? (p.lineCalendared as unknown[]).map(Boolean) : [];
     const ev = hasEv
       ? (p.lineEventIds as unknown[][]).map((x) => (Array.isArray(x) ? x.map(String) : []))
       : [];
+    const planRefs = hasPlan
+      ? (p.linePlanRefs as unknown[][]).map((x) => (Array.isArray(x) ? x.map(String) : []))
+      : [];
     const kept: string[] = [];
     const keptCal: boolean[] = [];
     const keptEv: string[][] = [];
+    const keptPlan: string[][] = [];
     for (let i = 0; i < rows.length; i++) {
       if (isBlankTodoRow(rows[i])) continue;
       kept.push(rows[i]);
       if (hasCal) keptCal.push(cal[i] ?? false);
       if (hasEv) keptEv.push(ev[i] ?? []);
+      if (hasPlan) keptPlan.push(planRefs[i] ?? []);
     }
     const out: Record<string, unknown> = { ...p, content: kept.join('\n') };
     if (hasCal) out.lineCalendared = keptCal;
     if (hasEv) out.lineEventIds = keptEv;
+    if (hasPlan) out.linePlanRefs = keptPlan;
     return out;
   });
 }

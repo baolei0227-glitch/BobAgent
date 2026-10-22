@@ -83,6 +83,28 @@
   /* Neutral 组：表面/文字/边框 */
   --surface: #f7f7f8;
   --surface-muted: #efeff2;
+
+  /* 波形柱专用（2026-10-11 八轮）：**不要借用 `--line-soft`（那是边框色 = ink 28%）** ——
+     实测波形柱对波形底只有 **1.83:1**，低于"有意义的非文本图形"3:1 下限，
+     看起来像空盒子。ink 55% ⇒ **3.83:1**（见 `音频编辑器视觉优化方案_20261011.md` §1.1）。 */
+  --wave-bar: rgba(23, 23, 23, 0.55); /* 回落值 */
+  --wave-bar: color-mix(in oklab, var(--ink) 55%, transparent); /* 跟随 --ink，主题切换不失效 */
+
+  /* 打点竖线/圆点专用（2026-10-18）：**必须与播放头/选区同屏可分**。
+     背景：播放头 = `--primary-strong`（2px 实紫）、选区边 = 55% 紫、悬停投影线 = 45%~100% 紫，
+     而打点竖线原本也是紫（34%）—— 三者同色相，1px 的打点线只能靠"比播放头淡"来区分，
+     实测在波形上分不出哪条是自己打的点、哪条是播放头（用户原话"打点后竖线颜色应该区别"）。
+     ⇒ 打点改用**琥珀色相**（书签语义），与紫色同屏即为互补色对，粗细之外多一维差异。
+     取值约束：#b06a06 对波形底 `--surface-muted`(#efeff2) 为 **3.73:1**（非文本图形 3:1 下限之上）；
+     不要再调浅 —— 更浅会与紫色一样"只是一种更淡的紫"的观感（色相差异被亮度差掩盖）。 */
+  --mark-line: #b06a06;
+  /* AI 落点（Highlights 选中的区间落成的点，2026-10-18 加）：**再换一个色相** ——
+     它与手打的琥珀点原本只靠"空心 / 实心"区分，点小了、离远了就分不出来。
+     取值约束：teal #0f8a7c 对波形底 `--surface-muted`(#efeff2) 为 **3.7:1**（非文本图形 3:1 之上）。
+     同屏三个色相各归各的：播放头 / 选区 = 紫、手打点 = 琥珀、AI 落点 = 青。 */
+  --mark-line-ai: #0f8a7c;
+  /* AI 点只有 5px 刻痕（见 AudioMarkTrack 注释），保持轻：同色相、降透明度 */
+  --mark-line-ai-soft: color-mix(in oklab, var(--mark-line-ai) 42%, transparent);
   --text: #171717;
   --text-muted: #52525b;
   --border: rgba(23, 23, 23, 0.12);
@@ -1592,13 +1614,36 @@ body {
   height: 0;
 }
 
+/* ===== 纯滑块滚动条（轨道 / 按钮 / 角落全透明：去掉背景色与背景框，只留滑块） ===== */
+.thumb-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ink-faint) 40%, transparent) transparent;
+}
+.thumb-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+.thumb-scroll::-webkit-scrollbar-track,
+.thumb-scroll::-webkit-scrollbar-corner,
+.thumb-scroll::-webkit-scrollbar-button {
+  background: transparent;
+  border: none;
+}
+.thumb-scroll::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--ink-faint) 40%, transparent);
+  border: none;
+  border-radius: 999px;
+}
+
 /* ===== Hippo Browser 胶囊态（收起后主窗口顶中部的窄胶囊 + 呼吸灯） ===== */
 .hippo-capsule {
   position: fixed;
   top: 56px;
   left: 50%;
-  transform: translate(-50%, 0);
+  transform: translate(calc(-50% + var(--capsule-x, 0px)), var(--capsule-y, 0px));
   z-index: 9999;
+  touch-action: none;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1615,8 +1660,15 @@ body {
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 .hippo-capsule:hover {
-  transform: translate(-50%, 0) scale(1.05);
+  transform: translate(calc(-50% + var(--capsule-x, 0px)), var(--capsule-y, 0px)) scale(1.05);
   box-shadow: 0 10px 30px rgba(75, 63, 227, 0.5);
+}
+/* 拖拽中：跟随指针，去掉过渡与 hover 放大，光标改为抓取态 */
+.hippo-capsule.is-dragging,
+.hippo-capsule.is-dragging:hover {
+  transform: translate(calc(-50% + var(--capsule-x, 0px)), var(--capsule-y, 0px));
+  transition: none;
+  cursor: grabbing;
 }
 .hippo-capsule__dot {
   width: 10px;

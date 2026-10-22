@@ -31,7 +31,8 @@ async function toolSandboxRollback(args: Record<string, unknown>): Promise<strin
   if (!appId) return 'Error: appId required';
   if (!file) return 'Error: file required（app 内相对路径，如 index.html）';
   try {
-    const { readdir, readFile, writeFile, stat } = await import('fs/promises');
+    const { readdir, readFile, stat } = await import('fs/promises');
+    const { parseHistoryName, writeAppFileAtomic } = await import('@/lib/sandbox/apps');
     // 路径穿越校验：file 必须落在 app 目录内
     const appDir = join(SANDBOX_APPS_DIR, appId);
     const target = join(appDir, file);
@@ -39,10 +40,11 @@ async function toolSandboxRollback(args: Record<string, unknown>): Promise<strin
       return 'Error: file 越界（必须是小程序目录内的相对路径）';
     }
     const historyDir = join(appDir, '.history', dirname(file));
-    const prefix = `${basename(file)}`; // 备份文件名格式：<时间戳>-<basename>
+    // 精确匹配 <时间戳>-<basename>：不能用 endsWith，否则同目录的 my-app.js 备份会被算成 app.js 的
+    const base = basename(file);
     let entries: string[] = [];
     try {
-      entries = (await readdir(historyDir)).filter((n) => n.endsWith(prefix) && n.length > prefix.length);
+      entries = (await readdir(historyDir)).filter((n) => parseHistoryName(n, base) !== null);
     } catch {
       entries = [];
     }
@@ -63,7 +65,9 @@ async function toolSandboxRollback(args: Record<string, unknown>): Promise<strin
       : entries[entries.length - 1];
     if (!match) return `Error: 未找到时间戳 "${stamp}" 对应的历史版本。可用 action="list" 查看。`;
     const content = await readFile(join(historyDir, match), 'utf-8');
-    await writeFile(target, content, 'utf-8');
+    // 走原子写：① 回滚前的当前内容也会进 .history（回滚本身可反悔）② 同步 manifest.updatedAt
+    const ok = await writeAppFileAtomic(appId, file, content);
+    if (!ok) return `Error: 回滚写入失败（小程序可能已删除，或触发了体积配额）。`;
     return `已回滚 ${appId}/${file} → ${match}（${content.length} chars）。请用 capture_preview 复核渲染效果。`;
   } catch (e) {
     return `Rollback failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -75,6 +79,16 @@ async function toolSandboxRollback(args: Record<string, unknown>): Promise<strin
  * 内联 app 内相对引用的 css/js（<link href> / <script src>），CDN 外链保留。
  * 输出到 bob-sandbox/exports/<appId>-<ts>.html。
  */
+/** 相对资源判定：非 http(s)://、非 //、非绝对路径、非 data:/mailto: 等 scheme（导出内联用） */
+export function isRelativeAssetPath(p: string): boolean {
+  const t = String(p ?? '').trim();
+  if (!t) return false;
+  if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(t)) return false; // http:// https:// //cdn
+  if (t.startsWith('/')) return false;                         // 绝对路径
+  if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return false;             // data: mailto: blob: …
+  return true;
+}
+
 async function toolSandboxExport(args: Record<string, unknown>): Promise<string> {
   const appId = String(args.appId ?? '');
   if (!appId) return 'Error: appId required';
@@ -86,22 +100,23 @@ async function toolSandboxExport(args: Record<string, unknown>): Promise<string>
     const appDir = join(SANDBOX_APPS_DIR, appId);
     let html = entry.content;
 
-    // 内联相对引用的 css：<link rel="stylesheet" href="x.css">
-    html = html.replace(/<link\b([^>]*)\bhref=["']([^"'http][^"']*\.css(?:\?[^"']*)?)["']([^>]*)>/gi, (_m, pre, href, post) => {
+    // 内联相对引用的 css/js。注意判据必须是"非 http(s)://、非 //、非绝对路径"——
+    // 原来的字符类 `[^"'http]` 会把 theme.css / print.css / tailwind.css 这类**以 h/t/p 开头**的
+    // 相对文件名一并跳过（2026-10-10 评估 B3/P2），导出页因此缺样式。
+    html = html.replace(/<link\b[^>]*\bhref=["']([^"']+\.css(?:\?[^"']*)?)["'][^>]*>/gi, (_m, href) => {
+      if (!isRelativeAssetPath(href)) return _m;
       try {
-        const cssPath = join(appDir, href.split('?')[0]);
-        const css = readFileSyncSafe(cssPath);
+        const css = readFileSyncSafe(join(appDir, href.split('?')[0]));
         if (css == null) return _m;
         return `<style data-inlined="${href}">${css}</style>`;
       } catch {
         return _m;
       }
     });
-    // 内联相对引用的 js：<script src="x.js">
-    html = html.replace(/<script\b([^>]*)\bsrc=["']([^"'http][^"']*\.js(?:\?[^"']*)?)["']([^>]*)><\/script>/gi, (_m, pre, href, post) => {
+    html = html.replace(/<script\b[^>]*\bsrc=["']([^"']+\.js(?:\?[^"']*)?)["'][^>]*><\/script>/gi, (_m, href) => {
+      if (!isRelativeAssetPath(href)) return _m;
       try {
-        const jsPath = join(appDir, href.split('?')[0]);
-        const js = readFileSyncSafe(jsPath);
+        const js = readFileSyncSafe(join(appDir, href.split('?')[0]));
         if (js == null) return _m;
         return `<script data-inlined="${href}">${js}<\/script>`;
       } catch {
@@ -132,13 +147,13 @@ function readFileSyncSafe(p: string): string | null {
 /** 常用 MCP 推荐目录（内置写死，本地盘点用；不触网） */
 const KNOWN_MCP_CATALOG: Array<{ id: string; name: string; purpose: string; how: string }> = [
   { id: 'bob-browser-mcp', name: 'Bob Browser', purpose: '真实浏览器自动化（导航/点击/填表/抓取反爬站）', how: 'bob-browser-mcp --serve 常驻 + streamable-http 接入' },
-  { id: 'github', name: 'GitHub', purpose: 'GitHub 仓库/代码搜索、文件读写、PR/Issue', how: 'stdio npx @modelcontextprotocol/server-github + GITHUB_PERSONAL_ACCESS_TOKEN' },
+  { id: 'github', name: 'GitHub', purpose: 'GitHub 仓库/代码搜索、文件读写、PR/Issue', how: 'streamable-http https://api.githubcopilot.com/mcp/ + GitHub PAT' },
   { id: 'context7', name: 'Context7', purpose: '代码库/框架文档查询', how: 'streamable-http https://mcp.context7.com/mcp' },
   { id: 'pkulaw', name: '北大法宝', purpose: '法律法规/案例检索（法律场景）', how: 'streamable-http pkulaw 网关' },
   { id: 'tianyancha', name: '天眼查', purpose: '企业工商/风险/知识产权查询', how: 'streamable-http mcp.tianyancha.com + API Key' },
   { id: 'brave-search', name: 'Brave Search', purpose: '网页搜索 API（快/结构化；内置 web_search 可替代）', how: 'stdio npx @modelcontextprotocol/server-brave-search + BRAVE_API_KEY' },
   { id: 'filesystem', name: 'Filesystem', purpose: '文件系统操作（与内置文件工具重复，通常不需要）', how: 'stdio npx @modelcontextprotocol/server-filesystem' },
-  { id: 'notion', name: 'Notion', purpose: 'Notion 文档/数据库操作', how: 'stdio npx @modelcontextprotocol/server-notion + token' },
+  { id: 'notion', name: 'Notion', purpose: 'Notion 文档/数据库操作', how: 'streamable-http https://mcp.notion.com/mcp + MCP token' },
   { id: 'excel-mcp', name: 'Excel', purpose: 'Excel 读写（内置 openpyxl 可替代，通常不需要）', how: 'npx excel-mcp-server（社区包）' },
 ];
 
@@ -298,7 +313,7 @@ async function toolListConfiguredModels(_args: Record<string, unknown>): Promise
       empty: totalModels === 0,
       totalModels,
       providers: result,
-      hint: '模型 ID 格式为 "provider:modelId"（如 deepseek:deepseek-v4-flash）。在小程序中通过 BobWork.request("chat", { model: "provider:modelId", messages: [...] }) 调用。省略 model 参数则走 Auto 模式自动选择。',
+      hint: '模型 ID 格式为 "provider:modelId"（如 deepseek:deepseek-v4-flash）。在小程序中通过 BobWork.request("chat", { model: "provider:modelId", messages: [...] }) 调用。model 必填，没有 Auto 选项（务必显式传具体模型；存量老调用应由用户重新选择模型而非依赖宿主兜底）。',
     }, null, 2);
   } catch (e) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;

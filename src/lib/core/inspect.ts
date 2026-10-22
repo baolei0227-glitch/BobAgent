@@ -9,6 +9,8 @@
 import { join } from 'path';
 import { promises as fs } from 'fs';
 import { listProjects, ProjectConfig } from '@/lib/project/project-manager';
+import { resolveAppRoot } from '@/lib/app-root';
+import { INBOX_PROJECT_ID, TODO_INBOX_NAME } from '@/lib/project/sticky-scope';
 import {
   readTodoIndexFile,
   writeTodoIndexFile,
@@ -185,6 +187,32 @@ export async function inspectStickyTodos(
       projectName: p.name || p.id,
       isCurrent: p.id === currentId,
       notes,
+      pendingCount,
+    });
+  }
+
+  // 未立项的临时待办：全局 Todo Inbox（app root 的 sticky 文件），仅在 scope='all' 时纳入。
+  // 与项目同构（同一套索引结构/读取函数），只是把 appRoot 当 pseudo-project root 用。
+  if (scope === 'all') {
+    const inboxRoot = resolveAppRoot();
+    let inboxIndex: StickyTodoIndex | null = await readTodoIndexFile(inboxRoot);
+    let inboxFromIndex = true;
+    if (!inboxIndex) {
+      inboxIndex = await readStickyMainAsIndex(inboxRoot);
+      inboxFromIndex = false;
+    }
+    if (!inboxFromIndex) anyFromIndex = false;
+    const inboxNotes = inboxIndex.notes.filter(
+      (n) => n && typeof n.noteId === 'string' && Array.isArray(n.pages),
+    );
+    const pendingCount = inboxNotes.reduce((sum, n) => {
+      return sum + n.pages.reduce((s2, pg) => s2 + (Array.isArray(pg.items) ? pg.items.length : 0), 0);
+    }, 0);
+    result.projects.push({
+      projectId: INBOX_PROJECT_ID,
+      projectName: TODO_INBOX_NAME,
+      isCurrent: false,
+      notes: inboxNotes,
       pendingCount,
     });
   }

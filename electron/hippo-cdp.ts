@@ -21,6 +21,23 @@
 import type { WebContents, WebFrameMain } from 'electron';
 import { navGateError, lintPageScript, renderLintIssues } from '../src/lib/browser-tools/policy';
 
+/**
+ * 一次下载的记录（主进程 will-download 产出，工具层只读）。
+ *
+ * 为什么不把 `DownloadItem` 直接交给工具层：DownloadItem 只能在主进程的事件回调里安全访问，
+ * 且下载结束后会被回收；工具层只需要「id / 文件名 / 保存路径 / 状态 / 进度」这些稳定字段。
+ */
+export interface BrowserDownloadRecord {
+  id: number;
+  fileName: string;
+  url: string;
+  totalBytes: number;
+  receivedBytes: number;
+  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted';
+  savePath: string;
+  startedAt: number;
+}
+
 /** 宿主能力（由 hippo-browser.ts 注入，避免本模块依赖窗口/标签内部状态） */
 export interface ExecHost {
   /** 当前活动标签的 webContents；Hippo 未就绪返回 null */
@@ -45,6 +62,18 @@ export interface ExecHost {
   closeTab(id: number): { ok: boolean; activeId: number };
   /** 新开标签打开 URL */
   openTab(url: string, activate?: boolean): { ok: boolean; id?: number; error?: string };
+  /** 触发一个 URL 下载，等 will-download 记录出现后返回（只等「开始」，不等传输完成） */
+  startDownload(url: string, timeoutMs?: number): Promise<BrowserDownloadRecord | null>;
+  /** since（毫秒时间戳）之后开始的最新一条下载；没有返回 null */
+  recentDownloadSince(since: number): BrowserDownloadRecord | null;
+  /** 等 since 之后开始的下一条下载；超时返回 null */
+  waitForDownloadSince(since: number, timeoutMs: number): Promise<BrowserDownloadRecord | null>;
+  /** 等指定下载结束（completed / cancelled / interrupted）或超时；返回最新快照 */
+  waitForDownloadDone(id: number, timeoutMs: number): Promise<BrowserDownloadRecord | null>;
+  /** 本次会话的全部下载记录（按开始时间倒序） */
+  listDownloads(): BrowserDownloadRecord[];
+  /** 在 Finder 中显示某次下载（未完成/文件不存在返回 false） */
+  revealDownload(id: number): boolean;
 }
 
 export interface Envelope {
@@ -57,7 +86,10 @@ export interface Envelope {
 
 const LOAD_TIMEOUT_MS = 20000;
 const CLICK_SETTLE_MS = 350;
-const SNAPSHOT_TIMEOUT_MS = 15000;
+/** 快照前的加载等待上限：快照读的就是当前 DOM，页面还在加载时不必等满 15s（ready=false 已如实返回） */
+const SNAPSHOT_SETTLE_MS = 1500;
+/** 新开标签的加载等待上限：拿得到 url/title 就返回，正文由后续 snapshot / wait 工具负责 */
+const OPEN_TAB_SETTLE_MS = 3000;
 /** browser_get_html 的字符上限（clean 快照是落盘「原件」，默认 20000 会把它截成残页） */
 const HTML_SNAPSHOT_MAX_CHARS = 4_000_000;
 const POLL_INTERVAL_MS = 120;
@@ -298,6 +330,19 @@ function ok(value: unknown, startedAt: number, wc: WebContents | null): Envelope
 
 function fail(phase: string, message: string, hint?: string): Envelope {
   return { ok: false, error: { phase, message, hint } };
+}
+
+/** 下载记录 → 工具返回值（模型可读；不把 DownloadItem 的内部状态透出去） */
+function downloadValue(rec: BrowserDownloadRecord): Record<string, unknown> {
+  return {
+    id: rec.id,
+    fileName: rec.fileName,
+    savePath: rec.savePath,
+    state: rec.state,
+    totalBytes: rec.totalBytes,
+    receivedBytes: rec.receivedBytes,
+    url: rec.url,
+  };
 }
 
 /**
@@ -724,6 +769,56 @@ const SNAPSHOT_BODY = `(() => {
 function snapshotScript(max: number, framePath: string): string {
   return `(() => { const __snapMax = ${max}; const __snapFramePath = ${JSON.stringify(framePath)}; return ${SNAPSHOT_BODY}; })()`;
 }
+
+/**
+ * 下载入口扫描（browser_find_downloads）：只找「像下载」的元素，避免为了一个附件把整页交互元素灌进上下文。
+ *
+ * 判定三条：href 后缀是文件类型 / 带 download 属性 / 文本或 class/id 命中下载词。
+ * 命中元素写 data-hippo-dl="i"，返回可直接交给 browser_download 的 selector（主文档内）。
+ * 不穿透 shadow DOM / iframe：那两类交给 browser_snapshot（它已打通），这里只做便宜的主文档预筛。
+ */
+const FIND_DOWNLOADS_SCRIPT = `(() => {
+  const EXT = /\\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|csv|txt|md|rtf|epub|png|jpe?g|gif|webp|mp3|mp4|wav)(?:[?#]|$)/i;
+  const HINT = /(下载|附件|导出|保存|download|export|save)/i;
+  const seen = new Set();
+  const out = [];
+  document.querySelectorAll('[data-hippo-dl]').forEach((e) => e.removeAttribute('data-hippo-dl'));
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 1 || r.height <= 1) return false;
+    const s = getComputedStyle(el);
+    return s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+  };
+  for (const el of Array.from(document.querySelectorAll('a[href], button, [role="button"], [download]'))) {
+    if (out.length >= 20) break;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'input') continue;
+    let vis = false;
+    try { vis = visible(el); } catch (e) { vis = false; }
+    if (!vis) continue;
+    const href = el.getAttribute('href') || '';
+    const text = String(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '')
+      .replace(/\\s+/g, ' ').trim().slice(0, 80);
+    const cls = String(el.getAttribute('class') || '');
+    const id = String(el.getAttribute('id') || '');
+    const dlAttr = el.hasAttribute('download');
+    const isFile = !!href && EXT.test(href);
+    const isHint = HINT.test(text) || HINT.test(cls) || HINT.test(id);
+    if (!dlAttr && !isFile && !isHint) continue;
+    if (href && seen.has(href)) continue;
+    if (href) seen.add(href);
+    const i = out.length;
+    el.setAttribute('data-hippo-dl', String(i));
+    out.push({
+      selector: '[data-hippo-dl="' + i + '"]',
+      tag,
+      text,
+      href,
+      kind: dlAttr ? 'download-attr' : (isFile ? 'file-link' : 'text-hint'),
+    });
+  }
+  return { url: location.href, title: document.title, ready: document.readyState === 'complete', candidates: out };
+})()`;
 
 /**
  * 逐帧快照：主文档 + 各子帧各跑一次 SNAPSHOT_BODY，元素合并成一张表（子帧元素带 `frame` 字段）。
@@ -1347,7 +1442,7 @@ export async function execBrowserTool(
       // ---- 元素交互 ----
       case 'browser_snapshot': {
         const max = Math.min(300, Math.max(1, Number(args.max) || 80));
-        await waitForLoad(wc, SNAPSHOT_TIMEOUT_MS);
+        await waitForLoad(wc, SNAPSHOT_SETTLE_MS);
         const value = await runSnapshot(wc, max);
         return ok(value, startedAt, wc);
       }
@@ -1374,20 +1469,124 @@ export async function execBrowserTool(
         const clickStale = staleFrameError(clickTarget);
         if (clickStale) return fail('inject', clickStale);
         const before = wc.getURL();
+        const clickAt = Date.now();
         if (clickTarget.frame) {
           // 子帧目标：帧内合成点击（跨帧坐标换算不可靠，见 frameClickScript 注释）
           const r = await run<{ ok: boolean; error?: string; desc?: string }>(wc, frameClickScript(resolver), clickTarget.frame);
           if (!r?.ok) return fail('inject', r?.error || '未找到目标元素（页面可能已变化，请重新 browser_snapshot）');
           await new Promise((res) => setTimeout(res, CLICK_SETTLE_MS));
           const after = wc.getURL();
-          return ok({ clicked: r.desc, frame: clickTarget.path, via: 'in-frame', url: after, title: wc.getTitle(), redirected: after !== before }, startedAt, wc);
+          const dl = host.recentDownloadSince(clickAt);
+          return ok({
+            clicked: r.desc,
+            frame: clickTarget.path,
+            via: 'in-frame',
+            url: after,
+            title: wc.getTitle(),
+            redirected: after !== before,
+            ...(dl ? { download: downloadValue(dl) } : {}),
+          }, startedAt, wc);
         }
         const box = await run<{ desc: string; x: number; y: number } | null>(wc, centerScript(resolver));
         if (!box) return fail('inject', '未找到目标元素（页面可能已变化，请重新 browser_snapshot）');
         await mouseClick(wc, box.x, box.y);
         await new Promise((r) => setTimeout(r, CLICK_SETTLE_MS));
         const afterUrl = wc.getURL();
-        return ok({ clicked: box.desc, url: afterUrl, title: wc.getTitle(), redirected: afterUrl !== before }, startedAt, wc);
+        const dl = host.recentDownloadSince(clickAt);
+        return ok({
+          clicked: box.desc,
+          url: afterUrl,
+          title: wc.getTitle(),
+          redirected: afterUrl !== before,
+          ...(dl ? { download: downloadValue(dl) } : {}),
+        }, startedAt, wc);
+      }
+
+      // ---- 下载 ----
+      case 'browser_find_downloads': {
+        const value = await run<Record<string, unknown>>(wc, FIND_DOWNLOADS_SCRIPT);
+        return ok(value, startedAt, wc);
+      }
+
+      case 'browser_download': {
+        let url = String(args.url ?? '').trim();
+        const resolver = resolverExpr(args);
+        if (!url && !resolver) return fail('syntax', '需要 url、ref 或 selector 之一');
+        // 相对地址（snapshot 里的 href 可能是 /files/a.pdf）按当前页解析成绝对地址
+        if (url && !/^(https?|file):\/\//i.test(url)) {
+          try {
+            url = new URL(url, wc.getURL() || undefined).toString();
+          } catch {
+            return fail('syntax', 'url 只支持 http/https/file 链接（相对地址也无法基于当前页面解析）');
+          }
+        }
+        if (url && !/^(https?|file):\/\//i.test(url)) {
+          return fail('syntax', 'url 只支持 http/https/file 链接');
+        }
+        // 默认在「开始」后再等 2s：小文件一轮就拿 completed，大文件最多多花 2s
+        const waitMs = Number.isFinite(Number(args.waitMs))
+          ? Math.min(30000, Math.max(0, Number(args.waitMs)))
+          : 2000;
+        const reveal = args.reveal === true;
+        const since = Date.now();
+        // 直链：主进程直接 downloadURL（走会话 cookie，不依赖页面点击）
+        if (url) {
+          const rec = await host.startDownload(url, 15000);
+          if (!rec) {
+            return fail(
+              'download',
+              '未捕获到下载',
+              '该地址可能不是直接文件（需要登录 / 由页面 JS 生成）。先用 browser_snapshot 找到下载链接再传 ref，或直接点击该链接',
+            );
+          }
+          const settled = waitMs > 0 ? await host.waitForDownloadDone(rec.id, waitMs) : rec;
+          const finalRec = settled ?? rec;
+          const revealed = reveal ? host.revealDownload(finalRec.id) : false;
+          return ok({ download: downloadValue(finalRec), ...(revealed ? { revealed: true } : {}) }, startedAt, wc);
+        }
+        // 元素：按 browser_click 的方式真实点击，再等 will-download 记录出现
+        if (!resolver) return fail('syntax', '需要 url、ref 或 selector 之一');
+        const dlTarget = targetFrame(wc, args);
+        const dlStale = staleFrameError(dlTarget);
+        if (dlStale) return fail('inject', dlStale);
+        if (dlTarget.frame) {
+          const r = await run<{ ok: boolean; error?: string; desc?: string }>(wc, frameClickScript(resolver), dlTarget.frame);
+          if (!r?.ok) return fail('inject', r?.error || '未找到目标元素（页面可能已变化，请重新 browser_snapshot）');
+        } else {
+          const box = await run<{ desc: string; x: number; y: number } | null>(wc, centerScript(resolver));
+          if (!box) return fail('inject', '未找到目标元素（页面可能已变化，请重新 browser_snapshot）');
+          await mouseClick(wc, box.x, box.y);
+        }
+        const rec = await host.waitForDownloadSince(since, 15000);
+        if (!rec) {
+          return fail(
+            'download',
+            '点击后未捕获到下载',
+            '该链接可能不是直接下载（需要登录 / 会打开新页面）。用 browser_snapshot 确认 href 后，把文件直链传给 browser_download 的 url；若打开的是 PDF，可用 browser_read_pdf 读文本，但它不会把原文件落到下载目录',
+          );
+        }
+        const settled = waitMs > 0 ? await host.waitForDownloadDone(rec.id, waitMs) : rec;
+        const finalRec = settled ?? rec;
+        const revealed = reveal ? host.revealDownload(finalRec.id) : false;
+        return ok({
+          download: downloadValue(finalRec),
+          ...(revealed ? { revealed: true } : {}),
+          url: wc.getURL(),
+          title: wc.getTitle(),
+        }, startedAt, wc);
+      }
+
+      case 'browser_downloads': {
+        const id = Number(args.id);
+        const waitMs = Math.min(30000, Math.max(0, Number(args.waitMs) || 0));
+        const list = host.listDownloads();
+        if (Number.isFinite(id) && id > 0) {
+          let rec = list.find((d) => d.id === id);
+          if (!rec) return fail('inject', `下载 ${id} 不存在（可能已被清空）`);
+          if (waitMs > 0) rec = (await host.waitForDownloadDone(id, waitMs)) ?? rec;
+          return ok({ download: downloadValue(rec) }, startedAt, wc);
+        }
+        return ok({ downloads: list.slice(0, 20).map(downloadValue) }, startedAt, wc);
       }
 
       case 'browser_click_coordinates': {
@@ -1396,10 +1595,20 @@ export async function execBrowserTool(
         if (!Number.isFinite(x) || !Number.isFinite(y)) return fail('syntax', 'x / y 必填');
         const button = (['left', 'right', 'middle'] as const).find((b) => b === args.button) || 'left';
         const before = wc.getURL();
+        const clickAt = Date.now();
         await mouseClick(wc, x, y, button);
         await new Promise((r) => setTimeout(r, CLICK_SETTLE_MS));
         const after = wc.getURL();
-        return ok({ clicked: true, x, y, url: after, title: wc.getTitle(), redirected: after !== before }, startedAt, wc);
+        const dl = host.recentDownloadSince(clickAt);
+        return ok({
+          clicked: true,
+          x,
+          y,
+          url: after,
+          title: wc.getTitle(),
+          redirected: after !== before,
+          ...(dl ? { download: downloadValue(dl) } : {}),
+        }, startedAt, wc);
       }
 
       case 'browser_hover': {
@@ -1756,11 +1965,11 @@ export async function execBrowserTool(
         if (denied) return fail('nav-denied', denied);
         const r = host.openTab(url, args.activate !== false);
         if (!r.ok) return fail('inject', r.error || '打开标签失败');
-        // 等待「新标签自身」加载完：activate:false 时活动标签仍是旧标签，
-        // 若等旧标签会立刻返回，新标签的 url/title 还是空白页占位值。
+        // 等待「新标签自身」加载到可读即可：activate:false 时活动标签仍是旧标签，
+        // 若等旧标签会立刻返回，新标签的 url/title 还是空白页占位值；正文交给后续 snapshot / wait。
         const target = (r.id !== undefined ? host.webContentsOfTab(r.id) : null) ?? host.activeWebContents();
         await bindTelemetry(target); // 新标签一开就记遥测
-        if (isAlive(target)) await waitForLoad(target, LOAD_TIMEOUT_MS);
+        if (isAlive(target)) await waitForLoad(target, OPEN_TAB_SETTLE_MS);
         const t = host.listTabs().find((x) => x.id === r.id);
         return ok({ id: r.id, url: t?.url || url, title: t?.title || '' }, startedAt, host.activeWebContents());
       }

@@ -1,0 +1,187 @@
+# macOS 冒烟 —— 在**真实 macOS** 上验证共享代码改动没有踩到 mac 侧
+#
+# 为什么需要这个工作流（此前仓库只有 Windows 的两条流水线，这是唯一的不对称缺口）：
+#   `src/lib/platform/**`、命令守卫、Python 解析、进程回收都是**双平台共享**的。
+#   Windows 化改了这些文件，而 mac 恰恰是「被动承受方」——新代码在 mac 上同样要跑。
+#   没有 CI ⇒ 这类回归只能靠手工冒烟（而手工冒烟不会每次都做）。
+#   本工作流把 windows-smoke 的三道闸门平移到 macOS，另加一道平台边界探针。
+#
+# 与 windows-smoke.yml 的差异（数字不同，别互相抄）：
+#   - selftest 断言下限 = **15**（mac 实数）；Windows 是 18 —— 多出 netstat/taskkill/
+#     PowerShell 三项 + `del` 系拦截一条。写错下限会让「本平台独有断言静默消失」也照样绿。
+#   - 闸门 0（平台边界探针）Win / mac 都跑，但 mac 是主要受益方：它守的是
+#     「平台分支只许出现在 src/lib/platform/**」这条单仓库得以成立的前提。
+#
+# 手动触发：仓库 Actions 页 → macOS Smoke → Run workflow。
+
+name: macOS Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'src/lib/platform/**'
+      - 'src/lib/python/**'
+      - 'src/lib/shell/**'
+      - 'scripts/platform-*.ts'
+      - 'scripts/check-platform-bounds.mjs'
+      - 'scripts/compile-desktop.mjs'
+      - 'scripts/check-pm.mjs'
+      - 'packages/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/macos-smoke.yml'
+
+concurrency:
+  group: macos-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-smoke:
+    name: macos-latest / node 22
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v5
+
+      # 不给 version 输入：pnpm/action-setup 会读 package.json 的 packageManager。
+      # ⚠️ 千万别同时显式写 version —— 两者不一致时 action-setup 直接报错
+      #    "Multiple versions of pnpm specified"，且在 setup 阶段就失败。
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      # 证据先于结论：这一段在任何可能失败的步骤之前，保证「机器长什么样」总有记录。
+      - name: 环境信息
+        shell: bash
+        run: |
+          echo "platform : $(node -p process.platform)"
+          echo "arch     : $(node -p process.arch)"
+          echo "node     : $(node -v)"
+          echo "pnpm     : $(pnpm -v)"
+          sw_vers
+          echo "--- lsof 前 3 行（mac 进程层的唯一见证）---"
+          lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -3 || true
+
+      # --ignore-scripts：本工作流不碰 Electron / better-sqlite3 的原生构建，
+      # 跳过 postinstall 可省掉 electron 二进制下载（≈100MB）与原生编译，
+      # 也让「原生模块装不上」不污染信号（那是打包时才需要证明的事）。
+      # 不带 --no-frozen-lockfile 兜底：锁文件漂移本身就是缺陷，要红，不要悄悄重算。
+      - name: 安装依赖
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile --ignore-scripts --reporter=append-only 2>&1 | tee install.log
+          echo "install OK (frozen-lockfile)"
+
+      # 闸门 0：平台边界 —— 单仓库同时供 mac / win 的前提。
+      # 判据是「src/ 下除 src/lib/platform/** 外零平台嗅探」，历史遗留走棘轮（只减不增）。
+      # 这条红不是「风格问题」，而是：嗅探一旦散开，两个平台会开始互相踩且**不会报错**。
+      - name: 平台边界探针
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/check-platform-bounds.mjs 2>&1 | tee bounds.log
+          # ⚠️ 用 pipefail + $?，**不要**用 ${PIPESTATUS[0]}：PIPESTATUS 是 bash 专有，
+          #   zsh 下它是空的 ⇒ `[ "" -ne 0 ]` 为假 ⇒ 判据退化成「恒为真」而静默放行。
+          #   （本地干跑实测踩到过：探针红了，闸门照样绿。）
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            detail=$(grep -E '\[FAIL\]' bounds.log | head -6 | tr '\n' '|')
+            echo "::error title=platform-bounds::${detail:0:3500}"
+            exit 1
+          fi
+          echo "::notice title=platform-bounds::$(grep -E '^无越界' bounds.log)"
+
+      # 闸门 1：解析器单测（Windows 样例 + 反例驱动，在 mac 上同样必须全过）。
+      # 双 reporter：verbose 给人看（失败时能定位断言），json 给机器读（做证据）。
+      - name: 单测 · 平台层与命令守卫
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm exec vitest run src/lib/platform src/lib/shell src/lib/python \
+            --reporter=verbose --reporter=json --outputFile.json=vitest.json 2>&1 | tee vitest.log
+          # ⚠️ 必须先看命令本身的退出码：只看 JSON 里的断言数会漏掉「测试红了但仍达下限」
+          #   （少跑一个文件是绿，跑红一个用例也照样是绿 —— 下限只管数量，不管结果）。
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            detail=$(grep -E 'FAIL|AssertionError|Expected|Received' vitest.log | head -12 | sed 's/^ *//' | tr '\n' '|')
+            echo "::error title=vitest::${detail:0:3500}"
+            exit 1
+          fi
+          # 证据必须从 JSON 取，不能解析人读输出：vitest 即使 stdout 不是 TTY 也照样上色，
+          # 任何行首锚定（`^\s*Test Files\s+\d+`）都必然落空 ⇒ 会把 Duration 行当成证据。
+          node -e '
+            const j = require("./vitest.json");
+            const files = j.testResults.length;
+            const sum = `files=${files} tests=${j.numTotalTests} passed=${j.numPassedTests} failed=${j.numFailedTests}`;
+            console.log(`::notice title=vitest-summary::${sum}`);
+            if (files < 4 || j.numTotalTests < 90) {
+              console.log(`::error title=vitest-coverage::断言数低于下限（${sum}，期望 files>=4 且 tests>=90）—— 有测试文件没被跑到`);
+              process.exit(1);
+            }
+          '
+
+      # 闸门 2：真机断言 —— 用真实进程自证「阶段 C/D 在 mac 上也是真的」。
+      # 失败即为真缺陷，必须修代码而不是改断言。
+      - name: 真机断言 · 进程层 / 命令守卫
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm exec tsx scripts/platform-selftest.ts 2>&1 | tee selftest.log
+          # 同上：pipefail + $?（不要用 PIPESTATUS，它只有 bash 有）
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            # 每条 FAIL 行都要带「为什么不成立」——只报「查询失败」的断言与没有断言等价。
+            detail=$(grep -E '\[FAIL\]' selftest.log | head -10 | sed 's/^ *//' | tr '\n' '|')
+            echo "::error title=selftest::${detail:0:3500}"
+            exit 1
+          fi
+          # 绿了也要留证据：断言条数下限按**本平台**取。mac 实数是 15（Windows 18）。
+          # 下限放进变量而不是硬编码进文案：改了判据而忘了改文案，报错会说反话。
+          total=$(grep -c '\[OK  \]' selftest.log)
+          min=15
+          echo "::notice title=selftest-summary::通过 ${total} 项（mac 下限 ${min}）"
+          if [ "$total" -lt "$min" ]; then
+            echo "::error title=selftest-coverage::断言数 ${total} 低于下限 ${min}（mac 实数）—— 有断言没被执行"
+            exit 1
+          fi
+
+      # 闸门 3：能力报告。缺 python/ffmpeg 在 runner 上是预期的（macOS 镜像不带 ffmpeg），
+      # 所以不阻断 —— 但结论必须**匿名可读**（Actions 日志要 token 才能下载，annotation 不用）。
+      - name: 能力自检（报告，不阻断）
+        shell: bash
+        run: |
+          pnpm exec tsx scripts/platform-doctor.ts > doctor.log 2>&1 || true
+          cat doctor.log
+          {
+            echo "## platform-doctor (macos-latest)"
+            echo '```'
+            cat doctor.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=doctor::$(grep -E '结论|缺 |缺失|OK|warn|FAIL' doctor.log | head -20 | tr '\n' '/')"
+
+      - name: 上传诊断日志
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: macos-smoke-logs
+          path: |
+            install.log
+            bounds.log
+            vitest.log
+            vitest.json
+            selftest.log
+            doctor.log
+          if-no-files-found: ignore
+          retention-days: 7

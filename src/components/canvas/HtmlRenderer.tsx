@@ -8,10 +8,8 @@ import { MARKDOWN_SANITIZE_WHITELIST } from '@/lib/sanitize-whitelist';
 import { normalizeSourceUrl } from '@/lib/materials/source-url';
 import { isLikelyQuestionnaire, JSON_CODE_FENCE } from './QuestionnairePanel';
 import { bus, BusEvents } from '@/lib/bus';
-// 正文图片点击放大预览（与 UnifiedViewer 图片查看器同源 yarl lightbox）
-import Lightbox from 'yet-another-react-lightbox';
-import Zoom from 'yet-another-react-lightbox/plugins/zoom';
-import 'yet-another-react-lightbox/styles.css';
+// 正文图片点击放大预览（共享 ImagePreviewLightbox：图片撑满视口，小图也会明显放大）
+import { ImagePreviewLightbox } from './ImagePreviewLightbox';
 
 interface HtmlRendererProps {
   content: string;
@@ -390,12 +388,10 @@ function HtmlRendererImpl({ content, readSources, onOpenDoc }: HtmlRendererProps
         document.body,
       )}
       {preview && (
-        <Lightbox
+        <ImagePreviewLightbox
           open
-          close={() => setPreview(null)}
           slides={[{ src: preview.src, alt: preview.alt || undefined }]}
-          plugins={[Zoom]}
-          controller={{ closeOnBackdropClick: true }}
+          onClose={() => setPreview(null)}
         />
       )}
     </>

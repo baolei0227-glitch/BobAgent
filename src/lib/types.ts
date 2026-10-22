@@ -423,6 +423,16 @@ export interface SearchConfig {
   baseUrl: string;
 }
 
+/**
+ * 联网搜索 / 抓取的 provider 选择（与聊天模型无关）：
+ *   - 具体 provider id：`deepseek-search-api` / `deepseek-fetch-api` / `http`；
+ *   - `auto`：按服务默认优先级挑第一个可用 provider。
+ */
+export interface WebSearchSettings {
+  searchProvider: string;
+  fetchProvider: string;
+}
+
 export interface AvailableModel {
   group: string;
   modelId: string;
@@ -512,6 +522,8 @@ export type AiChatNodeData = {
   createdAt?: string;
   /** AI Coding 节点：绑定的小程序（Bob Sandbox app）ID */
   sandboxAppId?: string;
+  /** 管家派发的会话：产物暂存批次 id（Outbox）。存在时本会话交付物落暂存区，不写当前项目 */
+  outboxBatchId?: string;
   /** 已压缩对话轮次数（memory_compacted_until）：请求时跳过已压缩历史，交由压缩记忆+成果块兜底 */
   compactedUntil?: number;
   /** 多智能体协作模式开关（frontmatter multi_agent_mode）：开启后本轮请求带 multiAgentMode，主 agent 只作

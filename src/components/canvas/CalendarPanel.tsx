@@ -191,10 +191,16 @@ function durationMinutesOf(ev: CalendarEvent, startMin: number): number {
 }
 
 /** 月视图事件行（格子内与「+N more」浮层共用）：小竖棒 + 时刻/标题 + 红旗 */
-function MonthEventRow({ ev, onOpen }: { ev: CalendarEvent; onOpen: (ev: CalendarEvent) => void }) {
+function MonthEventRow({ ev, onSelect, onOpen }: { ev: CalendarEvent; onSelect?: () => void; onOpen: (ev: CalendarEvent) => void }) {
   return (
     <div
       onClick={(e) => {
+        e.stopPropagation();
+        // 单击选中该日（左侧待办栏随之跳转）；无 onSelect 时（如「+N more」浮层）回退为打开编辑
+        if (onSelect) onSelect();
+        else onOpen(ev);
+      }}
+      onDoubleClick={(e) => {
         e.stopPropagation();
         onOpen(ev);
       }}
@@ -1030,14 +1036,13 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
     <div
       ref={panelRef}
       data-calendar-panel
-      className="fixed left-1/2 top-0 z-[51] flex h-full -translate-x-1/2 flex-col overflow-hidden"
+      className="fixed left-1/2 top-2 bottom-2 z-[51] flex -translate-x-1/2 flex-col overflow-hidden rounded-2xl"
       style={{
         // 居中显示：以视口水平中线为轴（宽度由 PANEL_DEFAULT_WIDTH 给定，或拖拽后的像素值）
         width: panelWidth === null ? PANEL_DEFAULT_WIDTH : `${panelWidth}px`,
-        maxWidth: '100vw',
+        maxWidth: 'calc(100vw - 16px)',
         backgroundColor: 'var(--paper)',
-        borderLeft: '1px solid var(--line)',
-        borderRight: '1px solid var(--line)',
+        border: '1px solid var(--line)',
         boxShadow: 'var(--shadow-lg)',
         fontFamily: "var(--font-sans)",
         WebkitAppRegion: 'no-drag',
@@ -1564,6 +1569,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                             borderColor: 'var(--line-soft)',
                             backgroundColor: isToday ? 'var(--primary-faint)' : 'transparent',
                           }}
+                          onClick={() => setSelectedDate(ds)}
                           onDoubleClick={() => openCreate(ds)}
                           title="Double-click to add"
                         >
@@ -1589,7 +1595,14 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                             return (
                               <div
                                 key={ev.event_id}
-                                onClick={() => openEdit(ev)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedDate(ds);
+                                }}
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  openEdit(ev);
+                                }}
                                 className="absolute left-0.5 right-0.5 cursor-pointer overflow-hidden rounded-md border-l-2 px-1 py-0.5 text-11 leading-tight transition-colors hover:bg-[var(--paper-hover)]"
                                 style={{
                                   top: (startMin / 60) * HOUR_HEIGHT + 1,
@@ -1677,6 +1690,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
+                          setSelectedDate(cellDateStr);
                           openCreate(cellDateStr);
                         }}
                         className="flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-hover)] group-hover:opacity-100"
@@ -1689,7 +1703,7 @@ export function CalendarPanel({ projectId, onClose }: CalendarPanelProps) {
                     {/* 事件标签：占满格子剩余高度并裁剪，超出部分不溢出格子 */}
                     <div className="mt-0.5 min-h-0 flex-1 space-y-px overflow-hidden">
                       {dayEvents.slice(0, visibleCount).map((ev) => (
-                        <MonthEventRow key={ev.event_id} ev={ev} onOpen={openEdit} />
+                        <MonthEventRow key={ev.event_id} ev={ev} onSelect={() => setSelectedDate(cellDateStr)} onOpen={openEdit} />
                       ))}
                       {dayEvents.length > visibleCount && (
                         <button

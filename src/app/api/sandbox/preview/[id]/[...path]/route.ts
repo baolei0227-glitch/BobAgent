@@ -1,9 +1,10 @@
 import { NextRequest } from 'next/server';
 import { extname } from 'path';
-import { readAppFile, readAppEntry } from '@/lib/sandbox/apps';
+import { readAppFile } from '@/lib/sandbox/apps';
 import { buildBridgeClientScript } from '@/lib/sandbox/bridge';
-import { getSandboxChatPermission } from '@/lib/settings';
-import { buildAiBadgeInjection, buildConsoleCaptureInjection, buildPreviewInteractionPatchInjection } from '../route';
+import { isSandboxFullTrustServer } from '@/lib/settings-server';
+import { guardRequestSource } from '@/lib/http/loopback-guard';
+import { buildConsoleCaptureInjection, buildPreviewInteractionPatchInjection } from '../route';
 
 /** 常见 Web 文件扩展名 → Content-Type 映射 */
 const CONTENT_TYPES: Record<string, string> = {
@@ -50,14 +51,26 @@ const CONTENT_TYPES: Record<string, string> = {
  * GET /api/sandbox/preview/<appId>/<path...>
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string; path: string[] }> },
 ) {
+  // 只读静态资源：app 入口在 sandbox iframe（opaque origin）里加载，浏览器会把子资源判成
+  // cross-site；这里只放行 GET/HEAD，写操作仍由其它沙箱路由严格拦截。
+  const denied = await guardRequestSource(request, { allowCrossSiteRead: true });
+  if (denied) return denied;
   try {
     const { id, path: pathSegments } = await params;
 
-    // 拒绝访问内部 .history/ 目录
-    if (pathSegments[0] === '.history') {
+    // 拒绝访问内部目录/私有数据：历史、Layer-1 快照、回收站、Layer-2 磁盘数据、清单。
+    // 静态预览只服务页面、脚本、样式、图片等资源；这些目录不属于 app 资源。
+    const blockedRoot = pathSegments[0];
+    if (
+      blockedRoot === '.history' ||
+      blockedRoot === '.state' ||
+      blockedRoot === '.trash' ||
+      blockedRoot === 'data' ||
+      blockedRoot === 'manifest.json'
+    ) {
       return new Response('Not Found', { status: 404 });
     }
 
@@ -70,34 +83,17 @@ export async function GET(
     const ext = extname(relPath).toLowerCase();
     const contentType = CONTENT_TYPES[ext] ?? 'application/octet-stream';
 
-    // HTML 预览页与入口页一致：注入 AI 徽标 + bridge + console 捕获。
-    // 让 mockup.html 等子路径原型页也有「首次使用模型授权」入口（右上角灰点 AI 徽标，点击弹授权窗），
-    // 否则用户打开原型预览时完全看不到模型授权入口。
+    // HTML 预览页与入口页一致：注入 bridge + console 捕获。
+    // （AI 徽标已随「放开小程序权限」移除：权限默认开放，预览页不再有任何授权入口/图标。）
     if (ext === '.html') {
       let html = content.toString('utf-8');
       try {
-        const entry = await readAppEntry(id);
-        const showAiBadge = entry ? entry.app.aiBadge !== false : true;
-        let badgeInjection = '';
-        if (showAiBadge) {
-          const level = await getSandboxChatPermission(id);
-          badgeInjection = buildAiBadgeInjection(id, level !== 'none');
-        }
-        if (badgeInjection) {
-          const bodyMatch = html.match(/<body\b([^>]*)>/i);
-          if (bodyMatch && bodyMatch.index != null) {
-            const at = bodyMatch.index + bodyMatch[0].length;
-            html = html.slice(0, at) + badgeInjection + html.slice(at);
-          } else {
-            html = badgeInjection + html;
-          }
-        }
         // console捕获 + 交互补丁注入到 head（尽早执行）；bridge 脚本放 body 末尾
         const headPatch = buildConsoleCaptureInjection(id) + buildPreviewInteractionPatchInjection();
         html = html.includes('</head>')
           ? html.replace('</head>', headPatch + '</head>')
           : html + headPatch;
-        const bodyPatch = buildBridgeClientScript(id);
+        const bodyPatch = buildBridgeClientScript(id, { fullTrust: await isSandboxFullTrustServer().catch(() => true) });
         html = html.includes('</body>')
           ? html.replace('</body>', bodyPatch + '</body>')
           : html + bodyPatch;
@@ -110,6 +106,10 @@ export async function GET(
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
+          // 与入口预览页一致：只允许**回环 origin** 内嵌（宿主 UI 的 localhost 与预览的 127.0.0.1
+          // 是不同 origin，方案 B 的应用内 iframe 需要这条白名单；跨站仍被拦）
+          'Content-Security-Policy': "frame-ancestors 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*",
+          'Referrer-Policy': 'no-referrer-when-downgrade',
         },
       });
     }

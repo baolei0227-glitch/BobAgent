@@ -78,8 +78,9 @@ function serviceUnavailable(reason: string): OcrServiceResult {
     upgradedCount: 0,
     error:
       `识别服务 bob-ocr-mcp 不可用：${reason}。` +
-      '请确认已安装 bob-ocr-mcp 且常驻服务在线（bob-ocr-mcp --install-daemon 安装 launchd 守护，' +
-      '默认 http://127.0.0.1:9478/mcp），并在 BobWork 设置 → MCP 中启用 "Bob OCR"。',
+      'Bob OCR 的本地常驻桥随 BobWork 分发、由宿主自动托管拉起（127.0.0.1:9478）；' +
+      '请先在 设置 → Extensions Store → Plugins 确认 "Bob OCR" 处于启用状态，' +
+      '仍未就绪时查看插件日志 <数据根>/host-bridge.log，或手动执行 bob-ocr-mcp --serve 排障。',
   };
 }
 

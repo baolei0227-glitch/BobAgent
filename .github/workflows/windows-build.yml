@@ -138,6 +138,20 @@ jobs:
           $ok = (Get-Content native.log -Encoding UTF8 | Select-String -Pattern '✓|没有原生模块') -join ' / '
           Write-Host "::notice title=native-abi::$ok"
 
+      # Windows 没有系统 python3，而 Office 模板填充 / Word 修订 / PDF 文本提取 / 图片裁剪
+      # 都经 pythonBin 调 Python 脚本。这里组装嵌入式解释器 + win_amd64 轮子，
+      # 产物落在 .build/python，由 electron-builder.win.yml 的 extraResources 挂进
+      # resources/python（与 pack-win.sh 的目录布局一致）。
+      - name: 组装随包嵌入式 Python
+        shell: pwsh
+        run: |
+          node scripts/assemble-win-python.mjs 2>&1 | Tee-Object -FilePath winpython.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content winpython.log -Tail 25 -Encoding UTF8) -join ' | '
+            Write-Host "::error title=winpython::$tail"
+            exit 1
+          }
+
       - name: 打包 NSIS 安装包
         shell: pwsh
         run: |
@@ -172,7 +186,11 @@ jobs:
             @{ n = 'adm-zip';               p = "$app/node_modules/adm-zip/package.json" },
             @{ n = 'next server.js';        p = "$ns/server.js" },
             @{ n = 'public（静态资源）';     p = "$ns/public" },
-            @{ n = '内置头像';              p = 'release/win-unpacked/resources/avatars' }
+            @{ n = '内置头像';              p = 'release/win-unpacked/resources/avatars' },
+            @{ n = '随包 Python 解释器';    p = 'release/win-unpacked/resources/python/python.exe' },
+            @{ n = 'python-docx';          p = 'release/win-unpacked/resources/python/Lib/site-packages/docx/__init__.py' },
+            @{ n = 'Pillow';               p = 'release/win-unpacked/resources/python/Lib/site-packages/PIL/Image.py' },
+            @{ n = 'lxml（win_amd64）';     p = 'release/win-unpacked/resources/python/Lib/site-packages/lxml/etree.cp311-win_amd64.pyd' }
           )
           $bad = @()
           foreach ($c in $checks) {
@@ -196,8 +214,17 @@ jobs:
             Write-Host "::error title=pack-contents::server.js 不是自定义入口（不含 /remote-login）"
             exit 1
           }
+          # 结构齐全 ≠ 能 import：这是唯一能做真机验证的地方（mac 只能做结构断言）。
+          # 用随包解释器亲自导入一遍，判据不依赖任何推断。
+          $py = 'release/win-unpacked/resources/python/python.exe'
+          $out = & $py -c 'import docx, PIL, lxml, pdfplumber, openpyxl, pptx, pypdf; print("py-ok")' 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error title=pack-contents::随包 Python 无法导入依赖：$out"
+            exit 1
+          }
+          Write-Host "  [OK] 随包 Python 可导入 docx/PIL/lxml/pdfplumber/openpyxl/pptx/pypdf"
           $kb = [Math]::Round((Get-Item "$ns/server.js").Length / 1KB, 1)
-          Write-Host "::notice title=pack-contents::8 项齐全 / server.js 含 remote-login（$kb KB）"
+          Write-Host "::notice title=pack-contents::12 项齐全 / server.js 含 remote-login（$kb KB） / Python import 通过"
 
       - name: 产物清单（匿名可读）
         shell: pwsh
@@ -236,6 +263,7 @@ jobs:
             nextbuild.log
             stage.log
             native.log
+            winpython.log
             builder.log
           if-no-files-found: ignore
           retention-days: 7

@@ -23,8 +23,8 @@ import { readConfig } from '@/lib/project/project-manager';
 import { PROVIDER_PRESETS } from '@/lib/providers/presets';
 import type { ModelPriceOverride } from '@/lib/settings';
 
-/** 用量来源标识：宿主对话 | 宿主非 chat 直连 | 插件（OCR / notes） */
-export type UsageSource = 'chat' | 'host-other' | 'ocr' | 'notes';
+/** 用量来源标识：宿主对话 | 宿主非 chat 直连 | 插件（OCR / notes）| 按次计费的 Web 工具 */
+export type UsageSource = 'chat' | 'host-other' | 'ocr' | 'notes' | 'web';
 
 /** 缓存命中 token 的成本折扣系数（相对 input 单价）。
  *  OpenAI 系 cache read ≈ 0.25×，ark/GLM 等网关约 0.1×。按主流取 0.25，可校准。 */
@@ -98,18 +98,32 @@ export interface UsageBucket {
   estCost: number | null;
 }
 
+/** 按次计费的 Web 工具用量（无 token，只有调用次数与金额） */
+export interface WebToolUsage {
+  /** 聚合键，形如 `deepseek:web-search` / `deepseek:web-fetch` */
+  key: string;
+  calls: number;
+  estCost: number | null;
+}
+
 export interface UsageSummary {
   totals: UsageBucket;
   byModel: UsageBucket[];
   byDay: UsageBucket[];
-  /** 按自然月（YYYY-MM）聚合，供 All 视图的 By month 趋势 */
+  /** 按自然月（YYYY-MM）聚合，供 Year 视图的月度趋势 */
   byMonth: UsageBucket[];
+  /** Web 工具（DeepSeek Search / Fetch）按次计费流水，与 token 口径分开统计 */
+  webTools: WebToolUsage[];
 }
 
 export interface UsageWindow {
   from?: string;
   to?: string;
   projectId?: string | null;
+  /** 只统计这些来源（缺省 = 全部来源） */
+  sources?: UsageSource[];
+  /** 排除这些来源（如 byModel / 最近任务要剔除按次计费的 web 流水） */
+  excludeSources?: UsageSource[];
 }
 
 const USAGE_DB_PATH = join(resolveAppRoot(), USAGE_DB_FILENAME);
@@ -453,16 +467,70 @@ export async function recordTaskUsage(input: RecordUsageInput): Promise<void> {
   });
 }
 
+// ==================== Web 工具（按次计费） ====================
+
+/** DeepSeek Search / Fetch 按「成功请求」计费：¥5 / 1,000 次（Search、Fetch 同价，人民币结算）。
+ *  计费条件（官方 Billing 段）：HTTP 200 且确有结果（Search 的 results 非空 / Fetch 有正文）；
+ *  失败、空结果、超时、429 均不计费 —— 所以只在成功分支记账，绝不预先计费。
+ *  参考 https://api-docs.deepseek.com/guides/search#billing（英文站 $0.75/1k 为海外价；国内账号按 ¥5/千次，
+ *  与模型价格表同为人民币口径，面板才不会出现「美元总数 + 人民币明细」的混币种回落）。 */
+export const WEB_TOOL_UNIT_PRICE_CNY: Record<'search' | 'fetch', number> = {
+  search: 0.005,
+  fetch: 0.005,
+};
+
+export interface WebToolUsageInput {
+  tool: 'search' | 'fetch';
+  /** provider id，如 deepseek-search-api / deepseek-fetch-api */
+  provider: string;
+  projectRoot?: string;
+  projectId?: string | null;
+  nodeId?: string;
+}
+
+/** 落一条「按次计费」的 Web 工具流水（source='web'，0 token、calls=1、单价固定）。
+ *  与 recordTaskUsage 分开：这类调用没有 token，不能走 token 计费；task_id 留空不去重。
+ *  失败由调用方 try/catch 吸收，绝不阻塞工具主流程。 */
+export async function recordWebToolUsage(input: WebToolUsageInput): Promise<void> {
+  const { tool, provider, projectRoot, projectId, nodeId } = input;
+  const db = await openGlobalUsageDb();
+  const pid =
+    projectId != null ? projectId : projectRoot ? await resolveProjectIdByPath(projectRoot) : null;
+  // 聚合键用「厂商:web-search|web-fetch」：面板按 model 分组即可区分搜索与抓取
+  const vendor = provider.split('-')[0] || provider;
+  const model = `${vendor}:web-${tool}`;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO usage_log (
+      id, project_id, source, currency, task_id, node_id, agent, model,
+      prompt_tokens, completion_tokens, cache_hit_tokens, cache_miss_tokens, total_tokens,
+      calls, rounds, duration_ms, ttft_ms, est_cost, created_at
+    ) VALUES (
+      @id, @projectId, 'web', 'cny', NULL, @nodeId, NULL, @model,
+      0, 0, 0, 0, 0,
+      1, NULL, NULL, NULL, @cost, @now
+    )
+  `).run({
+    id: crypto.randomUUID().slice(0, 24),
+    projectId: pid,
+    nodeId: nodeId || null,
+    model,
+    cost: WEB_TOOL_UNIT_PRICE_CNY[tool],
+    now,
+  });
+}
+
 // ==================== 聚合查询 ====================
 
 const BUCKET_SELECT = `
-  COUNT(*) AS tasks,
+  SUM(CASE WHEN source = 'web' THEN 0 ELSE 1 END) AS tasks,
   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
   COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens,
   COALESCE(SUM(cache_miss_tokens), 0) AS cache_miss_tokens,
   COALESCE(SUM(total_tokens), 0) AS total_tokens,
-  COALESCE(SUM(calls), 0) AS calls,
+  COALESCE(SUM(CASE WHEN source = 'web' THEN 0 ELSE calls END), 0) AS calls,
   SUM(est_cost) AS est_cost
 `;
 
@@ -508,6 +576,22 @@ function buildWindowClause(opts: UsageWindow): { clause: string; params: Record<
     where.push('project_id = @projectId');
     params.projectId = opts.projectId;
   }
+  if (opts.sources && opts.sources.length > 0) {
+    const names = opts.sources.map((src, i) => {
+      const key = `src${i}`;
+      params[key] = src;
+      return `@${key}`;
+    });
+    where.push(`source IN (${names.join(', ')})`);
+  }
+  if (opts.excludeSources && opts.excludeSources.length > 0) {
+    const names = opts.excludeSources.map((src, i) => {
+      const key = `exc${i}`;
+      params[key] = src;
+      return `@${key}`;
+    });
+    where.push(`source NOT IN (${names.join(', ')})`);
+  }
   return { clause: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
 }
 
@@ -518,37 +602,60 @@ export function queryUsageSummary(db: DB, opts: UsageWindow = {}): UsageSummary 
   const totalsRow = db.prepare(`SELECT ${BUCKET_SELECT} FROM usage_log ${clause}`).get(params);
   const totals = rowToBucket(totalsRow as UsageBucketRow, 'total');
 
+  // 排行 / 日 / 月三张图只统计 token 口径：Web 工具按次计费、没有 token，
+  // 单列在 webTools（否则会出现 0 token 的伪模型行和「有金额没 token」的假柱条）。
+  // 总览（totals）仍含 web 金额：总花费必须完整。
+  const tokenWindow = buildWindowClause({ ...opts, excludeSources: ['web'] });
   const byModel = db
     .prepare(`
       SELECT model AS key, ${BUCKET_SELECT}
-      FROM usage_log ${clause}
+      FROM usage_log ${tokenWindow.clause}
       GROUP BY model
       ORDER BY total_tokens DESC
     `)
-    .all(params)
+    .all(tokenWindow.params)
     .map((r) => rowToBucket(r as UsageBucketRow, (r as UsageBucketRow).key));
 
   const byDay = db
     .prepare(`
       SELECT substr(created_at, 1, 10) AS key, ${BUCKET_SELECT}
-      FROM usage_log ${clause}
+      FROM usage_log ${tokenWindow.clause}
       GROUP BY substr(created_at, 1, 10)
       ORDER BY key ASC
     `)
-    .all(params)
+    .all(tokenWindow.params)
     .map((r) => rowToBucket(r as UsageBucketRow, (r as UsageBucketRow).key));
 
   const byMonth = db
     .prepare(`
       SELECT substr(created_at, 1, 7) AS key, ${BUCKET_SELECT}
-      FROM usage_log ${clause}
+      FROM usage_log ${tokenWindow.clause}
       GROUP BY substr(created_at, 1, 7)
       ORDER BY key ASC
     `)
-    .all(params)
+    .all(tokenWindow.params)
     .map((r) => rowToBucket(r as UsageBucketRow, (r as UsageBucketRow).key));
 
-  return { totals, byModel, byDay, byMonth };
+  // Web 工具（按次计费）：单独按 provider:tool 聚合调用次数与金额
+  const webWindow = buildWindowClause({ ...opts, sources: ['web'] });
+  const webTools = db
+    .prepare(`
+      SELECT model AS key, COUNT(*) AS calls, SUM(est_cost) AS est_cost
+      FROM usage_log ${webWindow.clause}
+      GROUP BY model
+      ORDER BY est_cost DESC
+    `)
+    .all(webWindow.params)
+    .map((raw) => {
+      const row = raw as { key: string; calls?: number; est_cost?: number | null };
+      return {
+        key: row.key,
+        calls: row.calls ?? 0,
+        estCost: row.est_cost == null ? null : Math.round(row.est_cost * 1e6) / 1e6,
+      } satisfies WebToolUsage;
+    });
+
+  return { totals, byModel, byDay, byMonth, webTools };
 }
 
 /** 最近 N 条流水明细（面板"最近任务"列表）；opts 限定与汇总同窗口，避免与所选时段矛盾 */

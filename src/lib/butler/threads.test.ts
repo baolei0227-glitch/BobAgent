@@ -16,6 +16,7 @@ import {
   ATTACHMENTS_BLOCK_HEAD,
   WECHAT_THREAD_TTL_MS,
   WORKSPACE_BLOCK_HEAD,
+  THREAD_KEEP_ROUNDS,
   countUnreadAssistant,
   overlapLen,
   parseWorkspaceFolder,
@@ -96,16 +97,37 @@ describe('裁头对齐（overlapLen）与裁剪窗（trimThreadMessages）', () 
     expect(overlapLen(['a', 'b'], ['a', 'b', 'c'])).toBe(2);
   });
 
-  it('trimThreadMessages 保留 system 与最近 20 轮，且剩余开头是 user', () => {
+  it('trimThreadMessages 超上限时裁到低水位（滞回），剩余开头是 user', () => {
     const sys = M('system', 'S');
     const pairs: ChatMessage[] = [];
     for (let i = 0; i < 25; i++) pairs.push(M('user', `u${i}`), M('assistant', `a${i}`));
     const out = trimThreadMessages([sys, ...pairs]);
     expect(out[0]).toEqual(sys);
-    expect(out.length).toBe(1 + 20 * 2);
+    // 滞回：超 20 轮时裁到 14 轮（不是刚好 20 轮，否则下一轮又要再裁一次）
+    expect(out.length).toBe(1 + THREAD_KEEP_ROUNDS * 2);
     expect(out[1].role).toBe('user');
-    // 落在窗口内的是最后 20 轮
-    expect(out[1].content).toBe('u5');
+    // 落在窗口内的是最后 14 轮
+    expect(out[1].content).toBe('u11');
+  });
+
+  it('滞回后连续 6 轮只追加：裁剪点不动，前缀可复用', () => {
+    const sys = M('system', 'S');
+    const pairs: ChatMessage[] = [];
+    for (let i = 0; i < 25; i++) pairs.push(M('user', `u${i}`), M('assistant', `a${i}`));
+    let thread = trimThreadMessages([sys, ...pairs]);
+    const pinned = thread[1].content; // 裁剪点上的第一条 user
+    // 模拟 6 轮对话：每轮读回线程 → 追加 user/assistant → 落库前再裁
+    for (let i = 0; i < 6; i++) {
+      thread = trimThreadMessages([
+        ...thread,
+        M('user', `new-u${i}`),
+        M('assistant', `new-a${i}`),
+      ]);
+      expect(thread[1].content).toBe(pinned); // 窗口没前移
+    }
+    // 第 7 轮才会再次触发裁剪（14 + 6 = 20 轮 > 高水位）
+    thread = trimThreadMessages([...thread, M('user', 'new-u6'), M('assistant', 'new-a6')]);
+    expect(thread[1].content).not.toBe(pinned);
   });
 
   it('末尾单条 user（还未答复）不会被裁掉', () => {
@@ -141,6 +163,20 @@ describe('摘要派生（summarizeThread）', () => {
     expect(s.preview).toBe('明天只有一场会。');
     expect(s.messageCount).toBe(2);
     expect(s.unread).toBe(1);
+  });
+
+  it('标题与副标题都去 Markdown 格式：标题符 / 列表符 / 加粗 / 链接只留文字', () => {
+    const md = '## 今日安排\n\n- **10:00** 项目周会\n- 见 [合同](https://x.com/a)';
+    const s = summarizeThread({
+      ...base,
+      messages: [
+        { role: 'user', content: '**帮我**看看[这个](https://x.com)' },
+        { role: 'assistant', content: md },
+      ],
+      tailTimes: [2, 1],
+    });
+    expect(s.title).toBe('帮我看看这个');
+    expect(s.preview).toBe('今日安排 10:00 项目周会 见 合同');
   });
 
   it('有人设时以姓名作标题；空线程副标题退化为人设性格', () => {

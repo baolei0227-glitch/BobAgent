@@ -265,6 +265,14 @@ export const desktop = {
     clearCookies(): Promise<{ ok: boolean; clearedCount?: number; error?: string }> {
       return raw()?.hippoBrowser?.clearCookies?.() ?? Promise.resolve({ ok: false, error: '非桌面环境' });
     },
+    /** 用系统默认程序打开某次下载 */
+    downloadOpen(id: number): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.downloadOpen?.(id) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
+    /** 在 Finder 中显示某次下载 */
+    downloadReveal(id: number): Promise<{ ok: boolean; error?: string }> {
+      return raw()?.hippoBrowser?.downloadReveal?.(id) ?? Promise.resolve({ ok: false, error: '非桌面环境' });
+    },
     /** 方案 A：上报浏览器锚点矩形（预览面板内容区）。null = 退出嵌入模式 */
     setAnchor(anchor: { x: number; y: number; width: number; height: number } | null): Promise<unknown> {
       return raw()?.hippoBrowser?.setAnchor?.(anchor) ?? Promise.resolve(null);
@@ -286,6 +294,11 @@ export const desktop = {
       const unsub = raw()?.hippoBrowser?.onCapsule?.(callback);
       return typeof unsub === 'function' ? unsub : () => {};
     },
+    /** 订阅「Hippo 里导出的 Markdown 改由画布预览面板打开」；返回取消订阅函数 */
+    onOpenLocalFile(callback: (payload: { path: string; name: string }) => void): () => void {
+      const unsub = raw()?.hippoBrowser?.onOpenLocalFile?.(callback);
+      return typeof unsub === 'function' ? unsub : () => {};
+    },
     /** 切换固定在前端（always-on-top） */
     toggleTop(): Promise<unknown> {
       return raw()?.hippoBrowser?.toggleTop?.() ?? Promise.resolve(null);
@@ -294,6 +307,18 @@ export const desktop = {
     onState(callback: (state: unknown) => void): () => void {
       const unsub = raw()?.hippoBrowser?.onState?.(callback);
       return typeof unsub === 'function' ? unsub : () => {};
+    },
+    /**
+     * 书签：查询全部。
+     * 加书签前**必须**先查重：主进程的 bm-toggle 是**切换**语义（有则删、无则加），
+     * 重复调用会把已有书签删掉（electron/hippo-browser.ts:544-561）。
+     */
+    bmList(): Promise<{ ok: boolean; list: Array<{ url: string; title: string; addedAt: number }> }> {
+      return raw()?.hippoBrowser?.bmList?.() ?? Promise.resolve({ ok: false, list: [] });
+    },
+    /** 书签：切换收藏态，返回是否已收藏（配合 bmList 使用，见上） */
+    bmToggle(payload: { url: string; title: string; favicon?: string }): Promise<{ ok: boolean; bookmarked?: boolean }> {
+      return raw()?.hippoBrowser?.bmToggle?.(payload) ?? Promise.resolve({ ok: false });
     },
   },
 };

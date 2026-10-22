@@ -1,8 +1,11 @@
 import { NextRequest } from 'next/server';
-import { readAppEntry } from '@/lib/sandbox/apps';
+import { readAppEntry, readAppLocalStorage } from '@/lib/sandbox/apps';
 import { buildBridgeClientScript } from '@/lib/sandbox/bridge';
-import { readSettingsFromFile } from '@/lib/settings-server';
-import { PRESET_THEME_VARIABLES, THEME_OPTIONS, getSandboxChatPermission } from '@/lib/settings';
+import { readSettingsFromFile, isSandboxFullTrustServer } from '@/lib/settings-server';
+import { guardRequestSource } from '@/lib/http/loopback-guard';
+import { mintAppToken } from '@/lib/sandbox/app-token';
+import { previewErrorHtml } from '@/lib/sandbox/preview-error';
+import { PRESET_THEME_VARIABLES, THEME_OPTIONS } from '@/lib/settings';
 
 /**
  * 构建当前主题的 CSS 变量注入块，插入到 iframe <head> 或内容开头。
@@ -29,136 +32,6 @@ ${cssVars}
 /* 深色主题标记：小程序可据此调整图表/Canvas 等无法用 CSS 变量的场景 */
 html[data-bob-dark="${dark ? 'true' : 'false'}"] {}
 </style>`;
-}
-
-/** 构建 AI 状态徽章（固定在小程序预览右上角）。
- *  - 绿色圆点：当前小程序已获 AI 调用授权；
- *  - 灰色圆点：未授权，点击触发 chatRequestPermission 弹窗申请；
- *  - 监听宿主广播的权限变更事件（bob_chat_permission_changed）实时更新颜色。
- * 小程序代码无需改动，宿主统一兜底。
- * 导出供静态子路径预览（mockup.html 等）复用，保证任意预览页都有授权入口。 */
-export function buildAiBadgeInjection(appId: string, granted: boolean): string {
-  const grantedStr = String(granted);
-  return `
-<style data-bob-aibadge="true">
-#bob-ai-badge {
-  position: fixed;
-  top: 8px;
-  right: 8px;
-  z-index: 2147483646;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 8px;
-  border-radius: 999px;
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  user-select: none;
-  border: 1px solid var(--border, #e5e5e5);
-  background: var(--paper, #ffffff);
-  backdrop-filter: blur(8px);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-  transition: opacity 0.2s ease, transform 0.15s ease;
-  opacity: 0;
-  animation: bobAiBadgeFadeIn 0.4s ease 0.15s forwards;
-}
-@keyframes bobAiBadgeFadeIn { to { opacity: 1; } }
-#bob-ai-badge:hover { transform: translateY(-1px); }
-#bob-ai-badge:active { transform: translateY(0); }
-#bob-ai-badge[data-granted="true"] {
-  color: var(--success, oklch(0.58 0.18 150));
-  border-color: color-mix(in oklab, var(--success, oklch(0.58 0.18 150)) 40%, var(--border, #e5e5e5));
-}
-#bob-ai-badge[data-granted="false"] {
-  color: var(--muted-foreground, #6b6b6b);
-}
-#bob-ai-badge-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--muted-foreground, #9a9a9a);
-  box-shadow: 0 0 0 0 rgba(0,0,0,0);
-}
-#bob-ai-badge[data-granted="true"] #bob-ai-badge-dot {
-  background: var(--success, oklch(0.58 0.18 150));
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--success, oklch(0.58 0.18 150)) 18%, transparent);
-}
-#bob-ai-badge-label {
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-</style>
-<div id="bob-ai-badge" data-granted="${grantedStr}" title="AI model access">
-  <span id="bob-ai-badge-dot"></span>
-  <span id="bob-ai-badge-label">AI</span>
-</div>
-<script data-bob-aibadge="true">
-(function () {
-  var APP_ID = ${JSON.stringify(appId)};
-  var grantedInit = ${grantedStr};
-  var badge = document.getElementById('bob-ai-badge');
-  if (!badge) return;
-
-  function setGranted(g) {
-    badge.setAttribute('data-granted', String(g));
-    badge.title = g ? 'AI model access: granted' : 'AI model access: denied (click to request)';
-  }
-  setGranted(grantedInit);
-
-  // 点击反馈：未授权→发起授权请求；已授权→提示去左侧面板关闭；失败→提示降级路径
-  var label = document.getElementById('bob-ai-badge-label');
-  var hintTimer = null;
-  function flash(text, ms) {
-    if (!label) return;
-    var orig = label.textContent;
-    label.textContent = text;
-    if (hintTimer) clearTimeout(hintTimer);
-    hintTimer = setTimeout(function () { label.textContent = orig; }, ms || 1600);
-  }
-
-  badge.addEventListener('click', function () {
-    var current = badge.getAttribute('data-granted') === 'true';
-    if (current) {
-      // 已授权：点击提示去左侧 Sandbox 面板关闭（避免误触撤销）
-      flash('AI on · toggle off in left panel', 2200);
-      return;
-    }
-    // 未授权：即时反馈 + 调宿主 chatRequestPermission 弹窗申请
-    flash('Requesting…', 2000);
-    window.BobWork && window.BobWork.request &&
-      window.BobWork.request('chatRequestPermission', {}).then(function (res) {
-        if (res && res.granted) {
-          setGranted(true);
-          flash('Granted', 1400);
-        } else {
-          flash('Not granted · use left panel', 2400);
-        }
-      }).catch(function () {
-        flash('Request failed · use left panel', 2400);
-      });
-  });
-
-  // 监听宿主广播：面板授权 chip 变更时实时同步
-  window.addEventListener('message', function (event) {
-    var msg = event.data;
-    if (!msg || msg.type !== 'bob_chat_permission_changed') return;
-    if (msg.appId !== APP_ID) return;
-    setGranted(!!msg.granted);
-  });
-
-  // 额外兜底：加载后再次查询（防止授权状态异步变更）
-  if (window.BobWork && window.BobWork.request) {
-    setTimeout(function () {
-      window.BobWork.request('chatGetPermission', {}).then(function (res) {
-        if (res && typeof res.granted === 'boolean') setGranted(res.granted);
-      }).catch(function () {});
-    }, 500);
-  }
-})();
-</script>`;
 }
 
 /**
@@ -281,44 +154,57 @@ export function buildPreviewInteractionPatchInjection(): string {
  * GET /api/sandbox/preview/<appId>
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  // 来源闸：预览入口是只读 GET，允许宿主（localhost）内嵌 127.0.0.1 预览页的 cross-site 导航；
+  // 写操作/其它沙箱路由仍按 loopback-guard 的严格规则拒绝。
+  const denied = await guardRequestSource(request, { allowCrossSiteRead: true });
+  if (denied) {
+    // 预览页会被直接当成文档显示；JSON/技术错误不能暴露给非程序员。
+    if ((request.headers.get('accept') || '').includes('text/html')) {
+      return friendlyPreviewError(
+        denied.status,
+        'This mini-app didn\'t open',
+        'The preview service rejected the request. Please try again.',
+      );
+    }
+    return denied;
+  }
   try {
     const { id } = await params;
     const entry = await readAppEntry(id);
     if (!entry) {
-      return new Response('App not found', { status: 404 });
+      return friendlyPreviewError(
+        404,
+        'Mini-app not found',
+        'It may have been deleted, or it is still being created. Go back and try again.',
+      );
     }
-    const clientScript = buildBridgeClientScript(id);
+    // 放开小程序权限（2026-10-10）：完全信任开关透传给桥脚本 → 不再有任何人工确认弹窗
+    const fullTrust = await isSandboxFullTrustServer().catch(() => true);
+    const clientScript = buildBridgeClientScript(id, { fullTrust });
     const themeStyle = await buildThemeStyleInjection();
     let html = entry.content;
 
     // ── Host origin meta (for iframe bridge targetOrigin tightening, P0#1) ──
     // Dev server / electron: request.url gives concrete origin; fall back to
     // 'self' style only when missing (postMessage tolerant on file://).
-    const hostOrigin = (_request.url && new URL(_request.url).origin) || 'null';
+    const hostOrigin = (request.url && new URL(request.url).origin) || 'null';
     const hostOriginMeta = `<meta name="bob-host-origin" content="${hostOrigin}" />`;
-
-    // ── AI badge 注入（根据 manifest.aiBadge，默认 true）──
-    const showAiBadge = entry.app.aiBadge !== false;
-    let aiBadgeInjection = '';
-    if (showAiBadge) {
-      const granted = await getSandboxChatPermission(id).then((g) => !!g).catch(() => false);
-      aiBadgeInjection = buildAiBadgeInjection(id, granted);
-    }
+    // 身份令牌（2026-10-10）：桥/流式路由只认这个令牌解出的 appId，不再信任自报的 _appId
+    const appToken = await mintAppToken(id).catch(() => '');
+    const appTokenMeta = appToken ? `<meta name="bob-app-token" content="${appToken}" />` : '';
+    // Layer-1 持久化快照：应用内 iframe 的 localStorage 不可用，桥从这里同步读、通过宿主异步写回。
+    // 必须在 app 自己的脚本之前注入；standalone（Hippo）会忽略它并继续用 localStorage。
+    const localSnapshot = await readAppLocalStorage(id).catch(() => ({} as Record<string, string>));
+    const localSnapshotScript = `<script data-bob-local-storage="true">window.__BOB_LOCAL_SNAPSHOT__=${JSON.stringify(localSnapshot).replace(/</g, '\\u003c')};</script>`;
 
     // ── P1#7: robust head injection (case-insensitive / attribute tolerant strings) ──
     function injectIntoHead(markup: string, injection: string): string {
       const headMatch = markup.match(/<head\b([^>]*)>/i);
       if (!headMatch) return injection + markup;
       const insertAt = headMatch.index! + headMatch[0].length;
-      return markup.slice(0, insertAt) + injection + markup.slice(insertAt);
-    }
-    function injectIntoBodyStart(markup: string, injection: string): string {
-      const bodyMatch = markup.match(/<body\b([^>]*)>/i);
-      if (!bodyMatch) return injection + markup;
-      const insertAt = bodyMatch.index! + bodyMatch[0].length;
       return markup.slice(0, insertAt) + injection + markup.slice(insertAt);
     }
     function injectBeforeBodyEnd(markup: string, injection: string): string {
@@ -330,12 +216,12 @@ export async function GET(
     // 注入 <base> + 主题 CSS 变量 + host-origin meta 到 <head>；同时注入实时 console 捕获 + 交互补丁（尽早 override console/window.open）
     // <base> 使小程序内相对路径（css/style.css、js/app.js）正确解析到 /api/sandbox/preview/<id>/ 下
     const baseTag = `<base href="/api/sandbox/preview/${id}/" />`;
-    html = injectIntoHead(html, baseTag + hostOriginMeta + themeStyle + buildConsoleCaptureInjection(id) + buildPreviewInteractionPatchInjection());
-
-    // 注入 AI badge：放在 <body> 最前（在小程序内容之前，保证渲染顺序）
-    if (showAiBadge && aiBadgeInjection) {
-      html = injectIntoBodyStart(html, aiBadgeInjection);
-    }
+    // 没有自带 <title> 时补一个（Hippo 标签栏/窗口标题可辨识；2026-10-10 评估 P0-4）
+    const hasTitle = /<title\b[^>]*>[\s\S]*?<\/title>/i.test(html);
+    const titleTag = hasTitle
+      ? ''
+      : `<title>${String(entry.app.name || id).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] as string))} · BobWork</title>`;
+    html = injectIntoHead(html, baseTag + titleTag + localSnapshotScript + hostOriginMeta + appTokenMeta + themeStyle + buildConsoleCaptureInjection(id) + buildPreviewInteractionPatchInjection());
 
     // 注入 bridge 脚本：优先放 </body> 前
     html = injectBeforeBodyEnd(html, clientScript);
@@ -344,8 +230,10 @@ export async function GET(
     // 小程序是 BobWork 原生功能组件，CSP 完全放开：
     // 允许同源/https/http 资源、内联脚本/样式、eval、data/blob URI。
     // frame-ancestors 保留 'self' 防止外部页面嵌套。
+    // frame-ancestors 必须包含宿主 UI 的 origin（方案 B 的应用内 iframe 预览）：
+    // 宿主演 localhost、预览跑 127.0.0.1，'self' 不足以放行。只放开回环名字，跨站仍不能内嵌。
     const cspDirectives = [
-      "frame-ancestors 'self'",
+      "frame-ancestors 'self' http://localhost:* http://127.0.0.1:* http://[::1]:*",
       "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: http: https:",
     ].join('; ');
 
@@ -354,13 +242,31 @@ export async function GET(
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
-        'X-Frame-Options': 'SAMEORIGIN',
+        // 不设 X-Frame-Options：它会把跨 origin 的宿主内嵌一并拦掉（frame-ancestors 已做同样的事，
+        // 且能精确到回环 origin 白名单）
         'Content-Security-Policy': cspDirectives,
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer-when-downgrade',
       },
     });
   } catch (e) {
-    return new Response(`Error: ${e instanceof Error ? e.message : String(e)}`, { status: 500 });
+    console.error('[sandbox preview] failed to render app:', e);
+    return friendlyPreviewError(
+      500,
+      'This mini-app didn\'t open',
+      'The preview service hit a problem. Please try again.',
+    );
   }
+}
+
+/** 预览失败统一返回人话 HTML（不把 JSON/堆栈当页面给用户看）。 */
+function friendlyPreviewError(status: number, title: string, message: string): Response {
+  return new Response(previewErrorHtml(title, message), {
+    status,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 }

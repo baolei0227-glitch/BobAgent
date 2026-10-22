@@ -6,12 +6,14 @@
  *   2) 否则使用默认的 `~/BobWork`
  */
 import { homedir } from 'os';
-import { join, sep, resolve } from 'path';
+import { join, sep, resolve, isAbsolute } from 'path';
 import { lstatSync } from 'fs';
 
 export function resolveAppRoot(): string {
   const env = (process.env.BOBWORK_HOME || '').trim();
-  if (env && env.startsWith('/')) return env;
+  // 用 isAbsolute 而非 startsWith('/')：Windows 的 `C:\...` 不以 `/` 开头，
+  // 旧写法会让 BOBWORK_HOME 覆盖被静默忽略（dev 隔离失效，数据落到 ~/BobWork）。
+  if (env && isAbsolute(env)) return env;
   return join(homedir(), 'BobWork');
 }
 
@@ -45,6 +47,16 @@ export const SANDBOX_DIRNAME = '.sandbox';
 
 /** Bob Sandbox 小程序专用目录名（小程序作为 BobWork 原生功能组件，独立目录，与临时沙盒产物隔离） */
 export const BOB_SANDBOX_DIRNAME = 'bob-sandbox';
+
+/** Butler 派发会话的「产物暂存区」目录名（可见目录，与 skills/ bob-sandbox/ 同级）。
+ *  背景：管家派活后产物原先直接落「当前项目」的 homework/，用户无从察觉、也不该被污染。
+ *  现在默认先落 outbox/<批次>/，待用户在「Outbox」面板或让管家归口到某个项目后再搬入。 */
+export const OUTBOX_DIRNAME = 'outbox';
+
+/** 产物暂存区根目录：<appRoot>/outbox */
+export function resolveOutboxRoot(): string {
+  return join(resolveAppRoot(), OUTBOX_DIRNAME);
+}
 
 /** 全局工具审计日志目录名（隐藏） */
 export const LOGS_DIRNAME = '.logs';

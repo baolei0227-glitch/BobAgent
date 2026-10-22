@@ -21,6 +21,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { getCurrentProject } from '@/lib/project/project-manager';
 import { docxTemplateLibraryRoot, sanitizeDocxScene, resolveDocxTemplateScript } from '@/lib/docx-template-mcp';
+import { pythonBin, shellArg } from '@/lib/platform';
 
 const execAsync = promisify(exec);
 export const maxDuration = 120;
@@ -167,7 +168,7 @@ export async function POST(request: NextRequest) {
       // 每套数据一个子目录（set_000/、set_001/...）：同套多个模板文件归入同一子目录，与批次目录双层隔离
       argParts.push('--row-subdir', 'set');
 
-      const cmd = ['/usr/bin/python3', ...argParts.map((p) => (p.startsWith('/') || p.startsWith('"')) ? p : `"${p}"`)].join(' ');
+      const cmd = [shellArg(pythonBin('模板批量填充')), ...argParts.map((p) => (p.startsWith('/') || p.startsWith('"')) ? p : `"${p}"`)].join(' ');
       const { stdout } = await execAsync(cmd, { timeout: 90_000, maxBuffer: 16 * 1024 * 1024 });
       const res = JSON.parse(stdout || '{}');
       if (!res.ok) {

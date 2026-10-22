@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
+import { createReadStream, promises as fs } from 'fs';
+import { Readable } from 'stream';
 import { join, resolve, sep, dirname, extname, basename } from 'path';
 import { homedir, tmpdir } from 'os';
 import { getCurrentProject, getProjectsDir } from '@/lib/project/project-manager';
@@ -7,13 +8,17 @@ import { expandEmbeds } from '@/lib/md-embed';
 import { cleanupMdAnnotationSidecars } from '@/lib/md-annotations-cleanup';
 import { renameMaterialsIndex } from '@/lib/materials/indexer';
 import { renameFileTags, removeFileTags, type TagScope } from '@/lib/files/tags';
+import { parseRange, rangeHeaders, unsatisfiableHeaders } from '@/lib/files/range';
+import { fileMime } from '@/lib/files/mime';
+import { fsPathKey } from '@/lib/platform';
 
 /**
  * 解析路径（支持 ~ 展开为主目录）
  */
 function resolvePath(input: string): string {
   if (input === '~') return homedir();
-  if (input.startsWith('~/')) return join(homedir(), input.slice(2));
+  // `~/x` 与 Windows 的 `~\x` 都要认（只认前者时，Windows 上「主目录」快捷方式静默失效）
+  if (input.startsWith('~/') || input.startsWith('~\\')) return join(homedir(), input.slice(2));
   return resolve(input);
 }
 
@@ -249,7 +254,8 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // 文件代理（返回文件二进制流，用于 PDF / Word / Excel 预览等浏览器端渲染场景）
+  // 文件代理（返回文件二进制流，用于 PDF / Word / Excel / 音频预览等浏览器端渲染场景）
+  // 支持 HTTP Range（单区间）：音频等大文件可由浏览器按需分段拉取，避免整份读进内存。
   if (action === 'file_proxy') {
     const filePath = searchParams.get('path');
     if (!filePath) {
@@ -258,30 +264,36 @@ export async function GET(request: NextRequest) {
     const resolved = resolvePath(filePath);
     try {
       const stat = await fs.stat(resolved);
-      const buffer = await fs.readFile(resolved);
       const ext = extname(resolved).toLowerCase();
-      const mimeMap: Record<string, string> = {
-        '.html': 'text/html; charset=utf-8',
-        '.htm': 'text/html; charset=utf-8',
-        '.pdf': 'application/pdf',
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.webp': 'image/webp',
-        '.bmp': 'image/bmp',
-        '.svg': 'image/svg+xml',
-        '.ico': 'image/x-icon',
+      // 200 / 206 / 416 三分支共用的头（Content-Type、mtime 哨兵、Accept-Ranges、缓存策略）
+      const baseHeaders: Record<string, string> = {
+        'Content-Type': fileMime(ext),
+        // 打开时刻的 mtime 哨兵：docx 编辑器（DocxTiptapEditor）记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
+        'X-File-Mtime': String(stat.mtimeMs),
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=3600',
       };
+
+      const range = parseRange(request.headers.get('range'), stat.size);
+      if (range === 'unsatisfiable') {
+        return new NextResponse(null, {
+          status: 416,
+          headers: { ...baseHeaders, ...unsatisfiableHeaders(stat.size) },
+        });
+      }
+      if (range) {
+        // 只送该区间：用文件流，不再整份读进内存
+        const nodeStream = createReadStream(resolved, { start: range.start, end: range.end });
+        return new NextResponse(Readable.toWeb(nodeStream) as unknown as ReadableStream, {
+          status: 206,
+          headers: { ...baseHeaders, ...rangeHeaders(range, stat.size) },
+        });
+      }
+
+      const buffer = await fs.readFile(resolved);
       return new NextResponse(buffer, {
         status: 200,
-        headers: {
-          'Content-Type': mimeMap[ext] || 'application/octet-stream',
-          'Content-Length': String(stat.size),
-          // 打开时刻的 mtime 哨兵：docx 编辑器（DocxTiptapEditor）记录后，更新原稿前比对该值，检测文件是否被 WPS 等外部程序改过
-          'X-File-Mtime': String(stat.mtimeMs),
-          'Cache-Control': 'public, max-age=3600',
-        },
+        headers: { ...baseHeaders, 'Content-Length': String(stat.size) },
       });
     } catch {
       return new NextResponse('File not found', { status: 404 });
@@ -614,14 +626,14 @@ export async function POST(request: NextRequest) {
 
       const isDir = srcStat.isDirectory();
       // 目录不能粘贴进自身或其子孙目录（fs.cp 递归复制自身会无限膨胀）：
-      // 比较前先解符号链接取真实路径；macOS 文件系统默认大小写不敏感，统一小写后再比前缀。
+      // 比较前先解符号链接取真实路径；macOS / Windows 文件系统默认大小写不敏感，统一小写后再比前缀。
       // 反向（源在目标之内，如把子目录粘到父目录）是合法操作，不拦。
       if (isDir) {
         const [realSource, realDest] = await Promise.all([
           fs.realpath(resolvedSource).catch(() => resolvedSource),
           fs.realpath(resolvedDest).catch(() => resolvedDest),
         ]);
-        const norm = (p: string) => (process.platform === 'darwin' ? p.toLowerCase() : p);
+        const norm = fsPathKey;
         const srcKey = norm(realSource);
         const dstKey = norm(realDest);
         if (dstKey === srcKey || dstKey.startsWith(srcKey + sep)) {
@@ -678,13 +690,13 @@ export async function POST(request: NextRequest) {
       }
 
       // 目录不能移入自身或其子孙目录：比较前先解符号链接取真实路径；
-      // macOS 文件系统默认大小写不敏感，统一小写后再比前缀。
+      // macOS / Windows 文件系统默认大小写不敏感，统一小写后再比前缀（判据见 fsPathKey）。
       if (srcStat.isDirectory()) {
         const [realSource, realDest] = await Promise.all([
           fs.realpath(resolvedSource).catch(() => resolvedSource),
           fs.realpath(resolvedDest).catch(() => resolvedDest),
         ]);
-        const norm = (p: string) => (process.platform === 'darwin' ? p.toLowerCase() : p);
+        const norm = fsPathKey;
         const srcKey = norm(realSource);
         const dstKey = norm(realDest);
         if (dstKey === srcKey || dstKey.startsWith(srcKey + sep)) {

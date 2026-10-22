@@ -25,6 +25,7 @@ import {
   BUTLER_DOC_EVENT,
   BUTLER_FOCUS_NOTICE_EVENT,
   BUTLER_INBOX_EVENT,
+  BUTLER_ORB_HOME_EVENT,
   BUTLER_PREFERENCES_EVENT,
   BUTLER_RULES_EVENT,
   BUTLER_TODAY_EVENT,
@@ -110,6 +111,33 @@ export function ButlerHost() {
     };
   }, []);
 
+  // 桌面悬浮球（独立球窗）被点击：主进程先恢复/聚焦主窗口，再派这条 IPC →
+  // 在这里转成同一条 BUS 打开抽屉收件箱（复用既有链路，抽屉本身零改动）。
+  // 不传 toggle：程序化唤起必须幂等打开，否则主进程的补发重试会把它又切回关闭态。
+  useEffect(() => {
+    const off = window.api?.butlerOrb?.onOpenInbox(() => {
+      window.dispatchEvent(new CustomEvent(BUTLER_INBOX_EVENT, { detail: { toggle: false } }));
+    });
+    return () => {
+      off?.();
+    };
+  }, []);
+
+  /**
+   * 左栏黄键「缩小」：收起抽屉，球留在原地（BobWork 窗口**不受影响** —— 最小化窗口是用户的事）。
+   * 这是现在唯一「点击收起」的入口（点击抽屉外空白不再收起）；区别在抽屉内部：
+   * 黄键不清 activeThreadId，回头打开还在原来那条会话。
+   */
+  const collapseToOrb = useCallback(() => {
+    close();
+  }, [close]);
+
+  /** 左栏红键「关闭」：收起抽屉，并把球送回中栏（对话区）左下角（丢弃拖拽位置）；BobWork 同样不动 */
+  const collapseAll = useCallback(() => {
+    close();
+    window.dispatchEvent(new Event(BUTLER_ORB_HOME_EVENT));
+  }, [close]);
+
   return (
     <>
       <ButlerNoticeHost />
@@ -122,6 +150,8 @@ export function ButlerHost() {
           onCloseDoc={closeDoc}
           onClose={close}
           focusNoticeId={drawer.focusNoticeId}
+          onMinimizeToOrb={collapseToOrb}
+          onCloseAll={collapseAll}
         />
       )}
     </>

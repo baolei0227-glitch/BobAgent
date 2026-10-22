@@ -29,6 +29,16 @@ files:
 #   用户排查问题时也能直接看到文件。
 asar: false
 
+# ⚠️ 关掉 electron-builder 的自动 rebuild，否则**在 macOS 上交叉打 Windows 包会直接失败**：
+#   @electron/rebuild 对 better-sqlite3（带 binding.gyp）会尝试 node-gyp 从源码重编，
+#   而 node-gyp 不支持跨平台编译，报错原文：
+#     "node-gyp does not support cross-compiling native modules from source."
+#   这个 rebuild 本来就不需要：better-sqlite3@13 走 N-API，包内自带 8 个平台的预编译
+#   （prebuilds/win32-x64.node），node-gyp-build 在运行期按平台挑，ABI 也是稳定的
+#   （实测宿主 node22 = NODE_MODULE_VERSION 127，Electron 43.2.0 = 148，同一份 .node 两边都能 require）。
+#   在 Windows runner 上构建时这一步恰好能成功，所以 CI 侧一直没有暴露。
+npmRebuild: false
+
 # 只取 stage-standalone.mjs 整理过的产物：
 #   - server.js 已被换成自定义入口（含 /remote-login）
 #   - 已补 assets/skills 与运行时脚本
@@ -47,8 +57,20 @@ extraResources:
   # 内置头像：与 mac 侧 build-electron.sh 的 Resources/avatars 布局对齐
   - from: assets/avatars
     to: avatars
+  # 随包嵌入式 Python（Windows 无系统 python3）：先跑 scripts/assemble-win-python.mjs
+  # 生成 .build/python，再由此挂进 resources/python，运行时由 pythonBin 解析。
+  # 注意：走 pack-win.sh 的 --prepackaged 路径时不会执行 extraResources，
+  # 那份目录由 assemble-win-resources.mjs 直接写入 resources/python（两处布局一致）。
+  - from: .build/python
+    to: python
 
 win:
+  # 应用与安装器图标。源是 public/icon-512.png（512×512），electron-builder 会自己
+  # 转成多尺寸 .ico。不设这一项时，构建日志会打
+  #   "default Electron icon is used reason=application icon is not set"
+  # 结果就是桌面上是个 Electron 默认图标，辨识度为零。
+  # 刻意写在 win 段内而不是 build/icon.png：后者会被 mac 侧一并捡走，影响面更大。
+  icon: public/icon-512.png
   target:
     - target: nsis
       arch:
@@ -60,5 +82,19 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
+  # 这三个是「装完桌面上有没有东西」的直接开关，显式写出来而不是靠默认值：
+  # createDesktopShortcut 默认虽然是 true，但便携版（--win dir）根本不执行安装脚本，
+  # 用户拿到解压目录会以为"装完了却没图标"。装安装器时这三项才真正生效。
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: BobWork
   # 未签名：Windows SmartScreen 会拦一次（更多信息 → 仍要运行）。
   # 测试版不引入自签证书，避免把「证书装没装」混进「应用能不能跑」的判断里。
+
+# 自动更新通道：必须与 package.json 的 build.publish 指向同一地址。
+# 这份独立配置不会继承 package.json 的 build 段 —— 不写 publish 时 electron-builder
+# 不会生成 latest.yml，Windows 端的 electron-updater 也就永远发现不了更新
+# （mac 侧的 latest-mac.yml 一直是 package.json 那份配置在生成，容易误以为 Windows 也有）。
+publish:
+  - provider: generic
+    url: https://gitcode.com/baolei89/BobWork/releases/download/latest

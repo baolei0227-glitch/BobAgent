@@ -18,6 +18,7 @@ import { execFile, spawn } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { createResidentManager, sleep, type ResidentInstance } from '@/lib/stt/resident-process';
+import { IS_WIN, sharedLibEnv } from '../platform';
 
 /** 空闲多久回收常驻服务：每次请求续期（会议里每 45s 一段，天然保持热态） */
 const PUNCT_IDLE_MS = 3 * 60 * 1000;
@@ -109,6 +110,13 @@ async function resolveSourcePath(): Promise<string> {
 /** 幂等构建：二进制比源码新就直接复用；否则 clang 编译后原子落位 */
 async function ensureBuilt(binaryPath: string): Promise<void> {
   if (buildError) throw new Error(buildError);
+  // Windows 没有 POSIX clang 工具链，punct_server.c 也需改写成 DLL 或纯 WASM（阶段 G，尚未做）。
+  // 显式失败而不是让 execFile 抛 ENOENT：调用方据此回退单次 CLI，日志里能看清原因。
+  if (IS_WIN) {
+    buildError =
+      'punct-server is not built for Windows yet (native/punct_server.c needs a POSIX clang toolchain); falling back to the single-shot punctuation CLI.';
+    throw new Error(buildError);
+  }
   const src = await resolveSourcePath();
   const [srcStat, binStat] = await Promise.all([
     fs.stat(src),
@@ -183,8 +191,8 @@ const resident = createResidentManager<PunctuationServerSpec & { key: string }, 
     const child = spawn(spec.binaryPath, [spec.modelPath, spec.libDir, String(spec.numThreads ?? 2)], {
       env: {
         ...process.env,
-        // 依赖库（libonnxruntime 等）经 @rpath 解析，用库搜索路径指到同一目录
-        DYLD_LIBRARY_PATH: [spec.libDir, process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+        // 依赖库（libonnxruntime 等）经 @rpath 解析：macOS 用 DYLD_*，Windows 用 PATH
+        ...sharedLibEnv(spec.libDir),
         LD_LIBRARY_PATH: [spec.libDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
       },
       stdio: ['pipe', 'pipe', 'pipe'],

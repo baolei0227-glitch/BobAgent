@@ -77,6 +77,18 @@ export interface PluginPanelDecl {
   statusPath?: string;
   /** static: 随包静态目录，相对插件包目录（如 panel）；绝对路径也可直接用 */
   staticRoot?: string;
+  /**
+   * serve: 宿主 origin 下的**稳定**路径前缀（无结尾斜杠），如 `/api/plugin-web/<id>`。
+   *
+   * 用途：面板端口由宿主按实例分配、重启即变（panel-ports.ts），任何需要持久化 URL 的
+   * 消费方（Hippo 原生书签存在 browser-bookmarks.json 里）都不能直连端口。声明本字段后，
+   * 宿主原生 HTTP 层（src/server.ts）会把该前缀反代到运行时端口，消费方只记宿主 origin。
+   *
+   * 🔴 跨包不变量：必须**逐字**等于插件自身 next.config 的 basePath（前缀 + 插件 id，
+   * 形如 `/api/plugin-web/bob-video-shot-mcp`）。运行时由
+   * `lib/http/plugin-web-proxy.ts` 的 isDeclaredPluginWebPanel() 守住，tsc 看不见。
+   */
+  hostPath?: string;
 }
 
 /** MCP 工具信息（从 MCP server 发现的工具） */
@@ -109,31 +121,39 @@ export const MCP_PRESETS: McpServerConfig[] = [
   {
     id: 'github',
     name: 'GitHub',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    env: {},
-    enabled: false, // 需要 GITHUB_PERSONAL_ACCESS_TOKEN
+    // 官方托管远端 MCP（https://api.githubcopilot.com/mcp/），身份用 Authorization: Bearer <PAT>。
+    // 原 stdio 方案 `npx -y @modelcontextprotocol/server-github` 已被官方废弃，
+    // 且要求用户机器装有 npm+node —— 真机「安装后插件拉不起来」的典型来源之一。
+    // 改走远端后：不依赖本地 node/npm，与 pkulaw/tianyancha 同一接入形态。
+    transport: 'streamable-http',
+    url: 'https://api.githubcopilot.com/mcp/',
+    headers: {},
+    timeout: 60,
+    enabled: false, // 需要 GitHub Personal Access Token
     authScheme: {
-      placement: { kind: 'env', key: 'GITHUB_PERSONAL_ACCESS_TOKEN' },
+      placement: { kind: 'header', key: 'Authorization', template: 'Bearer {KEY}' },
       placeholder: 'Paste your GitHub Personal Access Token',
       signupUrl: 'https://github.com/settings/tokens',
-      description: 'GitHub MCP 需要 Personal Access Token 才能操作仓库。',
+      description: 'GitHub 远端 MCP 需要 Personal Access Token（以 Bearer 方式校验）。',
     },
   },
   {
     id: 'notion',
     name: 'Notion',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@modelcontextprotocol/server-notion'],
-    env: {},
-    enabled: false, // 需要 NOTION_API_KEY
+    // 官方托管远端 MCP（https://mcp.notion.com/mcp），支持以 Bearer 方式传 MCP token
+    // （Business/Enterprise 工作区可在开发者门户创建 MCP token，无需浏览器 OAuth 登录）。
+    // 原 stdio 方案 `npx -y @modelcontextprotocol/server-notion` 的包在 npm 上并不存在 —— 必然拉不起来。
+    transport: 'streamable-http',
+    url: 'https://mcp.notion.com/mcp',
+    headers: {},
+    timeout: 60,
+    enabled: false, // 需要 Notion MCP token
     authScheme: {
-      placement: { kind: 'env', key: 'NOTION_API_KEY' },
-      placeholder: 'Paste your Notion Integration API Key',
+      placement: { kind: 'header', key: 'Authorization', template: 'Bearer {KEY}' },
+      placeholder: 'Paste your Notion MCP token',
       signupUrl: 'https://www.notion.so/my-integrations',
-      description: 'Notion MCP 需要 Integration API Key 才能读写页面。',
+      description:
+        'Notion 远端 MCP 需要 MCP token（Business/Enterprise 工作区可在开发者门户创建）或 OAuth 授权。',
     },
   },
   {
@@ -206,13 +226,21 @@ export const MCP_PRESETS: McpServerConfig[] = [
   {
     id: 'bob-ocr-mcp',
     name: 'Bob OCR',
-    // 常驻 daemon（bob-ocr-mcp --serve，端口 9478，token 鉴权）须以 Streamable HTTP 接入；
-    // token 由 daemon 生成（~/.bob-ocr-mcp/token.json），运行时由 manager 按 /setup/status 自动刷新，
+    // 常驻桥（bob-ocr-mcp --serve，端口 9478，token 鉴权）须以 Streamable HTTP 接入；
+    // token 由桥生成（<数据根>/token.json），运行时由 manager 按 /setup/status 自动刷新，
     // 故 url 里的占位 token 会在首次同步时被替换为真实值（同 bob-browser-mcp）。
+    //
+    // 2026-10-12（普通用户装完即用）：桥改为**随包分发**，由宿主托管拉起 ——
+    //   mcp/ocr-bridge.ts 在 syncServers 时探测 /setup/status：已有在线桥（用户自装
+    //   launchd daemon / 另一宿主）直接复用；未在线则用随包副本
+    //   `{BUNDLED}:bob-ocr-mcp/dist/cli.js --serve`（以 Electron 内置 Node 运行时启动，
+    //   用户机器无需安装 node）拉起，并注入 BOB_OCR_MCP_PORT / BOB_OCR_MCP_HOME。
+    //   所以本条目进入 SYSTEM_MCP_IDS：装完 BobWork 即默认启用，不再要求用户
+    //   自己 npm i -g + --install-daemon（旧路径仍兼容：外部 daemon 在线时原样复用）。
     transport: 'streamable-http',
     url: 'http://127.0.0.1:9478/mcp?token=TOKEN_PLACEHOLDER',
     timeout: 300, // 大 PDF 整份识别（本地 Vision 逐页）可能达 1-2 分钟
-    // 默认开启：daemon 未安装/未启动时连接失败自动自愈重试（设置面板可关闭）
+    // 默认开启：桥未在线时由宿主 ocr-bridge 拉起；仍可在设置面板关闭
     enabled: true,
   },
   {
@@ -272,17 +300,25 @@ export const MCP_PRESETS: McpServerConfig[] = [
     name: 'Bob Notes',
     // 随包分发的本地 MCP 插件（个人知识库 · Karpathy LLM Wiki）：
     // 笔记实现（raw/wiki/ingest/review/lint）全部在插件域
-    // （BobWork 托管数据根 ~/BobWork/extensions/bob-notes-mcp；--serve 拉起 web 面板），
-    // 宿主仅保留 /api/notebook 转发门面 + iframe 面板壳。--serve 拉起插件自带 web 面板
-    // （默认 9480，供 CanvasFlow iframe 嵌入）。提供 notes_add_raw/ingest/query/get/update/
-    // delete/review/lint/backfill/config_*/stats 工具，供宿主门面与专属笔记节点调用。
+    // （BobWork 托管数据根 ~/BobWork/extensions/bob-notes-mcp），
+    // 宿主仅保留 /api/notebook 转发门面 + iframe 面板壳。
+    // 提供 notes_add_raw/ingest/query/get/update/delete/review/lint/backfill/config_*/stats
+    // 工具，供宿主门面与专属笔记节点调用。
     transport: 'stdio',
     command: 'node',
     args: ['{BUNDLED}:bob-notes-mcp/dist/cli.js', '--serve'],
     timeout: 300, // ingest 编译（插件大脑模型长推理）可能达分钟级
     enabled: true,
-    // 自带 Web 面板（--serve 默认 9480）：宿主右侧预览面板通用插件 Tab 的内嵌入口（注册表数据源）
-    panel: { mode: 'serve', url: 'http://127.0.0.1:9480', statusPath: '/api/status' },
+    // 自带 Web 面板（宿主静态托管，供 CanvasFlow iframe 嵌入；注册表数据源）：
+    //   - UI：宿主零端口托管 dist/panel/index.html（端口再也不是面板 URL 的一部分）；
+    //   - API：仍由插件进程提供（--serve 拉起，端口由宿主按实例分配），
+    //          只经宿主 origin 的 hostPath 稳定反代访问 —— 建面板请求出发前统一带该前缀。
+    // 🔴 hostPath 必须逐字等于插件侧 src/web/server.ts 的 MOUNT_PREFIX（见 PluginPanelDecl.hostPath）。
+    panel: {
+      mode: 'static',
+      staticRoot: 'dist/panel',
+      hostPath: '/api/plugin-web/bob-notes-mcp',
+    },
     // 工具不注入普通 chat 节点（避免与宿主已有的 read_notebook 等别名工具重复）；
     // 仅宿主 /api/notebook 门面经 mcpManager 转发调用（同 bob-team-mcp 走 team_run 的模式）。
     exposeToChatNodes: false,
@@ -304,10 +340,32 @@ export const MCP_PRESETS: McpServerConfig[] = [
     panel: { mode: 'serve', url: 'http://127.0.0.1:9482', statusPath: '/api/status' },
     // 工具随场景注入 chat（MCP_SERVER_SCENES 标注 general），AI 可直接读写 Bob-Mind
   },
+  {
+    id: 'bob-video-shot-mcp',
+    name: 'Video Shot',
+    // 随包分发的本地 MCP 插件（视频自动截图工具）：应用实现全在插件域
+    // （--serve 拉起插件自带的 Next web，数据根 ~/BobWork/extensions/bob-video-shot-mcp）。
+    // 宿主只做两件事：注册本服务 + 一条稳定反代路由（src/server.ts 的 /api/plugin-web/**），
+    // 后者让 Hippo 原生书签能指向宿主 origin 而不是会漂移的插件端口。
+    transport: 'stdio',
+    command: 'node',
+    args: ['{BUNDLED}:bob-video-shot-mcp/dist/cli.js', '--serve'],
+    timeout: 120, // 插件 web 冷启动 + 抽帧分析可能达数十秒
+    enabled: false, // 安装制（Market → Install），不进 SYSTEM_MCP_IDS
+    // 🔴 hostPath 必须逐字等于插件 next.config 的 basePath（见 PluginPanelDecl.hostPath 注释）
+    panel: {
+      mode: 'serve',
+      url: 'http://127.0.0.1:9484', // 仅作未连接时的回退展示；正常走运行时端口
+      statusPath: '/api/status',
+      hostPath: '/api/plugin-web/bob-video-shot-mcp',
+    },
+    // 工具不注入普通 chat 节点（截图工作流由插件网页自己承载），保持 chat 工具面干净
+    exposeToChatNodes: false,
+  },
 ];
 
 /** 系统 MCP 服务（随包 bundled，BobWork 核心功能依赖）：出厂默认装配，Installed 中作为 System 服务展示 */
-export const SYSTEM_MCP_IDS: string[] = ['team', 'bob-preview-mcp', 'bob-notes-mcp', 'bob-mind-mcp'];
+export const SYSTEM_MCP_IDS: string[] = ['team', 'bob-preview-mcp', 'bob-notes-mcp', 'bob-mind-mcp', 'bob-ocr-mcp'];
 
 /**
  * 会出现在 Node 的 MCP 下拉中的服务（「插件 vs MCP」分区的 MCP 类）：

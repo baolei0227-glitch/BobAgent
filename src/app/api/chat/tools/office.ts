@@ -8,6 +8,7 @@ import { writeFile, unlink } from 'fs/promises';
 import { readdirSync, statSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { resolveDocxTemplateScript } from '@/lib/docx-template-mcp';
+import { pythonBin, shellArg, toolPathEnv } from '@/lib/platform';
 import type { Tool } from './index';
 import { getProjectRootPath, getWorkspacePath, truncate } from './shared';
 
@@ -77,10 +78,10 @@ async function toolScanDocxTemplates(args: Record<string, unknown>): Promise<str
 
   const SCRIPT_TIMEOUT = 30_000;
   try {
-    const cmd = ['/usr/bin/python3', ...parts].join(' ');
+    const cmd = [shellArg(pythonBin('Office 模板扫描')), ...parts].join(' ');
     const envChild = {
       ...process.env,
-      PATH: ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(':'),
+      PATH: toolPathEnv(),
     };
     const { stdout, stderr } = await execAsync(cmd, { cwd: await getWorkspacePath(), timeout: SCRIPT_TIMEOUT, maxBuffer: 1024 * 1024, env: envChild });
     let out = (stdout || '').trim();
@@ -173,10 +174,10 @@ async function toolFillDocxTemplates(args: Record<string, unknown>): Promise<str
 
   const SCRIPT_TIMEOUT = 120_000;
   try {
-    const cmd = ['/usr/bin/python3', ...argParts].join(' ');
+    const cmd = [shellArg(pythonBin('Office 模板填充')), ...argParts].join(' ');
     const envChild = {
       ...process.env,
-      PATH: ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(':'),
+      PATH: toolPathEnv(),
     };
     const { stdout, stderr } = await execAsync(cmd, { cwd: ws, timeout: SCRIPT_TIMEOUT, maxBuffer: 5 * 1024 * 1024, env: envChild });
     let out = (stdout || '').trim();

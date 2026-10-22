@@ -201,21 +201,54 @@ cat > "$STAGING/app/package.json" <<'EOF'
 }
 EOF
 
-# 5b. 为 app/ 安装最小依赖（main.js 只有 electron-updater 是外部依赖，其余已由 tsup 打包）
+# 5b. 为 app/ 安装最小依赖
+# ⚠️ 这份清单是**手抄**的，必须与 electron/dist/main.js 里 require 的外部模块一致。
+#    漏一个的后果不是「少个功能」，而是主进程在 load 期直接 MODULE_NOT_FOUND ——
+#    双击图标没反应，或弹 "A JavaScript error occurred in the main process: Cannot find module 'xxx'"。
+#    2026-10-19 就是这么崩的：main.ts 新增静态 `import AdmZip from 'adm-zip'`（tsup 原样外置成
+#    require，load 期求值），而本清单只写了 electron-updater ⇒ 装完启动即崩。
+#    故装完必须**按 main.js 实际 require 的模块逐个断言**（见下方 5b-assert），清单不再是唯一防线。
 log "Step 4/6: 安装 Electron 主进程最小依赖 ..."
 node -e "
+const deps = require('$PROJECT_DIR/package.json').dependencies;
 const pkg = {
   name: 'bob-desktop-runtime',
   private: true,
   main: 'main.js',
   dependencies: {
-    'electron-updater': require('$PROJECT_DIR/package.json').dependencies['electron-updater'] || '^6.0.0'
+    'electron-updater': deps['electron-updater'] || '^6.0.0',
+    'adm-zip': deps['adm-zip'] || '^0.6.0'
   }
 };
 require('fs').writeFileSync('$STAGING/app/package.json', JSON.stringify(pkg, null, 2));
 "
 npm --prefix "$STAGING/app" install --omit=dev --no-optional 2>&1 | tail -3
 ok "Electron 主进程依赖安装完成 ($(du -sh "$STAGING/app/node_modules" | awk '{print $1}'))"
+
+# 5b-assert. 断言 main.js 里 require 的每个外部模块都能在 app/node_modules 解析到。
+#   与 .github/workflows/windows-build.yml 的同名断言同源（Windows 侧早已吃过这个亏；
+#   mac 侧此前只靠手抄清单，于是漏了 adm-zip）。
+node -e "
+const fs = require('fs'), path = require('path'), { builtinModules } = require('module');
+const dir = '$STAGING/app/node_modules';
+const js = fs.readFileSync('$STAGING/app/main.js', 'utf8');
+const re = /require\(\s*['\"]([^'\"]+)['\"]\s*\)/g;
+const names = new Set();
+let m;
+while ((m = re.exec(js))) {
+  const n = m[1];
+  if (n.startsWith('.') || n.startsWith('/') || n.startsWith('node:')) continue;
+  const bare = n.startsWith('@') ? n.split('/').slice(0, 2).join('/') : n.split('/')[0];
+  if (builtinModules.includes(bare) || bare === 'electron') continue;
+  names.add(bare);
+}
+const missing = [...names].filter((n) => !fs.existsSync(path.join(dir, n, 'package.json')));
+if (missing.length) {
+  console.error('❌ app/node_modules 缺少 main.js 需要的外部模块: ' + missing.join(', '));
+  process.exit(1);
+}
+console.log('✅ main.js 外部依赖齐全: ' + [...names].sort().join(', '));
+"
 
 # 5c. 生成 app-update.yml
 # 自动更新源：GitCode（国内 CDN 加速，检查更新 + 下载安装包全走 GitCode）
@@ -497,6 +530,105 @@ if [ -d "$BOBBY_MCP_DIR" ]; then
   fi
 else
   warn "bobby-mcp 目录不存在，Bobby node 功能不可用"
+fi
+# 内置 bob-video-shot-mcp（视频自动截图工具 · Next.js 网页面板插件）：
+#   与前面几个 MCP 插件有两点结构差异，不处理的话用户点开面板只会看到空态：
+#   1) panel.mode = 'serve'（不是 static）。宿主在 /api/plugin-web/bob-video-shot-mcp
+#      处把请求反代到插件自己拉起的网页进程（见 projects/src/lib/http/plugin-web-proxy.ts）。
+#      端口是宿主动态分配的，所以 Hippo 书签必须记宿主反代地址、**不能**记插件端口。
+#   2) web/ 是 **Next standalone 产物**（自带 server.js 与裁剪过的 node_modules），
+#      不是内联在 cli.js 里的 HTML 字符串。dist/cli.js 只含 MCP 那半边。
+#      ⚠️ server.js 与 node_modules **缺一不可**；完整性判据见下方（只看 server.js 会静默漏掉 53MB）。
+#   ⚠️ web/ 里的资源前缀在 `next build` 时就被烘焙成 basePath
+#      （= /api/plugin-web/bob-video-shot-mcp，见 bob-video-shot-mcp/web-src/next.config.ts）。
+#      改动 panel.hostPath 后必须重跑 `npm run build:web`，否则页面能开、静态资源全 404。
+VIDEO_SHOT_MCP_DIR="$PROJECT_DIR/../bob-video-shot-mcp"
+# web/ 完整性判据 = server.js **且** node_modules/next/package.json。
+#   build-web.sh 第 48 行 `cp -R .next/standalone/. "$WEB/"` 是把 server.js 与
+#   node_modules（≈53MB：next / react / react-dom / styled-jsx / @next / @swc / client-only）
+#   **一起**拷进 web/ 的——后者才是 `node web/server.js` 里 require('next') 的运行时来源。
+#   只判 server.js 的后果：node_modules 若被裁掉（例如手工清盘），本脚本会**静默复用**这份残缺产物——
+#   包小 53MB 看着「更瘦」，实则 require('next') 只能向上回退到宿主 next-standalone/node_modules，
+#   而那里只有 next / react / react-dom（无 styled-jsx / @next / @swc / client-only）
+#   ⇒ 用户点开面板直接白屏。**体积变小是症状，不是优化。**
+video_shot_web_complete() {
+  [ -f "$VIDEO_SHOT_MCP_DIR/web/server.js" ] \
+    && [ -f "$VIDEO_SHOT_MCP_DIR/web/node_modules/next/package.json" ]
+}
+if [ -d "$VIDEO_SHOT_MCP_DIR" ]; then
+  log "内置 bob-video-shot-mcp（Video Shot）..."
+  if ! (cd "$VIDEO_SHOT_MCP_DIR" && npm run build >/dev/null 2>&1); then
+    warn "bob-video-shot-mcp 构建失败，Video Shot 功能将不可用"
+  else
+    # web/ 构建很慢（next build + web-src 依赖安装），只在 basePath 或网页源码变更时才需要重做
+    # → 已完整就复用，不完整才自愈，避免每次打包白等几分钟。
+    if ! video_shot_web_complete; then
+      # 自愈优先走便宜的那档：standalone 中间产物里就存着 build-web.sh 的拷贝源，
+      # 直接回填 node_modules 即可；重跑 next build 那档只留给「首次 / 源码变更」。
+      if [ -f "$VIDEO_SHOT_MCP_DIR/web/server.js" ] \
+         && [ -d "$VIDEO_SHOT_MCP_DIR/web-src/.next/standalone/node_modules/next" ]; then
+        log "  web/node_modules 缺失，从 web-src/.next/standalone 回填（免重跑 next build）..."
+        # 必须先删：目标目录已存在时 `cp -R src dst` 会嵌套成 dst/node_modules/node_modules
+        rm -rf "$VIDEO_SHOT_MCP_DIR/web/node_modules"
+        cp -R "$VIDEO_SHOT_MCP_DIR/web-src/.next/standalone/node_modules" "$VIDEO_SHOT_MCP_DIR/web/node_modules"
+      else
+        log "  web/ 缺失或不完整，构建网页面板（首次较慢）..."
+        if ! (cd "$VIDEO_SHOT_MCP_DIR" && npm run build:web >/dev/null 2>&1); then
+          warn "  网页面板构建失败，Video Shot 面板将无法打开"
+        fi
+      fi
+    fi
+    mkdir -p "$STAGING/next-standalone/bob-video-shot-mcp"
+    cp -R "$VIDEO_SHOT_MCP_DIR/dist" "$STAGING/next-standalone/bob-video-shot-mcp/dist"
+    cp "$VIDEO_SHOT_MCP_DIR/package.json" "$STAGING/next-standalone/bob-video-shot-mcp/package.json"
+    if video_shot_web_complete; then
+      cp -R "$VIDEO_SHOT_MCP_DIR/web" "$STAGING/next-standalone/bob-video-shot-mcp/web"
+      ok "bob-video-shot-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bob-video-shot-mcp" | awk '{print $1}'))"
+    else
+      # 不完整时**不拷**：半份 web/ 只会让用户白屏，且体积伪装成「已瘦身」；
+      # 空态面板（「插件未运行」）至少是诚实的失败。
+      warn "  web/ 不完整（缺 server.js 或 node_modules），Video Shot 面板将显示「插件未运行」空态"
+    fi
+  fi
+else
+  warn "bob-video-shot-mcp 目录不存在，Video Shot 功能不可用"
+fi
+# 内置 bob-ocr-mcp（Bob OCR · 扫描件/图片识别常驻桥）：
+#   2026-10-12 前它**不在随包清单里** —— 桥要用户自己 `npm i -g bob-ocr-mcp` 再 `--install-daemon`；
+#   普通用户装完 BobWork 只会在 Extensions Store 看到「Bob OCR plugin is offline or not configured」。
+#   现在随包分发，由宿主 mcp/ocr-bridge.ts 托管拉起（{BUNDLED}:bob-ocr-mcp/dist/cli.js --serve）。
+#   两点与 bob-team/bobby 同构，漏掉就会「装完不能用」：
+#   1) cli.js 是 esbuild 单文件 bundle，但 pdf-parse / @modelcontextprotocol/sdk / openai 保持 external
+#      ⇒ 必须自带 node_modules（standalone 的 node_modules 不含 SDK）；
+#   2) assets/（pdf_extractor.py / pdf_to_images.py / ocr_vision.swift / crop_regions.swift）
+#      是识别管线的真实执行件，findPackageAssetsDir 从 dist 上级目录定位 ⇒ 必须与 dist 同级随包。
+OCR_MCP_DIR="$PROJECT_DIR/../bob-ocr-mcp"
+if [ -d "$OCR_MCP_DIR" ]; then
+  log "内置 bob-ocr-mcp（Bob OCR）..."
+  if ! (cd "$OCR_MCP_DIR" && "$OCR_MCP_DIR/node_modules/.bin/tsc" --noEmit -p tsconfig.json >/dev/null 2>&1 && node scripts/build.mjs >/dev/null 2>&1); then
+    warn "bob-ocr-mcp 构建失败，Bob OCR 将不可用（用户只能自行安装 daemon）"
+  else
+    mkdir -p "$STAGING/next-standalone/bob-ocr-mcp"
+    cp -R "$OCR_MCP_DIR/dist" "$STAGING/next-standalone/bob-ocr-mcp/dist"
+    cp "$OCR_MCP_DIR/package.json" "$STAGING/next-standalone/bob-ocr-mcp/package.json"
+    if [ -d "$OCR_MCP_DIR/assets" ]; then
+      cp -R "$OCR_MCP_DIR/assets" "$STAGING/next-standalone/bob-ocr-mcp/assets"
+    else
+      warn "  bob-ocr-mcp/assets 不存在，本地 Vision / PDF 解析脚本将不可用（仅剩线上引擎）"
+    fi
+    npm --prefix "$STAGING/next-standalone/bob-ocr-mcp" install --omit=dev --no-optional --silent 2>&1 | tail -1 || true
+    # 校验运行时依赖真的落地：npm 缓存权限异常（~/.npm 里有 root 属主文件）时 install 会失败，
+    # 而 `|| true` 会把它吞掉 —— 缺 node_modules 的随包副本在用户机器上直接 MODULE_NOT_FOUND。
+    if [ -d "$STAGING/next-standalone/bob-ocr-mcp/node_modules/@modelcontextprotocol/sdk" ] \
+      && [ -d "$STAGING/next-standalone/bob-ocr-mcp/node_modules/pdf-parse" ] \
+      && [ -d "$STAGING/next-standalone/bob-ocr-mcp/node_modules/openai" ]; then
+      ok "bob-ocr-mcp 已内置 ($(du -sh "$STAGING/next-standalone/bob-ocr-mcp" | awk '{print $1}'))"
+    else
+      warn "bob-ocr-mcp 运行时依赖不完整（node_modules 缺 sdk/pdf-parse/openai）——随包桥启动会失败，请检查 npm 缓存权限后重跑"
+    fi
+  fi
+else
+  warn "bob-ocr-mcp 目录不存在，Bob OCR 不可用"
 fi
 ok "Next.js standalone 准备完成（node_modules: $(du -sh "$STAGING/next-standalone/node_modules" 2>/dev/null | awk '{print $1}')）"
 

@@ -24,6 +24,14 @@ export const IS_WIN = PLATFORM === 'win32';
 export const IS_DARWIN = PLATFORM === 'darwin';
 
 /**
+ * 处理器架构，原样透传 `process.arch`（`arm64` / `x64` / …）。
+ *
+ * 刻意**不做归一化**：sherpa-onnx 之类官方产物是按 `osx-arm64` / `osx-x64` 命名的，
+ * 归一化反而要再映射回去；而拼错的后果是下载 404、静默装不上引擎。
+ */
+export const ARCH = process.arch;
+
+/**
  * PATH 列表分隔符：Windows 为 `;`，POSIX 为 `:`。
  * 用 `path.delimiter` 而不是写字面量，是这套语义唯一的真源。
  */
@@ -101,6 +109,21 @@ export function dedupePaths(dirs: Iterable<string>): string[] {
 /** 拼 PATH 字符串 */
 export function joinPathList(dirs: Iterable<string>): string {
   return dedupePaths(dirs).join(PATH_DELIMITER);
+}
+
+/**
+ * 动态库搜索环境变量：把 shared 包的 lib 目录挂到子进程可见的位置。
+ *
+ * macOS 用 `DYLD_LIBRARY_PATH`，而 Windows **没有这个变量** —— 它按 PATH 搜 DLL。
+ * 只写 `DYLD_*` 不会报错，只会让 Windows 子进程以 0xC0000135（DLL 未找到）退出，
+ * 表现为「本地引擎明明装好了，一转写就崩」。
+ */
+export function sharedLibEnv(
+  libDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  if (IS_WIN) return { PATH: joinPathList([libDir, ...splitPathList(env.PATH)]) };
+  return { DYLD_LIBRARY_PATH: [libDir, env.DYLD_LIBRARY_PATH].filter(Boolean).join(':') };
 }
 
 /** 补可执行后缀：Windows 加 `.exe`，其它平台原样 */

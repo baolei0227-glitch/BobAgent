@@ -16,8 +16,8 @@
 /** `OutputFile: <path>` 行（行首可有空白；path 到行尾，行尾换行一并吃掉） */
 export const OUTPUT_FILE_LINE_RE = /^\s*OutputFile:\s*([^\n\r]+?)\s*(\r?\n|$)/gm;
 
-/** 可交付路径：项目相对前缀 / home 路径 / 绝对路径 */
-const DELIVERABLE_PREFIX_RE = /^(homework\/|materials\/|attachments\/|\.sandbox\/)/;
+/** 可交付路径：项目相对前缀 / Outbox 暂存区 / home 路径 / 绝对路径 */
+const DELIVERABLE_PREFIX_RE = /^(homework\/|materials\/|attachments\/|\.sandbox\/|outbox\/)/;
 
 /** 该路径是否值得做成文件卡片（判据：可交付形态，不判存在性——存在性由卡片/预览侧兜底） */
 export function isDeliverablePath(raw: string): boolean {

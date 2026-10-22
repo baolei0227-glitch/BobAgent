@@ -3,6 +3,7 @@ import { join } from 'path';
 import { promises as fs } from 'fs';
 import AdmZip from 'adm-zip';
 import { resolveAppRoot, BOB_SANDBOX_DIRNAME } from '@/lib/app-root';
+import { guardRequestSource } from '@/lib/http/loopback-guard';
 
 /**
  * Export a mini-app as a ZIP file.
@@ -12,9 +13,11 @@ import { resolveAppRoot, BOB_SANDBOX_DIRNAME } from '@/lib/app-root';
  * into a ZIP and returns it as a downloadable file.
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const denied = await guardRequestSource(request);
+  if (denied) return denied;
   try {
     const { id } = await params;
     // Basic sanity on appId to prevent path traversal
@@ -29,9 +32,11 @@ export async function GET(
     }
 
     const zip = new AdmZip();
-    // Add all files/dirs inside appDir, preserving relative paths
+    // Add all files/dirs inside appDir, preserving relative paths.
+    // 2026-10-10 评估：默认排除 .history（历史版本 = 一堆中间态快照，占体积且含被删掉的旧内容）。
     const entries = await fs.readdir(appDir, { withFileTypes: true });
     for (const entry of entries) {
+      if (entry.name === '.history' || entry.name === '.state') continue;
       const fullPath = join(appDir, entry.name);
       if (entry.isDirectory()) {
         zip.addLocalFolder(fullPath, entry.name);

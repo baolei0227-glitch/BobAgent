@@ -5,6 +5,7 @@
 
 export type SandboxTemplateId =
   | 'blank'
+  | 'ai-chat'
   | 'calculator'
   | 'todo'
   | 'habit'
@@ -45,6 +46,33 @@ const PAPER_STYLE = `
       box-shadow: 0 4px 18px rgba(0,0,0,0.06); padding: 24px; width: 100%; max-width: 380px;
     }
     h1 { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: #4a4036; }
+    /* 黄金脚手架：共享 tokens + .bw-* 组件。新模板/AI 生成优先复用，避免每次重造外壳。 */
+    :root { --bw-radius: 12px; --bw-gap: 12px; --bw-pad: 20px; }
+    .bw-card {
+      background: var(--paper, #fff); border: 1px solid var(--line, #e8e0d0);
+      border-radius: var(--bw-radius); box-shadow: 0 4px 18px rgba(0,0,0,0.06);
+      padding: var(--bw-pad); width: 100%;
+    }
+    .bw-title { font-size: 20px; font-weight: 600; color: var(--ink, #3a342c); margin: 0; }
+    .bw-muted { font-size: 12px; color: var(--ink-muted, #8a7f6f); }
+    .bw-tnum { font-variant-numeric: tabular-nums; }
+    .bw-input {
+      width: 100%; padding: 10px 12px; border: 1px solid var(--line, #e8e0d0);
+      border-radius: 8px; background: var(--input-bg, #fbf9f4); color: var(--ink, #3a342c);
+      font: inherit; outline: none;
+    }
+    .bw-input:focus { border-color: var(--primary, #6b8e4e); box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary, #6b8e4e) 25%, transparent); }
+    .bw-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 9px 14px; border: 1px solid var(--line, #e8e0d0); border-radius: 8px;
+      background: var(--paper, #fff); color: var(--ink, #3a342c); font: inherit; cursor: pointer;
+      transition: filter .15s, transform .05s;
+    }
+    .bw-btn:hover { filter: brightness(1.04); }
+    .bw-btn:active { transform: scale(.98); }
+    .bw-btn:disabled { opacity: .55; cursor: default; }
+    .bw-btn-primary { background: var(--primary, #6b8e4e); border-color: var(--primary, #6b8e4e); color: var(--brand-on, #fff); }
+    .bw-empty { padding: 20px 12px; text-align: center; color: var(--ink-muted, #8a7f6f); font-size: 12px; }
   </style>`;
 
 // ============================================================
@@ -948,6 +976,213 @@ ${PAPER_STYLE}
 </body>
 </html>`;
 
+/**
+ * 默认冒烟脚本（所有新小程序都会写入；模板自带 smoke-test.js 时不覆盖）。
+ * 由 coding 节点用 interact_preview 执行：结果写 window.__testResult。
+ */
+export const SMOKE_TEST_JS = `/* Minimal smoke test — run via interact_preview (page global scope). */
+window.__testResult = { ok: true, steps: [] };
+try {
+  var bodyText = (document.body.innerText || '').trim();
+  window.__testResult.steps.push({ step: 'body-rendered', ok: bodyText.length > 0 });
+  var primary = document.querySelector('button, [role="button"], input, textarea');
+  if (primary) {
+    primary.dispatchEvent(new Event('click', { bubbles: true }));
+    window.__testResult.steps.push({ step: 'primary-interaction', ok: true });
+  }
+} catch (e) {
+  window.__testResult.ok = false;
+  window.__testResult.error = String(e);
+}
+window.__testResult.ok = window.__testResult.ok && window.__testResult.steps.every(function (s) { return s.ok; });
+`;
+
+const AI_CHAT_SMOKE_TEST = `window.__testResult = { ok: true, steps: [] };
+try {
+  var input = document.querySelector('#input');
+  var send = document.querySelector('#send');
+  var messages = document.querySelector('#messages');
+  var model = document.querySelector('#model');
+  window.__testResult.steps.push({ step: 'core-elements', ok: !!(input && send && messages && model) });
+  if (input) {
+    input.value = 'hello';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    window.__testResult.steps.push({ step: 'input-accepts-text', ok: input.value === 'hello' });
+  }
+} catch (e) {
+  window.__testResult.ok = false;
+  window.__testResult.error = String(e);
+}
+window.__testResult.ok = window.__testResult.ok && window.__testResult.steps.every(function (s) { return s.ok; });
+`;
+
+const AI_CHAT_TEMPLATE = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+${PAPER_STYLE}
+  <style>
+    body { align-items: stretch; justify-content: stretch; padding: 0; background: var(--background, #faf8f3); }
+    .bw-app { width: 100%; max-width: 720px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; }
+    .bw-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line, #e8e0d0); background: var(--paper, #fff); }
+    .bw-model { width: auto; min-width: 120px; max-width: 220px; padding: 6px 8px; font-size: 12px; }
+    .bw-messages { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+    .bw-msg { display: flex; }
+    .bw-msg.user { justify-content: flex-end; }
+    .bw-bubble { max-width: 80%; padding: 9px 12px; border-radius: 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: var(--paper, #fff); border: 1px solid var(--line, #e8e0d0); color: var(--ink, #3a342c); }
+    .bw-msg.user .bw-bubble { background: var(--primary, #6b8e4e); border-color: var(--primary, #6b8e4e); color: var(--brand-on, #fff); }
+    .bw-status { min-height: 16px; padding: 0 18px; font-size: 11px; color: var(--ink-muted, #8a7f6f); }
+    .bw-compose { display: flex; gap: 8px; padding: 12px 18px 18px; border-top: 1px solid var(--line, #e8e0d0); background: var(--paper, #fff); }
+    .bw-compose .bw-input { resize: none; max-height: 120px; }
+  </style>
+</head>
+<body>
+  <div class="bw-app">
+    <header class="bw-head">
+      <div>
+        <h1 class="bw-title">AI Chat</h1>
+        <p class="bw-muted">Streaming replies · model picker</p>
+      </div>
+      <select id="model" class="bw-input bw-model" aria-label="Model"></select>
+    </header>
+    <main id="messages" class="bw-messages" aria-live="polite"></main>
+    <div id="status" class="bw-status"></div>
+    <footer class="bw-compose">
+      <textarea id="input" class="bw-input" rows="2" placeholder="Ask anything… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send" class="bw-btn bw-btn-primary" type="button">Send</button>
+    </footer>
+  </div>
+  <script>
+  (function () {
+    var messagesEl = document.getElementById('messages');
+    var inputEl = document.getElementById('input');
+    var sendEl = document.getElementById('send');
+    var modelEl = document.getElementById('model');
+    var statusEl = document.getElementById('status');
+    var history = [];
+    var busy = false;
+    var selectedModel = '';
+    try { selectedModel = BobStorage.get('selectedModel') || ''; } catch (e) {}
+
+    function setStatus(text) { statusEl.textContent = text || ''; }
+    function scroll() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+    function bubble(role, text) {
+      var el = document.createElement('div');
+      el.className = 'bw-msg ' + role;
+      var inner = document.createElement('div');
+      inner.className = 'bw-bubble';
+      inner.textContent = text;
+      el.appendChild(inner);
+      messagesEl.appendChild(el);
+      scroll();
+      return inner;
+    }
+    function renderEmpty() {
+      messagesEl.innerHTML = '';
+      var empty = document.createElement('div');
+      empty.className = 'bw-empty';
+      empty.textContent = 'Ask anything — replies stream in.';
+      messagesEl.appendChild(empty);
+    }
+    function loadModels() {
+      if (typeof BobWork === 'undefined') {
+        setStatus('Host bridge unavailable — configure a model first.');
+        return;
+      }
+      BobWork.request('listConfiguredModels', {}).then(function (data) {
+        var models = Array.isArray(data) ? data : ((data && data.models) || []);
+        modelEl.innerHTML = '';
+        var first = '';
+        var preferred = '';
+        models.forEach(function (m) {
+          if (!m || !m.provider || !m.modelId) return;
+          var value = m.provider + ':' + m.modelId;
+          if (!first) first = value;
+          if (!preferred && m.isDefault) preferred = value;
+          var opt = document.createElement('option');
+          opt.value = value;
+          opt.textContent = (m.label || m.modelId) + (m.supportsVision ? ' · vision' : '');
+          modelEl.appendChild(opt);
+        });
+        if (modelEl.options.length === 0) {
+          selectedModel = '';
+          setStatus('No model configured — add one in Manage Models.');
+          return;
+        }
+        var match = false;
+        for (var i = 0; i < modelEl.options.length; i++) {
+          if (modelEl.options[i].value === selectedModel) match = true;
+        }
+        if (!match) selectedModel = preferred || first;
+        modelEl.value = selectedModel;
+      }).catch(function () {
+        selectedModel = '';
+        setStatus('Model list unavailable — configure a model first.');
+      });
+    }
+    modelEl.addEventListener('change', function () {
+      selectedModel = modelEl.value || '';
+      try { BobStorage.set('selectedModel', selectedModel); } catch (e) {}
+    });
+    function send() {
+      var text = (inputEl.value || '').trim();
+      if (!text || busy) return;
+      if (!selectedModel) { setStatus('Select a model first.'); return; }
+      busy = true;
+      sendEl.disabled = true;
+      setStatus('');
+      if (messagesEl.querySelector('.bw-empty')) messagesEl.innerHTML = '';
+      bubble('user', text);
+      history.push({ role: 'user', content: text });
+      inputEl.value = '';
+      var out = bubble('assistant', '…');
+      var acc = '';
+      var payload = { model: selectedModel, messages: history.slice(), maxTokens: 2048 };
+      function done() {
+        history.push({ role: 'assistant', content: acc });
+        busy = false;
+        sendEl.disabled = false;
+        inputEl.focus();
+        setStatus('');
+      }
+      function fail(e) {
+        out.textContent = 'Model call failed: ' + (e && e.message ? e.message : String(e));
+        setStatus('Request failed — check the model configuration.');
+        busy = false;
+        sendEl.disabled = false;
+      }
+      try {
+        if (BobWork.chatStream) {
+          var handle = BobWork.chatStream({
+            model: payload.model,
+            messages: payload.messages,
+            maxTokens: payload.maxTokens,
+            onDelta: function (delta) {
+              acc += typeof delta === 'string' ? delta : (delta && delta.text) || '';
+              out.textContent = acc || '…';
+              scroll();
+            }
+          });
+          handle.promise.then(done).catch(fail);
+        } else {
+          BobWork.request('chat', payload).then(function (res) {
+            acc = (res && res.content) || '';
+            out.textContent = acc || '(empty reply)';
+            done();
+          }).catch(fail);
+        }
+      } catch (e) { fail(e); }
+    }
+    sendEl.addEventListener('click', send);
+    inputEl.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    renderEmpty();
+    loadModels();
+  })();
+  </script>
+</body>
+</html>`;
+
 // ============================================================
 // 注册
 // ============================================================
@@ -957,6 +1192,11 @@ export const APP_TEMPLATES: Record<SandboxTemplateId, SandboxTemplate> = {
     id: 'blank', label: 'Blank', description: '空白页，自由发挥',
     entry: 'index.html', files: { 'index.html': BLANK_TEMPLATE },
     promptSeed: { category: '其他（自定义）', interaction: '单页卡片式展示', persistence: '不需要，每次打开重新开始' },
+  },
+  'ai-chat': {
+    id: 'ai-chat', label: 'AI Chat', description: '流式 AI 对话 + 模型选择 + 错误兜底',
+    entry: 'index.html', files: { 'index.html': AI_CHAT_TEMPLATE, 'smoke-test.js': AI_CHAT_SMOKE_TEST },
+    promptSeed: { category: 'AI 智能问答/内容生成', interaction: '对话式交互', persistence: '仅本次会话临时保存即可（用 BobStorage.set）' },
   },
   calculator: {
     id: 'calculator', label: 'Calculator', description: '带基础运算的实用计算器',
@@ -1011,3 +1251,22 @@ export const APP_TEMPLATES: Record<SandboxTemplateId, SandboxTemplate> = {
 };
 
 export const SANDBOX_TEMPLATE_LIST: SandboxTemplate[] = Object.values(APP_TEMPLATES);
+
+/**
+ * 模板默认图标（emoji）：新建小程序时由 createApp 写入 manifest，
+ * 避免商店卡片/侧栏退回通用图标或名称首字母。
+ */
+export const SANDBOX_TEMPLATE_ICONS: Record<SandboxTemplateId, string> = {
+  blank: '✨',
+  'ai-chat': '🤖',
+  calculator: '🧮',
+  todo: '✅',
+  habit: '🌱',
+  pomodoro: '🍅',
+  'contact-form': '📋',
+  'data-table': '📊',
+  portfolio: '👤',
+  landing: '🚀',
+  reader: '📖',
+  converter: '🔁',
+};

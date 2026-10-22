@@ -70,7 +70,7 @@ const BUILTIN_WRITE_TOOLS: ReadonlySet<string> = new Set([
 /** browser MCP 写类动作词（browser-mcp/src/tools.ts 实际命名核对后抽取，匹配 action 不带命名空间）：
  *  - 页面操纵/表单交互（会改变页面状态或触发副作用请求）：click / type / fill_form /
  *    select_option / press_key / submit / click_coordinates / check / uncheck / drag；
- *  - 文件/内容产出：upload_file / export_pdf；
+ *  - 文件/内容产出：upload_file / download / export_pdf；
  *  - 视图滚动（任务点名，视作页面操纵写类）：scroll；
  *  - 脚本注入与持久存储写入（强副作用，等同 execute_script 语义）：run_js / page_script /
  *    set_cookie / clear_cookies / set_storage / clear_storage。
@@ -90,6 +90,8 @@ const BROWSER_WRITE_ACTIONS: ReadonlySet<string> = new Set([
   'uncheck',
   'drag',
   'upload_file',
+  'download',
+  'save_download',
   'export_pdf',
   'scroll',
   'run_js',

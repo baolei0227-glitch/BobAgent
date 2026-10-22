@@ -13,6 +13,7 @@ import TeamMemberPickerDialog from './TeamMemberPickerDialog';
 import TeamWorkbench from './TeamWorkbench';
 import LoginDialog from './LoginDialog';
 import { StreamingMarkdown, type ReadSourceInfo } from './HtmlRenderer';
+import { ImagePreviewLightbox } from './ImagePreviewLightbox';
 import { normalizeSourceUrl } from '@/lib/materials/source-url';
 import { bus, BusEvents } from '@/lib/bus';
 import {
@@ -103,8 +104,23 @@ export interface ChatNodeKernelProps {
 // options.outcomeMode: true 表示直接打开成果块编辑模式
 export const NodeReaderContext = React.createContext<(nodeMdId: string, options?: { outcomeMode?: boolean }) => void>(() => {});
 
+/** 预览 console 错误的修复消息（手动 Fix with AI 与宿主自动修复共用同一份文案） */
+function buildConsoleRepairText(errors: string[], source: 'auto' | 'manual' = 'manual'): string {
+  const head = source === 'auto'
+    ? 'Preview reported console errors after the last change. Fix them automatically (this is the one allowed auto-repair pass), then re-run the smoke test:'
+    : 'Preview reported console errors. Fix them, then re-run the smoke test:';
+  return [
+    head,
+    ...errors.slice(0, 8).map((x, i) => `${i + 1}. ${x}`),
+    '',
+    'After fixing, call capture_preview to confirm the rendering and interact_preview to confirm the interaction path; do not claim it is fixed without checking.',
+  ].join('\n');
+}
 
 
+
+/** 新建节点挂载后要自动发送的任务：纯文本，或带创建框上传的参考附件 */
+type PendingNodeTask = { text: string; attachments?: MessageAttachment[] };
 
 export function ChatNodeKernel({ id, data, selected, identity, ambientContext, researchMode, surface = 'canvas' }: ChatNodeKernelProps) {
   // 侧边栏面（Hippo 浏览器对话栏）：隐藏画布节点专属的卡片头元素（见下方 surface 判据）
@@ -163,6 +179,12 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
 
   // AI Coding 节点（coding 身份，绑定 Bob Sandbox 小程序）
   const isCoding = identity === 'coding';
+  // 多智能体协作能力位：只有 dynamic 画像（chat）能由「Multi-agent mode」开关激活 team 场景、
+  // 真正拿到 team_run；coding/市场 agent 是 fixed 画像且 fixedScenes 不含 team（见 CODING_PROFILE
+  // 注释：fixed 画像下 activeScenes 被忽略）。故 coding 对话不显示 Team/Multi-agent 入口——
+  // 否则就是「规则要求调 team_run、工具面里却没有它」的反向错位。服务端另有同口径护栏。
+  // 今天只有 chat 是 dynamic 画像；新增官方画像若要带 team，需同步这里与 supportsTeamCollab。
+  const canUseTeam = identity === 'chat';
   // 标题前身份图标（2026-09 口径：去掉高亮边框后，用图标区分 agent）：coding→Terminal / Kar→FileText / Butler→ClipboardList / Archivist→Archive / 其余→Bot
   // 尺寸：chat 的 Bot 16px；coding/kar/butler/archivist 专属图标 15px（2026-09 视觉校准）
   const TitleIdentityIcon: React.ComponentType<{ className?: string; style?: React.CSSProperties }> =
@@ -189,10 +211,14 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
   // 执行中点击发送的待办队列：严格插队（新消息排到队首），当前任务结束后自动逐条发送
   const pendingSendRef = useRef<string[]>([]);
   const [pendingSendCount, setPendingSendCount] = useState(0);
+  /** 本轮用户消息的自动修复预算：最多 1 次，防止 console 错误自修循环 */
+  const autoRepairBudgetRef = useRef(1);
+  /** 预览上报的 console 错误：等本轮结束后由宿主自动发一轮修复；只留最近一次 */
+  const pendingAutoRepairRef = useRef<{ appId: string; errors: string[] } | null>(null);
   // 一键安装等自动发送任务：设置（providerConfigs）尚未加载完成时的暂存位。
   // 挂载 effect 先于设置加载 effect 执行，此时 availableModels 为空会导致 doSend 在
   // 模型选择处被 alert 中断；等设置加载完成后再补发，消除挂载时序竞争。
-  const deferredAutoSendRef = useRef<string | null>(null);
+  const deferredAutoSendRef = useRef<PendingNodeTask | null>(null);
   const settingsLoadedRef = useRef(false);
   // 设置加载完成的 state 镜像：驱动下方"补发暂存任务"effect 触发（ref 不可作为依赖）
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -326,6 +352,10 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
   // 节点内内容分栏（dsh 对话 / 轨迹 / 团队）：默认对话视图；轨迹承载完整执行明细，
   // 团队是本节点关联团队的协作工作台（数据真相源在引擎侧，见 TeamWorkbench）
   const [pane, setPane] = useState<'chat' | 'trace' | 'team'>('chat');
+  // 能力位不支持多智能体时（coding 等 fixed 画像），任何残留的 team 分栏都回落到对话
+  useEffect(() => {
+    if (!canUseTeam && pane === 'team') setPane('chat');
+  }, [canUseTeam, pane]);
   /** P5b-1 历史 replay：点 Turn「查看原始轨迹」→ fetch /api/trajectory events → 窗口 → Trace 分栏渲染 */
   const [replay, setReplay] = useState<null | {
     taskId: string;
@@ -646,7 +676,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
   );
   /** 多智能体协作模式开关（frontmatter multi_agent_mode）：开启后本轮请求带 multiAgentMode，
    *  主 agent 可调用 team_run 编排多个成员协作，过程以折叠分支卡片呈现在「执行过程」区 */
-  const [multiAgentMode, setMultiAgentMode] = useState<boolean>(data.multiAgentMode === true);
+  const [multiAgentMode, setMultiAgentMode] = useState<boolean>(() => canUseTeam && data.multiAgentMode === true);
   /** Team 分栏两档模型（frontmatter team_main_model / team_worker_model）：队长跑主模型（规划成员与任务、
    *  复核并整合产出），全部成员一刀切跑次模型。只作用于多智能体协作，**绝不回写节点自身 chat 模型** */
   const [teamMainModel, setTeamMainModel] = useState<string>(typeof data.teamMainModel === 'string' ? data.teamMainModel : '');
@@ -794,16 +824,20 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
     // （忙碌时入待办队列，任务结束后自动发送；设置未加载完时暂存，加载完成后再补发，
     //   避免 availableModels 尚为空导致 doSend 在模型选择处被 alert 中断）
     const pendingTaskMap = window.__pendingNodeTasks;
-    if (pendingTaskMap?.[currentMdId]) {
-      const task = pendingTaskMap[currentMdId];
+    const rawTask = pendingTaskMap?.[currentMdId];
+    if (rawTask) {
       delete pendingTaskMap[currentMdId];
-      if (streamingRef.current || persistingRef.current) {
-        pendingSendRef.current.unshift(task);
-        setPendingSendCount(pendingSendRef.current.length);
-      } else if (!settingsLoadedRef.current) {
-        deferredAutoSendRef.current = task;
-      } else {
-        handleSendWithText(task);
+      const task: PendingNodeTask = typeof rawTask === 'string' ? { text: rawTask } : rawTask;
+      if (task.text.trim()) {
+        if (streamingRef.current || persistingRef.current) {
+          // 忙碌时只保留文字（附件仅在“新建即发送”的常见路径出现，活跃流期间极少）
+          pendingSendRef.current.unshift(task.text);
+          setPendingSendCount(pendingSendRef.current.length);
+        } else if (!settingsLoadedRef.current) {
+          deferredAutoSendRef.current = task;
+        } else {
+          sendPendingTask(task);
+        }
       }
     }
     // 外部一键安装等任务派发：显式发送（忙碌时入待办队列，任务结束后自动发送）
@@ -1045,7 +1079,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
     if (!settingsLoaded) return;
     const task = deferredAutoSendRef.current;
     deferredAutoSendRef.current = null;
-    handleSendWithText(task);
+    sendPendingTask(task);
   }, [settingsLoaded, availableModels]);
 
   /** 本地回环地址判定（localhost / 127.0.0.1 / [::1] / 0.0.0.0），与 /api/models/health 服务端判定口径一致 */
@@ -1349,6 +1383,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
   /** 切换多智能体协作模式（Multi-agent mode）：开启后本轮主 agent 可编排多成员协作；
    *  与 MCP 勾选同构：更新 state + 节点 data + 写盘 frontmatter 三连 */
   const toggleMultiAgentMode = () => {
+    if (!canUseTeam) return;
     const next = !multiAgentMode;
     setMultiAgentMode(next);
     setNodes((nds) =>
@@ -1628,8 +1663,8 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
     const el = scrollRef.current;
     if (!el) return;
     let raf = 0;
-    // 基准线取"容器顶部 + 32px"（覆盖容器 py-3 内边距与首条消息的间距）：
-    // 最后一条"顶边已越过基准线"的消息 = 当前占据视口顶部、正在阅读的那条。
+    // 基准线取容器垂直中线：最后一条"顶边已越过中线"的消息 = 当前正停留在阅读区中部的那条。
+    // 即问题滚动到中间区域时就切换圆点，不再要求它到达容器顶端。
     // 用 getBoundingClientRect 而非 offsetTop：不依赖 offsetParent，父级多包一层布局也不会失准。
     const computeActive = () => {
       raf = 0;
@@ -1637,7 +1672,7 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
       // 若此时用启发式重算，会因目标消息尚未落位而误判为相邻项，
       // 导致从后往前点选需点两次才能高亮正确（与画布链导航"点击即高亮"语义对齐）。
       if (programmaticScrollRef.current) return;
-      const line = el.getBoundingClientRect().top + 32;
+      const line = el.getBoundingClientRect().top + el.clientHeight / 2;
       let activeId: string | null = null;
       for (const m of userMessages) {
         const node = userMsgRefs.current.get(m.id);
@@ -1645,9 +1680,14 @@ export function ChatNodeKernel({ id, data, selected, identity, ambientContext, r
         if (node.getBoundingClientRect().top <= line) activeId = m.id;
         else break; // 消息按文档顺序排列，顶边一旦超出基准线即可停止
       }
-      // 无任何消息越过基准线（如首条上方有较高的欢迎/引导块）→ 兜底第一条，
-      // 保证 scrollTop=0 时最上方圆点始终可高亮，不会"够不到"
-      if (!activeId && userMessages.length > 0) {
+      // 中线判定下，滚到底部时最后一条可能仍在中线之下而漏选 → 直接高亮最后一条，
+      // 保证"读到底 = 最后一条圆点点亮"的直觉一致
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
+      if (atBottom && userMessages.length > 0) {
+        activeId = userMessages[userMessages.length - 1].id;
+      } else if (!activeId && userMessages.length > 0) {
+        // 无任何消息越过中线（如首条上方有较高的欢迎/引导块）→ 兜底第一条，
+        // 保证 scrollTop=0 时最上方圆点始终可高亮，不会"够不到"
         activeId = userMessages[0].id;
       }
       setActiveUserMsgId(activeId);
@@ -2095,12 +2135,21 @@ ${rows.join('\n')}
     doSend(text);
   };
 
+  /** 新建即发送：保留创建框附带的参考附件，一轮同时带上文字 + 附件 */
+  const sendPendingTask = (task: PendingNodeTask) => {
+    doSend(
+      task.text,
+      task.attachments && task.attachments.length > 0 ? { attachments: task.attachments } : undefined,
+    );
+  };
+
   /** 团队界面「发起协作」：需求文本走同一轮 /api/chat（本节点的既有链路），
    *  显式带上 multiAgent（不依赖 state 提交时序）；开关同步置为开启并落盘，
    *  之后停在团队视图看成员分工与协作过程，最终回答仍回落到对话流。
    *  ctx：团队输入框自己的附件/@引用上下文（该输入栏有独立的 composer 实例），
    *  随本轮透传给 doSend 顶替节点级 pending 状态 */
   const launchTeamRun = (text: string, ctx?: ComposerContext) => {
+    if (!canUseTeam) return;
     const t = text.trim();
     if (!t) return;
     if (!multiAgentMode) toggleMultiAgentMode();
@@ -2112,10 +2161,22 @@ ${rows.join('\n')}
    *  只能由调用方直接告知本轮名单（同 opts.multiAgent 口径），否则本轮会丢掉刚勾选的成员 */
   const doSend = async (
     userInput: string,
-    opts?: { continuation?: boolean; multiAgent?: boolean; presetAgentIds?: string[]; composer?: ComposerContext; attachments?: MessageAttachment[]; references?: MessageReference[] },
+    opts?: { continuation?: boolean; multiAgent?: boolean; presetAgentIds?: string[]; composer?: ComposerContext; attachments?: MessageAttachment[]; references?: MessageReference[]; autoRepair?: boolean },
   ) => {
     const isContinuation = opts?.continuation === true;
     if ((!userInput && !isContinuation) || streamingRef.current || persistingRef.current) return;
+    // 用户新消息 = 新的一轮：重置自动修复预算，并清掉上一轮遗留的待修复错误。
+    // autoRepair 自己也走 doSend，但不能重置预算（否则会无限自修）。
+    if (!opts?.autoRepair && !isContinuation) {
+      autoRepairBudgetRef.current = 1;
+      pendingAutoRepairRef.current = null;
+    }
+    // P2-10 关键遥测：本轮耗时 / 首代码 / 首预览 / 工具错误（只上报数值，不含用户内容）
+    const telemetryStartedAt = Date.now();
+    let telemetryFirstCodeMs: number | undefined;
+    let telemetryFirstPreviewMs: number | undefined;
+    let telemetryToolCalls = 0;
+    let telemetryToolErrors = 0;
     // 本轮引用上下文来源：团队输入栏发起时用其 composer 快照，其余情况沿用节点级输入栏
     // 重发/重试（Regenerate）会显式回传原轮快照（opts.attachments / opts.references），优先使用
     const turnAttachments = opts?.attachments ?? opts?.composer?.attachments ?? pendingAttachments;
@@ -2448,7 +2509,7 @@ ${rows.join('\n')}
     // 多智能体协作模式：开启才发送（缺省 = 关闭）；服务端据此激活 team 场景并注入编排规则。
     // opts.multiAgent：团队界面「发起协作」显式带上的本轮开关——同一次点击里 state 尚未提交，
     // 只能由调用方直接告知本轮是多智能体（见 launchTeamRun）
-    if (multiAgentMode || opts?.multiAgent === true) {
+    if (canUseTeam && (multiAgentMode || opts?.multiAgent === true)) {
       requestBody.multiAgentMode = true;
       // 本次执行的成员名单（弹窗选定的已安装 agent id）：不落盘、仅本轮生效；
       // 服务端据此优先编排名单内成员，并对名单外补充成员强制弹卡请用户批准
@@ -2640,6 +2701,13 @@ ${rows.join('\n')}
               }
               if (parsed.tool_call) {
                 const tc = parsed.tool_call as { name: string; arguments: Record<string, unknown>; phase?: 'pending' | 'running' | 'done' | 'error'; spanId?: string; startAt?: number; purpose?: string };
+                telemetryToolCalls += 1;
+                if (telemetryFirstCodeMs === undefined && /write_file|edit_code|write_app_file/.test(tc.name)) {
+                  telemetryFirstCodeMs = Date.now() - telemetryStartedAt;
+                }
+                if (telemetryFirstPreviewMs === undefined && /capture_preview|interact_preview/.test(tc.name)) {
+                  telemetryFirstPreviewMs = Date.now() - telemetryStartedAt;
+                }
                 // 去双轨（Trae 式）：正文 = 全部流式文本直出，不再把 tool_call 前的文字剥离进
                 // processNarration（该机制曾导致"模型先写结论再落盘"时交付物被吞、节点只剩 OutputFile 行）。
                 // 步骤卡片只从真实 toolCalls 派生，不参与正文文本。
@@ -2841,6 +2909,7 @@ ${rows.join('\n')}
               }
               if (parsed.tool_call_update) {
                 const up = parsed.tool_call_update as { name: string; phase?: 'running' | 'done' | 'error'; spanId?: string; startAt?: number };
+                if (up.phase === 'error') telemetryToolErrors += 1;
                 // 优先按 spanId 精确匹配（P1），fallback 到同名最后一个（历史消息兜底）
                 let updateIdx = -1;
                 if (up.spanId) {
@@ -2899,11 +2968,24 @@ ${rows.join('\n')}
                 }
                 if (mountedRef.current) {
                   // 文件操作工具完成后通知侧边栏刷新；命中 Bob Sandbox 小程序目录时同步刷新小程序列表
-                  if (tr.success && /^(write_file|delete_file|rename_file)$/.test(tr.name)) {
+                  // 2026-10-17：补 edit_code / sandbox_rollback（增量改码与回滚是小程序迭代常用路径，
+                  // 原先漏了 → 预览/商城不刷新）；事件带 appId，预览面板据此只刷新同一个 app。
+                  if (tr.success && /^(write_file|delete_file|rename_file|edit_code|sandbox_rollback)$/.test(tr.name)) {
                     window.dispatchEvent(new CustomEvent('project-files-changed'));
                     const lastRec = resultIdx >= 0 ? toolCallRecords[resultIdx] : null;
                     const argsStr = lastRec ? JSON.stringify(lastRec.arguments ?? {}) : '';
-                    if (argsStr.includes('.sandbox')) window.dispatchEvent(new Event('sandbox-changed'));
+                    // 真实目录是 bob-sandbox/apps/（旧判据 .sandbox/ 从不命中 → 商城不刷新，2026-10-10 评估 P1-6）
+                    // 优先从 path 参数取 appId（write_file 的 content 里也可能出现别的 app 路径）；
+                    // sandbox_rollback 没有 path，参数里直接给 appId。
+                    const pathArg = lastRec && typeof lastRec.arguments?.path === 'string'
+                      ? lastRec.arguments.path
+                      : '';
+                    const appId = /bob-sandbox\/apps\/([^/"']+)/.exec(pathArg)?.[1]
+                      ?? /bob-sandbox\/apps\/([^/"']+)/.exec(argsStr)?.[1]
+                      ?? (lastRec && typeof lastRec.arguments?.appId === 'string' ? lastRec.arguments.appId : undefined);
+                    if (appId || argsStr.includes('bob-sandbox/')) {
+                      window.dispatchEvent(new CustomEvent('sandbox-changed', { detail: { appId } }));
+                    }
                   }
                   // create_sticky_note / create_scheduled_todo 创建了画布便签 → 通知便签层重新加载（静默）
                   if ((tr.name === 'create_sticky_note' || tr.name === 'create_scheduled_todo') && tr.success) {
@@ -3549,6 +3631,40 @@ ${rows.join('\n')}
           }
         }
       abortRef.current = null;
+      // P2-10：一轮 coding 会话收尾，上报关键指标（仅数值；不阻塞、失败静默）
+      if (data.sandboxAppId && typeof window !== 'undefined') {
+        void fetch('/api/telemetry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appId: data.sandboxAppId,
+            modelId,
+            durationMs: Date.now() - telemetryStartedAt,
+            firstCodeMs: telemetryFirstCodeMs,
+            firstPreviewMs: telemetryFirstPreviewMs,
+            toolCalls: telemetryToolCalls,
+            toolErrors: telemetryToolErrors,
+            autoRepair: opts?.autoRepair === true,
+            consoleErrors: pendingAutoRepairRef.current?.errors.length ?? 0,
+          }),
+          keepalive: true,
+        }).catch(() => {});
+      }
+      // 有界自动修复：本轮写入后预览上报了 console error → 自动发一轮修复（每用户轮最多 1 次）。
+      // 只在没有排队用户消息时执行，避免抢用户的下一句；autoRepair 自身不再触发第二轮。
+      const pendingRepair = pendingAutoRepairRef.current;
+      if (!opts?.autoRepair && pendingRepair && autoRepairBudgetRef.current > 0 && pendingSendRef.current.length === 0 && !localInputRef.current.trim() && mountedRef.current) {
+        pendingAutoRepairRef.current = null;
+        autoRepairBudgetRef.current -= 1;
+        const text = buildConsoleRepairText(pendingRepair.errors, 'auto');
+        window.setTimeout(() => {
+          if (!mountedRef.current) return;
+          if (streamingRef.current || persistingRef.current) return;
+          if (pendingSendRef.current.length > 0) return;
+          if (localInputRef.current.trim()) return;
+          void doSend(text, { autoRepair: true });
+        }, 80);
+      }
       // 当前任务彻底结束（含持久化）后，逐条发送执行期间加入的待办消息
       if (mountedRef.current) {
         drainPending();
@@ -3562,6 +3678,50 @@ ${rows.join('\n')}
     setPendingSendCount(pendingSendRef.current.length);
     if (next) doSend(next);
   };
+
+  // 预览 console 错误的「Fix with AI」：事件由 SandboxPreviewFrame 派发，
+  // 只让当前聚焦、且绑定同一个 sandbox app 的 coding 节点接手，避免多个节点重复发送。
+  const doSendRef = useRef(doSend);
+  doSendRef.current = doSend;
+  useEffect(() => {
+    if (!isCoding || !selected || typeof data.sandboxAppId !== 'string' || !data.sandboxAppId) return;
+    const appId = data.sandboxAppId;
+    const onFix = (e: Event) => {
+      const d = (e as CustomEvent<{ appId?: string; errors?: string[] }>).detail;
+      if (!d || d.appId !== appId || !Array.isArray(d.errors) || d.errors.length === 0) return;
+      if (streamingRef.current || persistingRef.current) return;
+      void doSendRef.current(buildConsoleRepairText(d.errors, 'manual'));
+    };
+    window.addEventListener('sandbox-fix-errors', onFix);
+    return () => window.removeEventListener('sandbox-fix-errors', onFix);
+  }, [isCoding, selected, data.sandboxAppId]);
+
+  // 预览 console 错误自动上报（SandboxPreviewFrame 去抖后派发）：只记下待修复错误，
+  // 等本轮 doSend 收尾时若有预算就自动补一轮修复；不在这里直接发送，避免和流式/排队打架。
+  useEffect(() => {
+    if (!isCoding || !selected || typeof data.sandboxAppId !== 'string' || !data.sandboxAppId) return;
+    const appId = data.sandboxAppId;
+    const onConsole = (e: Event) => {
+      const d = (e as CustomEvent<{ appId?: string; errors?: string[] }>).detail;
+      if (!d || d.appId !== appId || !Array.isArray(d.errors) || d.errors.length === 0) return;
+      pendingAutoRepairRef.current = { appId, errors: d.errors.slice(0, 8) };
+      // 兜底触发：如果 console 错误在本轮 doSend 收尾之后才到（预览 reload 晚于模型结束），
+      // 这里再试一次；doSend 收尾路径会先消费 pending/budget，两条路径不会重复发。
+      window.setTimeout(() => {
+        if (!mountedRef.current) return;
+        if (streamingRef.current || persistingRef.current) return;
+        if (pendingSendRef.current.length > 0) return;
+        if (localInputRef.current.trim()) return;
+        const p = pendingAutoRepairRef.current;
+        if (!p || p.appId !== appId || autoRepairBudgetRef.current <= 0) return;
+        pendingAutoRepairRef.current = null;
+        autoRepairBudgetRef.current -= 1;
+        void doSendRef.current(buildConsoleRepairText(p.errors, 'auto'), { autoRepair: true });
+      }, 1200);
+    };
+    window.addEventListener('sandbox-console-errors', onConsole);
+    return () => window.removeEventListener('sandbox-console-errors', onConsole);
+  }, [isCoding, selected, data.sandboxAppId]);
 
   const handleStop = () => {
     // 用户主动停止：取消待办队列，待办文字合并回落回输入框，避免内容丢失
@@ -3676,6 +3836,33 @@ ${rows.join('\n')}
       );
     }
   }, [id, setNodes, dropdownModels, thinkingLevel]);
+
+  // 失败升级（P1-6）：预览里点「Stronger model」时，把本会话切到 DeepSeek Pro（若已配置），
+  // 并立即用新模型重发一轮修复。只在用户显式点击时发生，不静默改模型。
+  const handleSelectModelRef = useRef(handleSelectModel);
+  handleSelectModelRef.current = handleSelectModel;
+  useEffect(() => {
+    if (!isCoding || !selected || typeof data.sandboxAppId !== 'string' || !data.sandboxAppId) return;
+    const appId = data.sandboxAppId;
+    const onEscalate = (e: Event) => {
+      const d = (e as CustomEvent<{ appId?: string; errors?: string[] }>).detail;
+      if (!d || d.appId !== appId || !Array.isArray(d.errors) || d.errors.length === 0) return;
+      if (streamingRef.current || persistingRef.current) return;
+      const pro = dropdownModels.find((m) => /deepseek/i.test(m.modelId) && /pro/i.test(m.modelId))
+        ?? availableModels.find((m) => /deepseek/i.test(m.modelId) && /pro/i.test(m.modelId))
+        ?? dropdownModels.find((m) => /pro/i.test(m.modelId))
+        ?? availableModels.find((m) => /pro/i.test(m.modelId));
+      if (!pro) return;
+      handleSelectModelRef.current(pro.modelId);
+      const text = buildConsoleRepairText(d.errors, 'manual');
+      window.setTimeout(() => {
+        if (streamingRef.current || persistingRef.current) return;
+        void doSendRef.current(text);
+      }, 150);
+    };
+    window.addEventListener('sandbox-escalate-model', onEscalate);
+    return () => window.removeEventListener('sandbox-escalate-model', onEscalate);
+  }, [isCoding, selected, data.sandboxAppId, dropdownModels, availableModels]);
 
   // Auto 下线迁移：存量节点（含 CanvasFlow 新建的节点）modelId 为空，等候选池就绪后
   // 落成「候选池有序首选（池空则下拉首项）」，使"节点始终有具体模型"这一前提成立。
@@ -5049,9 +5236,10 @@ ${rows.join('\n')}
 
             {/* 多智能体协作（Multi-agent mode）：点击弹出成员选择器（已安装 Agent 包勾选）；
                 开启后本轮主 agent 可调用 team_run 编排多成员协作，与「团队」分栏是并行入口。
-                侧边栏不提供：browser 画像 fixedScenes 只有 browser + ledger，team 工具根本不会注入，
-                但服务端仍按开关注入 MULTI_AGENT_RULES —— 等于让模型去调一个不存在的工具（isSidebar） */}
-            {!isSidebar && (
+                只在 canUseTeam 时提供：侧边栏 / coding / 市场 agent 都是 fixed 画像，fixedScenes
+                不含 team，team 工具根本不会注入；若仍显示开关，服务端会注入 MULTI_AGENT_RULES
+                —— 等于让模型去调一个不存在的工具 */}
+            {!isSidebar && canUseTeam && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -5501,8 +5689,8 @@ ${rows.join('\n')}
                 无外框、无底色（与标题栏其他图标按钮同款样式），仅靠与主分栏的间距区分，
                 避免三个字数不等的文字标签挤在一个分段控件里 */}
             <div className="flex items-center gap-1.5">
-              {/* 视图切换 Chat/Team：Team 工作台是画布分栏形态，侧边栏不提供该入口 */}
-              {!isSidebar && (
+              {/* 视图切换 Chat/Team：Team 工作台是画布分栏形态，侧边栏与 fixed 画像不提供该入口 */}
+              {!isSidebar && canUseTeam && (
                 <div
                   className="flex items-center gap-0.5 rounded-lg border p-0.5"
                   style={{
@@ -5583,16 +5771,23 @@ ${rows.join('\n')}
                 <AlertTriangle className="h-3 w-3" style={{ color: 'var(--danger)' }} />
               </span>
             )}
-            {/* AI Coding 预览按钮：在小程序中打开预览 */}
+            {/* AI Coding 预览按钮：默认在应用内**沙箱**预览打开（2026-10-10 方案 B）；
+                按住 Alt/Shift 点击仍在 Hippo 独立页打开（顶层页 / 全窗口）。 */}
             {!isSidebar && typeof data.sandboxAppId === 'string' && data.sandboxAppId && (
               <>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    void openSandboxPreviewInHippo({ id: data.sandboxAppId as string, name: data.title || 'Sandbox App' });
+                    const appId = data.sandboxAppId as string;
+                    const appName = data.title || 'Sandbox App';
+                    if (e.altKey || e.shiftKey) {
+                      void openSandboxPreviewInHippo({ id: appId, name: appName });
+                      return;
+                    }
+                    window.dispatchEvent(new CustomEvent('sandbox-preview-open', { detail: { id: appId, name: appName } }));
                   }}
                   className="flex shrink-0 items-center rounded p-0.5 transition-opacity hover:opacity-70"
-                  title="Open preview"
+                  title="Preview inside BobWork (sandboxed) · Alt/Shift-click for Hippo"
                 >
                   <Play className="h-3.5 w-3.5" style={{ color: 'var(--info)' }} />
                 </button>
@@ -5713,12 +5908,13 @@ ${rows.join('\n')}
           >
             {userMessages.map((m) => {
               const isActive = activeUserMsgId === m.id;
+              const label = (m.content || '').replace(/\s+/g, ' ').trim() || 'Untitled';
               return (
                 <button
                   key={m.id}
                   type="button"
                   onClick={(e) => { e.stopPropagation(); scrollToUserMsg(m.id); }}
-                  className="flex items-center justify-center"
+                  className="group/dot relative flex items-center justify-center"
                   style={{
                     width: 20,
                     height: 20,
@@ -5741,6 +5937,20 @@ ${rows.join('\n')}
                       boxShadow: 'none',
                     }}
                   />
+                  {/* 悬停单个圆点 → 显示该圆点对应的提问提示（点击圆点本身即可跳转到该问题） */}
+                  <span
+                    className="pointer-events-none absolute left-full z-20 ml-2 hidden w-max max-w-[260px] whitespace-normal rounded-md border px-2 py-1 text-left text-11 leading-snug group-hover/dot:block"
+                    style={{
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      backgroundColor: '#fff',
+                      borderColor: 'color-mix(in oklab, var(--ink-muted) 18%, transparent)',
+                      boxShadow: '0 6px 20px color-mix(in oklab, #000 12%, transparent)',
+                      color: 'var(--ink)',
+                    }}
+                  >
+                    {label}
+                  </span>
                 </button>
               );
             })}
@@ -5794,7 +6004,7 @@ ${rows.join('\n')}
               {messagesInner}
             </div>
           )
-        ) : pane === 'team' ? (
+        ) : pane === 'team' && canUseTeam ? (
           /* 团队视图：本节点关联的协作团队工作台（引擎侧落盘真相源的只读投影 + 插话/重试），
              同时是多智能体的**唯一发起口**（需求输入 + 选成员 + 发起，走本节点同一轮 /api/chat） */
           <TeamWorkbench
@@ -6363,10 +6573,9 @@ function OutputFileKindIcon({ kind }: { kind: OutputFileItem['kind'] }) {
  *  仅项目内相对路径可经 /api/project-files/<projectId>/<path> 加载；~/ 与绝对路径等外部文件
  *  回退由 OutputFiles 卡片管理，不在此内联。 */
 function InlineImages({ files, projectId }: { files: OutputFileItem[]; projectId?: string }) {
-  const [lightbox, setLightbox] = useState<{ open: boolean; src: string; name: string }>({ open: false, src: '', name: '' });
+  const [preview, setPreview] = useState<{ src: string; name: string } | null>(null);
   if (!files || files.length === 0) return null;
   if (!projectId) return null;
-  const close = () => setLightbox({ open: false, src: '', name: '' });
   return (
     <>
       <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -6378,7 +6587,7 @@ function InlineImages({ files, projectId }: { files: OutputFileItem[]; projectId
               src={src}
               alt={f.name}
               loading="lazy"
-              onClick={() => setLightbox({ open: true, src, name: f.name })}
+              onClick={() => setPreview({ src, name: f.name })}
               className="max-h-[320px] w-auto max-w-full cursor-zoom-in rounded-lg border"
               style={{ borderColor: 'color-mix(in oklab, var(--line) 60%, transparent)', backgroundColor: 'var(--paper-hover)' }}
               onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
@@ -6386,29 +6595,15 @@ function InlineImages({ files, projectId }: { files: OutputFileItem[]; projectId
           );
         })}
       </div>
-      {lightbox.open && (
-        <div
-          className="fixed inset-0 z-[300] flex items-center justify-center bg-black/70 p-6"
-          onClick={close}
-        >
-          <div className="relative max-h-full max-w-full">
-            <img
-              src={lightbox.src}
-              alt={lightbox.name}
-              className="max-h-[85vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
-              onClick={(e) => e.stopPropagation()}
-            />
-            <button
-              type="button"
-              onClick={close}
-              className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors hover:opacity-80"
-              style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}
-              title="Close"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
+      {/* 放大预览与正文图片同源（ImagePreviewLightbox）：撑满视口 + 滚轮/双击缩放，
+          修复「产物图点开黑底预览后几乎没变大」——原先手写 lightbox 把图限在 max-h 85vh
+          且不放大固有尺寸小于视口的图。 */}
+      {preview && (
+        <ImagePreviewLightbox
+          open
+          slides={[{ src: preview.src, alt: preview.name }]}
+          onClose={() => setPreview(null)}
+        />
       )}
     </>
   );
@@ -6571,7 +6766,7 @@ function OutputFilesCard({ files, projectId }: { files: OutputFileItem[]; projec
         <div className="mt-1 grid grid-cols-1 gap-1">
           {files.map((f) => {
             const p = f.path.replace(/\\/g, '/');
-            const isSandboxApp = p.includes('.sandbox/');
+            const isSandboxApp = p.includes('bob-sandbox/');
             const isHomework = p.includes('homework/');
             const miss = isMissing(f);
             return (
@@ -6648,7 +6843,7 @@ function OutputFilesCard({ files, projectId }: { files: OutputFileItem[]; projec
         <div className="mt-1.5 flex flex-wrap gap-1 px-0.5">
           {files.map((f) => {
             const p = f.path.replace(/\\/g, '/');
-            const isSandboxApp = p.includes('.sandbox/');
+            const isSandboxApp = p.includes('bob-sandbox/');
             const isHomework = p.includes('homework/');
             const miss = isMissing(f);
             return (

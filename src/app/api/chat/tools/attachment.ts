@@ -711,7 +711,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
               );
             }
           } catch { /* MCP 不可用 → 下方返回明确错误 */ }
-          return `Attachment: ${path}\nType: PDF (${scannedPages} pages)\nSize: ${formatSize(fileStat.size)}\n\n无法识别：此 PDF 为扫描件或图片型文档，且识别服务 bob-ocr-mcp 不可用。请确认 OCR 插件已安装且常驻服务在线（bob-ocr-mcp --install-daemon），并在 BobWork 设置 → MCP 中启用 "Bob OCR"。`;
+          return `Attachment: ${path}\nType: PDF (${scannedPages} pages)\nSize: ${formatSize(fileStat.size)}\n\n无法识别：此 PDF 为扫描件或图片型文档，且识别服务 bob-ocr-mcp 不可用。Bob OCR 的常驻桥随 BobWork 分发并由宿主自动拉起；请确认 设置 → Extensions Store → Plugins 中 "Bob OCR" 已启用，仍未就绪时查看插件日志 <数据根>/host-bridge.log。`;
         }
       } catch (extractErr) {
         const fileStat = await stat(filePath);
@@ -816,7 +816,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
         }
       } catch { /* 缓存/识别异常 → 下方明确错误 */ }
 
-      return `Attachment: ${path}\nType: Image (${ext})\nSize: ${formatSize(fileStat.size)}\n\n无法识别：识别服务 bob-ocr-mcp 不可用。请确认 OCR 插件常驻服务在线（bob-ocr-mcp --install-daemon，默认 http://127.0.0.1:9478）且已配置视觉模型（插件 /settings 的 Vision 区块）。`;
+      return `Attachment: ${path}\nType: Image (${ext})\nSize: ${formatSize(fileStat.size)}\n\n无法识别：识别服务 bob-ocr-mcp 不可用（常驻桥随 BobWork 分发、由宿主自动拉起，默认 http://127.0.0.1:9478）。请确认 设置 → Extensions Store → Plugins 中 "Bob OCR" 已启用，并在插件 Configure 页确认 Vision 区块已配置模型。`;
     }
 
     // 视频文件：ffmpeg 抽帧 + 帧识别（统一走 bob-ocr-mcp image_understand；配置已收敛到插件）
@@ -862,7 +862,7 @@ async function toolReadAttachment(args: Record<string, unknown>, ctx?: ToolExecC
       } catch (videoErr) {
         const msg = videoErr instanceof Error ? videoErr.message : String(videoErr);
         if (msg.includes('bob-ocr-mcp 视觉模型不可用')) {
-          return `Attachment: ${path}\nType: Video (${ext})\nSize: ${formatSize(stat2.size)}\n\n未能分析视频：识别服务 bob-ocr-mcp 不可用或未配置视觉模型。请确认 OCR 插件常驻服务在线（bob-ocr-mcp --install-daemon）且已配置视觉模型（插件 /settings 的 Vision 区块）。`;
+          return `Attachment: ${path}\nType: Video (${ext})\nSize: ${formatSize(stat2.size)}\n\n未能分析视频：识别服务 bob-ocr-mcp 不可用或未配置视觉模型。请确认 设置 → Extensions Store → Plugins 中 "Bob OCR" 已启用，并在插件 Configure 页确认 Vision 区块已配置模型。`;
         }
         return `Attachment: ${path}\nType: Video (${ext})\nSize: ${formatSize(stat2.size)}\n\n视频分析失败: ${msg}`;
       }

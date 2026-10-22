@@ -1,4 +1,6 @@
 import { NextRequest } from 'next/server';
+import { guardRequestSource } from '@/lib/http/loopback-guard';
+import { resolveAppIdentity } from '@/lib/sandbox/app-token';
 import {
   executeSandboxChatStream,
   type SandboxChatMessage,
@@ -17,13 +19,36 @@ import {
  * 小程序是可信度低的代码，本端点绝不暴露文件/工具能力。
  */
 export async function POST(request: NextRequest) {
+  const denied = await guardRequestSource(request);
+  if (denied) return denied;
   try {
     const body = await request.json().catch(() => null);
-    const appId = String((body as Record<string, unknown> | undefined)?._appId ?? (body as Record<string, unknown> | undefined)?.appId ?? '');
+    // 身份闸：与 /api/sandbox/bridge 一致，只认签名令牌
+    const claimed = (body as Record<string, unknown> | undefined)?._appId ?? (body as Record<string, unknown> | undefined)?.appId;
+    const identity = await resolveAppIdentity({
+      token: String((body as Record<string, unknown> | undefined)?._appToken ?? ''),
+      claimedAppId: claimed ? String(claimed) : undefined,
+    });
+    if (!identity.appId) {
+      return Response.json(
+        { success: false, error: `unauthorized: ${identity.error ?? 'invalid app token'}` },
+        { status: 401, headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
+    const appId = String(identity.appId);
     const messages = ((body as Record<string, unknown> | undefined)?.messages as SandboxChatMessage[] | undefined) ?? [];
 
     if (!appId) {
       return Response.json({ success: false, error: 'appId is required' }, { status: 400 });
+    }
+    // 存在性闸：小程序已删除 → 410 Gone（与 /api/sandbox/bridge 一致）
+    const { sanitizeAppId, appExists } = await import('@/lib/sandbox/apps');
+    const safeAppId = sanitizeAppId(appId);
+    if (!safeAppId || !(await appExists(safeAppId))) {
+      return Response.json(
+        { success: false, error: 'mini-program not found or deleted', appId: safeAppId ?? null },
+        { status: 410, headers: { 'Cache-Control': 'no-store' } },
+      );
     }
 
     const data = (body as Record<string, unknown>) || {};

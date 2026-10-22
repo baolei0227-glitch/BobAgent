@@ -57,6 +57,12 @@ class LocalSource implements IFileSource {
   }
 }
 
+/** Outbox 暂存区相对路径（outbox/<batch>/homework/x.md）：不属于任何项目，走 /api/outbox 读取 */
+function isOutboxRel(path: string): boolean {
+  const p = path.replace(/\\/g, '/');
+  return p.startsWith('outbox/') && !p.includes('..');
+}
+
 /** 项目文件来源（对应左侧项目文件树；可写，保留编辑回写语义） */
 class ProjectSource implements IFileSource, IWritableSource {
   readonly kind = 'project' as const;
@@ -71,6 +77,11 @@ class ProjectSource implements IFileSource, IWritableSource {
   }
 
   async read(path: string): Promise<FileInfo> {
+    // Butler 产物暂存在 Outbox（未归口）：不在项目目录下，改走暂存区只读通道
+    if (isOutboxRel(path)) {
+      const resp = await fetch(`/api/outbox?action=read_file&path=${encodeURIComponent(path)}`);
+      return toFileInfo(await resp.json());
+    }
     const projectId = await this.currentProjectId();
     const resp = await fetch('/api/projects', {
       method: 'POST',
@@ -81,6 +92,7 @@ class ProjectSource implements IFileSource, IWritableSource {
   }
 
   async proxy(path: string): Promise<string> {
+    if (isOutboxRel(path)) return `/api/outbox?action=file_proxy&path=${encodeURIComponent(path)}`;
     const projectId = await this.currentProjectId();
     return `/api/projects?action=file_proxy&project_id=${encodeURIComponent(projectId)}&file_path=${encodeURIComponent(path)}`;
   }

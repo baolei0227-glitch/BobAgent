@@ -16,7 +16,10 @@ import * as fs from 'fs';
 import { autoUpdater, type UpdateInfo } from 'electron-updater';
 import { readSettingsFromFile, writeSettingsToFile, settingsFileExists } from '../src/lib/settings-server';
 import { captureRegionToFile, cleanupShotFile, ocrRecognize, ensureScreenRecordingPermission as checkScreenRecordingPermission, requestScreenRecordingPermission, buildScreenPermissionError } from '../src/lib/screen-ocr/capture';
+import AdmZip from 'adm-zip';
+import { IS_WIN, IS_DARWIN, POSIX_SYSTEM_DIRS, windowsBinDirs, splitPathList, joinPathList, exeName, listListeningPidsSync, listStaleServerPidsSync, terminatePid, isPidAlive } from '../src/lib/platform';
 import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener, setHippoChatCanvasNotifier, setMainWindowProvider } from './hippo-browser';
+import { setupButlerOrb, bindButlerOrbMainWindow, prewarmButlerOrb, disposeButlerOrb } from './butler-orb';
 import type { ScreenOcrGeometry } from './preload';
 
 let nextServerProc: ChildProcess | null = null;
@@ -34,6 +37,21 @@ const PORT = isDev
   ? Number(process.env.BOB_DEV_PORT || process.env.PORT) || 3000
   : 8321;
 const SERVER_URL = `http://localhost:${PORT}`;
+
+/**
+ * 本次启动的一次性停服令牌（随进程生成，不落盘）。
+ *
+ * 为什么需要：Windows 上**没有 SIGTERM 语义**，`process.kill()` 被 Node 映射成
+ * `TerminateProcess` —— 子进程当场消失，SQLite WAL 来不及收尾、正在写的 docx 半截落盘。
+ * 因此停服改走「HTTP 请求服务端自己关停」这条通道，令牌经子进程 env 注入，
+ * 服务端在校验通过后 `server.close()` 等在飞请求结束再退出（见 src/server.ts）。
+ *
+ * 强制要求：服务端读到该 env 后**立刻从 process.env 删除**，避免被它 spawn 的
+ * 插件/工具子进程继承（否则一个被诱导执行命令的插件就能停掉整个服务）。
+ */
+const SHUTDOWN_TOKEN = crypto.randomUUID();
+const SHUTDOWN_PATH = '/__bobwork/shutdown';
+
 
 /** 日志写入文件（生产模式诊断用） */
 const logDir = isDev ? null : app.getPath('logs');
@@ -63,11 +81,7 @@ if (!gotSingleLock) {
 } else {
   app.on('second-instance', () => {
     log('Second instance detected — focusing existing main window.');
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    openMainWindow();
   });
 }
 
@@ -126,21 +140,14 @@ function waitForServer(url: string, timeoutMs = 30000): Promise<void> {
  */
 function buildChildPath(): string {
   const home = app.getPath('home');
-  const pathDirs = new Set<string>([
-    '/usr/local/bin',
-    '/usr/bin',
-    '/bin',
-    '/usr/sbin',
-    '/sbin',
-    '/opt/homebrew/bin',
-    '/opt/homebrew/sbin',
-  ]);
+  // 目录表按平台取（Windows 用 System32/ProgramFiles\nodejs 等；POSIX 保持历史顺序）
+  const pathDirs = new Set<string>(IS_WIN ? windowsBinDirs() : POSIX_SYSTEM_DIRS);
 
   // 用户当前 PATH（可能包含 shell launcher 设置的路径）
   const currentPath = process.env.PATH || '';
-  for (const dir of currentPath.split(':')) {
-    const trimmed = dir.trim();
-    if (trimmed) pathDirs.add(trimmed);
+  // Windows 上必须按 ';' 切：按 ':' 切会把 `C:\Windows` 拆成 `C` + `\Windows`
+  for (const dir of splitPathList(currentPath)) {
+    pathDirs.add(dir);
   }
 
   // nvm 路径（扫描 versions 目录）
@@ -180,7 +187,40 @@ function buildChildPath(): string {
   const voltaDir = path.join(home, '.volta/bin');
   if (fs.existsSync(voltaDir)) pathDirs.add(voltaDir);
 
-  return Array.from(pathDirs).join(':');
+  return joinPathList(pathDirs);
+}
+
+/**
+ * 解析「Electron as node」子进程该用哪个可执行文件。
+ *
+ * macOS 打包版**不能**用 process.execPath：它是 App 包内的裸 Mach-O（Contents/MacOS/BobWork），
+ * 从 GUI 主进程 spawn 它时 macOS 会把它登记成**新的前台应用**，而裸可执行文件没有应用图标，
+ * Dock 里于是多出一颗通用可执行图标（黑底绿字 exec，悬停名 BobWork），每次启动必现。
+ * 改用包内 Frameworks 下的 helper（Info.plist 带 LSUIElement=true，与 Chromium 自家
+ * GPU/Renderer/Plugin helper 同款）：天生不进 Dock；它仍是同一份 Electron 二进制，
+ * Node 版本与 ABI 与随包原生模块完全一致（实测 node 24.18.0 arm64），且 process.resourcesPath
+ * 依旧解析到主 App 的 Resources（src/lib/settings-server.ts 依赖它定位随包资源）。
+ *
+ * 找不到 helper（dev / 非常规布局 / 打包改名）时回退 process.execPath：服务照常启动，
+ * 代价只是那颗 Dock 图标可能回来，绝不因此起不来。
+ */
+function resolveNodeRuntimeExecPath(): string {
+  // Windows / Linux 没有这个问题（进程不会进 Dock / 任务栏）
+  if (IS_WIN || process.platform !== 'darwin') return process.execPath;
+  const frameworksDir = path.join(path.dirname(path.dirname(process.execPath)), 'Frameworks');
+  const candidates: string[] = [];
+  try {
+    for (const entry of fs.readdirSync(frameworksDir)) {
+      // 只取「基础」helper：GPU/Renderer/Plugin 是带 --type 参数的进程专用壳
+      if (!entry.endsWith('.app') || !entry.includes('Helper') || /GPU|Renderer|Plugin/.test(entry)) continue;
+      const macosDir = path.join(frameworksDir, entry, 'Contents', 'MacOS');
+      for (const exe of fs.readdirSync(macosDir)) {
+        if (!exe.startsWith('.')) candidates.push(path.join(macosDir, exe));
+      }
+    }
+  } catch { /* 目录缺失/不可读：直接走兜底 */ }
+  candidates.push(process.execPath);
+  return candidates.find((c) => fs.existsSync(c)) ?? process.execPath;
 }
 
 /** 启动 Next.js standalone 服务
@@ -212,43 +252,78 @@ function startNextServer(): ChildProcess & { startupReady: Promise<void> } {
   const startupReady = new Promise<void>((resolve, reject) => {
     const trySpawn = () => {
       // 启动前先清本应用全部残留 next-server（含不监听端口、卡死占 CPU 的僵尸实例），
-      // 防止多次启动/闪退导致的孤儿进程堆积（它们不会被下方"只清监听端口"的 lsof 逻辑抓到）
+      // 防止多次启动/闪退导致的孤儿进程堆积（它们不会被下方"只清监听端口"的探测抓到）
       killStaleNextServers();
-      // 每轮启动前再清一次端口：第一轮 SIGTERM 可能没杀干净，第二轮前补一次
+      // 每轮启动前再清一次端口：第一轮优雅关闭可能没生效，第二轮前补一次
       try {
-        const probe = spawnSync('/usr/sbin/lsof', [`-tiTCP:${PORT}`, '-sTCP:LISTEN'], {
-          encoding: 'utf8',
-          timeout: 3000,
-        });
-        const stalePids = (probe.stdout || '')
-          .split('\n')
-          .map((s) => s.trim())
-          .filter((s) => s !== '' && s !== String(process.pid));
+        // 探测口径按平台分派（darwin: lsof -tiTCP:PORT -sTCP:LISTEN；win32: netstat -ano 解析 LISTENING）。
+        // 旧实现硬编码 /usr/sbin/lsof：Windows 上 spawnSync 直接 ENOENT，stdout 为空、
+        // stalePids 恒为空 ⇒ 一个残留都清不掉，日志里只有一句 spawn error。
+        const { pids, otherStates } = listListeningPidsSync(PORT);
+        const stalePids = pids.filter((p) => p !== process.pid);
         for (const pid of stalePids) {
-          try {
-            process.kill(Number(pid), 'SIGKILL');
-            log(`Spawn attempt ${attempts}: SIGKILL stale port ${PORT} pid=${pid}`);
-          } catch { /* ignore */ }
+          // darwin 保持历史行为（只 SIGKILL 该 pid）；Windows 必须 /T 连子进程一起收，
+          // 否则父进程死了、子进程还占着端口，下一轮照样 EADDRINUSE
+          if (terminatePid(pid, { force: true, tree: IS_WIN })) {
+            log(`Spawn attempt ${attempts}: kill stale port ${PORT} pid=${pid}`);
+          } else {
+            log(`Spawn attempt ${attempts}: 端口 ${PORT} 占用者 pid=${pid} 终止失败（权限不足？）`);
+          }
         }
-      } catch { /* ignore */ }
+        // 端口对得上、但一个 LISTENING 都没有：说明「谁在监听」的判断可能失灵（本地化/新格式）。
+        // 留证据而不是静默跳过 —— 否则又是一次「什么都不报、就是起不来」。
+        if (stalePids.length === 0 && otherStates.length > 0) {
+          log(`Spawn attempt ${attempts}: 端口 ${PORT} 未见 LISTENING（见到状态：${otherStates.join(',')}）`);
+        }
+      } catch (e) {
+        log(`Spawn attempt ${attempts}: 端口 ${PORT} 探测异常 ${(e as Error).message}`);
+      }
 
       const serverPath = path.join(process.resourcesPath, 'next-standalone', 'server.js');
       const childPath = buildChildPath();
       log(`Child PATH: ${childPath}`);
 
       const sandboxPath = path.join(app.getPath('home'), 'BobWork', '.sandbox');
+      // ⚠️ 用 **Electron 自带的 Node 运行时**（ELECTRON_RUN_AS_NODE=1），**不要** spawn 系统 PATH
+      // 里的 'node'：用户机器上可能根本没装 node，或装的是 x64 / 版本不符的 node —— 加载包内只有
+      // arm64 一份的原生模块（better-sqlite3 / sharp）时服务直接起不来
+      // （用户现场实测 `Next.js server failed to start … signal=SIGSEGV`）。
+      // Electron 的运行时与随包发布的原生模块架构/ABI 必然一致。
+      // 运行时选哪个二进制见 resolveNodeRuntimeExecPath()：macOS 打包版走包内 helper，
+      // 避免 Dock 里多出一颗无图标的 exec 图标。
       // 限制 V8 old space 上限为 1GB，避免长时间运行后堆膨胀到 1.49GB+ 触发 macOS jetsam 杀进程
       // （历史崩溃：node 24h 写 137GB + Footprint 1.49GB → jetsam → 应用闪退）
-      const proc = spawn('node', ['--max-old-space-size=1024', serverPath], {
+      const runtimeExec = resolveNodeRuntimeExecPath();
+      log(`Next.js server runtime: ${runtimeExec} (Electron as node)`);
+      const proc = spawn(runtimeExec, ['--max-old-space-size=1024', serverPath], {
         cwd: path.join(process.resourcesPath, 'next-standalone'),
         env: {
           ...process.env,
           PATH: childPath,
+          ELECTRON_RUN_AS_NODE: '1',
           PORT: String(PORT),
           HOSTNAME: 'localhost',
           NODE_ENV: 'production',
           COZE_WORKSPACE_PATH: sandboxPath,
-          FFMPEG_PATH: path.join(process.resourcesPath, 'bin', 'ffmpeg'),
+          // Windows 上 @ffmpeg-installer 落的是 ffmpeg.exe，硬编码无后缀会静默拿不到 ffmpeg
+          FFMPEG_PATH: path.join(process.resourcesPath, 'bin', exeName('ffmpeg')),
+          // 随包资源根目录：Next 服务子进程没有 process.resourcesPath，
+          // 靠它解析 resources/python（Windows 随包嵌入式解释器，见 binaries.ts pythonBin）。
+          BOBWORK_RESOURCES: process.resourcesPath,
+          ...(IS_WIN
+            ? {
+                // 显式指向随包解释器，避免服务端再去翻 LOCALAPPDATA / Program Files。
+                // 刻意不设 PYTHONHOME：embeddable 版靠 python311._pth 定位标准库，
+                // 设了 PYTHONHOME 反而会让 site-packages 解析错位。
+                BOBWORK_PYTHON: path.join(process.resourcesPath, 'python', 'python.exe'),
+              }
+            : {}),
+          // 优雅关停令牌（服务端读后立即从 process.env 删除，不传给插件子进程）
+          BOB_SHUTDOWN_TOKEN: SHUTDOWN_TOKEN,
+          // Windows 控制台默认代码页 936（GBK）：Python 子进程按 locale 编码输出，
+          // 中文路径/报错会变乱码或 UnicodeEncodeError。这两个变量只对 Python 生效，
+          // 不改变子进程的代码页设置（不依赖 chcp，避免污染全局控制台）。
+          ...(IS_WIN ? { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } : {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -329,71 +404,156 @@ function startNextServer(): ChildProcess & { startupReady: Promise<void> } {
 }
 
 /**
+ * 请求服务端自己优雅关停（POST /__bobwork/shutdown + 一次性令牌）。
+ * 返回 true = 服务端已受理（HTTP 200）。失败不抛错：调用方随后走强制终止兜底。
+ */
+function requestGracefulShutdown(): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    try {
+      const req = http.request(
+        `${SERVER_URL}${SHUTDOWN_PATH}`,
+        {
+          method: 'POST',
+          headers: { 'x-bob-shutdown-token': SHUTDOWN_TOKEN, 'content-length': '0' },
+          timeout: 1000,
+        },
+        (res) => {
+          res.resume();
+          done(res.statusCode === 200);
+        },
+      );
+      req.on('error', () => done(false));
+      req.on('timeout', () => {
+        req.destroy();
+        done(false);
+      });
+      req.end();
+    } catch {
+      done(false);
+    }
+  });
+}
+
+/**
+ * 已发起终止但尚未确认退出的 pid → 强杀截止时间戳。
+ *
+ * 为什么记截止时间而不是单纯记 pid：优雅关停需要一段窗口（等在飞请求收尾），
+ * 而 `will-quit` 是同步的、几乎紧跟 `before-quit` 发生 —— 若它无条件强杀，
+ * 优雅窗口名存实亡（等于又变回 TerminateProcess）。
+ */
+const pendingKills = new Map<number, number>();
+/** 优雅关停窗口：服务端自己关停 + 等在飞请求的时限。超过则强制终止。 */
+const GRACEFUL_KILL_DEADLINE_MS = 2500;
+
+/**
+ * 兜底强杀：把「已过优雅窗口」（或显式 force）的 pid 强制终止（含进程树）。
+ *
+ * 为什么必须有：`app.exit(0)` **不触发** will-quit，而定时器在进程退出后也不会再跑 ——
+ * 只靠 setTimeout 升级强杀，一旦退出路径比定时器快，子进程就变成占着端口的孤儿。
+ */
+function flushPendingKills(opts: { force?: boolean } = {}): void {
+  const now = Date.now();
+  for (const [pid, deadline] of [...pendingKills]) {
+    if (!opts.force && now < deadline) continue; // 还在优雅窗口内，交给定时器
+    pendingKills.delete(pid);
+    if (!isPidAlive(pid)) continue;
+    if (terminatePid(pid, { force: true, tree: true })) {
+      log(`Flush: force-killed lingering pid=${pid}`);
+    } else {
+      log(`Flush: 无法终止残留 pid=${pid}（权限不足？）`);
+    }
+  }
+}
+
+/** 轮询等这些 pid 退出（最多 timeoutMs）；用于退出前给优雅关停留窗口 */
+function waitPidsGone(pids: Iterable<number>, timeoutMs: number): Promise<void> {
+  const list = [...pids];
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const tick = () => {
+      const alive = list.filter((p) => isPidAlive(p));
+      if (alive.length === 0 || Date.now() >= deadline) return resolve();
+      setTimeout(tick, 60);
+    };
+    tick();
+  });
+}
+
+/**
  * 终止 Next.js 子进程。
  * ⚠️ 必须显式调用：安装更新用 app.exit(0) 退出时不会触发 before-quit/will-quit，
  * 若不杀掉子进程，它会成为孤儿进程继续占用端口，导致更新重启后新版本服务无法启动（应用打不开）。
- * SIGTERM 后 800ms 未退出再 SIGKILL 兜底（卡死/忙循环实例会忽略 SIGTERM）；
- * 最后清一轮全部残留实例，防止历史孤儿堆积。
+ *
+ * 终止顺序（阶段 C 修订）：
+ *   1. **HTTP 优雅关停**：服务端自己 server.close() + 等在飞请求结束
+ *      —— 保护 SQLite WAL 与正在写的 docx；
+ *   2. darwin/linux 仍先发 SIGTERM（历史行为，双保险，不改变 mac 观感）；
+ *      Windows 不发 —— 那里 `process.kill()` 就是 TerminateProcess，会直接废掉第 1 步；
+ *   3. GRACEFUL_KILL_DEADLINE_MS 后仍存活 → 强制终止（Windows `/T /F` 整树，POSIX SIGKILL）；
+ *   4. 最后清一轮全部残留实例，防止历史孤儿堆积。
  */
 function killNextServer(): void {
   const proc = nextServerProc;
   nextServerProc = null;
-  if (proc && !proc.killed) {
-    try {
-      proc.kill(); // SIGTERM
-      const t = setTimeout(() => {
-        try {
-          if (!proc.killed) {
-            proc.kill('SIGKILL');
-            log('Next.js server SIGKILL fallback (SIGTERM ignored / slow exit)');
-          }
-        } catch { /* ignore */ }
-      }, 800);
-      if (typeof (t as NodeJS.Timeout & { unref?: () => void }).unref === 'function') {
-        (t as NodeJS.Timeout & { unref: () => void }).unref();
+  const pid = proc?.pid;
+  if (proc && !proc.killed && pid) {
+    pendingKills.set(pid, Date.now() + GRACEFUL_KILL_DEADLINE_MS);
+    void requestGracefulShutdown().then((ok) => {
+      if (!ok) log('Graceful shutdown request rejected/unreachable — falling back to force kill');
+    });
+    // darwin/linux：保持历史的 SIGTERM（服务端通常立刻退出，随后定时器发现已死便什么都不做）
+    if (!IS_WIN) {
+      try { proc.kill(); } catch { /* ignore */ }
+    }
+    const t = setTimeout(() => {
+      if (!pendingKills.has(pid)) return; // 已被 flush 处理
+      pendingKills.delete(pid);
+      if (!isPidAlive(pid)) return;
+      if (terminatePid(pid, { force: true, tree: true })) {
+        log('Next.js server force-killed (graceful shutdown timed out)');
       }
-    } catch { /* ignore */ }
+    }, GRACEFUL_KILL_DEADLINE_MS + 100);
+    if (typeof (t as NodeJS.Timeout & { unref?: () => void }).unref === 'function') {
+      (t as NodeJS.Timeout & { unref: () => void }).unref();
+    }
   }
   killStaleNextServers();
 }
 
 /**
  * 清理本应用残留的 next-server 进程（含不监听端口、卡死占 CPU 的僵尸实例）。
- * 两步识别，双保险不误杀：
- *   1. ps 按进程标题匹配 `next-server`（Next standalone 启动后 process.title 变为 "next-server (vxx)"，
- *      命令行里不含路径，不能用路径匹配）；
- *   2. lsof 按 cwd 二次确认进程工作目录位于本应用 next-standalone。
- * 仅影响 BobWork.app 安装版；dev 模式（next dev）与其它 next-server 进程不受影响。
+ *
+ * 判据按平台分派 —— 这是旧实现的**结构性错误**：它依赖
+ *   `ps axo pid=,command=` 输出里进程标题为 `next-server`
+ * （Next standalone 启动后会把 process.title 改成 `next-server (vX.Y)`，命令行里不含路径）。
+ * **Windows 没有进程标题这个概念**，命令行永远是 `BobWork.exe … server.js`，
+ * 正则 `/^\s*(\d+)\s+next-server/` 一条都匹配不到 ⇒ 整个清扫静默失效。
+ *
+ *   - darwin/linux：ps 进程标题初筛 → lsof 按 cwd 二次确认（双保险不误杀别的 next-server）；
+ *   - win32：Get-CimInstance 按 **CommandLine 含 next-standalone** 匹配（命令行是完整路径，
+ *     比 mac 的标题判据更精确，不需要二次确认）。
+ *
+ * 仅影响本应用安装版；dev 模式（next dev，cwd 不在 next-standalone）不受影响。
  * 启动时调用防止多实例堆积；退出时调用兜底清除历史孤儿。
  */
 function killStaleNextServers(): void {
   try {
-    const ps = spawnSync('ps', ['axo', 'pid=,command='], { encoding: 'utf8', timeout: 3000 });
-    const candidates = new Set<number>();
-    for (const line of (ps.stdout || '').split('\n')) {
-      const m = line.match(/^\s*(\d+)\s+next-server/);
-      if (!m) continue;
-      const pid = Number(m[1]);
-      if (pid !== process.pid) candidates.add(pid);
+    const stalePids = listStaleServerPidsSync('next-standalone');
+    for (const pid of stalePids) {
+      if (pid === process.pid) continue;
+      if (terminatePid(pid, { force: true, tree: IS_WIN })) {
+        log(`Stale next-server cleanup: killed pid=${pid} (next-standalone orphan)`);
+      }
     }
-    if (candidates.size === 0) return;
-    const lsof = spawnSync('lsof', ['-a', '-d', 'cwd', '-p', [...candidates].join(',')], {
-      encoding: 'utf8',
-      timeout: 4000,
-    });
-    for (const line of (lsof.stdout || '').split('\n')) {
-      // cwd 行格式：node <pid> ... cwd DIR ... /Applications/BobWork.app/Contents/Resources/next-standalone
-      if (!line.includes('next-standalone')) continue;
-      const m = line.match(/^\S+\s+(\d+)\s/);
-      if (!m) continue;
-      const pid = Number(m[1]);
-      if (!candidates.has(pid)) continue;
-      try {
-        process.kill(pid, 'SIGKILL');
-        log(`Stale next-server cleanup: SIGKILL pid=${pid} (next-standalone orphan)`);
-      } catch { /* 已退出则忽略 */ }
-    }
-  } catch { /* ps/lsof 不可用时不阻塞启动 */ }
+  } catch (e) {
+    log(`Stale next-server cleanup skipped: ${(e as Error).message}`);
+  }
 }
 
 /** 探测本地 Next.js 服务是否可达（连接级；返回 500 等也视为存活，只有连接失败才算死） */
@@ -422,7 +582,7 @@ async function restartNextServer(): Promise<boolean> {
   serverRestartInFlight = true;
   try {
     log('[server-watchdog] Server unreachable — restarting Next.js server…');
-    killNextServer(); // SIGTERM → 800ms SIGKILL 兜底 + 清理残留，并置 nextServerProc = null
+    killNextServer(); // HTTP 优雅关停 → 2.5s 强杀兜底 + 清理残留，并置 nextServerProc = null
     const proc = startNextServer();
     nextServerProc = proc;
     await Promise.race([
@@ -476,12 +636,14 @@ const rendererCrashAt = new Map<number, number>();
 
 /** 创建主窗口（加载完成前保持隐藏，由欢迎窗口先行展示） */
 function createWindow(): BrowserWindow {
-  // 默认按主屏可用宽度开窗（此前固定 1400，宽屏上左右留白、达不到屏幕宽度；
-  // 窗口状态不落盘，重启即回到固定值，故此处直接取屏幕可用宽度）
-  const workArea = screen.getPrimaryDisplay().workAreaSize;
+  // 默认铺满主屏可用区域（此前宽度固定 1400、高度固定 900，宽屏上左右留白且底部不满；
+  // 窗口状态不落盘，重启即回到固定值，故此处直接取屏幕可用区域并按其原点摆放）
+  const workArea = screen.getPrimaryDisplay().workArea;
   const win = new BrowserWindow({
+    x: workArea.x,
+    y: workArea.y,
     width: workArea.width,
-    height: 900,
+    height: workArea.height,
     minWidth: 900,
     minHeight: 600,
     title: 'BobWork',
@@ -536,6 +698,54 @@ function createWindow(): BrowserWindow {
     win.webContents.reload();
   });
 
+  return win;
+}
+
+/**
+ * 创建主窗口并绑定 Butler 球窗监听。
+ *
+ * 为什么要包一层：主窗口在 macOS 上会被关闭后由 Dock 图标重建（见 activate），
+ * 而「最小化 → 球独立留在桌面 / 还原 → 收球」这些监听必须挂在**当前**这个窗口上。
+ * 直接调 createWindow() 会漏绑新窗口（表现为重建后最小化不再出球）。
+ */
+function createMainWindow(): BrowserWindow {
+  const win = createWindow();
+  bindButlerOrbMainWindow(win);
+  return win;
+}
+
+/**
+ * 显示主窗口（不存在则重建）。Dock 图标激活 / 第二次启动 / 点击桌面悬浮球都走这里，
+ * 三处行为必须一致（restore + show + focus）。
+ */
+function openMainWindow(): BrowserWindow | null {
+  if (!app.isReady()) {
+    // second-instance / activate 有可能在 whenReady 完成前到达，此时建窗会抛
+    // "Cannot create BrowserWindow before app is ready" → 等就绪再走一遍
+    void app.whenReady().then(() => openMainWindow());
+    return null;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+  const win = createMainWindow();
+  mainWindow = win;
+  // Hippo 初始化失败绝不能阻断主窗口显示：否则 openMainWindow 抛错后 loadURL/show 不执行，
+  // 应用会变成「有进程、无窗口」的假死状态（更新后重启时表现为「打不开，必须强制退出」）。
+  if (!isHippoReady()) {
+    try {
+      setupHippoBrowser();
+    } catch (err) {
+      log(`setupHippoBrowser failed (main window will still open): ${String(err)}`);
+    }
+  }
+  win.loadURL(SERVER_URL);
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show();
+  });
   return win;
 }
 
@@ -2160,6 +2370,15 @@ function setupAutoUpdater(): void {
     //   2) 解压出 BobWork.app
     //   3) 用 osascript 请求管理员权限复制覆盖 /Applications/BobWork.app
     //   4) 移除 quarantine 后重新启动
+    //
+    // ⚠️ 平台限制：这条通道是专门为绕过 Squirrel.Mac 的签名校验写的
+    //（解压 zip → osascript 提权覆盖 /Applications/BobWork.app），整条链路只对 macOS 成立。
+    // Windows 的安装包是 NSIS exe，由 electron-updater 直接 quitAndInstall() 处理。
+    // 不加这个守卫的话，Windows 上会命中不存在的 /usr/bin/unzip，
+    // 报出「Failed to extract update package」——与真因（平台不适用）完全无关的错误。
+    if (!IS_DARWIN) {
+      return { success: false, error: 'manual-zip-install 仅适用于 macOS；Windows 由 NSIS 安装器处理' };
+    }
     try {
       const cacheDir = path.join(app.getPath('home'), 'Library', 'Caches', 'bob-updater');
       // 优先使用 pending 目录中的完整更新包（含版本号文件名），兜底使用 update.zip
@@ -2223,10 +2442,8 @@ function setupAutoUpdater(): void {
         type: 'question',
         title: 'Restart to Complete Update',
         message: 'Restart BobWork to finish the update?',
-        detail:
-          'The update is ready to install.\n\n' +
-          'BobWork will close and restart automatically to complete the installation.\n' +
-          'Your projects and data will not be affected.',
+        // 精简文案：原三行说明（就绪/自动重启/数据不受影响）压成一句，减少弹窗信息量
+        detail: 'BobWork will reopen automatically. Your data is safe.',
         buttons: ['Restart Now', 'Later'],
         defaultId: 0,
         cancelId: 1,
@@ -2243,8 +2460,16 @@ function setupAutoUpdater(): void {
 
       // 安装脚本：等主进程退出后清理旧 app → 复制新 app → 移除 quarantine → 重新启动
       // /Applications 对 admin 组可写，无需管理员授权；detached 后台运行避免随主进程退出被终止
+      //
+      // ⚠️ 必须确保旧实例真正退出后再 `open`：否则 macOS 的 `open` 只是「激活」仍在运行的旧实例
+      // （不会启动新版本），而旧实例此时已无窗口 —— 表现为「更新后自动打开却半天打不开、
+      // 必须强制退出才恢复」。旧版只发 SIGTERM，主进程不退时无兜底 → 残留实例持单实例锁把新版
+      // 挡在门外（用户现场实测：升级始终不生效）。此处改 SIGKILL，并**轮询确认进程真的消失**再替换 app。
       const script = [
         `sleep 3`,
+        `pkill -9 -f "^${targetApp}/Contents/MacOS/BobWork$" 2>/dev/null || true`,
+        `for _ in $(seq 1 20); do pgrep -f "^${targetApp}/Contents/MacOS/BobWork$" >/dev/null 2>&1 || break; sleep 0.5; done`,
+        `pkill -9 -f "^${targetApp}/Contents/MacOS/BobWork$" 2>/dev/null || true`,
         `rm -rf "${targetApp}"`,
         `ditto "${extractedApp}" "${targetApp}"`,
         `xattr -dr com.apple.quarantine "${targetApp}" 2>/dev/null || true`,
@@ -2268,10 +2493,25 @@ function setupAutoUpdater(): void {
       // 先终止 Next.js 子进程，再退出当前应用：
       // app.exit() 不触发 before-quit，若不显式杀掉子进程，它将成为孤儿进程继续占用端口，
       // 导致替换后的新版本启动时服务无法绑定端口（应用打不开）。
+      // 同时先置 appQuitting：否则看门狗会在退出过程中把刚杀掉的 Next.js 服务又拉起来
+      //（用户现场实测：安装后主进程未退、服务被看门狗复活 → 旧实例持锁挡新版）。
+      appQuitting = true;
+      // 与 before-quit 同款收尾，安装路径不能省：app.exit() **不触发** before-quit，而退出时
+      // 主窗 closed 会走「出球」那条路 —— 那一刻服务已被杀，球窗加载 /butler-orb 失败，会在
+      // 桌面上留下一块 54×54 的白色置顶小方块（2026-10-12 用户实测：「更新后打开时白色的」）。
+      // 顺序要求：必须在 hide() 之前 dispose —— hide 会触发 win.on('hide') → showOrbFree()。
+      disposeButlerOrb();
+      // 再让主窗先消失、最后才杀服务：顺序反过来的话窗口还在、服务已没，界面会整片变白
+      //（渲染层所有 API 都取不到，日志表现为成片的 `加载项目列表失败: Failed to fetch`）。
+      try {
+        mainWindow?.hide();
+      } catch { /* 忽略 */ }
       killNextServer();
 
       // 延迟退出当前应用，让前端先收到返回值
       setTimeout(() => {
+        // app.exit(0) 不触发 will-quit ⇒ 升级强杀的定时器不会有机会跑，必须在这里同步兜底
+        flushPendingKills({ force: true });
         app.exit(0);
       }, 500);
 
@@ -2617,9 +2857,17 @@ app.whenReady().then(async () => {
             return { success: false, canceled: true };
           }
           const zipPath = save.filePath.replace(/\.zip$/i, '') + '.zip';
-          const ok = await new Promise<boolean>((resolve) => {
-            spawn('zip', ['-j', zipPath, ...files], { stdio: 'ignore' }).on('close', (code) => resolve(code === 0));
-          });
+          // 用内置打包器而不是 `zip` 命令：Windows 没有 zip 命令行（只有 PowerShell 的
+          // Compress-Archive，参数语义完全不同且慢）。adm-zip 已在依赖里，两平台同一份实现。
+          let ok = false;
+          try {
+            const zip = new AdmZip();
+            for (const f of files) zip.addLocalFile(f);
+            zip.writeZip(zipPath);
+            ok = fs.existsSync(zipPath);
+          } catch (e) {
+            log(`zip 打包失败: ${(e as Error).message}`);
+          }
           fs.rmSync(tmpDir, { recursive: true, force: true });
           if (!ok) return { success: false, error: 'zip 打包失败' };
           shell.showItemInFolder(zipPath);
@@ -2718,10 +2966,25 @@ app.whenReady().then(async () => {
     log(`GitCode query 拦截注册失败: ${String(err)}`);
   }
 
+  // Butler 桌面独立窗（最小化后留在桌面左下角的球 + 就地展开的 Butler 面板）：注册 IPC + 注入依赖。
+  // 放在创建主窗口之前，让紧跟着的 bindButlerOrbMainWindow 有 host 可用；
+  // 非 macOS 传 enabled:false，整个模块退化为空操作（不动 Windows/Linux 的退出语义）。
+  setupButlerOrb({
+    getMainWindow: () => mainWindow,
+    getServerUrl: () => SERVER_URL,
+    log,
+    // 悬浮球目前只有 macOS 形态（透明无边框 + 全 Space 可见 + skipTransformProcessType）。
+    // 非 darwin 显式记日志而不是静默禁用：功能消失必须有人知道，入口此时回退到主窗口。
+    enabled: IS_DARWIN,
+  });
+  if (!IS_DARWIN) {
+    log('[butler-orb] 当前平台未实现桌面悬浮球 —— Butler 入口回退到主窗口（阶段 H 处理）');
+  }
+
   log('Creating splash window...');
   const splashWindow = await createSplashWindow();
   log('Creating main window...');
-  mainWindow = createWindow();
+  mainWindow = createMainWindow();
   log('Main window created (hidden until server ready).');
   // 渲染进程错误诊断：转发 console 与崩溃事件到 ~/.bobwork-renderer.log（排查前端交互失效）
   mainWindow.webContents.on('console-message', (_e, level, message) => {
@@ -2802,6 +3065,8 @@ app.whenReady().then(async () => {
     // 预加载截图编辑覆盖窗口（保持隐藏）：首次 Cmd+Shift+O 直接 show + 下发截图，
     // 省去「建窗口 + loadURL + React 水合」这段——它是「按快捷键→出蒙版」延迟的最大头
     prewarmOcrEditorWindow();
+    // 预热 Butler 独立球窗（保持隐藏）：消除首次最小化时「先空窗再出球」的迟滞，同理
+    prewarmButlerOrb();
     // 预热屏幕几何：让助手枚举 NSScreen 拿到权威点尺寸，覆盖窗口据此创建（异步，不阻塞启动）
     void (async () => {
       try {
@@ -2844,7 +3109,7 @@ app.whenReady().then(async () => {
     mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(
       `<html><body style="background:#1a1a1a;color:#ff6b6b;font-family:sans-serif;padding:40px;">
       <h2>启动失败</h2>
-      <p>Next.js 服务启动超时。请检查日志：<br><code>~/Library/Logs/BobWork/bob-work.log</code></p>
+      <p>Next.js 服务启动超时。请检查日志：<br><code>${app.getPath('logs')}/bob-work.log</code></p>
       <p style="color:#888;margin-top:20px;">错误: ${String(err)}</p>
       </body></html>`
     )}`);
@@ -2852,26 +3117,26 @@ app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
-    // macOS: 点击 dock 图标时重新显示或创建窗口
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-    } else {
-      mainWindow = createWindow();
-      if (!isHippoReady()) setupHippoBrowser();
-      mainWindow.loadURL(SERVER_URL);
-      mainWindow.once('ready-to-show', () => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
-      });
-    }
+    // macOS: 点击 dock 图标时重新显示或创建窗口（与「点击桌面悬浮球」共用同一条路径）
+    openMainWindow();
   });
 });
 
 app.on('window-all-closed', () => {
   // macOS：关闭窗口后保持应用运行（dock 栏仍可见），不杀服务进程
   // 用户点击 dock 图标时通过 activate 事件重新创建窗口
-  if (process.platform !== 'darwin') {
+  if (!IS_DARWIN) {
+    // 非 macOS：关窗即退出。这里**异步等一下**优雅关停再 quit ——
+    // Windows 上 process.kill() 就是 TerminateProcess，直接杀掉会打断 SQLite WAL 收尾
+    // 与正在落盘的 docx；而 app.quit() 之后 will-quit 是同步的，没机会等。
+    const pid = nextServerProc?.pid;
     killNextServer();
-    app.quit();
+    void (async () => {
+      if (pid) await waitPidsGone([pid], GRACEFUL_KILL_DEADLINE_MS);
+      flushPendingKills({ force: true });
+      app.quit();
+    })();
+    return;
   }
 });
 
@@ -2882,6 +3147,8 @@ let quitCleanupStarted = false;
 app.on('before-quit', () => {
   // 通知看门狗停止探测/重启（退出流程正在终止服务）
   appQuitting = true;
+  // 销毁 Butler 独立球窗：否则退出时主窗 closed → 又会把球窗显示出来
+  disposeButlerOrb();
   // 全局快捷键随应用退出注销（避免残留占用系统级按键）
   try {
     globalShortcut.unregisterAll();
@@ -2905,4 +3172,13 @@ app.on('before-quit', () => {
   } catch {
     killNextServer();
   }
+});
+
+// 退出前最后一道同步兜底：把「已登记但还没确认退出」的子进程强杀掉。
+// 为什么不能只靠 before-quit 里的定时器：进程退出后定时器不再执行，
+// 剩下的子进程就成为占着端口的孤儿（下次启动会以 EADDRINUSE / 闪退的形式暴露）。
+app.on('will-quit', () => {
+  try {
+    flushPendingKills();
+  } catch { /* 兜底失败不阻塞退出 */ }
 });

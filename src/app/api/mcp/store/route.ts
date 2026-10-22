@@ -39,6 +39,12 @@ interface McpStoreEntryMeta {
   config?: boolean;
   /** 条目需要额外装配引导（如 Bob Browser 扩展下载/绑定）：Installed 卡渲染 Setup 展开块 */
   setup?: boolean;
+  /**
+   * 宿主 origin 下的稳定网页路径（如 /api/plugin-web/bob-video-shot-mcp）。
+   * 由 MCP_PRESETS 的 panel.hostPath 派生（不写进 registry.json，避免两处漂移）；
+   * Installed 卡据此显示 "Open in Hippo"（加书签 + 在 Hippo 新标签打开）。
+   */
+  hostPath?: string;
 }
 
 /** 读随包市场清单（静态只读，体量小无需缓存） */
@@ -112,6 +118,8 @@ export async function GET() {
         status: runtime
           ? { state: runtime.state, error: runtime.error, missingDeps: runtime.missingDeps }
           : undefined,
+        // 稳定网页路径：照 authDetail 的既有模式从预置派生，registry.json 不重复登记
+        hostPath: preset?.panel?.mode === 'serve' ? preset?.panel?.hostPath : undefined,
       };
     });
 

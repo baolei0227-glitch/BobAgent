@@ -24,6 +24,10 @@ export interface BundledDataHome {
 const PLUGIN_DATA_ENV: Record<string, { envKey: string; sub: string }> = {
   'bob-notes-mcp': { envKey: 'BOB_NOTES_MCP_HOME', sub: 'bob-notes-mcp' },
   'bob-mind-mcp': { envKey: 'BOB_MIND_MCP_HOME', sub: 'bob-mind-mcp' },
+  'bob-video-shot-mcp': { envKey: 'BOB_VIDEO_SHOT_MCP_HOME', sub: 'bob-video-shot-mcp' },
+  // Bob OCR 常驻桥虽由宿主托管拉起（mcp/ocr-bridge.ts，非 stdio 插件），数据根一样统一收进
+  // <APP_ROOT>/extensions/bob-ocr-mcp —— 与该插件自身默认根一致，用户自装 daemon 的既有数据无缝复用。
+  'bob-ocr-mcp': { envKey: 'BOB_OCR_MCP_HOME', sub: 'bob-ocr-mcp' },
 };
 
 /** 返回插件应注入的数据根（仅登记过的随包插件返回；其余 undefined 不注入） */

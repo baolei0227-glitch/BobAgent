@@ -9,7 +9,7 @@
  * 沙箱无这些依赖时，引擎 import 会失败 —— 本文件用懒加载 + 缺失跳过，避免拖垮其它套件。
  */
 import { EditorState } from '@tiptap/pm/state'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { blocksToDoc } from './blocks-to-tiptap'
 import { docToBlocks } from './tiptap-to-blocks'
 import { touchedTopLevelIndices } from './dirty-blocks'
@@ -32,13 +32,21 @@ function firstParagraphStart(doc: ReturnType<typeof blocksToDoc>): number {
   return pos
 }
 
+/**
+ * 引擎首次加载（jszip / fast-xml-parser / utif2）在测试环境里是数秒级成本。
+ * 放到 beforeAll 预热：原先两个用例都在 it() 体内首次加载，稳定撞上 5s 预算而超时。
+ * 60s 是「给冷启动留余量、但仍能抓住真挂死」的口径；断言本身仍受默认 5s 约束。
+ */
+let engineHandle: Awaited<ReturnType<typeof loadEngine>> = null
+beforeAll(async () => {
+  engineHandle = await loadEngine()
+  if (!engineHandle) console.warn('[edit-round-trip] 引擎依赖缺失，跳过（本地 pnpm install 后运行）')
+}, 60_000)
+
 describe('edit-round-trip（引擎级 · 需本地 pnpm install）', () => {
   it('改一段 → 保存 → 重解析：改后文本可见、块数守恒', async () => {
-    const engine = await loadEngine()
-    if (!engine) {
-      console.warn('[edit-round-trip] 引擎依赖缺失，跳过（本地 pnpm install 后运行）')
-      return
-    }
+    const engine = engineHandle
+    if (!engine) return // 依赖缺失时 beforeAll 已提示
     const { buildBlankDocx, parseDocx, saveDocx } = engine
 
     const original = await buildBlankDocx()
@@ -68,11 +76,8 @@ describe('edit-round-trip（引擎级 · 需本地 pnpm install）', () => {
   })
 
   it('编辑后零编辑再保存 → 字节不变（适配器路径稳定无漂移）', async () => {
-    const engine = await loadEngine()
-    if (!engine) {
-      console.warn('[edit-round-trip] 引擎依赖缺失，跳过（本地 pnpm install 后运行）')
-      return
-    }
+    const engine = engineHandle
+    if (!engine) return // 依赖缺失时 beforeAll 已提示
     const { buildBlankDocx, parseDocx, saveDocx } = engine
 
     const original = await buildBlankDocx()

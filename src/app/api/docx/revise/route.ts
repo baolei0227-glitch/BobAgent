@@ -20,6 +20,7 @@ import { mkdtemp, writeFile, readFile, rm } from 'fs/promises';
 import { accessSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { pythonBin } from '@/lib/platform';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,7 +46,13 @@ interface ReviseResponse {
   error?: string;
 }
 
-const PYTHON = '/usr/bin/python3';
+/**
+ * Python 解释器：走平台解析（darwin 仍为 /usr/bin/python3；Windows 取随包内置运行时）。
+ * 缺失时抛可读错误，而不是让 execFile 报 ENOENT。
+ */
+function pythonInterpreter(): string {
+  return pythonBin('Word 修订处理');
+}
 
 /**
  * 脚本路径：standalone 模式（next-standalone/scripts/ooxml-revise.py，由构建脚本复制）优先；
@@ -70,7 +77,7 @@ async function runRevise(mode: string, docxPath: string, outPath: string | null,
   const args = [resolveScript(), '--mode', mode, '--input', docxPath];
   if (outPath) args.push('--output', outPath);
   args.push('--payload', JSON.stringify(payload));
-  const { stdout } = await execFileAsync(PYTHON, args, { timeout: 60_000, maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await execFileAsync(pythonInterpreter(), args, { timeout: 60_000, maxBuffer: 32 * 1024 * 1024 });
   return JSON.parse(stdout || '{}') as Record<string, unknown>;
 }
 

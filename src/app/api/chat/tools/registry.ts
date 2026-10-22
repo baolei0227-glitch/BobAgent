@@ -97,6 +97,9 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   // 服务端只解析+授权+广播 session-request（界面未打开时拒绝，不静默失败）。
   // 归 butler：普通 chat 画像不注入，避免随口一句"建个会话"就派生一个无人看守的后台任务。
   create_session: ['butler'],
+  // 小程序资产：Butler 能列/建小程序，并把 coding 会话绑定到某个 app（P1-9）
+  list_mini_apps: ['butler'],
+  create_mini_app: ['butler'],
   // ---- butler（管家：日程/待办）----
   query_schedule: ['butler'],
   query_todos: ['butler'],
@@ -117,6 +120,20 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   project_plan_view: ['butler'],
   project_plan_add_steps: ['butler'],
   project_plan_step_status: ['butler'],
+  // 计划闭环（2026-10-18 补齐）：关闭/放弃/重开 + 删除。
+  // 此前计划只能创建与推进、无法收尾，plans.json 里堆着永不结束的计划。
+  project_plan_close: ['butler'],
+  project_plan_delete: ['butler'],
+  // ---- butler 项目治理（2026-10-18 补齐）：分类/标签/备注、重命名、归档/取消归档 ----
+  // 宿主 HTTP 早已具备这些能力，但管家侧只有 create_project / switch_project，
+  // 「把 X 项目归类 / 改名 / 归档」只能让用户去侧边栏手点。统一归 butler 场景（普通 chat 不注入）。
+  project_update_meta: ['butler'],
+  project_rename: ['butler'],
+  project_archive: ['butler'],
+  project_unarchive: ['butler'],
+  // 跨项目计划总览（只读，2026-10-18）：回答「哪个项目的计划停滞了 / 哪些步骤逾期了」
+  // 需要跨项目横向扫描，此前只能逐项目 project_plan_view；归 butler 场景。
+  project_plans_overview: ['butler'],
   // ---- butler 模型计费（对话维护单价覆盖：新增模型 / 厂商调价；改价只影响此后产生的用量）----
   // 只读查询 get_model_price 与写入 set_model_price 同归 butler；
   // 普通 chat 说"某模型改价了/新增了某模型，更新计费"时由 detectSceneHints 命中 butler 注入。
@@ -129,12 +146,6 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   meeting_start: ['butler'],
   meeting_append: ['butler'],
   meeting_end: ['butler'],
-
-  // ---- meeting 过往会议归档（会议记录员 Recorder 专属；2026-09-27）----
-  //  这两枚工具挂在**新场景 meeting** 上——只有 recorder 画像的 fixedScenes 含它，
-  //  管家（butler）/ 画布主对话 / 微信桥都拿不到（工具面 = 能力边界）。
-  meeting_search: ['meeting'],
-  meeting_summarize: ['meeting'],
 
   // ---- 节点树/画布结构依赖（画布节点对话 nodeId 存在才暴露）----
   read_upstream_node: ['node'],
@@ -158,12 +169,14 @@ export const SCENED_TOOLS: Record<string, ToolScene[]> = {
   manage_quick_launch: ['admin'],
   check_mcp_gaps: ['admin'],
   update_provider_config: ['admin'],
-  list_configured_models: ['admin'],
+  // coding 也要：小程序接 AI 时必须先列模型池（read_bridge_docs('chat') 的模型选择流程依赖它）
+  list_configured_models: ['admin', 'coding'],
   test_model: ['admin'],
   get_app_config: ['admin'],
   set_app_icon: ['admin'],
-  sandbox_rollback: ['admin'],
-  sandbox_export: ['admin'],
+  // coding 也要：唯一会写坏小程序的 agent 必须能回滚/导出（2026-10-10 评估 B3）
+  sandbox_rollback: ['admin', 'coding'],
+  sandbox_export: ['admin', 'coding'],
 
   // ---- console（应用状态只读查询：给 Chief of Staff 型助理「查应用」的能力）----
   // 2026-09-24 新增：list_agents / list_projects / list_nodes / get_app_status / read_inbox

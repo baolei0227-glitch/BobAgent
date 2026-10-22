@@ -29,6 +29,20 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STANDALONE = path.join(ROOT, '.next', 'standalone');
 
+/**
+ * 目标平台。默认 = 构建机平台（CI 上两者相同，所以以前没暴露问题）；
+ * 交叉打包时必须显式给 `--platform win32 --arch x64`，否则会把构建机的
+ * darwin-arm64 二进制打进 Windows 安装包 —— 装到 Windows 上 SQLite 直接
+ * `MODULE_NOT_FOUND`，而报错里不会出现"平台错了"字样。
+ */
+const argOf = (flag, dflt) => {
+  const i = process.argv.indexOf(flag);
+  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
+};
+const TARGET_PLATFORM = argOf('--platform', process.platform);
+const TARGET_ARCH = argOf('--arch', TARGET_PLATFORM === 'win32' ? 'x64' : process.arch);
+
+
 const log = (m) => console.log(`[stage] ${m}`);
 const fail = (m) => {
   console.error(`[stage] ❌ ${m}`);
@@ -143,6 +157,106 @@ function copyScripts() {
   log(`已拷入运行时脚本：${copied.join(', ') || '(无)'}`);
 }
 
+/**
+ * 从源码树里定位一个包的真实目录（兼容 pnpm 的 `.pnpm/<name>@<ver>/node_modules/<name>`）。
+ * `require.resolve` 在包带 `exports` 白名单时会拒绝 `package.json` 子路径，所以这里
+ * 直接按目录名找，不依赖 resolve 语义。
+ */
+function resolvePkgDir(name) {
+  const direct = path.join(ROOT, 'node_modules', name);
+  if (exists(direct)) return direct;
+  const pnpm = path.join(ROOT, 'node_modules', '.pnpm');
+  if (!exists(pnpm)) return null;
+  const prefix = name.replace('/', '+');
+  for (const d of fs.readdirSync(pnpm)) {
+    if (d !== prefix && !d.startsWith(`${prefix}@`)) continue;
+    const cand = path.join(pnpm, d, 'node_modules', name);
+    if (exists(cand)) return cand;
+  }
+  return null;
+}
+
+/** 找出 standalone 里所有带 prebuilds 目录的原生包（返回包目录本身） */
+function findNativePkgDirs(dir, depth = 0, out = new Set()) {
+  if (depth > 6 || !exists(dir)) return out;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (ent.isSymbolicLink() || !ent.isDirectory()) continue;
+    const p = path.join(dir, ent.name);
+    if (ent.name === 'prebuilds') {
+      out.add(dir);
+      continue;
+    }
+    findNativePkgDirs(p, depth + 1, out);
+  }
+  return out;
+}
+
+/**
+ * 确保每个原生包都有「目标平台」的预编译二进制。
+ *
+ * 为什么必须显式做：Next 的文件追踪只把**构建机上解析到的**那一份 `.node` 追进
+ * standalone（实测本机只有 darwin-arm64.node），可 `node-gyp-build` 是运行时按
+ * `prebuilds/<platform>-<arch>.node` 找的。交叉打包时不补，包里就缺目标平台的二进制。
+ */
+function stageNativePrebuilds() {
+  const pkgs = findNativePkgDirs(path.join(STANDALONE, 'node_modules'));
+  if (pkgs.size === 0) {
+    log('未发现带 prebuilds 的原生模块（本步无事可做）');
+    return;
+  }
+  const want = `${TARGET_PLATFORM}-${TARGET_ARCH}.node`;
+  for (const pkgDir of pkgs) {
+    const pkgJson = path.join(pkgDir, 'package.json');
+    const name = exists(pkgJson) ? JSON.parse(fs.readFileSync(pkgJson, 'utf8')).name : path.basename(pkgDir);
+    const dst = path.join(pkgDir, 'prebuilds', want);
+    if (exists(dst)) {
+      log(`原生预编译已就位：${name} → ${want}`);
+      continue;
+    }
+    const srcDir = resolvePkgDir(name);
+    const src = srcDir ? path.join(srcDir, 'prebuilds', want) : null;
+    if (!src || !exists(src)) {
+      fail(`${name} 缺 ${want}，且源码树里也没有 —— ${TARGET_PLATFORM}-${TARGET_ARCH} 不受该包支持`);
+    }
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(src, dst);
+    log(`✅ 补入原生预编译：${name}/${want}`);
+  }
+}
+
+/**
+ * 把 ffmpeg 装进 standalone。
+ *
+ * 为什么 Next 追踪不到：`audio-parser.ts` / `video-parser.ts` 用的是**动态** require
+ * （`req('@ffmpeg-installer/ffmpeg')`），静态分析看不见 ⇒ 实测 standalone 里
+ * `@ffmpeg-installer` 整个目录都没有，音视频解析在打包版里静默退化。
+ *
+ * 布局要求（见 @ffmpeg-installer/ffmpeg/index.js）：包装器用
+ * `path.resolve(__dirname, '..', '<platform>-<arch>')` 找二进制，即两个包必须是
+ * `node_modules/@ffmpeg-installer/{ffmpeg,<platform>-<arch>}` 的兄弟关系。
+ */
+function stageFfmpeg() {
+  const plat = `${TARGET_PLATFORM}-${TARGET_ARCH}`;
+  const names = ['@ffmpeg-installer/ffmpeg', `@ffmpeg-installer/${plat}`];
+  const dstRoot = path.join(STANDALONE, 'node_modules', '@ffmpeg-installer');
+  for (const name of names) {
+    const src = resolvePkgDir(name);
+    if (!src) {
+      log(`⚠️ 源码树缺 ${name} —— 目标平台 ${plat} 的 ffmpeg 不可用`);
+      continue;
+    }
+    const dst = path.join(dstRoot, path.basename(name));
+    fs.cpSync(src, dst, { recursive: true, dereference: true });
+    if (name === '@ffmpeg-installer/ffmpeg') {
+      // 包装器本身不含二进制（它只是按平台转发），断言二进制只会误报
+      log('✅ ffmpeg 包装器就位');
+      continue;
+    }
+    const bin = path.join(dst, TARGET_PLATFORM === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    log(exists(bin) ? `✅ ffmpeg 二进制就位：${name}（${(fs.statSync(bin).size / 1048576).toFixed(1)} MB）` : `⚠️ ${name} 拷入但缺二进制（${path.basename(bin)}）`);
+  }
+}
+
 function installCustomServer() {
   const built = path.join(ROOT, 'dist', 'server.js');
   if (!exists(built) || fs.statSync(built).size < 1024) {
@@ -178,9 +292,12 @@ function report() {
   log(`standalone 原生模块 ${native.length} 个：${native.join(', ') || '(无)'}`);
 }
 
+log(`目标平台：${TARGET_PLATFORM}-${TARGET_ARCH}（构建机 ${process.platform}-${process.arch}）`);
 resolveStandalone();
 installCustomServer();
 copySkills();
 copyScripts();
+stageNativePrebuilds();
+stageFfmpeg();
 report();
 log('完成');

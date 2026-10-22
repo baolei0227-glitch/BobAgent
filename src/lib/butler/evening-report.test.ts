@@ -113,6 +113,27 @@ describe('composeEveningText —— 正文组装（纯函数）', () => {
     }))!;
     expect(text).toContain('⚠ Partial data unavailable: overdue: 日历库读取失败');
   });
+
+  it('② 当日收件箱增量：只有感知源事件时也能成立，并单独成段', () => {
+    // 今日 / 逾期皆空，仅靠增量 → 不该被「闭嘴判据」吞掉
+    const text = mod.composeEveningText(input({
+      inboxHighlights: [{ title: '合作框架确认', detail: '张三 <zhang@example.com>' }],
+    }))!;
+    expect(text).toContain('📧 Noticed today (1):');
+    expect(text).toContain('- 合作框架确认');
+    // 未展示发件人细节（只列标题，避免手机端正文过长）
+    expect(text).not.toContain('zhang@example.com');
+  });
+
+  it('② 增量超出预览条数 → 补折叠计数行', () => {
+    const text = mod.composeEveningText(input({
+      inboxHighlights: Array.from({ length: 12 }, (_, i) => ({ title: `来信${i + 1}` })),
+    }))!;
+    expect(text).toContain('📧 Noticed today (12):');
+    expect(text).toContain('- 来信10');
+    expect(text).not.toContain('- 来信11');
+    expect(text).toContain('- … (+2 more)');
+  });
 });
 
 describe('runEveningReport —— 每日一次 + 投递接线', () => {

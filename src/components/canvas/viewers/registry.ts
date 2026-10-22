@@ -6,8 +6,11 @@
  * 数组顺序即匹配优先级（text 兜底必须最后）。
  * 新增文件类型 = 新增一个渲染器组件 + 在数组里注册一行，主组件（UnifiedViewer）零改动。
  *
- * 未来扩展示例：
- *   { id: 'video', test: (e) => ['mp4', 'webm', 'mov'].includes(e), load: () => import('./VideoViewer').then((m) => m.VideoViewer) },
+ * 视频（2026-10-18 新增）：mp4 / m4v / mov 走 VideoViewer，在 audio 之后、binary 之前
+ *   （binary 是 type==='binary' 的兜底，必须最后于各扩展名分支）。
+ *   - 只注册 Chromium 真能解码的容器：mkv / avi / wmv 不解复用，注册了也只是空壳，仍归 binary；
+ *   - `.webm` **不在视频表内**：audio 分支已先命中它（既有行为：webm 音频进音频编辑器），
+ *     若要改归属，须同步确认音频编辑器入口不被挪走（见 lib/files/mime.ts 的口径注释）。
  */
 import type { FileInfo } from '@/lib/files/types';
 import type { ViewerRenderer } from './types';
@@ -22,7 +25,9 @@ const CODE_EXTS = new Set([
 export const viewerRegistry: ViewerRenderer[] = [
   { id: 'xlsx',   test: (e) => ['xlsx', 'xls'].includes(e),    load: () => import('./XlsxViewer').then((m) => m.XlsxViewer) },
   // 音频必须先于 binary：音频文件同样 type === 'binary'，靠扩展名抢先匹配
-  { id: 'audio',  test: (e) => ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'aiff', 'aif'].includes(e), load: () => import('./AudioViewer').then((m) => m.AudioViewer) },
+  { id: 'audio',  test: (e) => ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'aiff', 'aif', 'webm'].includes(e), load: () => import('./AudioHippoLauncher').then((m) => m.AudioHippoLauncher) },
+  // 视频：只含 Chromium 可解码的容器（mkv/avi/wmv 不在内，仍走 binary 兜底）
+  { id: 'video',  test: (e) => ['mp4', 'm4v', 'mov'].includes(e), load: () => import('./VideoViewer').then((m) => m.VideoViewer) },
   // docx 必须先于 binary：docx/doc 的 type 同样是 'binary'，靠扩展名抢先匹配
   // 2026-09-30 变更（推翻 2026-09-28 的「docx 全部走 Hippo 整页」）：docx/doc 改为在预览面板内编辑。
   //   原因：① Hippo guest 无 preload ⇒ 「外部打开」「转 MD 后自动打开」静默失败（预览面板内 deb 适配器/bus 都在，自动恢复）；

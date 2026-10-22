@@ -118,28 +118,35 @@ export function isBlankTodoLine(raw: string): boolean {
   return t.length === 0 || CLIENT_BLANK_ROW_RE.test(t);
 }
 
-/** 剔除全部页的空待办行，保持 lineCalendared / lineEventIds 与行序对齐 */
+/** 剔除全部页的空待办行，保持 lineCalendared / lineEventIds / linePlanRefs 与行序对齐 */
 export function cleanTodoPages(pages: StickyNotePage[]): StickyNotePage[] {
   return pages.map((p) => {
     const rows = String(p.content ?? '').split('\n');
     const hasCal = Array.isArray(p.lineCalendared);
     const hasEv = Array.isArray(p.lineEventIds);
+    const hasPlan = Array.isArray(p.linePlanRefs);
     const cal = hasCal ? p.lineCalendared!.map(Boolean) : [];
     const ev = hasEv
       ? p.lineEventIds!.map((x) => (Array.isArray(x) ? x.slice() : []))
       : [];
+    const plan = hasPlan
+      ? p.linePlanRefs!.map((x) => (Array.isArray(x) ? x.slice() : []))
+      : [];
     const kept: string[] = [];
     const keptCal: boolean[] = [];
     const keptEv: string[][] = [];
+    const keptPlan: string[][] = [];
     for (let i = 0; i < rows.length; i++) {
       if (isBlankTodoLine(rows[i])) continue;
       kept.push(rows[i]);
       if (hasCal) keptCal.push(cal[i] ?? false);
       if (hasEv) keptEv.push(ev[i] ?? []);
+      if (hasPlan) keptPlan.push(plan[i] ?? []);
     }
     const out: StickyNotePage = { ...p, content: kept.join('\n') };
     if (hasCal) out.lineCalendared = keptCal;
     if (hasEv) out.lineEventIds = keptEv;
+    if (hasPlan) out.linePlanRefs = keptPlan;
     return out;
   });
 }

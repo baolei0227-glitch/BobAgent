@@ -19,6 +19,9 @@ vi.mock('@/lib/bridge/wechat-bridge', () => ({
 vi.mock('@/lib/bridge/feishu-bridge', () => ({
   feishuBridge: { getStatus: () => { throw new Error('feishu bridge down'); } },
 }));
+vi.mock('@/lib/bridge/mail-poll', () => ({
+  getMailStatus: () => { throw new Error('mail poll down'); },
+}));
 vi.mock('@/app/api/chat/tools', () => ({
   getLocalAuthorizedRoots: async () => [],
 }));

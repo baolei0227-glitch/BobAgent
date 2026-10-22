@@ -1,7 +1,7 @@
 ---
 name: user-guide
 description: "BobWork 用户说明书。解答用户关于软件使用方法、功能介绍、常见问题和实用技巧的疑问。
-  MANDATORY TRIGGERS: 怎么用, 使用方法, 说明书, 帮助文档, 新手指南, 怎么设置, 功能介绍, how to use, user guide, help, getting started, 教程, tutorial, 这是什么功能, 怎么操作, 项目账本, 档案员, 团队协作, Agent Teams, 思维导图, 快捷键"
+  MANDATORY TRIGGERS: 怎么用, 使用方法, 说明书, 帮助文档, 新手指南, 怎么设置, 功能介绍, how to use, user guide, help, getting started, 教程, tutorial, 这是什么功能, 怎么操作, 项目账本, 档案员, 团队协作, Agent Teams, 思维导图, 快捷键, 音频, 录音, 会议纪要, 视频截图, AI 修图, 管家, Today, 通知, 收件箱"
 ---
 
 # BobWork 用户说明书
@@ -13,28 +13,28 @@ description: "BobWork 用户说明书。解答用户关于软件使用方法、�
 
 ## 一、BobWork 是什么
 
-BobWork 是一个运行在你电脑上的 **AI 知识工作台**桌面应用：把 AI 对话、知识笔记、待办日程、文档与小程序的写作产出，按「项目」组织在一起，全部数据保存在本地。
+BobWork 是一个运行在你电脑上的 **AI 知识工作台**桌面应用：把 AI 对话、知识笔记、待办日程、文档与小程序、音视频等产出，按「项目」组织在一起，全部数据保存在本地。
 
 核心概念：
 
 - **项目（Project）**：工作的基本单元，例如一个案子、一个客户或一个主题。每个项目有独立的 AI 会话、文件、日历事件、笔记与便签。
-- **会话（Session）**：不同类型的 AI 对话节点。系统内置 **Chat / Coding** 两种，其余（Kar / Butler / Buzan / Archivist / Legal Intern / Legal Reviewer…）在 **Extensions Store** 的 Agent 市场安装后出现在「＋」菜单里。每个会话独立配置 AI 模型、思考档位与技能，互不干扰。
+- **会话（Session）**：不同类型的 AI 对话节点。系统内置 **Chat / Coding** 两种，其余（Kar / Buzan / Archivist / Legal Intern / Legal Reviewer…）在 **Extensions Store** 的 Agent 市场安装后出现在「＋」菜单里。每个会话独立配置 AI 模型、思考档位与技能，互不干扰。
+  > 注意：**管家 Butler 已经不是画布会话节点**（2026-09 起），它改由右下角悬浮球打开，见下。
 - **会话关系**：会话之间可建立关系形成「链」；左下角 **Node Map** 用关系图统一查看与管理节点连线，节点执行状态在这里实时可见。
 - **项目账本（Project Ledger）**：档案员 **Archivist** 维护的项目档案（`.ledger/`），登记材料事实、用户陈述与结论，材料变更会自动标记「需复核」；普通会话只能读，不能写。
 - **Agent Teams（团队协作）**：会话节点内的 **Team** 视图，把一次任务拆给多个 Agent 成员（检索实习生、复核员、合伙人等）分工执行，可实时插话与重试。
+- **Butler 悬浮球与助理抽屉**：右下角悬浮球打开管家抽屉，承载通知收件箱、Today 日报、Memories（记忆台）、日历、会议等——**原「BobMail 通知中心」已并入这里**。
 - **本地存储**：所有数据存放在你电脑上（默认 `~/BobWork/`，可用环境变量 `BOBWORK_HOME` 改变），不经过第三方服务器。
-- **⌘F 统一面板**：一个快捷键入口，承载文件搜索与全部功能入口，是 BobWork 最主要的快捷操作方式。
-- **Butler 抽屉**：点右下角悬浮球打开管家会话；在这里可以用斜杠快捷指令（`/todo` `/note` 等），也可以直接说一句话。
-- **BobMail 通知中心**：收件箱式管理日程提醒、巡检/网页报告、会议纪要、笔记维护等邮件。
+- **⌘F 统一面板**：一个快捷键入口，承载文件搜索与常用功能入口（Extensions Store / Bob Notes）。
 - **Kar 笔记库**：把随手记录编译成个人知识库（raw → wiki → index 三层），长期沉淀可检索的知识。
 - **Bob Sandbox 小程序**：AI Coding 会话直接编写并运行本地小程序（HTML 网页应用）。
 
 ### 典型工作流
 
 1. 新建或进入一个项目。
-2. 点项目标题旁的 **＋（Add session）** 新建会话：日常提问用 Chat，写小程序用 Coding，整理知识用 Kar，安排日程待办用 Butler，画思维导图用 Buzan，项目档案用 Archivist。
+2. 点左栏项目名右侧的 **＋（Add session）** 新建会话：日常提问用 Chat，写小程序用 Coding，整理知识用 Kar，画思维导图用 Buzan，项目档案用 Archivist。
 3. 在会话里和 AI 对话，流式查看回复；需要分工时切到节点内的 **Team** 视图发起多 Agent 协作。
-4. 在 **Butler 抽屉**里发快捷指令（`/todo` 加日程、`/note` 记笔记、`/inspect` 查待办…），或直接说一句话让管家代劳。
+4. 点右下角 **悬浮球**打开管家抽屉：发快捷指令（`/todo` `/note` `/meeting` `/inspect`），或直接说一句话让管家代劳；在 **Today** 里看今天的复盘与待办。
 5. 相关会话在 Node Map 中连成关系图，下游会话自动引用上游的关键成果作为上下文。
 
 ---
@@ -43,29 +43,30 @@ BobWork 是一个运行在你电脑上的 **AI 知识工作台**桌面应用：�
 
 BobWork 的主界面分为几块：
 
-- **左栏（导航）**：顶部是折叠按钮与实时搜索框；往下是功能入口（Project board / Local files / Browser / 各插件面板 / Templates / Markdown）；再往下是当前项目标题（点击打开 Workspace 浮层，右侧 **＋** 新建会话）；中间是当前项目的会话列表；底部是 **BobMail**（带未读角标）与 BobWork 图标（点击打开 **Settings**）。
-- **中栏（主会话区）**：展示当前聚焦的会话；无会话时显示 "No conversations yet." 引导。点左栏会话行即可切换聚焦。
-- **左下（Node Map）**：关系图缩略图入口，展开后可查看会话连线、执行状态并管理关系（⌘R 自动排版）。
-- **Workspace 浮层**：点左栏项目标题打开，管理项目列表与文件树（**Files / Log** 视图切换、**Compiled ledger** 按钮）。
+- **左栏（导航，可折叠成窄图标栏）**：顶部是折叠按钮与实时搜索框；往下依次是 **Project board**（悬停出现 **＋ 新建项目**）、**Local files**、**Browser**，以及各插件 / 工具入口（如 **Bob-Mind**、**Audio Editor**、**Templates**、**Markdown**，随已启用插件而定）；再往下是当前项目行（项目名/Folder 图标 + **Node map** 开关 + **＋ Add session**）；中间是当前项目的会话列表；下方是快速提问框；底部品牌行是 **BobWork 图标（打开 Settings）+ 版本号**，行最右侧是 **Calendar** 入口。
+- **中栏（主会话区）**：展示当前聚焦的会话；无会话时显示 "No conversation open" 引导。点左栏会话行即可切换聚焦。
+- **左下（Node Map）**：关系图入口，展开后可查看会话连线、执行状态并管理关系（⌘R 自动排版）。
+- **Workspace 浮层**：点左栏项目名打开，管理项目列表与文件树（**Files / Log** 视图切换、**Compiled ledger** 按钮）。
+- **右下（Butler 悬浮球）**：打开管家抽屉（通知 / Today / Memories / 日历 / 会议）。
 - **⌘F 统一面板**：按 `⌘F`（Windows/Linux 为 `Ctrl+F`）打开。
-- **右侧面板区**：UnifiedViewer 预览与本地文件浏览。
+- **右侧面板区**：预览面板（UnifiedViewer）与本地文件浏览。
 
 ### 左栏入口
 
 | 入口 | 功能 |
 |---|---|
 | 搜索框 | 直接输入即搜当前项目文件（不弹浮层）；⌘F 则打开统一面板 |
-| Project board | 项目看板（大视图，浏览与切换项目，⌘G） |
+| Project board | 项目看板（大视图，浏览与切换项目，⌘G）；行内悬停 **＋** 新建项目 |
 | Local files | 本地文件浏览与授权 |
 | Browser | Hippo Browser 内置浏览器（⌘⇧B） |
-| 插件面板 | 已启用插件各占一行（Bob Notes / Bob-Mind 等），点击打开 |
-| Templates | docx 字段模板 |
-| Markdown | 快速新建会话文档 |
-| Trash | 回收站（误删的会话节点可恢复） |
-| BobMail（底部） | 收件箱，带未读角标 |
-| BobWork 图标（底部） | 打开 **Settings**；悬停显示当前版本号 |
+| 插件 / 工具入口 | 已启用插件各占一行（Bob-Mind 等），另有 **Audio Editor**（音频编辑器）、**Templates**（docx 字段模板）、**Markdown**（新建会话文档） |
+| 项目行 | 项目名（点击打开 Workspace）；**Node map** 开关；**＋ Add session** 新建会话 |
+| 会话列表 | 当前项目的会话，见下 |
+| 快速提问框 | 直接输入一段话 → 在当前项目新建一个 Chat 会话并运行（⌘/Ctrl+Enter） |
+| BobWork 图标（底部） | 打开 **Settings**；旁边显示当前版本号 |
+| Calendar（底部右侧） | 打开日历面板 |
 
-> 左栏顶部有折叠按钮，可收成窄图标栏（只留图标，悬停显示名称）。
+> 左栏顶部有折叠按钮，可收成窄图标栏；窄栏里同一批入口以纯图标排列（含 **Trash** 回收站，误删的会话节点可恢复）。
 
 ### 会话列表
 
@@ -76,7 +77,10 @@ BobWork 的主界面分为几块：
 `⌘F` 打开一个居中的搜索面板：
 
 - **文件搜索**：直接输入文字搜索当前项目文件。
-- 底部图标栏是常用功能入口：**Extensions Store**（扩展 / 技能 / Agent 市场）、**Mini Programs**（Bob Sandbox 小程序）、**Calendar**（日历）、**Bob Notes**（笔记面板），以及各已启用插件面板、**Templates**、**Markdown**。
+- 底部图标栏是常用功能入口：**Extensions Store**（扩展 / 技能 / Agent 市场）、**Bob Notes**（笔记面板）。
+- **Mini Programs** 入口已迁到 Butler 左栏的 **Mini Apps**：右栏列出已标星的小程序，点开在 Hippo 打开；Browse store 进商城标星。
+
+<!-- 功能按钮渲染位置：CanvasFlow 的 navActions（Extensions Store / Bob Notes）传入 UnifiedPalette；Calendar 已于 2026-09-25 迁回左栏底部品牌栏右侧；Mini Programs 已于 2026-10-18 迁到 Butler 左栏 Mini Apps -->
 
 ---
 
@@ -86,7 +90,7 @@ BobWork 的主界面分为几块：
 
 1. 首次打开 BobWork，没有项目时会显示欢迎/新建项目引导，创建第一个项目即可。
 2. 项目创建后进入主界面，中栏显示空态引导。
-3. 点击左栏项目标题旁的 **＋（Add session）** 新建第一个会话。
+3. 点击左栏项目名右侧的 **＋（Add session）** 新建第一个会话。
 
 ### 新建项目与分类
 
@@ -96,19 +100,19 @@ BobWork 的主界面分为几块：
 
 ### 新建会话（＋Add session）
 
-点左栏项目标题右侧的 **＋**，下拉选择会话类型：
+点左栏项目名右侧的 **＋**，下拉选择会话类型：
 
 | 类型 | 用途 | 强调色 |
 |---|---|---|
 | **Chat** | 通用 AI 对话，适合日常问答、分析、写作 | 暖红 |
 | **Coding** | AI 编程会话：绑定一个小程序项目，直接写代码并预览 | 蓝 |
 | **Kar** | 个人知识库（笔记）管理，对话即可查笔记、整理素材 | 黄 |
-| **Butler** | 待办与日程助理 | 绿 |
 | **Buzan** | 思维导图（Bob-Mind）搭档：捕捉零散想法、按父子结构整理、导出到项目 | 紫 |
 | **Archivist** | 项目账本档案员：登记事实与结论、编译材料、做观点体检 | 青灰 |
 
-- **Chat / Coding** 是系统内置；**Kar / Butler / Buzan / Archivist** 等以官方包形式提供，先在 **Extensions Store → Agent 市场**安装，安装后才会出现在「＋」菜单里。
+- **Chat / Coding** 是系统内置；**Kar / Buzan / Archivist** 等以官方包形式提供，先在 **Extensions Store → Agent 市场**安装，安装后才会出现在「＋」菜单里。
 - 市场里还有 **Legal Intern（检索实习生）/ Legal Reviewer（复核员）**，主要作为 **Agent Teams** 的成员身份使用，也可单独装成会话节点。
+- **Butler 不在画布会话列表里**：它是全局管家，由右下角悬浮球打开。
 - 新建的会话会出现在左栏会话列表顶部，并自动聚焦到中栏。
 
 ### 配置 AI 模型
@@ -126,7 +130,7 @@ BobWork 支持多家模型供应商（共用 OpenAI 兼容接口）：
 | SiliconFlow | 硅基流动开放平台（如 DeepSeek-V3） |
 | AgentPlan / CodingPlan | 订阅制专属网关：通用对话推理（AgentPlan）与编程（CodingPlan） |
 | Ollama | 本机 Ollama，运行时自动发现本地模型，无需 API Key |
-| BobMultimodal | 本地多模态服务（MLX 离线）：视觉 + 语音识别，无需 API Key |
+| BobMultimodal | 本地多模态服务（MLX 离线）：视觉 + 语音识别/合成，无需 API Key |
 
 **添加模型（Test & Add 流程）**：设置 → Role Assignment → 顶部 **Model Pool** 按钮打开模型池弹窗：
 
@@ -145,8 +149,9 @@ BobWork 支持多家模型供应商（共用 OpenAI 兼容接口）：
 - **Chat Model**：对话默认模型（候选池首个即默认）；Auto 模式下每轮取候选池首项，带图时优先取池内视觉模型
 - **Task Model**：任务摘要 / 会议纪要 / 日程解析
 - **Outcome Model**：成果块 / 法律引用等结构化编辑
-- **Audio STT Model**：语音转文字（支持豆包、AgentPlan/CodingPlan、DashScope、SiliconFlow、OpenAI、本地 BobMultimodal）
-- **Image Edit Model**：AI 修图独立于聊天模型，走 images 专用接口
+- **Audio STT Model**：语音转文字（云端：豆包、AgentPlan/CodingPlan、DashScope、SiliconFlow、OpenAI 等；本地：BobMultimodal，或下载本地引擎后用 sherpa 系列）
+- **Audio TTS Model**：文字转语音（朗读回复、播客朗读等；候选池只列 TTS 类模型）
+- **Image Edit Model**：AI 修图独立于聊天模型，走 images 专用接口（如 Doubao SeedEdit / OpenAI gpt-image-1 / Qwen qwen-image-edit；本地 BobMultimodal / Ollama 亦可）
 
 > 视觉识别（图片转文字、OCR）由 Bob OCR 扩展统一管理，不再需要单独配置「视觉模型」角色。
 
@@ -157,13 +162,16 @@ BobWork 支持多家模型供应商（共用 OpenAI 兼容接口）：
 - **Models**：Role Assignment（角色分配）、Model Usage（用量统计）
 - **Appearance**：Appearance（主题与外观）、Icons & Avatars（图标与头像）
 - **Prompts**：Quick Prompts（快捷提示词）
-- **Extensions**：Templates（docx 字段模板）、WeChat Bind（微信绑定）、Hippo Browser（内置浏览器）、File Organizer（文件整理）
+- **Extensions**：Templates（docx 字段模板）、WeChat Bind（微信绑定）、Feishu Bot（飞书机器人）、Email Inbox（邮件感知，IMAP）、Hippo Browser（内置浏览器）、File Organizer（文件整理）
+- **Butler**：Butler Notify（通知与免打扰）、Remote Access（手机/远程访问）
 - **Overview**：Architecture（能力架构图）
 
 设置面板内还有 **Keyboard Shortcuts** 快捷键速查（可折叠，默认折叠），是快捷键的权威清单：
 **⌘F** 全局搜索面板、**⌘G** 项目看板、**⌘R** 关系图自动排版、**⌘S** 保存文档、**⌘⇧F** 文档/PDF 内查找替换、**⌘Z / ⇧⌘Z** 撤销/重做、**⌘Enter** 发送消息、**⌘/Ctrl + 滚轮** 缩放画布、**⌘⇧O** 截图 OCR（仅 macOS）、**⌘⇧B** 显示/隐藏内置浏览器，以及 Butler 对话框的 **Enter / ⇧Enter / Esc**（发送 / 换行 / 关闭）。
 
 技能 / 插件 / Agent 的安装管理在 **⌘F → Extensions Store**（独立窗口，分 **Market / Installed / Add Custom** 三个视图，可安装技能、Agent 官方包与 MCP 服务，并做启停、换 API Key、卸载）。
+
+> **内置技能**（无需下载即可用）：`bob-ui`、`skill-creator`、`user-guide`；其余技能（如 docx / pptx / xlsx / pdf / legal-drafter / legal-statute-search / meeting-minutes / video-split 等）需在 Extensions Store 下载后启用，装在 `~/BobWork/skills/`。
 
 ---
 
@@ -222,6 +230,7 @@ Auto 模式下档位默认 **High**（可手动调整）。思考过程默认折
 | | 附件 | @ 引用 |
 |---|---|---|
 | 来源 | 任意本地文件 | 项目 materials/ 文件夹 |
+| 落盘位置 | 也统一落项目 materials/（附件即资料） | 项目 materials/ 文件夹 |
 | 适合场景 | 临时上传单份文件 | 长期参考资料反复引用 |
 
 ### 工具调用与步骤看板
@@ -236,7 +245,7 @@ AI 回复中可能嵌入需要你回答的问题，自动弹出选择题/填空�
 
 ## 五、快捷指令（Butler 抽屉）
 
-在 **Butler 抽屉**里输入以 `/` 开头的内容，会弹出候选指令；也可以完全不写指令，直接用一句话把要做的事告诉管家（例如「明天下午三点和客户开会」「帮我记一笔：……」）。
+点右下角 **悬浮球**打开管家抽屉，在输入框里输入以 `/` 开头的内容会弹出候选指令；也可以完全不写指令，直接用一句话把要做的事告诉管家（例如「明天下午三点和客户开会」「帮我记一笔：……」）。
 
 ### 可用指令
 
@@ -244,7 +253,7 @@ AI 回复中可能嵌入需要你回答的问题，自动弹出选择题/填空�
 |---|---|---|
 | `/todo` | 添加日程事件 | AI 把文本解析成日历事件；`/todo del today/week/日期` 删除；`/todo check today/week/overdue/关键词` 查询日程 |
 | `/note` | 记笔记 | AI 编译文本进个人知识库；`/note raw <内容>` 只囤素材不编译（之后用 `/note ingest` 统一编译）、`/note check` 查询、`/note ingest` 编译积压素材、`/note review` 回看、`/note lint` 自检 |
-| `/meeting` | 会议纪要 | 开启会议会话，之后的内容累积成一场会议，`/meeting out` 结束（或静默 10 分钟自动结束）并自动生成纪要发到 BobMail |
+| `/meeting` | 会议纪要 | 开启会议会话，之后的内容累积成一场会议，`/meeting out` 结束（或静默 10 分钟自动结束）并自动生成纪要发到 Butler 收件箱 |
 | `/inspect` | 查待办 | 列出当前项目所有便签里未完成的待办（项目→便签→页）；`/inspect all` 跨全部项目，可带关键词过滤（如 `/inspect 合同 报价`） |
 | `/help` | 帮助 | 列出全部指令及用法 |
 
@@ -254,45 +263,63 @@ AI 回复中可能嵌入需要你回答的问题，自动弹出选择题/填空�
 ### 结果去向
 
 - `/todo`、`/note` 新建内容 → 右上角 **Toast 即时回执**（不进收件箱）。
-- `/todo del`、`/todo check`、`/note check`、`/inspect`、会议纪要 → 生成 **BobMail 邮件**。
+- `/todo del`、`/todo check`、`/note check`、`/inspect`、会议纪要 → 生成一条 **回执 / 通知卡片**，出现在 Butler 抽屉里（联系人 **Bobby** 的通知助理）。
 
 ---
 
-## 六、BobMail 通知中心
+## 六、Butler 抽屉（通知中心 / 助理）
 
-点击左栏底部的 **BobMail** 图标（带未读角标）打开；Node Map 展开后标题栏也有 Inbox 入口。
+点右下角 **悬浮球**打开；抽屉从右侧滑出，**点外部空白不会关闭**，用 Esc 或关闭键收起。
 
-### 分区与类型
+### 布局（微信式）
 
-- **INBOX**（待处理，默认展开）
-- **ARCHIVE**（已归档，默认折叠）
-
-邮件按类型分为 6 桶：**SCHEDULES**（日程提醒 / 待办删除、查询 / 日报）、**ACTIONS**（任务、笔记等即时动作）、**WEB**（网页报告）、**INSPECT**（待办巡检报告）、**NOTES**（笔记查询结果）、**MEETINGS**（会议纪要）。
-
-同一线程的多轮邮件会折叠成一条显示（标题带 🧵 N msgs 标记）。
+- **最左 48px 图标键**：**Buddy**（新建会话）、**Today**（日报与建议）、**Memories**（记忆台）、**Calendar**（日历）、**Meeting**（会议）；名字由悬停提示给出。
+- **联系人列**：顶部常驻 **Bobby**（通知助理，系统推送类通知都归它，不可删除），下面是各会话联系人（头像 / 标题 / 预览 / 时间）。顶部搜索栏同时过滤联系人与消息流。
+- **中栏**：当前联系人的消息流——工具行（人设 + 「已读」开关）+ 时间线 + 输入框。通知不是普通气泡，而是**一张卡片**：日历提醒等短回执的待办项可**在行内直接勾选**；报告类长文档点卡片头部到右栏读正文。
+- **右栏（预览/阅读器，默认不显示）**：点左栏功能键、点某条回执或点桌面通知才展开；是**增量**（展开时抽屉整体加宽，不挤占中栏）。栏首自带关闭键，可单独收起。
 
 ### 已读与角标
 
-- 打开收件箱**不会**自动标已读；点开某封邮件才标记已读。
-- 侧边角标数字 = **INBOX 中未归档的邮件数**（含已读未归档）。需要消除角标请归档或删除，而不是只读一遍。
+- 打开抽屉**不会**自动标已读；点卡片右端的**眼睛按钮**才切换「已读 / 未读」。**「已读」等价于「归档」**。
+- 中栏工具行那颗「已读」开关：不点亮 = 只看未读通知；点亮 = 只看已读。
 
-### 归档操作（按类型）
+### Today（日报）
 
-- **日程类**（calendar）：行内圆圈「Complete」→ 完成并归档。
-- **其它**（web / notes / inspect / 巡检 / 日报 / 会议纪要等）：行内「Mark as done」单条归档；线程类邮件归档整条线程。
-- 邮件操作走行内按钮（Complete / Mark as done / 删除等），已无 J/K 翻页等邮件专用快捷键。
-- ARCHIVE 分区标题栏有 **Select** 按钮，进入多选删除模式。
+打开即 **Report** 页签，共四个页签：
 
-### 报告邮件（WEB）
+- **Report**：昨日复盘 + 2–3 条结构化建议（由规则实时推导，不进模型、不缓存），建议卡片可点击。
+- **News**：当日资讯简报——按你配置的主题抓取，AI 只做归纳总结（顶部「今日看点」总述 + 每条一句话总结与相关性说明 + 原文链接），防幻觉；LLM 不可用时退化成纯链接列表。
+- **Schedule**：今天的日程，行内可直接勾选完成。
+- **Sticky**：今天要做的便签待办，行内可直接勾选完成。
 
-网页报告邮件提供两个按钮：**下载 .md**（导出本地）与 **复制链接**。复制出的链接粘贴到任一 AI 对话框后，AI 会自动读取并分析该报告内容。
+> Report / News 右上角有红点提示有新内容；切到对应页签即视为已读。
 
-### 自动送达的邮件
+### Memories（记忆台）
+
+打开管家的「记忆台」，首屏是一张简笔画大脑连六个入口节点，点节点进入对应分区（左上角 `← All` 返回脑图）。六段分别是：
+
+- **Preferences（用户长期记忆）**：你的偏好与事实（你是谁、怎么称呼你等），可增 / 改 / 删。
+- **Rules（习惯规则）**：声明式习惯，例如「每周一提醒我复核待办」，可一键停用。
+- **Skills（固化技能）**：经你确认固化下来的多步编排，成为确定性资产，可 Retire / 恢复。
+- **Threads（会话上下文）**：各会话/联系人的只读概览（人设、条数、未读、常驻工作区）。
+- **Evidence（学习闭环）**：规则的学习信号、被拉黑模式、冲突消解等证据视图。
+- **Knowledge（项目账本）**：`.ledger/` 条目数与待编译数的只读锚点（写权归 Archivist）。
+
+### Calendar（日程）与 Meeting（会议）
+
+抽屉内的这两个键分别打开日历面板与会议面板（见后文「八、日历」「二十、会议记录」）。
+
+### 报告类回执（网页 / 巡检 / 日报）
+
+报告类通知在右栏阅读器里提供 **复制链接** 与 **下载 .md**：复制出的链接粘贴到任一 AI 对话框后，AI 会自动读取并分析该报告内容。
+
+### 自动送达的通知
 
 - **Morning Report**：每天上午的日程/待办日报（也推送到微信）。
 - **Sticky Report 每日巡检**：汇总全部项目未完成的便签待办。
-- **日历到期提醒**：事件到点自动发提醒邮件。
+- **日历到期提醒**：事件到点自动发提醒。
 - **笔记维护摘要**：笔记库定期自动 ingest / review 后发摘要。
+- **邮件感知**（可选）：绑定邮箱后，新邮件按信封信息（不下载正文、不回执）生成通知。
 
 ---
 
@@ -304,16 +331,14 @@ AI 回复中可能嵌入需要你回答的问题，自动弹出选择题/填空�
 - **颜色**：绿/蓝/黄/粉可选。
 - **完成行自动沉底**：勾选完成的事项移到便签底部。
 - **上限**：每个项目最多 3 张待办便签。
-- **查询**：便签里未完成的待办会被 `/inspect` 汇总成巡检报告（按 项目→便签→事项 组织）。
-- **入日历**：待办行**不会**自动进日历；点行尾的 **Add to calendar** 才把它加为日历事件（可先识别文本里的时间）。
-
-> 旧版「编号笔记（NOTE）」模式已停用；记录长内容请用 `/note` 或 Kar 会话。
+- **查询**：便签里未完成的待办会被 `/inspect` 汇总成巡检报告（按 项目→便签→事项 组织），也显示在 Butler 抽屉的 **Today → Sticky**。
+- **入日历**：待办行**不会**自动进日历；点行尾的 **Add to calendar** 才把它加为日历事件（可先识别文本里的时间）。便签「结算」保存时，带具体时间的待办会自动排进日历。
 
 ---
 
 ## 八、日历
 
-- **打开**：⌘F 面板底部的 **Calendar** 图标。
+- **打开**：左栏底部品牌行最右侧的 **Calendar** 图标，或 Butler 抽屉左栏的 **Calendar** 键。
 - **月视图/日视图**：显示当月事件，可点击切换。
 - **创建/编辑事件**：标题、描述、地点、开始/结束时间、全天开关、优先级、颜色、标签与到期提醒。
 - **删除**：删除的事件只是隐藏（软删除），不再出现在日历中。
@@ -330,7 +355,7 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 - **三层结构**：raw（原始素材）→ wiki（编译后的知识条目）→ index（索引）。
 - **投喂素材**：在 Butler 抽屉用 `/note raw` 把原文先收进 raw/（只囤着不编译）；用 `/note` 直接让 AI 编译成 wiki。
 - **查询/维护**：`/note check` 查询笔记、`/note ingest` 编译积压、`/note review` 定期回看、`/note lint` 质量自检。
-- **浏览界面**：左栏 **Bob Notes** 入口或 ⌘F 面板底部的 **Bob Notes** 图标打开笔记库面板，支持全文检索、标签、日期筛选。
+- **浏览界面**：⌘F 面板底部的 **Bob Notes** 图标打开笔记库面板，支持全文检索、标签、日期筛选。
 - 在对话里直接向 Kar 提问，它会检索笔记回答，避免重复记忆。
 
 ---
@@ -362,11 +387,17 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 **Coding 会话** = 对话 + 一个本地小程序项目（Bob Sandbox）：
 
 1. 左栏 **＋ → Coding**，在弹出的对话框中给小程序命名、选一个方向/模板（或空白起步），先创建小程序再建立会话。
-2. 在会话里描述你想要的页面/功能；AI 首轮会弹出设计表单确认需求，然后直接写代码。
-3. 写好的页面可实时预览：⌘F 面板底部的 **Mini Programs**，或会话顶部的 Play 按钮。
+2. 在会话里描述你想要的页面/功能；默认 AI 首轮会弹 6 问设计表单确认需求，也可以在创建时打开 **Fast build**，确认一份可编辑简报后直接出首版。
+3. 写好的页面可实时预览：Butler 左栏 **Mini Apps**（已标星的小程序，点开在 Hippo 打开），或会话顶部的 Play 按钮。
 4. AI 修改代码后预览自动刷新；生成结果保存在项目 homework 目录。
+5. 创建对话框可附带**参考图/PDF**（挂到首轮消息，AI 先看再做）；小程序界面语言默认跟随愿望语言（中文愿望 → 中文界面）。
+6. 内置 **AI Chat** 模板（流式回复 + 模型选择），每个新小程序自带 `smoke-test.js` 冒烟脚本。
+7. 商城卡片右侧铅笔按钮：改名/图标/描述、**Duplicate**（复制代码，不复制私有数据与历史）、**Version history**（按文件回滚历史版本）。
+8. 预览右上角 Console 捕获运行错误：**Fix with AI** 手动修；模型每轮最多自动补修 1 次；仍失败可点 **Stronger model** 切到 DeepSeek Pro 再试。
+9. Butler 也能操作小程序：「列一下小程序」「做一个小程序/给小程序 X 加个功能」——Butler 会调用 `list_mini_apps` / `create_mini_app`，或把 coding 会话绑定到已有 app。
+10. Coding 关键指标（耗时/首代码/首预览/工具错误/自动修复）追加到 `bob-sandbox/telemetry.jsonl`，不记录愿望或代码内容。
 
-**图片 AI 修图**：在预览面板打开图片后可进入 AI 修图（图生图）：框选区域重绘、局部修改，保留版本历史；结果保存在当前项目 homework 目录。
+**图片 AI 修图**：见「二十一、图像 AI 编辑」。
 
 ---
 
@@ -383,17 +414,18 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 ├── .agents.json            # Agent 配置
 ├── .templates.db           # docx 字段模板库（全局）
 ├── .calendar.db            # 日历（全局）
-├── .inbox.db               # 收件箱（BobMail，全局）
+├── .inbox.db               # 收件箱 / 回执库（Butler 通知，全局）
 ├── .usage.db               # 用量统计（全局）
+├── .audio-library/         # 音频库（按内容指纹去重，内含源音频/打点/片段）
 ├── BobWorkspace/           # 所有项目
 │   └── <名称>-日期/
 │       ├── notes-memory/   # 会话笔记（.md）
-│       ├── materials/      # @ 引用素材库
+│       ├── materials/      # 素材库 + @ 引用（附件与粘贴截图统一落这里）
 │       ├── homework/       # AI 交付/产出（图片、文档、证据卡等）
-│       ├── attachments/    # 对话附件与粘贴截图
 │       ├── sticky-notes/   # 便签与待办索引
 │       ├── .ledger/        # 项目账本（SCHEMA / index / log / raw / wiki）
 │       └── .project.db     # 项目数据库
+├── butler/                 # 管家数据（会话线程 / 附件 / 播客等）
 ├── agents/<id>/agent.json  # 已安装的 Agent 包
 ├── bob-sandbox/
 │   └── apps/<appId>/       # 小程序源码
@@ -411,6 +443,7 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 ### 隐私边界
 
 - 微信桥只在本机运行；消息处理有去重与超时保护。
+- 邮件感知只取信封级字段（主题/发件人/时间），**不下载正文、不回执、不标记已读**。
 - AI 不能偷偷访问你的隐私目录；要 AI 读写外部目录必须先授权。
 
 ---
@@ -419,7 +452,7 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 
 ### 用 ⌘F 快速操作
 
-所有常用功能都能在 ⌘F 面板一步到达：搜文件、开日历、打开小程序、打开笔记面板、打开扩展商店、打开文档模板。发指令（`/todo`）则到 Butler 抽屉；设置点左栏底部的 BobWork 图标。
+⌘F 面板一步到达：搜文件、打开 Extensions Store、打开小程序、打开笔记面板。开日历点左栏底部的 Calendar；发指令（`/todo`）到 Butler 抽屉；设置点左栏底部的 BobWork 图标。
 
 ### 不同会话用不同模型
 
@@ -427,9 +460,9 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 
 ### 记录与沉淀
 
-- 随手的事 → `/todo` 进日历；到点自动提醒进 BobMail。
+- 随手的事 → `/todo` 进日历；到点自动提醒。
 - 想记的长内容 → `/note` 或交给 Kar；长期引用素材 → `/note raw` 先收着，攒一批再 `/note ingest`。
-- 用便签勾清单，`/inspect` 汇总成巡检报告。
+- 用便签勾清单，`/inspect` 汇总成巡检报告，也显示在 Today → Sticky。
 
 ### @ 引用 vs 附件
 
@@ -442,15 +475,17 @@ Kar 会话是你的个人知识库助手（借鉴 Karpathy「LLM Wiki」思路�
 
 ### HTML 文件怎么快速改文字？
 
-在预览面板打开 HTML 编辑模式 → 点击页面元素弹出工具条：**⚡ 直接替换**（本地秒改、保留加粗斜体，不调 AI）或 **✨ AI 优化**（先生成纯文字草稿，确认后再替换）；`⌘/Ctrl + Enter` 直接应用。
+在预览面板的 HTML 编辑模式点击页面元素，弹出工具条：**⚡ 直接替换**（本地秒改、保留加粗斜体，不调 AI）或 **✨ AI 优化**（先生成纯文字草稿，确认后再替换）。
 
 ### 网页/报告怎么分析？
 
-BobMail 里打开 WEB 报告邮件 → 点「复制链接」→ 粘贴到任一 AI 对话框，AI 自动读取分析；也可「下载 .md」导出。
+Butler 抽屉里打开报告类回执 → 点「复制链接」→ 粘贴到任一 AI 对话框，AI 自动读取分析；也可「下载 .md」导出。
 
 ### 截图 / OCR？
 
 按 **⌘ + Shift + O**（Windows/Linux 为 Ctrl+Shift+O）进入截图：选区截屏后可裁剪、标注；点「OCR」把截屏区域转成文字，在弹窗中复制使用；✓ 则直接把裁剪图片复制到剪贴板。
+
+> Bob OCR（图片 / 扫描件转文字）随 BobWork 内置，**不需要单独安装**：设置 → Extensions Store → Plugins → Bob OCR 保持启用即可，本地常驻桥由应用自动拉起，首次启动会自动从 BobWork 已有配置导入视觉 / OCR 模型。要换视觉模型或 OCR 引擎，点该卡片上的 **Configure** 维护。
 
 ---
 
@@ -458,7 +493,7 @@ BobMail 里打开 WEB 报告邮件 → 点「复制链接」→ 粘贴到任一 
 
 ### Hippo Browser 内置浏览器
 
-左栏 **Browser** 入口（或 ⌘⇧B）打开内置浏览器窗口，可正常浏览网页；设置 → Extensions → Hippo Browser 里可管理它的行为（如清除浏览数据）。
+左栏 **Browser** 入口（或 ⌘⇧B）打开内置浏览器窗口，可正常浏览网页；设置 → Extensions → Hippo Browser 里可管理它的行为（如清除浏览数据）。部分插件（如视频截图工具）以网页形式运行在 Hippo 里，可从书签栏打开。
 
 ### AI 网页自动化
 
@@ -515,6 +550,57 @@ AI 也可以**直接操作你正在使用的 Chrome 标签页**完成网页操�
 
 ---
 
+## 十八、音频查看器与音频编辑器（Audio Editor）
+
+左栏 **Audio Editor** 入口（或直接点画布上的音频文件）在预览面板打开音频编辑器，支持波形播放、打点批注与选区截取：
+
+- **导入音频**：面板内选一个本地音频 → 复制进应用自有**音频库**（`~/BobWork/.audio-library/`，按内容指纹去重），随即作为新源音频载入编辑。
+- **音频库（Library）**：列出库内全部音频，点击载入、可删除（连带其打点与片段）。
+- **打点（Marks）**：在波形上点击或拖选即可加打点；打点带名称与时间，磁吸到已有打点/刻度。改动有撤销，落盘只有一个出口。
+- **选区截取（Clip）**：在波形上拖出区间 → 浮出 **Clip / Play / ✕** 浮条，点 Clip 截取为片段（走 ffmpeg，产物与源音频同居一处），可自定义文件名。
+- **转写与智能打点**：**Understand this audio** 转写音频 → 右侧转写面板点句跳转、播放高亮；可 **Generate marks**（按段生成打点）、行内 **✂** 按句截取，也可 **AI 精选**区间（只给建议、勾选后才导出）。
+- **片段管理**：源音频下方列出全部片段，点某条切换为「二次编辑」，每条可**改名 / 删除 / 下载**；首行固定为「Source audio」用于切回。
+- **加载策略**：大文件按需拉取波形峰值 + HTTP Range 播放（不整份下载）；小文件整份加载。波形解码失败时自动退回原生音频控件，播放不受影响。
+
+---
+
+## 十九、视频截图工具（bob-video-shot 插件）
+
+安装并在 Hippo 中打开（或从 Extensions Store 的「Open in Hippo」进入）后，可**从一段视频里自动截取多张画面**：
+
+- **导入视频**：上传一段视频（插件本身**不录屏**；微信等视频需先自行录制/导出后上传）。
+- **截图模式**：按**间隔 / 智能 / 关键帧 / 自定义 / 帧率 / AI 自定义 / 微信视频**等方式自动检测画面边界并抽帧；「微信视频」模式用自适应采样 + 缩略图相似度去重 + AI 边界判重，减少重复/花屏帧。
+- **截图网格**：抽取结果以缩略图网格展示，可挑帧、编辑（选区 / 箭头 / 文字标注）。
+- **导出**：预览面板「下载」单张，或「全选 → 下载选中」打包成 ZIP（落到 `~/Downloads`）。
+
+> 注意：结果只存在于当前标签页状态，**刷新 / 关闭标签页会丢失**，请及时下载。
+> 需要把**滚动长截图**切成多页（切页）请用 `video-split` 技能（需先在 Extensions Store 下载）。
+
+---
+
+## 二十、会议记录（Meeting）
+
+Butler 抽屉左栏 **Meeting** 键打开会议面板，**主界面就是过往会议列表**（History 即家）：
+
+- **Live meeting**：选好落点（一行当前目标 + Change + Start meeting）后开始录音；开启后由会议控制台接管中栏，边录边转写、显示实时字幕（需在设置里选好语音转写模型；仅下载了本地流式模型时才逐字实时，云端模型为段级字幕）。结束自动生成**纪要**与**全文转写**。
+- **Import recording**：导入一段已有的录音文件，分段转写（引擎单次上限 30 分钟，自动切窗），产物口径与 Live 一致。
+- **Podcast**：把文本生成播客音频（音频落 `butler/podcast/`），也出现在 History 里。
+- **History**：同一场会议的纪要 / 转写 / 回放聚合成一个条目（默认折叠，点开展开），回放按钮在父行；点 ▶ 进入波形回放，可在时间轴上打点截取。
+- 会议纪要与转写会写入指定目录，并生成通知到 Butler 收件箱。
+
+---
+
+## 二十一、图像 AI 编辑（AI 修图）
+
+在预览面板打开一张图片后可进入 **AI 修图（图生图）**：
+
+- **框选区域重绘**：框出要修改的区域，描述想要的效果，AI 局部重绘。
+- **版本历史**：保留每次修改的版本，可回退对比。
+- **模型**：使用设置里 **Image Edit Model**（走 images 专用接口，独立于聊天模型）。
+- **产物**：结果保存在当前项目 homework 目录。
+
+---
+
 ## 常见问题
 
 ### 怎么添加模型？
@@ -527,16 +613,20 @@ Ollama 与 BobMultimodal 是本地厂商，无需 API Key（填任意值或留�
 订阅制专属模型网关：AgentPlan 负责通用对话推理，CodingPlan 负责编程任务。
 
 ### 怎么新建会话？
-点左栏项目标题旁的 **＋（Add session）**，选 Chat / Coding / Kar / Butler / Buzan / Archivist（后四者需先在 Extensions Store 的 Agent 市场安装）。
+点左栏项目名右侧的 **＋（Add session）**，选 Chat / Coding / Kar / Buzan / Archivist（后三者需先在 Extensions Store 的 Agent 市场安装）。**Butler 不在这里**——它由右下角悬浮球打开。
 
-### 怎么删除会话？
-左栏会话行 hover，点行尾 **⋯** 菜单删除（可到 Trash 回收站恢复）。
+### BobMail 去哪里了？
+已并入 **Butler 抽屉**：点右下角悬浮球，通知都归到联系人 **Bobby**（通知助理），「已读」即「归档」。
+
+### 怎么删消息 / 会话？
+- 会话：左栏会话行 hover，点行尾 **⋯** 菜单删除（可到 Trash 回收站恢复）。
+- Butler 消息：鼠标移入气泡，浮出复制 / 删除 / 多选三颗图标键。
 
 ### 会话执行中怎么看状态？
 左栏会话行末绿点：实心=完成、呼吸=执行中；Node Map 中对应节点也有状态提示。
 
 ### 怎么查待办？
-在 Butler 抽屉发 `/inspect`（本项目的便签待办）或 `/inspect all`（全部项目），结果发到 BobMail。
+在 Butler 抽屉发 `/inspect`（本项目的便签待办）或 `/inspect all`（全部项目），结果进 Butler 收件箱；也可直接看 **Today → Sticky**。
 
 ### 怎么加日程？
 在 Butler 抽屉直接说「明天下午三点和客户开会」（或发 `/todo 明天下午三点和客户开会`），AI 解析后写入日历；`/todo check` 查询、`/todo del` 删除。
@@ -544,11 +634,14 @@ Ollama 与 BobMultimodal 是本地厂商，无需 API Key（填任意值或留�
 ### 怎么记笔记？
 在 Butler 抽屉发 `/note 你的内容`（或直接说「帮我记一笔：……」）存入知识库；新建 Kar 会话可持续对话式整理；`/note check` 查询已有笔记。
 
-### 模板（Templates）是什么？Bob Solution 还有吗？
-模板仅指 **docx 字段模板**（固定版式、占位字段）：在设置 → Templates 管理，编辑 Word 时经预览面板 Templates tab 套用。原先的会话模板（Bob Solution）已移除，不再提供保存/套用整套会话的功能。
+### Today 面板里有什么？
+四个页签：**Report**（昨日复盘 + 建议）、**News**（资讯简报）、**Schedule**（今天的日程）、**Sticky**（今天的便签待办）；Schedule / Sticky 行内可直接勾选完成。
+
+### 模板（Templates）是什么？还有会话模板吗？
+模板仅指 **docx 字段模板**（固定版式、占位字段）：在设置 → Templates 管理，编辑 Word 时经预览面板 Templates tab 套用。原先的会话模板（Bob Solution）已移除。
 
 ### 模型在哪里管理？
-所有模型都进「模型池」（设置 → Model Pool），勾选后才会出现在会话选择器里。
+所有模型都进「模型池」（设置 → Role Assignment → Model Pool），勾选后才会出现在会话选择器里。
 
 ### 思考档位可以关吗？
 可以。四档 **Off / Low / High / Max**（默认 High），思考过程透明展示（默认折叠为 Think 芯片）。
@@ -559,17 +652,36 @@ Ollama 与 BobMultimodal 是本地厂商，无需 API Key（填任意值或留�
 ### 项目账本怎么用？
 先装 **Archivist** 会话；材料放进 materials/ 会自动登记，系统后台自动编译。看账本点 Workspace 右上角的 **Compiled ledger**。详见「十五、项目账本与档案员」。
 
+### 音频怎么打点和截取？
+左栏 **Audio Editor** 打开编辑器：导入音频 → 在波形上打点 / 拖选截取；也可先转写再用转写面板的按句打点 / 截取。详见「十八、音频查看器与音频编辑器」。
+
+### 怎么从视频里截多张图？
+装 **bob-video-shot** 插件，在 Hippo 里打开并上传视频，选截图模式抽帧，然后下载单张或打包 ZIP。插件不录屏。详见「十九、视频截图工具」。
+
+### 会议怎么记录和回放？
+Butler 抽屉左栏 **Meeting**：Live meeting 边录边转写，或导入录音转写；结束后生成纪要 + 全文转写，进入 History 可回放（波形上可打点截取）。详见「二十、会议记录」。
+
+### AI 修图怎么用？
+预览面板打开图片 → 进入 AI 修图 → 框选区域描述效果 → 生成；保留版本历史。模型用设置里的 **Image Edit Model**。
+
 ### 数据和笔记存在哪？
-主数据在 `~/BobWork/`（项目在 `BobWorkspace/`，日历 / 收件箱 / 用量为全局库）；笔记库在 `~/BobWork/extensions/bob-notes-mcp/notes/`；项目账本在各项目目录的 `.ledger/`。
+主数据在 `~/BobWork/`（项目在 `BobWorkspace/`，日历 / 收件箱 / 用量为全局库）；音频库在 `~/BobWork/.audio-library/`；笔记库在 `~/BobWork/extensions/bob-notes-mcp/notes/`；项目账本在各项目目录的 `.ledger/`。
 
 ### 误删了会话怎么办？
-左栏 Trash 图标打开回收站，可恢复或彻底删除。
+左栏 **Trash** 图标打开回收站，可恢复或彻底删除。
 
 ### 怎么检查更新？
-点左栏底部的 BobWork 图标（悬停显示版本号）→ 检查更新；下载完会提示 Restart Now / Later。
+点左栏底部的 BobWork 图标（旁边显示版本号）→ 检查更新；下载完会提示 Restart Now / Later。
 
-### 怎么绑定微信？
-设置 → Extensions → WeChat Bind 扫码绑定；之后文字、图片、语音、文件消息都会与桌面画布同步。
+### 怎么绑定微信 / 飞书？
+- 微信：设置 → Extensions → WeChat Bind 扫码绑定；之后文字、图片、语音、文件消息都会与桌面画布同步。
+- 飞书：设置 → Extensions → Feishu Bot 配置机器人；之后机器人私聊消息会进入管家通道。
+
+### 邮箱感知怎么开？
+设置 → Extensions → **Email Inbox** 填 IMAP 凭证；开启后新邮件只按信封信息生成通知（不下载正文、不回执、不标已读）。
+
+### 手机能远程用吗？
+设置 → Butler → **Remote Access** 配置远程访问（令牌鉴权）；配合 Tailscale 等可在手机上打开 Web 版（`/butler` 单栏页）。
 
 ### 主题可以换吗？
 BobWork 使用统一紫色主题（Purple），App / 小程序 / Widget 同一组色彩 Token；可在设置 → Appearance 查看。

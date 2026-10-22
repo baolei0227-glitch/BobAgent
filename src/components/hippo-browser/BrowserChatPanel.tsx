@@ -276,6 +276,16 @@ export function BrowserChatPanel({ winId }: BrowserChatPanelProps) {
     void bridge?.toast?.(text);
   }, [bridge]);
 
+  // 下载卡片的 Open / Show in Finder 失败时，由内核派发 bob-hippo-toast → 统一走工具栏 toast
+  useEffect(() => {
+    const onToast = (e: Event) => {
+      const text = (e as CustomEvent<{ text?: string }>).detail?.text;
+      if (text) notify(text);
+    };
+    window.addEventListener('bob-hippo-toast', onToast);
+    return () => window.removeEventListener('bob-hippo-toast', onToast);
+  }, [notify]);
+
   useEffect(() => {
     setResearch(readResearch(winId));
   }, [winId]);

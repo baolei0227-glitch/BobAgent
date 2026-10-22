@@ -227,3 +227,40 @@ describe('resolveProjectWithFallback — 未提及项目时兜底当前激活项
     if (!ambiguous.ok) expect(JSON.parse(ambiguous.payload).error).toBe('project_ambiguous');
   });
 });
+
+describe('resolveProjectWithFallback — 显式「未立项」引用路由到 Todo Inbox（allowInbox）', () => {
+  it('allowInbox=true + Inbox 别名 → project=null / source=inbox（不再被当前项目吞掉）', async () => {
+    for (const ref of ['inbox', '  INBOX ', 'Todo Inbox', 'todo-inbox', '__inbox__', '__global__', '未立项', '收件箱']) {
+      const r = await resolveProjectWithFallback(ref, { allowGlobal: true, allowInbox: true }, makeDeps());
+      expect(r.ok, ref).toBe(true);
+      if (r.ok) {
+        expect(r.source, ref).toBe('inbox');
+        expect(r.project, ref).toBeNull();
+      }
+    }
+  });
+
+  it('allowInbox=true 但引用是真实项目 → 仍解析该项目（inbox 只认精确别名）', async () => {
+    const r = await resolveProjectWithFallback(LITIGATION.id, { allowInbox: true }, makeDeps());
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.source).toBe('explicit');
+      expect(r.project?.id).toBe(LITIGATION.id);
+    }
+  });
+
+  it('未开 allowInbox → "inbox" 不被识别，走名字匹配 → project_not_found（不静默落当前项目）', async () => {
+    const r = await resolveProjectWithFallback('inbox', {}, makeDeps());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(JSON.parse(r.payload).error).toBe('project_not_found');
+  });
+
+  it('allowInbox 不影响空引用兜底：未提及项目仍落当前激活项目（current_fallback）', async () => {
+    const r = await resolveProjectWithFallback(undefined, { allowGlobal: true, allowInbox: true }, makeDeps());
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.source).toBe('current_fallback');
+      expect(r.project?.id).toBe(CONTRACT.id);
+    }
+  });
+});

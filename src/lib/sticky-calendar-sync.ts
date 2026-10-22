@@ -33,6 +33,8 @@ import { parseTodoTime } from '@/lib/todo-time-parse';
 import { resolveTaskModel } from '@/lib/core/task-model';
 import { parseTasksWithModel } from '@/lib/core/task-summarize';
 import { getProjectById } from '@/lib/project/project-manager';
+import { GLOBAL_SCOPE_PROJECT_ID } from '@/lib/project/sticky-scope';
+import { resolveAppRoot } from '@/lib/app-root';
 // 冲突检测（2026-09-25）：三条入日历路径共用同一套重叠查询，见 lib/calendar/overlaps.ts
 import {
   findEventOverlaps,
@@ -174,6 +176,12 @@ async function projectNameOf(projectId: string): Promise<string> {
   } catch {
     return '';
   }
+}
+
+/** 便签行的日历事件归属 scope：Inbox（project_id='__global__'）→ 'global'；项目 → 'project'。
+ *  与 app/api/calendar/events POST 的 scope 口径一致（无项目待办即全局）。 */
+function eventScopeOf(projectId: string): 'project' | 'global' {
+  return projectId === GLOBAL_SCOPE_PROJECT_ID ? 'global' : 'project';
 }
 
 /** 便签行反向锚点（事件 source_ref 的 JSON 结构）。
@@ -458,7 +466,7 @@ export async function addStickyLineToCalendar(
       ...(location ? { location } : {}),
       start_time: start,
       end_time: end,
-      scope: 'project',
+      scope: eventScopeOf(projectId),
       reminder_minutes: reminderMinutes,
       ...(opts?.priority ? { priority: opts.priority } : {}),
       // 手动入日历：显式传来了开始时间 → 时间归用户，不带 autoTime（后续改行文本不重排时间）
@@ -539,6 +547,11 @@ export async function autoAddStickyLinesToCalendar(
   projectId: string,
   note: StickyNote,
 ): Promise<{ note: StickyNote; created: number; rescheduled: number; conflicts: number; conflictTitles: string[] }> {
+  // 系统「计划待办」便签不参与自动入日历：那些行是计划步骤的镜像（plan → sticky 单向），
+  // 自动批量建事件会把整棵计划灌进日历；需要时用户可对单行手动「Add to calendar」。
+  if (note.planTodos) {
+    return { note, created: 0, rescheduled: 0, conflicts: 0, conflictTitles: [] };
+  }
   const pages = Array.isArray(note.pages) ? note.pages : [];
   const db = await getCalendarDb();
   const projectName = await projectNameOf(projectId);
@@ -727,7 +740,7 @@ export async function autoAddStickyLinesToCalendar(
             start_time: start,
             end_time: end,
             ...(allDay ? { all_day: true } : {}),
-            scope: 'project',
+            scope: eventScopeOf(projectId),
             reminder_minutes: reminder,
             source_ref: sourceRef,
           }));
@@ -793,9 +806,11 @@ export async function cancelNoteEvents(note: StickyNote | null | undefined): Pro
 
 /** 解析便签所在项目目录（事件 project_id → 项目路径） */
 async function resolveProjectDirByEvent(projectId: string): Promise<string | null> {
-  if (!projectId || projectId === '__global__') return null;
+  if (!projectId) return null;
+  // 全局事件（'__global__' = Inbox 行）→ 便签落在应用根目录（pseudo-project root），
+  // 与 /api/sticky-notes 的 Inbox 写入口径一致
+  if (projectId === GLOBAL_SCOPE_PROJECT_ID) return resolveAppRoot();
   try {
-    const { getProjectById } = await import('@/lib/project/project-manager');
     const p = await getProjectById(projectId);
     return p?.path ?? null;
   } catch {
@@ -860,6 +875,10 @@ export async function pushCalendarEventToSticky(
 
   // parseTodoLines 与原始 content 行序一一对应（不丢行），rawLines 供原位改写
   const rawLines = String(page.content).split('\n');
+  // 行级计划标记：删行时同步裁剪，避免与行序错位（系统「计划待办」便签才会带它）
+  const planRefs = Array.isArray(page.linePlanRefs)
+    ? page.linePlanRefs.map((x) => (Array.isArray(x) ? x.slice() : []))
+    : undefined;
   const removeLine = opts?.removeLine === true || event.status === 'cancelled';
   let changed = false;
 
@@ -869,6 +888,7 @@ export async function pushCalendarEventToSticky(
     if (remaining.length === 0) {
       rawLines.splice(lineIdx, 1);
       evs.splice(lineIdx, 1);
+      if (planRefs) planRefs.splice(lineIdx, 1);
     } else {
       evs[lineIdx] = remaining;
     }
@@ -896,6 +916,7 @@ export async function pushCalendarEventToSticky(
     content: rawLines.join('\n'),
     lineEventIds: evs,
     lineCalendared: cal,
+    ...(planRefs ? { linePlanRefs: planRefs } : {}),
   };
   const nextNote: StickyNote = {
     ...note,

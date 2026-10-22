@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Move, Undo2, Redo2, RotateCcw, Check, X, ScanText, Copy, Loader2, ArrowUpRight, Type, Underline, Plus } from 'lucide-react';
+import { Move, Undo2, Redo2, RotateCcw, Check, X, ScanText, Copy, Loader2, ArrowUpRight, Type, Underline, Plus, Square } from 'lucide-react';
 import type { ScreenOcrGeometry } from '@/lib/desktop-adapter';
 
 /** 马赛克工具图标：4×4 像素块、对角填充（像素化/模糊语义，lucide 无对应图标故自绘） */
@@ -54,13 +54,46 @@ export interface ScreenOcrEditorProps {
   screenIndex?: number | null;
 }
 
-type Tool = 'select' | 'mosaic' | 'arrow' | 'text' | 'underline';
+type Tool = 'select' | 'mosaic' | 'rect' | 'arrow' | 'text' | 'underline';
 type Sel = { x: number; y: number; w: number; h: number };
 
-/** 可移动标注对象：文字 / 箭头（对象化：可点选、拖动、删除；渲染在独立覆盖层 canvas） */
-type Mark =
+/** 可移动标注对象：文字 / 箭头 / 下划线批注（对象化：可点选、拖动、删除；渲染在独立覆盖层 canvas）。
+ *  导出类型供单测构造样本。 */
+export type Mark =
   | { kind: 'text'; id: number; x: number; y: number; value: string }
-  | { kind: 'arrow'; id: number; x1: number; y1: number; x2: number; y2: number }
+  /**
+   * 箭头：x1/y1 → x2/y2（**x2/y2 = 三角尖端**，`drawArrow` 的头就画在这一端）。
+   * 可携带文字批注（与下划线批注同构）：value 为空 = 纯箭头；textX/textY = 文字气泡锚点
+   * （用户拖「+ 按钮」落定），缺省回退到「**起点（箭尾）**沿箭头反方向外移一个字距」。
+   */
+  | {
+      kind: 'arrow';
+      id: number;
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      value?: string;
+      textX?: number;
+      textY?: number;
+    }
+  /**
+   * 矩形框标注：x/y = 左上角，w/h 恒为正（创建时已归一化，反向拖拽不会出现负宽高）。
+   * 空心描边，用于圈出区域；与箭头同为一等对象（可选中 / 拖动 / Delete / 撤销）。
+   * 可携带文字批注（与下划线 / 箭头同构）：value 为空 = 纯矩形框；textX/textY = 气泡锚点
+   * （用户拖「+ 按钮」落定），缺省回退到「框下方外侧、与左边对齐」。引线起点取**框边界的最近点**。
+   */
+  | {
+      kind: 'rect';
+      id: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      value?: string;
+      textX?: number;
+      textY?: number;
+    }
   /**
    * 下划线批注：x/y 为横线左端，w 为线长，value 为批注文字（空串 = 纯下划线，无批注）。
    * textX / textY = 文字气泡锚点（用户拖动「+ 按钮」落定的位置）；
@@ -79,17 +112,28 @@ type Mark =
 
 /** 文字输入草稿：x/y 为输入框位置；
  *  携带 underline 时表示「下划线批注」的待落定横线（旧路径：一次成型）；
- *  携带 underlineId 时表示「给已落定的下划线补批注」（新路径：先画线，后拖按钮定位批注）。 */
+ *  携带 underlineId / arrowId / rectId 时表示「给已落定的下划线 / 箭头 / 矩形框补批注」
+ *  （新路径：先画线/框，后拖按钮定位批注）；
+ *  同时携带对应几何（underline / arrow / rect）⇒ 目标在输入期间被误删时可原样重建，绝不静默丢字。 */
 type TextDraft = {
   x: number;
   y: number;
   value: string;
   underline?: { x: number; y: number; w: number };
   underlineId?: number;
+  arrow?: { x1: number; y1: number; x2: number; y2: number };
+  arrowId?: number;
+  rect?: { x: number; y: number; w: number; h: number };
+  rectId?: number;
 };
 
-/** 刚画完的下划线上挂着的「添加批注」按钮（图像像素坐标；endX = 划线结束端，作引线起点） */
-type UnderlinePending = { id: number; x: number; y: number; endX: number };
+/**
+ * 刚画完的标注（下划线 / 箭头 / 矩形框）上挂着的「+ 添加批注」按钮（图像像素坐标）。
+ * `kind` 决定引线起点如何从该 mark 的几何求得：下划线取横线、箭头取箭杆线段
+ * （两者都是「线段上距气泡最近的点」），矩形框取「框边界上距气泡最近的点」，
+ * 故不再冗余存端点 / 矩形顶点。
+ */
+type AnchorPending = { kind: 'underline' | 'arrow' | 'rect'; id: number; x: number; y: number };
 
 /** 撤销/重做快照：主画布（原图+马赛克）像素 + 标注对象列表 */
 type Snap = { img: ImageData; marks: Mark[] };
@@ -102,10 +146,17 @@ const MARK_TEXT_BG = '#FFFFFF';
 const MARK_GEOM_BASE_W = 3024;
 /** 下划线批注：最短线长（图像像素），短于此按误触处理，不进入输入 */
 const MIN_UNDERLINE = 16;
+/** 矩形框标注：最小边长（图像像素），任一边短于此按误触处理，不创建对象 */
+const MIN_RECT = 12;
 /** 马赛克块大小（canvas 像素） */
 const MOSAIC_BLOCK = 12;
-/** 马赛克画笔半径档位（相对基准半径的倍率：细 / 中 / 粗） */
-const MOSAIC_BRUSH_STEPS = [0.5, 1, 1.8];
+/**
+ * 马赛克画笔半径档位（相对基准半径的倍率：细 / 中 / 粗）。
+ * 2026-10-17 用户要求「三档不变、每档都更细，当前中档顶到最大档」⇒ 整体下调一档：
+ * 旧 [0.5, 1, 1.8] → 新 [0.25, 0.5, 1]（旧的细档成为新中档，旧的中档成为新粗档，细档再细一档）。
+ * 等差比 ≈ ×2，故新细档取 0.25；默认档仍是索引 1（中），保持不变。
+ */
+const MOSAIC_BRUSH_STEPS = [0.25, 0.5, 1];
 /** 撤销栈最大深度（全图快照内存保护） */
 const MAX_HISTORY = 30;
 /** 选区最小边长（canvas 像素） */
@@ -115,8 +166,8 @@ const ANCHOR_BTN_R = 13;
 /** 批注气泡与横线的距离小于「字号 × 该系数」时不画引线。
  *  = 1.0 的语义：批注停在默认位置（线下方约一个字距）时不画，被拖远/拖到侧面才画。 */
 const LEADER_MIN_GAP = 1.0;
-/** 浮动工具条宽度（窗口像素） */
-const TOOLBAR_W = 236;
+/** 浮动工具条宽度（窗口像素）：仅作首帧估算，挂载后由 clientWidth 实测覆盖 */
+const TOOLBAR_W = 268;
 /** 选区/裁剪输出圆角半径（图像自然像素） */
 const SEL_RADIUS = 10;
 
@@ -178,6 +229,43 @@ function drawUnderline(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
   ctx.stroke();
 }
 
+/** 画矩形框标注（空心描边；线宽与下划线同基准，随图宽自适应） */
+function drawRectMark(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
+  const k = (ctx.canvas.width || MARK_GEOM_BASE_W) / MARK_GEOM_BASE_W;
+  ctx.strokeStyle = MARK_COLOR;
+  ctx.lineWidth = Math.max(2, 5 * k);
+  ctx.lineJoin = 'round';
+  ctx.strokeRect(x, y, w, h);
+}
+
+/**
+ * 矩形框几何：由「拖拽起点 → 当前点」归一化为「左上角 + 正宽高」。
+ *
+ * 预览与落定**共用同一份口径**（两份实现漂移是这类拖拽工具的经典 bug 源：
+ * 常见写法是预览用 min/abs、落定另写一套，反向拖拽时预览与结果不一致）。
+ * `cw/ch` = 画布边界（图像像素）；**两端各自钳进 [0, 边界]**，再相减求宽高 ——
+ * 只钳左上角（`x = max(0, min(x0, cw))`）会让框沿拖拽方向多伸出一段：起点在图外时，
+ * 宽高仍是「原起止点的差值」，框就比用户实际拖出的范围更大。
+ * 归一化后 w/h 恒为正，下游（渲染 / 命中 / 移动 / 撤销）无需再处理负宽高。
+ *
+ * 导出供单测直接验算几何（`__tests__/rect-geometry.test.ts`）。
+ */
+export function rectFromDrag(
+  sx: number,
+  sy: number,
+  cx: number,
+  cy: number,
+  cw = Number.POSITIVE_INFINITY,
+  ch = Number.POSITIVE_INFINITY,
+): { x: number; y: number; w: number; h: number } {
+  const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+  const x = clamp(Math.min(sx, cx), cw);
+  const y = clamp(Math.min(sy, cy), ch);
+  const x2 = clamp(Math.max(sx, cx), cw);
+  const y2 = clamp(Math.max(sy, cy), ch);
+  return { x, y, w: Math.max(0, x2 - x), h: Math.max(0, y2 - y) };
+}
+
 /** 下划线批注的气泡锚点 y（图像像素）：缺省回退到「线下方一个字距」；并钳制在图内，保证气泡完整可见 */
 function underlineTextY(
   m: Extract<Mark, { kind: 'underline' }>,
@@ -189,13 +277,26 @@ function underlineTextY(
   return Math.max(p.y, Math.min(raw, canvasH - (fontSize + p.y * 2)));
 }
 
-/** 引线起点：横线上距批注气泡最近的点（钳制在线段范围内） */
-function leaderAnchorOnLine(
-  m: Extract<Mark, { kind: 'underline' }>,
+/**
+ * 引线起点：**线段上距批注气泡最近的点**（沿线段方向投影，钳制在两端点之间）。
+ * 下划线 = (x,y)→(x+w,y) 的特例（旧实现是「把气泡中心 x 钳进 [x, x+w]、y 取线 y」，对水平线结果完全相同）；
+ * 箭头 = 箭杆线段 ⇒ 引线永远挂在离气泡最近的那一段上。两种批注共用同一份几何，避免两份实现漂移。
+ */
+function leaderAnchorOnSegment(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
   box: { x: number; y: number; w: number; h: number },
 ): { x: number; y: number } {
   const cx = box.x + box.w / 2;
-  return { x: Math.max(m.x, Math.min(m.x + m.w, cx)), y: m.y };
+  const cy = box.y + box.h / 2;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const l2 = dx * dx + dy * dy;
+  if (l2 < 1e-9) return { x: x1, y: y1 };
+  const t = Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / l2));
+  return { x: x1 + t * dx, y: y1 + t * dy };
 }
 
 /**
@@ -350,6 +451,119 @@ function underlineTextX(
   return Math.max(p.x, Math.min(raw, maxX));
 }
 
+/**
+ * 箭头批注的缺省气泡锚点：**起点（箭尾）沿箭头反方向外移一个字距**。
+ * 语义 = 「文字在箭尾、箭头指向被标注对象」的常规标注画法（气泡贴着起点，不压在被指对象上）；
+ * 空间不足由 arrowTextX / arrowTextY 的钳制兜底。
+ */
+function arrowDefaultTextAnchor(
+  m: Extract<Mark, { kind: 'arrow' }>,
+  fontSize: number,
+): { x: number; y: number } {
+  const dx = m.x2 - m.x1;
+  const dy = m.y2 - m.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const reach = fontSize * 1.1;
+  return { x: m.x1 - (dx / len) * reach, y: m.y1 - (dy / len) * reach };
+}
+
+/** 箭头批注的气泡锚点 x（图像像素）：缺省落在箭尾（起点）外侧；文字过长时整体左移，保证气泡完整可见 */
+function arrowTextX(
+  ctx: CanvasRenderingContext2D,
+  m: Extract<Mark, { kind: 'arrow' }>,
+  value: string,
+): number {
+  const fs = markFontSize(ctx.canvas.width);
+  const p = textBubblePadding(fs);
+  const raw = m.textX ?? arrowDefaultTextAnchor(m, fs).x;
+  if (!value) return raw;
+  ctx.font = markFont(ctx.canvas.width);
+  const tw = ctx.measureText(value).width;
+  const maxX = ctx.canvas.width - (tw + p.x); // 气泡右边缘不出图
+  return Math.max(p.x, Math.min(raw, maxX));
+}
+
+/** 箭头批注的气泡锚点 y（图像像素）：缺省落在箭尾（起点）外侧；并钳制在图内，保证气泡完整可见 */
+function arrowTextY(
+  m: Extract<Mark, { kind: 'arrow' }>,
+  fontSize: number,
+  canvasH: number,
+): number {
+  const p = textBubblePadding(fontSize);
+  const raw = m.textY ?? arrowDefaultTextAnchor(m, fontSize).y;
+  return Math.max(p.y, Math.min(raw, canvasH - (fontSize + p.y * 2)));
+}
+
+/**
+ * 矩形框批注的缺省气泡锚点 y：**框下方外侧**（与下划线批注「线下方」同一观感）。
+ * 框贴到图底、下方放不下整块气泡时翻到**框上方**——否则 rectTextY 的钳制会把气泡塞进框内，
+ * 视觉上变成「框里糊了一块白」，还压住被圈住的内容。
+ */
+function rectTextY(
+  m: Extract<Mark, { kind: 'rect' }>,
+  fontSize: number,
+  canvasH: number,
+): number {
+  const p = textBubblePadding(fontSize);
+  const bubbleH = fontSize + p.y * 2;
+  // 与框边的**净空**（已扣掉气泡内边距）：下方 / 上方取同一个值，两处默认位置都不触发引线
+  // （净空 3px ⇒ 气泡中心距边 3 + bubbleH/2 = 20 < LEADER_MIN_GAP × 字号 = 24）。
+  const gap = Math.max(2, Math.round(fontSize * 0.12));
+  const below = m.y + m.h + gap + p.y;
+  const above = m.y - gap - fontSize - p.y;
+  const raw = m.textY ?? (below + bubbleH <= canvasH ? below : above);
+  return Math.max(p.y, Math.min(raw, canvasH - bubbleH));
+}
+
+/** 矩形框批注的气泡锚点 x（图像像素）：缺省与框左边对齐；文字过长时整体左移，保证气泡完整可见 */
+function rectTextX(
+  ctx: CanvasRenderingContext2D,
+  m: Extract<Mark, { kind: 'rect' }>,
+  value: string,
+): number {
+  const fs = markFontSize(ctx.canvas.width);
+  const p = textBubblePadding(fs);
+  const raw = m.textX ?? m.x;
+  if (!value) return raw;
+  ctx.font = markFont(ctx.canvas.width);
+  const tw = ctx.measureText(value).width;
+  const maxX = ctx.canvas.width - (tw + p.x); // 气泡右边缘不出图
+  return Math.max(p.x, Math.min(raw, maxX));
+}
+
+/**
+ * 矩形框的引线起点：**框边界上距气泡最近的点**。
+ *
+ * 不能沿用「气泡中心 clamp 进框」——那个只对框外有效；气泡拖到框内部时 clamp 返回气泡中心本身，
+ * 引线长度变 0、箭头方向也无从谈起。故分两种情况：
+ *  · 气泡中心在框外 → clamp 到框（对角方位自然落在框角，仍是边界上的最近点）；
+ *  · 气泡中心在框内 → 比较到四条边的距离，取最近那条边的垂足。
+ * 导出供单测覆核（含「气泡落进框内」这个容易退化的分支）。
+ */
+export function leaderAnchorOnRect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  box: { x: number; y: number; w: number; h: number },
+): { x: number; y: number } {
+  const cx = box.x + box.w / 2;
+  const cy = box.y + box.h / 2;
+  const inside = cx > x && cx < x + w && cy > y && cy < y + h;
+  if (!inside) {
+    return { x: Math.max(x, Math.min(cx, x + w)), y: Math.max(y, Math.min(cy, y + h)) };
+  }
+  const dl = cx - x;
+  const dr = x + w - cx;
+  const dt = cy - y;
+  const db = y + h - cy;
+  const m = Math.min(dl, dr, dt, db);
+  if (m === dl) return { x, y: cy };
+  if (m === dr) return { x: x + w, y: cy };
+  if (m === dt) return { x: cx, y };
+  return { x: cx, y: y + h };
+}
+
 /** 画批注文字气泡：白底 + 标注红字，返回气泡矩形（供选中框复用） */
 function drawTextBubble(
   ctx: CanvasRenderingContext2D,
@@ -369,27 +583,61 @@ function drawTextBubble(
   return r;
 }
 
-/** 命中检测：从后往前（后画的在上），返回命中的标注对象或 null */
-function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, py: number): Mark | null {
+/** 标注对象的批注气泡矩形（图像像素）；无批注返回 null。
+ *  **命中检测 / 单独拖气泡 / 选中框**三处共用，避免「看得见但点不中」「点中了却拖不动」这类判定漂移。 */
+function markTextBubbleRect(ctx: CanvasRenderingContext2D, m: Mark): Sel | null {
+  if (m.kind === 'text') return textBubbleRect(ctx, m.x, m.y, m.value);
+  if (!m.value) return null;
   const fs = markFontSize(ctx.canvas.width);
+  const h = ctx.canvas.height;
+  if (m.kind === 'underline')
+    return textBubbleRect(ctx, underlineTextX(ctx, m, m.value), underlineTextY(m, fs, h), m.value);
+  if (m.kind === 'arrow')
+    return textBubbleRect(ctx, arrowTextX(ctx, m, m.value), arrowTextY(m, fs, h), m.value);
+  return textBubbleRect(ctx, rectTextX(ctx, m, m.value), rectTextY(m, fs, h), m.value);
+}
+
+/** 气泡的**有效**锚点（把缺省回退算进来）。拖气泡以它作起点，否则 textX 未设时一拖就跳回默认位置。 */
+export function markTextPos(ctx: CanvasRenderingContext2D, m: Mark): { x: number; y: number } | null {
+  const r = markTextBubbleRect(ctx, m);
+  if (!r) return null;
+  const p = textBubblePadding(markFontSize(ctx.canvas.width));
+  return { x: r.x + p.x, y: r.y + p.y };
+}
+
+/** 命中检测：从后往前（后画的在上），返回命中的标注对象或 null。导出供单测覆核矩形框的「只命中边」语义。 */
+export function hitTestMark(ctx: CanvasRenderingContext2D, marks: Mark[], px: number, py: number): Mark | null {
   ctx.font = markFont(ctx.canvas.width);
   ctx.textBaseline = 'top';
+  const inBox = (r: Sel) => px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
   for (let i = marks.length - 1; i >= 0; i--) {
     const m = marks[i];
     if (m.kind === 'text') {
-      // 按气泡矩形判定（含内边距），点到底色边缘也能选中
-      const r = textBubbleRect(ctx, m.x, m.y, m.value);
-      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return m;
-    } else if (m.kind === 'underline') {
-      // 命中横线本体（线段）或线下批注文字气泡
-      if (distToSegment(px, py, m.x, m.y, m.x + m.w, m.y) <= 8) return m;
-      if (m.value) {
-        const r = textBubbleRect(ctx, underlineTextX(ctx, m, m.value), underlineTextY(m, fs, ctx.canvas.height), m.value);
-        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return m;
-      }
-    } else {
-      if (distToSegment(px, py, m.x1, m.y1, m.x2, m.y2) <= 8) return m;
+      // 文字标注本身就是气泡：按矩形判定（含内边距），点到底色边缘也能选中
+      if (inBox(textBubbleRect(ctx, m.x, m.y, m.value))) return m;
+      continue;
     }
+    // ① 先判本体（横线 / 箭杆 / 空心框的四条边）
+    if (m.kind === 'underline') {
+      if (distToSegment(px, py, m.x, m.y, m.x + m.w, m.y) <= 8) return m;
+    } else if (m.kind === 'arrow') {
+      if (distToSegment(px, py, m.x1, m.y1, m.x2, m.y2) <= 8) return m;
+    } else {
+      // 矩形框：**只命中四条边（容差 8px），内部不拦截**。
+      // 空心框的语义是「圈出区域」；若内部也命中，在框内放文字/下划线会被判成「选中并拖动这个框」。
+      const { x, y, w, h } = m;
+      if (
+        distToSegment(px, py, x, y, x + w, y) <= 8 ||
+        distToSegment(px, py, x + w, y, x + w, y + h) <= 8 ||
+        distToSegment(px, py, x + w, y + h, x, y + h) <= 8 ||
+        distToSegment(px, py, x, y + h, x, y) <= 8
+      ) {
+        return m;
+      }
+    }
+    // ② 再判批注气泡（气泡被拖离本体后，本体之外也要能点中）
+    const r = markTextBubbleRect(ctx, m);
+    if (r && inBox(r)) return m;
   }
   return null;
 }
@@ -479,7 +727,9 @@ export function ScreenOcrEditor({
   const [mosaicStep, setMosaicStep] = useState(1);
   const [phase, setPhase] = useState<'idle' | 'edit'>('idle');
   const [dragging, setDragging] = useState(false);
-  const [dragMode, setDragMode] = useState<null | 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'underline' | 'markMove' | 'anchor'>(null);
+  const [dragMode, setDragMode] = useState<
+    null | 'select' | 'move' | 'resize' | 'mosaic' | 'rect' | 'arrow' | 'underline' | 'markMove' | 'textMove' | 'anchor'
+  >(null);
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
   const [scale, setScale] = useState(1);
   /** 马赛克画笔半径（图像像素）：基准随图像宽度自适应，再按档位缩放，保证不同 DPR 截图视觉一致 */
@@ -569,17 +819,52 @@ export function ScreenOcrEditor({
   const textDraftRef = useRef<TextDraft | null>(null);
   /** 文字输入框最近一次挂载时间戳（挂载初期误失焦保护用） */
   const textMountTs = useRef(0);
+  /**
+   * 文字输入框挂载：记录挂载时刻 + 延迟一拍聚焦。
+   * ⚠️ 必须是稳定引用（useCallback）：原先写成内联箭头 `<textarea ref={(el) => …}>`，
+   * 每次重渲染都会换身份 ⇒ React 重新调用 ⇒ textMountTs 被持续刷新 ⇒
+   * onBlur 里 `Date.now() - textMountTs < 400` 的防误失焦保护恒为真 ⇒ 真失焦时草稿既不落定也不清理。
+   */
+  const focusTextInput = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    textMountTs.current = Date.now();
+    // 挂载后聚焦（覆盖窗口可能刚激活，延迟一拍确保成为 key window 后聚焦有效）
+    requestAnimationFrame(() => {
+      try {
+        el.focus();
+      } catch { /* ignore */ }
+    });
+  }, []);
   /** 刚画完下划线时挂在线尾的「+ 添加批注」按钮（可拖拽定位批注位置；不点则保持纯下划线） */
-  const [underlinePending, setUnderlinePending] = useState<UnderlinePending | null>(null);
-  const underlinePendingRef = useRef<UnderlinePending | null>(null);
-  const setUnderlinePendingBoth = useCallback((p: UnderlinePending | null) => {
-    underlinePendingRef.current = p;
-    setUnderlinePending(p);
+  const [anchorPending, setAnchorPending] = useState<AnchorPending | null>(null);
+  const anchorPendingRef = useRef<AnchorPending | null>(null);
+  const setAnchorPendingBoth = useCallback((p: AnchorPending | null) => {
+    anchorPendingRef.current = p;
+    setAnchorPending(p);
   }, []);
   /** scale 的 ref 镜像（redrawMarks 内换算按钮半径用，避免给它加依赖引发连锁重建） */
   const scaleRef = useRef(1);
+  /** 指针是否悬停在批注气泡上（仅用于光标提示；ref 镜像避免每次移动都 setState） */
+  const overLabelRef = useRef(false);
+  const [overLabel, setOverLabel] = useState(false);
+  const setOverLabelBoth = useCallback((v: boolean) => {
+    if (overLabelRef.current === v) return;
+    overLabelRef.current = v;
+    setOverLabel(v);
+  }, []);
   const dragRef = useRef<{
-    mode: 'select' | 'move' | 'resize' | 'mosaic' | 'arrow' | 'underline' | 'markMove' | 'anchor' | null;
+    mode:
+      | 'select'
+      | 'move'
+      | 'resize'
+      | 'mosaic'
+      | 'rect'
+      | 'arrow'
+      | 'underline'
+      | 'markMove'
+      | 'textMove'
+      | 'anchor'
+      | null;
     handle?: string;
     startX: number;
     startY: number;
@@ -589,6 +874,8 @@ export function ScreenOcrEditor({
     /** 标注对象拖动：被拖对象 id 与命中时原坐标（用于偏移） */
     markId?: number;
     markFrom?: Mark;
+    /** 单独拖批注气泡：按下时的**有效**锚点（已含缺省回退），仅改 textX/textY */
+    textFrom?: { x: number; y: number };
     /** 马赛克涂抹：上一个落笔点（用于相邻点插值，消除快速拖动断层） */
     lastX?: number;
     lastY?: number;
@@ -656,7 +943,7 @@ export function ScreenOcrEditor({
           ? drawTextBubble(ctx, underlineTextX(ctx, m, m.value), underlineTextY(m, fs, mc.height), m.value)
           : null;
         if (box) {
-          const a = leaderAnchorOnLine(m, box);
+          const a = leaderAnchorOnSegment(m.x, m.y, m.x + m.w, m.y, box);
           const b = leaderEndAtBubble(a, box, Math.max(2, Math.round(fs * 0.1)));
           if (b && Math.hypot(b.x - a.x, b.y - a.y) >= fs * LEADER_MIN_GAP) drawLeaderArrow(ctx, a.x, a.y, b.x, b.y);
         }
@@ -671,32 +958,80 @@ export function ScreenOcrEditor({
           ctx.strokeRect(left, top, right - left, bottom - top);
           ctx.setLineDash([]);
         }
-      } else {
+      } else if (m.kind === 'arrow') {
+        // 箭头（可带文字批注，与下划线批注同构）：箭杆 + 箭尾（起点）外侧的气泡 + 气泡被拖离时补单向虚线引线
         drawArrow(ctx, m.x1, m.y1, m.x2, m.y2);
+        const box = m.value
+          ? drawTextBubble(ctx, arrowTextX(ctx, m, m.value), arrowTextY(m, fs, mc.height), m.value)
+          : null;
+        if (box) {
+          const a = leaderAnchorOnSegment(m.x1, m.y1, m.x2, m.y2, box);
+          const b = leaderEndAtBubble(a, box, Math.max(2, Math.round(fs * 0.1)));
+          if (b && Math.hypot(b.x - a.x, b.y - a.y) >= fs * LEADER_MIN_GAP) drawLeaderArrow(ctx, a.x, a.y, b.x, b.y);
+        }
         if (m.id === selId) {
+          // 选中框 = 箭杆包围盒 ∪ 气泡外框（只框箭杆会让气泡看起来「没被选中」）
+          const ax0 = Math.min(m.x1, m.x2) - 5;
+          const ay0 = Math.min(m.y1, m.y2) - 5;
+          const ax1 = Math.max(m.x1, m.x2) + 5;
+          const ay1 = Math.max(m.y1, m.y2) + 5;
+          const left = box ? Math.min(ax0, box.x - 2) : ax0;
+          const top = box ? Math.min(ay0, box.y - 2) : ay0;
+          const right = box ? Math.max(ax1, box.x + box.w + 2) : ax1;
+          const bottom = box ? Math.max(ay1, box.y + box.h + 2) : ay1;
           ctx.setLineDash([4, 3]);
           ctx.strokeStyle = 'rgba(75,63,227,0.95)';
           ctx.lineWidth = 1.2;
-          ctx.strokeRect(
-            Math.min(m.x1, m.x2) - 5,
-            Math.min(m.y1, m.y2) - 5,
-            Math.abs(m.x2 - m.x1) + 10,
-            Math.abs(m.y2 - m.y1) + 10,
-          );
+          ctx.strokeRect(left, top, right - left, bottom - top);
+          ctx.setLineDash([]);
+        }
+      } else {
+        // 矩形框标注（可带文字批注，与下划线/箭头同构）：空心框 + 框外气泡 + 气泡被拖离时补单向虚线引线。
+        // 引线起点取「框边界最近点」，故气泡拖到框的任意一侧都能正对过去。
+        drawRectMark(ctx, m.x, m.y, m.w, m.h);
+        const box = m.value
+          ? drawTextBubble(ctx, rectTextX(ctx, m, m.value), rectTextY(m, fs, mc.height), m.value)
+          : null;
+        if (box) {
+          const a = leaderAnchorOnRect(m.x, m.y, m.w, m.h, box);
+          const b = leaderEndAtBubble(a, box, Math.max(2, Math.round(fs * 0.1)));
+          if (b && Math.hypot(b.x - a.x, b.y - a.y) >= fs * LEADER_MIN_GAP) drawLeaderArrow(ctx, a.x, a.y, b.x, b.y);
+        }
+        if (m.id === selId) {
+          // 选中框 = 框外扩 4px ∪ 气泡外框
+          const left = box ? Math.min(m.x - 4, box.x - 2) : m.x - 4;
+          const top = box ? Math.min(m.y - 4, box.y - 2) : m.y - 4;
+          const right = box ? Math.max(m.x + m.w + 4, box.x + box.w + 2) : m.x + m.w + 4;
+          const bottom = box ? Math.max(m.y + m.h + 4, box.y + box.h + 2) : m.y + m.h + 4;
+          ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = 'rgba(75,63,227,0.95)';
+          ctx.lineWidth = 1.2;
+          ctx.strokeRect(left, top, right - left, bottom - top);
           ctx.setLineDash([]);
         }
       }
     }
-    // 下划线批注草稿：输入期间把「待落定横线」画出来（提交后才成为 mark 对象）
-    const draftLine = textDraftRef.current?.underline;
-    if (draftLine) drawUnderline(ctx, draftLine.x, draftLine.y, draftLine.w);
-    // 「+ 按钮」存在期间：画一条预览引线（横线上最近点 → 按钮当前位置，随拖拽实时更新）
-    const pend = underlinePendingRef.current;
+    // 标注草稿：输入期间把「待落定几何」画出来。仅当对应 mark **已不在列表里**时补画
+    // （旧「一次成型」路径，或新路径的横线/箭头在输入期间被误删），避免与已有 mark 重复描边。
+    const draft = textDraftRef.current;
+    if (draft && !marksRef.current.some((mm) => mm.id === (draft.underlineId ?? draft.arrowId ?? draft.rectId))) {
+      if (draft.underline) drawUnderline(ctx, draft.underline.x, draft.underline.y, draft.underline.w);
+      if (draft.arrow) drawArrow(ctx, draft.arrow.x1, draft.arrow.y1, draft.arrow.x2, draft.arrow.y2);
+      if (draft.rect) drawRectMark(ctx, draft.rect.x, draft.rect.y, draft.rect.w, draft.rect.h);
+    }
+    // 「+ 按钮」存在期间：画一条预览引线（mark 上距按钮最近的点 → 按钮当前位置，随拖拽实时更新）
+    const pend = anchorPendingRef.current;
     if (pend) {
       const m = marksRef.current.find((mm) => mm.id === pend.id);
-      if (m && m.kind === 'underline') {
+      if (m && (m.kind === 'underline' || m.kind === 'arrow' || m.kind === 'rect')) {
         const rImg = ANCHOR_BTN_R / Math.max(scaleRef.current, 0.0001);
-        const a = { x: Math.max(m.x, Math.min(m.x + m.w, pend.endX)), y: m.y };
+        const zero = { x: pend.x, y: pend.y, w: 0, h: 0 };
+        const a =
+          m.kind === 'rect'
+            ? leaderAnchorOnRect(m.x, m.y, m.w, m.h, zero)
+            : m.kind === 'underline'
+              ? leaderAnchorOnSegment(m.x, m.y, m.x + m.w, m.y, zero)
+              : leaderAnchorOnSegment(m.x1, m.y1, m.x2, m.y2, zero);
         const len = Math.hypot(pend.x - a.x, pend.y - a.y);
         if (len > rImg + 4) {
           drawLeaderArrow(ctx, a.x, a.y, pend.x - ((pend.x - a.x) / len) * rImg, pend.y - ((pend.y - a.y) / len) * rImg);
@@ -799,9 +1134,9 @@ export function ScreenOcrEditor({
     redoRef.current.push({ img: getCtx().getImageData(0, 0, canvas.width, canvas.height), marks: marksRef.current.slice() });
     restoreSnapshot(prev);
     // 撤销后「+ 按钮」指向的线可能已不存在 → 一并收起
-    if (underlinePendingRef.current) setUnderlinePendingBoth(null);
+    if (anchorPendingRef.current) setAnchorPendingBoth(null);
     refreshStates();
-  }, [getCanvas, getCtx, restoreSnapshot, refreshStates, setUnderlinePendingBoth]);
+  }, [getCanvas, getCtx, restoreSnapshot, refreshStates, setAnchorPendingBoth]);
 
   const redo = useCallback(() => {
     const next = redoRef.current.pop();
@@ -809,9 +1144,9 @@ export function ScreenOcrEditor({
     const canvas = getCanvas()!;
     undoRef.current.push({ img: getCtx().getImageData(0, 0, canvas.width, canvas.height), marks: marksRef.current.slice() });
     restoreSnapshot(next);
-    if (underlinePendingRef.current) setUnderlinePendingBoth(null);
+    if (anchorPendingRef.current) setAnchorPendingBoth(null);
     refreshStates();
-  }, [getCanvas, getCtx, restoreSnapshot, refreshStates, setUnderlinePendingBoth]);
+  }, [getCanvas, getCtx, restoreSnapshot, refreshStates, setAnchorPendingBoth]);
 
   const reset = useCallback(() => {
     const img = originalRef.current;
@@ -824,36 +1159,86 @@ export function ScreenOcrEditor({
     getCtx().drawImage(img, 0, 0);
     setMarksBoth([]);
     setSelMarkIdBoth(null);
-    setUnderlinePendingBoth(null);
+    setAnchorPendingBoth(null);
     redrawMarks();
     refreshStates();
-  }, [getCanvas, getCtx, pushUndo, setMarksBoth, setSelMarkIdBoth, setUnderlinePendingBoth, redrawMarks, refreshStates]);
+  }, [getCanvas, getCtx, pushUndo, setMarksBoth, setSelMarkIdBoth, setAnchorPendingBoth, redrawMarks, refreshStates]);
 
   /** 提交文字草稿：把文本画到内容画布（空文本直接丢弃） */
   const commitTextDraft = useCallback(
     (d: TextDraft) => {
       setTextDraftBoth(null);
       const v = d.value.trim();
-      // 纯文字工具：空文本直接丢弃；下划线批注：即使没写字也保留横线（只划线不批注是合理用法）
+      // 纯文字工具：空文本直接丢弃；下划线 / 箭头批注：即使没写字也保留线（只画线不批注是合理用法）
       if (!v && !d.underline) {
         redrawMarks();
         return;
       }
-      // 新路径：给已落定的下划线补批注（拖「+ 按钮」定位后输入）→ 回填 value 与气泡锚点
-      if (d.underlineId !== undefined) {
-        // 拖了按钮但没写字：保持纯下划线，不产生空撤销步
+      // 新路径：给已落定的标注（下划线 / 箭头 / 矩形框）补批注（拖「+ 按钮」定位后输入）→ 回填 value 与气泡锚点
+      const attachId = d.underlineId ?? d.arrowId ?? d.rectId;
+      if (attachId !== undefined) {
+        // 拖了按钮但没写字：保持纯线 / 纯框，不产生空撤销步
         if (!v) {
           redrawMarks();
           return;
         }
-        pushUndo();
-        setMarksBoth(
-          marksRef.current.map((m) =>
-            m.id === d.underlineId && m.kind === 'underline'
-              ? { ...m, value: v, textX: Math.round(d.x), textY: Math.round(d.y) }
-              : m,
-          ),
+        const target = marksRef.current.find(
+          (m): m is Extract<Mark, { kind: 'underline' | 'arrow' | 'rect' }> =>
+            m.id === attachId && (m.kind === 'underline' || m.kind === 'arrow' || m.kind === 'rect'),
         );
+        if (target) {
+          pushUndo();
+          setMarksBoth(
+            marksRef.current.map((m) =>
+              m === target ? { ...m, value: v, textX: Math.round(d.x), textY: Math.round(d.y) } : m,
+            ),
+          );
+          redrawMarks();
+          return;
+        }
+        // 兜底（曾经静默丢字的地方）：落定目标已不在标注列表里 —— 例如输入期间按退格，
+        // 被窗口捕获阶段的「删除选中标注」快捷键截走，把这条线删了。
+        // 原实现 `map(m => m.id === id ? ... : m)` 匹配不到就原样返回 = 无任何反馈，
+        // 用户输入凭空消失（输入框已在函数开头关闭）。改为按草稿记录的几何重建，
+        // 保证「用户写下的字一定落到图上」。
+        pushUndo();
+        const rebuilt: Mark = d.underline
+          ? {
+              kind: 'underline',
+              id: markIdRef.current++,
+              x: Math.round(d.underline.x),
+              y: Math.round(d.underline.y),
+              w: Math.round(d.underline.w),
+              value: v,
+              textX: Math.round(d.x),
+              textY: Math.round(d.y),
+            }
+          : d.arrow
+            ? {
+                kind: 'arrow',
+                id: markIdRef.current++,
+                x1: Math.round(d.arrow.x1),
+                y1: Math.round(d.arrow.y1),
+                x2: Math.round(d.arrow.x2),
+                y2: Math.round(d.arrow.y2),
+                value: v,
+                textX: Math.round(d.x),
+                textY: Math.round(d.y),
+              }
+            : d.rect
+              ? {
+                  kind: 'rect',
+                  id: markIdRef.current++,
+                  x: Math.round(d.rect.x),
+                  y: Math.round(d.rect.y),
+                  w: Math.round(d.rect.w),
+                  h: Math.round(d.rect.h),
+                  value: v,
+                  textX: Math.round(d.x),
+                  textY: Math.round(d.y),
+                }
+              : { kind: 'text', id: markIdRef.current++, x: Math.round(d.x), y: Math.round(d.y), value: v };
+        setMarksBoth([...marksRef.current, rebuilt]);
         redrawMarks();
         return;
       }
@@ -884,13 +1269,13 @@ export function ScreenOcrEditor({
     (t: Tool) => {
       if ((tool === 'text' || tool === 'underline') && textDraftRef.current) commitTextDraft(textDraftRef.current);
       // 换工具：收起「+ 按钮」（已画的纯下划线保留）
-      if (underlinePendingRef.current) {
-        setUnderlinePendingBoth(null);
+      if (anchorPendingRef.current) {
+        setAnchorPendingBoth(null);
         redrawMarks();
       }
       setTool(t);
     },
-    [tool, commitTextDraft, setUnderlinePendingBoth, redrawMarks],
+    [tool, commitTextDraft, setAnchorPendingBoth, redrawMarks],
   );
 
   /** 马赛克：把以 (cx,cy) 为圆心、radius 半径内的像素按 MOSAIC_BLOCK 网格块化（每块取平均色） */
@@ -956,41 +1341,67 @@ export function ScreenOcrEditor({
       e.currentTarget.setPointerCapture(e.pointerId);
       const pos = toImagePos(e.clientX, e.clientY);
       // 点画布任意处（「+ 按钮」自身已 stopPropagation）→ 收起按钮，纯下划线保留
-      if (underlinePendingRef.current) {
-        setUnderlinePendingBoth(null);
+      if (anchorPendingRef.current) {
+        setAnchorPendingBoth(null);
         redrawMarks();
       }
       // 进行中的文字草稿：任何工具按下前先落定（防残留输入框/状态混乱）
       if ((tool === 'text' || tool === 'underline') && textDraftRef.current) commitTextDraft(textDraftRef.current);
-      // 公共前置：命中已有标注（文字 / 箭头 / 下划线批注）→ 选中并拖动。
-      // 放开到 text / underline 工具：刚画完线想微调批注时，不必先切回「选择」工具；
-      // 代价：在已有标注上无法起笔新线/新文字，需从空白处起笔（涂抹与箭头不受影响）。
-      if (tool === 'select' || tool === 'text' || tool === 'underline') {
-        const mc = markCanvasRef.current;
-        if (mc) {
-          const hit = hitTestMark(mc.getContext('2d')!, marksRef.current, pos.x, pos.y);
-          if (hit) {
-            if (selMarkIdRef.current !== hit.id) setSelMarkIdBoth(hit.id);
-            redrawMarks();
-            // 拖动前压栈（含对象快照）→ 一次撤销步撤销整段移动
-            pushUndo();
-            dragRef.current = {
-              mode: 'markMove',
-              markId: hit.id,
-              markFrom: hit,
-              startX: pos.x,
-              startY: pos.y,
-              curX: pos.x,
-              curY: pos.y,
-              sel0: selRef.current ?? { x: 0, y: 0, w: 0, h: 0 },
-            };
-            setDragMode('markMove');
-            setDragging(true);
-            return;
-          }
-          // 仅「选择」工具在空白处点击时清空选中态
-          if (tool === 'select') setSelMarkIdBoth(null);
+      // ① 批注气泡：**任何非涂抹工具下都可单独拖动**，且只改 textX/textY，不动线 / 框本体。
+      // 这是「方框 / 箭头 / 划线加了文字后调不动位置」的根因修复：此前只有 select/text/underline
+      // 会命中标注，而刚画完形状时工具仍是 arrow/rect —— 按在文字上只会起笔新形状，永远抓不到标签。
+      // 气泡是纯文字底色，不存在「在气泡上起笔」的合理意图，故这里不受当前工具限制。
+      const mc = markCanvasRef.current;
+      if (mc && tool !== 'mosaic') {
+        const c2d = mc.getContext('2d')!;
+        const hit = hitTestMark(c2d, marksRef.current, pos.x, pos.y);
+        const bubble = hit ? markTextBubbleRect(c2d, hit) : null;
+        const onBubble =
+          !!bubble && pos.x >= bubble.x && pos.x <= bubble.x + bubble.w && pos.y >= bubble.y && pos.y <= bubble.y + bubble.h;
+        if (hit && onBubble) {
+          if (selMarkIdRef.current !== hit.id) setSelMarkIdBoth(hit.id);
+          redrawMarks();
+          pushUndo();
+          dragRef.current = {
+            // 文字标注本身就是气泡，整体平移即可；线 / 框上的标签只挪标签
+            mode: hit.kind === 'text' ? 'markMove' : 'textMove',
+            markId: hit.id,
+            markFrom: hit,
+            textFrom: markTextPos(c2d, hit) ?? undefined,
+            startX: pos.x,
+            startY: pos.y,
+            curX: pos.x,
+            curY: pos.y,
+            sel0: selRef.current ?? { x: 0, y: 0, w: 0, h: 0 },
+          };
+          setDragMode(hit.kind === 'text' ? 'markMove' : 'textMove');
+          setDragging(true);
+          return;
         }
+        // ② 本体（横线 / 箭杆 / 空心框的四条边）命中 → 整体拖动。
+        // 只放开到 select / text / underline：刚画完线想微调时不必切回选择工具；
+        // 箭头 / 矩形工具保留「按下去就起笔新对象」的语义（否则起点压在旧对象边上会反复失手）。
+        if (hit && (tool === 'select' || tool === 'text' || tool === 'underline')) {
+          if (selMarkIdRef.current !== hit.id) setSelMarkIdBoth(hit.id);
+          redrawMarks();
+          // 拖动前压栈（含对象快照）→ 一次撤销步撤销整段移动
+          pushUndo();
+          dragRef.current = {
+            mode: 'markMove',
+            markId: hit.id,
+            markFrom: hit,
+            startX: pos.x,
+            startY: pos.y,
+            curX: pos.x,
+            curY: pos.y,
+            sel0: selRef.current ?? { x: 0, y: 0, w: 0, h: 0 },
+          };
+          setDragMode('markMove');
+          setDragging(true);
+          return;
+        }
+        // 仅「选择」工具在空白处点击时清空选中态
+        if (!hit && tool === 'select') setSelMarkIdBoth(null);
       }
       // 文字：在点击处开新输入框（不进入拖拽）
       if (tool === 'text') {
@@ -1010,6 +1421,16 @@ export function ScreenOcrEditor({
         setSelMarkIdBoth(null);
         dragRef.current = { mode: 'arrow', startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y, sel0: { x: 0, y: 0, w: 0, h: 0 } };
         setDragMode('arrow');
+        setDragging(true);
+        return;
+      }
+      // 矩形框：拖拽预览 → 松开落定（对象化，一次矩形一个撤销步）。
+      // 刻意**不**并入上面的「命中已有标注 → 拖动」分支（与箭头对齐）：框选是「拖出新区」语义，
+      // 若起点落在旧框边上就变成拖旧框，用户想画相邻两个框时会反复失手。要移动旧框请用「选择」工具。
+      if (tool === 'rect') {
+        setSelMarkIdBoth(null);
+        dragRef.current = { mode: 'rect', startX: pos.x, startY: pos.y, curX: pos.x, curY: pos.y, sel0: { x: 0, y: 0, w: 0, h: 0 } };
+        setDragMode('rect');
         setDragging(true);
         return;
       }
@@ -1037,7 +1458,7 @@ export function ScreenOcrEditor({
       setSelBoth({ x: pos.x, y: pos.y, w: 0, h: 0 });
       setDragging(true);
     },
-    [toImagePos, tool, phase, mosaicRadius, pushUndo, paintMosaicAt, setSelBoth, commitTextDraft, setTextDraftBoth, redrawMarks, setSelMarkIdBoth, setUnderlinePendingBoth],
+    [toImagePos, tool, phase, mosaicRadius, pushUndo, paintMosaicAt, setSelBoth, commitTextDraft, setTextDraftBoth, redrawMarks, setSelMarkIdBoth, setAnchorPendingBoth],
   );
 
   const onPointerMove = useCallback(
@@ -1083,6 +1504,14 @@ export function ScreenOcrEditor({
         redrawMarks();
         const mc = markCanvasRef.current;
         if (mc) drawArrow(mc.getContext('2d')!, d.startX, d.startY, pos.x, pos.y);
+      } else if (d.mode === 'rect') {
+        // 预览：标注层重绘 marks + 拖拽中的矩形（与落定共用 rectFromDrag，反向拖拽不会预览/结果不一致）
+        redrawMarks();
+        const mc = markCanvasRef.current;
+        if (mc) {
+          const r = rectFromDrag(d.startX, d.startY, pos.x, pos.y, canvas.width, canvas.height);
+          drawRectMark(mc.getContext('2d')!, r.x, r.y, r.w, r.h);
+        }
       } else if (d.mode === 'markMove') {
         // 拖动标注对象：按命中时原坐标 + 偏移更新
         const from = d.markFrom;
@@ -1105,6 +1534,7 @@ export function ScreenOcrEditor({
                   textY:
                     from.textY === undefined ? undefined : Math.max(0, Math.round(from.textY + dy)),
                 };
+              // 箭头批注整体移动：箭杆与文字同步偏移（起点与气泡锚点的相对位置不变）
               if (m.kind === 'arrow' && from.kind === 'arrow')
                 return {
                   ...m,
@@ -1112,8 +1542,38 @@ export function ScreenOcrEditor({
                   y1: Math.max(0, Math.round(from.y1 + dy)),
                   x2: Math.max(0, Math.round(from.x2 + dx)),
                   y2: Math.max(0, Math.round(from.y2 + dy)),
+                  textX:
+                    from.textX === undefined ? undefined : Math.max(0, Math.round(from.textX + dx)),
+                  textY:
+                    from.textY === undefined ? undefined : Math.max(0, Math.round(from.textY + dy)),
+                };
+              // 矩形框整体移动：宽高不变，只挪左上角；带的批注气泡同步偏移（相对位置不变）
+              if (m.kind === 'rect' && from.kind === 'rect')
+                return {
+                  ...m,
+                  x: Math.max(0, Math.round(from.x + dx)),
+                  y: Math.max(0, Math.round(from.y + dy)),
+                  textX:
+                    from.textX === undefined ? undefined : Math.max(0, Math.round(from.textX + dx)),
+                  textY:
+                    from.textY === undefined ? undefined : Math.max(0, Math.round(from.textY + dy)),
                 };
               return m;
+            }),
+          );
+          redrawMarks();
+        }
+      } else if (d.mode === 'textMove') {
+        // 单独拖批注气泡：只改 textX/textY，线 / 框本体不动。
+        // 起点用按下时的**有效**锚点（含缺省回退）→ 首次拖动不会从默认位置跳一下。
+        const from = d.textFrom;
+        if (from) {
+          const nx = Math.max(0, Math.min(Math.round(from.x + (pos.x - d.startX)), canvas.width));
+          const ny = Math.max(0, Math.min(Math.round(from.y + (pos.y - d.startY)), canvas.height));
+          setMarksBoth(
+            marksRef.current.map((m) => {
+              if (m.id !== d.markId || m.kind === 'text') return m;
+              return { ...m, textX: nx, textY: ny };
             }),
           );
           redrawMarks();
@@ -1121,9 +1581,9 @@ export function ScreenOcrEditor({
       } else if (d.mode === 'anchor') {
         // 拖「+ 按钮」：按偏移移动按钮（钳制在图内），引线随按钮实时重绘
         const from = d.anchorFrom;
-        const p = underlinePendingRef.current;
+        const p = anchorPendingRef.current;
         if (from && p) {
-          setUnderlinePendingBoth({
+          setAnchorPendingBoth({
             ...p,
             x: Math.max(0, Math.min(from.x + (pos.x - d.startX), canvas.width)),
             y: Math.max(0, Math.min(from.y + (pos.y - d.startY), canvas.height)),
@@ -1132,7 +1592,7 @@ export function ScreenOcrEditor({
         }
       }
     },
-    [toImagePos, getCanvas, mosaicRadius, paintMosaicAt, setSelBoth, redrawMarks, setMarksBoth, setUnderlinePendingBoth],
+    [toImagePos, getCanvas, mosaicRadius, paintMosaicAt, setSelBoth, redrawMarks, setMarksBoth, setAnchorPendingBoth],
   );
 
   /** 复位拖拽状态（指针取消/丢失兜底，防止 dragging 卡死导致工具条不弹） */
@@ -1148,7 +1608,14 @@ export function ScreenOcrEditor({
     if (d.mode === 'select') {
       const s = selRef.current;
       if (s && s.w >= MIN_SEL && s.h >= MIN_SEL) setPhase('edit');
-    } else if (d.mode === 'arrow' || d.mode === 'underline' || d.mode === 'markMove' || d.mode === 'anchor') {
+    } else if (
+      d.mode === 'arrow' ||
+      d.mode === 'rect' ||
+      d.mode === 'underline' ||
+      d.mode === 'markMove' ||
+      d.mode === 'textMove' ||
+      d.mode === 'anchor'
+    ) {
       // 取消未落定操作：清预览、恢复原标注层
       redrawMarks();
     }
@@ -1184,39 +1651,112 @@ export function ScreenOcrEditor({
           { kind: 'underline', id, x: Math.round(x), y: Math.round(d.startY), w: Math.round(w), value: '' },
         ]);
         // 按钮默认落在划线结束端（左往右划在右端、右往左划在左端）下方约一个字距处
-        setUnderlinePendingBoth({
+        setAnchorPendingBoth({
+          kind: 'underline',
           id,
           x: d.curX,
           y: Math.min(d.startY + underlineTextOffset(fs) + fs * 0.8, hMax),
-          endX: d.curX,
         });
         setSelMarkIdBoth(id);
       }
       redrawMarks();
     } else if (d.mode === 'anchor') {
       // 「+ 按钮」松手：在按钮当前位置开输入框（一次拖拽同时完成「定位 + 开始输入」）
-      const p = underlinePendingRef.current;
+      const p = anchorPendingRef.current;
       if (p) {
-        setTextDraftBoth({ x: Math.round(p.x), y: Math.round(p.y), value: '', underlineId: p.id });
-        setUnderlinePendingBoth(null);
+        // 一并把几何写进草稿：即便这条线/框在输入期间被误删（退格命中全局删除快捷键），
+        // 落定时也能按原样重建 —— 见 commitTextDraft 的兜底分支。
+        const target = marksRef.current.find(
+          (m): m is Extract<Mark, { kind: 'underline' | 'arrow' | 'rect' }> =>
+            m.id === p.id && (m.kind === 'underline' || m.kind === 'arrow' || m.kind === 'rect'),
+        );
+        setTextDraftBoth({
+          x: Math.round(p.x),
+          y: Math.round(p.y),
+          value: '',
+          underlineId: target?.kind === 'underline' ? p.id : undefined,
+          underline:
+            target?.kind === 'underline' ? { x: target.x, y: target.y, w: target.w } : undefined,
+          arrowId: target?.kind === 'arrow' ? p.id : undefined,
+          arrow:
+            target?.kind === 'arrow'
+              ? { x1: target.x1, y1: target.y1, x2: target.x2, y2: target.y2 }
+              : undefined,
+          rectId: target?.kind === 'rect' ? p.id : undefined,
+          rect:
+            target?.kind === 'rect'
+              ? { x: target.x, y: target.y, w: target.w, h: target.h }
+              : undefined,
+        });
+        setAnchorPendingBoth(null);
       }
       redrawMarks();
     } else if (d.mode === 'arrow') {
-      // 落定箭头（对象化）：有效线段 → 入标注列表 + 一次撤销步；过短则丢弃（清预览）
-      if (Math.hypot(d.curX - d.startX, d.curY - d.startY) >= 6) {
+      // 落定箭头（对象化）：有效线段 → 入标注列表 + 一次撤销步；过短则丢弃（清预览）。
+      // 落定后与下划线批注同构：在**起点（箭尾）**外侧挂「+ 添加批注」按钮（不点 = 纯箭头）。
+      const len = Math.hypot(d.curX - d.startX, d.curY - d.startY);
+      if (len >= 6) {
+        const fs = nat ? markFontSize(nat.w) : 24;
+        const pad = textBubblePadding(fs);
+        const id = markIdRef.current++;
+        const x1 = Math.round(d.startX);
+        const y1 = Math.round(d.startY);
+        const x2 = Math.round(d.curX);
+        const y2 = Math.round(d.curY);
+        pushUndo();
+        setMarksBoth([...marksRef.current, { kind: 'arrow', id, x1, y1, x2, y2 }]);
+        // 按钮默认落在起点（箭尾）沿箭头反方向外移一个字距处（空间不足则钳制在图内）
+        const anchor = arrowDefaultTextAnchor({ kind: 'arrow', id, x1, y1, x2, y2 }, fs);
+        setAnchorPendingBoth({
+          kind: 'arrow',
+          id,
+          x: Math.max(pad.x, Math.min(anchor.x, (nat ? nat.w : Number.MAX_SAFE_INTEGER) - pad.x)),
+          y: Math.max(
+            pad.y,
+            Math.min(anchor.y, (nat ? nat.h : Number.MAX_SAFE_INTEGER) - (fs + pad.y * 2)),
+          ),
+        });
+        setSelMarkIdBoth(id);
+      }
+      redrawMarks();
+    } else if (d.mode === 'rect') {
+      // 落定矩形框（对象化）：宽高都达标才入列表（任一边过短 = 误触）；一次矩形一个撤销步。
+      // 落定后与下划线/箭头同构：在**框左下角外侧**挂「+ 添加批注」按钮（不点 = 纯矩形框）。
+      const cw = nat ? nat.w : Number.MAX_SAFE_INTEGER;
+      const ch = nat ? nat.h : Number.MAX_SAFE_INTEGER;
+      const r = rectFromDrag(d.startX, d.startY, d.curX, d.curY, cw, ch);
+      if (r.w >= MIN_RECT && r.h >= MIN_RECT) {
+        const fs = nat ? markFontSize(nat.w) : 24;
+        const pad = textBubblePadding(fs);
+        const id = markIdRef.current++;
         pushUndo();
         setMarksBoth([
           ...marksRef.current,
-          { kind: 'arrow', id: markIdRef.current++, x1: Math.round(d.startX), y1: Math.round(d.startY), x2: Math.round(d.curX), y2: Math.round(d.curY) },
+          {
+            kind: 'rect',
+            id,
+            x: Math.round(r.x),
+            y: Math.round(r.y),
+            w: Math.round(r.w),
+            h: Math.round(r.h),
+          },
         ]);
+        // 按钮默认落在框下方外侧、与左边对齐（= rectTextY 的缺省气泡位置），空间不足则钳进图内
+        setAnchorPendingBoth({
+          kind: 'rect',
+          id,
+          x: Math.max(pad.x, Math.min(r.x, cw - pad.x)),
+          y: Math.max(pad.y, Math.min(r.y + r.h + underlineTextOffset(fs) + fs * 0.8, ch - pad.y)),
+        });
+        setSelMarkIdBoth(id);
       }
       redrawMarks();
-    } else if (d.mode === 'markMove') {
-      // 标注对象拖动结束：pushUndo 已在按下时记录拖动前状态（撤销一次移动）
+    } else if (d.mode === 'markMove' || d.mode === 'textMove') {
+      // 拖动结束：pushUndo 已在按下时记录拖动前状态（撤销一次移动）
       setSelMarkIdBoth(d.markId ?? null);
     }
     resetDrag();
-  }, [setSelBoth, pushUndo, setMarksBoth, redrawMarks, setSelMarkIdBoth, resetDrag, selectTarget, nat, setTextDraftBoth, setUnderlinePendingBoth]);
+  }, [setSelBoth, pushUndo, setMarksBoth, redrawMarks, setSelMarkIdBoth, resetDrag, selectTarget, nat, setTextDraftBoth, setAnchorPendingBoth]);
 
   /** 「+ 添加批注」按钮按下：进入拖拽。
    *  必须 stopPropagation——否则画布的 onPointerDown 会先收起按钮并开始新的框选（同工具条 L1457 的处理）。 */
@@ -1225,7 +1765,7 @@ export function ScreenOcrEditor({
       if (e.button !== 0) return;
       e.stopPropagation();
       e.preventDefault();
-      const p = underlinePendingRef.current;
+      const p = anchorPendingRef.current;
       if (!p) return;
       e.currentTarget.setPointerCapture(e.pointerId);
       const pos = toImagePos(e.clientX, e.clientY);
@@ -1244,10 +1784,21 @@ export function ScreenOcrEditor({
     [toImagePos],
   );
 
-  /** 未拖拽时的指针移动：窗口吸附 hover 高亮（仅 select 工具 + 有吸附目标时） */
+  /** 未拖拽时的指针移动：窗口吸附 hover 高亮（仅 select 工具 + 有吸附目标时）+ 气泡 hover 光标提示 */
   const onRootPointerMove = useCallback(
     (e: React.PointerEvent) => {
       if (dragRef.current.mode) return; // 拖拽中不改 hover，避免干扰自由框选
+      // 先判「是否悬停在某条批注气泡上」→ 光标变 move（否则「这段文字能拖」完全靠猜）
+      const mc = markCanvasRef.current;
+      const c2d = mc && tool !== 'mosaic' ? mc.getContext('2d') : null;
+      if (c2d) {
+        const p = toImagePos(e.clientX, e.clientY);
+        const hit = hitTestMark(c2d, marksRef.current, p.x, p.y);
+        const r = hit ? markTextBubbleRect(c2d, hit) : null;
+        setOverLabelBoth(!!r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h);
+      } else if (overLabelRef.current) {
+        setOverLabelBoth(false);
+      }
       if (tool !== 'select' || snapTargets.length === 0) {
         if (hoverTargetRef.current) setHoverTargetBoth(null);
         return;
@@ -1255,7 +1806,7 @@ export function ScreenOcrEditor({
       const pos = toImagePos(e.clientX, e.clientY);
       setHoverTargetBoth(hitTarget(pos.x, pos.y));
     },
-    [tool, snapTargets.length, hitTarget, toImagePos, setHoverTargetBoth],
+    [tool, snapTargets.length, hitTarget, toImagePos, setHoverTargetBoth, setOverLabelBoth],
   );
 
   /** 缩放手柄按下（阻止冒泡到画布），捕获指针以便移出元素后继续 */
@@ -1278,6 +1829,14 @@ export function ScreenOcrEditor({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      // 焦点在输入框（文字 / 下划线批注）里时，编辑键必须留给输入框：
+      // 否则退格会命中下面的「删除选中标注」分支 —— 而下划线创建即被选中（见「+ 按钮」落定处的
+      // setSelMarkIdBoth(id)），用户改一个错字就会把整条横线连同批注一起删掉，
+      // 随后 Enter 落定到已失效的 id（静默丢字）。Tab 同理不该触发吸附轮换。
+      // Esc 不在此列：它仍需用于「丢弃草稿」。
+      const t = e.target as HTMLElement | null;
+      const editing =
+        !!t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable === true);
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1287,17 +1846,17 @@ export function ScreenOcrEditor({
         e.preventDefault();
         e.stopImmediatePropagation();
         redo();
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selMarkIdRef.current) {
+      } else if (!editing && (e.key === 'Delete' || e.key === 'Backspace') && selMarkIdRef.current) {
         // 删除选中的标注对象（文字/箭头）
         e.preventDefault();
         e.stopImmediatePropagation();
         pushUndo();
         setMarksBoth(marksRef.current.filter((m) => m.id !== selMarkIdRef.current));
         // 连同「+ 添加批注」按钮一起收起（否则按钮会指向已被删除的线）
-        if (underlinePendingRef.current?.id === selMarkIdRef.current) setUnderlinePendingBoth(null);
+        if (anchorPendingRef.current?.id === selMarkIdRef.current) setAnchorPendingBoth(null);
         setSelMarkIdBoth(null);
         redrawMarks();
-      } else if (e.key === 'Tab' && snapTargets.length > 0) {
+      } else if (!editing && e.key === 'Tab' && snapTargets.length > 0) {
         // 微信式：Tab 在窗口 / 菜单栏 / Dock 之间轮换吸附选中
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1310,8 +1869,8 @@ export function ScreenOcrEditor({
         e.preventDefault();
         e.stopImmediatePropagation();
         // 有「+ 添加批注」按钮时：先只收起按钮（纯下划线保留），不退出编辑器
-        if (underlinePendingRef.current) {
-          setUnderlinePendingBoth(null);
+        if (anchorPendingRef.current) {
+          setAnchorPendingBoth(null);
           redrawMarks();
           return;
         }
@@ -1332,7 +1891,7 @@ export function ScreenOcrEditor({
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [undo, redo, onCancel, setTextDraftBoth, pushUndo, setMarksBoth, setSelMarkIdBoth, redrawMarks, snapTargets, setHoverTargetBoth, selectTarget, setUnderlinePendingBoth]);
+  }, [undo, redo, onCancel, setTextDraftBoth, pushUndo, setMarksBoth, setSelMarkIdBoth, redrawMarks, snapTargets, setHoverTargetBoth, selectTarget, setAnchorPendingBoth]);
 
   /** 按选区裁剪内容画布 → dataUrl（选区无效返回 null；输出带圆角，透明角） */
   const cropToDataUrl = useCallback((): string | null => {
@@ -1456,7 +2015,11 @@ export function ScreenOcrEditor({
       ? 'text'
       : tool === 'mosaic'
         ? 'crosshair'
-        : dragMode === 'move' || dragMode === 'resize'
+        : dragMode === 'move' ||
+            dragMode === 'resize' ||
+            dragMode === 'markMove' ||
+            dragMode === 'textMove' ||
+            overLabel
           ? 'move'
           : 'crosshair';
 
@@ -1533,15 +2096,16 @@ export function ScreenOcrEditor({
           }}
         />
 
-        {/* 刚画完的下划线：线尾的「+ 添加批注」按钮（拖到合适位置松手即输入；不点它 = 纯下划线） */}
-        {underlinePending && (
+        {/* 刚画完的下划线 / 箭头 / 矩形框：外侧的「+ 添加批注」按钮
+            （拖到合适位置松手即输入；不点它 = 纯线 / 纯框） */}
+        {anchorPending && (
           <div
             onPointerDown={onAnchorPointerDown}
             title="拖到合适位置后松手，即可添加批注"
             style={{
               position: 'absolute',
-              left: underlinePending.x * scale - ANCHOR_BTN_R,
-              top: underlinePending.y * scale - ANCHOR_BTN_R,
+              left: anchorPending.x * scale - ANCHOR_BTN_R,
+              top: anchorPending.y * scale - ANCHOR_BTN_R,
               width: ANCHOR_BTN_R * 2,
               height: ANCHOR_BTN_R * 2,
               borderRadius: '50%',
@@ -1667,17 +2231,7 @@ export function ScreenOcrEditor({
         {textDraft && (
           <textarea
             value={textDraft.value}
-            ref={(el) => {
-              if (el) {
-                textMountTs.current = Date.now();
-                // 挂载后聚焦（覆盖窗口可能刚激活，延迟一拍确保成为 key window 后聚焦有效）
-                requestAnimationFrame(() => {
-                  try {
-                    el.focus();
-                  } catch { /* ignore */ }
-                });
-              }
-            }}
+            ref={focusTextInput}
             onPointerDown={(e) => e.stopPropagation()}
             onChange={(e) => setTextDraftBoth({ ...textDraft, value: e.target.value })}
             onBlur={() => {
@@ -1687,9 +2241,13 @@ export function ScreenOcrEditor({
             }}
             onKeyDown={(e) => {
               e.stopPropagation();
+              // 中文输入法「上屏」那一下也会发 Enter（isComposing=true / keyCode=229）——那是确认候选词，
+              // 不是落定。不拦会在成文之前就提交半截甚至空草稿。本仓库其他 Enter 提交点均有此守卫。
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Enter') {
                 e.preventDefault();
-                commitTextDraft(textDraft);
+                // 从 ref 取草稿：state 可能滞后于输入框 DOM 的实际内容
+                commitTextDraft(textDraftRef.current ?? textDraft);
               }
             }}
             style={{
@@ -1747,40 +2305,55 @@ export function ScreenOcrEditor({
             </button>
             {tool === 'mosaic' && (
               <>
-                {MOSAIC_BRUSH_STEPS.map((_, i) => (
-                  <button
-                    key={i}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      width: 26,
-                      height: 26,
-                      borderRadius: 8,
-                      border: 'none',
-                      background: mosaicStep === i ? 'rgba(255,255,255,0.22)' : 'transparent',
-                      color: mosaicStep === i ? '#fff' : 'rgba(255,255,255,0.75)',
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => setMosaicStep(i)}
-                    title={`Brush size: ${['Fine', 'Medium', 'Thick'][i]}`}
-                  >
-                    <span
+                {MOSAIC_BRUSH_STEPS.map((step, i) => {
+                  // 圆点直径按档位倍率同比缩放（最大档 = 15px）⇒ 以后调档位常量时 UI 自动跟随，
+                  // 不会再出现「图标大小与实际笔刷不符」
+                  const dot = Math.max(
+                    4,
+                    Math.round((15 * step) / MOSAIC_BRUSH_STEPS[MOSAIC_BRUSH_STEPS.length - 1]),
+                  );
+                  return (
+                    <button
+                      key={i}
                       style={{
-                        display: 'block',
-                        width: [6, 10, 15][i],
-                        height: [6, 10, 15][i],
-                        borderRadius: '50%',
-                        background: 'currentColor',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: 26,
+                        height: 26,
+                        borderRadius: 8,
+                        border: 'none',
+                        background: mosaicStep === i ? 'rgba(255,255,255,0.22)' : 'transparent',
+                        color: mosaicStep === i ? '#fff' : 'rgba(255,255,255,0.75)',
+                        cursor: 'pointer',
                       }}
-                    />
-                  </button>
-                ))}
+                      onClick={() => setMosaicStep(i)}
+                      title={`Brush size: ${['Fine', 'Medium', 'Thick'][i]}`}
+                    >
+                      <span
+                        style={{
+                          display: 'block',
+                          width: dot,
+                          height: dot,
+                          borderRadius: '50%',
+                          background: 'currentColor',
+                        }}
+                      />
+                    </button>
+                  );
+                })}
                 <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.18)', margin: '0 4px' }} />
               </>
             )}
             <button style={toolBtn(tool === 'arrow')} onClick={() => switchTool('arrow')} title="Arrow: drag to draw (hand-drawn sketch)">
               <ArrowUpRight className="h-4 w-4" />
+            </button>
+            <button
+              style={toolBtn(tool === 'rect')}
+              onClick={() => switchTool('rect')}
+              title="Rect: drag to box a region, then drag the + button to add a note"
+            >
+              <Square className="h-4 w-4" />
             </button>
             <button style={toolBtn(tool === 'text')} onClick={() => switchTool('text')} title="Text: click to add text">
               <Type className="h-4 w-4" />

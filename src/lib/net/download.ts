@@ -17,11 +17,19 @@ import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { requireCapability } from '../platform';
 
 const execFileAsync = promisify(execFile);
 
-/** 系统 curl（macOS 自带）：原生支持 `-C -` 断点续传 */
-const CURL_BIN = '/usr/bin/curl';
+/**
+ * curl 路径：按平台解析（Windows 用 System32\curl.exe，自 Win10 1803 起随系统）。
+ * 缺失时抛可读错误——下载引擎/模型是硬依赖，静默降级只会让 UI 无限转圈。
+ */
+let curlBinCache: string | null = null;
+function curlBin(): string {
+  if (!curlBinCache) curlBinCache = requireCapability('curl', '模型/引擎下载');
+  return curlBinCache;
+}
 /** 单次 curl 调用的硬超时（curl 自身的 --speed-limit 会先兜住"假死"） */
 const CURL_TIMEOUT_MS = 15 * 60 * 1000;
 /** 单文件下载最大尝试轮数（每轮都会从 .part 已有字节续传） */
@@ -111,7 +119,7 @@ function curlDownload(url: string, outPath: string): Promise<void> {
       '-o', outPath,
       url,
     ];
-    execFile(CURL_BIN, args, { timeout: CURL_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, _stdout, stderr) => {
+    execFile(curlBin(), args, { timeout: CURL_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, _stdout, stderr) => {
       if (err) {
         const detail = String(stderr || (err as Error).message).trim().split('\n').slice(-3).join(' | ');
         reject(new Error(`curl 失败：${detail.slice(0, 300)}`));
@@ -125,5 +133,7 @@ function curlDownload(url: string, outPath: string): Promise<void> {
 /** 用系统 tar 解压 .tar.bz2 到 destDir（调用方自行读取顶层目录名） */
 export async function extractTarBz2(archive: string, destDir: string): Promise<void> {
   await fs.mkdir(destDir, { recursive: true });
-  await execFileAsync('/usr/bin/tar', ['-xjf', archive, '-C', destDir], { timeout: 300_000 });
+  // Windows 10 1803+ 自带 bsdtar（tar.exe），同样接受 -xjf
+  const tar = requireCapability('tar', '模型包解压');
+  await execFileAsync(tar, ['-xjf', archive, '-C', destDir], { timeout: 300_000 });
 }

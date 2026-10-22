@@ -8,11 +8,15 @@
  * 现在每个联系人 = 一条会话 = 一个助理，中栏只显示**当前这一个联系人**的消息流。
  *
  * 四栏分工：
- *   - 左栏 48px：**纯图标功能键**（Buddy · Today · Memory · Calendar · Meeting），名字由悬停弹窗给出
- *   - 联系人列 168px（窄窗收成覆盖层）：**常驻**。置顶行 = 两个常驻联系人：**Bobby**
- *           （通知助理，系统推送类通知的归属）与**Recorder**（会议记录员）；两者都不可删除、
- *           无「人设」入口。其余 = 各会话（头像 / 标题 / 预览 / 时间 / 删除）。点击即切换中栏。
- *           **顶部是搜索栏**（2026-09-26 自中栏工具行移来）：同一个词同时过滤本列联系人与中栏时间线。
+ *   - 左栏 56px：**窗口键 + 助理头像 + 纯图标功能键**（Chats · Today · Calendar · Mini Apps · Outbox · Meeting），
+ *           名字由悬停弹窗给出。2026-10-20 的两处调整：**助理头像本身即记忆入口**（点头像 = 打开 Memories 台，
+ *           原独立的 Memories 键并入头像）；**「加好友」键从本栏移到联系人列搜索框右侧**（见下），
+ *           左栏因此不再占这两颗键。
+ *   - 联系人列 208px（窄窗收成覆盖层）：**常驻**。置顶行 = 常驻联系人 **Bobby**
+ *           （通知助理，系统推送类通知的归属）；它不可删除，其余 = 各会话（头像 / 标题 / 预览 / 时间 / 删除）。点击即切换中栏。
+ *           **顶部是搜索栏 + 右侧的「加好友」键**（2026-09-26 搜索栏自中栏工具行移来，
+ *           2026-10-20 加好友键自左栏 Buddy 键移到搜索框右侧，列宽同时由 168 加宽到 208）：
+ *           同一个词同时过滤本列联系人与中栏时间线。
  *   - 中栏：**当前联系人的消息流** —— 工具行（人设 + 通知助理的「已读」开关）+ 时间线 + 输入框。
  *           普通联系人 = 该会话的消息气泡；通知助理 = 该线程的通知行 + 追问往返，按时间归并，
  *           通知行渲染成一张卡片：短回执（日历提醒等）的待办项**就在行内勾选**，
@@ -84,7 +88,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   ArrowUpCircle,
   Bell,
-  Brain,
+  Boxes,
   CalendarDays,
   Check,
   CheckCircle2,
@@ -95,10 +99,12 @@ import {
   Flag,
   /** 本地文件夹入口按钮（与回形针并排，见 attachFolder） */
   FolderOpen,
+  Inbox,
   Link2,
   ListChecks,
   Loader2,
   MapPin,
+  MessagesSquare,
   Mic,
   PanelLeft,
   Paperclip,
@@ -129,8 +135,8 @@ import { recurrenceLabel } from '@/lib/calendar/recurrence';
 /** 回执详情的展示格式层（2026-10-05 抽出，桌面与移动端共用一份口径）：
  *  formatTime / ScheduleDetail / fmtEventWhen / fmtReminderMinutes 见该文件注释。 */
 import { fmtEventWhen, fmtReminderMinutes, formatTime, type ScheduleDetail } from './noticeFormat';
-/** 头像：人物素材 id + 底色都由名字/性格稳定派生（纯函数，见文件注释） */
-import { avatarTint, defaultAvatarId } from '@/lib/butler/avatar';
+/** 头像：人设（自定义图 / 选定内置张）覆盖优先，缺省时按性格/名字稳定派生（纯函数，见文件注释） */
+import { avatarTint, resolveAvatarId } from '@/lib/butler/avatar';
 import PersonaAvatar from '@/components/butler/PersonaAvatar';
 /** 等待口语（话风 + 静默分档 + 取句）：纯函数模块，文案三条规矩由 wait-lines.test.ts 守着 */
 import { WAIT_STRIP_MIN_SILENCE_SEC, waitLineFor, waitVoiceOf } from '@/lib/butler/wait-lines';
@@ -193,6 +199,10 @@ import { ButlerConfirmModal, type ButlerConfirmState } from '@/components/canvas
 /** 正文渲染器：与画布对话节点同源（rAF 合并 + 200ms 节流 + 未闭合代码围栏稳定化）。
  *  HtmlRenderer 早已由 page.tsx → CanvasFlow → ChatNodeKernel 进入首屏包，故此处静态引用不新增首载成本。 */
 import { StreamingMarkdown, openFileByProjectRelPath } from '@/components/canvas/HtmlRenderer';
+/** Widget 可视化：与画布对话节点（ChatNodeKernel）同源 —— 容错归一 → 分块 → 净化 + 作用域化渲染。
+ *  此前正文只走 StreamingMarkdown，```widget:* 围栏会退化成裸代码块。 */
+import { WidgetRenderer, WidgetSkeleton } from '@/components/canvas/WidgetRenderer';
+import { hasWidgetBlocks, hasOpenWidgetFence, parseWidgetBlocks } from '@/lib/widget-blocks';
 import QuestionPopup, {
   type AnswerEntry,
   type QuestionItem,
@@ -206,6 +216,8 @@ import { ButlerTodayPanel } from './ButlerTodayPanel';
 import { ButlerMemoryConsole } from './ButlerMemoryConsole';
 import { ButlerDocPanel } from './ButlerDocPanel';
 import { ButlerCalendarPanel } from './ButlerCalendarPanel';
+import { ButlerMiniAppsPanel } from './ButlerMiniAppsPanel';
+import { ButlerOutboxPanel } from './ButlerOutboxPanel';
 /** 检索实况面板（2026-10-05 自本文件抽出，见 ./ButlerSearchTrace 文件头）：桌面右栏 search 分区
  *  与移动端 /butler 分区栈共用同一份实现，避免「复制一份」造成的双真源。原名为 WechatSearchTrace。 */
 import { ButlerSearchTrace } from './ButlerSearchTrace';
@@ -244,7 +256,7 @@ const openDocInDrawer = (path: string): boolean => {
  * 'search' = 公众号「检索实况」（**没有左栏键**，由「Search WeChat Articles」触发时自动切入）：
  * 逐篇显示召回结果与 AI 精选的判定（留下 / 去除）。它是**过程态**，不落库。
  */
-export type ButlerSection = 'detail' | 'today' | 'preferences' | 'rules' | 'calendar' | 'meeting' | 'search';
+export type ButlerSection = 'detail' | 'today' | 'preferences' | 'rules' | 'calendar' | 'meeting' | 'search' | 'miniapps' | 'outbox';
 
 export interface ButlerDrawerProps {
   section: ButlerSection;
@@ -255,6 +267,17 @@ export interface ButlerDrawerProps {
   onClose: () => void;
   /** 桌面通知点击后要定位的回执 id（由 ButlerHost 从事件里取出后传入） */
   focusNoticeId?: string | null;
+  /**
+   * 左栏黄键「Minimize」：收起抽屉，并把 BobWork 一起收走，但**在桌面留下悬浮球**。
+   * 宿主各自实现（BobWork 侧 = 最小化主窗 + 出球；桌面面板窗 = 收回成球）。
+   * 不传则不渲染黄键（别的宿主不该看到一颗点不动的按钮）。
+   */
+  onMinimizeToOrb?: () => void;
+  /**
+   * 左栏红键「Close」：收起抽屉，并把 BobWork 一起收走，桌面**不留球**（彻底收起）。
+   * 不传时红键维持老语义：只收起抽屉（= onClose）。
+   */
+  onCloseAll?: () => void;
 }
 
 /** 单条会话的取回结果：气泡 + 会话级选型（模型 / 思考档位，见 lib/butler/threads-shared） */
@@ -266,6 +289,9 @@ interface SessionState {
   thinkingLevel: ThinkingLevel | null;
   /** 会话级工作区（用户指定 · 锁定操作范围）；null = 未指定（见 lib/butler/threads-shared） */
   workspaceFolder: ButlerWorkspaceFolder | null;
+  /** 服务端线程最后写入时刻（ms）；0 = 未下发。见 threads.ts upsertThread 写 updatedAt: now。
+   *  折叠补追用它判「本轮是否已落库」：裁头 / 重复提问都不影响它（见 turnLanded）。 */
+  updatedAt: number;
 }
 
 /** 抽屉模型下拉的一项（标签即 `provider:modelId`，与 /api/butler/threads 的 modelId 同构） */
@@ -346,6 +372,7 @@ async function fetchSessionState(threadId: string): Promise<SessionState | null>
     modelId: typeof data.modelId === 'string' ? data.modelId : null,
     thinkingLevel: parseThinkingLevel(data.thinkingLevel),
     workspaceFolder: parseWorkspaceFolder(data.workspaceFolder),
+    updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : 0,
   };
 }
 
@@ -508,18 +535,16 @@ function ButlerWaitingLine({
   persona,
   since,
   title,
-  personality,
 }: {
   persona: ButlerPersona | null;
   since: number;
   title: string;
-  personality?: string;
 }) {
   const { line } = useWaitLine(persona, since);
   return (
     <div className="flex items-start gap-2">
       {/* 头像：与正式回复同款同尺寸——等待与正文是同一个说话人，换的只是气泡里的字 */}
-      <ContactAvatar name={title} personality={personality} size={BUBBLE_AVATAR_SIZE} />
+      <ContactAvatar name={title} persona={persona} size={BUBBLE_AVATAR_SIZE} />
       <div
         className="relative flex min-w-0 max-w-[80%] items-center gap-1.5 px-3 py-1.5 text-xs"
         style={bubbleOtherStyle}
@@ -769,17 +794,21 @@ const TIGHT_W = 640;
  * 联系人列宽度（常驻栏 / 窄窗覆盖层同宽，覆盖层只是改成绝对定位）。
  * 2026-09-26 由 200 收到 168：行首加了 30px 头像，靠缩边距 / 删键让位，
  * 中栏反而多出一截——这一列只承担「找得到人」，不承担阅读。
+ * 2026-10-20 回到 208：加好友键挪进搜索行（右侧一颗方键）后，
+ * 168 的列宽里搜索框只剩 ~110px，检索词稍长就被压没 ⇒ 列加宽 40px 把位置补回来。
  */
-const CONTACTS_W = 168;
+const CONTACTS_W = 208;
 
 /**
- * 中栏（对话）宽度上限：余量优先给中栏（对话区），不够了才回落右栏。
+ * 中栏（对话）宽度上限：**只用于「从未手动拖动过」的自适应宽度**。
  * 2026-09-27 自 420 放宽到 560：用户要求「中间对话区域加宽」，回到更舒展的阅读宽度。
- * 放宽只影响自适应宽度 autoW（中栏本身是 flex-1，靠抽屉整体加宽而非向内挤压右栏）；
- * 右栏仍先满足 rightDesiredW，余量不足时才压到 RIGHT_MIN_W。
+ * 中栏宽度**不随右栏显隐变化** —— 右侧面板是「抽屉整体加宽」的增量，不是向内挤压（见 chatW / rightInFlow）。
  */
 const CHAT_MAX_W = 560;
-/** 右栏最小宽度：再窄列表 / 待办就挤不下，宁可让抽屉整体加宽 */
+/**
+ * 右栏最小可读宽度：余量不足这个数时右栏不再占位（在流内），改回覆盖层。
+ * 宁可盖住中栏，也不把中栏压窄 —— 「中栏宽度恒定」是硬口径（2026-10-09）。
+ */
 const RIGHT_MIN_W = 280;
 
 /**
@@ -879,14 +908,18 @@ const TODAY_BADGE_POLL_MS = 30_000;
 
 /**
  * 联系人头像：人物卡通头像（PersonaAvatar）+ 名字派生的底色（见 lib/butler/avatar.ts）。
- * 用哪张由**人设性格**（personality）决定，没写性格才按名字散列——每处调用都必须把人设传进来，
- * 否则同一个人会在联系人列和中栏气泡 / 通知卡片变成两个人。
- * 纯派生物，不落库——所以各处各渲染一次也永远一致。
+ * 用哪张按**人设**决定，优先级：persona.avatarImage（用户上传的自定义图，最高）
+ * > persona.avatar（用户选定的内置张）> 性格关键词 / 名字散列派生。
+ * 系统身份（Bobby / 小微）的形象按显示名钉死，上面两种覆盖对它们**一律无效**（见 resolveAvatarId）。
+ * 每处调用都必须把**整份人设**传进来（而非只传 personality），否则同一个人会
+ * 在联系人列 / 气泡 / 通知卡片三处长得不一样。
+ * 纯派生物 + 本地图，不落库——所以各处各渲染一次也永远一致。
  * 形状是**圆角矩形**而非正圆（2026-09-26）：方头像才和右侧的名字行同属一个「内容块」，
  * 正圆更像徽标/状态点。圆角取 size 的 0.3 倍，两处尺寸（32 / 30）自动等比；
  * 素材的衣领画到画布下沿，靠 overflow-hidden 被圆角裁掉。
  */
-function ContactAvatar({ name, personality, size }: { name: string; personality?: string; size: number }) {
+function ContactAvatar({ name, persona, size }: { name: string; persona?: ButlerPersona | null; size: number }) {
+  const custom = persona?.avatarImage;
   return (
     <span
       className="flex shrink-0 items-center justify-center overflow-hidden"
@@ -898,7 +931,12 @@ function ContactAvatar({ name, personality, size }: { name: string; personality?
       }}
       aria-hidden
     >
-      <PersonaAvatar id={defaultAvatarId(name, personality)} />
+      {custom ? (
+        /* 自定义图：走 /api/butler/avatar 回读（路径即内容指纹 → 换图自动破缓存），object-cover 填满圆角框 */
+        <img src={`/api/butler/avatar?path=${encodeURIComponent(custom)}`} alt="" className="h-full w-full object-cover" />
+      ) : (
+        <PersonaAvatar id={resolveAvatarId(name, persona?.personality, persona?.avatar)} />
+      )}
     </span>
   );
 }
@@ -1159,6 +1197,13 @@ function WechatFileCard({ path, name }: { path: string; name: string }) {
     let cancelled = false;
     (async () => {
       try {
+        // Outbox 暂存区产物（未归口）：走暂存区只读通道取大小，不查当前项目
+        if (path.replace(/\\/g, '/').startsWith('outbox/')) {
+          const resp = await fetch(`/api/outbox?action=stat&path=${encodeURIComponent(path)}`);
+          const data = await resp.json();
+          if (!cancelled && data?.success && data.exists) setSize(data.size ?? 0);
+          return;
+        }
         const cur = await fetch('/api/projects').then((r) => r.json());
         const projectId = cur?.current_id || '';
         if (!projectId) return;
@@ -1194,6 +1239,39 @@ function WechatFileCard({ path, name }: { path: string; name: string }) {
 }
 
 /**
+ * 正文渲染（widget 感知）：与画布对话节点（ChatNodeKernel）同源。
+ *
+ * ```widget:svg/html/mermaid/chart/antv 围栏经「容错归一 → 分块 → 净化 + 作用域化渲染」，
+ * 渲染成可视化而不是裸代码；流式期间未闭合的围栏用骨架屏占位。
+ * 无 widget 时保持原行为（整段交给 StreamingMarkdown）。
+ */
+function ButlerMarkdown({
+  content,
+  streaming,
+  onOpenDoc,
+}: {
+  content: string;
+  streaming: boolean;
+  onOpenDoc?: (path: string) => boolean;
+}) {
+  if (!hasWidgetBlocks(content)) {
+    return <StreamingMarkdown content={content} streaming={streaming} onOpenDoc={onOpenDoc} />;
+  }
+  return (
+    <div className="flex w-full flex-col gap-0.5">
+      {parseWidgetBlocks(content).map((block, i) =>
+        block.kind === 'text' ? (
+          <StreamingMarkdown key={i} content={block.content} streaming={streaming} onOpenDoc={onOpenDoc} />
+        ) : (
+          <WidgetRenderer key={i} widget={block.widget} />
+        ),
+      )}
+      {streaming && hasOpenWidgetFence(content) && <WidgetSkeleton />}
+    </div>
+  );
+}
+
+/**
  * 助手气泡（含「朗读」按钮）。
  *
  * 为什么单独抽成一个组件：朗读状态是**组件内 hook**（useReadAloud），而气泡是在
@@ -1209,7 +1287,7 @@ function WechatFileCard({ path, name }: { path: string; name: string }) {
 function AssistantBubble({
   message,
   title,
-  personality,
+  persona,
   selectMode,
   selected,
   onToggleSelected,
@@ -1221,7 +1299,7 @@ function AssistantBubble({
 }: {
   message: DialogMessage;
   title: string;
-  personality?: string;
+  persona?: ButlerPersona | null;
   /** 多选模式：气泡左侧出现勾选框，这条操作条常显（不再靠 hover） */
   selectMode: boolean;
   selected: boolean;
@@ -1276,6 +1354,8 @@ function AssistantBubble({
     outputFiles.filter((f) => failedPaths.has(f.path)).map((f) => f.path),
   );
   const hasBody = !!bodyContent.trim();
+  /** widget 正文：不套气泡、满宽展示（与画布对话节点 ChatNodeKernel 同口径），单独走一条分支 */
+  const hasWidget = hasWidgetBlocks(bodyContent);
   /** 纯文件消息（正文只剩空串）时不渲染空气泡，只留卡片；其余情况照常渲染 */
   const showBubble = hasBody || !!message.pending || outputFiles.length === 0;
 
@@ -1287,9 +1367,13 @@ function AssistantBubble({
       {selectMode && !message.pending && (
         <MsgCheckbox checked={selected} onToggle={() => onToggleSelected(message.id)} />
       )}
-      <ContactAvatar name={title} personality={personality} size={BUBBLE_AVATAR_SIZE} />
-      <div className="min-w-0 max-w-[80%]">
-        {showBubble && (
+      <ContactAvatar name={title} persona={persona} size={BUBBLE_AVATAR_SIZE} />
+      <div className={hasWidget ? 'min-w-0 flex-1' : 'min-w-0 max-w-[80%]'}>
+        {/* Widget 正文：不套气泡、满宽展示（与 ChatNodeKernel 同口径） */}
+        {hasWidget && (
+          <ButlerMarkdown content={bodyContent} streaming={!!message.pending} onOpenDoc={openDocInDrawer} />
+        )}
+        {showBubble && !hasWidget && (
           <div className="butler-md relative px-3 py-1.5 text-xs" style={bubbleOtherStyle}>
             {message.content ? (
               <StreamingMarkdown content={bodyContent} streaming={!!message.pending} onOpenDoc={openDocInDrawer} />
@@ -1485,7 +1569,7 @@ function WechatSearchLive({
   status,
   notice,
   title,
-  personality,
+  persona,
 }: {
   busy: boolean;
   captcha: boolean;
@@ -1494,7 +1578,7 @@ function WechatSearchLive({
   /** 非空 = 一条兜底说明（桥离线 / 未找到文章） */
   notice: string;
   title: string;
-  personality?: string;
+  persona?: ButlerPersona | null;
 }) {
   const bubbleText = captcha
     ? '需要先通过验证：在 Hippo Browser 打开 weixin.sogou.com 完成验证后重试'
@@ -1504,7 +1588,7 @@ function WechatSearchLive({
     <div className="mt-2 flex flex-col gap-2">
       {/* 过程气泡：进行中 = 三点动画 + 阶段文案；验证码/失败 = 兜底说明 */}
       <div className="flex items-start gap-2">
-        <ContactAvatar name={title} personality={personality} size={BUBBLE_AVATAR_SIZE} />
+        <ContactAvatar name={title} persona={persona} size={BUBBLE_AVATAR_SIZE} />
         <div className="min-w-0 max-w-[80%]">
           <div className="butler-md relative px-3 py-1.5 text-xs" style={bubbleOtherStyle}>
             <span className="inline-flex items-center gap-1">
@@ -1566,7 +1650,7 @@ function noticeText(n: ButlerNotice): string {
 function NoticeCard({
   notice,
   title,
-  personality,
+  persona,
   selectMode,
   checked,
   onOpen,
@@ -1577,7 +1661,7 @@ function NoticeCard({
 }: {
   notice: ButlerNotice;
   title: string;
-  personality?: string;
+  persona?: ButlerPersona | null;
   /** 多选态（与对话气泡**共用**同一套）：整行 = 勾选这张卡 */
   selectMode: boolean;
   /** 多选态下这张卡片是否被勾上 */
@@ -1623,7 +1707,7 @@ function NoticeCard({
       {/* 多选勾选框：**放在头像前**（圆圈 → 头像 → 卡片），与 AssistantBubble 收到的消息同一位置，
           也和右侧自己发的气泡对称。多选期间整片行外留出这一颗，卡片本体不再内嵌。 */}
       {selectMode && <MsgCheckbox checked={checked} onToggle={onToggleSelected} />}
-      <ContactAvatar name={title} personality={personality} size={BUBBLE_AVATAR_SIZE} />
+      <ContactAvatar name={title} persona={persona} size={BUBBLE_AVATAR_SIZE} />
       <div className="relative min-w-0">
         {/* 未读红点（微信里「还没听过的语音」那颗）：**点开卡片**才灭。
             挂在卡片右上角外侧——卡片本体 overflow-hidden，放里面会被圆角裁掉。 */}
@@ -1807,7 +1891,8 @@ function WindowDot({ color, label, onClick }: { color: string; label: string; on
  * 左栏功能键：**只留图标**（2026-09-26）。
  * 原来是「图标在上、文字在下」，这一栏被文字撑到 84px 宽；而「Buddy / Today / Memories / Calendar」
  * 这几个名字只在新手第一次用时才有价值，之后看图就够。改为悬停时在右侧弹出名字（白底英文，
- * 与全站 UI 文案一律英文的约定一致），栏宽随之收到 48px（与窄窗一致，抽屉整体也能窄 36px）。
+ * 与全站 UI 文案一律英文的约定一致），栏宽随之收到 48px（与窄窗一致，抽屉整体也能窄 36px）；
+ * 2026-10-18 加宽到 56px：顶部三颗窗口键在 48 栏里顶满，视觉上像要溢出。
  * 弹窗用 group-hover + opacity（不用 title）：title 有系统延迟、且样式不可控；
  * z-50 是为了盖住窄窗下 z-40 的联系人覆盖层。
  */
@@ -1866,7 +1951,69 @@ function RailItem({
   );
 }
 
-export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, onClose, focusNoticeId }: ButlerDrawerProps) {
+/**
+ * 「正在回答时折叠」留下的未完回合：折叠瞬间的气泡快照 + 会话 threadId。
+ *
+ * 为什么需要它：服务端要到**流结束时才整轮落库**（entry.ts 的 finally）。折叠会 abort 前端消费
+ * （服务端照旧生成），此后重开抽屉若直接采用服务端状态，会拿到「还没写进本轮提问」的旧快照
+ * —— 当前这轮问答整段消失，看起来就是「正在回答的时候缩小会丢失会话」。
+ * 故折叠时留一份快照，重开同一条会话先用它显示，再轮询到回复落地（见 openChatSession）。
+ *
+ * 模块级即可跨「卸载 → 重挂载」存活（同一渲染进程内）；桌面面板窗口不卸载，用不到它。
+ */
+let pendingTurn: { threadId: string; messages: DialogMessage[]; baselineAt: number } | null = null;
+/** 补追轮询节奏 / 上限：butler 正常生成本就 20–60s，给足 3 分钟 */
+const PENDING_TURN_POLL_MS = 5000;
+const PENDING_TURN_POLL_MAX_MS = 180000;
+/**
+ * 折叠快照里最后一条用户气泡的正文 = 本轮提问（服务端存的是「正文 + 附件/工作区块」，用正文去认）。
+ */
+function lastUserText(msgs: DialogMessage[]): string {
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    if (msgs[i].role === 'user') return msgs[i].content ?? '';
+  }
+  return '';
+}
+/**
+ * 本轮回复是否已落库。三条同时成立才认：
+ *
+ *  1. **时间戳**：`updatedAt > baselineAt`。线程每次写回复都把 updatedAt 顶到 now（threads.ts upsertThread）
+ *     —— 裁头不影响它、重复提问也不影响它。置已读刻意不改 updatedAt（threads.ts L410），
+ *     所以「只是点了下会话」不会被误判成本轮已落库。
+ *     baselineAt 取**发出时刻**而非折叠时刻：服务端可能在折叠之前就写完了（客户端还没读到尾帧），
+ *     用折叠时刻会把这种已落库的回复判成「没落地」→ 一直闪。
+ *  2. **服务端末尾是助手气泡**：落库恒为「提问 + 回复」成对写（entry.ts 的 finally），
+ *     末尾不是助手就说明这轮还没写完。
+ *  3. **末尾那轮的 user 正文对得上本轮提问**：挡掉**别的轮次**的写入——上一条被中途打断时
+ *     （B5「中途改」）服务端稍后才会落库，时间戳会「变新」但那不是本轮。
+ *     纯附件轮的例外：整段注入块被 stripInjectedBlocks 剥掉 → 服务端那份 user 正文为空，
+ *     此时无从比对，认它落地（否则纯附件轮永远判不落地 → 三个点一直闪）。
+ *
+ * 不按条数比：trimThreadMessages 只留最近 N 轮，服务端返回可能比折叠快照还短
+ * （2026-10-16 事故：`len >= baseline` 恒假 → 轮询永不采纳 → 等待点一直闪）。
+ */
+function turnLanded(msgs: DialogMessage[], asked: string, updatedAt: number, baselineAt: number): boolean {
+  if (msgs.length === 0) return false;
+  if (!(updatedAt > baselineAt)) return false;
+  const last = msgs[msgs.length - 1];
+  if (!last || last.role !== 'assistant') return false;
+  let lastUserIdx = -1;
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    if (msgs[i].role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  // 末尾助手之前没有 user：不是成对写下来的，别认
+  if (lastUserIdx < 0) return false;
+  const q = (msgs[lastUserIdx].content ?? '').trim();
+  if (!q) return true; // 纯附件轮（正文被剥空）
+  const a = asked.trim();
+  if (!a) return true; // 快照认不出提问（理论上不会走到）—— 时间戳 + 成对写已足够
+  return q.includes(a) || a.includes(q);
+}
+
+export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, onClose, focusNoticeId, onMinimizeToOrb, onCloseAll }: ButlerDrawerProps) {
   const winW = useWindowWidth();
   /** 窄窗：右栏不占位，改为点开回执才盖住列表的覆盖层 */
   const isNarrow = winW < NARROW_W;
@@ -1912,10 +2059,15 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     return g;
   }, []);
 
-  /** 拖动移动：左栏按下（栏上的按钮除外）→ **位移过阈值**才冻结基准 → pointerup 落盘；只单击则什么都不发生 */
+  /**
+   * 拖动移动：左栏 / 联系人标题栏 / 对话框标题栏按下（栏上的按钮与输入框除外）→
+   * **位移过阈值**才冻结基准 → pointerup 落盘；只单击则什么都不发生。
+   * 跳过输入类元素（input / textarea / 可编辑区 / 链接）是必需的：标题栏里嵌着搜索框，
+   * 若在它们头上也 preventDefault，点一下就没法聚焦输入文字了。
+   */
   const startMove = useCallback(
     (e: ReactPointerEvent) => {
-      if ((e.target as Element).closest('button')) return; // 左栏的按钮（窗口键 / 功能键）不触发拖动
+      if ((e.target as Element).closest('button, input, textarea, select, a, [contenteditable="true"]')) return;
       e.preventDefault();
       const startX = e.clientX;
       const startY = e.clientY;
@@ -1993,6 +2145,31 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     onClose();
   }, [onClose]);
 
+  /**
+   * 左栏黄键「Minimize to floating ball」：收起抽屉 + 把 BobWork 一起收走，但桌面留球。
+   * 与红键的关键差别：**不清 activeThreadId** —— 缩小是「先放一边」，回头再打开还要回到原来那条会话；
+   * 清掉的话回来会跳到默认联系人。宿主没实现时退回「只收起抽屉」。
+   */
+  const minimizeToOrb = useCallback(() => {
+    stopReadAloud();
+    (onMinimizeToOrb ?? onClose)();
+  }, [onMinimizeToOrb, onClose]);
+
+  /**
+   * 左栏红键「Close」（2026-10-10 起语义加重）：收起抽屉 + 把 BobWork 一起收走，桌面不留球。
+   * 与老行为（只收起抽屉）的差别对用户是「关得干净」：连桌面的球都不留，彻底让出屏幕。
+   * 宿主没实现时维持老行为。
+   */
+  const closeAll = useCallback(() => {
+    if (!onCloseAll) {
+      closeWindow(); // 未接新语义的宿主：维持老行为，只收起抽屉
+      return;
+    }
+    stopReadAloud();
+    clearActiveThreadId();
+    onCloseAll();
+  }, [onCloseAll, closeWindow]);
+
   const [notices, setNotices] = useState<ButlerNotice[]>(() => getButlerNotices());
   /** 右栏详情：当前选中的回执 id */
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -2014,6 +2191,9 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   /** 红点已读标记：用户看过的摘要日期键（localStorage 同步过来） */
   const [todayDigestSeen, setTodayDigestSeen] = useState<string | null>(null);
   const [messages, setMessages] = useState<DialogMessage[]>([]);
+  /** 折叠瞬间的气泡快照源：卸载 cleanup 的闭包拿不到最新 messages，用 ref 保真（见 pendingTurn） */
+  const messagesRef = useRef<DialogMessage[]>(messages);
+  messagesRef.current = messages;
   /**
    * 联系人列（chatSessions = 全部联系人的摘要行，含置顶的通知助理）。
    * 与 `messages` 的分工：`messages` 是**当前联系人**的气泡，chatSessions 是**联系人列**的数据源。
@@ -2118,6 +2298,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   const [streamStalledSec, setStreamStalledSec] = useState(0);
   /** 最近一次实际发出的正文（含注入块）：看门狗触发时的「重新发送」用它原样重发，不重新拼块 */
   const lastOutgoingRef = useRef<string>('');
+  /** 本轮提问的**发出时刻**：折叠补追判「本轮是否已落库」的时间戳基线（见 pendingTurn / turnLanded） */
+  const turnSentAtRef = useRef(0);
   /** 待重发文本：点重试先 abort，等 sending 落地后由 effect 发出（send 在 sending 时会直接返回） */
   const retryRef = useRef<string | null>(null);
   /**
@@ -2394,8 +2576,6 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
    * 常驻联系人线程 ID。取自列表接口的摘要身份标记（systemRole）而不是前端再写常量，
    * 保证前后端只认一个真源：
    *   - 'notify' = Bobby，通知助理（lib/core/butler-notify.ts）
-   *   - 'recorder' = Recorder，会议记录员（lib/core/butler-recorder.ts）
-   * 现在置顶行有两条，不能再用 find(pinned) 猜哪一个才是通知助理（会取到第一条）。
    */
   const notifyThreadId = useMemo(
     () => chatSessions.find((s) => s.systemRole === 'notify')?.threadId ?? null,
@@ -2418,11 +2598,6 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   /** 当前中栏看的是不是常驻「通知助理」（决定时间线要不要把通知行归并进来） */
   const isNotifyContact = !!notifyThreadId && activeThreadId === notifyThreadId;
   /**
-   * 当前中栏看的是不是 Recorder —— 只对它隐藏「人设」入口、且后端也拒绝改人设。
-   * 「通知助理」（Bobby）自 2026-09-28 起可设人设（首次打开该联系人时由用户设定），故不再算「不可改」。
-   */
-  const isRecorderContact = !!activeThreadId && chatSessions.some((s) => s.threadId === activeThreadId && s.systemRole === 'recorder');
-  /**
    * 当前中栏看的是不是常驻「小微」（搜索助手）——只对它免掉搜索词过滤。
    * 原因：搜索栏那串字对小微来说是**待检索的关键词**（点按钮才发起），不是过滤条件。
    * 若照常过滤，起搜后刚落库的综述 / 卡片只要不含这串字就会被筛掉，会话看起来「一片空白」——
@@ -2444,20 +2619,15 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     return 'New chat';
   }, [activeThreadId, chatSessions]);
 
-  /** 当前联系人的人设性格：中栏每条气泡 / 通知卡片的头像要拿它挑人物素材，须与联系人列的是同一张（见 ContactAvatar） */
-  const currentContactPersonality = useMemo(
-    () => chatSessions.find((s) => s.threadId === activeThreadId)?.persona?.personality,
-    [activeThreadId, chatSessions],
-  );
-
-  /** 当前联系人的人设全量：等待行要说「与人设同口吻」的话，光有性格不够（还要称呼 / 说话风格） */
+  /** 当前联系人的人设全量：等待行要说「与人设同口吻」的话，光有性格不够（还要称呼 / 说话风格）；
+   *  同时也是中栏每条气泡 / 通知卡片头像的输入（头像按人设覆盖，见 ContactAvatar） */
   const currentContactPersona = useMemo(
     () => chatSessions.find((s) => s.threadId === activeThreadId)?.persona ?? null,
     [activeThreadId, chatSessions],
   );
 
   /**
-   * 联系人列：常驻联系人（通知助理 / Recorder）置顶 + 其余会话（服务端已按更新时间排序，这里只做置顶归位）。
+   * 联系人列：常驻联系人（通知助理）置顶 + 其余会话（服务端已按更新时间排序，这里只做置顶归位）。
    * 新建会话会**立即落库**（见 startNewChat），所以不再需要本地的「新会话」占位行——
    * 确认建好之后列表里就已经是一条真实行（标题 = 人设姓名）。
    * 与中栏时间线共用同一个搜索词（搜索栏已挪到本列顶部）：这里按 标题 / 预览 过滤，
@@ -2962,7 +3132,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
    * 结果是打开抽屉看到的通知**全是「已读」**，角标等于摆设，
    * 用户也分不清「已读」和「完成（归档）」——故改为：未读就是未读，点开某一条才清零。
    *
-   * 顺带做一件事：通知/会话在服务端变了（通知助理预备下一批回执、Recorder 侧来消息）
+   * 顺带做一件事：通知/会话在服务端变了（通知助理预备下一批回执、小微侧来消息）
    * → **去抖重拉会话列表**。否则列表的预览与未读角标要等下次关开抽屉才刷新。
    * （本 effect 依赖 refreshChatSessions，故从原来靠前的位置下移到它之后。）
    */
@@ -3159,11 +3329,17 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       setPendingAtts([]);
       setAttachError(null);
       setSending(true);
+      // 新一轮接管：同一条会话若还在「折叠补追」，先作废标记 —— 补追 tick 会据此自行停掉，
+      // 否则它采纳落地回复时会把刚发出的这一轮覆盖掉。
+      if (pendingTurn && pendingTurn.threadId === threadIdRef.current) pendingTurn = null;
       // 等待行从此刻起换口语（首 token 未到那段静默最像卡住，越早给交代越好）；
       // 同时作为「上次可见输出」的基线——首字落下后由流式帧把静默计时归零（见 send 内的 content 分支）。
       const startedAt = Date.now();
       setWaitSince(startedAt);
       lastVisibleAtRef.current = startedAt;
+      // 折叠补追的时间戳基线（发出时刻）：见 turnLanded —— 用发出时刻而不是折叠时刻，
+      // 才能覆盖「服务端在折叠前就写完了这轮」的情形。
+      turnSentAtRef.current = startedAt;
       // 看门狗基线：本轮开头即视为"刚有字节"；此后每读到一段流就刷新（见下方 reader.read()）。
       lastStreamAtRef.current = startedAt;
       setStreamStalledSec(0);
@@ -3677,16 +3853,79 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     setLoginPopup(null);
   }, [postQuestionAnswers]);
 
+  /** 补追轮询句柄：同一时刻只允许一条（切走 / 采纳后立即清掉） */
+  const landingPollRef = useRef<number | null>(null);
+  const stopLandingPoll = useCallback(() => {
+    if (landingPollRef.current !== null) {
+      window.clearInterval(landingPollRef.current);
+      landingPollRef.current = null;
+    }
+  }, []);
+  /**
+   * 「正在回答时折叠」后的补追：轮询该会话，直到服务端把本轮回复落库（entry.ts 的 finally 才整轮写库），
+   * 再切到服务端状态 —— 否则界面停在「只有提问、没有回复」，看起来像对话丢了。
+   * 到达上限仍未落地就作罢（保留折叠快照，至少本轮提问还在）。
+   */
+  const startLandingPoll = useCallback(
+    (threadId: string, asked: string, baselineAt: number) => {
+      stopLandingPoll();
+      const startedAt = Date.now();
+      const tick = async () => {
+        // 已切走、或该会话的补追已被新一轮接管/超时作废 → 停
+        // （pendingTurn 留着：回头再点回同一条由 openChatSession 接管）
+        if (threadIdRef.current !== threadId || pendingTurn?.threadId !== threadId) {
+          stopLandingPoll();
+          return;
+        }
+        if (Date.now() - startedAt > PENDING_TURN_POLL_MAX_MS) {
+          stopLandingPoll();
+          // 追不回就作罢（服务端这轮没落库：上游整轮失败 → entry.ts 只在 combined.trim() 非空时才写）：
+          // 把还在闪的**空白占位**去掉（别留一个空气泡），有半截正文的停掉流式光标。
+          // 提问气泡留着，用户至少看得出自己问了什么、也知道这轮没答成。
+          // （走到这里说明用户此刻仍停在这条会话上，动它不会误伤别的会话。）
+          setMessages((prev) =>
+            prev.filter((m) => !(m.pending && !m.content)).map((m) => (m.pending ? { ...m, pending: false } : m)),
+          );
+          return;
+        }
+        const state = await fetchSessionState(threadId).catch(() => null);
+        if (!state || !turnLanded(state.messages, asked, state.updatedAt, baselineAt)) return;
+        pendingTurn = null;
+        stopLandingPoll();
+        setMessages(state.messages);
+        setModelTag(state.modelId ?? '');
+        setThinking(state.thinkingLevel ?? DEFAULT_THINKING_LEVEL);
+        setWorkspaceFolder(state.workspaceFolder);
+        // 用户此刻正看着这条：落地即已读，别让角标在自己眼皮底下点起来
+        void markThreadRead(threadId);
+      };
+      landingPollRef.current = window.setInterval(() => void tick(), PENDING_TURN_POLL_MS);
+      void tick();
+    },
+    [markThreadRead, stopLandingPoll],
+  );
+
   // 关闭抽屉（折叠成悬浮球）：中止在飞的流 + 回收挂起（否则服务端干等到超时）。
   // 同样开一次未读追踪：abort 不打断服务端生成，回复落地时人已经不在这个会话里，
   // 正是「角标该亮」的场景（追踪器挂在 ButlerNoticeHost，卸载后仍能跑完）。
   useEffect(() => {
     return () => {
-      if (streamAbortRef.current && threadIdRef.current) watchForUnreadGrowth();
+      if (streamAbortRef.current && threadIdRef.current) {
+        // 「正在回答时折叠」：服务端整轮要等流结束才落库，这里留一份气泡快照 + threadId，
+        // 重开抽屉接回这条会话时先用快照把对话显示出来，再轮询到回复落地（见 openChatSession）。
+        // baselineAt 用**发出时刻**（回退到折叠时刻只为兜底）——服务端可能在折叠前已写完这一轮。
+        pendingTurn = {
+          threadId: threadIdRef.current,
+          messages: messagesRef.current,
+          baselineAt: turnSentAtRef.current || Date.now(),
+        };
+        watchForUnreadGrowth();
+      }
+      stopLandingPoll();
       streamAbortRef.current?.abort();
       releasePendingInteractions();
     };
-  }, [releasePendingInteractions]);
+  }, [releasePendingInteractions, stopLandingPoll]);
 
   // ===== 会话历史（Chats）=====
 
@@ -3706,6 +3945,36 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       streamAbortRef.current?.abort();
       try {
         const state = await fetchSessionState(threadId);
+        // 「正在回答时折叠」后又接回同一条：服务端整轮（提问 + 回复）要到流结束才落库
+        // （entry.ts 的 finally），此刻服务端状态里**还没有本轮提问**——直接采用就会把这一轮
+        // 问答抹掉（用户 2026-10-16 反馈「正在回答的时候缩小会丢失会话」）。此时先用折叠快照
+        // 显示，再轮询到回复落地（startLandingPoll）才切回服务端状态。
+        if (pendingTurn && pendingTurn.threadId === threadId) {
+          const pending = pendingTurn;
+          const asked = lastUserText(pending.messages);
+          if (!state || !turnLanded(state.messages, asked, state.updatedAt, pending.baselineAt)) {
+            threadIdRef.current = threadId;
+            setActiveThreadId(threadId);
+            writeActiveThreadId(threadId);
+            setMessages(pending.messages);
+            if (state) {
+              setModelTag(state.modelId ?? '');
+              setThinking(state.thinkingLevel ?? DEFAULT_THINKING_LEVEL);
+              setWorkspaceFolder(state.workspaceFolder);
+            }
+            setModelMenuOpen(false);
+            setThinkingMenuOpen(false);
+            startLandingPoll(threadId, asked, pending.baselineAt);
+            void markThreadRead(threadId);
+            setContactsOpen(false);
+            requestAnimationFrame(() => {
+              if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+            });
+            return;
+          }
+          // 回复已落地 → 抹掉标记，交给下面的正常回填
+          pendingTurn = null;
+        }
         if (!state) {
           await refreshChatSessions();
           return;
@@ -3731,7 +4000,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         /* 读取失败：保持当前会话不动 */
       }
     },
-    [releasePendingInteractions, refreshChatSessions, markThreadRead],
+    [releasePendingInteractions, refreshChatSessions, markThreadRead, startLandingPoll],
   );
 
   /**
@@ -3744,6 +4013,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     threadIdRef.current = null;
     setActiveThreadId(null);
     clearActiveThreadId();
+    // 会话已删/清空：折叠补追标记一并作废，别让它回头把已不存在的会话快照端出来
+    pendingTurn = null;
     setMessages([]);
     // 空白态 = 未绑定任何会话 → 工作区一并清空，别把它留在下一个会话上
     setWorkspaceFolder(null);
@@ -3760,14 +4031,14 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     setPersonaDialog({ mode: 'create' });
   }, []);
 
-  /** 中栏「人设」键：编辑当前会话的人设（只有 Recorder 是系统身份，没有这个入口） */
+  /** 中栏「人设」键：编辑当前会话的人设 */
   const openPersonaEditor = useCallback(() => {
-    if (!activeThreadId || isRecorderContact) return;
+    if (!activeThreadId) return;
     setPersonaError(null);
     // 常驻联系人（Bobby / 小微）：标 systemRole，弹窗据此锁名 + 不给删除入口
     const systemRole = isNotifyContact ? 'notify' : activeThreadId === searchThreadId ? 'search' : undefined;
     setPersonaDialog({ mode: 'edit', threadId: activeThreadId, systemRole });
-  }, [activeThreadId, isRecorderContact, isNotifyContact, searchThreadId]);
+  }, [activeThreadId, isNotifyContact, searchThreadId]);
 
   /**
    * 首次使用引导：第一次打开 Bobby（通知助理）且尚未设人设 → 自动弹人设弹窗让用户设定。
@@ -3840,7 +4111,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   /** 删除会话；若删的正是当前会话 → 退到列表最新一条，没有就清成空白态 */
   const removeChatSession = useCallback(
     async (s: ButlerThreadSummary) => {
-      if (s.pinned) return; // 常驻联系人（通知助理 / Recorder）不可删
+      if (s.pinned) return; // 常驻联系人（通知助理）不可删
       const ok = await confirmAsk({
         title: 'Delete this chat?',
         message: `“${s.title}” · ${s.messageCount} messages`,
@@ -3884,7 +4155,12 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       const list = await refreshChatSessions();
       if (list.length === 0) return;
       const pointer = readActiveThreadId();
-      const target = pointer && list.some((s) => s.threadId === pointer) ? pointer : list[0].threadId;
+      // 指针优先——但指针未必已在列表里：「正在回答时缩小」的新会话要等流结束才落库，
+      // 这时列表里还没有它，若退到 list[0] 会切到别的会话，用户就以为会话丢了。
+      const target =
+        pointer && (list.some((s) => s.threadId === pointer) || pendingTurn?.threadId === pointer)
+          ? pointer
+          : list[0].threadId;
       await openChatSession(target);
     })();
   }, [refreshChatSessions, openChatSession]);
@@ -3998,44 +4274,54 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
   const rightDesiredW = docPath ? 560 : section === 'meeting' ? 480 : 420;
   /** 会议视图是否正在右栏**可见**：停在 meeting 分区且没有文档预览抢位 */
   const meetingVisible = section === 'meeting' && !docPath;
-  /** 左栏宽度：固定 48（文字已改为悬停弹窗，不再需要给文字留宽度） */
-  const railW = 48;
-  /**
-   * 右栏是否**占位**：窄窗（< NARROW_W）下右栏是盖住中栏的覆盖层，
-   * 不参与抽屉宽度计算，否则会算出一段谁也没用的空白。
-   */
-  const rightInFlow = rightVisible && !isNarrow;
+  /** 左栏宽度：固定 56（文字已改为悬停弹窗，不再需要给文字留宽度；
+      2026-10-18 由 48 加宽到 56 —— 顶部三颗窗口键 3×12 + 2×6 = 48 正好顶满 48 栏，视觉上像要溢出） */
+  const railW = 56;
   /** 左栏 + 联系人列的固定占位（窄窗下联系人列同为覆盖层，不占位） */
   const sideW = railW + (isTight ? 0 : CONTACTS_W);
   /** 抽屉可用宽度上限（按 vw 收口，四周留边距） */
   const availW = Math.round(winW * DRAWER_W_RATIO);
   /**
-   * 右栏宽度 = **增量**：先按「中栏保持 CHAT_MAX_W」反推可用余量，再夹在 [RIGHT_MIN_W, desired]。
-   * 于是宽窗下中栏宽度不变、抽屉整体向右加宽；窗口不够时先压右栏宽度，最后才动中栏。
+   * 中栏（对话）目标宽度 —— **与右栏显隐无关**（硬口径 2026-10-09）。
+   * 为什么：右栏一旦参与「中栏该多宽」的推导，开预览就会压窄中栏、关预览中栏又弹宽，
+   * 表现为「打开右侧预览，关闭后中间对话框会展开」（尤其手动拖过抽屉、中栏宽 ≠ CHAT_MAX_W 时）。
+   *   - 有手动几何：取用户拖定的中栏宽（geom.w − 固定列），拖宽了就是中栏变宽；
+   *   - 从未拖动过（geom 为 null）：自适应宽（≤ CHAT_MAX_W）。
    */
-  const rightWidth = rightInFlow
-    ? Math.max(RIGHT_MIN_W, Math.min(rightDesiredW, availW - sideW - CHAT_MAX_W))
-    : 0;
-  /** 中栏（对话）宽度：夹在 [0, CHAT_MAX_W] —— 余量优先给右栏，不够了才回落 */
-  const chatW = Math.max(0, Math.min(CHAT_MAX_W, availW - sideW - rightWidth));
+  const chatW = geom
+    ? Math.max(0, geom.w - sideW)
+    : Math.min(CHAT_MAX_W, Math.max(0, availW - sideW));
+  /** 中栏之外还剩多少余量可给右栏（不含「抽屉整体加宽」出来的那部分） */
+  const roomForRight = availW - sideW - chatW;
+  /**
+   * 右栏是否**占位**（在流内，把抽屉整体加宽）：
+   *   - 窄窗（< NARROW_W）恒为覆盖层，不占位（否则会算出一段谁也没用的空白）；
+   *   - 宽窗但余量不足 RIGHT_MIN_W 时也退回覆盖层 —— 宁可盖住中栏，也不改写中栏宽度。
+   */
+  const rightInFlow = rightVisible && !isNarrow && roomForRight >= RIGHT_MIN_W;
+  /** 右栏为**覆盖层**（窄窗 / 余量不足）：盖在左栏右侧的整块区域上，不参与抽屉宽度计算 */
+  const rightOverlay = rightVisible && !rightInFlow;
+  /**
+   * 右栏宽度 = **增量**：只吃中栏之外的余量（roomForRight），夹在 [RIGHT_MIN_W, rightDesiredW]。
+   * 中栏一点不让 → 抽屉整体向右加宽；关掉再收回。
+   */
+  const rightWidth = rightInFlow ? Math.min(rightDesiredW, roomForRight) : 0;
   /** 自适应宽 = 各栏之和；再夹一次 availW，防窄窗下各栏下限之和顶破可用宽度 */
   const autoW = Math.min(availW, sideW + chatW + rightWidth);
   /** 自适应高 = min(760px, 86vh) */
   const autoH = Math.min(DRAWER_MAX_H, Math.round(winH * DRAWER_H_RATIO));
   /**
-   * 手动几何下的宽度下限：右栏占位时**必须至少容得下中栏 + 右栏**（= sideW + chatW + rightWidth）。
-   * 为什么：geom 一旦存在，boxW 就由它定死；存的若是「右栏关闭时」的旧宽度（如 48+168+420=636），
-   * 右栏展开便无处可加宽，只能靠 flex-1 的中栏让位 → 视觉上就是「右栏向内挤压对话区域」。
-   * 这正是「安装版右栏向左挤压、dev 版向右展开」的成因：安装版 localStorage 背着这份旧几何，dev 是干净 origin。
-   * 补上这条下限后，手动几何与「右栏是增量」不再互相矛盾：关右栏回到用户拖定的宽度，开右栏整体向右加宽。
+   * 面板实际宽度。
+   *   - 手动几何：在用户拖定的宽度上**叠加右栏增量**（geom.w + rightWidth），关右栏即收回 geom.w；
+   *     因 rightWidth ≤ availW − geom.w，加宽后不会越出可用区，中栏因此全程不变。
+   *   - 从未手动调整过（geom 为 null）：严格等于自适应值 autoW。
+   *   - 最大化：铺满可用区域。
    */
-  const minPanelW = rightInFlow ? Math.max(DRAWER_MIN_W, sideW + chatW + rightWidth) : DRAWER_MIN_W;
-  /**
-   * 面板实际宽高。**从未手动调整过（geom 为 null）时严格等于自适应值**——不碰这两个新功能就零变化；
-   * 手动几何只做夹取（不越出可用区域、不小于 minPanelW），最大化则直接铺满可用区域。
-   * 宽度变化由中栏（flex-1）吸收，所以拖宽了就是中栏变宽，不需要另算各栏。
-   */
-  const boxW = zoomed ? availW : geom ? clampNum(geom.w, minPanelW, Math.max(minPanelW, availW)) : autoW;
+  const boxW = zoomed
+    ? availW
+    : geom
+      ? clampNum(geom.w + rightWidth, DRAWER_MIN_W, Math.max(DRAWER_MIN_W, availW))
+      : autoW;
   const boxH = zoomed ? autoH : geom ? clampNum(geom.h, DRAWER_MIN_H, Math.max(DRAWER_MIN_H, autoH)) : autoH;
   /**
    * 面板左上角：最大化 = 居中铺满；有手动几何 = 用它并钳回视口内；
@@ -4065,45 +4351,33 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
             ? 'Meeting'
             : section === 'search'
               ? 'Search Live'
-              : 'Bobby';
+              : section === 'miniapps'
+                ? 'Mini Apps'
+                : section === 'outbox'
+                  ? 'Outbox'
+                  : 'Bobby';
   /**
    * 顶部条最终显示的标题。
    *
    * `topTitleStrong`（加粗 / 深色）判定的是「**本栏唯一的一级标题**」：
-   *   - Today：面板自己的标题已删（嵌入态不再重复一遍「Today」），标题也只在这里。
+   *   - Today / Mini Apps：面板自己的大标题已删（嵌入态不再重复一遍栏目名），标题也只在这里。
    * 记忆 / 日历 / 其余回执的正文里各自有标题，顶栏保持原样的浅色小字即可（相当于面包屑）。
    */
   const topTitle = rightTitle;
-  const topTitleStrong = section === 'today';
+  const topTitleStrong = section === 'today' || section === 'miniapps' || section === 'outbox';
 
   return (
     <>
       {/*
-      点击抽屉外任意处 → 收起（2026-10-01）。
-      为什么用「铺满视口的透明层」而不是 document 的 mousedown 监听：
-        ① 语义要的是**吞掉**这次点击 —— 被点中的画布节点 / 侧栏 / 树节点不该同时响应。
-           用监听器只能决定「收不收抽屉」，拦不住外部元素自己的动作；一层挡板天然吞掉。
-        ② 层级高于抽屉的浮层（toast 1350 / 排程确认卡与 PersonaDialog 1400 / 画布侧栏弹窗 1600 /
-           ConfirmDialog 9999）都在挡板**之上**，它们的点击不受影响，也就不必为
-           「有弹窗时不要收起」逐项加判断（若用监听器，portal 到 body 的弹窗会被判成「外部」
-           → 先卸载抽屉再丢掉弹窗，点确认按钮必然打空）。
-      为什么 z 取 1299 而不是「贴着抽屉的 1319」：
-        悬浮球是 z-1300。贴着抽屉取值会把它一起盖住 —— 球点不动、拖不动、hover 也没了。
-        1299 = 高于全部常规页面内容（画布 UI z-40、旧面板 z-1200/1250）而低于悬浮球，
-        于是「点页面任何地方收起」与「球照常可点可拖」同时成立。
-      不做可见遮罩：抽屉刻意「无遮罩」，这里只挡事件、不压暗画面。
-      只认主键：右键（button !== 0）放行，画布右键菜单等照常。
+      点击抽屉外任意处**不再**收起（2026-10-19）：收起只保留用户手动「缩小至悬浮球」（左栏黄键）。
+      原先此处铺一层 fixed inset-0 的透明挡板吞掉外部点击以收起抽屉；现移除，
+      画布 / 侧栏等外部区域照常响应自身交互，抽屉保持打开。
       */}
     <div
-      aria-hidden
-      onPointerDown={(e) => {
-        if (e.button !== 0) return;
-        onClose();
-      }}
-      style={{ position: 'fixed', inset: 0, zIndex: 1299, background: 'transparent' }}
-    />
-    <div
       ref={panelRef}
+      // 稳定钩子：宿主靠它认出「这张卡」——桌面面板窗要把它当窗口本体（拖动区 / 卡片边界），
+      // 用 Tailwind 的 z-[1320] 类名去匹配太脆（类名一改就断）
+      data-butler-drawer-panel
       className="fixed z-[1320] flex overflow-hidden"
       style={{
         // 居中弹窗（原来是右侧全高抽屉）：没手动拖过时仍旧 left/top 50% + translate(-50%,-50%) 稳居中；
@@ -4137,47 +4411,95 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         }}
         onPointerDown={startMove}
       >
-        {/* 窗口键：只留「关闭 / 放大-还原」两颗（2026-09-26 去掉黄键「最小化」）——
-            黄键原本做的事与红键完全相同（都收起抽屉，见 onClose），同一栏里并排两颗同义的键只是噪音。 */}
+        {/* 窗口键：红「关闭」/ 黄「缩小」/ 绿「放大-还原」，与 macOS 三色键同序同色。
+            黄键 2026-09-26 曾因「与红键同义」被删；2026-10-10 以**不同语义**回归：
+              红 = 收起抽屉 + 把 BobWork 一起收走，桌面不留球（彻底让出屏幕，见 onCloseAll）；
+              黄 = 收起抽屉 + 把 BobWork 一起收走，但桌面**留**悬浮球（回头点球即可回来，见 onMinimizeToOrb）。
+            宿主没实现黄键时不渲染它 —— 别的宿主不该看到一颗点不动的按钮。 */}
         <div className="mb-1.5 flex shrink-0 items-center gap-1.5" style={{ cursor: 'grab' }} title="Hold to drag the panel">
-          <WindowDot color="#ff5f57" label="Close" onClick={closeWindow} />
+          <WindowDot color="#ff5f57" label="Close" onClick={closeAll} />
+          {onMinimizeToOrb && (
+            <WindowDot color="#febc2e" label="Minimize — shrink to the floating ball" onClick={minimizeToOrb} />
+          )}
           <WindowDot color="#28c840" label={zoomed ? 'Restore' : 'Zoom'} onClick={() => setZoomed((v) => !v)} />
         </div>
         {/* 助理标：用**悬浮球同一张河马线稿**（public/butler-orb.png），外裹一圈圆角方框。
             2026-09-26 收小 + 加框 + 下移：线稿原先按 36px 铺满整栏，在 48px 宽的栏里像块贴纸；
             缩到 20px 装进 36px 圆角格后，与联系人列的圆角方头像同属一套「图标都装在格子里」的语言。
             框色取 --panel-bg（#ffffff）而非栏底 --paper：同色的话就只剩一圈边框在飘。
-            mt-3 把它从顶部红绿键拉开（原先紧贴，两团黑糊成一团）。 */}
-        <div
-          className="mt-3 mb-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
-          style={{ cursor: 'grab', backgroundColor: 'var(--panel-bg)', border: '1px solid var(--line)' }}
+            mt-3 把它从顶部红绿键拉开（原先紧贴，两团黑糊成一团）。
+
+            2026-10-20：**记忆入口收进这颗头像** —— 原左栏那颗独立的 Memories 键（Brain 图标）并入这里，
+            点头像即打开 Memories 台，「头像 = Butler 本尊 = 它记得你什么」这层含义比另立一个大脑图标更直白，
+            左栏也随之少一个键。点亮条件沿用原键（右栏开在 rules / preferences）。
+            做成 <button> 而非原来的装饰 div，两条理由：
+              ① 它现在要可点（原来只是「图标装在格子里」的静态标）；
+              ② nav 的 startMove 会跳过所有 button —— 头像自此不再是拖动把手，
+                 拖动改由下方的窗口键行与栏间空白承担（这些抓取面都还在）。 */}
+        <button
+          type="button"
+          onClick={() => pickSection('rules')}
+          aria-label="Memories"
+          className="group relative mt-3 mb-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-colors"
+          style={{
+            backgroundColor: rightOpen && (section === 'rules' || section === 'preferences') ? 'var(--primary-soft)' : 'var(--panel-bg)',
+            border: `1px solid ${rightOpen && (section === 'rules' || section === 'preferences') ? 'var(--primary-strong)' : 'var(--line)'}`,
+          }}
         >
           <img src="/butler-orb.png" alt="Butler" draggable={false} className="h-5 w-5 select-none" />
-        </div>
-        {/* Buddy：点亮 = 当前正是一条新会话（点击反馈）。原先藏在会话列表头部，2026-09-26 提到这里。
-            图标用 UsersRound（两个人并排）：它画的是「关系」而不是「动作」——
-            Handshake 是握手成交的一瞬，读不出「有个搭子」；Plus 更像「加一条记录」。
-            人形轮廓在左栏 16px 下也不糊（同为候选的 message-circle-heart / hand-heart 会糊成一团）。 */}
-        <RailItem icon={UsersRound} label="Buddy" active={isNewChat} onClick={startNewChat} />
+          {/* 悬停弹窗沿用 RailItem 那套 group-hover（不用 title：系统延迟 + 样式不可控），
+              栏目名与右栏顶栏 / 原左栏键同字（Memories），三处读起来才是同一个地方。 */}
+          <span
+            className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md px-2 py-1 text-10 font-medium opacity-0 transition-opacity group-hover:opacity-100"
+            style={{
+              backgroundColor: 'var(--panel-bg)',
+              color: 'var(--ink-strong)',
+              border: '1px solid var(--line)',
+              boxShadow: '0 6px 18px rgba(0,0,0,0.14)',
+            }}
+          >
+            Memories
+          </span>
+        </button>
+        {/* 会话键（2026-10-19）：头像正下方的第一个去处——「回到好友列表 + 对话」这个默认视图。
+            点它 = 收起右栏（Today / Memories / Calendar 这些分区都住在右栏）+ 露出联系人列，
+            等于从任何分区一键回到聊天；窄窗下联系人列是覆盖层，这一下就是把它叫出来。
+            图标 MessagesSquare（两只并排的气泡）画的正是「一场会话」，与联系人列那颗「两人并排」的加好友键同属一套关系语言。
+            点亮条件 = 右栏没开（正常聊天态）；一旦点开某个分区，它就灭掉。 */}
+        <RailItem
+          icon={MessagesSquare}
+          label="Chats"
+          active={!rightVisible}
+          onClick={() => {
+            closeRight();
+            setContactsOpen(true);
+            inputRef.current?.focus();
+          }}
+        />
+        {/* Buddy 键已迁出左栏（2026-10-20）：它其实是**加好友**、不是「右栏分区」——
+            左栏管的是右栏分区（Today / Memories / Calendar 这类常驻去处），
+            而这颗键通向的是「往联系人列里添一个人」，与搜索框同处联系人列才合语义。
+            新位置 = 联系人列搜索框右侧（见上方联系人标题栏），原名 label「Buddy」不再保留。
+            （它更早藏在会话列表头部，2026-09-26 曾提到左栏，如今又回到同一条栏里。） */}
         {/* 原「详情」键已删（2026-09-26）：它与联系人列置顶的常驻「通知助理」行重复，
             而右栏详情分区本身仍可由悬浮球 / 桌面通知 / 点通知卡片头部打开，能力没有丢。 */}
         <RailItem icon={Sun} label="Today" active={rightOpen && section === 'today'} dot={todayHasNew} onClick={() => pickSection('today')} />
-        {/* 独立的 Memories 键已删（2026-09-29）：记忆并入 Memories 台的 Preferences 段，不再单占一个左栏键。
+        {/* 独立的 Memories 键已删（2026-09-29 并入 Memories 台的 Preferences 段；
+            2026-10-20 起整个「记忆入口」收进顶部那颗助理头像 —— 点头像即进 Memories 台，
+            左栏不再单占一个键，见上方助理标注）。
             外部的 `openButlerPreferences()`（旧名 `openButlerMemories()` 为兼容别名）事件仍可用——
             它落到 section='preferences'，由同一个 Memories 面板带 `initialSection='preferences'` 打开
-            （见右栏渲染与 rightTitle）。 */}
-        {/* Memories（2026-10-02 由 Customize 改名）：Butler 的记忆台，六段
-            —— Preferences / Rules / Skills / Threads / Evidence / Knowledge（见 ButlerMemoryConsole 头注释；
-            "don't …" 类否定式写入落 Rules 段，不落 Preferences）。
-            图标沿用原 Memories 的 Brain（2026-09-29）：记忆已并入本页，
-            「大脑 = 关于我的认知」这层含义跟着搬过来，比通用清单图标更贴。 */}
-        <RailItem
-          icon={Brain}
-          label="Memories"
-          active={rightOpen && (section === 'rules' || section === 'preferences')}
-          onClick={() => pickSection('rules')}
-        />
+            （见右栏渲染与 rightTitle）。
+            Memories 台六段：Preferences / Rules / Skills / Threads / Evidence / Knowledge
+            （见 ButlerMemoryConsole 头注释；"don't …" 类否定式写入落 Rules 段，不落 Preferences）。 */}
         <RailItem icon={CalendarDays} label="Calendar" active={rightOpen && section === 'calendar'} onClick={() => pickSection('calendar')} />
+        {/* Mini Apps（2026-10-18 从 ⌘F 迁入）：右栏列出已标星的小程序，点卡片在 Hippo 打开；
+            「Browse store」收起抽屉后打开 Mini Programs 商城（标星 / 取消标星都在那里）。 */}
+        <RailItem icon={Boxes} label="Mini Apps" active={rightOpen && section === 'miniapps'} onClick={() => pickSection('miniapps')} />
+        {/* Outbox：管家派发会话的交付物暂存区（右栏列出批次，可归口到项目 / 保留 / 丢弃）。
+            原先挂在画布左栏的通用快捷行里，2026-10-20 迁到这里 —— 它是**管家自己的产物去处**，
+            与 Today / Mini Apps 同属「管家右栏分区」，放在左栏通用行里既割裂又不合语义。 */}
+        <RailItem icon={Inbox} label="Outbox" active={rightOpen && section === 'outbox'} onClick={() => pickSection('outbox')} />
         {/* Meeting：会议视图（开始面板 / 控制台，录音 + 实时字幕 + 会后纪要）住在右栏的 meeting 分区。
             会议开始时右栏自动展开；进行中即使切到别的分区，控制台仍常驻挂载（隐藏），录音不中断。
             图标用 Video 而非 Mic（2026-09-29）：Mic 读作「一个麦克风 / 语音输入」，
@@ -4221,9 +4543,14 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
             同一个词同时过滤**联系人列**与**中栏时间线**（+ 右栏回执列表），
             因为中栏只显示当前联系人，光筛内容会不知道筛的是谁。
             不写 placeholder（本项目搜索框一律不放提示文字），放大镜 + 清空键表达用途。 */}
-        <div className="shrink-0 px-2 pt-2 pb-1.5">
+        {/* 联系人标题栏（2026-10-10）：这一行既是列首（搜索框）也当**拖动抓手**——
+            按住它空白处可整体拖动抽屉，与左栏同一套 startMove。搜索框自身走 input 例外，不受影响。 */}
+        <div className="shrink-0 px-2 pt-2 pb-1.5" style={{ touchAction: 'none' }} onPointerDown={startMove}>
+          {/* 搜索框与「加好友」并排（2026-10-20）：两件事是一体的两端——找人 / 添人，
+              微信同款布局。加好友键原先挂在左栏（label「Buddy」），逐字搬到这里。 */}
+          <div className="flex items-center gap-1.5">
           <div
-            className="flex items-center gap-1 rounded-lg px-1.5"
+            className="flex min-w-0 flex-1 items-center gap-1 rounded-lg px-1.5"
             style={{ border: '1px solid var(--line)', backgroundColor: 'var(--paper)' }}
           >
             <Search className="h-3 w-3 shrink-0" style={{ color: 'var(--ink-faint)' }} />
@@ -4246,6 +4573,23 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                 <X className="h-3 w-3" />
               </button>
             )}
+          </div>
+          {/* 加好友（原左栏「Buddy」键，2026-10-20 移到搜索框右侧）：
+              点它 = 弹**人设弹窗（创建态）**，确认后立即落库并在联系人列出现新行（见 startNewChat）。
+              点亮条件沿用原键：当前正是一条新会话（清空气泡是最容易被忽略的反馈，这盏灯给的就是它）。
+              图标沿用 UsersRound（两个人并排）——它画的是「关系」而不是「动作」：
+              Handshake 是握手成交的一瞬，读不出「有个搭子」；Plus 更像「加一条记录」。
+              这里同时也是联系人标题栏，但 startMove 本就跳过 button，所以它不会被当成拖动把手。 */}
+          <button
+            type="button"
+            onClick={startNewChat}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--paper-hover)]"
+            style={{ color: isNewChat ? 'var(--primary-strong)' : 'var(--ink-muted)' }}
+            title="New buddy"
+            aria-label="New buddy"
+          >
+            <UsersRound className="h-3.5 w-3.5" />
+          </button>
           </div>
           {/* 公众号检索只有点了按钮才发起（不再随输入自动搜）：检索要开专属后台标签、读正文耗时，
               交给用户显式触发。点下去即切到「小微」会话：过程块挂在它时间线末尾，跑完把
@@ -4295,7 +4639,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                         与微信一致——标题行只留名字与时间，不再被角标挤窄）。
                         取接口/store 里的值而非等重拉列表：点开一条当场清零，角标不等下一轮。 */}
                     <span className="relative shrink-0">
-                      <ContactAvatar name={s.title} personality={s.persona?.personality} size={30} />
+                      <ContactAvatar name={s.title} persona={s.persona} size={30} />
                       {rowBadge > 0 && (
                         <span
                           className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-9 font-semibold tabular-nums"
@@ -4392,10 +4736,12 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
       <div className="flex min-w-0 flex-1 flex-col" style={{ backgroundColor: 'var(--panel-bg)' }}>
             {/* 中栏恒为聊天：会议视图（开始面板 / 控制台）已迁到右栏 Meeting 分区，不再接管本栏 */}
             <>
-            {/* 工具行：窄窗联系人列开关 + 当前联系人 + 通知助理的批量多选入口 */}
+            {/* 对话框标题栏（2026-10-10）：除了显示当前联系人，也当**拖动抓手**——
+                按住名字右侧的空白可整体拖动抽屉（栏上的按钮仍由 startMove 排除）。 */}
             <div
               className="flex shrink-0 items-center gap-1 px-3 py-2"
-              style={{ borderBottom: DIVIDER_SOFT }}
+              style={{ borderBottom: DIVIDER_SOFT, touchAction: 'none' }}
+              onPointerDown={startMove}
             >
               {/* 窄窗才需要：联系人列成了覆盖层，得有个入口把它叫出来（点某条联系人后自动收起） */}
               {isTight && (
@@ -4418,8 +4764,8 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
               </span>
               {/* 批量多选入口已移除（2026-09-29）：标题栏不再摆「Select」，
                   每条消息 / 每张卡片自己的操作条上就有一颗，从这里进多选更贴近「选中这条」的直觉。 */}
-              {/* 人设：编辑当前会话的助理人设。只有 Recorder 是系统身份，不出现这个键 */}
-              {activeThreadId && !isRecorderContact && (
+              {/* 人设：编辑当前会话的助理人设 */}
+              {activeThreadId && (
                 <button
                   type="button"
                   onClick={openPersonaEditor}
@@ -4440,7 +4786,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                 （那些地方要能做选中文字、点开通知），其余落点（含气泡之间的空隙）都聚焦输入框。 */}
             <div
               ref={bodyRef}
-              className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
+              className="thumb-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2"
               // 对话界面**白底**（--panel-bg #fff）：AI 回复的灰气泡靠这层白浮起来；
               // 工具行 / 输入区同属这一栏，也是白的，整片读起来就是一整块聊天画布。
               style={{ backgroundColor: 'var(--panel-bg)' }}
@@ -4524,7 +4870,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                           <AssistantBubble
                             message={m}
                             title={currentContactTitle}
-                            personality={currentContactPersonality}
+                            persona={currentContactPersona}
                             selectMode={selectMode}
                             selected={selectedKeys.has(it.key)}
                             onToggleSelected={toggleSelected}
@@ -4548,7 +4894,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                       key={it.key}
                       notice={n}
                       title={currentContactTitle}
-                      personality={currentContactPersonality}
+                      persona={currentContactPersona}
                       selectMode={selectMode}
                       checked={selectMode && selectedKeys.has(it.key)}
                       // 点开 = 打开右栏看正文（日报类长文档只有这条路能读到全文）。
@@ -4578,7 +4924,6 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                     persona={currentContactPersona}
                     since={waitSince}
                     title={currentContactTitle}
-                    personality={currentContactPersonality}
                   />
                 )}
 
@@ -4607,7 +4952,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                   status={wechatSummaryStatus}
                   notice={wechatNotice}
                   title={currentContactTitle}
-                  personality={currentContactPersonality}
+                  persona={currentContactPersona}
                 />
               )}
             </div>
@@ -5067,23 +5412,23 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         <div
           className={
             rightVisible
-              ? isNarrow ? 'absolute inset-y-0 z-[5] flex flex-col' : 'flex shrink-0 flex-col'
+              ? rightOverlay ? 'absolute inset-y-0 z-[5] flex flex-col' : 'flex shrink-0 flex-col'
               : 'hidden'
           }
           style={{
-            // 窄窗覆盖层只盖「中栏」，左栏（预览区切换器）必须保持可见可点；
-            // 宽窗则是常规占位栏，宽度随内容（文档预览更宽）
-            ...(isNarrow ? { left: railW, right: 0 } : { width: rightWidth }),
+            // 覆盖层（窄窗 / 余量不足）只盖「中栏」，左栏（预览区切换器）必须保持可见可点；
+            // 占位栏则按 rightWidth 增量排在右侧 —— 中栏宽度全程不变
+            ...(rightOverlay ? { left: railW, right: 0 } : { width: rightWidth }),
             borderLeft: DIVIDER_SOFT,
             backgroundColor: 'var(--popover)',
           }}
         >
-          {/* 右栏顶部条：**宽窄统一** —— 右栏现在是默认隐藏、可单独收起的栏，两态各只出现一个关闭键：
-              窄窗下右栏是覆盖层，用「返回会话」向左退出；宽窗下是占位栏，用 X 收起。
+          {/* 右栏顶部条：**覆盖/占位统一** —— 右栏现在是默认隐藏、可单独收起的栏，两态各只出现一个关闭键：
+              覆盖层（窄窗 / 余量不足）用「返回会话」向左退出；占位栏用 X 收起。
               文档预览态不叠此条（ButlerDocPanel 自带 header，标题 / 重新载入 / 关闭）。 */}
           {!docPath && (
             <div className="flex shrink-0 items-center gap-1.5 px-2 py-1.5" style={{ borderBottom: DIVIDER_SOFT }}>
-              {isNarrow && (
+              {rightOverlay && (
                 <button
                   type="button"
                   onClick={closeRight}
@@ -5120,7 +5465,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                   </span>
                 </>
               )}
-              {!isNarrow && (
+              {!rightOverlay && (
                 <button
                   type="button"
                   onClick={closeRight}
@@ -5166,6 +5511,11 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
             />
           ) : section === 'calendar' ? (
             <ButlerCalendarPanel />
+          ) : section === 'miniapps' ? (
+            <ButlerMiniAppsPanel onCloseButler={onClose} />
+          ) : section === 'outbox' ? (
+            /* Outbox 站：管家派发会话的交付物暂存区，归口到项目 / 保留 / 丢弃 */
+            <ButlerOutboxPanel />
           ) : section === 'search' ? (
             /* 检索实况：召回的逐篇账本（留下 / 判定中 / 去除）。两个来源、同一套渲染：
                  - openedTrace（点气泡下方入口回看的历史某一轮，落库那份；2026-10-01 起
@@ -5206,7 +5556,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
                       </div>
                       <div className="butler-md mt-2 text-xs" style={{ color: 'var(--ink)' }}>
                         {selectedNotice.body ? (
-                          <StreamingMarkdown content={selectedNotice.body} streaming={false} onOpenDoc={openDocInDrawer} />
+                          <ButlerMarkdown content={selectedNotice.body} streaming={false} onOpenDoc={openDocInDrawer} />
                         ) : null}
                       </div>
                     </>
@@ -5483,6 +5833,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
           fixedName={personaDialogIsNotify ? notifyTitle : personaDialogIsSearch ? searchTitle : undefined}
           expandAdvanced={personaDialogIsResident}
           initial={personaDialogInitial}
+          threadId={personaDialog.mode === 'edit' ? personaDialog.threadId : undefined}
           saving={personaSaving}
           error={personaError}
           onCancel={() => {

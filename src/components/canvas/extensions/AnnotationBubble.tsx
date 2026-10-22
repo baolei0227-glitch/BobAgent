@@ -209,22 +209,33 @@ export function AnnotationBubble({ editor, onAdd, onAsk, onDirectRevise, canAskC
   /** AI 直接修订：把选中文字按意见直接改写进稿（不挂批注）；成功则清空输入并收起气泡，失败保留输入可重试 */
   const directRevise = async () => {
     if (!onDirectRevise || !text.trim() || submitting || directing) return;
-    const locked = lastSelRef.current;
-    if (!locked) return;
-    const { from, to } = locked;
-    const quote = editor.state.doc.textBetween(from, to, '\n').trim();
-    if (!quote) return;
     setDirecting(true);
     setEditError(null);
     try {
+      const locked = lastSelRef.current;
+      if (!locked) return;
+      const { from, to } = locked;
+      let quote = '';
+      try {
+        quote = editor.state.doc.textBetween(from, to, '\n').trim();
+      } catch {
+        // 锁定的选区坐标已随文档变化失效 → 必须明确报错，否则点击后毫无反应（静默失败）
+        setEditError('选中范围已失效（文档已变化），请重新选择文字后再试');
+        return;
+      }
+      if (!quote) return;
       const err = await onDirectRevise(quote, text.trim(), from, to, '');
       if (err === null) {
         setText('');
-        editor.chain().focus().setTextSelection(from).run();
+        // 收起气泡用的选区重置：位置失效时忽略（不影响已完成的改写）
+        try { editor.chain().focus().setTextSelection(from).run(); } catch { /* ignore */ }
       } else {
         // 失败原因直接展示（模型未配置 / 网络 / 跑偏校验 / 定位失败等）
         setEditError(err || 'AI 修订失败，请重试');
       }
+    } catch (e) {
+      // 兜底：任何未预期异常都必须显示出来，避免「转圈结束、毫无反应」
+      setEditError(`AI 修订失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setDirecting(false);
     }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   createNodeMarkdown,
+  normalizeSandboxSpec,
   appendConversation,
   removeConversation,
   parseNodeMarkdown,
@@ -110,23 +111,40 @@ export async function POST(request: NextRequest) {
     setCurrentProjectPath(project.path);
 
     if (action === 'create') {
-      const { title, model, sources, tags, position_x, position_y, sandbox_app_id, node_type, annotated_node_ids, annotation_text, md_anchor } = body;
+      const { title, model, sources, tags, position_x, position_y, sandbox_app_id, outbox_batch_id, sandbox_spec, node_type, annotated_node_ids, annotation_text, md_anchor } = body;
       if (!title) {
         return NextResponse.json({ error: 'title is required' }, { status: 400 });
       }
       const cleanedTitle = cleanTitleText(title) || '未命名节点';
       const nodeId = body.node_id || generateNodeId();
+      // 管家派发的会话：节点带 outbox_batch_id（产物落暂存区，不写当前项目）。
+      // 只接受我们自己的批次 id 形态（otb_…），避免任意字符串进入 frontmatter。
+      const outboxBatchId = typeof outbox_batch_id === 'string' && /^otb_[A-Za-z0-9_-]{1,64}$/.test(outbox_batch_id) ? outbox_batch_id : undefined;
       const mdContent = createNodeMarkdown(nodeId, cleanedTitle, {
         model, sources, tags,
         position_x: typeof position_x === 'number' ? position_x : undefined,
         position_y: typeof position_y === 'number' ? position_y : undefined,
         sandbox_app_id: typeof sandbox_app_id === 'string' && sandbox_app_id ? sandbox_app_id : undefined,
+        outbox_batch_id: outboxBatchId,
+        sandbox_spec: normalizeSandboxSpec(sandbox_spec),
         node_type: typeof node_type === 'string' && node_type ? node_type : undefined,
         annotation_node_ids: Array.isArray(annotated_node_ids) && annotated_node_ids.length > 0 ? annotated_node_ids : undefined,
         annotation_text: typeof annotation_text === 'string' && annotation_text ? annotation_text : undefined,
         md_anchor: typeof md_anchor === 'string' && md_anchor ? md_anchor : undefined,
       });
       const relativePath = await writeNodeFile(cleanedTitle, mdContent);
+      // 批次回填会话 id：让 Outbox 面板 / 清理策略能反查到派发它的会话（失败不影响建节点）
+      if (outboxBatchId) {
+        try {
+          const { readBatch, writeBatch } = await import('@/lib/outbox/store');
+          const batch = await readBatch(outboxBatchId);
+          if (batch && !batch.session_id) {
+            await writeBatch({ ...batch, session_id: nodeId });
+          }
+        } catch {
+          /* 回填失败（批次已被清理等）不影响会话创建 */
+        }
+      }
       return NextResponse.json({ success: true, node_id: nodeId, title: cleanedTitle, file_path: relativePath });
     }
 

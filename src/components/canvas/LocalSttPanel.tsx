@@ -169,7 +169,7 @@ export function LocalSttPanel({ model, onModelChange }: LocalSttPanelProps) {
 
   /** 删除已下载的引擎或模型（磁盘释放，之后可重新下载）；删除当前首选模型时清除选择 */
   const remove = async (opts: { target: 'binary' | 'model'; modelId?: string; label: string }) => {
-    if (!window.confirm(`Delete ${opts.label}?\nThis frees disk space. You can download it again later.`)) return;
+    if (!window.confirm(`Delete ${opts.label}? You can re-download it later.`)) return;
     setError(null);
     try {
       const res = await fetch('/api/stt/local', {

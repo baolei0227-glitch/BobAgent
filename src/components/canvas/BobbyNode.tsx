@@ -169,8 +169,8 @@ function BobbyNodeInner({ id, data, selected }: {
   // 删除节点（宿主统一负责后端档案删除 + 本地移除节点/关联边）
   const handleDelete = useCallback(async () => {
     const ok = await confirmAsk({
-      title: 'Delete Node?',
-      message: 'Deleting "Bobby node" will permanently remove this node.\nThis action cannot be undone.',
+      title: 'Delete node?',
+      message: 'This cannot be undone.',
     });
     if (!ok) return;
     nodeHost.deleteNodeWithEdges(id);

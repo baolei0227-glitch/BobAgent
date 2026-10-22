@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, X, Pin, Check, Layers, ClipboardList } from 'lucide-react';
+import { Plus, X, Pin, Check, Layers, ClipboardList, Trash2 } from 'lucide-react';
 import type { StickyNote } from '@/app/api/sticky-notes/route';
 import { Button } from '@/components/ui/button';
 import { loadSettings, saveSettings, type StickyTodoTemplate } from '@/lib/settings';
@@ -312,7 +312,7 @@ function NoteCardEditor({
   };
 
   const confirmDeleteNote = () => {
-    if (!window.confirm('Delete this todo note?')) return;
+    if (!window.confirm('Delete this note?')) return;
     ops.deleteNote(note.id);
   };
 
@@ -568,7 +568,7 @@ function NoteCardEditor({
                   className="flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors hover:bg-black/10"
                   style={{ color: 'rgba(23,23,23,.55)' }}
                 >
-                  <X size={12} strokeWidth={2} />
+                  <Trash2 size={12} strokeWidth={2} />
                 </button>
               </div>
             </div>
@@ -1161,6 +1161,8 @@ export default function StickyTodoDock() {
       if (cal) cal.splice(afterIndex + 1, 0, false);
       const evIds = Array.isArray(p.lineEventIds) ? p.lineEventIds.map((x) => [...x]) : undefined;
       if (evIds) evIds.splice(afterIndex + 1, 0, []);
+      const planRefs = Array.isArray(p.linePlanRefs) ? p.linePlanRefs.map((x) => [...x]) : undefined;
+      if (planRefs) planRefs.splice(afterIndex + 1, 0, []);
       clearSaveTimer();
       setNotes((prev) =>
         prev.map((n) =>
@@ -1174,6 +1176,7 @@ export default function StickyTodoDock() {
                         content: serializeTodoLines(lines),
                         ...(cal ? { lineCalendared: cal } : {}),
                         ...(evIds ? { lineEventIds: evIds } : {}),
+                        ...(planRefs ? { linePlanRefs: planRefs } : {}),
                       }
                     : x,
                 ),
@@ -1200,6 +1203,8 @@ export default function StickyTodoDock() {
       if (cal) cal.splice(index, 1);
       const evIds = Array.isArray(p.lineEventIds) ? p.lineEventIds.map((x) => [...x]) : undefined;
       if (evIds) evIds.splice(index, 1);
+      const planRefs = Array.isArray(p.linePlanRefs) ? p.linePlanRefs.map((x) => [...x]) : undefined;
+      if (planRefs) planRefs.splice(index, 1);
       clearSaveTimer();
       const patchedPages = pages.map((x, xi) =>
         xi === 0
@@ -1208,6 +1213,7 @@ export default function StickyTodoDock() {
               content: serializeTodoLines(lines),
               ...(cal ? { lineCalendared: cal } : {}),
               ...(evIds ? { lineEventIds: evIds } : {}),
+              ...(planRefs ? { linePlanRefs: planRefs } : {}),
             }
           : x,
       );
@@ -1245,6 +1251,11 @@ export default function StickyTodoDock() {
           const [entry] = evIds.splice(index, 1);
           evIds.push(entry);
         }
+        const planRefs = Array.isArray(p.linePlanRefs) ? p.linePlanRefs.map((x) => [...x]) : undefined;
+        if (planRefs && index < planRefs.length) {
+          const [entry] = planRefs.splice(index, 1);
+          planRefs.push(entry);
+        }
         return {
           pages: pages.map((x, xi) =>
             xi === 0
@@ -1253,6 +1264,7 @@ export default function StickyTodoDock() {
                   content: serializeTodoLines(lines),
                   ...(cal ? { lineCalendared: cal } : {}),
                   ...(evIds ? { lineEventIds: evIds } : {}),
+                  ...(planRefs ? { linePlanRefs: planRefs } : {}),
                 }
               : x,
           ),

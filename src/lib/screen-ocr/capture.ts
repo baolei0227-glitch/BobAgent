@@ -136,7 +136,7 @@ export async function ocrRecognize(imagePath: string): Promise<string> {
     // 仅 bob-ocr-mcp：不可用/失败即抛错（不降级本地 Swift Vision）
     const viaMcp = await ocrImageViaMcp(imagePath).catch(() => null);
     if (viaMcp !== null) return viaMcp;
-    throw new Error('OCR 引擎已设为 MCP，但 bob-ocr-mcp 不可用（请确认插件常驻服务在线且已在 MCP 设置中启用）。');
+    throw new Error('OCR 引擎已设为 MCP，但 bob-ocr-mcp 常驻桥不可用（桥随 BobWork 分发、由宿主自动拉起；请确认 设置 → Extensions Store → Plugins 中 "Bob OCR" 已启用）。');
   }
   // auto（默认）：bob-ocr-mcp 优先，失败降级本地 Swift Vision
   try {

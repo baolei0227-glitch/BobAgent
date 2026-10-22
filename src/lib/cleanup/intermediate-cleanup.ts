@@ -14,7 +14,7 @@ import { promises as fs } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { listProjects } from '@/lib/project/project-manager';
-import { SANDBOX_DIRNAME } from '@/lib/app-root';
+import { SANDBOX_DIRNAME, BOB_SANDBOX_DIRNAME, resolveAppRoot } from '@/lib/app-root';
 
 /** 中间产物保留天数（超过即清理） */
 const INTERMEDIATE_MAX_AGE_DAYS = 7;
@@ -34,6 +34,18 @@ const EXPORTS_KEEP_MAX = 30;
 
 /** exports/ 目录保留时长（毫秒，超过即删） */
 const EXPORTS_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Outbox（管家派发会话的产物暂存区）保留策略——**刻意不用中间产物的 7 天口径**：
+ *  这里放的是"用户还没处理"的交付物，误删成本高，必须给足处理时间。
+ *   - pending：保留 OUTBOX_MAX_AGE_DAYS 天 + 总批次上限 OUTBOX_KEEP_MAX_BATCHES（超限按创建时间从旧到新淘汰）
+ *   - kept：用户显式保留 → 永不自动删
+ *   - assigned / discarded：已归口或已丢弃 → 立即清（暂存副本留着无意义）
+ *  临期（剩余 ≤ OUTBOX_WARN_BEFORE_DAYS 天）由 Outbox 面板提示，不做静默删除。 */
+/** Outbox 保留总时长（天）：导出给 UI/工具，避免口径写死两处 */
+export const OUTBOX_MAX_AGE_DAYS = 30;
+/** 临期提醒窗口（天）：Outbox 面板据此提示「N 天后清理」（导出给 UI 用，避免口径写死两处） */
+export const OUTBOX_WARN_BEFORE_DAYS = 7;
+const OUTBOX_KEEP_MAX_BATCHES = 50;
 
 /** 递归清扫一个目录中超过截止时间的文件；空目录一并移除。返回删除的文件+目录数。
  *  `maxDepth` 限制递归层数：0 = 只清该目录自身的文件、不进入子目录
@@ -81,6 +93,53 @@ async function sweepDir(
   return removed;
 }
 
+/** 小程序 .history 保留策略（2026-10-10 评估：实测 .history 占小程序目录 83%，且不在任何清理任务里）：
+ *  每个目录最多留 HISTORY_KEEP_MAX 份、且删除超过 HISTORY_KEEP_MS 的快照。 */
+const SANDBOX_HISTORY_KEEP_MAX = 20;
+const SANDBOX_HISTORY_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * 清理小程序 .history 版本快照：逐个目录按「数量上限 + 过期时长」裁剪（不删当前文件本身）。
+ * 返回删除数；单目录/单文件失败静默。
+ */
+async function pruneSandboxHistory(): Promise<number> {
+  const appsDir = join(resolveAppRoot(), BOB_SANDBOX_DIRNAME, 'apps');
+  const apps = await fs.readdir(appsDir).catch(() => [] as string[]);
+  let removed = 0;
+  const now = Date.now();
+
+  async function walk(dir: string): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    const files: Array<{ name: string; mtimeMs: number }> = [];
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(full);
+      } else if (e.isFile()) {
+        const st = await fs.stat(full).catch(() => null);
+        if (st) files.push({ name: e.name, mtimeMs: st.mtimeMs });
+      }
+    }
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs); // 新的在前
+    const doomed = new Set<string>();
+    for (const f of files) if (now - f.mtimeMs > SANDBOX_HISTORY_KEEP_MS) doomed.add(f.name);
+    for (let i = SANDBOX_HISTORY_KEEP_MAX; i < files.length; i++) doomed.add(files[i]!.name);
+    for (const name of doomed) {
+      try {
+        await fs.rm(join(dir, name), { force: true });
+        removed++;
+      } catch { /* 单个失败忽略 */ }
+    }
+  }
+
+  for (const appId of apps) {
+    const historyDir = join(appsDir, appId, '.history');
+    const st = await fs.stat(historyDir).catch(() => null);
+    if (st?.isDirectory()) await walk(historyDir);
+  }
+  return removed;
+}
+
 /**
  * 清理兜底沙盒 exports/（沙盒小程序导出的独立页面）：只保留最近 EXPORTS_KEEP_MAX 个，
  * 且删除超过 EXPORTS_KEEP_MS 的旧文件——数量上限防堆积，过期策略保证「不再导出也会被清」。
@@ -124,6 +183,43 @@ async function pruneExportsDir(): Promise<number> {
   return removed;
 }
 
+/**
+ * 清理 Outbox（管家产物暂存区，<appRoot>/outbox）：
+ *  1) 终态批次（assigned / discarded）立即整批删除；
+ *  2) pending 批次按「过期 OUTBOX_MAX_AGE_DAYS 天 + 超额 OUTBOX_KEEP_MAX_BATCHES 批」淘汰；
+ *     kept（用户保留）永不自动删。
+ * 批次 id/目录合法性由 store.discardBatch 二次校验；返回删除批次数，单个失败静默。
+ */
+async function pruneOutbox(): Promise<number> {
+  const { listBatches, discardBatch } = await import('@/lib/outbox/store');
+  const batches = await listBatches().catch(() => []);
+  const now = Date.now();
+  const maxAgeMs = OUTBOX_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+  let removed = 0;
+
+  for (const b of batches) {
+    if (b.status === 'assigned' || b.status === 'discarded') {
+      if (await discardBatch(b.batch_id)) removed++;
+    }
+  }
+
+  const pending = batches
+    .filter((b) => b.status === 'pending')
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)); // 旧的在前
+  const keepFrom = Math.max(0, pending.length - OUTBOX_KEEP_MAX_BATCHES);
+  for (let i = 0; i < pending.length; i++) {
+    const b = pending[i]!;
+    const created = Date.parse(b.created_at);
+    // created_at 不可解析时不做年龄淘汰（fail-safe：宁可留、不可误删）
+    const expired = Number.isFinite(created) && now - created > maxAgeMs;
+    const overQuota = i < keepFrom; // 超出数量上限 → 从最旧的开始淘汰
+    if (expired || overQuota) {
+      if (await discardBatch(b.batch_id)) removed++;
+    }
+  }
+  return removed;
+}
+
 /** 全量清扫：遍历所有项目（含归档/垃圾桶，均为磁盘上的真实残留），
  *  删除各自 homework/.ai-workspace/ 中超过保留期的文件；
  *  另清扫无激活项目时的兜底工作区（见 FALLBACK_WORKSPACE_DIR 注释）。返回删除总数。 */
@@ -149,6 +245,10 @@ export async function sweepIntermediateFiles(): Promise<number> {
   totalRemoved += await sweepDir(FALLBACK_WORKSPACE_DIR, cutoffMs, { left: MAX_FILES_PER_PROJECT }, 0);
   // exports/ 单独按「数量上限 + 过期时长」清理，不套用中间产物的 7 天口径
   totalRemoved += await pruneExportsDir();
+  // 小程序 .history 版本快照（全局 bob-sandbox/apps/*/.history，不在项目列表内）
+  totalRemoved += await pruneSandboxHistory();
+  // Outbox 暂存区（管家派发会话的交付物）：终态即清，pending 按 30 天 / 50 批淘汰，kept 免删
+  totalRemoved += await pruneOutbox();
   return totalRemoved;
 }
 

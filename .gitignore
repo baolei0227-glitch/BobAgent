@@ -166,6 +166,9 @@ Desktop.ini
 # electron-builder output
 release/
 release-dist/
+# Windows 随包 Python 的组装产物与下载缓存（scripts/assemble-win-python.mjs）
+.build/
+.cache/
 
 # Playwright 测试输出
 test-results/

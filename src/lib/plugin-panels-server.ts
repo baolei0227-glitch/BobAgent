@@ -9,15 +9,22 @@
  *
  * 形态：
  *   - serve  ：插件自起本地网页，宿主 iframe 内嵌，进入前探测 statusPath 就绪态；
- *   - static ：随包静态目录，宿主 /api/plugin-panel/<id>/** 代理托管（零端口、无孤儿进程风险），
+ *   - static ：随包静态目录，宿主 /api/plugin-panel/<id>/** 代理托管（UI 零端口、无孤儿进程风险），
  *              面板声明的 staticRoot 相对插件包目录（随包插件经 {BUNDLED} 定位包根）。
+ *              ⚠️ UI 零端口 ≠ 插件进程可缺席：static 面板的 API 仍来自插件进程，若同时声明
+ *              hostPath（/api/plugin-web/<id>）则须按需连接，否则接口只会得到 503 引导页。
  *
  * 只有 enabled 的实例才进清单：出厂默认装配的 bob-notes/bob-mind 恒 enabled → 注册表出厂即有两条。
  */
 
 import { promises as fs } from 'fs';
-import { execFile } from 'child_process';
 import { join, isAbsolute } from 'path';
+import {
+  isPidAlive,
+  isReapableStale,
+  listListeningPidsAsync,
+  terminatePid,
+} from '@/lib/platform';
 import type { McpServerConfig } from '@/lib/mcp/types';
 import { MCP_PRESETS } from '@/lib/mcp/types';
 import type { PluginPanelEntry, PluginPanelIcon } from '@/lib/plugin-panels';
@@ -74,9 +81,14 @@ export async function collectPluginPanelEntries(): Promise<PluginPanelEntry[]> {
   const configs = settings.mcpServers ?? [];
   const entries: PluginPanelEntry[] = [];
 
-  // 出条目前确保 serve 插件已连接：端口由宿主在连接时按实例分配并登记（见 manager.createConnection）。
+  // 出条目前确保「需要活上游」的插件已连接：端口由宿主在连接时按实例分配并登记
+  // （见 manager.createConnection）。判据含 static+hostPath —— 这类面板的 UI 虽由宿主静态
+  // 托管（不依赖端口），但其 API 反代仍需运行时端口，不先连接就只会 503 引导页。
   // 不先连接就只能回退预置固定端口（9480/9482），iframe 会指向另一个宿主的实例（数据根共享，静默串台）。
-  if (configs.some((c) => c.enabled && effectivePanel(c)?.mode === 'serve')) {
+  if (configs.some((c) => {
+    const p = effectivePanel(c);
+    return c.enabled && !!p && (p.mode === 'serve' || !!p.hostPath);
+  })) {
     try {
       await mcpManager.syncServers(configs);
     } catch (e) {
@@ -157,29 +169,25 @@ async function readPanelConflict(pluginId: string): Promise<PanelConflictMarker 
   }
 }
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 监听指定端口的进程 pid（macOS lsof）；非 darwin / 查询失败返回 null */
-function portHolderPid(port: number): Promise<number | null> {
-  if (process.platform !== 'darwin') return Promise.resolve(null);
-  return new Promise((resolve) => {
-    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { timeout: 2000 }, (err, stdout) => {
-      if (err) return resolve(null);
-      const pid = Number(String(stdout).trim().split('\n')[0]);
-      resolve(Number.isInteger(pid) && pid > 0 ? pid : null);
-    });
-  });
+/**
+ * 监听指定端口的进程 pid；查询失败返回 null。
+ *
+ * 平台分派（见 lib/platform/process.ts）：darwin/linux → `lsof -tiTCP:PORT`；
+ * Windows → `netstat -ano` 解析 LISTENING 行。
+ * 旧实现在非 darwin 上直接 `return null` —— Windows 上等于**永远不回收残留实例**，
+ * 面板被上一代进程占着、界面静默停在旧版本，而日志里没有任何异常。
+ */
+async function portHolderPid(port: number): Promise<number | null> {
+  const { pids, otherStates } = await listListeningPidsAsync(port);
+  if (pids.length > 0) return pids[0];
+  if (otherStates.length > 0) {
+    console.warn(`[plugin-panel] 端口 ${port} 未见 LISTENING（见到状态：${otherStates.join(',')}）`);
+  }
+  return null;
 }
 
 /**
@@ -200,50 +208,30 @@ async function isOwnPluginOnPort(pluginId: string, port: number): Promise<boolea
   }
 }
 
-/** 取进程的父 pid（ps）；失败返回 null */
-function processParentPid(pid: number): Promise<number | null> {
-  return new Promise((resolve) => {
-    execFile('ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 2000 }, (err, stdout) => {
-      if (err) return resolve(null);
-      const ppid = Number(String(stdout).trim());
-      resolve(Number.isInteger(ppid) && ppid > 0 ? ppid : null);
-    });
-  });
-}
-
 /**
- * 只回收「本宿主的上一代」与「孤儿」：
- *   - ppid === 本进程 pid：本宿主重复 spawn 留下的旧一代（真凶场景）；
- *   - ppid === 1：宿主崩溃/被强杀后 reparent 到 launchd 的孤儿。
+ * 只回收「本宿主的上一代」与「孤儿」： *   - ppid === 本进程 pid：本宿主重复 spawn 留下的旧一代（真凶场景）；
+ *   - POSIX：ppid === 1（宿主崩溃/被强杀后 reparent 到 launchd 的孤儿）；
+ *   - Windows：**没有 reparent**，孤儿的 ParentProcessId 保留为那个已死的 pid，
+ *     因此判据是「父进程已不存在」。用 ppid === 1 在 Windows 上恒为假 = 静默失效。
  * 父进程是另一个仍在运行的主机（如同时开着的打包版 App / 另一个 dev 服务）时，它是合法实例，
  * 绝不回收——否则两个宿主会互相抢杀、面板来回失效。不认识的占用者一律不碰。
  */
 async function isReapableStaleHolder(pid: number): Promise<boolean> {
-  if (pid === process.pid || pid === process.ppid) return false;
-  const ppid = await processParentPid(pid);
-  return ppid !== null && (ppid === process.pid || ppid === 1);
+  return isReapableStale(pid);
 }
 
 /**
- * 回收「本插件的残留实例」：重复 spawn 的上一代、宿主崩溃后 reparent 到 launchd 的孤儿
- * 都会卡在面板端口上。SIGTERM →1s→ 仍存活则 SIGKILL；返回是否真的回收了进程。
+ * 回收「本插件的残留实例」：重复 spawn 的上一代、宿主崩溃后留下的孤儿
+ * 都会卡在面板端口上。优雅终止（SIGTERM / taskkill /T）→1s→ 仍存活则强制终止；
+ * 返回是否真的回收了进程。
  */
 async function reapStaleHolder(pluginId: string, pid: number, port: number): Promise<boolean> {
   if (!(await isReapableStaleHolder(pid))) return false;
   if (!isPidAlive(pid) || !(await isOwnPluginOnPort(pluginId, port))) return false;
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    return false;
-  }
+  // 平台分派：POSIX 发 SIGTERM；Windows 走 taskkill /T（那里没有信号语义）
+  if (!terminatePid(pid, { force: false, tree: true })) return false;
   for (let i = 0; i < 10 && isPidAlive(pid); i++) await delay(100);
-  if (isPidAlive(pid)) {
-    try {
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      /* 已退出 */
-    }
-  }
+  if (isPidAlive(pid)) terminatePid(pid, { force: true, tree: true });
   return true;
 }
 

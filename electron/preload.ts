@@ -97,6 +97,8 @@ export interface HippoBrowserState {
   capsule: boolean;
   /** 是否固定在前端（always-on-top） */
   alwaysOnTop: boolean;
+  /** 地址栏默认搜索模式：AI 检索 / Bing */
+  searchMode: 'defaultAi' | 'defaultBing';
 }
 
 /** Hippo Browser 侧边栏（Cmd+Shift+B）API */
@@ -105,6 +107,8 @@ export interface HippoBrowserApi {
   close: () => Promise<HippoBrowserState>;
   toggle: () => Promise<HippoBrowserState>;
   navigate: (url: string) => Promise<{ ok: boolean; error?: string }>;
+  /** 地址栏搜索图标：弹出原生菜单切换 AI 检索 / Bing */
+  searchMenu: () => Promise<{ ok: boolean }>;
   /** 在 Hippo 新建标签打开 URL（不覆盖当前标签）：小程序预览等场景 */
   openUrlInNewTab: (url: string) => Promise<{ ok: boolean; error?: string }>;
   /** 按工具菜单的「打开方式」开关打开链接（书签点击用）：新标签 / 覆盖当前标签 */
@@ -160,6 +164,8 @@ export interface HippoBrowserApi {
   getCapsule: () => Promise<boolean>;
   /** 主窗口胶囊态变更订阅（true=收起显示胶囊，false=恢复隐藏胶囊） */
   onCapsule: (callback: (capsule: boolean) => void) => () => void;
+  /** 订阅「Hippo 里导出的 Markdown 改由画布预览面板打开」（path=绝对路径，name=展示名） */
+  onOpenLocalFile: (callback: (payload: { path: string; name: string }) => void) => () => void;
   /** 切换固定在前端（always-on-top），返回最新状态 */
   toggleTop: () => Promise<HippoBrowserState>;
   onState: (callback: (state: HippoBrowserState) => void) => () => void;
@@ -233,7 +239,7 @@ export interface HippoBrowserApi {
   /** 下载：用系统默认程序打开已完成的文件 */
   downloadOpen: (id: number) => Promise<{ ok: boolean; error?: string }>;
   /** 下载：在访达中定位文件 */
-  downloadReveal: (id: number) => Promise<{ ok: boolean }>;
+  downloadReveal: (id: number) => Promise<{ ok: boolean; error?: string }>;
   /** 下载：清除已结束（完成/取消/中断）的记录 */
   downloadClear: () => Promise<{ ok: boolean; downloads: HippoDownloadRecord[] }>;
   /** 下载：切换下载列表面板（独立浮层子窗口，不挤占网页视图） */
@@ -266,6 +272,31 @@ export interface HippoDownloadRecord {
   startedAt: number;
 }
 
+/** Butler 悬浮球在「主窗口侧」会收到的窗口状态变化：球据此归位到中栏左下角 */
+export type ButlerOrbWindowState = 'maximize' | 'unmaximize' | 'enter-full-screen' | 'leave-full-screen' | 'restore';
+
+/**
+ * Butler 独立置顶球窗（BobWork 最小化 / 隐藏后，留在桌面左下角的那颗球）
+ *
+ * 两组接口分属两个窗口，别混用：
+ *   - onWindowState / onOpenInbox  → 主窗口的渲染层（ButlerOrb / ButlerHost）监听
+ *   - dragStart / dragEnd          → 独立球窗（/butler-orb）发消息
+ */
+export interface ButlerOrbApi {
+  /** 主窗口：最大化 / 还原 / 进出全屏（球丢弃拖拽偏移，弹回中栏左下角） */
+  onWindowState: (callback: (state: ButlerOrbWindowState) => void) => () => void;
+  /** 主窗口：独立球窗被点击 → 打开 Butler 抽屉（收件箱） */
+  onOpenInbox: (callback: () => void) => () => void;
+  /** 独立球窗：指针按下；offset = 指针在球窗内的位置（主进程据此让窗口跟手移动） */
+  dragStart: (offset: { x: number; y: number }) => void;
+  /** 独立球窗：指针抬起；moved=false 视作点击（就地展开 Butler 面板，BobWork 保持最小化） */
+  dragEnd: (payload: { moved: boolean }) => void;
+  /** 面板窗「缩小」：收回成悬浮球，球停在面板当前所在位置 */
+  panelMinimize: () => void;
+  /** 面板窗「关闭」：球与面板一起从桌面消失（下次最小化时重新出现） */
+  panelClose: () => void;
+}
+
 export interface Api {
   update: UpdateApi;
   settings: SettingsApi;
@@ -288,6 +319,8 @@ export interface Api {
   screenOcr: ScreenOcrApi;
   /** Hippo Browser 侧边栏（Cmd+Shift+B） */
   hippoBrowser: HippoBrowserApi;
+  /** Butler 悬浮球：主窗口内那颗 + 最小化后的独立置顶球窗 */
+  butlerOrb: ButlerOrbApi;
   /** 画布：外部（Hippo 对话栏「投送画布」）投送会话后，把新节点挂进画布并置焦点 */
   onCanvasFocusNode: (callback: (payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void) => () => void;
 }
@@ -346,6 +379,22 @@ const api: Api = {
     add: () => ipcRenderer.invoke('avatar:add'),
     delete: (id: string) => ipcRenderer.invoke('avatar:delete', id),
   },
+  butlerOrb: {
+    onWindowState: (callback: (state: ButlerOrbWindowState) => void) => {
+      const wrapper = (_e: Electron.IpcRendererEvent, state: ButlerOrbWindowState) => callback(state);
+      ipcRenderer.on('butler-orb:window-state', wrapper);
+      return () => ipcRenderer.removeListener('butler-orb:window-state', wrapper);
+    },
+    onOpenInbox: (callback: () => void) => {
+      const wrapper = () => callback();
+      ipcRenderer.on('butler-orb:open-inbox', wrapper);
+      return () => ipcRenderer.removeListener('butler-orb:open-inbox', wrapper);
+    },
+    dragStart: (offset: { x: number; y: number }) => ipcRenderer.send('butler-orb:drag-start', offset),
+    dragEnd: (payload: { moved: boolean }) => ipcRenderer.send('butler-orb:drag-end', payload),
+    panelMinimize: () => ipcRenderer.send('butler-orb:panel-minimize'),
+    panelClose: () => ipcRenderer.send('butler-orb:panel-close'),
+  },
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   onCanvasFocusNode: (callback: (payload: { nodeId: string; title?: string; conversations?: unknown[] }) => void) => {
     const wrapper = (_e: Electron.IpcRendererEvent, payload: { nodeId: string; title?: string; conversations?: unknown[] }) => callback(payload);
@@ -403,6 +452,7 @@ const api: Api = {
     toggleMaximize: () => ipcRenderer.invoke('hippo-browser:toggle-maximize'),
     toggle: () => ipcRenderer.invoke('hippo-browser:toggle'),
     navigate: (url: string) => ipcRenderer.invoke('hippo-browser:navigate', url),
+    searchMenu: () => ipcRenderer.invoke('hippo-browser:search-menu'),
     openUrlInNewTab: (url: string) => ipcRenderer.invoke('hippo-browser:open-url-new-tab', url),
     openLink: (url: string) => ipcRenderer.invoke('hippo-browser:open-link', url),
     back: () => ipcRenderer.invoke('hippo-browser:back'),
@@ -448,6 +498,11 @@ const api: Api = {
       const wrapper = (_e: Electron.IpcRendererEvent, state: HippoBrowserState) => callback(state);
       ipcRenderer.on('hippo-browser:state', wrapper);
       return () => ipcRenderer.removeListener('hippo-browser:state', wrapper);
+    },
+    onOpenLocalFile: (callback: (payload: { path: string; name: string }) => void) => {
+      const wrapper = (_e: Electron.IpcRendererEvent, payload: { path: string; name: string }) => callback(payload);
+      ipcRenderer.on('hippo-browser:open-local-file', wrapper);
+      return () => ipcRenderer.removeListener('hippo-browser:open-local-file', wrapper);
     },
     htmlEditStart: () => ipcRenderer.invoke('hippo-browser:html-edit-start'),
     htmlEditExit: () => ipcRenderer.invoke('hippo-browser:html-edit-exit'),

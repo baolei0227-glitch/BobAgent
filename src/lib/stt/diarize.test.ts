@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   buildSpeakerChunks,
   clipChunks,
+  speakerForRange,
   diarModeOf,
   parseDiarizationOutput,
+  planClusterMerge,
+  type ClusterCentroid,
   type DiarChunk,
 } from '@/lib/stt/diarize';
 
@@ -219,6 +222,20 @@ describe('clipChunks', () => {
   });
 });
 
+describe('speakerForRange', () => {
+  const chunks = [
+    { start: 0, end: 5, speaker: 0 },
+    { start: 5, end: 10, speaker: 1 },
+  ];
+  it('取重叠最长的切块', () => {
+    expect(speakerForRange(chunks, 1, 3)).toBe(0);
+    expect(speakerForRange(chunks, 6, 9)).toBe(1);
+  });
+  it('完全没重叠 → null（不硬塞说话人）', () => {
+    expect(speakerForRange(chunks, 20, 21)).toBeNull();
+  });
+});
+
 describe('diarModeOf', () => {
   it('参会人数口径 → 分离模式（solo 不分离）', () => {
     expect(diarModeOf('solo')).toBeNull();
@@ -227,5 +244,69 @@ describe('diarModeOf', () => {
     expect(diarModeOf('auto')).toBe('auto');
     expect(diarModeOf(undefined)).toBe('auto');
     expect(diarModeOf('bogus')).toBe('auto');
+  });
+});
+
+describe('planClusterMerge', () => {
+  const c = (speaker: number, centroid: number[], confidence: number | null = null): ClusterCentroid => ({
+    speaker,
+    centroid,
+    confidence,
+  });
+  // 时长权重：默认按「说话越多的簇越重」给
+  const dur = (map: Record<number, number>) => (s: number) => map[s] ?? 0;
+
+  it('两位真人（余弦远低于阈值）不合并，且 remap 是恒等映射', () => {
+    const clusters = [c(0, [1, 0]), c(1, [0, 1])];
+    const plan = planClusterMerge(clusters, [0, 1], dur({ 0: 60, 1: 50 }));
+    expect(plan.merged).toBe(false);
+    expect(plan.clusters).toBe(clusters); // 原样返回，不动旧口径
+    expect([...plan.remap.entries()]).toEqual([
+      [0, 0],
+      [1, 1],
+    ]);
+  });
+
+  it('同一人被拆成多簇（余弦 ≥ 阈值）→ 并回一个人、簇号重排、质心按说话时长加权', () => {
+    // 0 与 2 余弦 ≈ 0.90（同一人），2 只说了 5s
+    const clusters = [c(0, [1, 0], 0.9), c(2, [0.9, 0.44], 0.7)];
+    const plan = planClusterMerge(clusters, [0, 2], dur({ 0: 60, 2: 5 }));
+    expect(plan.merged).toBe(true);
+    expect(plan.clusters).toHaveLength(1);
+    expect(plan.clusters[0].speaker).toBe(0);
+    expect(plan.clusters[0].confidence).toBeCloseTo(0.8); // (0.9 + 0.7) / 2
+    // 合并质心仍与主簇同向（被 5s 那簇轻微带偏，但余弦仍 > 0.99）
+    expect(plan.clusters[0].centroid[0]).toBeGreaterThan(0.99);
+    expect(plan.clusters[0].centroid[1]).toBeGreaterThan(0);
+    expect(plan.remap.get(0)).toBe(0);
+    expect(plan.remap.get(2)).toBe(0);
+  });
+
+  it('无质心的簇也一起编号，不与重排后的新簇号撞号', () => {
+    // 0 与 3 是同一人（有质心）；1、2 段太短没算出声纹
+    const plan = planClusterMerge([c(0, [1, 0]), c(3, [0.95, 0.31])], [0, 1, 2, 3], dur({ 0: 40, 3: 6, 1: 2, 2: 1 }));
+    expect(plan.merged).toBe(true);
+    expect(plan.remap.get(0)).toBe(plan.remap.get(3));
+    expect(plan.remap.get(1)).toBe(1);
+    expect(plan.remap.get(2)).toBe(2);
+    // 4 个原簇号 → 3 个新簇号，且互不相同
+    expect(new Set(plan.remap.values()).size).toBe(3);
+    // 身份层只写有质心的簇（合并组），无质心簇不写
+    expect(plan.clusters.map((x) => x.speaker)).toEqual([0]);
+  });
+
+  it('用平均连接而非单连接：不被中间桥接簇链式并成一大坨', () => {
+    // A~B = 0.70，B~C = 0.70（都过 0.6），但 A~C = 0，桥接后的质心与 C 只有 0.39 → 不连坐
+    const clusters = [c(0, [1, 0]), c(1, [0.7, 0.71]), c(2, [0, 1])];
+    const plan = planClusterMerge(clusters, [0, 1, 2], dur({ 0: 10, 1: 10, 2: 10 }), 0.6);
+    expect(plan.merged).toBe(true);
+    expect(new Set(plan.remap.values()).size).toBe(2); // 只并掉 A、B，C 独立
+  });
+
+  it('阈值可调（阈值高于任何一对余弦 → 不合并）；少于 2 簇无从合并', () => {
+    const clusters = [c(0, [1, 0]), c(1, [0.7, 0.71])];
+    expect(planClusterMerge(clusters, [0, 1], dur({ 0: 10, 1: 10 }), 0.95).merged).toBe(false);
+    expect(planClusterMerge([c(0, [1, 0])], [0], dur({ 0: 10 })).merged).toBe(false);
+    expect(planClusterMerge([], [0, 1], dur({ 0: 1, 1: 1 })).merged).toBe(false);
   });
 });

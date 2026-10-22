@@ -88,6 +88,12 @@ export interface AgentProfile {
    * 要么在不需要它的画像 coreExclusions 里显式排除；chat 不排除 = 只背场景工具与内核。
    */
   coreExclusions?: readonly string[];
+  /** 浏览器工具白名单（核心档）：只约束 `browser_*` / `hippo_browser_*`，其余内核工具不受影响。
+   *  与 coreExclusions 的区别：coreExclusions 是"永远不要"，本清单是"核心档只留这些"，
+   *  可通过 settings.browserToolset='full' 绕过（见 toolAllowlistBypassOnFull）。 */
+  toolAllowlist?: readonly string[];
+  /** settings.browserToolset === 'full' 时绕过 toolAllowlist（设置 → Hippo Browser 可切回全量工具面） */
+  toolAllowlistBypassOnFull?: boolean;
   /**
    * 是否从 Agent 列表（listAgents → /api/agents、画布创建菜单、团队选人）中隐藏。
    * 用于「存在但非画布身份」的画像：Hippo Browser 的 ChatSidebar 需要一个固定工具画像
@@ -95,6 +101,18 @@ export interface AgentProfile {
    * 不应出现在 Agent 创建菜单里。隐藏只影响列表枚举，不影响 identity 解析。
    */
   hidden?: boolean;
+}
+
+/**
+ * 多智能体协作能力：team_run 标注 scenes:['team']，只有下面两类画像会被注入——
+ *  - dynamic 画像（chat）：开关可激活 team 场景；
+ *  - fixedScenes 显式包含 'team' 的 fixed 画像。
+ * coding / 市场 agent 是 fixed 且不含 team（见 CODING_PROFILE 注释：fixed 画像下 activeScenes 被忽略），
+ * 服务端据此忽略 multiAgentMode；前端据此隐藏 Team / Multi-agent 入口，避免「规则要求调 team_run、
+ * 工具面里却没有它」的反向错位。
+ */
+export function supportsTeamCollab(profile: Pick<AgentProfile, 'scenes' | 'fixedScenes'>): boolean {
+  return profile.scenes === 'dynamic' || (profile.fixedScenes ?? []).includes('team');
 }
 
 /** 通用对话 Agent */
@@ -356,8 +374,10 @@ ${BUTLER_MEMORY_ROUTING}
 - 状态查询（只读）：query_todos / query_schedule（**排期与改期前必先调它看占位**）/ read_inbox；list_projects / list_nodes / get_app_status / list_agents
 - 派发协作：team_run（多步骤、跨专业、需要产出物时；成员名册与任务拆分由你规划，名单外补充成员须经用户批准）
 - 事务自有：create_sticky_note（默认落点：无时间的待办/清单/计划 → 便签行，结算后会自动入日历） / create_scheduled_todo（**仅用于**给「仍未入日历」的行排期，或用户要求精确时刻） / todo_update（**改期/改名/勾掉既有事项走它**） / todo_delete（先 query_todos 拿 event_id）
-- 应用结构：create_project（用户明确要「新建/开一个项目」→ **直接创建并回报**，不要先提案等确认；**缺名称先问**，绝不编造名称；只创建**不切换**当前项目，用户说要进去就用 switch_project）/ switch_project（用户明确说「打开/进入/切到 X 项目」→ 直接切，切完一句话回报；**不要为了写数据去切项目**——写工具自带 project 参数）/ create_session（用户要「新建一个会话/让某个 agent 把这件事干了」→ 传 project + agent + task 一次办完；传了 task 就会在后台无人看守地执行，只交用户真正要的活；界面没打开时工具回 ui_not_open，如实告诉用户先打开 BobWork 再重试）
-- 计划树（多步骤复杂目标）：project_plan_start / project_plan_view / project_plan_add_steps / project_plan_step_status
+- 应用结构：create_project（用户明确要「新建/开一个项目」→ **直接创建并回报**，不要先提案等确认；**缺名称先问**，绝不编造名称；只创建**不切换**当前项目，用户说要进去就用 switch_project；**往某个已存在的项目里写待办/便签/计划时，一律用写类工具的 project 参数，绝不为了写数据而 create_project**——点名项目已存在（哪怕只差日期后缀）时服务端会拒绝并回报 project_already_exists，这时应改用 project=<既有项目 id 或名字> 写入，不要新建同名重复项目）/ switch_project（用户明确说「打开/进入/切到 X 项目」→ 直接切，切完一句话回报；**不要为了写数据去切项目**——写工具自带 project 参数）/ create_session（用户要「新建一个会话/让某个 agent 把这件事干了」→ 传 project + agent + task 一次办完；传了 task 就会在后台无人看守地执行，只交用户真正要的活；界面没打开时工具回 ui_not_open，如实告诉用户先打开 BobWork 再重试）
+- 项目治理：project_update_meta（改分类/标签/备注；分类限预设六类，**不确认不自造**）/ project_rename（改名——只改显示名，目录不变）/ project_archive（归档，数据保留，**当前项目被归档会自动切走**）/ project_unarchive（恢复；已归档项目也能按名字找到）——**都要点名项目**（用户没说清先问），别拿它当整理借口批量乱动
+- 计划树（多步骤复杂目标）：project_plan_start / project_plan_view / project_plan_add_steps / project_plan_step_status / project_plan_close（收尾：done 完成或 abandoned 放弃；要续做用 status=active 重开）/ project_plan_delete（仅用户明确要求删计划时才用）
+- 跨项目计划总览：project_plans_overview（只读一次看清各项目计划进度 / 逾期步骤 / 停滞天数）——回答「哪个项目停滞了 / 现在该先推哪件事」用它，别逐项目 project_plan_view 来回查
 - 偏好沉淀：remember_preference / read_preferences / update_preference / delete_preference
 - 模型计费：get_model_price / set_model_price（**单价数字必须由用户提供或经用户核实，严禁编造或凭记忆填写**）
 - 上下文与材料：read_upstream_node / intern_search / list_directory（仅规划需要时）
@@ -435,64 +455,6 @@ export const ARCHIVIST_BASE_SYSTEM_PROMPT =
 通用引用规则：
 - 引用具体数字/时间/事实必须能够指明来源；不确定使用"据我了解""我不确定"等限定语，不要编造细节。`;
 
-/** Recorder（会议记录员）常驻内核剔除清单（2026-09-27 新增第三个常驻系统身份）：
- *  与 Kar / Archivist 同款——记录员只做「过往会议检索 + 按需出总结」（两枚会议工具），
- *  不需要文件读写/命令执行/网页检索这些通用内核能力（会议正文由工具直接取回，不经文件工具）。 */
-export const RECORDER_CORE_EXCLUSIONS = [
-  // 文件读写/编辑/目录
-  'read_file', 'write_file', 'edit_code', 'rename_file', 'delete_file', 'list_directory', 'search_files',
-  // 命令/脚本执行
-  'run_command', 'execute_script',
-  // 网页检索
-  'web_search', 'web_fetch',
-] as const;
-
-/** 会议记录员（Recorder）专项基础系统提示（缓存头，字节稳定）：
- *  与 coding/note/butler 同款——专项身份的通用 BASE 提示里塞满了法律/医学/金融铁律、OCR 路由、
- *  butler 事务记忆等对它无用的固定上下文，故给一段只讲「会议检索与总结」的专属提示。
- *  它是**第二个常驻系统身份**（Bobby / Recorder，见 lib/butler/storage.ts），
- *  钉在 Butler 抽屉联系人列「Bobby」正下方。 */
-export const RECORDER_BASE_SYSTEM_PROMPT =
-  `你是 Recorder，BobWork 的会议记录员，常驻在 Butler 抽屉的联系人列里。你只负责会议这一件事：**检索过往会议内容**、**按用户要求生成会议总结**。回答简洁明了，适合在卡片中阅读（用户可能就在会议现场或刚开完会）。
-
-【能力边界 · 只做会议】
-- 你的全部能力就是两枚工具：\`meeting_search\`（无参数=最近会议清单；带 query=跨会议正文检索；带 path=取某场全文）与 \`meeting_summarize\`（按用户要求对该场会议重新出总结）。
-- **不做会议之外的事**：待办/日程/项目/知识库/写文件/跑代码/查网页都不归你管。用户问这类问题 → 一句话说明「这不是我的范围」，并指向对应入口（画布 Butler 节点或 Bobby 联系人 / Kar 节点 / AI Coding 节点），**不要**试图用会议工具代劳，也不要假装能做。
-- 会议正文（转写全文 + 已生成的纪要）由工具直接取回，你**看不到**也**不需要**文件系统；不要声称读取了某个文件。
-
-【工具使用】tools 参数中的工具按需加载，只调用实际存在的工具名：
-- \`meeting_search\`：用户说「找一下…」「上次会里提到的…」「有哪些会议」→ 先搜。**检索是确定性匹配（子串/正则），没有语义检索**——所以关键词要贴用户原话；一次没命中就换一个更短的词再试一次（如「预算」而非「这季度预算方案」），仍无命中就如实说「没找到相关会议」，**不要**凭印象编造会议内容。
-- \`meeting_summarize\`：用户说「总结一下」「按我的要求整理」「只列行动项」→ 用 tool。用户的要求（结构、关注点、详略、语言）**原样**传给 \`instruction\`，不要自己改写或补充他没提的约束。没指定哪一场会议时用最新一场（工具默认），并在回复里说明你总结的是哪一场。
-- \`ask_user_questions\`：用户说的会议指向不明（同名多场 / 时间含糊）→ 先用它一次性问清，别猜。
-- \`todo_write\` / \`finish_task\`：多步任务（先检索再逐场总结）建轨；简单单步问答不建轨。
-
-【工具结果即事实 · 禁止编造】
-- 所有关于会议内容的陈述必须来自工具返回：会议标题、时间、发言、数字、行动项——工具里没有的一个字都不许补。不确定就用「据我了解」「我不确定」限定，或直接说查不到。
-- 引用某场会议时带上它的标题与时间，让用户能自己去 History 里核对。
-- \`meeting_summarize\` 返回的总结正文是**已完成的成品**：原样呈现给用户（只允许做排版层面的处理，如调整标题层级），**不得**自己重写、增删要点或另起一套结构；若你的回复比它短，也是从它里面摘，不是替它写。
-
-【回答格式】
-- 回答渲染为 HTML 卡片，可直接用 Markdown（# 标题、**粗体**、- 列表、代码块用三反引号）；禁止 <script>/<style>/<iframe> 等危险标签。
-- 检索结果先给「命中几场 + 每场标题/时间/一句摘要」，用户要看细节再展开；不要一次倾倒全文。
-- 正文即交付物：说完就停，不要在末尾追加「任务完成」之类的空壳宣告。
-
-通用引用规则：
-- 引用具体内容（发言、数字、行动项）必须来自 meeting_search / meeting_summarize 的真实返回；不确定使用「据我了解」「我不确定」等限定语，不要编造细节。`;
-
-/** 会议记录员（Recorder）画像：固定工具面 = 新场景 `meeting`（两枚会议工具专供它，别的身份拿不到）
- *  + 常驻内核剔除文件/命令/网页检索 → 能力边界与提示词严格对齐。
- *  hidden：它是常驻联系人而非画布节点身份，不进 Agent 创建菜单与市场列表（但可被身份解析命中）。 */
-export const RECORDER_PROFILE: AgentProfile = {
-  id: 'recorder',
-  label: 'Recorder',
-  scenes: 'fixed',
-  fixedScenes: ['meeting'],
-  forceBrowserTools: false,
-  baseSystemPrompt: RECORDER_BASE_SYSTEM_PROMPT,
-  coreExclusions: RECORDER_CORE_EXCLUSIONS,
-  hidden: true,
-};
-
 /** 浏览器对话栏（Hippo ChatSidebar）常驻内核剔除清单（P2 专职化）：
  *  边看边问时不该误动本地文件 —— 文件读写/编辑/目录 + 命令/脚本执行一律不挂。
  *  侧边栏只有这一档（不再有「解锁重活切回 chat」的旁路）。
@@ -511,6 +473,21 @@ export const BROWSER_CORE_EXCLUSIONS = [
  *  六节骨架 + 脚注规范打架（见 route.ts BROWSER_RESEARCH_RULES）。故从 L1 技能目录里一并剔除，
  *  免得模型看到简介就 load_skill 进来。侧边栏只有这一档，本剔除清单对所有侧边栏会话恒定生效。 */
 export const BROWSER_SKILL_EXCLUSIONS = ['deep-research'] as const;
+
+/** 浏览器对话栏「Core 档」工具白名单（默认档，设置 → Hippo Browser 可切 Full）：
+ *  保留日常浏览/下载/读 PDF/表单/标签页所需；cookie/storage/网络/console、拖拽/坐标/视口/前进后退等
+ *  低频高级工具留给 Full。清单只作用于 browser_* / hippo_browser_*，不影响 web_search / ledger / ocr。
+ *  目的：侧栏首轮工具 schema 从 ~97KB 降到核心量级，减少模型选工具与首字延迟。 */
+export const BROWSER_CORE_TOOLS = [
+  'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_fill_form',
+  'browser_press_key', 'browser_scroll', 'browser_extract_text', 'browser_screenshot', 'browser_run_js',
+  'browser_wait', 'browser_wait_for', 'browser_wait_for_text', 'browser_wait_network_idle',
+  'browser_select_option', 'browser_upload_file', 'browser_find_downloads', 'browser_download', 'browser_downloads',
+  'browser_save_download',
+  'browser_get_html', 'browser_get_viewport', 'browser_export_pdf', 'browser_list_tabs', 'browser_active_tab',
+  'browser_switch_tab', 'browser_open_tab', 'browser_close_tab', 'browser_handle_dialog', 'browser_page_script',
+  'browser_read_pdf',
+] as const;
 
 /** 某 Agent 的技能剔除清单（技能调用的**执行侧**闸门用；其余身份返回空数组）。
  *  与 injectSkillContext 的 L1 目录剔除共用同一份常量（route.ts 两处消费同一函数）——
@@ -534,6 +511,8 @@ const BROWSER_PROFILE: AgentProfile = {
   fixedScenes: ['browser', 'ledger', 'ocr'],
   forceBrowserTools: true,
   coreExclusions: BROWSER_CORE_EXCLUSIONS,
+  toolAllowlist: BROWSER_CORE_TOOLS,
+  toolAllowlistBypassOnFull: true,
   hidden: true,
 };
 
@@ -548,7 +527,6 @@ export const AGENT_PROFILES: Record<AgentId, AgentProfile> = {
   chat: CHAT_PROFILE,
   coding: CODING_PROFILE,
   browser: BROWSER_PROFILE,
-  recorder: RECORDER_PROFILE,
 };
 
 /** 按 Agent 标识取配置（未知/缺省回退到通用对话 Agent） */

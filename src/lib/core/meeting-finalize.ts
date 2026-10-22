@@ -9,8 +9,8 @@
  *
  * 2026-09-27：新增「导入录音」模式（会议面板 Import → api/butler/meeting 的 import_finish）——
  * 它没有会议会话，只有拼好的转写文本，故收口到 finalizeMeetingText / recordTranscriptText。
- * 2026-09-27：抽出 summarizeMeetingText（**只调模型、不落库**）——会议记录员 Recorder 的
- * meeting_summarize 工具要的就是「按用户要求出纪要、但别写收件箱」；finalizeMeetingText 改调它再落库。
+ * 2026-09-27：抽出 summarizeMeetingText（**只调模型、不落库**）——「按用户要求出纪要、但别写收件箱」
+ * 的场景走它；finalizeMeetingText 改调它再落库。
  */
 import { insertInbox } from './inbox.ts';
 import { NOTIFY_THREAD_ID } from '@/lib/butler/storage';
@@ -21,7 +21,7 @@ import type { MeetingSession } from './meeting-session.ts';
  * 失败返回空串（调用方按"整理失败"回话）。
  *
  * instruction：用户对本次总结的额外要求（如「只列行动项和负责人」），原样透传给模型；
- * 缺省 = 按默认 schema 出。会议记录员 Recorder 的 meeting_summarize 工具走这条（它只要结果、不要落库）。
+ * 缺省 = 按默认 schema 出。只要结果、不要落库的场景走这条。
  */
 export async function summarizeMeetingText(
   title: string,

@@ -12,6 +12,13 @@
  * 真源：`<APP_ROOT>/butler/.state/threads/<threadId>.json`（读写见 threads.ts）。
  */
 import { stripThinkTags, type ChatMessage } from '@/lib/bus';
+// 头像 id 的合法集合与清洗：人设里现在可以带「用户显式选定的头像」，
+// 校验口径必须与渲染侧（avatar.ts 的 resolveAvatarId）同源，免得两处各写一份枚举。
+import { isPersonaAvatarId, type AvatarId } from '@/lib/butler/avatar';
+// Markdown → 纯文本（纯函数、无 Node 依赖）：联系人列的预览行只有一行，渲染不了 Markdown，
+// 原来的 `**`、`-`、`|`、`![]()` 会原样露出来。复用 TTS 的净化器（同一套「只去格式、不丢正文」口径），
+// 不另写一份 Markdown 剥离逻辑，免得两处口径漂移。
+import { toSpeakableText } from '@/lib/tts/plain-text';
 import type { ThinkingLevel } from '@/lib/types';
 
 export type { ChatMessage };
@@ -30,6 +37,9 @@ export const BUTLER_THREAD_ID_PREFIX = 'b-';
 
 /** 线程保留最近 N 轮（= 2*N 条 user/assistant）；超出裁剪最早对话对 */
 export const THREAD_MAX_ROUNDS = 20;
+/** 裁剪低水位：超过 THREAD_MAX_ROUNDS 时一次性裁到这里（滞回，避免窗口每轮前移）。
+ *  详见 trimThreadMessages 的缓存说明；两个值都必须 > 0 且 KEEP < MAX。 */
+export const THREAD_KEEP_ROUNDS = 14;
 
 /**
  * 会话级人设（角色卡裁剪版）。字段与既有 ChatPersona 同构，仅归属改为 Butler 线程文件。
@@ -48,6 +58,17 @@ export interface ButlerPersona {
   addressUser?: string;
   /** 来自哪个预设模板（如 'tsundere'），仅作溯源展示 */
   template?: string;
+  /**
+   * 用户显式选定的**内置头像**（10 张性格原型之一，见 avatar.ts 的 PERSONA_AVATAR_IDS）。
+   * 缺省 = 沿用「性格关键词 → 名字散列」的纯派生。与 avatarImage 互斥，后者优先。
+   */
+  avatar?: AvatarId;
+  /**
+   * 用户上传的**自定义头像**（绝对路径，落在 `<APP_ROOT>/butler/` 内）。
+   * 优先级最高；但**系统身份（Bobby / 小微）不受其影响**——形象按显示名钉死（见 resolveAvatarId）。
+   * 由「编辑人设」上传，经 /api/butler/attachments 落到角色目录，再由 /api/butler/avatar 回读。
+   */
+  avatarImage?: string;
 }
 
 /**
@@ -113,15 +134,15 @@ export interface ButlerThreadSummary {
   messageCount: number;
   /** 列表标题：人设姓名 > 首条 user 消息单行截断；都无则 'New chat' */
   title: string;
-  /** 列表副标题：最后一条 assistant 回复截断（已剥 think）；无回复时退化为性格描述 */
+  /** 列表副标题：最后一条 assistant 回复截断（已剥 think、已去 Markdown 格式）；无回复时退化为性格描述 */
   preview: string;
   persona: ButlerPersona | null;
   /** 置顶（常驻联系人 = true）：联系人列永远排在最前且不渲染删除键 */
   pinned?: boolean;
   /** 未读消息数：readAt 之后到达的 assistant 消息条数（自己发的不算未读） */
   unread: number;
-  /** 常驻身份标记：'notify' = Bobby（通知助理）；'recorder' = Recorder（会议记录员）；'search' = 小微（搜索助手）。普通线程无此字段 */
-  systemRole?: 'notify' | 'recorder' | 'search';
+  /** 常驻身份标记：'notify' = Bobby（通知助理）；'search' = 小微（搜索助手）。普通线程无此字段 */
+  systemRole?: 'notify' | 'search';
   /**
    * 该会话的**常驻工作区**（2026-10-02 补：Memory 台的 Threads 段要显示它）。
    * 真源是线程文件的 `workspaceFolder`（见 `parseWorkspaceFolder`：非绝对路径一律归一为 null）；
@@ -151,6 +172,9 @@ export function threadExpiresAt(source: ButlerThreadSource, now: number = Date.n
   return source === 'wechat' ? now + WECHAT_THREAD_TTL_MS : null;
 }
 
+/** 自定义头像路径长度上限：超长视为脏数据（正常路径远短于此），按「未指定」处理 */
+export const AVATAR_IMAGE_PATH_MAX = 1024;
+
 /** 解析 persona（坏数据 / 非对象 / 无 name 一律当作「无人设」，不让脏数据进模型上下文） */
 export function parsePersona(raw: unknown): ButlerPersona | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -161,6 +185,13 @@ export function parsePersona(raw: unknown): ButlerPersona | null {
   };
   const name = typeof o.name === 'string' ? (o.name as string).trim() : '';
   if (!name) return null;
+  // 头像（2026-10-18 新增）：内置 id 走与渲染侧同源的枚举校验；
+  // 自定义图只做**形状**清洗（绝对路径 + 不超长），目录越界由 /api/butler/avatar 的读取侧再拦一道。
+  const avatarImageRaw = pick('avatarImage');
+  const avatarImage =
+    avatarImageRaw && avatarImageRaw.startsWith('/') && avatarImageRaw.length <= AVATAR_IMAGE_PATH_MAX
+      ? avatarImageRaw
+      : undefined;
   return {
     name,
     personality: pick('personality'),
@@ -168,6 +199,8 @@ export function parsePersona(raw: unknown): ButlerPersona | null {
     style: pick('style'),
     addressUser: pick('addressUser'),
     template: pick('template'),
+    avatar: isPersonaAvatarId(o.avatar) ? o.avatar : undefined,
+    avatarImage,
   };
 }
 
@@ -298,19 +331,31 @@ export function countUnreadAssistant(
 }
 
 /**
- * 裁剪 messages：保留 system + 最近 THREAD_MAX_ROUNDS 轮 user/assistant 对。
- * 超出时丢弃最旧的 user+assistant 对（保证 system prompt 始终存在）。
+ * 裁剪 messages：保留 system + 最近若干轮 user/assistant 对。
+ * 超出**高水位** THREAD_MAX_ROUNDS 时一次性裁到**低水位** THREAD_KEEP_ROUNDS（滞回）。
+ *
+ * ⚠️ 为什么必须滞回（2026-10-17 缓存回测）：
+ * 本函数在**每轮落库时**都会被调用（entry.ts 写回 / threads.ts upsert）。若窗口「裁到刚好等于高水位」，
+ * 则到达上限后**每轮都必须再裁 1 对**——裁剪点每轮前移，发送前缀从第一条消息起就与上一轮不同，
+ * 整段历史每轮全价重读，前缀缓存彻底失效。
+ * 实测：管家主线程 `butler-notify` 正好卡在 40 条（= 20×2），prompt ≈100k tokens，逐轮命中率仅 22–27%；
+ * 这类「>90k 上下文的管家首调」14 次就吃掉全部 miss 的 16.7%。
+ * 滞回后窗口在 14↔20 轮之间阶梯变化：裁剪之后连续 ~6 轮只追加、裁剪点不动，
+ * 前缀可复用，同一段上下文只付一次全价（预估该类 miss 降 ~5 倍）。
+ * 代价：裁剪后那一刻上下文从 20 轮降到 14 轮（「最多 20 轮」的上限不变，产品语义不扩大）。
  */
 export function trimThreadMessages(messages: ChatMessage[]): ChatMessage[] {
   if (!Array.isArray(messages) || messages.length === 0) return [];
   const sys = messages[0]?.role === 'system' ? messages[0] : null;
   const rest = sys ? messages.slice(1) : messages;
   // rest 按 [user, assistant, user, assistant, ...] 交替，最后一个可能是 user（待提问时）
-  const maxPairs = THREAD_MAX_ROUNDS * 2;
+  const highLimit = THREAD_MAX_ROUNDS * 2;
+  const lowLimit = Math.min(THREAD_KEEP_ROUNDS, THREAD_MAX_ROUNDS) * 2;
   // 如果最后是单个 user（还没有 assistant 回答），裁剪时也要保留它（因此保留最右奇数条）
   let trimmed = rest;
-  if (trimmed.length > maxPairs) {
-    const overflow = trimmed.length - maxPairs;
+  if (trimmed.length > highLimit) {
+    // 裁到低水位（不是刚好裁到高水位）——滞回，让后续若干轮窗口稳定、前缀可复用
+    const overflow = trimmed.length - lowLimit;
     // 向偶数对齐向下切：overflow 如果是奇数，多删 1 条让剩余开头是 user
     const sliceStart = (overflow % 2) === 0 ? overflow : overflow + 1;
     trimmed = trimmed.slice(sliceStart);
@@ -348,11 +393,13 @@ export function summarizeThread(thread: ButlerThread): ButlerThreadSummary {
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
     messageCount: messages.length,
-    // 有专属人设时以「姓名」作标题（用户是按助理名字认人的），否则退回首条提问截断
-    title: thread.persona?.name ?? (firstUser ? condense(firstUser.content, TITLE_MAX) : 'New chat'),
+    // 有专属人设时以「姓名」作标题（用户是按助理名字认人的），否则退回首条提问截断。
+    // 同 preview：先去 Markdown 格式再截断，否则 `##`、`**` 等标记会露在联系人行标题里
+    title: thread.persona?.name ?? (firstUser ? condense(toSpeakableText(firstUser.content), TITLE_MAX) : 'New chat'),
     // 还没聊过时副标题退化为人设描述，否则空线程在列表里只剩一个名字、看不出它是谁
+    // 预览行是**单行纯文本**：先把 Markdown 还原成人话（去 `**`/列表符/表格竖线/链接 URL），再压行截断
     preview: lastAssistant
-      ? condense(stripThinkTags(lastAssistant.content), PREVIEW_MAX)
+      ? condense(toSpeakableText(stripThinkTags(lastAssistant.content)), PREVIEW_MAX)
       : condense(thread.persona?.personality ?? '', PREVIEW_MAX),
     persona: thread.persona,
     // readAt 为 0 按「一律未读」：若退化成 updatedAt，那条「读过之后才落的回复」会被随 updatedAt 一起前移，永远判不出未读

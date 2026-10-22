@@ -10,12 +10,15 @@
  * 底色仍按**名字**散列（avatarTint），所以同性格的两个人靠底色区分。
  * 全程**纯派生**：不落库、不联网、不调模型，所以联系人列与中栏工具行两处各渲染一次也永远一致。
  *
- * 例外是**系统身份**（Bobby / Recorder / 小微，见 lib/butler/storage.ts 的三个常驻线程）：
+ * 例外是**系统身份**（Bobby / 小微，见 lib/butler/storage.ts 的两个常驻线程）：
  * 形象与底色一律由 SYSTEM_IDENTITIES 按显示名钉死，不参与性格推导
  * （Bobby 与小微都允许用户设人设，但头像仍是钉死的系统形象，不随性格变）。
  *
- * 为什么不做成「用户挑」：好友（人设助理）是随手新建的，逐个挑头像纯属打扰；
+ * 默认不做成「用户挑」：好友（人设助理）是随手新建的，逐个挑头像纯属打扰；
  * 由性格文字推导，也符合本项目「配置类界面一律极简」的约定。
+ * 2026-10-18 起允许**显式覆盖**（「编辑人设」里选内置 10 张，或上传一张自定义图）：
+ * 覆盖口径见 resolveAvatarId —— 不指定时行为与从前**完全一致**（纯派生）。
+ * 系统身份（Bobby / 小微）始终保持钉死形象，覆盖对它们无效。
  *
  * 形象一律中性（不按性格定性别 / 长相），且刻意画得很平：缩到 20px 时五官会糊掉，
  * 能认出来的只有「发型轮廓 + 主色」。
@@ -42,7 +45,7 @@ export type AvatarId = (typeof AVATAR_IDS)[number];
 
 /**
  * 系统身份钉死的形象 + 底色色相。键 = **显示名**
- * （lib/butler/storage.ts 的 NOTIFY_TITLE / RECORDER_TITLE / SEARCH_TITLE，改名要同步这里）。
+ * （lib/butler/storage.ts 的 NOTIFY_TITLE / SEARCH_TITLE，改名要同步这里）。
  * 底色也一并钉死：否则名字散列会把「小微 = 微信绿」冲成随机色相，绿色卫衣就失去呼应。
  */
 const SYSTEM_IDENTITIES: Record<string, { id: AvatarId; hue: number }> = {
@@ -52,12 +55,6 @@ const SYSTEM_IDENTITIES: Record<string, { id: AvatarId; hue: number }> = {
    * 普通好友同形，2026-10-01 补了这张专用件；底色一直保持 210° 未变。
    */
   'Bobby': { id: 'bell', hue: 210 },
-  /**
-   * Recorder（会议记录员）：借用「三无」形象（长直发 + 半阖眼，一副埋头记笔录的样子），
-   * 琥珀橙底（录制指示灯的感觉）与另外两个系统身份拉开距离。
-   * 没有专用美术件——系统身份只需「一眼分得开」，不值得再画一张。
-   */
-  Recorder: { id: 'kuudere', hue: 32 },
   /**
    * 小微（搜索与资料整理助手）：专用形象 `wechat`（黑发双丸子头 + 微信绿卫衣 + 胸前对话气泡）
    * + 微信绿（#07C160 ≈ 149°）底 —— 底色必须跟着形象走，否则绿色卫衣失去呼应。
@@ -96,7 +93,7 @@ function hash(s: string): number {
 
 /**
  * 名字 + 性格 → 头像 id。
- * 系统身份（Bobby / Recorder）直接返回钉死的形象；
+ * 系统身份（Bobby / 小微）直接返回钉死的形象；
  * 其余先按 personality 里的关键词投票（命中最多者胜，同票取 AVATAR_RULES 靠前者），
  * 一句话都没命中（或根本没写性格）才退回名字散列——空名字退化为调色板首项。
  */
@@ -116,6 +113,34 @@ export function defaultAvatarId(name: string, personality?: string): AvatarId {
   }
   if (!key) return PERSONA_AVATAR_IDS[0];
   return PERSONA_AVATAR_IDS[hash(key) % PERSONA_AVATAR_IDS.length];
+}
+
+/**
+ * 该值是否是**允许用户挑选**的内置头像 id。
+ * 只认 10 张性格原型：系统专用件（bell / wechat）不给普通好友，也不进候选池，
+ * 否则「改头像」就成了一条给普通人穿上系统形象的路子。
+ */
+export function isPersonaAvatarId(v: unknown): v is AvatarId {
+  return typeof v === 'string' && (PERSONA_AVATAR_IDS as readonly string[]).includes(v);
+}
+
+/**
+ * 名字 + 性格 + 用户显式选定 → 头像 id（渲染侧的**唯一入口**）。
+ *
+ * 优先级：系统身份钉死 > 用户选定 > 性格关键词 / 名字散列。
+ *   - 系统身份（Bobby / 小微）**永不被覆盖**：它们的形象是身份的一部分，必须与环境里
+ *     人设真源同名钉死（见 storage.ts 的 NOTIFY_TITLE / SEARCH_TITLE）；
+ *   - override 只认内置 10 张（非法值/缺省 → 落回推导），所以「用户选定」不会把
+ *     普通好友变成系统形象，也不会因脏数据把头像渲染空；
+ *   - 上传的自定义图**不在这里**：图由调用方（ContactAvatar）直接按路径渲染，
+ *     优先级高于本函数返回值，同样受系统身份例外约束。
+ */
+export function resolveAvatarId(name: string, personality?: string, override?: string | null): AvatarId {
+  const key = name.trim();
+  const pinned = SYSTEM_IDENTITIES[key];
+  if (pinned) return pinned.id;
+  if (isPersonaAvatarId(override)) return override;
+  return defaultAvatarId(name, personality);
 }
 
 /**

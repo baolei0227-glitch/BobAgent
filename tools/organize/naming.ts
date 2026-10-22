@@ -57,6 +57,10 @@ export interface MoveRecord {
   /** 判定依据或失败原因（供人工复核） */
   note: string;
   model: string;
+  /** token 用量（含复核与截断重试；老日志无此字段） */
+  tokens?: { prompt: number; completion: number; reasoning: number };
+  /** 因截断重试的次数 */
+  retries?: number;
 }
 
 export interface OrganizeLog {
@@ -64,11 +68,95 @@ export interface OrganizeLog {
   entries: MoveRecord[];
 }
 
+/** 主题归一：去空白与常见噪音后缀，用于「同一份文件」的近似判定 */
+function topicKey(topic: string): string {
+  return topic
+    .replace(/[\s·・\-_（）()【】\[\]]/g, '')
+    .replace(/(最终版|最新版|修订版|扫描件|副本|复印件|电子版|版本)$/g, '')
+    .toLowerCase();
+}
+
+/** 归一后相似度（按较长的串做 LCS 比例：抗 OCR 丢字/多字） */
+function similarTopic(a: string, b: string): boolean {
+  const x = topicKey(a);
+  const y = topicKey(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  // 互为前缀（「财产分配债权人账户信息」vs「…信息表」）也视为同一主题
+  if (x.length >= 4 && y.length >= 4 && (x.startsWith(y) || y.startsWith(x))) return true;
+  const [long, short] = x.length >= y.length ? [x, y] : [y, x];
+  if (short.length < 4) return false;
+  // 最长公共子序列长度 / 长串长度 ≥ 0.85 视为同主题
+  const dp = new Array<number>(short.length + 1).fill(0);
+  let best = 0;
+  for (let i = 1; i <= long.length; i++) {
+    let prev = 0;
+    for (let j = 1; j <= short.length; j++) {
+      const cur = dp[j];
+      dp[j] = long[i - 1] === short[j - 1] ? prev + 1 : Math.max(dp[j], dp[j - 1]);
+      prev = cur;
+    }
+  }
+  best = dp[short.length];
+  return best / long.length >= 0.85;
+}
+
+/** 目录内已用主题清单（去重、保序、限量）：注入提示词让模型优先沿用既有措辞 */
+export async function listTopics(
+  dir: string,
+  rule: NamingRule = DEFAULT_NAMING,
+  limit = 30,
+): Promise<string[]> {
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const name of entries) {
+    const topic = parseName(name.slice(0, name.length - extname(name).length), rule)?.topic;
+    if (!topic || seen.has(topic)) continue;
+    seen.add(topic);
+    out.push(topic);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * 主题稳定化：模型对同一份内容可能给出近似但不一致的主题
+ * （「主播合作保密协议」/「商业秘密保密协议」这类同义改写，或 OCR 多字少字），
+ * 而版本累加依赖主题一致。这里在目标目录里找「已经存在的同主题」，
+ * 命中就沿用既有措辞——同一主题在目录里只有一个写法，文件名不会越攒越乱。
+ * 返回 null = 目录里没有可复用的同主题（首次归档，采用模型给的新主题）。
+ */
+export async function reuseExistingTopic(
+  dir: string,
+  topic: string,
+  rule: NamingRule = DEFAULT_NAMING,
+): Promise<string | null> {
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return null;
+  }
+  const topics = entries
+    .map((name) => parseName(name.slice(0, name.length - extname(name).length), rule)?.topic)
+    .filter((t): t is string => !!t);
+  if (topics.includes(topic)) return null; // 已有完全同名：无需改写
+  return topics.find((t) => similarTopic(t, topic)) ?? null;
+}
+
 /**
  * 计算版本号序号：
  *   1) 目录内同主题既有文件的最大序号 +1；
- *   2) 若为同主题首份（序号 1）且文档自带版本标识，采纳文档标识；
- *   3) 其余情况用序号。
+ *   2) 主题精确匹配优先；一个都没命中时，退一步用「同目录内近似主题」匹配
+ *      （模型/OCR 让主题抖一两个字时，版本号不会重置成 v01）；
+ *   3) 若为同主题首份（序号 1）且文档自带版本标识，采纳文档标识；
+ *   4) 其余情况用序号。
  * 只认当前命名规则的文件名——改规则后旧名文件不再计入同主题。
  */
 export async function resolveVersionIndex(
@@ -77,17 +165,27 @@ export async function resolveVersionIndex(
   docVersion: string | null,
   rule: NamingRule = DEFAULT_NAMING,
 ): Promise<number> {
-  let max = 0;
   let entries: string[] = [];
   try {
     entries = await fs.readdir(dir);
   } catch {
     /* 目录不可读按空处理 */
   }
-  for (const name of entries) {
-    const parsed = parseName(name.slice(0, name.length - extname(name).length), rule);
-    if (parsed && parsed.topic === topic) max = Math.max(max, parsed.version);
+  const parsedList = entries
+    .map((name) => parseName(name.slice(0, name.length - extname(name).length), rule))
+    .filter((p): p is NonNullable<typeof p> => !!p);
+
+  let exact = 0;
+  for (const p of parsedList) {
+    if (p.topic === topic) exact = Math.max(exact, p.version);
   }
+  let max = exact;
+  if (max === 0) {
+    for (const p of parsedList) {
+      if (similarTopic(p.topic, topic)) max = Math.max(max, p.version);
+    }
+  }
+
   const next = max + 1;
   if (next === 1 && docVersion) {
     const n = Number(docVersion.replace(/\D/g, ''));

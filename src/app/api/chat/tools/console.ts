@@ -11,6 +11,7 @@
  * 依赖方向单向：仅 type-only 依赖 './index'，运行时依赖一律动态 import（与 design.ts / audio.ts 同构）。
  */
 import type { Tool } from './index';
+import type { ProjectConfig } from '@/lib/project/project-manager';
 
 /** 统一错误返回：不向模型抛异常，转成可读文案 */
 function fail(e: unknown): string {
@@ -49,22 +50,48 @@ async function toolListAgents(): Promise<string> {
 
 // ────────────────────────────── list_projects ──────────────────────────────
 
-/** 列出全部项目（含当前项目标记与每个活跃项目的规模统计） */
+/** 列出全部项目（含当前项目标记、分类/标签/备注、最近活动与规模统计） */
 async function toolListProjects(args: Record<string, unknown>): Promise<string> {
   try {
     const withStats = args.withStats !== false;
     const { listProjects, getProjectStats } = await import('@/lib/project/project-manager');
+    const { getProjectLastActivityAt } = await import('@/lib/project/activity');
     const { projects, active_projects, archived_projects, trashed_projects, currentId } = await listProjects();
 
-    const shape = async (p: { id: string; name: string; path: string }) => {
-      const base = { id: p.id, name: p.name, path: p.path, isCurrent: p.id === currentId };
-      if (!withStats) return base;
+    /** 整理元信息：项目分类 / 自定义标签 / 备注（用于判断「这个项目是什么」） */
+    const meta = (p: ProjectConfig) => ({
+      category: p.category ?? null,
+      tags: p.tags ?? [],
+      note: p.note ?? null,
+    });
+
+    /** 最近活动（有界扫描 + 10 分钟 memo）：at + 停滞天数，用于判断「这个项目还活着吗」 */
+    const activity = async (p: ProjectConfig) => {
+      try {
+        const last = await getProjectLastActivityAt(p);
+        if (!last) return { lastActivityAt: null, lastActivityKind: null, stalledDays: null };
+        const ms = new Date(last.at).getTime();
+        return {
+          lastActivityAt: last.at,
+          lastActivityKind: last.kind,
+          stalledDays: Number.isNaN(ms) ? null : Math.max(0, Math.floor((Date.now() - ms) / 86400000)),
+        };
+      } catch {
+        // 单个项目的活动扫描失败不影响整体返回
+        return { lastActivityAt: null, lastActivityKind: null, stalledDays: null };
+      }
+    };
+
+    const shape = async (p: ProjectConfig) => {
+      const base = { id: p.id, name: p.name, path: p.path, isCurrent: p.id === currentId, ...meta(p) };
+      const merged = { ...base, ...(await activity(p)) };
+      if (!withStats) return merged;
       try {
         const st = await getProjectStats(p.id);
-        return { ...base, nodeCount: st.nodeCount, dbSizeKB: st.dbSizeKB, createdDaysAgo: st.createdDaysAgo };
+        return { ...merged, nodeCount: st.nodeCount, dbSizeKB: st.dbSizeKB, createdDaysAgo: st.createdDaysAgo };
       } catch {
         // 单个项目统计失败不影响整体返回
-        return { ...base, stats: 'unavailable' };
+        return { ...merged, stats: 'unavailable' };
       }
     };
 
@@ -79,7 +106,13 @@ async function toolListProjects(args: Record<string, unknown>): Promise<string> 
           total: projects.length,
         },
         active_projects: active,
-        archived_projects: archived_projects.map((p) => ({ id: p.id, name: p.name, archived: true })),
+        archived_projects: archived_projects.map((p) => ({
+          id: p.id,
+          name: p.name,
+          archived: true,
+          archivedAt: p.archived_at ?? null,
+          ...meta(p),
+        })),
       },
       null,
       2,
@@ -251,7 +284,7 @@ export const consoleToolDefs: Tool[] = [
   {
     name: 'list_projects',
     description:
-      'List all projects: id, name, path, which one is current, plus size stats (node count, db size, age) for each active project. Read-only. Use it to answer "有什么项目 / 当前在哪个项目" and to pick a projectId for follow-up queries. Set withStats=false to skip per-project stats and answer faster.',
+      'List all projects: id, name, path, which one is current, its organising metadata (category / tags / note), its last activity time and stalled days, plus size stats (node count, db size, age) for each active project. Archived projects are listed separately (id / name / archivedAt / category / tags / note). Read-only. Use it to answer "有什么项目 / 当前在某个项目 / 哪些项目很久没动了" and to pick a projectId for follow-up queries; the stalledDays field is the "is this project dead?" signal. Set withStats=false to skip per-project size stats and answer faster.',
     parameters: {
       type: 'object',
       properties: {

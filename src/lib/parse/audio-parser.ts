@@ -63,6 +63,23 @@ const STT_TIMEOUT_MS = 120000;
  *  正常说话峰值 -2 ~ -20 dB，故 -50 dB 对轻声说话仍留足余量。 */
 const SILENCE_MAX_VOLUME_DB = -50;
 
+/**
+ * 「这段范围里没有可转写的语音」（静音 / 空稿）—— 一个**可区分的类型**，不是一句文案。
+ *
+ * 为什么值得单独一个类：长音频**窗口化**转写（`lib/audio/windowed.ts`）会逐窗调用本函数，
+ * 而 57 分钟的录音里出现一整段静音是常态。若调用方只能靠 `message` 字符串分辨"没语音"还是"真出错"，
+ * 就会把"某窗静音"当成致命错误 ⇒ **整段转写卡在这一窗反复失败、永远到不了后面**。
+ * 有类型之后，窗口化那边可以明确地"跳过这一窗、继续下一窗"。
+ *
+ * ⚠️ `message` 文案与历史上抛出的**逐字一致**（`/api/transcribe` 与 `transcribe_audio` 工具都直接透出它）。
+ */
+export class NoSpeechError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NoSpeechError';
+  }
+}
+
 /** 微碎片切片下限（字节）。说话人分离的边界抖动会切出几十毫秒的空块（实测 34ms =
  *  1166 字节），云端 STT 对这类空音频直接返回 HTTP 422（"转写结果为空"），
  *  **一块碎片就足以让整段转写全部失败**（76s 音频只剩这一处报错）。碎片不含可转写
@@ -628,8 +645,16 @@ export async function parseAudio(
   if (fileStat.size === 0) {
     throw new Error(`This audio file is empty (0 bytes) — nothing to transcribe. Re-record it or upload a valid audio file: ${fileName}`);
   }
-  if (fileStat.size > MAX_FILE_BYTES) {
-    throw new Error(`Audio file exceeds the ${MAX_FILE_BYTES / 1024 / 1024}MB limit — transcription refused.`);
+  // 体积上限**按本次要转写的范围判**：
+  //  - 整段转写 ⇒ 拦的是整个文件（原语义不变）；
+  //  - 带 rangeStartSec/rangeEndSec ⇒ 实际只解这一段（`convertToWav` 用输入定位，`-ss` 在 `-i` 前），
+  //    真正的成本上界是**范围时长**（下面 `duration > MAX_DURATION_SEC` 已单独把关）
+  //    ⇒ 这里对整文件判体积会把"2 小时 / 300MB 的录音只想转第 10 分钟"也一并拒掉，属误伤。
+  //    这正是长音频走**窗口化**（`lib/audio/windowed.ts`）的必要条件：否则 108MB 的 57 分钟录音
+  //    即便切成 20 分钟一段，仍会在这一行被拒 —— 而用户拿到的报错会是"文件超过 100MB"，
+  //    与"时长超 30 分钟"混在一起，根因更难看出。
+  if (!range && fileStat.size > MAX_FILE_BYTES) {
+    throw new Error(`Audio file exceeds the ${MAX_FILE_BYTES / 1024 / 1024}MB limit — transcription refused. Transcribe a shorter range instead.`);
   }
 
   const ffmpegPath = await resolveFfmpegPath();
@@ -669,6 +694,14 @@ export async function parseAudio(
   // 二者互斥、不做自动回退：设置面板里选了哪个就用哪个，没选就明确报错。
   const sherpaMod = stt?.provider === 'sherpa-local' ? await import('@/lib/stt/sherpa') : null;
   const localModelId = sherpaMod ? (stt?.localModel || '') : '';
+  // 该模型是否需要外部补标点（Zipformer CTC 只出裸字；SenseVoice 自带标点/ITN）
+  const localModelDef = sherpaMod ? sherpaMod.findLocalModel(localModelId) : undefined;
+  const needsPunctuation = !!(
+    sherpaMod &&
+    localModelDef &&
+    sherpaMod.isBatchModel(localModelDef) &&
+    localModelDef.needsPunctuation
+  );
   if (sherpaMod) {
     if (!localModelId) {
       throw new Error('No local offline model selected. Pick one in Settings → Roles → Audio STT Model.');
@@ -689,7 +722,7 @@ export async function parseAudio(
     // 故先量峰值音量，过低直接判空——绝不把静音喂给模型。
     const maxVolumeDb = await measureMaxVolumeDb(ffmpegPath, wavPath);
     if (maxVolumeDb !== null && maxVolumeDb < SILENCE_MAX_VOLUME_DB) {
-      throw new Error('No speech detected — the recording is silent (input level too low).');
+      throw new NoSpeechError('No speech detected — the recording is silent (input level too low).');
     }
     // 探测实际转写时长：range 块取切好的 wav，整段取原音频
     const duration = range
@@ -769,8 +802,15 @@ export async function parseAudio(
     // 按停顿切句后片段数会到几十个，而 CLI 每次 spawn 都要重载模型（实测 1 个文件 1.68s、
     // 3 个文件 1.77s）——逐段调用会把分钟级任务拖成十几分钟。
     // 批量失败（行数不符等）不致命：退回逐段转写，结果口径完全一致。
+    // 有的离线模型（Zipformer CTC）一次只能吃一个 wav；批量调用会直接失败，故先看模型能力位。
+    const batchCapable = !(
+      sherpaMod &&
+      localModelDef &&
+      sherpaMod.isBatchModel(localModelDef) &&
+      localModelDef.supportsBatchFiles === false
+    );
     let batchTexts: string[] | null = null;
-    if (sherpaMod && keepIdx.length > 1) {
+    if (sherpaMod && keepIdx.length > 1 && batchCapable) {
       try {
         batchTexts = await sherpaMod.sherpaTranscribeMany(keepIdx.map((i) => parts[i]), localModelId);
       } catch (e) {
@@ -789,6 +829,12 @@ export async function parseAudio(
           ? await sherpaMod.sherpaTranscribe(parts[i], localModelId)
           : await cloudTranscribe(stt!, parts[i], i, segCount, startOffset);
 
+      // 只出裸字的模型（Zipformer CTC）：逐段补标点/断句。
+      // 失败时 `punctuateText` 原样返回，标点是增强项，绝不阻断转写。
+      if (segText && needsPunctuation && sherpaMod) {
+        segText = await sherpaMod.punctuateText(segText);
+      }
+
       if (segText) {
         // 多段时统一带时间戳前缀（便于定位音频位置）。
         // 说话人标签必须**另起一行**：回放的段起点正则要求 `[mm:ss]` 独占一行（MeetingReplay.parseSegments）
@@ -805,7 +851,7 @@ export async function parseAudio(
 
     const extracted = transcripts.join('\n\n').trim();
     if (!extracted) {
-      throw new Error('Empty transcript — no speech detected.');
+      throw new NoSpeechError('Empty transcript — no speech detected.');
     }
 
     // 标签即选定的引擎（云端 / 本地互斥单选）

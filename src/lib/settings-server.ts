@@ -14,11 +14,11 @@
 import { promises as fs, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
-import { defaultSettings, normalizeCustomThemes, DEFAULT_QUICK_PROMPTS, type AppSettings, type SttSettings } from './settings';
+import { defaultSettings, normalizeCustomThemes, DEFAULT_QUICK_PROMPTS, isSandboxFullTrust, resolveSandboxChatPermission, resolveSandboxGraphPermission, type AppSettings, type SandboxChatPermission, type SandboxGraphPermission, type SttSettings } from './settings';
 import { resolveAppRoot } from './app-root';
 import { encryptSettings, decryptSettings, hasPlainSecrets, hasLegacySecrets } from './secrets';
 import { sanitizeBaseUrl } from './types';
-import { MCP_PRESETS, DEFAULT_MCP_SERVERS, type McpServerConfig } from './mcp/types';
+import { MCP_PRESETS, DEFAULT_MCP_SERVERS, SYSTEM_MCP_IDS, type McpServerConfig } from './mcp/types';
 import { LOCAL_STT_MODELS, isLocalSttBinaryInstalled, isLocalSttModelReady } from './stt/sherpa';
 
 /** 清理所有 provider 的 baseUrl：去掉误存的端点后缀（如 .../images/generations），
@@ -218,6 +218,30 @@ async function firstReadyLocalSttModel(): Promise<string | null> {
   return null;
 }
 
+/**
+ * 系统随包插件的面板声明对齐出厂预置（出厂升级迁移，2026-10-19）。
+ *
+ * 面板形态会随版本演进（如 bob-notes 从「插件自起网页 serve，钉死 9480」改为
+ * 「UI 由宿主静态托管、零端口 + hostPath 稳定反代」）。而实例配置里的 panel 是**旧版本写下
+ * 的快照**，effectivePanel 又优先取实例配置 ⇒ 不对齐就让升级用户永远停在旧形态：
+ * 面板 URL 仍挂在会漂移/易被占用的固定端口上 —— 正是「各机装好后插件面板打不开」的场景之一。
+ *
+ * 仅覆盖 SYSTEM_MCP_IDS（随包系统插件，属宿主自有的出厂能力）；
+ * 市场/自定义插件（如 bob-video-shot-mcp）的 panel 属用户配置，一律不动。
+ */
+export function syncBundledPanelDecls(configs: McpServerConfig[]): McpServerConfig[] {
+  let touched = false;
+  const next = configs.map((c) => {
+    if (!SYSTEM_MCP_IDS.includes(c.id)) return c;
+    const presetPanel = MCP_PRESETS.find((p) => p.id === c.id)?.panel;
+    if (!presetPanel) return c;
+    if (c.panel && JSON.stringify(c.panel) === JSON.stringify(presetPanel)) return c;
+    touched = true;
+    return { ...c, panel: { ...presetPanel } };
+  });
+  return touched ? next : configs;
+}
+
 export async function readSettingsFromFile(): Promise<AppSettings> {
   try {
     const APP_ROOT = resolveAppRoot();
@@ -245,6 +269,9 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
       if (missing.length > 0) {
         merged.mcpServers = [...merged.mcpServers, ...missing];
       }
+      // 面板声明对齐预置（同上「出厂升级」口径）：旧版本写下的面板快照会挡住新形态生效，
+      // 让升级用户自动拿到当前形态（如 bob-notes 的去端口化面板），无需手工改配置。
+      merged.mcpServers = syncBundledPanelDecls(merged.mcpServers);
     }
 
     // 出厂快捷指令补全（同 MCP 口径）：已保存过 quickPrompts 的老配置里没有新增的出厂条目，
@@ -276,6 +303,133 @@ export async function readSettingsFromFile(): Promise<AppSettings> {
     console.warn('[settings] 读取 .settings.json 失败，返回空配置（version=0 标记）:', err);
     return resolveSettings({ ...defaultSettings(), version: BROKEN_VERSION });
   }
+}
+
+// ============================================================
+// 出口脱敏 / 写回保护（2026-10-10 评估 P0-2）
+//
+// 背景：`GET /api/settings` 返回**解密后**的设置，里面有 providers[].apiKey、mcpServers[].env、
+// remoteAccess.token 等明文；读权限只有 loopback Host 校验 —— 而同源的小程序预览页也是 loopback，
+// 于是任何小程序都能 fetch 到全部密钥。这里做两层缓解（真正的边界仍是同源隔离，见设计方案）：
+//   1. GET 出口把密钥字段替换成掩码常量（UI 只需知道"已配置"）；
+//   2. PUT 收到掩码/空值时**保留磁盘上的旧值**，避免 UI 把掩码写回、把真 Key 抹掉。
+// ============================================================
+
+/** 密钥掩码（前端拿到这个值表示"已配置"，原值不会出服务端） */
+export const SECRET_MASK = '••••••••';
+
+/** 字段名命中即视为密钥（大小写不敏感） */
+const SECRET_FIELD_RE = /^(apikey|password|token|accesstoken|apisecret|clientsecret|secret)$/i;
+/** 这些字段是"值即密钥"的字典（MCP 的 env / headers） */
+const SECRET_MAP_FIELDS = new Set(['env', 'headers']);
+
+function mapSecrets<T>(value: T, mode: 'mask' | 'preserve', stored: unknown): T {
+  if (Array.isArray(value)) {
+    const storedArr = Array.isArray(stored) ? stored : [];
+    return value.map((v, i) => mapSecrets(v, mode, storedArr[i])) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    const storedObj = (stored && typeof stored === 'object' ? stored : {}) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_FIELD_RE.test(k) && typeof v === 'string') {
+        if (mode === 'mask') {
+          out[k] = v ? SECRET_MASK : v;
+        } else {
+          const prev = storedObj[k];
+          // 掩码或空值 → 保留旧值；否则按用户输入
+          out[k] = (v === '' || v === SECRET_MASK) && typeof prev === 'string' && prev ? prev : v;
+        }
+        continue;
+      }
+      if (SECRET_MAP_FIELDS.has(k) && v && typeof v === 'object') {
+        const prevMap = (storedObj[k] && typeof storedObj[k] === 'object' ? storedObj[k] : {}) as Record<string, unknown>;
+        const nextMap: Record<string, unknown> = {};
+        for (const [mk, mv] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof mv !== 'string') { nextMap[mk] = mapSecrets(mv, mode, prevMap[mk]); continue; }
+          if (mode === 'mask') nextMap[mk] = mv ? SECRET_MASK : mv;
+          else {
+            const prev = prevMap[mk];
+            nextMap[mk] = (mv === '' || mv === SECRET_MASK) && typeof prev === 'string' && prev ? prev : mv;
+          }
+        }
+        out[k] = nextMap;
+        continue;
+      }
+      out[k] = mapSecrets(v, mode, storedObj[k]);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
+/** GET 出口脱敏：密钥字段 → 掩码常量（结构不变，UI 无需改） */
+export function maskSettingsSecrets(settings: AppSettings): AppSettings {
+  return mapSecrets(settings, 'mask', null);
+}
+
+/** PUT 写回保护：incoming 里的掩码/空密钥 → 用磁盘上的旧值补齐 */
+export function preserveStoredSecrets(incoming: AppSettings, stored: AppSettings): AppSettings {
+  return mapSecrets(incoming, 'preserve', stored);
+}
+
+let sandboxSecretCache: { at: number; value: string } | null = null;
+const SANDBOX_SECRET_TTL_MS = 60_000;
+
+/**
+ * 小程序桥签名密钥（2026-10-10）：读不到就生成一个并落盘。
+ * 缓存 60s，避免每个桥请求都读文件；`rotateSandboxBridgeSecret()` 会立刻失效缓存。
+ */
+export async function getSandboxBridgeSecret(): Promise<string> {
+  const now = Date.now();
+  if (sandboxSecretCache && now - sandboxSecretCache.at < SANDBOX_SECRET_TTL_MS) return sandboxSecretCache.value;
+  const settings = await readSettingsFromFile();
+  let secret = typeof settings.sandboxBridgeSecret === 'string' ? settings.sandboxBridgeSecret : '';
+  if (!secret) {
+    const { randomBytes } = await import('crypto');
+    secret = randomBytes(32).toString('base64url');
+    settings.sandboxBridgeSecret = secret;
+    await writeSettingsToFile(settings);
+  }
+  sandboxSecretCache = { at: now, value: secret };
+  return secret;
+}
+
+/** 轮换密钥（所有已签发的页面令牌立即失效；需要用户刷新预览页） */
+export async function rotateSandboxBridgeSecret(): Promise<string> {
+  const settings = await readSettingsFromFile();
+  const { randomBytes } = await import('crypto');
+  const secret = randomBytes(32).toString('base64url');
+  settings.sandboxBridgeSecret = secret;
+  await writeSettingsToFile(settings);
+  sandboxSecretCache = { at: Date.now(), value: secret };
+  return secret;
+}
+
+/**
+ * 小程序权限的**服务端**读取（2026-10-10 修复「每次都要询问」的根因之一）。
+ *
+ * lib/settings.ts 的 loadSettings() 在 Node 端没有 window/Electron IPC，会退化为
+ * defaultSettings()（空配置）—— 于是桥里的 chatGetPermission / 预览页徽标永远读到"未授权"，
+ * 小程序就会一次次申请授权。服务端（桥、预览路由、模型闸）必须走读文件这条路径。
+ */
+export async function getSandboxChatPermissionServer(appId: string): Promise<SandboxChatPermission> {
+  if (!appId) return 'none';
+  const settings = await readSettingsFromFile();
+  return resolveSandboxChatPermission(settings, appId);
+}
+
+/** 服务端读取某小程序的画布对接授权级别（完全信任下默认 'control'） */
+export async function getSandboxGraphPermissionServer(appId: string): Promise<SandboxGraphPermission> {
+  if (!appId) return 'none';
+  const settings = await readSettingsFromFile();
+  return resolveSandboxGraphPermission(settings, appId);
+}
+
+/** 服务端读取全局「完全信任」开关（缺省 = 放开） */
+export async function isSandboxFullTrustServer(): Promise<boolean> {
+  const settings = await readSettingsFromFile();
+  return isSandboxFullTrust(settings);
 }
 
 /**

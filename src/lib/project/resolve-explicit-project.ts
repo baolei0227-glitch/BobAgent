@@ -17,6 +17,7 @@
  * 依赖以 deps 注入（默认走 project-manager），便于纯单测，避免测试触达文件系统。
  */
 import { getCurrentProject, listProjects } from '@/lib/project/project-manager';
+import { isInboxRef } from '@/lib/project/sticky-scope';
 
 /** 解析结果里的项目最小契约（id / 显示名 / 磁盘路径） */
 export interface ResolvedProjectRef {
@@ -144,8 +145,10 @@ export async function resolveExplicitProject(
  *   explicit         用户点名了项目（id / 名称）
  *   current_explicit 用户明确说"当前项目 / 这个项目"
  *   current_fallback 用户未提及项目 → 自动落到当前激活项目
- *   global           用户未提及项目且当前无激活项目 → 落全局（仅日历事件可如此） */
-export type ProjectSource = 'explicit' | 'current_explicit' | 'current_fallback' | 'global';
+ *   global           用户未提及项目且当前无激活项目 → 落全局（仅日历事件可如此）
+ *   inbox            显式引用「inbox / 未立项 / 先记一下」→ 落全局 Todo Inbox（未立项的临时待办；
+ *                    需调用方显式 allowInbox，仅有归属弹性的写类工具可接） */
+export type ProjectSource = 'explicit' | 'current_explicit' | 'current_fallback' | 'global' | 'inbox';
 
 export type ResolveProjectWithFallbackResult =
   | { ok: true; project: ResolvedProjectRef | null; source: ProjectSource }
@@ -156,6 +159,7 @@ const NO_ACTIVE_PROJECT_MESSAGE =
 
 /**
  * 在 resolveExplicitProject 之上加「未提及项目 → 落当前激活项目」的统一兜底（写类工具共用口径）：
+ *   - allowInbox=true 且引用是 Inbox 别名        → project=null / source='inbox'（全局 Todo Inbox，未立项）
  *   - 点名项目 / 显式 current                  → explicit / current_explicit
  *   - 未提及项目（空引用）或无 current 可用    → 自动落当前激活项目（current_fallback）
  *   - allowGlobal=true 且当前无激活项目        → project=null / source='global'（仅日历事件可如此）
@@ -164,9 +168,15 @@ const NO_ACTIVE_PROJECT_MESSAGE =
  */
 export async function resolveProjectWithFallback(
   ref: unknown,
-  opts: { allowGlobal?: boolean } = {},
+  opts: { allowGlobal?: boolean; allowInbox?: boolean } = {},
   deps: ProjectLookupDeps = defaultProjectLookupDeps,
 ): Promise<ResolveProjectWithFallbackResult> {
+  // 显式「未立项」引用（用户说"先记一下 / 还没立项 / 临时"）：直接落全局 Todo Inbox，
+  // 不再被当前项目兜底吞掉。需调用方显式开 allowInbox —— 有固定项目归属的工具（会话 / 计划等）
+  // 不接此引用，避免拿到 null 项目。
+  if (opts.allowInbox && isInboxRef(typeof ref === 'string' ? ref : undefined)) {
+    return { ok: true, project: null, source: 'inbox' };
+  }
   const resolved = await resolveExplicitProject(typeof ref === 'string' ? ref : undefined, deps);
   if (resolved.ok) {
     return {

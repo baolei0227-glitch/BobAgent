@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
-import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge, Globe, FolderOpen, Bell } from 'lucide-react';
+import { Check, X, Loader2, Zap, Image, Brain, Sparkles, FileText, AlertCircle, Search, ChevronRight, ChevronDown, ChevronUp, Eye, EyeOff, ExternalLink, Plug, MessageCircle, MessageSquare, Mail, Wrench, Palette, Rocket, Box, Info, ArrowUpCircle, Type, Keyboard, Trash, ClipboardCheck, BookOpen, CalendarDays, Gauge, Globe, FolderOpen, Bell, RefreshCw, RotateCcw, Mic, Network, Archive } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -40,6 +40,7 @@ import { VISION_MODEL_PATTERN, OCR_MODEL_PATTERN, MODEL_VENDOR_PATTERNS, normali
 import { TemplateLibraryModal } from './TemplateLibraryModal';
 import { WechatBindModal } from './WechatBindModal';
 import { FeishuBindModal } from './FeishuBindModal';
+import { MailBindModal } from './MailBindModal';
 import { UsagePanel } from './UsagePanel';
 import { ToggleSwitch } from './ToggleSwitch';
 import { LocalSttPanel } from './LocalSttPanel';
@@ -286,13 +287,15 @@ export function SettingsModal({
   // 单模型添加验证中（勾选 / Add 时的连接测试），驱动 spinner 与防重复点击
   const [verifyingModelId, setVerifyingModelId] = useState<string | null>(null);
   // 统一导航：左栏目录选中项，右栏显示对应面板
-  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'feishu' | 'usage' | 'browser' | 'fileorganizer' | 'butlernotify' | 'remote'>('roles');
+  const [activeSection, setActiveSection] = useState<'chat' | 'roles' | 'web' | 'icons' | 'theme' | 'diagram' | 'quickprompts' | 'templates' | 'wechat' | 'feishu' | 'mail' | 'usage' | 'browser' | 'fileorganizer' | 'butlernotify' | 'remote'>('roles');
   // Hippo Browser：清除 Cookies 按钮状态
   const [browserClearBusy, setBrowserClearBusy] = useState(false);
   const [browserClearMsg, setBrowserClearMsg] = useState('');
   const [browserClearErr, setBrowserClearErr] = useState(false);
   // AI Browser 开关：开 = 任务执行只走应用内 Hippo（内置 browser_*），关 = 只走 Bob Browser 扩展通道
   const [aiBrowserHippo, setAiBrowserHippo] = useState(false);
+  // 浏览器侧栏工具面：true = Core（默认，快），false = Full（全部浏览器工具）
+  const [browserToolsetCore, setBrowserToolsetCore] = useState(true);
   // 文件自动整理投递箱：本地编辑态，改动后随自动保存落盘
   const [fileOrgEnabled, setFileOrgEnabled] = useState(false);
   const [fileOrgDir, setFileOrgDir] = useState('');
@@ -302,6 +305,24 @@ export function SettingsModal({
   const [fileOrgPickErr, setFileOrgPickErr] = useState('');
   // 命名规则（受控选项：字段顺序 / 分隔符 / 版本号补零）
   const [fileOrgNaming, setFileOrgNaming] = useState<NamingRule>(DEFAULT_NAMING);
+
+  // ---- File Organizer 运行状态（历史 / 失败原因 / 重试）：数据源见 /api/core/file-organizer ----
+  type FoPendingItem = {
+    name: string; path: string; size: number; mtime: string;
+    failure: string; attempts: number; method: string; model: string; updatedAt: string;
+  };
+  type FoHistoryItem = {
+    at: string; from: string; category: string; topic: string; version: string;
+    verdict: string; note: string; model: string;
+    tokens?: { prompt: number; completion: number; reasoning: number }; retries?: number;
+  };
+  const [foRuntime, setFoRuntime] = useState<{
+    configured: boolean; enabled: boolean; root: string;
+    categories: string[]; existing: string[]; pending: FoPendingItem[]; history: FoHistoryItem[];
+  } | null>(null);
+  const [foRuntimeLoading, setFoRuntimeLoading] = useState(false);
+  const [foRuntimeErr, setFoRuntimeErr] = useState('');
+  const [foRetrying, setFoRetrying] = useState('');
   // Butler 推送克制（B5）：免打扰时段 / 单日上限；本地编辑态，改动随自动保存落盘。
   // 口径见 lib/core/quiet-hours.ts —— 用户自订日历提醒永不被静默，只受单日上限。
   const [bnEnabled, setBnEnabled] = useState(true);
@@ -349,9 +370,9 @@ export function SettingsModal({
       setRaEnabled(!!d.enabled);
       setRaToken(d.token || '');
       setRaMode(d.mode === 'strict' ? 'strict' : 'loopback-exempt');
-      setRaMsg(action === 'disable' ? '远程访问已关闭' : '已更新，请把 Token 填入手机端 App');
+      setRaMsg(action === 'disable' ? 'Remote access disabled' : 'Updated. Enter the Token in the mobile app.');
     } catch {
-      setRaMsg('操作失败，请重试');
+      setRaMsg('Operation failed. Please try again.');
     } finally {
       setRaBusy(false);
     }
@@ -410,12 +431,69 @@ export function SettingsModal({
       setFileOrgPickErr(e instanceof Error ? e.message : String(e));
     }
   }, []);
+  /** 拉取整理运行状态（待处理清单 + 最近记录）：打开 File Organizer 面板 / 重试后调用 */
+  const refreshFoRuntime = useCallback(async () => {
+    setFoRuntimeLoading(true);
+    setFoRuntimeErr('');
+    try {
+      const r = await fetch('/api/core/file-organizer', { cache: 'no-store' });
+      const data = (await r.json()) as {
+        ok?: boolean; configured?: boolean; enabled?: boolean; root?: string;
+        categories?: string[]; existing?: string[];
+        pending?: FoPendingItem[]; history?: FoHistoryItem[]; error?: string;
+      };
+      if (!data?.ok) throw new Error(data?.error || 'failed to load organizer status');
+      setFoRuntime({
+        configured: data.configured === true,
+        enabled: data.enabled === true,
+        root: data.root ?? '',
+        categories: data.categories ?? [],
+        existing: data.existing ?? [],
+        pending: data.pending ?? [],
+        history: data.history ?? [],
+      });
+    } catch (e) {
+      setFoRuntimeErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFoRuntimeLoading(false);
+    }
+  }, []);
+
+  /** 重试：把 _待处理 里的文件搬回投递箱并清掉失败指纹，watcher 下一轮会重新判定 */
+  const handleRetryPending = useCallback(async (path?: string) => {
+    setFoRetrying(path || '*');
+    setFoRuntimeErr('');
+    try {
+      const r = await fetch('/api/core/file-organizer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retry', path }),
+      });
+      const data = (await r.json()) as { ok?: boolean; error?: string; moved?: number };
+      if (!data?.ok) throw new Error(data?.error || 'retry failed');
+      await refreshFoRuntime();
+    } catch (e) {
+      setFoRuntimeErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFoRetrying('');
+    }
+  }, [refreshFoRuntime]);
+
+  // 切到 File Organizer 分区时拉一次运行状态（重试按钮挂在设置面板里，随面板打开刷新）
+  useEffect(() => {
+    if (!open || activeSection !== 'fileorganizer') return;
+    void refreshFoRuntime();
+  }, [open, activeSection, refreshFoRuntime]);
+
   // Model Pool 以独立弹窗方式打开（从 Role Assignment 的按钮进入，左侧导航不再包含该项）
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
   // 默认保存目录已固定为内置 BobWorkspace（~/BobWork/BobWorkspace），不提供自定义存储位置
   // 架构图全屏放大
   const [diagramZoom, setDiagramZoom] = useState(false);
   const [searchConfig, setSearchConfig] = useState<SearchConfig>({ apiKey: '', baseUrl: '' });
+  // 联网搜索/抓取 provider（与聊天模型解耦）
+  const [webSearchProvider, setWebSearchProvider] = useState('deepseek-search-api');
+  const [webFetchProvider, setWebFetchProvider] = useState('deepseek-fetch-api');
   const [expandedModels, setExpandedModels] = useState<ModelDetailState>({});
 
   // 自动保存：debounce 计时器 + 「正在写盘」单飞标记（写盘期间不并发写同一 settings.json）
@@ -600,6 +678,8 @@ export function SettingsModal({
         isLoadingRef.current = true;
         const settings: AppSettings = await migrateOldSettingsIfNeeded() || await loadSettings();
         setSearchConfig(settings.search);
+        setWebSearchProvider(settings.webSearch?.searchProvider ?? 'deepseek-search-api');
+        setWebFetchProvider(settings.webSearch?.fetchProvider ?? 'deepseek-fetch-api');
 
         // 基于 PROVIDER_PRESETS 统一构造：扩展新 provider 时无需改此处
         const newKeys = buildProviderRecord(() => '');
@@ -717,6 +797,8 @@ export function SettingsModal({
         setBnLimitErr('');
         // AI 浏览器通道（undefined = hippo，默认通道；仅显式 'chrome' 才显示为关）
         setAiBrowserHippo(settings.aiBrowser !== 'chrome');
+        // 浏览器侧栏工具面（undefined = core，默认核心档；仅显式 full 才显示为全量）
+        setBrowserToolsetCore(settings.browserToolset !== 'full');
         try {
           const api = (window as unknown as { api: { avatar: { list: () => Promise<Array<{ id: string; name: string; dataUrl: string; builtin: boolean }>> } } }).api;
           if (api?.avatar) {
@@ -756,6 +838,7 @@ export function SettingsModal({
     };
   }, [
     apiKeys, customBaseUrls, selectedModels, searchConfig,
+    webSearchProvider, webFetchProvider,
     selectedChatModel, chatModelPool, chatAutoVisionOnImage,
     sttProvider, sttModel, sttPool, localSttModel,
     imageEditProvider, imageEditModel, imageEditSelectedModels, imagePool,
@@ -772,6 +855,8 @@ export function SettingsModal({
     bnEnabled, bnQuietStart, bnQuietEnd, bnDailyLimit,
     // AI 浏览器通道（开关切换 → 下一轮对话工具面自动按新通道裁剪）
     aiBrowserHippo,
+    // 浏览器侧栏工具面（core / full，下一轮对话生效）
+    browserToolsetCore,
     // 字体缩放（原先点击即独立落盘，现并入自动保存，避免与自动保存并发写同一 settings.json）
     fontScale,
   ]);
@@ -1182,6 +1267,7 @@ export function SettingsModal({
       await updateSettingsFields({
         providers: newConfigs,
         search: { apiKey: searchConfig.apiKey.trim(), baseUrl: searchConfig.baseUrl.trim() },
+        webSearch: { searchProvider: webSearchProvider, fetchProvider: webFetchProvider },
         taskModel: taskModelPool[0] ? { defaultProvider: taskModelPool[0].provider, defaultModel: taskModelPool[0].modelId, pool: taskModelPool } : undefined,
         outcomeModel: outcomeModelPool[0] ? { defaultProvider: outcomeModelPool[0].provider, defaultModel: outcomeModelPool[0].modelId, pool: outcomeModelPool } : undefined,
         chatModel: {
@@ -1250,6 +1336,8 @@ export function SettingsModal({
         },
         // AI 浏览器通道：显式写单值（互斥，不做 auto 判据）
         aiBrowser: aiBrowserHippo ? 'hippo' : 'chrome',
+        // 浏览器侧栏工具面：显式写单值（core = 默认核心档；full = 全量）
+        browserToolset: browserToolsetCore ? 'core' : 'full',
         // Butler 推送克制（B5）：非法项回落默认（不写该字段 = quiet-hours 用默认值），
         // 并在面板上给出内联提示（见 notifyCheck）。
         butlerNotify: {
@@ -1385,7 +1473,7 @@ export function SettingsModal({
         <div className="flex min-h-0 flex-1">
           {/* ========== 左栏导航 ========== */}
           <div
-            className="w-52 shrink-0 overflow-y-auto border-r px-2 py-3"
+            className="hide-scrollbar w-52 shrink-0 overflow-y-auto border-r px-2 py-3"
             style={{
               borderColor: 'var(--line-soft)',
               backgroundColor: 'var(--paper-soft)',
@@ -1443,6 +1531,12 @@ export function SettingsModal({
                   keywords: ['role', 'task', 'outcome', 'stt', 'image', 'edit', 'chat model', 'assign', 'model', 'api key', 'provider', 'fetch', 'base url', 'pool', 'candidate pool', 'manage models'],
                 },
                 {
+                  id: 'web',
+                  label: 'Web Search',
+                  icon: <Globe className="h-3.5 w-3.5" />,
+                  keywords: ['web', 'search', 'fetch', 'deepseek', 'http', 'provider', '联网', '搜索', '抓取', '网页'],
+                },
+                {
                   id: 'usage',
                   label: 'Model Usage',
                   icon: <Gauge className="h-3.5 w-3.5" />,
@@ -1498,6 +1592,12 @@ export function SettingsModal({
                       label: 'Feishu Bot',
                       icon: <MessageSquare className="h-3.5 w-3.5" />,
                       keywords: ['feishu', 'lark', 'bot', '飞书', '机器人'],
+                    },
+                    {
+                      id: 'mail',
+                      label: 'Email Inbox',
+                      icon: <Mail className="h-3.5 w-3.5" />,
+                      keywords: ['mail', 'email', 'imap', 'inbox', '邮箱', '邮件', '收件箱'],
                     },
                     {
                       id: 'browser',
@@ -1613,7 +1713,7 @@ export function SettingsModal({
 
           {/* ========== 右栏面板容器 ========== */}
           <div
-            className="flex-1 min-w-0 overflow-y-auto"
+            className="hide-scrollbar flex-1 min-w-0 overflow-y-auto"
             style={{ maxHeight: '100%' }}
           >
         {activeSection === 'icons' && (
@@ -2121,20 +2221,22 @@ export function SettingsModal({
 
             {(() => {
               // ===== 空间站舱段布局：顶部接入舱 → Command Core → 底部动力/输出舱 =====
-              const canvasW = 920;
+              const canvasW = 1100;
               const canvasH = 700;
-              const coreRect = { x: 66, y: 210, w: 788, h: 250 };
+              const coreRect = { x: 30, y: 210, w: 1040, h: 250 };
 
-              // Command Core 乘员：画布上可创建的 Agent 节点舱
+              // Command Core 乘员：画布上可创建的 Agent 节点舱（内置 Chat / Coding，官方包 Kar / Buzan / Archivist）
               // 2026-09-25：Butler 已不再是画布节点（能力融合进悬浮球 Butler 抽屉），从乘员表移除
               const crew = [
                 { id: 'crew-chat', title: 'Chat', icon: <MessageSquare className="h-4 w-4" /> },
                 { id: 'crew-coding', title: 'Coding', icon: <Wrench className="h-4 w-4" /> },
                 { id: 'crew-kar', title: 'Kar', icon: <BookOpen className="h-4 w-4" /> },
+                { id: 'crew-buzan', title: 'Buzan', icon: <Network className="h-4 w-4" /> },
+                { id: 'crew-archivist', title: 'Archivist', icon: <Archive className="h-4 w-4" /> },
               ];
               // 乘员按数量在核心舱内水平居中（成员数变化时不必手改坐标）
               const crewPos = (() => {
-                const spacing = 150;
+                const spacing = 180;
                 const w = 132;
                 const groupW = (crew.length - 1) * spacing + w;
                 const startX = coreRect.x + (coreRect.w - groupW) / 2;
@@ -2152,14 +2254,16 @@ export function SettingsModal({
                 w: number;
                 h: number;
               }[] = [
-                { id: 'comms', name: 'Communications', icon: <MessageCircle className="h-4 w-4" />, x: 66, y: 52, w: 176, h: 96 },
-                { id: 'dock', name: 'Docking Port', icon: <Plug className="h-4 w-4" />, x: 270, y: 52, w: 176, h: 96 },
-                { id: 'lab', name: 'Science Lab', icon: <Box className="h-4 w-4" />, x: 474, y: 52, w: 176, h: 96 },
+                { id: 'comms', name: 'Communications', icon: <MessageCircle className="h-4 w-4" />, x: 30, y: 52, w: 176, h: 96 },
+                { id: 'dock', name: 'Docking Port', icon: <Plug className="h-4 w-4" />, x: 246, y: 52, w: 176, h: 96 },
+                { id: 'lab', name: 'Science Lab', icon: <Box className="h-4 w-4" />, x: 462, y: 52, w: 176, h: 96 },
                 { id: 'sensing', name: 'Sensing Array', icon: <Zap className="h-4 w-4" />, x: 678, y: 52, w: 176, h: 96 },
-                { id: 'energy', name: 'Energy Core', icon: <Brain className="h-4 w-4" />, power: true, x: 66, y: 560, w: 176, h: 96 },
-                { id: 'knowledge', name: 'Knowledge Bay', icon: <FileText className="h-4 w-4" />, x: 270, y: 560, w: 176, h: 96 },
-                { id: 'schedule', name: 'Schedule Deck', icon: <CalendarDays className="h-4 w-4" />, x: 474, y: 560, w: 176, h: 96 },
-                { id: 'support', name: 'Support Systems', icon: <Palette className="h-4 w-4" />, x: 678, y: 560, w: 176, h: 96 },
+                { id: 'meeting', name: 'Meeting Deck', icon: <Mic className="h-4 w-4" />, x: 894, y: 52, w: 176, h: 96 },
+                { id: 'energy', name: 'Energy Core', icon: <Brain className="h-4 w-4" />, power: true, x: 30, y: 560, w: 176, h: 96 },
+                { id: 'knowledge', name: 'Knowledge Bay', icon: <FileText className="h-4 w-4" />, x: 246, y: 560, w: 176, h: 96 },
+                { id: 'media', name: 'Media Bay', icon: <Image className="h-4 w-4" />, x: 462, y: 560, w: 176, h: 96 },
+                { id: 'schedule', name: 'Schedule Deck', icon: <CalendarDays className="h-4 w-4" />, x: 678, y: 560, w: 176, h: 96 },
+                { id: 'support', name: 'Support Systems', icon: <Palette className="h-4 w-4" />, x: 894, y: 560, w: 176, h: 96 },
               ];
 
               const stationSvg = (
@@ -2901,6 +3005,61 @@ export function SettingsModal({
                 );
               })()}
 
+      {activeSection === 'web' && (
+        <div className="px-6 py-5">
+          <h2 className="text-17 font-semibold" style={{ color: 'var(--ink-strong)' }}>Web Search</h2>
+          <p className="mt-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
+            Search and fetch providers are independent of the chat model. Any model with tool calling can use
+            {' '}<code className="text-11">web_search</code> / <code className="text-11">web_fetch</code>.
+          </p>
+          <div className="mt-4 overflow-hidden rounded-lg border" style={{ borderColor: 'var(--line-soft)', backgroundColor: 'var(--paper)' }}>
+            <div className="flex items-start gap-4 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-13 font-medium" style={{ color: 'var(--ink)' }}>Search provider</div>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  DeepSeek Search API uses the DeepSeek provider key. Auto picks the first available provider.
+                </p>
+              </div>
+              <select
+                value={webSearchProvider}
+                onChange={(e) => setWebSearchProvider(e.target.value)}
+                className="h-8 w-56 shrink-0 rounded-md border px-3 text-sm"
+                style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+              >
+                <option value="deepseek-search-api">DeepSeek Search API</option>
+                <option value="auto">Auto (DeepSeek first)</option>
+              </select>
+            </div>
+            <div className="border-t" style={{ borderColor: 'var(--line-soft)' }} />
+            <div className="flex items-start gap-4 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-13 font-medium" style={{ color: 'var(--ink)' }}>Fetch provider</div>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  Local HTTP fetches public pages without a key; it cannot bypass anti-bot sites.
+                </p>
+              </div>
+              <select
+                value={webFetchProvider}
+                onChange={(e) => setWebFetchProvider(e.target.value)}
+                className="h-8 w-56 shrink-0 rounded-md border px-3 text-sm"
+                style={{ backgroundColor: 'var(--paper)', borderColor: 'var(--line)', color: 'var(--ink-strong)' }}
+              >
+                <option value="deepseek-fetch-api">DeepSeek Fetch API</option>
+                <option value="http">Local HTTP (no key)</option>
+                <option value="auto">Auto (DeepSeek first)</option>
+              </select>
+            </div>
+          </div>
+          <p className="mt-3 text-xs" style={{ color: 'var(--ink-faint)' }}>
+            DeepSeek providers reuse the DeepSeek key from Models. Changes apply from the next tool call.
+          </p>
+          <p className="mt-1 text-xs" style={{ color: 'var(--ink-faint)' }}>
+            DeepSeek Search / Fetch are billed per successful request (¥5 per 1,000; empty or failed calls are free)
+            and are counted under Model Usage → Web tools.
+          </p>
+        </div>
+      )}
+
       {/* Templates / WeChat Bind 等：直接在右侧面板内嵌显示（不再弹窗） */}
       {activeSection === 'templates' && (
         <TemplateLibraryModal embedded open onOpenChange={() => {}} />
@@ -2910,6 +3069,9 @@ export function SettingsModal({
       )}
       {activeSection === 'feishu' && (
         <FeishuBindModal embedded open onOpenChange={() => {}} />
+      )}
+      {activeSection === 'mail' && (
+        <MailBindModal embedded open onOpenChange={() => {}} />
       )}
       {activeSection === 'usage' && (
         <UsagePanel embedded onClose={() => setActiveSection('roles')} />
@@ -3097,6 +3259,140 @@ export function SettingsModal({
               </p>
             )}
           </div>
+
+          {/* 整理历史 / 失败原因 / 一键重试：让每次判定可解释、可补救 */}
+          <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Activity</h4>
+                <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                  Why files landed in _待处理, and what was filed recently.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button variant="ghost" size="sm" onClick={() => void refreshFoRuntime()} disabled={foRuntimeLoading}>
+                  <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${foRuntimeLoading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </Button>
+                {foRuntime && foRuntime.pending.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleRetryPending()}
+                    disabled={foRetrying !== ''}
+                  >
+                    <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    Retry all ({foRuntime.pending.length})
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {foRuntimeErr && (
+              <p className="mt-2 text-xs" style={{ color: 'var(--danger)' }}>{foRuntimeErr}</p>
+            )}
+
+            {foRuntime && !foRuntime.configured && (
+              <p className="mt-3 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                Set an Inbox Folder above to see what has been organized.
+              </p>
+            )}
+
+            {foRuntime && foRuntime.configured && (
+              <>
+                {/* 分类结构：既有目录就是模型的词表，列出来便于判断是否在长同义目录 */}
+                {foRuntime.existing.length > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    <span className="text-11" style={{ color: 'var(--ink-muted)' }}>Categories in use</span>
+                    {foRuntime.existing.map((c) => (
+                      <Chip key={c} variant="paper" size="sm" label={`${c}`} />
+                    ))}
+                  </div>
+                )}
+
+                {/* 待处理清单：失败原因 + 重试次数 + 单项重试 */}
+                <div className="mt-3">
+                  <p className="text-11" style={{ color: 'var(--ink-muted)' }}>
+                    Needs attention ({foRuntime.pending.length})
+                  </p>
+                  {foRuntime.pending.length === 0 ? (
+                    <p className="mt-1 text-xs" style={{ color: 'var(--ink-muted)' }}>Nothing pending.</p>
+                  ) : (
+                    <div className="mt-1.5 max-h-56 space-y-1.5 overflow-auto pr-1">
+                      {foRuntime.pending.map((it) => (
+                        <div
+                          key={it.path}
+                          className="flex items-start justify-between gap-3 rounded-lg px-2.5 py-2"
+                          style={{ backgroundColor: 'var(--paper-soft)' }}
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-xs" style={{ color: 'var(--ink-strong)' }} title={it.name}>
+                              {it.name}
+                            </p>
+                            <p className="mt-0.5 text-11" style={{ color: 'var(--ink-muted)' }}>
+                              {it.failure || '（老记录没有原因，重新判定即可看到）'}
+                              {it.attempts > 0 ? ` · 判过 ${it.attempts} 次` : ''}
+                              {it.method ? ` · ${it.method}` : ''}
+                            </p>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="shrink-0"
+                            disabled={foRetrying !== ''}
+                            onClick={() => void handleRetryPending(it.path)}
+                          >
+                            <RotateCcw className="mr-1 h-3 w-3" />
+                            Retry
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 最近整理记录 */}
+                <div className="mt-4">
+                  <p className="text-11" style={{ color: 'var(--ink-muted)' }}>
+                    Recent activity ({foRuntime.history.length})
+                  </p>
+                  {foRuntime.history.length === 0 ? (
+                    <p className="mt-1 text-xs" style={{ color: 'var(--ink-muted)' }}>No files organized yet.</p>
+                  ) : (
+                    <div className="mt-1.5 max-h-72 space-y-1 overflow-auto pr-1">
+                      {foRuntime.history.map((h, i) => (
+                        <div key={`${h.at}-${i}`} className="flex items-start gap-2 text-xs">
+                          <span className="shrink-0 tabular-nums" style={{ color: 'var(--ink-muted)' }}>
+                            {h.at.slice(5, 16).replace('T', ' ')}
+                          </span>
+                          <span
+                            className="w-16 shrink-0 truncate"
+                            style={{ color: h.category === '_待处理' ? 'var(--warn)' : 'var(--ink-strong)' }}
+                            title={h.category}
+                          >
+                            {h.category}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--ink)' }} title={h.from}>
+                            {h.topic || h.from}
+                          </span>
+                          {h.retries ? (
+                            <span className="shrink-0" style={{ color: 'var(--ink-muted)' }} title="截断后重试过">
+                              ↻{h.retries}
+                            </span>
+                          ) : null}
+                          {h.tokens && h.tokens.completion > 0 ? (
+                            <span className="shrink-0 tabular-nums" style={{ color: 'var(--ink-muted)' }} title="本次判定 token">
+                              {h.tokens.completion}t
+                            </span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -3197,7 +3493,7 @@ export function SettingsModal({
           <div>
             <h3 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>Remote Access</h3>
             <p className="mt-1 text-xs" style={{ color: 'var(--ink-muted)' }}>
-              允许手机经私有隧道（Tailscale / Cloudflare Tunnel）远程操作本机 BobWork。开启后，所有非本机请求必须持 Bearer Token；桌面端（localhost）自动豁免，不受影响。
+              Let your phone remotely control this Mac&apos;s BobWork over a private tunnel (Tailscale / Cloudflare Tunnel). Once enabled, all non-local requests must carry a Bearer Token; the desktop app (localhost) is exempt and unaffected.
             </p>
           </div>
 
@@ -3205,9 +3501,9 @@ export function SettingsModal({
           <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>启用远程访问</h4>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Enable Remote Access</h4>
                 <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                  仅在已配置私有隧道、且 Mac 常开时开启。Token 是唯一密钥，泄露即等于放开本机。
+                  Turn this on only when a private tunnel is configured and the Mac stays powered on. The Token is the only key — leaking it is equivalent to exposing this Mac.
                 </p>
               </div>
               <ToggleSwitch
@@ -3224,20 +3520,20 @@ export function SettingsModal({
               <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
                 <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Access Token</h4>
                 <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                  复制到手机端 BobWork Remote App 的 Token 字段。每次「重旋」都会使旧 Token 失效。
+                  Copy this into the Token field of the BobWork Remote app on your phone. Each rotation invalidates the old Token.
                 </p>
                 <div className="mt-3 flex items-center gap-2">
                   <Input value={raToken} readOnly className="flex-1 font-mono text-xs" />
-                  <Button variant="ghost" size="sm" onClick={() => navigator.clipboard?.writeText(raToken)}>复制</Button>
-                  <Button variant="ghost" size="sm" onClick={() => applyRemoteAccess('rotate')} disabled={raBusy}>重旋</Button>
+                  <Button variant="ghost" size="sm" onClick={() => navigator.clipboard?.writeText(raToken)}>Copy</Button>
+                  <Button variant="ghost" size="sm" onClick={() => applyRemoteAccess('rotate')} disabled={raBusy}>Rotate</Button>
                 </div>
               </div>
 
               {/* 鉴权模式 */}
               <div style={{ borderColor: 'var(--line)' }} className="rounded-xl border p-4">
-                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>鉴权模式</h4>
+                <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>Auth Mode</h4>
                 <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
-                  Loopback-exempt（默认）：仅非本机请求需 Token，Tailscale / WireGuard 直连下精准命中。Strict：所有请求（含本机）强制 Token，用于 Cloudflare Tunnel（其本地跳为 loopback，会绕过豁免）；Strict 模式下桌面端需同步配置自动补 Token。
+                  Loopback-exempt (default): only non-local requests need a Token — a precise fit for direct Tailscale / WireGuard connections. Strict: all requests (including local) require a Token — use this for Cloudflare Tunnel (its local hop is loopback and would bypass the exemption); in Strict mode the desktop app must be configured to auto-attach the Token.
                 </p>
                 <div className="mt-3 flex items-center gap-3">
                   <ToggleSwitch
@@ -3246,7 +3542,7 @@ export function SettingsModal({
                     title={raMode === 'strict' ? 'Strict' : 'Loopback-exempt'}
                   />
                   <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
-                    {raMode === 'strict' ? 'Strict（全请求强制）' : 'Loopback-exempt（默认）'}
+                    {raMode === 'strict' ? 'Strict (enforced on all requests)' : 'Loopback-exempt (default)'}
                   </span>
                 </div>
               </div>
@@ -3290,6 +3586,35 @@ export function SettingsModal({
             </div>
 
             <div className="border-t" style={{ borderColor: 'var(--line-soft)' }} />
+
+            {/* Browse toolset：Hippo 侧栏工具面 Core / Full（仅 Hippo 通道生效） */}
+            {aiBrowserHippo && (
+              <>
+                <div className="flex items-start gap-4 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-13 font-medium" style={{ color: 'var(--ink)' }}>
+                      Browse toolset
+                    </div>
+                    <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+                      {browserToolsetCore
+                        ? 'Core: everyday browse / download / PDF tools only — smaller context, faster first token. Turn off for all advanced browser tools.'
+                        : 'Full: all browser tools, including cookies/storage, network/console and drag/coordinate/viewport controls.'}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2 pt-0.5">
+                    <span className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+                      {browserToolsetCore ? 'Core' : 'Full'}
+                    </span>
+                    <ToggleSwitch
+                      checked={browserToolsetCore}
+                      onChange={() => setBrowserToolsetCore((v) => !v)}
+                      title={browserToolsetCore ? 'Core toolset' : 'Full toolset'}
+                    />
+                  </div>
+                </div>
+                <div className="border-t" style={{ borderColor: 'var(--line-soft)' }} />
+              </>
+            )}
 
             <div className="flex items-center gap-4 px-4 py-3">
               <div className="min-w-0 flex-1 text-13 font-medium" style={{ color: 'var(--ink)' }}>
@@ -3557,12 +3882,13 @@ export function SettingsModal({
           </div>
         </div>
 
+        {(saveError || saveStatus === 'saved' || saveStatus === 'saving') && (
         <div
-          className="flex shrink-0 items-center justify-end gap-2 border-t px-4 py-3"
+          className="flex shrink-0 items-center gap-2 border-t px-4 py-3"
           style={{ borderColor: 'var(--line-soft)' }}
         >
           {saveError && (
-            <div className="mr-auto min-w-0 max-w-[360px]">
+            <div className="min-w-0 max-w-[360px]">
               <Callout
                 variant="danger"
                 size="sm"
@@ -3572,27 +3898,18 @@ export function SettingsModal({
             </div>
           )}
           {!saveError && saveStatus === 'saved' && (
-            <div className="mr-auto min-w-0 max-w-[200px]">
+            <div className="min-w-0 max-w-[200px]">
               <Callout variant="success" size="sm" title="Saved" icon={<Check className="h-4 w-4" />} />
             </div>
           )}
           {!saveError && saveStatus === 'saving' && (
-            <div className="mr-auto flex items-center gap-1.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
+            <div className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--ink-muted)' }}>
               <Loader2 className="h-3 w-3 animate-spin" />
               Saving…
             </div>
           )}
-          <Button
-            variant="ghost"
-            tone="neutral"
-            size="sm"
-            onClick={() => onOpenChange(false)}
-            className="text-sm"
-            style={{ color: 'var(--ink-muted)' }}
-          >
-            Close
-          </Button>
         </div>
+        )}
         </TooltipProvider>
 
 

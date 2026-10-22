@@ -6,11 +6,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  CURATED_TOPIC_SITES,
   DEFAULT_NEWS_TOPICS,
   NEWS_TOPIC_LIMIT_MAX,
   NEWS_TOPIC_LIMIT_MIN,
   NEWS_TOPIC_SOFT_MAX,
   normalizeNewsConfig,
+  sitesForTopic,
   slugifyTopic,
 } from './types';
 
@@ -77,5 +79,53 @@ describe('normalizeNewsConfig', () => {
     const many = Array.from({ length: 40 }, (_, i) => ({ label: `T${i}` }));
     const cfg = normalizeNewsConfig({ topics: many });
     expect(cfg.topics).toHaveLength(NEWS_TOPIC_SOFT_MAX * 2);
+  });
+});
+
+/**
+ * 权威站（sites）—— 采集第二级（`site:<domain>` 定向检索）的配置口径。
+ * 这一组的失败模式是「白名单过滤过头」：把用户/默认值里合法但写法宽松的域名丢掉，
+ * 导致第二级静默失效、整条链路只剩裸关键词搜索。故逐条断言归一化结果。
+ */
+describe('topic sites (权威站)', () => {
+  it('normalizes protocols, paths, case and www down to a bare domain', () => {
+    const cfg = normalizeNewsConfig({
+      topics: [{ label: 'Tech', sites: ['HTTPS://WWW.36Kr.com/article/1', 'ifanr.com', 'www.qbitai.com/'] }],
+    });
+    expect(cfg.topics[0].sites).toEqual(['36kr.com', 'ifanr.com', 'qbitai.com']);
+  });
+
+  it('drops invalid entries and de-duplicates', () => {
+    const cfg = normalizeNewsConfig({
+      topics: [{ label: 'Tech', sites: ['not a domain', 'a', 42, null, 'ok.com', 'ok.com'] }],
+    });
+    expect(cfg.topics[0].sites).toEqual(['ok.com']);
+  });
+
+  it('caps sites at the same limit as feeds', () => {
+    const many = Array.from({ length: 20 }, (_, i) => `s${i}.com`);
+    const cfg = normalizeNewsConfig({ topics: [{ label: 'Tech', sites: many }] });
+    expect(cfg.topics[0].sites).toHaveLength(6);
+  });
+
+  it('omits both source keys when empty (old-config compatibility)', () => {
+    const cfg = normalizeNewsConfig({ topics: [{ label: 'Tech' }] });
+    expect('sites' in cfg.topics[0]).toBe(false);
+    expect('feeds' in cfg.topics[0]).toBe(false);
+  });
+
+  it('prefers topic-supplied sites over the built-in table', () => {
+    const base = { id: 'tech', label: 'Tech', query: 'x', limit: 4, lang: 'en' as const };
+    expect(sitesForTopic(base)).toEqual(CURATED_TOPIC_SITES.tech);
+    expect(sitesForTopic({ ...base, sites: ['mine.com'] })).toEqual(['mine.com']);
+  });
+
+  it('returns an empty list for an unknown topic (caller falls back to keyword search)', () => {
+    expect(sitesForTopic({ id: 'nope', label: 'Nope', query: 'x', limit: 4, lang: 'en' })).toEqual([]);
+  });
+
+  it('covers legal, which has no usable RSS feed', () => {
+    expect(CURATED_TOPIC_SITES.legal).toContain('court.gov.cn');
+    expect(CURATED_TOPIC_SITES.legal.length).toBeGreaterThan(0);
   });
 });

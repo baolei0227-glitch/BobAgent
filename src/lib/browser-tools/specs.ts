@@ -38,7 +38,9 @@ export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       'opaque <iframe>. Refs carry their scope prefix: `e3` = main document, `s1-e2` = inside the 1st shadow root, ' +
       '`f1-e4` = inside iframe f1. Pass refs back verbatim — they are consumed by browser_click / browser_type / ' +
       'browser_fill_form, and (main-document refs only) inside browser_page_script via bb.$(\'e3\'). ' +
-      'Refs are renumbered on every snapshot — take a fresh snapshot after any navigation or large DOM change.',
+      'Refs are renumbered on every snapshot — take a fresh snapshot after any navigation or large DOM change. ' +
+      'It waits at most ~1.5s for the page to settle: if the result has ready:false, use browser_wait_for_text / ' +
+      'browser_wait_network_idle before re-snapshotting instead of retrying the same snapshot blindly.',
     returns:
       '{ url, title, ready, elements: [{ ref, tag, role, name, value?, href?, disabled?, frame?, shadow? }], ' +
       'frames?: [{ frame, url, elements }] }  // `frames` lists the iframes that were scanned (present only when there are any)',
@@ -59,8 +61,9 @@ export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       'Click an element. Prefer the ref from browser_snapshot (scope prefixes like `s1-e2` / `f1-e4` work as-is); ' +
       'a CSS selector also works. ' +
       'Main-document targets get real mouse events (including scroll-into-view), so the page\'s real interaction logic fires. ' +
-      'Targets inside an iframe are clicked in-frame on the element itself (the reply marks this with via="in-frame").',
-    returns: '{ clicked: target description, url, title, redirected?, frame?, via? }',
+      'Targets inside an iframe are clicked in-frame on the element itself (the reply marks this with via="in-frame"). ' +
+      'If the click starts a download, the reply includes download { id, fileName, savePath, state } — poll it with browser_downloads.',
+    returns: '{ clicked: target description, url, title, redirected?, frame?, via?, download? }',
     parameters: {
       type: 'object',
       properties: {
@@ -450,6 +453,76 @@ export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     maxOutput: 600,
   },
 
+  // ---- 下载 ----
+  {
+    name: 'browser_save_download',
+    description:
+      'Copy a completed download into the current project materials/ folder (default `materials/downloads/`). Use after ' +
+      'browser_download when the user wants the file inside the project (materials is visible to later file/ledger steps). ' +
+      'Pass the download id; optional `folder` picks a subfolder. Fails if the download is still progressing or no project is active.',
+    returns: '{ saved, path, bytes }',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Download id returned by browser_download / browser_downloads' },
+        folder: { type: 'string', description: 'Optional subfolder under materials/ (default "downloads")' },
+      },
+      required: ['id'],
+    },
+    maxOutput: 800,
+  },
+  {
+    name: 'browser_find_downloads',
+    description:
+      'Scan the current page for download entry points: file-extension links (pdf/doc/docx/xls/xlsx/ppt/pptx/zip/rar/7z/csv/txt/md/rtf/epub/images/audio/video), ' +
+      'elements with a `download` attribute, and buttons/links whose text, class or id contains 下载/附件/导出/保存/download/export/save. ' +
+      'Returns candidates with `selector` (usable by browser_download), `href`, text and kind. Cheaper than a full snapshot when the page is large or the ' +
+      'download control is icon-only. Main document only — if it returns nothing, fall back to browser_snapshot.',
+    returns: '{ url, title, ready, candidates: [{ selector, tag, text, href, kind }] }',
+    parameters: { type: 'object', properties: {} },
+    maxOutput: 2500,
+  },
+  {
+    name: 'browser_download',
+    description:
+      'Download a file from the current page. Provide `url` for a direct file link, or `ref` / `selector` for a ' +
+      'download link/button on the page (the host performs a real click, so cookies and JS handlers still apply). ' +
+      'The host writes the file to the system Downloads folder and returns { download: { id, fileName, savePath, state, totalBytes } }. ' +
+      'After starting it waits up to `waitMs` (default 2000, max 30000) for completion, so small files come back completed in one round; ' +
+      'if it is still progressing, poll browser_downloads with the id instead of sleeping. ' +
+      'Set reveal=true only when the user asks to show the file in Finder; it takes effect when the download is completed. ' +
+      'Do NOT use browser_export_pdf to obtain a file (that prints the page to PDF), do NOT use browser_read_pdf ' +
+      '(it only returns text and keeps the file in a temp dir), and do NOT fetch binary content via browser_run_js.',
+    returns: '{ download: { id, fileName, savePath, state, totalBytes, receivedBytes, url }, revealed? }',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Direct file URL (http/https/file or a relative href resolved against the current page). Use this when the href is known.' },
+        ref: { type: 'string', description: 'Element ref from browser_snapshot (download link/button)' },
+        selector: { type: 'string', description: 'CSS selector (used when no ref)' },
+        waitMs: { type: 'number', description: 'After starting, wait this long for completion (default 2000, max 30000; 0 = return immediately)' },
+        reveal: { type: 'boolean', description: 'Reveal the completed file in Finder (default false; only when the user asks)' },
+      },
+    },
+    maxOutput: 1200,
+  },
+  {
+    name: 'browser_downloads',
+    description:
+      'List downloads started in Hippo Browser, newest first (state, progress, save path). Pass `id` to inspect one ' +
+      'download; with `waitMs` it waits up to that long for the download to finish instead of returning immediately. ' +
+      'Use after browser_download / browser_click to confirm a download completed, instead of sleeping with browser_wait.',
+    returns: '{ downloads: [{ id, fileName, savePath, state, totalBytes, receivedBytes, url }] } or { download }',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Download id (omit to list all)' },
+        waitMs: { type: 'number', description: 'With id: wait this long for completion (default 0, max 30000)' },
+      },
+    },
+    maxOutput: 3000,
+  },
+
   // ---- 内容提取 ----
   {
     name: 'browser_get_html',
@@ -523,7 +596,9 @@ export const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   },
   {
     name: 'browser_open_tab',
-    description: 'Open a URL in a new tab and activate it.',
+    description:
+      'Open a URL in a new tab and activate it. Returns once the tab is readable (up to ~3s); title may be empty ' +
+      'while the page is still loading — continue with browser_wait_for_text / browser_snapshot, do not retry opening it.',
     returns: '{ id, url, title }',
     parameters: {
       type: 'object',

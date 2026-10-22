@@ -4,7 +4,7 @@
  * 背景：`roles.json` 只增不删，线程被删后条目仍在（实测运行实例 10 条角色 vs 3 个活线程，
  * 含已退役的 `butler-wechat`）。本用例锁四条不变量：
  *   ① 无线程文件的普通条目 → 清掉；
- *   ② 三个常驻 id（Bobby / Recorder / 小微）→ **豁免**（线程可能只是还没首次创建）；
+ *   ② 两个常驻 id（Bobby / 小微）→ **豁免**（线程可能只是还没首次创建）；
  *   ③ 有线程文件的条目 → 保留；
  *   ④ **绝不删角色目录**（目录里是用户的附件/文档，清的只是指针）。
  *
@@ -45,7 +45,6 @@ describe('pruneOrphanRoles', () => {
   it('清掉无线程文件的条目、豁免常驻 id、保留有文件的条目、不动角色目录', async () => {
     seed({
       'butler-notify': { name: 'Bobby', dir: 'Bobby' },
-      'butler-recorder': { name: 'Recorder', dir: 'Recorder' },
       'butler-search': { name: '小微', dir: '小微' },
       'chat-1-orphan': { name: '小张', dir: '小张' },
       'butler-wechat': { name: 'Xiao Wei', dir: 'Xiao Wei' },
@@ -59,7 +58,7 @@ describe('pruneOrphanRoles', () => {
 
     expect(removed.sort()).toEqual(['butler-wechat', 'chat-1-orphan']);
     const roles = await readRoles();
-    expect(Object.keys(roles.threads).sort()).toEqual(['b-1-live', 'butler-notify', 'butler-recorder', 'butler-search']);
+    expect(Object.keys(roles.threads).sort()).toEqual(['b-1-live', 'butler-notify', 'butler-search']);
     // ④ 目录仍在
     expect(existsSync(join(home, 'butler', '小张', '2026-10-01', 'attachments'))).toBe(true);
   });

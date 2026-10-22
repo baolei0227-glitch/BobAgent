@@ -13,7 +13,7 @@
  * 避免在浏览器环境中加载 fs/path/os 模块。
  */
 
-import type { ProviderConfig, SearchConfig } from './types';
+import type { ProviderConfig, SearchConfig, WebSearchSettings } from './types';
 import type { McpServerConfig } from './mcp/types';
 import { DEFAULT_MCP_SERVERS } from './mcp/types';
 // 命名规则（纯函数模块，前端/后端共用；不引 fs）→ 见 naming-rule.ts
@@ -111,6 +111,24 @@ export interface ButlerNotifySettings {
   quietEnd?: string;
   /** 单日主动推送上限（默认 6；0 = 不限）。含用户自订提醒，避免刷屏式关心 */
   dailyPushLimit?: number;
+}
+
+/**
+ * 邮箱感知（IMAP 只读接入）凭证 —— 2026-10-10 感知面 ①。
+ *
+ * 形态为**通用 IMAP 手填**（不锁厂商、不走 OAuth），任何支持 IMAP 的邮箱都能接。
+ * 配置类界面极简原则：端口默认 993（隐式 TLS）、目录固定 INBOX，都不进表单；
+ * 只保留三项必填。**只读不写**——本期不含 SMTP（对外代发属「手」，产品定位未拍板前不做）。
+ */
+export interface MailSettings {
+  /** 邮箱地址（同时作为 IMAP 登录用户名） */
+  address?: string;
+  /** 密码 / 应用专用密码（授权码）；Gmail / QQ / 163 等一般需在邮箱后台生成应用密码 */
+  password?: string;
+  /** IMAP 服务器主机名（如 imap.gmail.com / imap.qq.com / imap.163.com） */
+  imapHost?: string;
+  /** IMAP 端口；缺省 993（隐式 TLS） */
+  imapPort?: number;
 }
 
 /** 图像编辑（Image Edit）配置：独立于聊天模型（图像编辑走 images API，不兼容 chat completions）。
@@ -345,6 +363,8 @@ export interface AppSettings {
   version: number;
   providers: ProviderConfig[];
   search: SearchConfig;
+  /** 联网搜索/抓取 provider 选择；缺省时走 deepseek-search-api / deepseek-fetch-api */
+  webSearch: WebSearchSettings;
   taskModel: TaskModelSettings;
   outcomeModel: TaskModelSettings;
   /** 主对话模型（Role Assignment 中指定）：
@@ -365,6 +385,8 @@ export interface AppSettings {
   /** Butler 主动推送克制策略（免打扰 / 单日上限，见 lib/core/quiet-hours.ts）；
    *  缺省 = **开启**（开箱即克制：默认 22:00→08:00、单日上限 6）；显式 `enabled:false` 才关闭 */
   butlerNotify?: ButlerNotifySettings;
+  /** 邮箱感知（IMAP 只读接入）凭证；未配置 = 未接入（感知层静默 idle，不建连不报错） */
+  mail?: MailSettings;
   /** 图像编辑（Image Edit）模型配置：图片 AI 编辑专用（独立于聊天/视觉模型） */
   imageEdit?: ImageEditSettings;
   ui: UISettings;
@@ -427,6 +449,10 @@ export interface AppSettings {
    *  aiBrowser='chrome' → 任务执行只走 Bob Browser 通道，内置 browser_* 不注入；
    *  undefined = 'hippo'（默认通道）—— Hippo 为默认，仅显式写入 'chrome' 才回退 Bob Browser。 */
   aiBrowser?: 'hippo' | 'chrome';
+  /** 浏览器侧栏工具面档位（设置 → Hippo Browser → Browse toolset）：
+   *  'core'（默认/undefined）= 日常浏览/下载/PDF 的核心工具集，上下文更小、首字更快；
+   *  'full' = 恢复全部 browser_* / hippo_browser_*（cookie/storage、网络/console、拖拽/坐标/视口等）。 */
+  browserToolset?: 'core' | 'full';
   /** ⌘F 自定义快捷入口（用户自建插件/工作流一键入口） */
   quickLaunchers?: QuickLauncher[];
   /** 已启用的技能名集合（Agent 级，key='default' 的全局默认池）；undefined = 从未配置，走系统默认技能 */
@@ -450,8 +476,24 @@ export interface AppSettings {
    *   - 'none'       未授权（默认），任何模型调用一律拒绝
    *   - 'per_call'   每次调用都需用户确认；弹窗会附 token/金额预估（P1#10）
    *   - 'permanent'  永久授权（等同于旧版 granted:true）
-   *  key = appId。由用户在授权弹窗 / Sandbox 面板授予或撤销。 */
+   *  key = appId。由用户在授权弹窗 / Bob Sandbox 商城（Butler → Mini Apps → Browse store）授予或撤销。 */
   sandboxChatPermissions?: Record<string, SandboxChatPermission>;
+  /** 小程序「完全信任」全局开关（2026-10-10 定档：放开小程序权限）。
+   *  - true / undefined（默认）：所有小程序默认获得全权 —— 模型调用无需申请（等同 permanent）、
+   *    画布对接等同 control、桥的写盘/工具通道不再弹确认；小程序可直接用 hostTool 调用宿主全部工具
+   *    （读文件 / 写文件 / 列目录 / 跑命令 / 用 Butler·笔记·日历·检索等，与画布节点里的 AI 同权）。
+   *  - false：回到逐项授权（模型/画布各自申请，桥的人工确认动作重新弹窗）。
+   *  单小程序仍可「显式否决」：sandboxChatPermissions[appId] = 'none' / sandboxGraphPermissions[appId] = 'none'
+   *  优先于本开关（商城里点 Revoke 即写入显式 none）。 */
+  sandboxFullTrust?: boolean;
+  /** 小程序桥的**签名密钥**（2026-10-10）：预览路由用它给每个小程序签 appId 令牌，
+   *  桥/流式路由据此判定"是谁在调用"——不再信任客户端自报的 `_appId`。
+   *  首次使用时自动生成（randomBytes(32) base64url）。rotate 它就等于让所有已签发的页面令牌立即失效。 */
+  sandboxBridgeSecret?: string;
+  /** 逃生开关：允许在**小程序预览 origin**（127.0.0.1）上写系统日历（CalDAV）。
+   *  默认 undefined = 禁止（预览 origin 只读），因为小程序代码不该能改你的日历；
+   *  若你的 macOS 日历是用 http://127.0.0.1:<port>/api/dav/ 订阅的、且需要双向同步，设 true。 */
+  calendarDavWritableOnPreviewHost?: boolean;
   /** 思考档位策略开关（Phase 2-2a 新增）；undefined = 两开关默认开（与策略抽取前行为一致）。不改设置 UI */
   thinking?: ThinkingSettings;
   /** 会议专属设置（录音源 / 参会人数 / 会后自动整理）；undefined = 走默认，见 meetingSettingsOf */
@@ -521,10 +563,12 @@ export function getImageModelCandidates(settings: AppSettings): string[] {
  *  - 'control'：可读 + 可操作（展开收起、移动、缩放、选中） */
 export type SandboxGraphPermission = 'none' | 'read' | 'control';
 
-/** P1#10 小程序模型调用三级授权级别：
- *  - 'none'       未授权（默认），任何模型调用一律拒绝
- *  - 'per_call'   每次调用前都需宿主弹窗确认；调用前会在宿主侧先预估 token 与金额
- *  - 'permanent'  永久授权（等同于旧版 granted:true，一次确认后不再打扰）*/
+/** 小程序模型调用授权级别：
+ *  - 'none'       显式否决：任何模型调用一律拒绝（要改 settings.json 才能恢复）
+ *  - 'permanent'  允许调用（完全信任下的默认值）
+ *  - 'per_call'   **遗留档位，等价于 permanent**：逐次确认弹窗与金额预估从未实现
+ *                 （`estimateChatCost` 无调用方）。保留在联合类型里只是为了不把旧配置
+ *                 解读成 'none'（那会让小程序突然失去模型能力）；新代码不要再写入它。*/
 export type SandboxChatPermission = 'none' | 'per_call' | 'permanent';
 
 /** P1#10: 粗略 token 估算（中文 1 char ≈ 1.5 tokens，英文 4 chars ≈ 1 token）。
@@ -654,6 +698,7 @@ export function defaultSettings(): AppSettings {
     version: 1,
     providers: [],
     search: { apiKey: '', baseUrl: '' },
+    webSearch: { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' },
     taskModel: {},
     outcomeModel: {},
     chatModel: {},
@@ -1120,35 +1165,78 @@ export async function updateConfirmTools(tools: string[] | null): Promise<void> 
   await saveSettings(settings);
 }
 
-/** 读取某小程序的画布对接授权级别；undefined = 'none' */
+/** 小程序「完全信任」默认值：放开（undefined 视作 true）。显式写 false 才回到逐项授权。 */
+export const DEFAULT_SANDBOX_FULL_TRUST = true;
+
+/** 纯函数：解析完全信任开关（缺省放开）。前端/服务端共用，禁引 fs。 */
+export function isSandboxFullTrust(settings: Pick<AppSettings, 'sandboxFullTrust'>): boolean {
+  return settings.sandboxFullTrust !== false;
+}
+
+/** 纯函数：解析某小程序的画布对接授权级别。
+ *  显式表项优先（含显式 'none' = 用户在 Bob Sandbox 商城点过 Revoke）；无表项时按完全信任开关 → 'control' / 'none'。 */
+export function resolveSandboxGraphPermission(
+  settings: Pick<AppSettings, 'sandboxGraphPermissions' | 'sandboxFullTrust'>,
+  appId: string,
+): SandboxGraphPermission {
+  const explicit = settings.sandboxGraphPermissions?.[appId];
+  if (explicit === 'none' || explicit === 'read' || explicit === 'control') return explicit;
+  if (!appId) return 'none';
+  return isSandboxFullTrust(settings) ? 'control' : 'none';
+}
+
+/** 纯函数：解析某小程序「模型调用（bridge chat）」授权级别（P1#10 三级化）。
+ *  显式表项优先（含显式 'none'）；无表项时按完全信任开关 → 'permanent' / 'none'。
+ *  兼容旧版 boolean：true → 'permanent'，false → 'none'。 */
+export function resolveSandboxChatPermission(
+  settings: Pick<AppSettings, 'sandboxChatPermissions' | 'sandboxFullTrust'>,
+  appId: string,
+): SandboxChatPermission {
+  const raw = settings.sandboxChatPermissions?.[appId] as unknown as SandboxChatPermission | boolean | undefined;
+  if (raw === true) return 'permanent';
+  if (raw === false) return 'none';
+  if (raw === 'none' || raw === 'per_call' || raw === 'permanent') return raw;
+  if (!appId) return 'none';
+  return isSandboxFullTrust(settings) ? 'permanent' : 'none';
+}
+
+/** 读取全局「完全信任」开关（服务端/前端共用） */
+export async function getSandboxFullTrust(): Promise<boolean> {
+  const settings = await loadSettings();
+  return isSandboxFullTrust(settings);
+}
+
+/** 设置全局「完全信任」开关（放开 / 收回小程序全权） */
+export async function updateSandboxFullTrust(enabled: boolean): Promise<void> {
+  await updateSettingsFields({ sandboxFullTrust: !!enabled });
+}
+
+/** 读取某小程序的画布对接授权级别（完全信任下默认 'control'） */
 export async function getSandboxGraphPermission(appId: string): Promise<SandboxGraphPermission> {
   if (!appId) return 'none';
   const settings = await loadSettings();
-  return settings.sandboxGraphPermissions?.[appId] ?? 'none';
+  return resolveSandboxGraphPermission(settings, appId);
 }
 
-/** 设置（授予/撤销）某小程序的画布对接授权级别 */
+/** 设置（授予/撤销）某小程序的画布对接授权级别。
+ *  'none' 写显式否决项（不再删除键）：完全信任默认放开后，删除键 = 回到"默认 control"，
+ *  会让商城里的 Revoke 形同虚设，故必须落显式 none。 */
 export async function updateSandboxGraphPermission(
   appId: string,
   level: SandboxGraphPermission,
 ): Promise<void> {
   const settings = await loadSettings();
   const permissions = { ...(settings.sandboxGraphPermissions ?? {}) };
-  if (level === 'none') delete permissions[appId];
+  if (level === 'none') permissions[appId] = 'none';
   else permissions[appId] = level;
   await updateSettingsFields({ sandboxGraphPermissions: permissions });
 }
 
-/** 读取某小程序「模型调用（bridge chat）」授权级别（P1#10 三级化）。
- *  兼容旧版 boolean：true → 'permanent'，false/undefined → 'none' */
+/** 读取某小程序「模型调用（bridge chat）」授权级别（完全信任下默认 'permanent'）。 */
 export async function getSandboxChatPermission(appId: string): Promise<SandboxChatPermission> {
   if (!appId) return 'none';
   const settings = await loadSettings();
-  const raw = settings.sandboxChatPermissions?.[appId] as unknown as SandboxChatPermission | boolean | undefined;
-  if (raw === true) return 'permanent';
-  if (raw === false || raw == null) return 'none';
-  if (raw === 'none' || raw === 'per_call' || raw === 'permanent') return raw;
-  return 'none';
+  return resolveSandboxChatPermission(settings, appId);
 }
 
 /** 便捷判断：授权级别 >= per_call（即 permanent 或 per_call 均视为"可以调用"，仅是否弹确认不同）。
@@ -1159,7 +1247,8 @@ export async function isSandboxChatAllowed(appId: string): Promise<boolean> {
 }
 
 /** 设置某小程序的「模型调用（bridge chat）」三级授权级别（P1#10）。
- *  入参 granted: boolean 兼容旧版：true → 'permanent'，false → 'none' */
+ *  入参 granted: boolean 兼容旧版：true → 'permanent'，false → 'none'。
+ *  'none' 写显式否决项（不再删除键），理由同 updateSandboxGraphPermission。 */
 export async function updateSandboxChatPermission(
   appId: string,
   granted: SandboxChatPermission | boolean,
@@ -1170,7 +1259,7 @@ export async function updateSandboxChatPermission(
     (granted || 'none');
   const settings = await loadSettings();
   const permissions = { ...(settings.sandboxChatPermissions ?? {}) };
-  if (level === 'none') delete permissions[appId];
+  if (level === 'none') permissions[appId] = 'none';
   else permissions[appId] = level;
   await updateSettingsFields({ sandboxChatPermissions: permissions });
 }

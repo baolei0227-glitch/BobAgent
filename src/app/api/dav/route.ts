@@ -11,6 +11,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { handleDavRequest } from '@/lib/calendar/dav-server';
+import { decideDavOnPreviewHost, davWriteAllowedOnPreviewHost } from '@/lib/http/preview-host';
 
 /**
  * Catch-all handler for CalDAV requests.
@@ -20,6 +21,15 @@ import { handleDavRequest } from '@/lib/calendar/dav-server';
  */
 export async function DavProxy(req: NextRequest) {
   const method = req.method.toUpperCase();
+  // 预览 origin（127.0.0.1）只读：小程序代码不得修改系统日历（写方法 403）
+  const dav = decideDavOnPreviewHost({
+    host: req.headers.get('host') ?? '',
+    method,
+    allowWrite: await davWriteAllowedOnPreviewHost(),
+  });
+  if (dav.action === 'deny') {
+    return NextResponse.json({ success: false, error: dav.message }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
+  }
   const url = req.url;
   const headers: Record<string, string> = {};
 

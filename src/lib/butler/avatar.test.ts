@@ -10,8 +10,16 @@
  * 且两张专用件都不入名字散列池（普通好友拿不到）。
  */
 import { describe, expect, it } from 'vitest';
-import { PERSONA_AVATAR_IDS, SYSTEM_AVATAR_IDS, avatarHue, avatarTint, defaultAvatarId } from './avatar';
-import { NOTIFY_TITLE, RECORDER_TITLE, SEARCH_TITLE } from './storage';
+import {
+  PERSONA_AVATAR_IDS,
+  SYSTEM_AVATAR_IDS,
+  avatarHue,
+  avatarTint,
+  defaultAvatarId,
+  isPersonaAvatarId,
+  resolveAvatarId,
+} from './avatar';
+import { NOTIFY_TITLE, SEARCH_TITLE } from './storage';
 
 describe('系统身份头像按显示名钉死', () => {
   it('Bobby：专用件 bell（铃铛）+ 蓝底 210°', () => {
@@ -24,13 +32,8 @@ describe('系统身份头像按显示名钉死', () => {
     expect(avatarHue(SEARCH_TITLE)).toBe(149);
   });
 
-  it('Recorder：kuudere 形象 + 琥珀橙 32°（本次互换未涉及）', () => {
-    expect(defaultAvatarId(RECORDER_TITLE)).toBe('kuudere');
-    expect(avatarHue(RECORDER_TITLE)).toBe(32);
-  });
-
-  it('三个身份两两可辨：形象互不相同、色相互不相同', () => {
-    const names = [NOTIFY_TITLE, RECORDER_TITLE, SEARCH_TITLE];
+  it('两个身份两两可辨：形象互不相同、色相互不相同', () => {
+    const names = [NOTIFY_TITLE, SEARCH_TITLE];
     const ids = names.map((n) => defaultAvatarId(n));
     const hues = names.map((n) => avatarHue(n));
     expect(new Set(ids).size).toBe(names.length);
@@ -68,5 +71,43 @@ describe('系统身份头像按显示名钉死', () => {
     const a = defaultAvatarId('张三');
     expect(defaultAvatarId('张三')).toBe(a);
     expect(a).not.toBe('wechat');
+  });
+});
+
+/**
+ * 2026-10-18「可换头像」新增：用户显式选定（内置 10 张 / 上传自定义图）必须被渲染侧认，
+ * 但**系统身份例外**——否则改头像会变成一条给普通人穿上 Bobby / 小微形象的路子。
+ * 自定义图（avatarImage）由调用方直接渲染，不在本模块口径内，故只测内置覆盖。
+ */
+describe('头像覆盖（resolveAvatarId / isPersonaAvatarId）', () => {
+  it('无覆盖时与纯派生完全一致（引入覆盖不改变既有行为）', () => {
+    expect(resolveAvatarId('小法', '严谨、专业')).toBe(defaultAvatarId('小法', '严谨、专业'));
+    expect(resolveAvatarId('张三')).toBe(defaultAvatarId('张三'));
+    expect(resolveAvatarId('张三', undefined, null)).toBe(defaultAvatarId('张三'));
+  });
+
+  it('合法内置 id 覆盖性格推导', () => {
+    // 「严谨」本身会派生出 rigorous，覆盖成 genki 后必须生效
+    expect(resolveAvatarId('小法', '严谨、专业', 'genki')).toBe('genki');
+  });
+
+  it('非法覆盖一律落回派生（脏数据不会把头像渲染空）', () => {
+    expect(resolveAvatarId('小法', '严谨', 'not-a-real-id')).toBe('rigorous');
+    expect(resolveAvatarId('小法', '严谨', '')).toBe('rigorous');
+    // 系统专用件不在候选池：即便被塞进来也不认
+    expect(resolveAvatarId('小法', '严谨', 'bell')).toBe('rigorous');
+  });
+
+  it('系统身份永不被覆盖：形象是身份的一部分', () => {
+    expect(resolveAvatarId(NOTIFY_TITLE, '傲娇但心软', 'genki')).toBe('bell');
+    expect(resolveAvatarId(SEARCH_TITLE, '元气满满', 'genki')).toBe('wechat');
+  });
+
+  it('isPersonaAvatarId 只认 10 张性格原型，拒系统专用件与非字符串', () => {
+    for (const id of PERSONA_AVATAR_IDS) expect(isPersonaAvatarId(id)).toBe(true);
+    for (const id of SYSTEM_AVATAR_IDS) expect(isPersonaAvatarId(id)).toBe(false);
+    expect(isPersonaAvatarId('')).toBe(false);
+    expect(isPersonaAvatarId(undefined)).toBe(false);
+    expect(isPersonaAvatarId(3)).toBe(false);
   });
 });

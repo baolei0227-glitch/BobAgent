@@ -58,7 +58,7 @@ export type {
 } from './threads-shared';
 
 /** 线程 id 白名单：字母数字与 `-` / `_`，1–128 位。同时挡住目录穿越（不含 `.` 与 `/`）。
- *  历史 id（`chat-…`）、常驻 id（`butler-notify` / `butler-recorder`）与新 id（`b-…`）都在此集合内。 */
+ *  历史 id（`chat-…`）、常驻 id（`butler-notify` / `butler-search`）与新 id（`b-…`）都在此集合内。 */
 const THREAD_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** 线程目录：<APP_ROOT>/butler/.state/threads */
@@ -657,6 +657,19 @@ export function startThreadSweeper(): void {
 /** 退役清理：删除旧的「Bobby」微信桥常驻线程（2026-09-28 起微信入站消息改落通知助理线程）。幂等。 */
 export async function purgeRetiredWechatThread(): Promise<boolean> {
   const file = threadFilePath('butler-wechat');
+  try {
+    await fs.unlink(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 退役清理：删除旧的「Recorder」会议记录员常驻线程（2026-10-09 起该常驻联系人已移除）。
+ *  该线程曾被列表接口在每次读取时幂等创建，故升级后几乎必然存在——不清掉会以「未命名角色」的
+ *  幽灵联系人身份重新出现在联系人列。角色目录（butler/Recorder/）不删：那里面有用户的产物。幂等。 */
+export async function purgeRetiredRecorderThread(): Promise<boolean> {
+  const file = threadFilePath('butler-recorder');
   try {
     await fs.unlink(file);
     return true;

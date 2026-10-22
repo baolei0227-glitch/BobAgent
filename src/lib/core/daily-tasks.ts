@@ -320,25 +320,34 @@ const STICKY_ITEM_LIMIT = 100;
  * 与「日历改状态 → 反向落回便签行」合成双向链路。
  */
 async function buildStickyTodoItems(): Promise<ButlerNoticeItem[]> {
-  const [{ listProjects }, { listOpenTodoRows }, { getCalendarDb, getEvent }] = await Promise.all([
+  const [
+    { listProjects },
+    { listOpenTodoRows },
+    { getCalendarDb, getEvent },
+    { resolveAppRoot },
+    { INBOX_PROJECT_ID, TODO_INBOX_NAME },
+  ] = await Promise.all([
     import('@/lib/project/project-manager'),
     import('@/lib/sticky-todo'),
     import('@/lib/db'),
+    import('@/lib/app-root'),
+    import('@/lib/project/sticky-scope'),
   ]);
   const { projects, active_projects } = await listProjects();
   const activeList = active_projects.length > 0 ? active_projects : projects.filter((p) => !p.archived);
   const db = await getCalendarDb();
   const out: ButlerNoticeItem[] = [];
-  for (const p of activeList) {
-    if (out.length >= STICKY_ITEM_LIMIT) break;
+
+  /** 把某归属（项目 / 全局 Todo Inbox）的未完成便签行铺平为可点击项（key/sticky 结构一致） */
+  const appendItemsFor = async (projectId: string, projectName: string, root: string): Promise<void> => {
+    if (out.length >= STICKY_ITEM_LIMIT) return;
     let rows: Awaited<ReturnType<typeof listOpenTodoRows>>;
     try {
-      rows = await listOpenTodoRows(p.path);
+      rows = await listOpenTodoRows(root);
     } catch (e) {
-      console.warn('[daily-tasks] 读取便签待办失败:', p.id, e);
-      continue;
+      console.warn('[daily-tasks] 读取便签待办失败:', projectId, e);
+      return;
     }
-    const projectName = p.name || p.id;
     // 便签层是否有信息量（与 formatInspectReply 同一折叠口径）：项目内多张便签、或便签标题
     // 与项目名不同 —— 都不成立时「◇ 同名便签」是纯噪声，卡片上就不占那一行
     const noteIds = new Set(rows.map((r) => r.noteId));
@@ -350,14 +359,14 @@ async function buildStickyTodoItems(): Promise<ButlerNoticeItem[]> {
       const evStart = ev?.start_time ?? '';
       const startMs = evStart ? new Date(evStart).getTime() : 0;
       out.push({
-        key: `sticky:${p.id}:${row.noteId}:${row.pageId}:${row.lineIndex}`,
+        key: `sticky:${projectId}:${row.noteId}:${row.pageId}:${row.lineIndex}`,
         title: row.text,
         time: evStart ? fmtDateTime(evStart) : '',
         startMs: Number.isFinite(startMs) ? startMs : 0,
         status: ev?.status === 'done' ? 'done' : 'scheduled',
         source: 'sticky',
         sticky: {
-          projectId: p.id,
+          projectId,
           noteId: row.noteId,
           pageId: row.pageId,
           lineIndex: row.lineIndex,
@@ -367,6 +376,13 @@ async function buildStickyTodoItems(): Promise<ButlerNoticeItem[]> {
         ...(showNoteLayer ? { subgroup: row.noteTitle || row.noteId } : {}),
       });
     }
+  };
+
+  // 未立项的临时待办（全局 Todo Inbox）放在最前：它们没有项目上下文兜底，最需要用户处理
+  await appendItemsFor(INBOX_PROJECT_ID, TODO_INBOX_NAME, resolveAppRoot());
+  for (const p of activeList) {
+    await appendItemsFor(p.id, p.name || p.id, p.path);
+    if (out.length >= STICKY_ITEM_LIMIT) break;
   }
   return out;
 }

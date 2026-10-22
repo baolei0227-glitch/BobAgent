@@ -40,6 +40,7 @@ describe('isWriteKindTool 内置读类工具（保守：不误判）', () => {
     'web_fetch',
     'ask_user_questions',
     'list_files',
+    'browser_downloads',
   ])('%s → false', (name) => {
     expect(isWriteKindTool(name)).toBe(false);
   });
@@ -60,6 +61,8 @@ describe('isWriteKindTool browser 写类（主对话 mcp__ 全名 / browser.clic
     'mcp__bob-browser-mcp__browser_drag',
     // 文件/内容产出
     'mcp__bob-browser-mcp__browser_upload_file',
+    'mcp__bob-browser-mcp__browser_download',
+    'mcp__bob-browser-mcp__browser_save_download',
     'mcp__bob-browser-mcp__browser_export_pdf',
     // 视图滚动
     'mcp__bob-browser-mcp__browser_scroll',

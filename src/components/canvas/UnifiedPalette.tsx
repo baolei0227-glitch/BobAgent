@@ -14,7 +14,6 @@ import {
 
 import { bus, BusEvents } from '@/lib/bus';
 import { desktop } from '@/lib/desktop-adapter';
-import { openSandboxPreviewInHippo } from '@/lib/sandbox/open-preview';
 import { isBrowserDoc, isPreviewable } from './viewers/registry';
 import { FileName } from './FileName';
 
@@ -47,8 +46,6 @@ interface UnifiedPaletteProps {
   onClose: () => void;
   /** 输入框下方功能入口（仅图标，悬停显示名称）：由宿主注入，保持面板不感知各功能面板的开关状态 */
   actions?: Array<{ key: string; label: string; icon: ReactNode; onClick: () => void; disabled?: boolean }>;
-  /** 标星小程序快捷图标（与功能入口同一行，之间用竖线隔开）：点击直接打开预览 */
-  starredApps?: Array<{ id: string; name: string }>;
 }
 
 /** 文件扩展名 → 图标颜色（与本地文件浏览器一致） */
@@ -80,7 +77,7 @@ function shortPath(p: string): string {
   return parts.slice(-3).join('/') || p;
 }
 
-export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedPaletteProps) {
+export function UnifiedPalette({ open, onClose, actions }: UnifiedPaletteProps) {
   // ===== 输入 =====
   const [query, setQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -313,14 +310,14 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
           </kbd>
         </div>
 
-        {/* 功能入口图标行（2026-09-12 自左侧边栏迁入）：仅图标，悬停显示名称；
-            其后紧跟标星小程序快捷图标，两者之间用竖线隔开 */}
-        {((actions && actions.length > 0) || (starredApps && starredApps.length > 0)) && (
+        {/* 功能入口图标行（2026-09-12 自左侧边栏迁入）：仅图标，悬停显示名称。
+            标星小程序入口已于 2026-10-18 迁到 Butler 左栏「Mini Apps」，⌘F 不再展示。 */}
+        {actions && actions.length > 0 && (
           <div
             className="flex shrink-0 items-center gap-0.5 px-3 pb-3"
             style={{ borderBottom: '1px solid var(--line-soft)' }}
           >
-            {actions?.map((act) => (
+            {actions.map((act) => (
               <button
                 key={act.key}
                 type="button"
@@ -334,44 +331,6 @@ export function UnifiedPalette({ open, onClose, actions, starredApps }: UnifiedP
                 {act.icon}
               </button>
             ))}
-            {/* 竖线分隔：功能按钮 / 标星小程序 */}
-            {actions && actions.length > 0 && starredApps && starredApps.length > 0 && (
-              <span
-                className="mx-1 h-5 w-px shrink-0"
-                style={{ backgroundColor: 'color-mix(in oklab, var(--line) 30%, transparent)' }}
-              />
-            )}
-            {/* 标星小程序（点击直接打开预览，最多显示 5 个，超出折叠为 +N 打开商店） */}
-            {starredApps?.slice(0, 5).map((app) => (
-              <button
-                key={app.id}
-                type="button"
-                title={`${app.name} — open`}
-                aria-label={app.name}
-                onClick={() => {
-                  void openSandboxPreviewInHippo({ id: app.id, name: app.name });
-                  onClose();
-                }}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--paper-soft)] text-sm font-semibold text-[var(--ink-strong)] transition-all duration-100 hover:scale-[1.18] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:shadow-sm"
-              >
-                {app.name.charAt(0).toUpperCase()}
-              </button>
-            ))}
-            {starredApps && starredApps.length > 5 && (
-              <button
-                type="button"
-                title="More starred apps — open store"
-                aria-label="More starred mini programs"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent('sandbox-store-open'));
-                  onClose();
-                }}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sm font-medium transition-colors hover:brightness-95"
-                style={{ backgroundColor: 'var(--paper-soft)', color: 'var(--ink-muted)' }}
-              >
-                +{starredApps.length - 5}
-              </button>
-            )}
           </div>
         )}
 

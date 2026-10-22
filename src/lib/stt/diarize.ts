@@ -4,9 +4,15 @@
  * 定位：给「导入录音」的整段音频标出「谁在什么时候说」，供 parseAudio 按说话人切块转写，
  * 从而在会议记录里产出 `[说话人 N]` 分块。全程本地、音频不出网。
  *
- * 为什么对**整段**音频只分离一次（而不是每 25 分钟窗口各跑一次）：
- * 声纹聚类是全局的——分窗口独立聚类会让「第 2 个窗口的说话人 1」与「第 1 个窗口的说话人 1」
- * 变成两个人，编号必须全局一致。故整段跑一次、结果缓存、各窗口从缓存里切片。
+ * 为什么长音频要分段、又不能各段独立编号：
+ * 整段 pyannote 在 1 小时以上会逼近 30 分钟超时，也没有中间进度；但各段独立聚类会让
+ * 「第 2 段的说话人 1」与「第 1 段的说话人 1」变成两个人。故 >20 分钟的音频按 10 分钟分段，
+ * 段内聚类、段间用声纹质心对齐到同一套全局 speaker id，最后合并、缓存、各窗口从缓存切片。
+ * 短音频仍整段跑一次（更稳，也少一次切段开销）。
+ *
+ * 簇的总量由 CLI 聚类阈值决定，但阈值只是一个标量：长录音里同一个人会因远近场/音量差异被切成
+ * 好几簇（实测 300s 两人录音在 0.9 下切出 10 簇）。故拿到每簇声纹质心后，再按质心余弦做一次
+ * 「同一个人合并」（planClusterMerge）——这是压掉假说话人的主力，阈值只负责把量级压到可控。
  *
  * 结果落 `<project>/.cache/diar/`，刻意**不放** `.cache/parse/`：parse 缓存有 2000 条 LRU
  * （写后按 mtime 删最旧）与归档 30 天整目录清理，会把体积大得多的分离结果当普通条目挤掉。
@@ -36,7 +42,8 @@ import {
   sherpaLibDir,
   sherpaModelDir,
 } from '@/lib/stt/sherpa';
-import { centroidOf, embedWavs } from '@/lib/stt/speaker-embed';
+import { centroidOf, cosineSimilarity, embedWavs, normalizeEmbedding } from '@/lib/stt/speaker-embed';
+import { sharedLibEnv } from '../platform';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,12 +52,16 @@ const MODEL_ID = 'diarize-pyannote-3dspeaker';
 
 /** 切块/聚类参数一变就 +1：缓存键带着它，旧结果自动失效（不需要用户手动清缓存） */
 // v3：开启 compute-confidence 并缓存每簇声纹质心（跨录音认人的身份层）；旧缓存缺这两项，故 +1
-export const DIAR_VERSION = 3;
+// v4：auto 聚类阈值 0.9→0.95，并按声纹质心把「同一人被拆出的多个簇」并回一个人（切块口径变了）
+// v5：duo/group 不再做声纹合并（用户已声明人数时，CLI 聚类就是权威；0.5 的余弦阈值会把
+//     同性别/同电话音色的两位真人并成一个，正是"选了 2 人却仍没有标签"的来源）
+export const DIAR_VERSION = 5;
 
 // 聚类阈值（CLI help：larger → fewer clusters）
-// 实测（本机两段真实录音 76.5s / 166.1s）：0.6 会把 2-3 人的对话切成 17 / 19 簇，
-// 0.9 起「只说了零点几秒」的假簇基本消失（→ 4 / 3 簇），再往上 0.95/0.97 不再变化。
-const THRESHOLD_AUTO = 0.9; // auto：默认口径，压掉假簇又不至于把真人并掉
+// 实测（本机两段真实录音 76.5s / 166.1s）：0.6 会把 2-3 人的对话切成 17 / 19 簇；
+// 本机 300s 双人录音复核：0.5 → 35 簇、0.9 → 10 簇、0.95 → 6 簇、0.97 与 0.95 持平。
+// 0.9 对长录音明显偏松（同一个人因远近场/音量差异被切成几簇），故抬到 0.95 那个平台上。
+const THRESHOLD_AUTO = 0.95; // auto：压掉假簇，又不至于把两位真人并成一个
 const THRESHOLD_GROUP = 0.8; // group：用户已声明 3 人以上，放宽一点留住小角色
 
 // 切块参数
@@ -65,6 +76,18 @@ const TINY_CLUSTER_SHARE_AUTO = 0.05;
 const MAX_CHUNK_SEC = 60; // 单块上限（与旧固定切片一致，避免单次转写过长）
 const MAX_CHUNKS = 300; // 切块数上限：超了就退回固定 60s 网格
 const MIN_AVG_CHUNK_SEC = 3; // 平均块长下限：太碎就退回固定网格
+
+/**
+ * 长音频分段分离：整段跑 pyannote 在 1 小时以上会逼近 30 分钟超时，而且没有中间进度。
+ * 超过阈值就按 10 分钟一段切开、两段并行；每段内部照常聚类，段与段之间用声纹质心对齐
+ * （同一人跨段保持同一个全局 speaker id），最后再合并成一份 turns。
+ */
+const LONG_DIAR_THRESHOLD_SEC = 20 * 60;
+const LONG_DIAR_CHUNK_SEC = 10 * 60;
+const LONG_DIAR_THREADS = 2; // 4 段并行 × 2 线程 = 8 核；比 2 段 × 4 线程更快
+const LONG_DIAR_CONCURRENCY = 4;
+const LONG_DIAR_MATCH_SIM = 0.5;
+const LONG_DIAR_MAX_SPEAKERS = 8; // auto 模式跨段允许的全局人数上限；duo 另有 2 人硬上限
 
 // 每簇声纹质心（跨录音认人的身份层）
 const MAX_CENTROID_SLICES = 3; // 每簇最多取几段来算质心（多取只是更稳，边际收益递减）
@@ -171,18 +194,22 @@ async function runDiarization(
   wavPath: string,
   mode: DiarMode,
   timeoutMs: number,
+  onProgress?: (pct: number) => void,
+  threadsOverride?: number,
 ): Promise<{ stdout: string; stderr: string }> {
   const def = findLocalModel(MODEL_ID);
   if (!def || !isDiarizationModel(def)) {
     throw new Error(`Speaker diarization model is missing from the registry: ${MODEL_ID}`);
   }
   const dir = sherpaModelDir(def.id);
+  // 两个子模型默认都只用 1 线程，而这一步是导入流程里的同步等待：按 CPU 核数给足线程
+  // （封顶 4、且留一核给界面/别的活；核少时退回 2，别把机器抢死）
+  const threads = Math.max(1, Math.min(4, threadsOverride ?? Math.max(2, (os.cpus()?.length ?? 4) - 1)));
   const args = [
     `--segmentation.pyannote-model=${path.join(dir, def.segmentationFile)}`,
     `--embedding.model=${path.join(dir, def.embeddingFile)}`,
-    // 两个模型默认都只用 1 线程，显式提到 2：这一步在导入流程里是同步等待，别白白翻倍
-    '--segmentation.num-threads=2',
-    '--embedding.num-threads=2',
+    `--segmentation.num-threads=${threads}`,
+    `--embedding.num-threads=${threads}`,
     '--min-duration-on=0.3',
     '--min-duration-off=0.5',
     ...clusteringArgs(mode),
@@ -192,7 +219,7 @@ async function runDiarization(
     const child = spawn(sherpaDiarizationBinaryPath(), args, {
       env: {
         ...process.env,
-        DYLD_LIBRARY_PATH: [sherpaLibDir(), process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(':'),
+        ...sharedLibEnv(sherpaLibDir()),
       },
     });
     let stdout = '';
@@ -202,8 +229,27 @@ async function runDiarization(
       reject(new Error(`Speaker diarization timed out (${Math.round(timeoutMs / 1000)}s).`));
     }, timeoutMs);
 
+    // CLI 把进度打到 **stderr**（strings 已确认格式：`progress %.2f%%`）。管道分块可能把一行
+    // 截断在两块之间，故留一个行缓冲，只在遇到换行时才解析——否则会漏掉半行、进度看起来停住。
+    let errBuf = '';
+    const noteProgress = (chunk: string) => {
+      if (!onProgress) return;
+      errBuf += chunk;
+      const lines = errBuf.split(/\r?\n/);
+      errBuf = lines.pop() ?? '';
+      for (const line of lines) {
+        const m = /progress\s+(\d+(?:\.\d+)?)%/.exec(line);
+        if (!m) continue;
+        const pct = Number(m[1]);
+        if (Number.isFinite(pct)) onProgress(pct);
+      }
+    };
     child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.stderr.on('data', (d: Buffer) => {
+      const s = d.toString();
+      stderr += s;
+      noteProgress(s);
+    });
     child.on('error', (e) => { clearTimeout(timer); reject(e); });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -396,6 +442,20 @@ function dominantSpeaker(turns: DiarTurn[], start: number, end: number): number 
  * 首块回拉到窗口起点、末块拉到窗口终点，保证窗口内**无空隙**（裁剪掉的只是边界静音）。
  * range 为 null 时原样返回。
  */
+/** 取与 [start, end) 重叠最长的切块说话人；完全没重叠（静音/语气词）返回 null。 */
+export function speakerForRange(chunks: DiarChunk[], start: number, end: number): number | null {
+  let best: number | null = null;
+  let bestOverlap = 0;
+  for (const c of chunks) {
+    const overlap = Math.min(end, c.end) - Math.max(start, c.start);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      best = c.speaker;
+    }
+  }
+  return bestOverlap > 0 ? best : null;
+}
+
 export function clipChunks(chunks: DiarChunk[], range: { start: number; end: number } | null): DiarChunk[] {
   if (!range) return chunks.map((c) => ({ ...c }));
   const inside = chunks
@@ -412,6 +472,132 @@ export function clipChunks(chunks: DiarChunk[], range: { start: number; end: num
 }
 
 // ============================================================
+// 声纹簇合并（纯函数，便于单测）
+// ============================================================
+
+/**
+ * 两个簇的质心余弦比到多少就判为「同一个人」。
+ *
+ * 实测（本机 300s 双人录音，阈值 0.95 分出 6 簇）：
+ *   - 两位真人之间 0.05~0.22（不同人）；
+ *   - 被拆出来的假簇对真人 0.63~0.64（同一人）。
+ * 与 speaker-lib.MATCH_THRESHOLD 同口径（同一个 3dspeaker 向量空间），且那边实测同一人 0.63~0.87、
+ * 不同人 0.08~0.22，取区间中点 0.5，两侧余量最均衡。
+ */
+const VOICEPRINT_MERGE_SIM = 0.5;
+
+export interface ClusterMergePlan {
+  /** 原簇号 → 合并后簇号（覆盖传入的**全部**簇号，含无质心的簇） */
+  remap: Map<number, number>;
+  /** 合并后的簇（新簇号）；**无质心**的簇（段太短、算不出声纹）不在此列 */
+  clusters: ClusterCentroid[];
+  /** 是否真的发生过合并；false = remap 是恒等映射、clusters 原样，调用方无需重建切块 */
+  merged: boolean;
+}
+
+/** 合并过程中的一组：成员簇号 + 各自质心/权重/置信度 */
+interface MergeGroup {
+  members: number[];
+  entries: { vec: number[]; w: number; conf: number | null }[];
+}
+
+/** 组的代表质心 = 成员质心按说话时长加权求和后归一化（与 speaker-embed.centroidOf 同一口径） */
+function groupCentroid(g: MergeGroup): number[] {
+  const dim = g.entries[0]?.vec.length ?? 0;
+  const out = new Array<number>(dim).fill(0);
+  for (const e of g.entries) {
+    if (e.vec.length !== dim) continue; // 维度不一致的成员不参与（模型换过就别硬凑）
+    for (let i = 0; i < dim; i++) out[i] += e.vec[i] * e.w;
+  }
+  return normalizeEmbedding(out);
+}
+
+/**
+ * 按声纹质心把「同一个人被拆出的多个簇」并回一个人。
+ *
+ * 为什么需要它：CLI 的聚类阈值只是一个标量，长录音里同一个人会因远近场/音量差异被切成几簇
+ * （实测 300s 两人录音在阈值 0.9 下切出 10 簇）。而质心是「这个声音」的代表——两簇质心余弦够近
+ * 就是同一个人，这比「时长占比」更直接、也更不容易误伤真人。
+ *
+ * 合并用**平均连接**（两组的代表质心做余弦），不用单连接：单连接会被中间桥接的簇「链式」并成一大坨。
+ * 只在**真的发生合并**时重排簇号；否则原样返回（保持既有编号，不动旧口径）。
+ * 无质心的簇（段太短算不出声纹）各自成组——它留给时长占比兜底清理，不在这里替它认人。
+ */
+export function planClusterMerge(
+  clusters: ClusterCentroid[],
+  allSpeakers: number[],
+  durationOf: (speaker: number) => number,
+  threshold = VOICEPRINT_MERGE_SIM,
+): ClusterMergePlan {
+  const ids = [...new Set(allSpeakers)].sort((a, b) => a - b);
+  const identity = (): ClusterMergePlan => ({
+    remap: new Map(ids.map((s) => [s, s])),
+    clusters,
+    merged: false,
+  });
+  if (clusters.length < 2 || !(threshold > 0)) return identity();
+
+  let groups: MergeGroup[] = clusters.map((c) => ({
+    members: [c.speaker],
+    entries: [{ vec: normalizeEmbedding(c.centroid), w: Math.max(0, durationOf(c.speaker)) || 1, conf: c.confidence ?? null }],
+  }));
+
+  let merged = false;
+  for (;;) {
+    // 找代表质心最相近、且超过阈值的两组（平均连接）
+    let bi = -1;
+    let bj = -1;
+    let best = -Infinity;
+    for (let i = 0; i < groups.length; i++) {
+      const ci = groupCentroid(groups[i]);
+      for (let j = i + 1; j < groups.length; j++) {
+        const sim = cosineSimilarity(ci, groupCentroid(groups[j]));
+        if (sim > best) {
+          best = sim;
+          bi = i;
+          bj = j;
+        }
+      }
+    }
+    if (bi < 0 || best < threshold) break;
+    const a = groups[bi];
+    const b = groups[bj];
+    groups = groups.filter((_, i) => i !== bi && i !== bj);
+    groups.push({ members: [...a.members, ...b.members], entries: [...a.entries, ...b.entries] });
+    merged = true;
+  }
+  if (!merged) return identity();
+
+  // 重排簇号：合并组 + 无质心簇（自成一组），按「最小成员簇号」排序后依次编号 0..n-1。
+  // 无质心簇**必须**一起编号，否则它们会与重排后的新簇号撞号（两簇共用一个 id）。
+  const grouped = new Set(groups.flatMap((g) => g.members));
+  const unassigned = ids.filter((s) => !grouped.has(s));
+  const final: { members: number[]; centroid: number[] | null; conf: number[] }[] = [
+    ...groups.map((g) => ({
+      members: g.members,
+      centroid: groupCentroid(g),
+      conf: g.entries.map((e) => e.conf).filter((c): c is number => c !== null),
+    })),
+    ...unassigned.map((s) => ({ members: [s], centroid: null, conf: [] as number[] })),
+  ];
+  final.sort((a, b) => Math.min(...a.members) - Math.min(...b.members));
+
+  const remap = new Map<number, number>();
+  final.forEach((g, i) => g.members.forEach((s) => remap.set(s, i)));
+
+  const out: ClusterCentroid[] = [];
+  final.forEach((g, i) => {
+    if (!g.centroid) return; // 无质心的簇不写身份层（与 computeClusterCentroids 的口径一致）
+    out.push({
+      speaker: i,
+      centroid: g.centroid,
+      confidence: g.conf.length ? g.conf.reduce((a, b) => a + b, 0) / g.conf.length : null,
+    });
+  });
+  return { remap, clusters: out, merged: true };
+}
+
+// ============================================================
 // 缓存（.cache/diar/，与 .cache/parse/ 独立）
 // ============================================================
 
@@ -419,8 +605,9 @@ function diarCacheDir(projectPath: string): string {
   return path.join(projectPath, '.cache', DIAR_CACHE_DIR);
 }
 
-function cacheKeyOf(hash: string, mode: DiarMode): string {
-  return `diar-${hash}-D${DIAR_VERSION}-${mode}`;
+function cacheKeyOf(hash: string, mode: DiarMode, range?: { start: number; end: number }): string {
+  const suffix = range ? `-r${Math.round(range.start)}-${Math.round(range.end)}` : '';
+  return `diar-${hash}-D${DIAR_VERSION}-${mode}${suffix}`;
 }
 
 interface DiarCacheRecord {
@@ -484,6 +671,229 @@ export async function readDiarClusters(
 // ============================================================
 // 主入口
 // ============================================================
+
+// ============================================================
+// 长音频分段分离（超过 LONG_DIAR_THRESHOLD_SEC 才走）
+// ============================================================
+
+interface ChunkDiarResult {
+  start: number;
+  end: number;
+  turns: DiarTurn[];
+  clusters: ClusterCentroid[];
+}
+
+/** 从已转好的 16k 单声道 wav 切一段（PCM 直接切，快且无损） */
+async function sliceWav(
+  ffmpegPath: string,
+  srcWav: string,
+  outWav: string,
+  start: number,
+  duration: number,
+): Promise<void> {
+  await execFileAsync(
+    ffmpegPath,
+    ['-y', '-ss', String(start), '-t', String(duration), '-i', srcWav, '-c:a', 'pcm_s16le', outWav],
+    { timeout: 5 * 60 * 1000 },
+  );
+}
+
+/** 单段分离：turns 用段内相对时间；clusters 的 speaker 也是段内编号 */
+async function diarizeOneChunk(
+  ffmpegPath: string,
+  srcWav: string,
+  chunkPath: string,
+  start: number,
+  end: number,
+  mode: DiarMode,
+): Promise<ChunkDiarResult> {
+  const dur = end - start;
+  await sliceWav(ffmpegPath, srcWav, chunkPath, start, dur);
+  const { stdout, stderr } = await runDiarization(chunkPath, mode, timeoutFor(dur), undefined, LONG_DIAR_THREADS);
+  const turns = parseDiarizationOutput(stdout, stderr);
+  if (turns.length === 0) return { start, end, turns: [], clusters: [] };
+  const chunks = buildSpeakerChunks(turns, dur, {
+    tinyClusterShare: mode === 'auto' ? TINY_CLUSTER_SHARE_AUTO : 0,
+  });
+  const clusters = await computeClusterCentroids(chunkPath, chunks, turns, ffmpegPath);
+  return { start, end, turns, clusters };
+}
+
+/** 段内簇 → 全局 speaker 号（按声纹质心做跨段对齐；duo 最多 2 人） */
+function mapChunkClusters(
+  local: ClusterCentroid[],
+  globals: ClusterCentroid[],
+  globalWeights: Map<number, number>,
+  localWeights: Map<number, number>,
+  mode: DiarMode,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  const sorted = [...local].sort((a, b) => a.speaker - b.speaker);
+  const addGlobal = (c: ClusterCentroid): number => {
+    const id = globals.length;
+    globals.push({ speaker: id, centroid: c.centroid, confidence: c.confidence });
+    globalWeights.set(id, localWeights.get(c.speaker) ?? 1);
+    return id;
+  };
+  const mergeInto = (id: number, c: ClusterCentroid) => {
+    const old = globals.find((g) => g.speaker === id);
+    if (!old) return;
+    const wOld = globalWeights.get(id) ?? 1;
+    const wNew = localWeights.get(c.speaker) ?? 1;
+    const total = wOld + wNew;
+    old.centroid = normalizeEmbedding(old.centroid.map((v, i) => (v * wOld + c.centroid[i] * wNew) / total));
+    globalWeights.set(id, total);
+  };
+
+  if (sorted.length === 0) return out;
+  if (globals.length === 0) {
+    sorted.forEach((c) => out.set(c.speaker, addGlobal(c)));
+    return out;
+  }
+
+  const cap = mode === 'duo' ? 2 : LONG_DIAR_MAX_SPEAKERS;
+  // duo 且已有两个全局人：直接比较「直配 / 交换」两种分配，取相似度和更大的那种。
+  if (mode === 'duo' && globals.length >= 2 && sorted.length >= 2) {
+    const a = sorted[0];
+    const b = sorted[1];
+    const g0 = globals[0];
+    const g1 = globals[1];
+    const straight = cosineSimilarity(a.centroid, g0.centroid) + cosineSimilarity(b.centroid, g1.centroid);
+    const swapped = cosineSimilarity(a.centroid, g1.centroid) + cosineSimilarity(b.centroid, g0.centroid);
+    const [ia, ib] = straight >= swapped ? [g0.speaker, g1.speaker] : [g1.speaker, g0.speaker];
+    out.set(a.speaker, ia);
+    out.set(b.speaker, ib);
+    mergeInto(ia, a);
+    mergeInto(ib, b);
+    // duo 理论只有 2 簇；万一段内多出簇，归到最像的那个，不新增第三个人。
+    for (const c of sorted.slice(2)) {
+      const best = globals
+        .map((g) => ({ id: g.speaker, sim: cosineSimilarity(c.centroid, g.centroid) }))
+        .sort((x, y) => y.sim - x.sim)[0];
+      if (best) {
+        out.set(c.speaker, best.id);
+        mergeInto(best.id, c);
+      }
+    }
+    return out;
+  }
+
+  const used = new Set<number>();
+  for (const c of sorted) {
+    const candidates = globals
+      .map((g) => ({ id: g.speaker, sim: cosineSimilarity(c.centroid, g.centroid) }))
+      .sort((x, y) => y.sim - x.sim);
+    const best = candidates.find((x) => !used.has(x.id)) ?? candidates[0];
+    const shouldCreate =
+      globals.length < cap &&
+      (!best || best.sim < LONG_DIAR_MATCH_SIM) &&
+      // duo 已有一个全局人、段里出现第二个不同声音：允许创建第二个；
+      // 但 duo 达到 2 人后不再创建。
+      !(mode === 'duo' && globals.length >= 2);
+    if (shouldCreate) {
+      const id = addGlobal(c);
+      out.set(c.speaker, id);
+      used.add(id);
+    } else if (best) {
+      out.set(c.speaker, best.id);
+      used.add(best.id);
+      mergeInto(best.id, c);
+    }
+  }
+  return out;
+}
+
+/**
+ * 长音频分段分离：返回全局 speaker 切块 + 每簇质心。
+ * 每段最多重试一次；单段失败不拖垮整条（记 console.warn 后跳过），但全空则返回 null。
+ */
+async function runDiarizationChunked(
+  wavPath: string,
+  durationSec: number,
+  mode: DiarMode,
+  ffmpegPath: string,
+  onProgress?: (pct: number) => void,
+): Promise<{ chunks: DiarChunk[]; clusters: ClusterCentroid[] } | null> {
+  const total = Math.max(1, Math.ceil(durationSec / LONG_DIAR_CHUNK_SEC));
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bob-diar-long-'));
+  const results: (ChunkDiarResult | null)[] = new Array(total).fill(null);
+  let completed = 0;
+  try {
+    for (let base = 0; base < total; base += LONG_DIAR_CONCURRENCY) {
+      const batch = Array.from(
+        { length: Math.min(LONG_DIAR_CONCURRENCY, total - base) },
+        (_, k) => base + k,
+      );
+      const batchResults = await Promise.all(
+        batch.map(async (i) => {
+          const start = i * LONG_DIAR_CHUNK_SEC;
+          const end = Math.min(durationSec, start + LONG_DIAR_CHUNK_SEC);
+          if (end - start < 1) return null;
+          const chunkPath = path.join(tmpDir, `chunk-${i}.wav`);
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              return await diarizeOneChunk(ffmpegPath, wavPath, chunkPath, start, end, mode);
+            } catch (e) {
+              if (attempt === 0) continue;
+              console.warn(
+                `[diarize] 长音频第 ${i + 1}/${total} 段失败，跳过:`,
+                e instanceof Error ? e.message : e,
+              );
+            }
+          }
+          return null;
+        }),
+      );
+      batchResults.forEach((r, k) => { results[batch[k]] = r; });
+      completed += batch.length;
+      onProgress?.(Math.min(99, (completed / total) * 100));
+    }
+
+    const globals: ClusterCentroid[] = [];
+    const globalWeights = new Map<number, number>();
+    const turns: DiarTurn[] = [];
+    for (const r of results) {
+      if (!r || r.turns.length === 0 || r.clusters.length === 0) continue;
+      const localWeights = new Map<number, number>();
+      for (const c of r.clusters) {
+        const weight = r.turns
+          .filter((t) => t.speaker === c.speaker)
+          .reduce((acc, t) => acc + Math.max(0, t.end - t.start), 0);
+        localWeights.set(c.speaker, Math.max(weight, 1));
+      }
+      const map = mapChunkClusters(r.clusters, globals, globalWeights, localWeights, mode);
+      for (const t of r.turns) {
+        const speaker = map.get(t.speaker);
+        if (speaker === undefined) continue;
+        turns.push({ ...t, start: t.start + r.start, end: t.end + r.start, speaker });
+      }
+    }
+    if (turns.length === 0) return null;
+
+    const chunkOpts = { tinyClusterShare: mode === 'auto' ? TINY_CLUSTER_SHARE_AUTO : 0 };
+    let chunks = buildSpeakerChunks(turns, durationSec, chunkOpts);
+    if (chunks.length === 0) return null;
+    let clusters = globals;
+    if (mode === 'auto') {
+      const durationBySpeaker = new Map<number, number>();
+      for (const c of chunks) {
+        if (c.speaker === null) continue;
+        durationBySpeaker.set(c.speaker, (durationBySpeaker.get(c.speaker) ?? 0) + (c.end - c.start));
+      }
+      const plan = planClusterMerge(clusters, [...new Set(turns.map((t) => t.speaker))], (s) => durationBySpeaker.get(s) ?? 0);
+      if (plan.merged) {
+        for (const t of turns) t.speaker = plan.remap.get(t.speaker) ?? t.speaker;
+        chunks = buildSpeakerChunks(turns, durationSec, chunkOpts);
+        if (chunks.length === 0) return null;
+        const kept = new Set(chunks.map((c) => c.speaker).filter((s): s is number => s !== null));
+        clusters = plan.clusters.filter((c) => kept.has(c.speaker));
+      }
+    }
+    return { chunks, clusters };
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
 
 /** 同 key 的分离只跑一次：import_probe 与紧随其后的首个 import_segment 会并发到达 */
 const inFlight = new Map<string, Promise<DiarChunk[] | null>>();
@@ -576,17 +986,26 @@ async function computeClusterCentroids(
 /**
  * 整段音频做一次说话人分离（带缓存与并发去重）。
  * 返回整段切块列表；**不可用或失败一律返回 null**（调用方据此退回固定 60s 无标签链路，绝不阻断转写）。
+ *
+ * @param deps.onProgress CLI 报的 `progress xx%`（0~100）。长录音这一步要跑几分钟到二十几分钟，
+ *   HTTP 侧据此把进度推给客户端；命中缓存时不回调（缓存即秒回，没有等待可言）。
  */
 export async function ensureDiarization(
   audioPath: string,
   projectPath: string,
   mode: DiarMode,
-  deps: { ffmpegPath: string },
+  deps: {
+    ffmpegPath: string;
+    onProgress?: (pct: number) => void;
+    /** 只分离这一段（源时间轴秒）；不传 = 整段。用于「稿子只覆盖前 62 分钟」时避免分离 3.6 小时 */
+    range?: { start: number; end: number };
+  },
 ): Promise<DiarChunk[] | null> {
   if (!(await isDiarizationAvailable())) return null;
 
   const hash = await sha256File(audioPath);
-  const key = cacheKeyOf(hash, mode);
+  const range = deps.range && deps.range.end - deps.range.start >= 1 ? deps.range : undefined;
+  const key = cacheKeyOf(hash, mode, range);
   const file = path.join(diarCacheDir(projectPath), `${key}.json`);
 
   const cached = await readDiarCache(file, key);
@@ -598,36 +1017,98 @@ export async function ensureDiarization(
   const task = (async (): Promise<DiarChunk[] | null> => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bob-diar-'));
     const wavPath = path.join(tmpDir, 'audio.wav');
+    const offset = range?.start ?? 0;
+    const shiftChunks = (list: DiarChunk[]): DiarChunk[] =>
+      offset === 0 ? list : list.map((c) => ({ ...c, start: c.start + offset, end: c.end + offset }));
     try {
-      await execFileAsync(
-        deps.ffmpegPath,
-        ['-y', '-i', audioPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath],
-        { timeout: 5 * 60 * 1000 },
-      );
+      const ffArgs = ['-y'];
+      if (range) ffArgs.push('-ss', String(range.start), '-t', String(range.end - range.start));
+      ffArgs.push('-i', audioPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath);
+      await execFileAsync(deps.ffmpegPath, ffArgs, { timeout: 5 * 60 * 1000 });
       const durationSec = await probeWavDurationSec(deps.ffmpegPath, wavPath);
-      const { stdout, stderr } = await runDiarization(wavPath, mode, timeoutFor(durationSec));
-      const turns = parseDiarizationOutput(stdout, stderr);
+      // 长音频：分段跑 + 跨段声纹对齐。整段 pyannote 在 1h+ 会逼近 30min 超时且没有进度；
+      // 分段后每段独立聚类，再用质心把同一人接回同一个全局 speaker id。
+      if (durationSec !== null && durationSec >= LONG_DIAR_THRESHOLD_SEC) {
+        const long = await runDiarizationChunked(
+          wavPath,
+          durationSec,
+          mode,
+          deps.ffmpegPath,
+          deps.onProgress,
+        );
+        if (!long) return null;
+        const shifted = shiftChunks(long.chunks);
+        await writeDiarCache(file, {
+          key,
+          duration_sec: durationSec,
+          chunks: shifted,
+          clusters: long.clusters,
+          cached_at: new Date().toISOString(),
+        });
+        console.info(
+          `[diarize] 长音频分段完成：${Math.ceil(durationSec / LONG_DIAR_CHUNK_SEC)} 段，` +
+            `clusters=${long.clusters.length} chunks=${shifted.length} mode=${mode}` +
+            (range ? ` range=${Math.round(range.start)}-${Math.round(range.end)}` : ''),
+        );
+        return shifted;
+      }
+      const { stdout, stderr } = await runDiarization(wavPath, mode, timeoutFor(durationSec), deps.onProgress);
+      let turns = parseDiarizationOutput(stdout, stderr);
       if (turns.length === 0) {
         console.warn('[diarize] 分离未产出任何段，退回无标签链路');
         return null;
       }
-      const chunks = buildSpeakerChunks(turns, durationSec ?? turns[turns.length - 1].end, {
-        tinyClusterShare: mode === 'auto' ? TINY_CLUSTER_SHARE_AUTO : 0,
-      });
+      const duration = durationSec ?? turns[turns.length - 1].end;
+      const chunkOpts = { tinyClusterShare: mode === 'auto' ? TINY_CLUSTER_SHARE_AUTO : 0 };
+      let chunks = buildSpeakerChunks(turns, duration, chunkOpts);
       if (chunks.length === 0) return null;
+
+      // 每簇声纹质心（身份层）：回放/认人时只读缓存，不再回头重跑分离。
+      // 顺带用它做「同一人被拆出的多个簇」的合并（比时长占比更直接，见 planClusterMerge）。
+      let clusters = await computeClusterCentroids(wavPath, chunks, turns, deps.ffmpegPath);
+      const allSpeakers = [...new Set(turns.map((t) => t.speaker))];
+      const durationBySpeaker = new Map<number, number>();
+      for (const c of chunks) {
+        if (c.speaker === null) continue;
+        durationBySpeaker.set(c.speaker, (durationBySpeaker.get(c.speaker) ?? 0) + (c.end - c.start));
+      }
+      /**
+       * 声纹合并只在 auto 下做。duo / group 是用户**明确声明人数**的模式：
+       * CLI 已按 `--clustering.num-clusters=2`（duo）或更松的阈值（group）给出簇，
+       * 这里再按 0.5 的余弦合并，会把同性别、同电话音色的两位真人并回一个人 ——
+       * 用户选了「2 人」却还是拿到一份无标签稿，就是这么来的。
+       */
+      const plan =
+        mode === 'auto'
+          ? planClusterMerge(clusters, allSpeakers, (s) => durationBySpeaker.get(s) ?? 0)
+          : {
+              merged: false,
+              remap: new Map(allSpeakers.map((s) => [s, s])),
+              clusters,
+            };
+      if (plan.merged) {
+        turns = turns.map((t) => ({ ...t, speaker: plan.remap.get(t.speaker) ?? t.speaker }));
+        chunks = buildSpeakerChunks(turns, duration, chunkOpts);
+        if (chunks.length === 0) return null;
+        // 重建时极小簇兜底可能又并掉几簇 → 身份层只保留最终切块里真实存在的簇（避免名单出现幽灵 Speaker）
+        const kept = new Set(chunks.map((c) => c.speaker).filter((s): s is number => s !== null));
+        clusters = plan.clusters.filter((c) => kept.has(c.speaker));
+        console.info(
+          `[diarize] 声纹合并后：簇 ${allSpeakers.length} → ${new Set(turns.map((t) => t.speaker)).size}`,
+        );
+      }
       console.info(
         `[diarize] mode=${mode} clusters=${new Set(turns.map((t) => t.speaker)).size} turns=${turns.length} chunks=${chunks.length}`,
       );
-      // 每簇声纹质心（身份层）：同在这一步算好，回放/认人时只读缓存，不再回头重跑分离
-      const clusters = await computeClusterCentroids(wavPath, chunks, turns, deps.ffmpegPath);
+      const shifted = shiftChunks(chunks);
       await writeDiarCache(file, {
         key,
         duration_sec: durationSec ?? 0,
-        chunks,
+        chunks: shifted,
         clusters,
         cached_at: new Date().toISOString(),
       });
-      return chunks;
+      return shifted;
     } catch (e) {
       // 分离是增强项：失败只留痕，不写缓存（否则模型就绪后会一直命中失败态）
       console.warn('[diarize] 说话人分离失败，退回无标签链路:', e instanceof Error ? e.message : e);

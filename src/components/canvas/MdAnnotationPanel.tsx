@@ -6,7 +6,7 @@
 // - 修订列表：修订后逐条展示（删除/新增），支持逐条 + 整体 接受/拒绝
 
 import { useState } from 'react';
-import { MessageSquare, X, Wand2, Loader2, Check, Trash2, CornerDownRight, Plus, Minus, FileDiff, ArrowRight, LocateFixed, Eye, Pencil, ListChecks } from 'lucide-react';
+import { MessageSquare, X, Wand2, Loader2, Check, Trash2, CornerDownRight, Plus, Minus, FileDiff, ArrowRight, LocateFixed, Eye, Pencil, ListChecks, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { CheckReport } from './CheckReport';
 import { summarizeChecks } from '@/lib/md-export/check';
@@ -37,14 +37,14 @@ export interface MdAnnotation {
 export type AnnotationIntent = 'auto' | 'polish' | 'shorten' | 'expand' | 'translate' | 'fix' | 'format' | 'custom';
 
 export const ANNOTATION_INTENTS: { id: AnnotationIntent; label: string; prefix: string }[] = [
-  { id: 'auto', label: '自动判断', prefix: '由 AI 自行判断意见意图并执行' },
-  { id: 'polish', label: '改写润色', prefix: '改写润色（保持原意，提升表达质量）' },
-  { id: 'shorten', label: '精简压缩', prefix: '精简压缩（删去冗余，保持关键信息）' },
-  { id: 'expand', label: '扩写补充', prefix: '扩写补充（按意见展开细节，结合上下文）' },
-  { id: 'translate', label: '翻译', prefix: '翻译（按意见指定目标语言）' },
-  { id: 'fix', label: '修正事实', prefix: '修正事实/表述错误（按意见修正）' },
-  { id: 'format', label: '格式化', prefix: '结构化改写（可按需加列表/表格/图表；表格请直接输出 markdown 表格语法：| 列1 | 列2 |\n| --- | --- |）' },
-  { id: 'custom', label: '自定义', prefix: '' },
+  { id: 'auto', label: 'Auto', prefix: '由 AI 自行判断意见意图并执行' },
+  { id: 'polish', label: 'Polish', prefix: '改写润色（保持原意，提升表达质量）' },
+  { id: 'shorten', label: 'Shorten', prefix: '精简压缩（删去冗余，保持关键信息）' },
+  { id: 'expand', label: 'Expand', prefix: '扩写补充（按意见展开细节，结合上下文）' },
+  { id: 'translate', label: 'Translate', prefix: '翻译（按意见指定目标语言）' },
+  { id: 'fix', label: 'Fix facts', prefix: '修正事实/表述错误（按意见修正）' },
+  { id: 'format', label: 'Format', prefix: '结构化改写（可按需加列表/表格/图表；表格请直接输出 markdown 表格语法：| 列1 | 列2 |\n| --- | --- |）' },
+  { id: 'custom', label: 'Custom', prefix: '' },
 ];
 
 export interface Revision {
@@ -93,11 +93,26 @@ export interface RevisionRound {
     newText: string;
     /** 差异点前 20 字符，作为定位锚（oldText 可能在全文多处出现） */
     preContext: string;
+    /** 改动前后的渲染态纯文本指纹（修订卡片点击定位用；oldText/newText 是 markdown 源码，
+     *  在渲染纯文本中匹配不到，纯文本指纹才能精确命中含语法的改动） */
+    plainOld?: string;
+    plainNew?: string;
   };
   /** 来源批注 id（单条「AI 修改」生成的轮次记录对应批注；该轮修订被接受时自动标记批注已解决） */
   annotationId?: string;
+  /** 该轮改写【之前】批注的锚点：拒绝该轮修订时用来把批注重新锚回旧文本，
+   *  否则批注 quote 停在被还原掉的新文本上，定位失败、看起来「批注消失」 */
+  annotationBefore?: {
+    quote: string;
+    from?: number;
+    to?: number;
+    prefix?: string;
+    suffix?: string;
+  };
   /** 「改了什么」的一句话说明（由 old/new 差异确定性生成，不额外调模型；随轮次持久化到 sidecar） */
   note?: string;
+  /** 轮次来源：'user' = 人工修订模式下的手工编辑；缺省 = AI 修订 */
+  author?: 'ai' | 'user';
 }
 
 /** 一轮「按批注修订」的结果回报：改了几条、哪几条失败及原因（失败原因可见，不再静默丢弃） */
@@ -196,6 +211,17 @@ function pairOps(ops: RevisionOp[]): { oldText?: string; newText?: string; items
   return pairs;
 }
 
+/** 一轮修订的「逻辑条数」：相邻 delete+insert（同一次替换）合并为 1 条，避免一次改写被计成 2 */
+function changeCount(round: RevisionRound): number {
+  return round.ops?.length ? pairOps(round.ops).length : pairRevisions(round.revisions).length;
+}
+
+/** 一轮中「待处理」的逻辑条数：某条配对里还有 pending 项即计入 1（含部分处理的情况） */
+function pendingChangeCount(round: RevisionRound): number {
+  const pairs = round.ops?.length ? pairOps(round.ops) : pairRevisions(round.revisions);
+  return pairs.filter((p) => p.items.some((i) => i.status === 'pending')).length;
+}
+
 export function MdAnnotationPanel({
   open,
   annotations,
@@ -231,11 +257,8 @@ export function MdAnnotationPanel({
   if (!open) return null;
 
   const unresolved = annotations.filter((a) => !a.resolved);
-  // 全部轮次待处理修订总数（修订 tab 徽章）
-  const totalPending = revisionRounds.reduce(
-    (sum, r) => sum + (r.ops ? r.ops.filter((op) => op.status === 'pending').length : r.revisions.filter((rev) => rev.status === 'pending').length),
-    0,
-  );
+  // 全部轮次待处理修订总数（修订 tab 徽章）——按「逻辑条数」计（delete+insert 合并为 1）
+  const totalPending = revisionRounds.reduce((sum, r) => sum + pendingChangeCount(r), 0);
   // 批量重写进度：当前重写条在待重写列表中的序号（用于禁用其他卡片按钮 + 卡片呼吸灯）
   const rewriteQueue = annotations.filter((a) => !a.resolved && a.quote.trim() && a.content.trim());
   const rewritingIndex = rewritingId ? rewriteQueue.findIndex((x) => x.id === rewritingId) : -1;
@@ -264,7 +287,7 @@ export function MdAnnotationPanel({
             title="Annotations view"
           >
             <MessageSquare className="h-3 w-3" />
-            批注{unresolved.length > 0 ? ` ${unresolved.length}` : ''}
+            Annotations{unresolved.length > 0 ? ` ${unresolved.length}` : ''}
           </button>
           <button
             onClick={() => onViewChange('revisions')}
@@ -277,7 +300,7 @@ export function MdAnnotationPanel({
             title="Revisions view (before → after)"
           >
             <FileDiff className="h-3 w-3" />
-            修订{totalPending > 0 ? ` ${totalPending}` : ''}
+            Revisions{totalPending > 0 ? ` ${totalPending}` : ''}
           </button>
           <button
             onClick={() => onViewChange('checks')}
@@ -368,7 +391,7 @@ export function MdAnnotationPanel({
       <div className="min-h-0 flex-1 overflow-y-auto ai-canvas-scroll px-2 py-2">
         {annotations.length === 0 && revisionRounds.length === 0 && (
           <div className="px-2 py-3 text-11 leading-relaxed" style={{ color: 'var(--ink-faint)' }}>
-            选中文字 → 点 AI Edit 面板里的批注按钮，挂一条意见。之后点卡片上的「AI 修改」单条处理，或点「按批注修订」批量处理。
+            Select text → click the annotation button in the AI Edit panel to attach a comment. Then use &ldquo;AI revise&rdquo; on a card for a single edit, or &ldquo;Revise all per annotations&rdquo; to batch-process them.
           </div>
         )}
 
@@ -417,7 +440,7 @@ export function MdAnnotationPanel({
                     tone="neutral"
                     size="micro"
                   >
-                    取消
+                    Cancel
                   </Button>
                   <Button
                     onClick={(e) => {
@@ -430,7 +453,7 @@ export function MdAnnotationPanel({
                     size="micro"
                   >
                     <Check className="h-2.5 w-2.5" />
-                    保存
+                    Save
                   </Button>
                 </div>
               </div>
@@ -439,7 +462,7 @@ export function MdAnnotationPanel({
             )}
             <div className="mt-0.5 flex items-center justify-between">
               <span className="text-10" style={{ color: 'var(--ink-faint)' }}>
-                {a.resolved ? '已解决' : new Date(a.createdAt).toLocaleString()}
+                {a.resolved ? 'Resolved' : new Date(a.createdAt).toLocaleString()}
               </span>
               <div className="flex items-center gap-0.5">
                 {!a.resolved && (
@@ -473,7 +496,7 @@ export function MdAnnotationPanel({
                       {a.id === rewritingId ? (
                         <Loader2 className="h-3 w-3 animate-spin" />
                       ) : (
-                        'AI 修改'
+                        'AI revise'
                       )}
                     </button>
                   </>
@@ -503,7 +526,7 @@ export function MdAnnotationPanel({
         <div className="min-h-0 flex-1 overflow-y-auto ai-canvas-scroll px-2 py-2">
           {revisionRounds.length === 0 ? (
             <div className="px-2 py-3 text-11 leading-relaxed" style={{ color: 'var(--ink-faint)' }}>
-              暂无修订。切到批注视图点「按批注修订」生成修订，每次修订保留一轮历史，可随时切换查看。
+              No revisions yet. While this panel is open your own edits are recorded as revision rounds; close it to go back to AI revisions only. Use &ldquo;Revise all per annotations&rdquo; to generate AI revisions. Each round keeps its own history you can revisit anytime.
             </div>
           ) : (
             <div className="flex flex-col gap-2">
@@ -512,15 +535,13 @@ export function MdAnnotationPanel({
                   History
                 </span>
                 <span className="text-10" style={{ color: 'var(--ink-faint)' }}>
-                  {revisionRounds.length} 轮
+                  {revisionRounds.length} rounds
                 </span>
               </div>
               {revisionRounds.map((r, i) => {
                 const active = r.id === activeRoundId;
                 const roundPairs = r.ops?.length ? pairOps(r.ops) : pairRevisions(r.revisions);
-                const pendingCount = r.ops
-                  ? r.ops.filter((op) => op.status === 'pending').length
-                  : r.revisions.filter((rev) => rev.status === 'pending').length;
+                const pendingCount = pendingChangeCount(r);
                 const ts = new Date(r.createdAt);
                 const sameDay = ts.toDateString() === new Date().toDateString();
                 const timeLabel = sameDay
@@ -531,12 +552,12 @@ export function MdAnnotationPanel({
                 const srcAnn = annotations.find((a) => a.id === r.annotationId);
                 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
                 const summary = srcAnn?.content
-                  ? `批注：${clip(srcAnn.content, 18)}${r.note ? ` · ${r.note}` : ''}`
+                  ? `${clip(srcAnn.content, 18)}${r.note ? ` · ${r.note}` : ''}`
                   : r.note
                     ? r.note
                     : r.patch
-                      ? `改「${clip(r.patch.oldText || '', 10)}」${r.patch.newText ? `→「${clip(r.patch.newText, 10)}」` : ''}`
-                      : `${r.ops?.length ?? r.revisions.length} 处修订`;
+                      ? `Changed "${clip(r.patch.oldText || '', 10)}"${r.patch.newText ? ` → "${clip(r.patch.newText, 10)}"` : ''}`
+                      : (() => { const n = changeCount(r); return `${n} edit${n > 1 ? 's' : ''}`; })();
                 return (
                   <div
                     key={r.id}
@@ -564,10 +585,15 @@ export function MdAnnotationPanel({
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="flex items-center gap-1.5 text-11 font-medium" style={{ color: active ? 'var(--primary)' : 'var(--ink)' }}>
                           {timeLabel}
+                          {r.author === 'user' && (
+                            <span className="flex items-center gap-0.5 rounded px-1 py-px text-9 font-semibold" style={{ backgroundColor: 'var(--paper-hover)', color: 'var(--ink-muted)' }}>
+                              <UserRound className="h-2.5 w-2.5" /> You
+                            </span>
+                          )}
                           {pendingCount > 0 && (
                             <span className="flex items-center gap-0.5 rounded px-1 py-px text-9 font-semibold" style={{ backgroundColor: 'var(--danger-soft)', color: 'var(--danger)' }}>
                               <span className="h-1 w-1 rounded-full" style={{ backgroundColor: 'var(--danger)' }} />
-                              {pendingCount} 待处理
+                              {pendingCount} pending
                             </span>
                           )}
                         </span>
@@ -577,7 +603,7 @@ export function MdAnnotationPanel({
                       </span>
                       {active && (
                         <span className="flex shrink-0 items-center gap-0.5 rounded px-1 py-px text-9 font-semibold" style={{ backgroundColor: 'color-mix(in oklab, var(--primary) 12%, transparent)', color: 'var(--primary)' }}>
-                          <Eye className="h-2.5 w-2.5" /> 查看中
+                          <Eye className="h-2.5 w-2.5" /> Viewing
                         </span>
                       )}
                     </button>
@@ -587,7 +613,7 @@ export function MdAnnotationPanel({
                       {active && pendingCount > 0 && (
                         <div className="mb-1.5 flex items-center justify-between rounded bg-[var(--paper-soft)] px-2 py-1">
                           <span className="text-10" style={{ color: 'var(--ink-muted)' }}>
-                            {pendingCount} 待处理
+                            {pendingCount} pending
                           </span>
                           <div className="flex items-center gap-1">
                             <Button
@@ -597,7 +623,7 @@ export function MdAnnotationPanel({
                               size="micro"
                               title="Accept all revisions in this round"
                             >
-                              全部接受
+                              Accept all
                             </Button>
                             <Button
                               onClick={onRejectAll}
@@ -606,7 +632,7 @@ export function MdAnnotationPanel({
                               size="micro"
                               title="Reject all revisions in this round"
                             >
-                              全部拒绝
+                              Reject all
                             </Button>
                           </div>
                         </div>
@@ -633,7 +659,7 @@ export function MdAnnotationPanel({
                               </span>
                               <span className="flex items-center gap-1.5 text-10" style={{ color: 'var(--ink-faint)' }}>
                                 <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/revision:opacity-100" style={{ color: 'var(--primary)' }}>
-                                  <LocateFixed className="h-2.5 w-2.5" /> 定位
+                                  <LocateFixed className="h-2.5 w-2.5" /> Locate
                                 </span>
                                 {pair.oldText !== undefined && pair.newText !== undefined && (
                                   <span className="flex items-center gap-0.5">
@@ -646,12 +672,12 @@ export function MdAnnotationPanel({
                             </div>
                             {pair.oldText !== undefined && (
                               <div className="text-11 leading-relaxed" style={{ color: 'var(--danger)', textDecoration: 'line-through' }}>
-                                修订前：{pair.oldText.length > 60 ? `${pair.oldText.slice(0, 60)}…` : pair.oldText}
+                                Before: {pair.oldText.length > 60 ? `${pair.oldText.slice(0, 60)}…` : pair.oldText}
                               </div>
                             )}
                             {pair.newText !== undefined && (
                               <div className="text-11 leading-relaxed" style={{ color: 'var(--success)' }}>
-                                修订后：{pair.newText.length > 60 ? `${pair.newText.slice(0, 60)}…` : pair.newText}
+                                After: {pair.newText.length > 60 ? `${pair.newText.slice(0, 60)}…` : pair.newText}
                               </div>
                             )}
                             {active && !allAccepted && !allRejected && (
@@ -662,7 +688,7 @@ export function MdAnnotationPanel({
                                   tone="success"
                                   size="micro"
                                 >
-                                  接受
+                                  Accept
                                 </Button>
                                 <Button
                                   onClick={(e) => { e.stopPropagation(); pair.items.forEach((r) => onRejectRevision(keyOf(r))); }}
@@ -670,7 +696,7 @@ export function MdAnnotationPanel({
                                   tone="danger"
                                   size="micro"
                                 >
-                                  拒绝
+                                  Reject
                                 </Button>
                               </div>
                             )}
@@ -679,7 +705,7 @@ export function MdAnnotationPanel({
                       })}
                       {active && pendingCount === 0 && roundPairs.length > 0 && (
                         <div className="mt-0.5 flex items-center gap-1 px-1 text-10" style={{ color: 'var(--success)' }}>
-                          <Check className="h-3 w-3" /> 全部处理完成
+                          <Check className="h-3 w-3" /> All processed
                         </div>
                       )}
                     </div>

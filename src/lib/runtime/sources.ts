@@ -32,6 +32,8 @@ export interface SourceStatus {
   wechat?: { running: boolean; bound: boolean };
   /** 飞书桥状态；undefined = 桥模块不可用（降级省略该行） */
   feishu?: { running: boolean; bound: boolean };
+  /** 邮箱（IMAP）感知状态；undefined = 邮件模块不可用（降级省略该行） */
+  mail?: { running: boolean; bound: boolean; unreadCount: number };
 }
 
 /** 一条源登记。新增源只在此数组追加一条即可（可见性文案 + 工具面护栏同时就位）。 */
@@ -91,6 +93,22 @@ export const SOURCES: SourceEntry[] = [
     render: (st) => bridgeLine('飞书', st.feishu, '设置填写凭证'),
   },
   {
+    // 邮件感知（2026-10-10 感知面 ①）：标准 IMAP 只读接入，「别人主动找你」的最大集合。
+    // 未接入 → 与微信/飞书同款「未接入 + 引导去设置」；已接入 → 报运行态与最近一轮未读数。
+    id: 'mail',
+    label: '邮箱',
+    kind: 'external',
+    scenes: [],
+    tools: [],
+    render: (st) => {
+      const m = st.mail;
+      if (!m) return null;
+      if (!m.bound) return '- 邮箱：未接入（可引导用户去设置填写邮箱地址与 IMAP 凭证）';
+      const unread = m.unreadCount > 0 ? `（最近一轮未读 ${m.unreadCount} 封）` : '';
+      return `- 邮箱：已接入并${m.running ? '运行中' : '未连接'}${unread}`;
+    },
+  },
+  {
     id: 'files',
     label: '本地授权目录',
     kind: 'indexed',
@@ -126,16 +144,6 @@ export const SOURCES: SourceEntry[] = [
     tools: ['read_notebook', 'read_note'],
     excludedTools: ['delete_notebook'],
     render: () => '- 个人笔记库（索引优先，先看 index 再精读单条）：用 read_notebook，精读用 read_note',
-  },
-  {
-    id: 'meeting',
-    label: '会议归档',
-    kind: 'indexed',
-    // 会议归档是 Recorder 专属（刻意能力边界）：管家 effectiveScenes 不含 'meeting' → 本行不出现。
-    // 日后若对管家开放，只需在 route 的 extraScenes 补一行，本行文案自动跟随。
-    scenes: ['meeting'],
-    tools: ['meeting_search', 'meeting_summarize'],
-    render: () => '- 会议归档（跨会议检索转写 / 纪要正文）：用 meeting_search',
   },
   {
     id: 'butler-domain',

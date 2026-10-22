@@ -54,17 +54,23 @@ export interface EveningInput {
   cards: { title: string; reason: string }[];
   /** 数据源降级说明（非空时必须明示，避免「查询失败 = 今天很空」被误读） */
   degraded: string[];
+  /**
+   * 当日收件箱增量（② 神经：感知源今天替用户留意到的事，如新邮件）。可选 —— 缺省视为没有，
+   * 保持「今日与逾期皆空且无增量 → 闭嘴」的既有判据不变。
+   */
+  inboxHighlights?: { title: string; detail?: string }[];
 }
 
 /**
  * 组装正文。**返回 null = 今天没有值得播报的东西**（调用方据此彻底静默）。
  *
- * 判据只看「今天 / 逾期」两项计数：两者皆 0 时即便还有建议卡（`clear` 卡），
+ * 判据看「今天 / 逾期 / 当日收件箱增量」三项计数：三者皆 0 时即便还有建议卡（`clear` 卡），
  * 也不值得在晚上推一条去说「你今天很空」。
  */
 export function composeEveningText(input: EveningInput): string | null {
   const { todayCount, overdueCount, todayItems, overdueItems } = input;
-  if (todayCount === 0 && overdueCount === 0) return null;
+  const highlights = input.inboxHighlights ?? [];
+  if (todayCount === 0 && overdueCount === 0 && highlights.length === 0) return null;
 
   const lines: string[] = [];
   if (overdueCount > 0) {
@@ -79,6 +85,12 @@ export function composeEveningText(input: EveningInput): string | null {
   } else {
     lines.push(...todayItems.slice(0, PREVIEW).map((i) => `- ${i.time} · ${i.title}`));
     if (todayCount > PREVIEW) lines.push(`- … (+${todayCount - PREVIEW} more)`);
+  }
+  if (highlights.length > 0) {
+    lines.push('');
+    lines.push(`📧 Noticed today (${highlights.length}):`);
+    lines.push(...highlights.slice(0, PREVIEW).map((h) => `- ${h.title}`));
+    if (highlights.length > PREVIEW) lines.push(`- … (+${highlights.length - PREVIEW} more)`);
   }
   if (input.cards.length > 0) {
     lines.push('');
@@ -148,6 +160,8 @@ export async function runEveningReport(now: Date = new Date()): Promise<EveningR
     overdueItems: bundle.schedule.items.filter((i) => i.section === 'overdue'),
     cards: bundle.cards.map((c) => ({ title: c.title, reason: c.reason })),
     degraded: bundle.snapshot.degraded,
+    // 当日收件箱增量（② 神经）：感知源今天替用户留意到的事，一并进晚间汇总
+    inboxHighlights: (bundle.inboxHighlights ?? []).map((h) => ({ title: h.title, detail: h.detail })),
   });
   if (!body) return { ran: true, skipped: 'nothing-to-report' };
 

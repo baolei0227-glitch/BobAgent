@@ -658,6 +658,8 @@ export interface CreateEventData {
 }
 
 export interface UpdateEventData {
+  /** 归属项目改写（待办归属迁移用）；'__global__' = 全局/Inbox */
+  project_id?: string;
   title?: string;
   description?: string | null;
   location?: string | null;
@@ -768,6 +770,7 @@ export async function updateEvent(
   const setters: string[] = [];
   const params: unknown[] = [];
 
+  if (data.project_id !== undefined) { setters.push('project_id = ?'); params.push(data.project_id); }
   if (data.title !== undefined) { setters.push('title = ?'); params.push(data.title); }
   if (data.description !== undefined) { setters.push('description = ?'); params.push(data.description); }
   if (data.location !== undefined) { setters.push('location = ?'); params.push(data.location); }

@@ -6,12 +6,13 @@
  * 理由是建议讲的都是「今天」：9:00 缓存到下午就过时了（用户上午已经处理掉），
  * 而规则是确定性的、可解释、可点击（对齐仓库既有取向：能声明式表达就走 Rule）。
  *
- * 四类信号（按优先级，最多取 MAX_CARDS 条）：
+ * 五类信号（按优先级，最多取 MAX_CARDS 条）：
  *   1. overdue  逾期待办      —— 有未完成且已过期的事件
- *   2. overload 今日过载      —— 今天排了 OVERLOAD_THRESHOLD 项及以上
- *   3. sticky   便签待办积压  —— 全项目未完成便签行累计 STICKY_BACKLOG_THRESHOLD 及以上
- *   4. stalled  项目停滞      —— 活跃项目最近一次活动距今 >= STALLED_DAYS 天
- *   5. clear    今天很空       —— 上述全空，且快照未降级
+ *   2. plan     计划逾期/停滞 —— 计划树里登记 due 的步骤已过期，或计划久未推进
+ *   3. overload 今日过载      —— 今天排了 OVERLOAD_THRESHOLD 项及以上
+ *   4. sticky   便签待办积压  —— 全项目未完成便签行累计 STICKY_BACKLOG_THRESHOLD 及以上
+ *   5. stalled  项目停滞      —— 活跃项目最近一次活动距今 >= STALLED_DAYS 天
+ *   6. clear    今天很空       —— 上述全空，且快照未降级
  *
  * 两条硬约束：
  *   - **降级不误报**：数据源失败的信号直接跳过（overdue 查询失败时 count 会是 0，
@@ -27,7 +28,7 @@ import type { TodayEvent, TodaySnapshot } from '@/lib/butler/today';
 import { toNoticeItem } from '@/lib/core/daily-tasks';
 
 /** 建议类型 */
-export type AdviceKind = 'overdue' | 'overload' | 'sticky' | 'stalled' | 'clear';
+export type AdviceKind = 'overdue' | 'plan' | 'overload' | 'sticky' | 'stalled' | 'clear';
 
 /** 一条建议：一句话判断（title）+ 依据（reason）+ 可点击项（items） */
 export interface AdviceCard {
@@ -59,11 +60,27 @@ export interface AdviceIdleProject {
   lastActivityAt: string | null;
 }
 
+/** 计划信号（由 today-advice 逐项目读 plans.json + summarizePlan 派生）：一个计划一条 */
+export interface AdvicePlanSignal {
+  projectId: string;
+  projectName: string;
+  planId: string;
+  planTitle: string;
+  /** 已过期未完成的步骤数（0 = 无逾期） */
+  overdueSteps: number;
+  /** 最急的一条逾期步骤（overdueSteps > 0 时应有值） */
+  topOverdue?: { step: string; due: string; daysOverdue: number };
+  /** 计划久未推进的天数（null = 未达停滞阈值） */
+  stalledDays: number | null;
+}
+
 export interface AdviceInput {
   snapshot: TodaySnapshot;
   /** null = sticky 段构建失败 → 跳过积压信号 */
   sticky: AdviceStickyInput | null;
   idleProjects: AdviceIdleProject[];
+  /** 计划信号（可选：缺省 = 无计划数据，不产出 plan 卡） */
+  planSignals?: AdvicePlanSignal[];
   now?: Date;
 }
 
@@ -146,7 +163,38 @@ export function buildAdvice(input: AdviceInput): AdviceCard[] {
     });
   }
 
-  // 2) 今日过载
+  // 2) 计划逾期 / 停滞（项目治理面）：与日历逾期同属「已过期、越晚越贵」，故紧随其后。
+  //    计划信号缺省不存在时整段跳过；数据源失败在 today-advice 侧已降级为空数组（不误报）。
+  const planHit = (input.planSignals ?? [])
+    .filter((s) => s.overdueSteps > 0 || s.stalledDays !== null)
+    .sort((a, b) => b.overdueSteps - a.overdueSteps || (b.stalledDays ?? 0) - (a.stalledDays ?? 0));
+  if (planHit.length > 0) {
+    const overdueTotal = planHit.reduce((n, s) => n + s.overdueSteps, 0);
+    // 可点击项走 source='project'：点击即切到该项目（计划本身没有「勾选完成」的语义）
+    const items: ButlerNoticeItem[] = planHit.slice(0, MAX_ITEMS_PER_CARD).map((s) => ({
+      key: `plan:${s.planId}`,
+      title: `${s.projectName} · ${s.planTitle}`,
+      time: s.overdueSteps > 0 ? `${s.overdueSteps} step(s) overdue` : `stalled ${s.stalledDays}d`,
+      startMs: 0,
+      source: 'project',
+      project: { projectId: s.projectId, projectName: s.projectName },
+    }));
+    const top = planHit[0];
+    cards.push({
+      id: 'plan',
+      kind: 'plan',
+      count: overdueTotal,
+      title: overdueTotal > 0
+        ? `计划里有 ${overdueTotal} 个步骤已逾期（${planHit.length} 个计划）`
+        : `有 ${planHit.length} 个计划停滞`,
+      reason: top.overdueSteps > 0 && top.topOverdue
+        ? `最急：${top.projectName}「${top.planTitle}」的「${top.topOverdue.step}」已逾期 ${top.topOverdue.daysOverdue} 天`
+        : `「${top.projectName}」的「${top.planTitle}」已 ${top.stalledDays} 天未推进——建议推进或收尾`,
+      items,
+    });
+  }
+
+  // 3) 今日过载
   if (todayOk && snap.today.count >= OVERLOAD_THRESHOLD) {
     const candidates = deferCandidates(snap.today.events);
     const items = take(candidates, 'today');
@@ -164,7 +212,7 @@ export function buildAdvice(input: AdviceInput): AdviceCard[] {
     });
   }
 
-  // 3) 便签待办积压（sticky 段构建失败时跳过：null 不等于 0）
+  // 4) 便签待办积压（sticky 段构建失败时跳过：null 不等于 0）
   if (sticky && sticky.totalPending >= STICKY_BACKLOG_THRESHOLD) {
     const items: ButlerNoticeItem[] = [];
     for (const it of sticky.items) {
@@ -183,7 +231,7 @@ export function buildAdvice(input: AdviceInput): AdviceCard[] {
     });
   }
 
-  // 4) 项目停滞
+  // 5) 项目停滞
   const stalled = idleProjects
     .map((p) => {
       if (!p.lastActivityAt) return null;

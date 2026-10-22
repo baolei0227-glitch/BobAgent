@@ -44,10 +44,21 @@
     "kind": "plugin"
   },
   {
+    "id": "bob-video-shot-mcp",
+    "name": "Video Shot",
+    "description": "Automatic video screenshot tool. Import a video, detect scene boundaries, pick frames and export them as a ZIP. Built into BobWork — no download required; enable it from the Market, then open it as a tab in Hippo.",
+    "group": "download",
+    "category": "Media",
+    "risk": "normal",
+    "vetted": true,
+    "auth": false,
+    "kind": "plugin"
+  },
+  {
     "id": "bob-ocr-mcp",
     "name": "Bob OCR",
-    "description": "Scanned-document and image recognition service (local Vision + GLM-OCR / Online OCR). Requires the standalone bob-ocr-mcp daemon (port 9478; install.sh / --install-daemon). Model & vendor settings live in the plugin itself — open Configure to manage them.",
-    "group": "download",
+    "description": "Scanned-document and image recognition service (local Vision + GLM-OCR / Online OCR). Ships with BobWork: the app starts and supervises the local OCR bridge itself (port 9478) — no separate install needed. Model & vendor settings live in the plugin itself — open Configure to manage them.",
+    "group": "bundled",
     "category": "OCR",
     "risk": "normal",
     "vetted": true,
@@ -81,7 +92,7 @@
   {
     "id": "github",
     "name": "GitHub",
-    "description": "Manage GitHub repositories: issues, pull requests, code pushes and settings. Server package is pulled automatically via npx; requires a Personal Access Token.",
+    "description": "Manage GitHub repositories: issues, pull requests, code pushes and settings. Connects to GitHub's hosted MCP endpoint; requires a Personal Access Token.",
     "group": "download",
     "category": "Coding",
     "risk": "high",
@@ -92,7 +103,7 @@
   {
     "id": "notion",
     "name": "Notion",
-    "description": "Read and write Notion pages and databases you authorized. Server package is pulled automatically via npx; requires an Integration API Key.",
+    "description": "Read and write Notion pages and databases you authorized. Connects to Notion's hosted MCP endpoint; requires an MCP token.",
     "group": "download",
     "category": "Productivity",
     "risk": "high",

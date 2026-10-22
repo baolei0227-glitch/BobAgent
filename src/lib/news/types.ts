@@ -5,8 +5,8 @@
  *   - 主题（topic）是**结构化的**：每个主题自带检索词 / 条数 / 语言 —— 不复用 Memories
  *     （Memories 是自由文本、每轮注入耗 token，且否定式会被拦成规则）。
  *   - 主题数软上限 8：超出不报错，只在界面提示合并（配置本身照存）。
- *   - 每条新闻 = 一句话总结 + 一句 why + 来源域 + 原文链接；总结必须基于抓到的正文，
- *     由 generate.ts 先 web_fetch 再归纳（禁止只拿 search snippet 脑补）。
+ *   - 每条新闻 = 一句话总结 + 一句 why + 来源域 + 原文链接；总结优先基于检索一并带回的正文
+ *     （generate.ts 用 Search 的 need_content 取正文），正文缺失时回退检索摘要（snippet）。
  *
  * 本文件刻意不碰 fs / server-only 依赖：前端面板与 Butler 工具都能安全 import 这里的常量。
  */
@@ -25,6 +25,8 @@ export interface NewsTopic {
   lang: 'zh' | 'en';
   /** 该主题的策展新闻源（RSS/Atom）；留空则查内置策展表，仍为空则回退关键词搜索 */
   feeds?: string[];
+  /** 该主题的权威站域名（多为无 RSS 的领域权威渠道）；留空则查内置权威站表 */
+  sites?: string[];
 }
 
 /** 新闻主题配置（落 butler/.state/news/config.json） */
@@ -112,6 +114,26 @@ export function feedsForTopic(topic: NewsTopic): string[] {
   return CURATED_TOPIC_FEEDS[topic.id] ?? [];
 }
 
+/**
+ * 内置权威站表（按主题 slug id）—— 与 CURATED_TOPIC_FEEDS 的分工：
+ *   - feeds：有 RSS 的策展源，采集**第一级**；
+ *   - sites：该领域的权威站**域名**，采集**第二级** —— 用 `site:<domain>` 定向检索。
+ *
+ * 为什么需要 sites：权威渠道里有相当一部分没有 RSS（法院 / 检察院 / 司法部等），
+ * 只能靠站内定向检索兜住。域名容错 http(s) 前缀与路径，归一化时会被剥掉。
+ */
+export const CURATED_TOPIC_SITES: Record<string, string[]> = {
+  tech: ['36kr.com', 'ifanr.com', 'ithome.com', 'sspai.com', 'jiqizhixin.com', 'qbitai.com'],
+  finance: ['caixin.com', 'yicai.com', 'stcn.com', 'cs.com.cn', '21jingji.com'],
+  legal: ['court.gov.cn', 'spp.gov.cn', 'moj.gov.cn', 'legaldaily.com.cn'],
+};
+
+/** 主题的权威站：优先用主题自带的 sites，其次查内置权威站表；都没有则空数组（调用方回退裸关键词搜索） */
+export function sitesForTopic(topic: NewsTopic): string[] {
+  if (topic.sites && topic.sites.length > 0) return topic.sites;
+  return CURATED_TOPIC_SITES[topic.id] ?? [];
+}
+
 /** label → 稳定 slug（小写、非字母数字转连字符）；空则回退 'topic' */
 export function slugifyTopic(label: string): string {
   const s = label
@@ -133,6 +155,9 @@ function uniqueTopicId(label: string, taken: Set<string>): string {
   return `${base}-${Date.now()}`;
 }
 
+/** 每主题的源上限（feeds 与 sites 同口径，防配置膨胀）；前端源编辑面板按此封顶 */
+export const TOPIC_SOURCE_MAX = 6;
+
 /** 新闻源归一化：只保留合法 http(s) URL，去重，上限 6 条（防配置膨胀） */
 function normalizeFeeds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -142,7 +167,29 @@ function normalizeFeeds(raw: unknown): string[] {
     const s = u.trim();
     if (!/^https?:\/\//i.test(s) || out.includes(s)) continue;
     out.push(s);
-    if (out.length >= 6) break;
+    if (out.length >= TOPIC_SOURCE_MAX) break;
+  }
+  return out;
+}
+
+/**
+ * 权威站归一化：宽容接受「裸域名 / 带协议 / 带路径」的写法，统一剥成裸域名（小写、去 www.）后去重。
+ * 非法项（含空格 / 无点 / 非域名字符）直接丢弃 —— 与 normalizeFeeds 的「非法即丢」口径一致。
+ */
+function normalizeSites(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const s of raw) {
+    if (typeof s !== 'string') continue;
+    const d = s
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/[/?#].*$/, '')
+      .replace(/^www\./, '');
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d) || out.includes(d)) continue;
+    out.push(d);
+    if (out.length >= TOPIC_SOURCE_MAX) break;
   }
   return out;
 }
@@ -162,8 +209,13 @@ function normalizeTopic(raw: unknown, taken: Set<string>): NewsTopic | null {
   const rawId = typeof o.id === 'string' ? o.id.trim() : '';
   const id = rawId && !taken.has(rawId) ? rawId : uniqueTopicId(label, taken);
   taken.add(id);
+  // 与既有口径一致：为空则**不落键**（旧 config 与默认预设的字段逐字不变）
+  const topic: NewsTopic = { id, label, query, limit, lang };
   const feeds = normalizeFeeds(o.feeds);
-  return feeds.length > 0 ? { id, label, query, limit, lang, feeds } : { id, label, query, limit, lang };
+  if (feeds.length > 0) topic.feeds = feeds;
+  const sites = normalizeSites(o.sites);
+  if (sites.length > 0) topic.sites = sites;
+  return topic;
 }
 
 /**

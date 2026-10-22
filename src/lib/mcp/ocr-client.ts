@@ -354,8 +354,34 @@ async function callOcrTool(
   }
 }
 
+/**
+ * 桥托管兜底：条目已启用而桥不在线时，让宿主把随包桥拉起来（mcp/ocr-bridge.ts）。
+ *
+ * 为什么需要：MCP 运行态为 active 时桥必然在线，无需任何额外探测；
+ * 但首次调用早于 MCP 装配、或桥中途崩溃时，这里是最省事的自愈点
+ * （探测/拉起都是幂等的，失败只记日志，不改变"不可用即返回 null"的既有语义）。
+ */
+async function ensureBridgeIfEnabled(): Promise<void> {
+  try {
+    const { mcpManager } = await import('@/lib/mcp/manager');
+    if (mcpManager.getPluginStatuses().some((r) => r.id === OCR_MCP_ID && r.state === 'active')) return;
+    const { readSettingsFromFile } = await import('@/lib/settings-server');
+    const settings = await readSettingsFromFile();
+    const cfg = (settings.mcpServers ?? []).find((s) => s.id === OCR_MCP_ID && s.enabled && !s.builtin);
+    if (!cfg) return;
+    const { ensureOcrBridge } = await import('./ocr-bridge');
+    const bridge = await ensureOcrBridge({ waitMs: 3000 });
+    if (!bridge.ok) {
+      console.warn(`[ocr-mcp] 随包桥未能就绪：${bridge.error || 'unknown'}${bridge.logPath ? `（日志 ${bridge.logPath}）` : ''}`);
+    }
+  } catch (e) {
+    console.warn('[ocr-mcp] 随包桥托管异常（按桥不可用继续）:', e instanceof Error ? e.message : e);
+  }
+}
+
 /** 统一入口：读配置并调用工具；MCP 未配置返回 null */
 async function withOcrMcp<T>(fn: (cfg: McpServerConfig) => Promise<T | null>): Promise<T | null> {
+  await ensureBridgeIfEnabled();
   const cfg = await getOcrMcpConfig();
   if (!cfg?.url) return null;
   return fn(cfg);
@@ -486,6 +512,10 @@ export interface OcrSetupStatus {
   mcpOnline: boolean;
   /** 插件配置页地址（自带 token），在线且有值时可一键打开 */
   settingsUrl: string | null;
+  /** 不在线时的宿主侧原因（可直接展示：条目被禁用 / 随包桥拉起失败 / 端口被占…） */
+  error?: string;
+  /** 宿主托管桥的子进程日志路径（排障） */
+  logPath?: string;
 }
 
 /**
@@ -535,14 +565,50 @@ export async function getOcrTaskStatus(taskId: string): Promise<OcrTaskStatusRes
 
 /**
  * 探测插件常驻服务 /setup/status，取配置页地址（settingsUrl 带 token）。
- * 走插件的 HTTP 探测端点（非 MCP），BobWork 设置里的"Open Config"按钮用；
- * 插件不在线/未配置 → { mcpOnline: false, settingsUrl: null }。
+ * 走插件的 HTTP 探测端点（非 MCP），BobWork 设置里的 "Configure" 按钮用。
+ *
+ * 2026-10-12：这里同时是「宿主托管桥」的按需自愈点 —— 条目已启用但桥不在线时，
+ * 先让随包桥起来（ocr-bridge.ensureOcrBridge），再探测；仍不可用则把**宿主侧原因**
+ * （条目被禁用 / 随包入口缺失 / 进程退出码 / 端口被占 / 日志路径）一并返回，
+ * 卡片不再只丢一句让用户自己装 daemon 的终端命令。
  */
 export async function getOcrSetupStatus(): Promise<OcrSetupStatus> {
-  const cfg = await getOcrMcpConfig();
-  if (!cfg?.url) return { mcpOnline: false, settingsUrl: null };
+  // 1) 条目是否已装配且启用（不经过 getOcrMcpConfig：后者在"运行态非 active"时直接判不可用，
+  //    而本函数的职责恰恰是回答"桥为什么不在线、能不能拉起来"）
+  let cfg: McpServerConfig | undefined;
   try {
-    // 从 MCP URL（…/mcp?token=…）换路径到 /setup/status（该端点不校验 token，query 一并清掉）
+    const { readSettingsFromFile } = await import('@/lib/settings-server');
+    const settings = await readSettingsFromFile();
+    cfg = (settings.mcpServers ?? []).find((s) => s.id === OCR_MCP_ID && s.enabled && !!s.url);
+  } catch {
+    cfg = undefined;
+  }
+  const { ensureOcrBridge, ocrBridgeDiagnostics, ocrBridgeStatusUrl } = await import('./ocr-bridge');
+  if (!cfg?.url) {
+    return {
+      mcpOnline: false,
+      settingsUrl: null,
+      error: 'Bob OCR is not enabled. Turn it on in Settings → Extensions Store → Plugins (Bob OCR).',
+      logPath: ocrBridgeDiagnostics().logPath,
+    };
+  }
+
+  // 2) 确保随包桥在线（已有在线桥 = 直接复用；未在线 = 用随包副本 --serve 拉起）
+  const ensured = await ensureOcrBridge({ waitMs: 5000 });
+  if (!ensured.ok) {
+    const diag = ocrBridgeDiagnostics();
+    return {
+      mcpOnline: false,
+      settingsUrl: null,
+      error:
+        `Bob OCR bridge is not reachable at ${ocrBridgeStatusUrl()} — ${ensured.error || 'unknown reason'}. ` +
+        `Bundled bridge: next-standalone/bob-ocr-mcp. Log: ${ensured.logPath || diag.logPath}`,
+      logPath: ensured.logPath || diag.logPath,
+    };
+  }
+
+  // 3) 在线：取带 token 的配置页地址（settingsUrl 由桥自报，避免本处再拼 token）
+  try {
     const parsed = new URL(cfg.url);
     parsed.pathname = '/setup/status';
     parsed.search = '';
@@ -550,7 +616,9 @@ export async function getOcrSetupStatus(): Promise<OcrSetupStatus> {
     const timer = setTimeout(() => ctl.abort(), HANDSHAKE_TIMEOUT_MS);
     try {
       const res = await fetch(parsed.toString(), { signal: ctl.signal });
-      if (!res.ok) return { mcpOnline: false, settingsUrl: null };
+      if (!res.ok) {
+        return { mcpOnline: false, settingsUrl: null, error: `Bridge answered HTTP ${res.status} on /setup/status.` };
+      }
       const data = (await res.json()) as { settingsUrl?: unknown };
       return {
         mcpOnline: true,
@@ -559,7 +627,11 @@ export async function getOcrSetupStatus(): Promise<OcrSetupStatus> {
     } finally {
       clearTimeout(timer);
     }
-  } catch {
-    return { mcpOnline: false, settingsUrl: null };
+  } catch (e) {
+    return {
+      mcpOnline: false,
+      settingsUrl: null,
+      error: `Bridge went offline while probing /setup/status: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
