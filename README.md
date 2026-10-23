@@ -41,6 +41,30 @@ pnpm build
 cd scripts && bash build-electron.sh
 ```
 
+## 下载安装（终端用户）
+
+发布渠道为 GitCode Release，两个平台共用同一个版本号与更新频道：
+
+| 平台 | 安装包 | 说明 |
+|------|--------|------|
+| Windows x64 | `BobWork-<version>-win-x64.exe`（NSIS） | 双击安装，默认装到当前用户目录，无需管理员权限；未签名，SmartScreen 首次会拦一次（更多信息 → 仍要运行） |
+| macOS Apple Silicon | `BobWork-<version>-macos-arm64.zip` | 解压后拖入「应用程序」 |
+
+- Release 页面：<https://gitcode.com/baolei89/BobWork/releases>
+- 更新清单：macOS `latest/latest-mac.yml`、Windows `latest/latest.yml`
+- 两端都在应用内「检查更新」（左下角版本号）完成下载与安装：Windows 走 NSIS 安装器（静默升级后自动重启），macOS 走解压覆盖。
+
+### 构建 Windows 安装包
+
+```bash
+# 在 macOS 上交叉打包（自测用，需要 npmmirror 镜像）
+bash scripts/pack-win.sh
+
+# 正式出货：GitHub Actions → Windows Installer（真机构建 + 真机断言 + 可选发布）
+```
+
+出包后会由 `scripts/check-win-update-manifest.mjs` 核对 `latest.yml` 的版本、大小、sha512 与 `app-update.yml` 的更新源；任一项不符即拒绝发布。
+
 ## 项目结构
 
 ```

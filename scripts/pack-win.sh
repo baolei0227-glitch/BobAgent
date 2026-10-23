@@ -124,10 +124,13 @@ node "$EB" \
 EXE="release/BobWork-${VERSION}-win-x64.exe"
 [[ -f "$EXE" ]] || { bad "没有产出 $EXE"; exit 1; }
 ok "安装器 $(du -h "$EXE" | cut -f1)"
-# latest.yml 是 Windows 自动更新的唯一清单（对应 mac 的 latest-mac.yml）。
-# 少了它安装包本身能用，但「检查更新」永远静默无结果 —— 出包时就要拦住。
-[[ -f release/latest.yml ]] || { bad "没有产出 release/latest.yml（自动更新清单）—— 检查 electron-builder.win.yml 的 publish 段"; exit 1; }
-ok "更新清单 latest.yml"
+# latest.yml + app-update.yml 是 Windows 自动更新的两把钥匙（对应 mac 的 latest-mac.yml）：
+#   - 少了 latest.yml    → 「检查更新」永远静默无结果；
+#   - 少了 app-update.yml → 主进程直接判定 Auto-updater disabled；
+#   - 版本/sha512/大小对不上 → 下载完校验失败，删了重下无限循环。
+# 所以这里不只判存在，而是拿磁盘上的真实 exe 逐项核对。
+node scripts/check-win-update-manifest.mjs --dir release || { bad "更新清单校验未通过（见上方输出）"; exit 1; }
+ok "更新清单 latest.yml / app-update.yml 与安装包一致"
 
 # ---------------------------------------------------------------- 4. 免安装 zip
 say "4/4 免安装 zip"

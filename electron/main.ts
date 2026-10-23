@@ -17,7 +17,8 @@ import { autoUpdater, type UpdateInfo } from 'electron-updater';
 import { readSettingsFromFile, writeSettingsToFile, settingsFileExists } from '../src/lib/settings-server';
 import { captureRegionToFile, cleanupShotFile, ocrRecognize, ensureScreenRecordingPermission as checkScreenRecordingPermission, requestScreenRecordingPermission, buildScreenPermissionError } from '../src/lib/screen-ocr/capture';
 import AdmZip from 'adm-zip';
-import { IS_WIN, IS_DARWIN, POSIX_SYSTEM_DIRS, windowsBinDirs, splitPathList, joinPathList, exeName, listListeningPidsSync, listStaleServerPidsSync, terminatePid, isPidAlive } from '../src/lib/platform';
+import { IS_WIN, IS_DARWIN, POSIX_SYSTEM_DIRS, windowsBinDirs, splitPathList, joinPathList, exeName, listListeningPidsSync, listStaleServerPidsSync, terminatePid, isPidAlive, PLATFORM } from '../src/lib/platform';
+import { updateArtifactName, fileNameFromUpdateUrl, parseUpdateArtifact, pickLatestArtifact } from '../src/lib/update/artifact';
 import { setupHippoBrowser, openHtmlInHippo, openUrlInHippo, isHippoReady, toggleWindow, setMainWindowCapsuleListener, setHippoChatCanvasNotifier, setMainWindowProvider } from './hippo-browser';
 import { setupButlerOrb, bindButlerOrbMainWindow, prewarmButlerOrb, disposeButlerOrb } from './butler-orb';
 import type { ScreenOcrGeometry } from './preload';
@@ -1845,9 +1846,29 @@ function listAllAvatars(): AvatarItem[] {
 // GitCode 的 release 下载 CDN 已验证支持 HTTP Range（返回 206），因此自研下载器接管下载：
 //   断点续传（断网/重启后从断点继续，不全量重下）+ 自动重试 + sha512 校验 + 磁盘预检。
 
-/** updater 缓存根目录（与 app-update.yml 的 updaterCacheDirName 一致） */
+/**
+ * updater 缓存根目录（按平台取「缓存」语义的真实位置）。
+ *
+ * 为什么不手拼 `~/Library/Caches`：Windows 上会造出一个假的
+ * `C:\Users\x\Library\Caches`，与 electron-updater 自己的缓存目录永远对不上，
+ * 表现为「下载完了但安装时找不到包」。
+ *
+ * 也不使用 `app.getPath('cache')`：Electron 的 PathName 里没有 'cache'
+ * （类型定义会直接报错，运行期也不保证存在）。
+ *   - macOS  → ~/Library/Caches（与原实现一致，老用户的 .partial 可继续续传）
+ *   - Windows → %LOCALAPPDATA%（electron-updater 的常规缓存根）
+ *   - Linux  → $XDG_CACHE_HOME 或 ~/.cache
+ */
 function updaterCacheDir(): string {
-  return path.join(app.getPath('home'), 'Library', 'Caches', 'bob-updater');
+  if (IS_DARWIN) {
+    return path.join(app.getPath('home'), 'Library', 'Caches', 'bob-updater');
+  }
+  if (IS_WIN) {
+    const base = process.env.LOCALAPPDATA || app.getPath('userData');
+    return path.join(base, 'bob-updater');
+  }
+  const base = process.env.XDG_CACHE_HOME || path.join(app.getPath('home'), '.cache');
+  return path.join(base, 'bob-updater');
 }
 
 /** 自研下载目录（与 electron-updater 自身缓存隔离，互不干扰） */
@@ -1882,7 +1903,7 @@ let activeDownload: {
 } | null = null;
 
 /** 最近一次 update-available 的下载元数据（供手动重试/续传） */
-let lastUpdateMeta: { version: string; url: string; size: number; sha512: string } | null = null;
+let lastUpdateMeta: { version: string; fileName: string; url: string; size: number; sha512: string } | null = null;
 
 /** 简单版本号比较（仅支持 0.5.x 风格） */
 function versionGreater(a: string, b: string): boolean {
@@ -1923,9 +1944,11 @@ function cleanInterruptedDownloadCaches(opts?: { keepVersion?: string; keepSize?
           const fp = path.join(dir, entry.name);
           if (entry.name.endsWith('.partial')) {
             let keep = false;
-            const m = entry.name.match(/BobWork-([\d.]+)-macos-arm64\.zip\.partial$/);
-            if (m) {
-              const v = m[1];
+            // 平台无关：Windows 是 .exe.partial，macOS 是 .zip.partial。
+            // 只认合规产物名，避免把用户手放的文件当残留删掉。
+            const artifact = parseUpdateArtifact(entry.name.slice(0, -'.partial'.length));
+            if (artifact) {
+              const v = artifact.version;
               if (opts?.keepVersion && v === opts.keepVersion) {
                 try {
                   const s = fs.statSync(fp).size;
@@ -1939,10 +1962,10 @@ function cleanInterruptedDownloadCaches(opts?: { keepVersion?: string; keepSize?
               fs.rmSync(fp, { force: true });
               removed++;
             }
-          } else if (entry.name.endsWith('.zip')) {
-            // 已安装版本的完整安装包不再需要：仅保留版本号高于当前运行版本的 zip（供续装/回退）
-            const m = entry.name.match(/BobWork-([\d.]+)-macos-arm64\.zip$/);
-            if (m && !versionGreater(m[1], app.getVersion())) {
+          } else if (parseUpdateArtifact(entry.name)) {
+            // 已安装版本的完整安装包不再需要：仅保留版本号高于当前运行版本的包（供续装/回退）
+            const artifact = parseUpdateArtifact(entry.name);
+            if (artifact && !versionGreater(artifact.version, app.getVersion())) {
               fs.rmSync(fp, { force: true });
               removed++;
             }
@@ -2000,7 +2023,7 @@ function requestWithRedirects(url: string, headers: Record<string, string>, redi
   });
 }
 
-/** 计算文件 sha512（小写 hex，与 latest-mac.yml 一致） */
+/** 计算文件 sha512（小写 hex，与 mac 侧 `shasum -a 512` 生成的清单一致） */
 function sha512OfFile(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha512');
@@ -2009,6 +2032,24 @@ function sha512OfFile(filePath: string): Promise<string> {
     rs.on('end', () => resolve(hash.digest('hex')));
     rs.on('error', reject);
   });
+}
+
+/**
+ * 校验文件 sha512，**同时接受 hex 与 base64 两种写法**。
+ *
+ * 为什么必须兼容：两个平台的清单不是同一个工具生成的 ——
+ *   - macOS：scripts/package-release.sh 用 `shasum -a 512`（hex）；
+ *   - Windows：electron-builder 的 latest.yml 用 builder-util `hashFile`（base64）。
+ * 只比 hex 时，Windows 每一次下载都会「校验失败 → 删文件 → 重下」循环 3 次后报错，
+ * 而日志只写 checksum mismatch，与真因（编码不同）完全无关。
+ */
+async function sha512Matches(filePath: string, expected: string): Promise<boolean> {
+  const want = String(expected || '').trim();
+  if (!want) return false;
+  const hex = (await sha512OfFile(filePath)).toLowerCase();
+  if (hex === want.toLowerCase()) return true;
+  const base64 = Buffer.from(hex, 'hex').toString('base64');
+  return base64 === want;
 }
 
 /**
@@ -2094,8 +2135,14 @@ function downloadWithResume(
   });
 }
 
-/** 将已下载 zip 复制到 install handler 读取的 pending 目录（已存在且大小一致则跳过） */
+/**
+ * 将已下载的更新包复制到 install handler 读取的 pending 目录（已存在且大小一致则跳过）。
+ *
+ * 仅 macOS 需要：那边的安装实现是「解压 zip → 覆盖 .app」，依赖 pending 里的完整包。
+ * Windows 直接把 NSIS 安装器跑起来即可，再复制一份 380MB 的 exe 纯属浪费磁盘和时间。
+ */
 function ensurePendingCopy(finalPath: string): void {
+  if (!IS_DARWIN) return;
   try {
     const pendingDir = path.join(updaterCacheDir(), 'pending');
     fs.mkdirSync(pendingDir, { recursive: true });
@@ -2116,7 +2163,7 @@ function ensurePendingCopy(finalPath: string): void {
  *  - 下载完成做 sha512 校验；校验失败删除并全量重下
  *  - 最终失败保留 .partial，下次检查/重启自动从断点继续
  */
-async function startResumableDownload(meta: { version: string; url: string; size: number; sha512: string }): Promise<boolean> {
+async function startResumableDownload(meta: { version: string; fileName: string; url: string; size: number; sha512: string }): Promise<boolean> {
   if (activeDownload) {
     if (activeDownload.version === meta.version) return true; // 同版本已在下载中
     activeDownload.cancelled = true;
@@ -2124,7 +2171,8 @@ async function startResumableDownload(meta: { version: string; url: string; size
   }
   const dir = updateDownloadDir();
   fs.mkdirSync(dir, { recursive: true });
-  const fileName = `BobWork-${meta.version}-macos-arm64.zip`;
+  // 文件名来自清单（files[0].url），不再按平台写死：Windows 是 .exe、macOS 是 .zip
+  const fileName = meta.fileName;
   const finalPath = path.join(dir, fileName);
   const partialPath = `${finalPath}.partial`;
 
@@ -2132,7 +2180,7 @@ async function startResumableDownload(meta: { version: string; url: string; size
   // 前端会停在 downloading 转圈，因为没有任何后续事件能把它带出该状态）
   if (fs.existsSync(finalPath)) {
     try {
-      if ((await sha512OfFile(finalPath)).toLowerCase() === meta.sha512.toLowerCase()) {
+      if (await sha512Matches(finalPath, meta.sha512)) {
         log(`Update ${meta.version} already downloaded (checksum ok)`);
         ensurePendingCopy(finalPath);
         activeDownload = null;
@@ -2170,8 +2218,7 @@ async function startResumableDownload(meta: { version: string; url: string; size
           total,
         });
       });
-      const actual = (await sha512OfFile(finalPath)).toLowerCase();
-      if (actual !== meta.sha512.toLowerCase()) {
+      if (!(await sha512Matches(finalPath, meta.sha512))) {
         throw new Error('Checksum mismatch — will redownload from scratch');
       }
       // 复制到 install handler 读取的 pending 目录（保持原有安装流程不变）
@@ -2217,11 +2264,98 @@ async function startResumableDownloadFromInfo(info: UpdateInfo): Promise<boolean
       return false;
     }
   }
-  const fileName = file.url || `BobWork-${info.version}-macos-arm64.zip`;
-  const url = fileName.startsWith('http') ? fileName : `${resolveUpdateBaseUrl()}/${fileName}`;
-  const meta = { version: info.version, url, size, sha512 };
+  // ⚠️ 不能把 `file.url` 直接当本地文件名：GitCode 会给 URL 带上 ?noCache=，
+  // 原样拼进 path 会在 Windows 上产生非法字符，在 macOS 上则变成一个带问号的文件。
+  const rawUrl = typeof file?.url === 'string' ? file.url : '';
+  const fileName = fileNameFromUpdateUrl(rawUrl) || updateArtifactName(info.version, PLATFORM);
+  const url = rawUrl.startsWith('http') ? rawUrl : `${resolveUpdateBaseUrl()}/${rawUrl || fileName}`;
+  const meta = { version: info.version, fileName, url, size, sha512 };
   lastUpdateMeta = meta;
   return startResumableDownload(meta);
+}
+
+/**
+ * 找出下载目录里版本最高的 Windows 安装器（NSIS exe）。
+ *
+ * 必须按版本号挑而不是 `readdirSync()[0]`：文件按字母序返回，
+ * `0.7.9` 排在 `0.7.10` 之后，直接取第一个会把用户「升级」回旧版本。
+ */
+function findLatestWindowsInstaller(): string {
+  try {
+    const dir = updateDownloadDir();
+    const best = pickLatestArtifact(fs.readdirSync(dir), 'exe');
+    return best ? path.join(dir, best) : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Windows 更新安装：运行已下载的 NSIS 安装器，然后退出当前实例。
+ *
+ * 参数与 electron-updater 的 NsisUpdater 完全一致（见其 doInstall）：
+ *   /S            静默安装。assisted 安装器（oneClick:false）只有 Silent 时
+ *                 才执行「装完自动拉起」分支（app-builder-lib/installSection.nsh），
+ *                 不加则装完什么都不发生，用户会以为更新失败。
+ *   --force-run   安装完成后自动启动新版本。
+ *   --updated     标记这是升级：跳过安装目录选择页，复用已安装位置。
+ *   --package-file 让安装器知道包位置（差分/修复用）。
+ */
+async function installWindowsUpdate(): Promise<{ success: boolean; installing?: boolean; cancelled?: boolean; error?: string }> {
+  const installer = findLatestWindowsInstaller();
+  if (!installer) {
+    // 元数据缺失时下载走了 electron-updater 自带下载器，安装包在它自己的缓存里，
+    // 只有它知道 installerPath —— 交给 quitAndInstall（Windows 上不存在签名回滚问题）。
+    try {
+      log('No installer in custom download dir — delegating to electron-updater');
+      autoUpdater.quitAndInstall(false, true);
+      return { success: true, installing: true };
+    } catch (err) {
+      log(`Windows install fallback failed: ${String(err)}`);
+      return { success: false, error: 'No downloaded update installer found' };
+    }
+  }
+
+  const dialogOpts: Electron.MessageBoxOptions = {
+    type: 'question',
+    title: 'Restart to Complete Update',
+    message: 'Restart BobWork to finish the update?',
+    detail: 'BobWork will close, install the update, and reopen automatically. Your data is safe.',
+    buttons: ['Restart Now', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  };
+  const { response } = mainWindow
+    ? await dialog.showMessageBox(mainWindow, dialogOpts)
+    : await dialog.showMessageBox(dialogOpts);
+  if (response !== 0) {
+    log(`Windows install cancelled by user — installer staged (${installer})`);
+    return { success: false, cancelled: true, error: 'Update cancelled' };
+  }
+
+  mainWindow?.webContents.send('update:install-progress', { stage: 'installing', message: 'Installing update…', percent: 60 });
+  const args = ['/S', '--force-run', '--updated', `--package-file=${installer}`];
+  const child = spawn(installer, args, { detached: true, stdio: 'ignore' });
+  child.on('error', (err) => log(`Failed to launch Windows installer: ${String(err)}`));
+  child.unref();
+  log(`Windows installer launched: ${installer}`);
+
+  // 收尾顺序与 macOS 分支一致：先让窗口消失，再停 Next 服务，最后退出。
+  // 反过来会在退出瞬间留下「窗口还在、服务已停」的白屏（也会留下 Butler 球窗）。
+  mainWindow?.webContents.send('update:install-progress', { stage: 'launching', message: 'Restarting…', percent: 90 });
+  appQuitting = true;
+  disposeButlerOrb();
+  try {
+    mainWindow?.hide();
+  } catch { /* 忽略 */ }
+  killNextServer();
+  setTimeout(() => {
+    flushPendingKills({ force: true });
+    app.exit(0);
+  }, 500);
+
+  return { success: true, installing: true };
 }
 
 /** 自动更新配置 */
@@ -2235,7 +2369,7 @@ function setupAutoUpdater(): void {
   // 说明是同版本重复下载，删除以避免阻塞新版本检测
   try {
     const currentVersion = app.getVersion();
-    const cacheDir = path.join(app.getPath('home'), 'Library', 'Caches', 'bob-updater');
+    const cacheDir = updaterCacheDir();
     const pendingDir = path.join(cacheDir, 'pending');
     const updateInfoPath = path.join(pendingDir, 'update-info.json');
     if (fs.existsSync(updateInfoPath)) {
@@ -2371,16 +2505,18 @@ function setupAutoUpdater(): void {
     //   3) 用 osascript 请求管理员权限复制覆盖 /Applications/BobWork.app
     //   4) 移除 quarantine 后重新启动
     //
-    // ⚠️ 平台限制：这条通道是专门为绕过 Squirrel.Mac 的签名校验写的
-    //（解压 zip → osascript 提权覆盖 /Applications/BobWork.app），整条链路只对 macOS 成立。
-    // Windows 的安装包是 NSIS exe，由 electron-updater 直接 quitAndInstall() 处理。
-    // 不加这个守卫的话，Windows 上会命中不存在的 /usr/bin/unzip，
-    // 报出「Failed to extract update package」——与真因（平台不适用）完全无关的错误。
+    // ⚠️ 平台分流（2026-10 起 Windows 也走自动更新）：
+    //   - macOS：绕过 Squirrel 的签名校验，自实现「解压 zip → 覆盖 /Applications」；
+    //   - Windows：运行下载好的 NSIS 安装器（/S + --force-run 由安装器自己重启应用）；
+    //   - 其余平台：明确拒绝，而不是让它们命中 /usr/bin/unzip 报出与真因无关的错误。
+    if (IS_WIN) {
+      return await installWindowsUpdate();
+    }
     if (!IS_DARWIN) {
-      return { success: false, error: 'manual-zip-install 仅适用于 macOS；Windows 由 NSIS 安装器处理' };
+      return { success: false, error: '自动安装目前仅支持 macOS / Windows' };
     }
     try {
-      const cacheDir = path.join(app.getPath('home'), 'Library', 'Caches', 'bob-updater');
+      const cacheDir = updaterCacheDir();
       // 优先使用 pending 目录中的完整更新包（含版本号文件名），兜底使用 update.zip
       let zipPath = '';
       const pendingDir = path.join(cacheDir, 'pending');
@@ -2527,9 +2663,14 @@ function setupAutoUpdater(): void {
     const dirsToClean = [
       path.join(app.getPath('userData'), 'updater-cache'),
       path.join(app.getPath('userData'), '__update__'),
-      path.join(app.getPath('home'), 'Library', 'Caches', 'bob-updater'),
-      path.join(app.getPath('home'), 'Library', 'Caches', 'com.bobwork.app.ShipIt'),
-      path.join(app.getPath('home'), 'Library', 'Caches', 'com.bobwork.app.ShipItTemp'),
+      updaterCacheDir(),
+      // Squirrel.Mac 的残留目录只在 macOS 存在；其他平台拼出来只会是空路径
+      ...(IS_DARWIN
+        ? [
+            path.join(app.getPath('home'), 'Library', 'Caches', 'com.bobwork.app.ShipIt'),
+            path.join(app.getPath('home'), 'Library', 'Caches', 'com.bobwork.app.ShipItTemp'),
+          ]
+        : []),
     ];
     let deletedCount = 0;
     let freedBytes = 0;

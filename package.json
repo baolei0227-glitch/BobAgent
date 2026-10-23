@@ -25,7 +25,9 @@
     "build:next": "next build",
     "build:desktop": "bash ./scripts/build-electron.sh",
     "package:release": "bash ./scripts/package-release.sh",
-    "package:release:arm64": "bash ./scripts/package-release.sh arm64"
+    "package:release:arm64": "bash ./scripts/package-release.sh arm64",
+    "package:win": "bash ./scripts/pack-win.sh",
+    "check:win-update": "node scripts/check-win-update-manifest.mjs --dir release"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

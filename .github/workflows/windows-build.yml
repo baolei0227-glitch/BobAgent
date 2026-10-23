@@ -195,7 +195,9 @@ jobs:
             @{ n = '随包 Python 解释器';    p = 'release/win-unpacked/resources/python/python.exe' },
             @{ n = 'python-docx';          p = 'release/win-unpacked/resources/python/Lib/site-packages/docx/__init__.py' },
             @{ n = 'Pillow';               p = 'release/win-unpacked/resources/python/Lib/site-packages/PIL/Image.py' },
-            @{ n = 'lxml（win_amd64）';     p = 'release/win-unpacked/resources/python/Lib/site-packages/lxml/etree.cp311-win_amd64.pyd' }
+            @{ n = 'lxml（win_amd64）';     p = 'release/win-unpacked/resources/python/Lib/site-packages/lxml/etree.cp311-win_amd64.pyd' },
+            # 没有它主进程会直接判定 "Auto-updater disabled"：装上能用，但永远收不到更新
+            @{ n = '自动更新配置';          p = 'release/win-unpacked/resources/app-update.yml' }
           )
           $bad = @()
           foreach ($c in $checks) {
@@ -229,7 +231,21 @@ jobs:
           }
           Write-Host "  [OK] 随包 Python 可导入 docx/PIL/lxml/pdfplumber/openpyxl/pptx/pypdf"
           $kb = [Math]::Round((Get-Item "$ns/server.js").Length / 1KB, 1)
-          Write-Host "::notice title=pack-contents::12 项齐全 / server.js 含 remote-login（$kb KB） / Python import 通过"
+          Write-Host "::notice title=pack-contents::13 项齐全 / server.js 含 remote-login（$kb KB） / Python import 通过"
+
+      # 装上能用 ≠ 能更新：拿磁盘上的真实 exe 核对 latest.yml 的版本/大小/sha512，
+      # 并确认 app-update.yml 指向 GitCode 的 latest 频道。
+      # 这三项任一不对都不会在安装时暴露，只会表现为「检查更新永远没结果」。
+      - name: 自动更新清单校验
+        shell: pwsh
+        run: |
+          node scripts/check-win-update-manifest.mjs --dir release 2>&1 | Tee-Object -FilePath update-manifest.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content update-manifest.log -Tail 30 -Encoding UTF8) -join ' | '
+            $tail = $tail.Substring(0, [Math]::Min(3500, $tail.Length))
+            Write-Host "::error title=update-manifest::$tail"
+            exit 1
+          }
 
       - name: 产物清单（匿名可读）
         shell: pwsh
@@ -347,5 +363,6 @@ jobs:
             native.log
             winpython.log
             builder.log
+            update-manifest.log
           if-no-files-found: ignore
           retention-days: 7

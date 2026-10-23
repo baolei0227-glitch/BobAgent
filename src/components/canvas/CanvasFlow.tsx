@@ -4413,6 +4413,8 @@ function CanvasFlowInner() {
                     } else if (updateStatus === 'downloaded') {
                       setUpdateStatus('installing');
                       desktop.update.install().then((r) => {
+                        // 用户在「Restart Now / Later」里选了 Later：包已下载好，回到「可安装」态
+                        if (r?.cancelled) { setUpdateStatus('downloaded'); return; }
                         if (r && !r.success) setUpdateStatus('error');
                       }).catch(() => setUpdateStatus('error'));
                     } else {

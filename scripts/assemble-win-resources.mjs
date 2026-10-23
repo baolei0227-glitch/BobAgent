@@ -324,6 +324,26 @@ function slimAppNodeModules() {
   log(`app/node_modules 已裁到 ${keep.size} 个包（删掉 ${removed} 个冗余，顶层条目 ${count(appNm)}）`);
 }
 
+// ---- 4.5 app-update.yml（自动更新开关）----
+// 主进程据此判断「要不要启用更新」以及「去哪里查」：
+//   isUpdaterEnabled = fs.existsSync(resources/app-update.yml)
+// 少这一份 ⇒ 应用装完能跑，但「检查更新」永远返回 Auto-updater disabled。
+// 与 mac 的 scripts/package-release.sh 5c 节、electron-builder.win.yml 的 publish 段保持一致。
+const UPDATE_OWNER = process.env.GITCODE_OWNER || 'baolei89';
+const UPDATE_REPO = process.env.GITCODE_REPO || 'BobWork';
+const appUpdatePath = path.join(RES, 'app-update.yml');
+fs.writeFileSync(
+  appUpdatePath,
+  [
+    'provider: generic',
+    `url: https://gitcode.com/${UPDATE_OWNER}/${UPDATE_REPO}/releases/download/latest`,
+    'channel: latest',
+    'updaterCacheDirName: bob-updater',
+    '',
+  ].join('\n'),
+);
+log(`已写入 ${path.relative(ROOT, appUpdatePath)}（更新源 GitCode latest 频道）`);
+
 // ---- 5. 自检 ----
 const must = [
   'server.js',
@@ -350,6 +370,11 @@ if (!fs.existsSync(path.join(pySite, 'PIL', 'Image.py'))) bad += 1;
 if (!fs.existsSync(path.join(pySite, 'lxml', 'etree.cp311-win_amd64.pyd'))) bad += 1;
 log(`${fs.existsSync(pyExe) ? '✅' : '❌'} ../python/python.exe`);
 log(`${fs.existsSync(path.join(pySite, 'docx', '__init__.py')) ? '✅' : '❌'} ../python/Lib/site-packages/docx`);
+
+// 自动更新开关（resources/app-update.yml，与 next-standalone 同级）
+const appUpdateOk = fs.existsSync(appUpdatePath);
+if (!appUpdateOk) bad += 1;
+log(`${appUpdateOk ? '✅' : '❌'} ../app-update.yml`);
 
 // 残留符号链接计数（Windows 上等于坏文件）
 let restLinks = 0;
