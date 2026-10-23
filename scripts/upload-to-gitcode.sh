@@ -11,6 +11,9 @@ set -Eeuo pipefail
 #   GITCODE_TOKEN   GitCode 访问令牌（必填）
 #   GITCODE_OWNER   仓库所属用户/组织（默认 baolei89）
 #   GITCODE_REPO    仓库名（默认 BobWork）
+#   UPLOAD_PLATFORM 只传某一平台：both（默认）/ mac / win。
+#                   用于「补发单平台」：避免把已上线的 250MB zip 再传一遍，
+#                   也避免重复文件被 GitCode 拒绝后中断整批上传。
 #
 # 用法（在 projects/ 目录下执行）：
 #   bash ./scripts/upload-to-gitcode.sh
@@ -51,19 +54,30 @@ OUTPUT_DIR_MAC="$OUTPUT_DIR"
 # Windows 产物由 pack-win.sh 直接落在 release/（mac 仍走 release-dist）。
 # 两者都扫，但**互不要求**：只发 mac 或只发 win 都能跑。
 WIN_OUTPUT_DIR="$PROJECT_DIR/release"
-for f in \
-  "$OUTPUT_DIR_MAC/BobWork-${VERSION}-macos-arm64.dmg" \
-  "$OUTPUT_DIR_MAC/BobWork-${VERSION}-macos-arm64.zip" \
-  "$OUTPUT_DIR_MAC/latest-mac-arm64.yml" \
-  "$OUTPUT_DIR_MAC/latest-mac.yml" \
-  "$WIN_OUTPUT_DIR/BobWork-${VERSION}-win-x64.exe" \
-  "$WIN_OUTPUT_DIR/BobWork-${VERSION}-win-x64.exe.blockmap" \
-  "$WIN_OUTPUT_DIR/latest.yml"; do
-  [ -f "$f" ] && FILES+=("$f")
-done
+UPLOAD_PLATFORM="${UPLOAD_PLATFORM:-both}"
+add_file() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  case "$UPLOAD_PLATFORM" in
+    # 用 if 而不是 `[[ ]] &&`：后者在条件不成立时返回 1，set -e 会让整个脚本
+    # 在第一个被过滤掉的文件处静默退出（错误信息都不打印）。
+    mac) if [[ "$f" == "$OUTPUT_DIR_MAC"/* ]]; then FILES+=("$f"); fi ;;
+    win) if [[ "$f" == "$WIN_OUTPUT_DIR"/* ]]; then FILES+=("$f"); fi ;;
+    both) FILES+=("$f") ;;
+    *) err "UPLOAD_PLATFORM 只能是 both / mac / win（当前：$UPLOAD_PLATFORM）"; exit 1 ;;
+  esac
+  return 0
+}
+add_file "$OUTPUT_DIR_MAC/BobWork-${VERSION}-macos-arm64.dmg"
+add_file "$OUTPUT_DIR_MAC/BobWork-${VERSION}-macos-arm64.zip"
+add_file "$OUTPUT_DIR_MAC/latest-mac-arm64.yml"
+add_file "$OUTPUT_DIR_MAC/latest-mac.yml"
+add_file "$WIN_OUTPUT_DIR/BobWork-${VERSION}-win-x64.exe"
+add_file "$WIN_OUTPUT_DIR/BobWork-${VERSION}-win-x64.exe.blockmap"
+add_file "$WIN_OUTPUT_DIR/latest.yml"
 
 if [ ${#FILES[@]} -eq 0 ]; then
-  err "未找到任何构建产物（mac: $OUTPUT_DIR / win: $WIN_OUTPUT_DIR）"
+  err "未找到任何构建产物（mac: ${OUTPUT_DIR} / win: ${WIN_OUTPUT_DIR}）"
   err "请先执行 package-release.sh（mac）或 pack-win.sh（Windows）生成产物"
   exit 1
 fi
@@ -72,6 +86,15 @@ log "待上传文件："
 for f in "${FILES[@]}"; do
   echo "  - $(basename "$f") ($(du -h "$f" | awk '{print $1}'))"
 done
+
+# 跨平台一致性闸门：两边的更新清单 version 必须都等于 package.json 的版本。
+# 缺一边只警告（允许单平台补发），但版本不一致直接拒绝上传 —— 否则会出现
+# 「mac 已更新到 .747、Windows 用户永远停在 .746」这种无声漂移。
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
+node "$PROJECT_DIR/scripts/check-release-parity.mjs" || {
+  err "跨平台版本不一致，已中止上传（见上方 parity 报告）"
+  exit 1
+}
 
 # ---------- 2. 提取 Release Notes ----------
 # 用 node 而非 python3：macOS 的 /usr/bin/python3 是 Xcode 垫片，未同意 Xcode 许可协议时

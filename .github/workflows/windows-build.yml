@@ -17,6 +17,11 @@ name: Windows Installer
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_to_gitcode:
+        description: '构建后上传到 GitCode Release（要求同版本 macOS 已发布）'
+        type: boolean
+        default: false
   push:
     branches:
       - 'ci/win-installer'
@@ -247,9 +252,86 @@ jobs:
           name: BobWork-win-installer
           path: |
             release/*.exe
+            release/*.exe.blockmap
             release/latest.yml
           if-no-files-found: error
           retention-days: 14
+
+      # 构建完直接上架（方案 C）：产物在 Windows runner 上，GitCode 是发布渠道，
+      # 过去要靠人工把 382MB artifact 搬过去，每版都卡在同一个环节。
+      # 只在 workflow_dispatch 且勾选 publish_to_gitcode 时执行 —— 普通 CI 不发布。
+      #
+      # 顺序闸门：Release 必须已由 macOS 创建。若 Windows 先建 tag，latest 频道里
+      # 只有 latest.yml、没有 latest-mac.yml，已装 mac 用户检查更新会静默失败。
+      - name: 发布到 GitCode Release
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_gitcode == 'true' }}
+        shell: pwsh
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GITCODE_TOKEN) {
+            Write-Host "::error title=gitcode::未配置 GITCODE_TOKEN secret（Settings → Secrets and variables → Actions → New repository secret）"
+            exit 1
+          }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          $token = $env:GITCODE_TOKEN
+          $api = 'https://api.gitcode.com/api/v5/repos/baolei89/BobWork'
+          $download = 'https://gitcode.com/baolei89/BobWork/releases/download'
+
+          # 1) 两平台必须同一个 tag：找不到 mac 先发的 Release 就拒绝发 Windows。
+          $rel = $null
+          try {
+            $rel = Invoke-RestMethod -Uri "$api/releases/tags/$tag?access_token=$token" -Method Get -TimeoutSec 30
+          } catch {
+            Write-Host "::error title=gitcode::看不到 Release $tag —— 必须先发布 macOS 同版本，再发 Windows"
+            exit 1
+          }
+          $existing = @($rel.assets | ForEach-Object { $_.name })
+          Write-Host "::notice title=gitcode::目标 Release $tag，已有 $($existing.Count) 个资产"
+
+          # 2) OBS 两段式上传：先取签名 URL 与必需 headers，再 PUT 二进制。
+          $files = @(
+            "release/BobWork-$version-win-x64.exe",
+            "release/BobWork-$version-win-x64.exe.blockmap",
+            "release/latest.yml"
+          )
+          $failed = @()
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { $failed += "$f（文件缺失）"; continue }
+            $name = Split-Path $f -Leaf
+            if ($existing -contains $name) { Write-Host "  [SKIP] $name 已存在"; continue }
+
+            $uploaded = $false
+            for ($i = 1; $i -le 3 -and -not $uploaded; $i++) {
+              $info = curl.exe -sS --max-time 60 "$api/releases/$tag/upload_url?access_token=$token&file_name=$name" | ConvertFrom-Json
+              if (-not $info.url) { Write-Host "  获取上传地址失败，重试 $i/3"; Start-Sleep 3; continue }
+              $headerArgs = @()
+              foreach ($p in $info.headers.PSObject.Properties) { $headerArgs += @('-H', "$($p.Name): $($p.Value)") }
+              $code = curl.exe -sS -o NUL -w "%{http_code}" -X PUT --max-time 900 @headerArgs --data-binary "@$f" $info.url
+              if ($code -eq '200') {
+                $uploaded = $true
+                Write-Host "  [OK] $name"
+              } else {
+                Write-Host "  PUT $name -> HTTP $code，重试 $i/3"
+                Start-Sleep 3
+              }
+            }
+            if (-not $uploaded) { $failed += $name }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "::error title=gitcode::上传失败：$($failed -join ', ')"
+            exit 1
+          }
+
+          # 3) 更新清单可访问性（CDN 可能滞后，只警告不失败）
+          foreach ($yml in @('latest-mac.yml', 'latest.yml')) {
+            $code = curl.exe -sS -o NUL -w "%{http_code}" -L --max-time 60 "$download/latest/$yml"
+            if ($code -eq '200') { Write-Host "::notice title=update::$yml 可访问" }
+            else { Write-Host "::warning title=update::$yml 暂不可访问（HTTP $code），等待 CDN 刷新" }
+          }
+          Write-Host "::notice title=gitcode::Windows $version 已发布：$download/$tag/"
 
       - name: 上传构建日志
         if: always()
