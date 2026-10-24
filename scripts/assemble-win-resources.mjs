@@ -89,15 +89,24 @@ fs.cpSync(path.join(ROOT, 'public'), path.join(TARGET, 'public'), { recursive: t
 log('已补 public');
 
 // ---- 4. ffmpeg 放到主进程约定的 resources/bin/ffmpeg.exe ----
+// 复用 assemble-win-ffmpeg.mjs：它知道 pnpm 把 optional 依赖放在 .pnpm 里的位置，
+// 不再依赖仓库根目录存在 node_modules/@ffmpeg-installer/win32-x64。
 const binDir = path.join(RES, 'bin');
 fs.mkdirSync(binDir, { recursive: true });
-const ff = path.join(ROOT, 'node_modules', '@ffmpeg-installer', 'win32-x64', 'ffmpeg.exe');
-if (fs.existsSync(ff)) {
-  fs.copyFileSync(ff, path.join(binDir, 'ffmpeg.exe'));
-  log(`已放 resources/bin/ffmpeg.exe（${(fs.statSync(ff).size / 1048576).toFixed(1)} MB）`);
-} else {
-  log('⚠️ 找不到 win32 ffmpeg.exe');
+let ffOk = false;
+try {
+  execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'assemble-win-ffmpeg.mjs')], { stdio: 'inherit' });
+  const staged = path.join(ROOT, '.build', 'bin', 'ffmpeg.exe');
+  if (fs.existsSync(staged)) {
+    fs.copyFileSync(staged, path.join(binDir, 'ffmpeg.exe'));
+    log(`已放 resources/bin/ffmpeg.exe（${(fs.statSync(staged).size / 1048576).toFixed(1)} MB）`);
+    ffOk = true;
+  }
+} catch {
+  // 交叉打包机没有 win32 二进制时保持警告而不是失败：与既有行为一致，
+  // 最终由 pack-win.sh 的产物断言决定要不要出包。
 }
+if (!ffOk) log('⚠️ 找不到 win32 ffmpeg.exe');
 
 // ---- 4.4 随包嵌入式 Python（Windows 没有系统 python3；评估文档 §10.2-E）----
 // 必须随包分发：Office 模板填充 / Word 修订 / PDF 文本提取 / 图片裁剪 都经 pythonBin 调用。

@@ -157,6 +157,12 @@ jobs:
             exit 1
           }
 
+      # 主进程把 FFMPEG_PATH 指向 resources/bin/ffmpeg.exe；该二进制是 optional
+      # 传递依赖，仓库根目录没有稳定路径，先归集到 .build/bin 再由 extraResources 挂进包。
+      - name: 归集内置 ffmpeg
+        shell: pwsh
+        run: node scripts/assemble-win-ffmpeg.mjs
+
       - name: 打包 NSIS 安装包
         shell: pwsh
         run: |
@@ -197,7 +203,9 @@ jobs:
             @{ n = 'Pillow';               p = 'release/win-unpacked/resources/python/Lib/site-packages/PIL/Image.py' },
             @{ n = 'lxml（win_amd64）';     p = 'release/win-unpacked/resources/python/Lib/site-packages/lxml/etree.cp311-win_amd64.pyd' },
             # 没有它主进程会直接判定 "Auto-updater disabled"：装上能用，但永远收不到更新
-            @{ n = '自动更新配置';          p = 'release/win-unpacked/resources/app-update.yml' }
+            @{ n = '自动更新配置';          p = 'release/win-unpacked/resources/app-update.yml' },
+            # 主进程把 FFMPEG_PATH 指向这里；缺了视频抽帧/转码会静默失效
+            @{ n = '内置 ffmpeg';           p = 'release/win-unpacked/resources/bin/ffmpeg.exe' }
           )
           $bad = @()
           foreach ($c in $checks) {
@@ -231,7 +239,7 @@ jobs:
           }
           Write-Host "  [OK] 随包 Python 可导入 docx/PIL/lxml/pdfplumber/openpyxl/pptx/pypdf"
           $kb = [Math]::Round((Get-Item "$ns/server.js").Length / 1KB, 1)
-          Write-Host "::notice title=pack-contents::13 项齐全 / server.js 含 remote-login（$kb KB） / Python import 通过"
+          Write-Host "::notice title=pack-contents::14 项齐全 / server.js 含 remote-login（$kb KB） / Python import 通过"
 
       # 装上能用 ≠ 能更新：拿磁盘上的真实 exe 核对 latest.yml 的版本/大小/sha512，
       # 并确认 app-update.yml 指向 GitCode 的 latest 频道。
@@ -300,6 +308,12 @@ jobs:
   #   同一 token 在 Ubuntu runner 与本机均为 200 —— 属 GitCode 对该 IP 段/边缘节点的异常。
   #   产物用 actions/download-artifact 在 GitHub 内部传递，不需要重下公网。
   #
+  # ⚠️ 带宽是真正的瓶颈：376MB 安装包从美国 runner 传到 GitCode 实测只有约
+  #    200 KB/s，单次 PUT 需要 ~30 分钟。因此 job 超时给到 120 分钟、单次 PUT
+  #    给到 60 分钟；否则会在中途被杀，表现为「跑了半小时一个资产都没有」。
+  #    国内网络下用本机 `bash scripts/pack-win.sh` + `upload-to-gitcode.sh` 会快得多，
+  #    这条 CI 通道只作为无人值守时的兜底。
+  #
   # 顺序闸门（不可省）：Release 必须已由 macOS 创建。若 Windows 先建 tag，latest
   # 频道里只有 latest.yml、没有 latest-mac.yml，已装 mac 用户检查更新会静默失败。
   publish:
@@ -307,7 +321,7 @@ jobs:
     needs: build-installer
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_gitcode == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 120
 
     steps:
       - name: 检出
@@ -368,7 +382,7 @@ jobs:
               url=$(printf '%s' "$info" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s); if(!d.url) process.exit(1); console.log(d.url)})') || { echo "  获取上传地址失败 $i/3"; sleep 5; continue; }
               hargs=()
               while IFS= read -r h; do hargs+=(-H "$h"); done < <(printf '%s' "$info" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s); for (const [k,v] of Object.entries(d.headers||{})) console.log(k+": "+v)})')
-              up=$(curl -sS -o /tmp/put.out -w "%{http_code}" -X PUT --max-time 900 \
+              up=$(curl -sS -o /tmp/put.out -w "%{http_code}" -X PUT --max-time 3600 \
                 "${hargs[@]}" --data-binary "@$f" "$url") || up=000
               echo "  PUT $name -> HTTP $up"
               if [ "$up" = "200" ]; then uploaded=1; break; fi

@@ -63,6 +63,16 @@ extraResources:
   # 那份目录由 assemble-win-resources.mjs 直接写入 resources/python（两处布局一致）。
   - from: .build/python
     to: python
+  # 内置 ffmpeg：主进程把 FFMPEG_PATH 指向 resources/bin/ffmpeg(.exe)
+  #（electron/main.ts 的 spawn 环境），不挂这一条时 Windows 侧会去 PATH 里找，
+  # 结果是视频抽帧/转码相关功能静默不可用。
+  #
+  # ⚠️ 不能直接写 node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe：
+  #    它是 optional 传递依赖，pnpm 装在 .pnpm 里，仓库根目录没有这个路径
+  #    （Windows CI 会因 from 不存在直接失败）。先用 scripts/assemble-win-ffmpeg.mjs
+  #    归集到 .build/bin，这里只挂确定路径。
+  - from: .build/bin
+    to: bin
 
 win:
   # 应用与安装器图标。源是 public/icon-512.png（512×512），electron-builder 会自己
