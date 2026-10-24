@@ -273,89 +273,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 构建完直接上架（方案 C）：产物在 Windows runner 上，GitCode 是发布渠道，
-      # 过去要靠人工把 382MB artifact 搬过去，每版都卡在同一个环节。
-      # 只在 workflow_dispatch 且勾选 publish_to_gitcode 时执行 —— 普通 CI 不发布。
-      #
-      # 顺序闸门：Release 必须已由 macOS 创建。若 Windows 先建 tag，latest 频道里
-      # 只有 latest.yml、没有 latest-mac.yml，已装 mac 用户检查更新会静默失败。
-      - name: 发布到 GitCode Release
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_gitcode == 'true' }}
-        shell: pwsh
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not $env:GITCODE_TOKEN) {
-            Write-Host "::error title=gitcode::未配置 GITCODE_TOKEN secret（Settings → Secrets and variables → Actions → New repository secret）"
-            exit 1
-          }
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tag = "v$version"
-          $token = $env:GITCODE_TOKEN
-          $api = 'https://api.gitcode.com/api/v5/repos/baolei89/BobWork'
-          $download = 'https://gitcode.com/baolei89/BobWork/releases/download'
-
-          # 1) 两平台必须同一个 tag：找不到 mac 先发的 Release 就拒绝发 Windows。
-          #
-          # ⚠️ 用 curl.exe 而不是 Invoke-RestMethod：后者失败时会把真实原因（HTTP 码/响应体）
-          # 吞掉，只剩一句「看不到 Release」——与实际故障（403/网络/鉴权）完全无关，
-          # 2026-10-24 首次真机发布就因此误判过一次。curl 的 -w 能留下证据。
-          $relFile = 'release-info.json'
-          $code = curl.exe -sS --max-time 60 -o $relFile -w "%{http_code}" "$api/releases/tags/$tag?access_token=$token"
-          if ($code -ne '200') {
-            $body = if (Test-Path $relFile) { (Get-Content $relFile -Raw) } else { '' }
-            if ($body.Length -gt 800) { $body = $body.Substring(0, 800) }
-            Write-Host "::error title=gitcode::查询 Release $tag 失败（HTTP $code）：$body"
-            exit 1
-          }
-          $rel = Get-Content $relFile -Raw | ConvertFrom-Json
-          Remove-Item $relFile -ErrorAction SilentlyContinue
-          $existing = @($rel.assets | ForEach-Object { $_.name })
-          Write-Host "::notice title=gitcode::目标 Release $tag，已有 $($existing.Count) 个资产"
-
-          # 2) OBS 两段式上传：先取签名 URL 与必需 headers，再 PUT 二进制。
-          $files = @(
-            "release/BobWork-$version-win-x64.exe",
-            "release/BobWork-$version-win-x64.exe.blockmap",
-            "release/latest.yml"
-          )
-          $failed = @()
-          foreach ($f in $files) {
-            if (-not (Test-Path $f)) { $failed += "$f（文件缺失）"; continue }
-            $name = Split-Path $f -Leaf
-            if ($existing -contains $name) { Write-Host "  [SKIP] $name 已存在"; continue }
-
-            $uploaded = $false
-            for ($i = 1; $i -le 3 -and -not $uploaded; $i++) {
-              $info = curl.exe -sS --max-time 60 "$api/releases/$tag/upload_url?access_token=$token&file_name=$name" | ConvertFrom-Json
-              if (-not $info.url) { Write-Host "  获取上传地址失败，重试 $i/3"; Start-Sleep 3; continue }
-              $headerArgs = @()
-              foreach ($p in $info.headers.PSObject.Properties) { $headerArgs += @('-H', "$($p.Name): $($p.Value)") }
-              $code = curl.exe -sS -o NUL -w "%{http_code}" -X PUT --max-time 900 @headerArgs --data-binary "@$f" $info.url
-              if ($code -eq '200') {
-                $uploaded = $true
-                Write-Host "  [OK] $name"
-              } else {
-                Write-Host "  PUT $name -> HTTP $code，重试 $i/3"
-                Start-Sleep 3
-              }
-            }
-            if (-not $uploaded) { $failed += $name }
-          }
-          if ($failed.Count -gt 0) {
-            Write-Host "::error title=gitcode::上传失败：$($failed -join ', ')"
-            exit 1
-          }
-
-          # 3) 更新清单可访问性（CDN 可能滞后，只警告不失败）
-          foreach ($yml in @('latest-mac.yml', 'latest.yml')) {
-            $code = curl.exe -sS -o NUL -w "%{http_code}" -L --max-time 60 "$download/latest/$yml"
-            if ($code -eq '200') { Write-Host "::notice title=update::$yml 可访问" }
-            else { Write-Host "::warning title=update::$yml 暂不可访问（HTTP $code），等待 CDN 刷新" }
-          }
-          Write-Host "::notice title=gitcode::Windows $version 已发布：$download/$tag/"
-
+      # 发布不在本 job 里做：Windows runner 访问 api.gitcode.com 实测会拿到
+      # 429 / 404「Release Not Found」，而同一 token 在 Ubuntu runner 与本机均为 200。
+      # 发布逻辑见文件末尾的 publish job（产物走 actions/download-artifact 在
+      # GitHub 内部传递，不经过公网重下）。
       - name: 上传构建日志
         if: always()
         uses: actions/upload-artifact@v5
@@ -373,3 +294,94 @@ jobs:
             update-manifest.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # 发布单独放在 ubuntu-latest：
+  #   Windows runner 访问 api.gitcode.com 实测拿到 429 / 404「Release Not Found」，
+  #   同一 token 在 Ubuntu runner 与本机均为 200 —— 属 GitCode 对该 IP 段/边缘节点的异常。
+  #   产物用 actions/download-artifact 在 GitHub 内部传递，不需要重下公网。
+  #
+  # 顺序闸门（不可省）：Release 必须已由 macOS 创建。若 Windows 先建 tag，latest
+  # 频道里只有 latest.yml、没有 latest-mac.yml，已装 mac 用户检查更新会静默失败。
+  publish:
+    name: 发布到 GitCode / ubuntu
+    needs: build-installer
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_gitcode == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v5
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 下载安装包（GitHub 内部传递）
+        uses: actions/download-artifact@v5
+        with:
+          name: BobWork-win-installer
+          path: release
+
+      - name: 产物清单
+        run: ls -lh release
+
+      - name: 上传到 GitCode Release
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -euo pipefail
+          API="https://api.gitcode.com/api/v5/repos/baolei89/BobWork"
+          TAG="v$(node -p "require('./package.json').version")"
+          DL="https://gitcode.com/baolei89/BobWork/releases/download"
+          if [ -z "${GITCODE_TOKEN:-}" ]; then
+            echo "::error title=gitcode::未配置 GITCODE_TOKEN secret"
+            exit 1
+          fi
+
+          # 1) 顺序闸门：Release 必须已存在（GitCode 偶发 429/404，带退避重试）
+          code=""
+          for i in 1 2 3 4 5; do
+            code=$(curl -sS -o rel.json -w "%{http_code}" --max-time 60 \
+              "$API/releases/tags/$TAG?access_token=$GITCODE_TOKEN") || true
+            echo "lookup #$i -> $code"
+            [ "$code" = "200" ] && break
+            sleep $((i * 20))
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error title=gitcode::查询 Release $TAG 失败（HTTP $code）：$(head -c 800 rel.json)"
+            exit 1
+          fi
+          existing=$(node -e 'const r=require("./rel.json"); for (const a of (r.assets||[])) console.log(a.name)')
+          echo "release $TAG 已有资产：$(echo "$existing" | tr '\n' ' ')"
+
+          # 2) 逐个上传；latest.yml 放最后，保证清单出现时安装包已在
+          fail=0
+          for f in release/*.exe release/*.exe.blockmap release/latest.yml; do
+            if [ ! -f "$f" ]; then echo "::error title=gitcode::产物缺失 $f"; fail=1; continue; fi
+            name=$(basename "$f")
+            if printf '%s\n' "$existing" | grep -qx "$name"; then echo "  [SKIP] $name"; continue; fi
+            uploaded=0
+            for i in 1 2 3; do
+              info=$(curl -sS --max-time 60 "$API/releases/$TAG/upload_url?access_token=$GITCODE_TOKEN&file_name=$name") || { sleep 5; continue; }
+              url=$(printf '%s' "$info" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s); if(!d.url) process.exit(1); console.log(d.url)})') || { echo "  获取上传地址失败 $i/3"; sleep 5; continue; }
+              hargs=()
+              while IFS= read -r h; do hargs+=(-H "$h"); done < <(printf '%s' "$info" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s); for (const [k,v] of Object.entries(d.headers||{})) console.log(k+": "+v)})')
+              up=$(curl -sS -o /tmp/put.out -w "%{http_code}" -X PUT --max-time 900 \
+                "${hargs[@]}" --data-binary "@$f" "$url") || up=000
+              echo "  PUT $name -> HTTP $up"
+              if [ "$up" = "200" ]; then uploaded=1; break; fi
+              sleep 10
+            done
+            if [ "$uploaded" != "1" ]; then echo "::error title=gitcode::上传失败 $name"; fail=1; fi
+          done
+          [ "$fail" = "0" ] || exit 1
+
+          # 3) 更新清单可访问性（CDN 可能滞后，只警告不失败）
+          for y in latest-mac.yml latest.yml; do
+            c=$(curl -sS -o /dev/null -w "%{http_code}" -L --max-time 60 "$DL/latest/$y")
+            if [ "$c" = "200" ]; then echo "::notice title=update::$y 可访问"
+            else echo "::warning title=update::$y 暂不可访问（HTTP $c），等待 CDN 刷新"; fi
+          done
+          echo "::notice title=gitcode::Windows $TAG 已发布：$DL/$TAG/"
