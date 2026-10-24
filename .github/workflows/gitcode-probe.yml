@@ -1,0 +1,27 @@
+# 临时探针：验证 GitHub-hosted runner 能否访问 GitCode API（用完即删）
+#
+# 背景：Windows Installer 的「发布到 GitCode」步骤在查 Release 时失败，
+# 而 Invoke-RestMethod 把真实原因吞掉了。先用最小成本拿到 HTTP 码，
+# 再决定是改鉴权、改上传方式，还是放弃 CI 直发。
+
+name: GitCode Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: ubuntu-latest / curl
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: probe GitCode API
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -x
+          echo "public: $(curl -sS -o /dev/null -w '%{http_code}' -m 30 'https://api.gitcode.com/api/v5/repos/baolei89/BobWork')"
+          code=$(curl -sS -o /tmp/release.json -w '%{http_code}' -m 30 "https://api.gitcode.com/api/v5/repos/baolei89/BobWork/releases/tags/v0.7.746?access_token=$GITCODE_TOKEN")
+          echo "release_with_token: $code"
+          head -c 600 /tmp/release.json || true
+          echo
