@@ -297,13 +297,20 @@ jobs:
           $download = 'https://gitcode.com/baolei89/BobWork/releases/download'
 
           # 1) 两平台必须同一个 tag：找不到 mac 先发的 Release 就拒绝发 Windows。
-          $rel = $null
-          try {
-            $rel = Invoke-RestMethod -Uri "$api/releases/tags/$tag?access_token=$token" -Method Get -TimeoutSec 30
-          } catch {
-            Write-Host "::error title=gitcode::看不到 Release $tag —— 必须先发布 macOS 同版本，再发 Windows"
+          #
+          # ⚠️ 用 curl.exe 而不是 Invoke-RestMethod：后者失败时会把真实原因（HTTP 码/响应体）
+          # 吞掉，只剩一句「看不到 Release」——与实际故障（403/网络/鉴权）完全无关，
+          # 2026-10-24 首次真机发布就因此误判过一次。curl 的 -w 能留下证据。
+          $relFile = 'release-info.json'
+          $code = curl.exe -sS --max-time 60 -o $relFile -w "%{http_code}" "$api/releases/tags/$tag?access_token=$token"
+          if ($code -ne '200') {
+            $body = if (Test-Path $relFile) { (Get-Content $relFile -Raw) } else { '' }
+            if ($body.Length -gt 800) { $body = $body.Substring(0, 800) }
+            Write-Host "::error title=gitcode::查询 Release $tag 失败（HTTP $code）：$body"
             exit 1
           }
+          $rel = Get-Content $relFile -Raw | ConvertFrom-Json
+          Remove-Item $relFile -ErrorAction SilentlyContinue
           $existing = @($rel.assets | ForEach-Object { $_.name })
           Write-Host "::notice title=gitcode::目标 Release $tag，已有 $($existing.Count) 个资产"
 
