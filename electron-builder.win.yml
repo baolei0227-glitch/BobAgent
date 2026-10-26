@@ -39,6 +39,13 @@ asar: false
 #   在 Windows runner 上构建时这一步恰好能成功，所以 CI 侧一直没有暴露。
 npmRebuild: false
 
+# ⚠️ 打包前裁掉 app/node_modules 里主进程用不到的依赖（2026-10-24 实测：不裁是
+#   948 MB / 32170 个文件，整包 37421 个文件；裁完 3 MB / 274 个文件，整包 5525 个）。
+#   NSIS 逐文件写盘 + Defender 逐文件扫描 ⇒ 文件数是安装时长的第一因子。
+#   判据：electron/dist/main.js 的外部 require 只有 adm-zip 与 electron-updater。
+#   钩子会在裁剪后立刻验证这两个包仍可 resolve，解析不到直接让构建失败。
+afterPack: scripts/after-pack-win-slim.cjs
+
 # 只取 stage-standalone.mjs 整理过的产物：
 #   - server.js 已被换成自定义入口（含 /remote-login）
 #   - 已补 assets/skills 与运行时脚本

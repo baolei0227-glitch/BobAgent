@@ -14,6 +14,21 @@
 
 ***
 
+## v0.7.747 (2026-10-26)
+
+> Windows 版发布链路打通（构建 / 自动更新 / 随包运行时），并把 Butler 的模型凭据改为客户端解密后透传 —— 修掉 Windows 上服务端子进程解不开设置密钥时「模型未配置」的问题。
+
+### 新增
+
+* **Windows 构建与自动更新**：新增 [electron-builder.win.yml](file:///Users/baolei/Desktop/BobWork/projects/electron-builder.win.yml) 与 [after-pack-win-slim.cjs](file:///Users/baolei/Desktop/BobWork/projects/scripts/after-pack-win-slim.cjs)，打通下载 / 安装 / 重启闭环；随包 ffmpeg、Python 与本地语音引擎；发布走 GitCode Release（CI 在 Linux job 发布，绕开 Windows runner 的 429/404）。
+
+### 修复与优化
+
+* **Butler 模型凭据透传**（[ButlerDrawer.tsx](file:///Users/baolei/Desktop/BobWork/projects/src/components/butler/ButlerDrawer.tsx) · [threads/route.ts](file:///Users/baolei/Desktop/BobWork/projects/src/app/api/butler/threads/route.ts) · [entry.ts](file:///Users/baolei/Desktop/BobWork/projects/src/lib/butler/entry.ts)）：渲染进程经 Electron IPC 拿到**已解密**的 `apiKey / baseUrl / providerModelId`，随本轮请求透传；服务端不再依赖"主进程与服务端子进程派生同一把机器密钥"。浏览器模式（只见掩码）仍回退服务端解析。
+* **清理**：移除 95 个 Finder 复制产生的「 2」重复文件（逐一校验与原名内容一致），避免重复编译与误纳入构建。
+
+***
+
 ## v0.7.746 (2026-10-22)
 
 > 跨平台基础层落地：把散落在 20+ 文件的 `process.platform` 判断与 POSIX 路径假设收敛到 `lib/platform`，为 Windows 支持铺路；macOS 行为保持不变。

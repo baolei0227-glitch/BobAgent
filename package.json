@@ -1,6 +1,6 @@
 {
   "name": "bob-work",
-  "version": "0.7.746",
+  "version": "0.7.747",
   "private": true,
   "main": "electron/dist/main.js",
   "scripts": {
@@ -27,7 +27,8 @@
     "package:release": "bash ./scripts/package-release.sh",
     "package:release:arm64": "bash ./scripts/package-release.sh arm64",
     "package:win": "bash ./scripts/pack-win.sh",
-    "check:win-update": "node scripts/check-win-update-manifest.mjs --dir release"
+    "check:win-update": "node scripts/check-win-update-manifest.mjs --dir release",
+    "release:win": "bash ./scripts/release-win.sh"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
