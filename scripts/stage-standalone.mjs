@@ -276,6 +276,50 @@ function installCustomServer() {
   log(`✅ 自定义 server 就位（${kb} KB，含 /remote-login）`);
 }
 
+/**
+ * 删掉 Next 文件追踪顺带拷进来的「发布产物 / 文档 / 测试」目录。
+ *
+ * 为什么必须在这里做（2026-10-26 实测）：
+ *   `next build` 的 standalone 会把项目根下若干目录整棵带进来 ——
+ *   实测 release/ 198MB、release-dist/ 256MB（都是上一次打包的产物），
+ *   再加上 docs/、e2e/、RELEASES.md、tsbuildinfo。
+ *   Windows 打包直接吃 standalone（electron-builder 的 extraResources），
+ *   于是这 450MB+ 垃圾原样进了安装包：0.7.747 的 Windows 包 478MB 里近一半是它。
+ *   next.config 的 outputFileTracingExcludes 对这些目录不生效（实测），
+ *   所以在「build 之后、打包之前」这一步统一收口，本地与 CI 两条路径都受益。
+ */
+const JUNK_DIRS = ['release', 'release-dist', 'docs', 'e2e', 'test-results', '.github', '.trae', '.workbuddy'];
+const JUNK_FILE_RE = /^(RELEASES\.md|tsconfig.*\.json|.*\.tsbuildinfo)$/;
+
+function dirSize(p) {
+  let total = 0;
+  const st = fs.lstatSync(p);
+  if (!st.isDirectory()) return st.size;
+  for (const e of fs.readdirSync(p, { withFileTypes: true })) total += dirSize(path.join(p, e.name));
+  return total;
+}
+
+function pruneJunk() {
+  let freed = 0;
+  for (const name of JUNK_DIRS) {
+    const p = path.join(STANDALONE, name);
+    if (!exists(p)) continue;
+    try {
+      freed += dirSize(p);
+      fs.rmSync(p, { recursive: true, force: true });
+    } catch { /* 删不掉就留着，不阻断打包 */ }
+  }
+  for (const name of fs.readdirSync(STANDALONE)) {
+    if (!JUNK_FILE_RE.test(name)) continue;
+    const p = path.join(STANDALONE, name);
+    try {
+      freed += fs.lstatSync(p).size;
+      fs.rmSync(p, { recursive: true, force: true });
+    } catch { /* 同上 */ }
+  }
+  if (freed > 0) log(`已清理非运行时文件 ${(freed / 1048576).toFixed(0)} MB（release/、release-dist/、docs/ 等）`);
+}
+
 function report() {
   const nm = path.join(STANDALONE, 'node_modules');
   const native = [];
@@ -299,5 +343,6 @@ copySkills();
 copyScripts();
 stageNativePrebuilds();
 stageFfmpeg();
+pruneJunk();
 report();
 log('完成');
