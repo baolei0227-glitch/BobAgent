@@ -47,13 +47,34 @@ interface ButlerModel {
   providerModelId?: string;
 }
 
+/** 客户端解析好的模型凭据（三件套）。
+ *
+ *  与 chat 节点同一条取 Key 路径：渲染进程经 Electron IPC 拿到**已解密的** apiKey 后随请求透传，
+ *  服务端不再自行解密设置文件。这样就不再依赖「主进程与服务端子进程派生同一把机器密钥」——
+ *  Windows 上后者解不开时，Butler 也能正常拿到 Key。 */
+export interface ButlerModelCredential {
+  apiKey: string;
+  baseUrl: string;
+  providerModelId: string;
+}
+
 /** 解析 Butler 对话使用的模型。
  *
  *  - **显式选型**（`provider:modelId` 标签，来自抽屉模型下拉 / 会话已存的选择）：该厂商仍已配置
  *    且能算出 baseUrl → 用它；标签失效（厂商被删或去掉 Key）时**静默回退自动**，不让一条历史
  *    选择把整个会话卡在 400 上（用户在抽屉里换一个模型即可继续）。
  *  - **自动**：第一个已配置的自定义 provider 的第一个**对话**模型（无则报错引导配置）。 */
-export async function resolveButlerModel(tag?: string | null): Promise<ButlerModel> {
+export async function resolveButlerModel(
+  tag?: string | null,
+  credential?: ButlerModelCredential | null,
+): Promise<ButlerModel> {
+  // 客户端已解析好的三件套优先：Key 由渲染进程经 IPC 解密后透传，服务端不再读设置文件。
+  const credApiKey = credential?.apiKey?.trim() || '';
+  const credBaseUrl = credential?.baseUrl?.trim() || '';
+  const credModelId = credential?.providerModelId?.trim() || '';
+  if (credApiKey && credBaseUrl && credModelId) {
+    return { custom: true, providerModelId: credModelId, apiKey: credApiKey, baseUrl: credBaseUrl };
+  }
   const settings = await readSettingsFromFile();
   const explicit = (tag ?? '').trim();
   if (explicit) {
@@ -135,6 +156,8 @@ export interface ButlerTurnOptions {
    * undefined（微信桥等不带选型的老调用方）= 沿用线程里存的选择。
    */
   modelId?: string | null;
+  /** 本轮模型凭据（渲染进程明文透传；缺省 = 服务端按 modelId 自行解析设置文件）。 */
+  modelCredential?: ButlerModelCredential | null;
   /** 本轮思考档位：抽屉传当前选择；undefined = 沿用线程选择，再回退历史默认 medium（语义同 high）。 */
   thinkingLevel?: ThinkingLevel | null;
 }
@@ -192,7 +215,7 @@ export async function askButler(
   //    会话级选型（模型 / 思考档位）：本轮传了用本轮，否则用会话存的，最后回退历史默认。
   const modelTag = parseModelTag(opts.modelId) ?? thread?.modelId ?? null;
   const level: ThinkingLevel = parseThinkingLevel(opts.thinkingLevel) ?? thread?.thinkingLevel ?? 'medium';
-  const model = await resolveButlerModel(modelTag);
+  const model = await resolveButlerModel(modelTag, opts.modelCredential);
   const projectId = await resolveActiveProjectId();
   const ac = new AbortController();
   const timeoutTimer = setTimeout(() => ac.abort(new Error('请求超时（180 秒），请稍后重试或简化问题')), 180_000);
@@ -353,7 +376,7 @@ export async function streamButlerTurn(
   //    会话级选型（模型 / 思考档位）同 askButler：本轮传了用本轮，否则沿用会话存的。
   const modelTag = parseModelTag(opts.modelId) ?? thread?.modelId ?? null;
   const level: ThinkingLevel = parseThinkingLevel(opts.thinkingLevel) ?? thread?.thinkingLevel ?? 'medium';
-  const model = await resolveButlerModel(modelTag);
+  const model = await resolveButlerModel(modelTag, opts.modelCredential);
   const projectId = await resolveActiveProjectId();
   const upstream = await fetch(`${base}/api/chat`, {
     method: 'POST',

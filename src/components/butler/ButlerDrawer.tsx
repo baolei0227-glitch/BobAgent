@@ -187,6 +187,7 @@ import {
   DEFAULT_THINKING_LEVEL,
   THINKING_LEVELS,
   getAvailableModels,
+  getProviderPreset,
   type MessageAttachment,
   type ProviderConfig,
   type ThinkingLevel,
@@ -2932,6 +2933,26 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
     return out;
   }, [modelProviders]);
 
+  /**
+   * 本轮模型凭据（apiKey / baseUrl / providerModelId）：与 chat 节点同一条取 Key 路径。
+   * 渲染进程的 loadSettings() 经 Electron IPC 拿到的是**已解密**的 Key，随请求直接透传，
+   * 服务端不再自行读盘解密 —— Windows 上服务端子进程解不开时也不会退化成「未配置模型」。
+   * 浏览器模式（无 desktopAPI）拿到的是掩码，此时返回 null 交服务端解析。
+   */
+  const modelCredential = useMemo(() => {
+    const sep = modelTag.indexOf(':');
+    if (sep <= 0) return null;
+    const provider = modelProviders.find((p) => p.type === modelTag.slice(0, sep));
+    const apiKey = provider?.apiKey?.trim() || '';
+    if (!apiKey || /^•+$/.test(apiKey)) return null;
+    const baseUrl =
+      provider?.baseUrl?.trim() ||
+      getProviderPreset(modelTag.slice(0, sep) as ProviderConfig['type'])?.baseUrl;
+    const providerModelId = modelTag.slice(sep + 1).trim();
+    if (!baseUrl || !providerModelId) return null;
+    return { apiKey, baseUrl, providerModelId };
+  }, [modelTag, modelProviders]);
+
   /** 当前模型项；模型池尚未就绪（modelTag 为空）时无匹配 */
   const currentModelOption = modelOptions.find((o) => o.tag === modelTag);
   /** 模型不支持思考 → 档位不可点；模型池未就绪时放开（发送前必落成具体模型或由服务端兜底） */
@@ -3362,6 +3383,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
             // 会话级选型随消息带上：Auto 已下线，这里正常是具体标签；
             // 仅「模型池未就绪 / 没配对话模型」才会是 ''，转 null 交服务端兜底解析
             modelId: modelTag || null,
+            ...(modelCredential ? { modelCredential } : {}),
             thinkingLevel: thinking,
           }),
         });
@@ -3568,7 +3590,7 @@ export function ButlerDrawer({ section, onSectionChange, docPath, onCloseDoc, on
         void refreshChatSessions();
       }
     },
-    [draft, sending, attaching, pendingAtts, workspaceFolder, confirmAsk, refreshChatSessions, markThreadRead, modelTag, thinking],
+    [draft, sending, attaching, pendingAtts, workspaceFolder, confirmAsk, refreshChatSessions, markThreadRead, modelTag, modelCredential, thinking],
   );
 
   /**

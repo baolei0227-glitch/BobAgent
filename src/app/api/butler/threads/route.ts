@@ -48,11 +48,21 @@ export async function POST(request: NextRequest) {
        *  缺省（微信桥等）= 沿用线程里存的选择。清洗见 threads-shared.parseModelTag / parseThinkingLevel。 */
       modelId?: string | null;
       thinkingLevel?: string | null;
+      /** 抽屉从渲染进程透传的模型三件套（Key 已在客户端解密）。
+       *  带上它服务端不必再自行解密设置文件 —— Windows 上服务端子进程解不开 Key 时仍可用。 */
+      modelCredential?: { apiKey?: string; baseUrl?: string; providerModelId?: string };
     };
     const question = (body.text || '').trim();
     if (!question) {
       return NextResponse.json({ success: false, error: 'Please enter a question for the chat' });
     }
+
+    // 三件套统一清洗：缺任一字段即视为未提供，交回 entry 的服务端解析兜底
+    const cred = body.modelCredential;
+    const modelCredential =
+      cred && typeof cred.apiKey === 'string' && typeof cred.baseUrl === 'string' && typeof cred.providerModelId === 'string'
+        ? { apiKey: cred.apiKey, baseUrl: cred.baseUrl, providerModelId: cred.providerModelId }
+        : undefined;
 
     // 浏览器端为相对路径（baseUrl 为空），Node 端（微信桥）显式传服务地址
     const base = new URL(request.url).origin;
@@ -66,6 +76,7 @@ export async function POST(request: NextRequest) {
         source: body.source ?? 'panel',
         // 选型原样下传（清洗在 entry 侧统一做）：undefined 与 null 语义不同——null = 回自动，不可合并
         modelId: body.modelId,
+        modelCredential,
         thinkingLevel: parseThinkingLevel(body.thinkingLevel),
       });
     }
@@ -77,6 +88,7 @@ export async function POST(request: NextRequest) {
       source: body.source,
       channel: body.channel,
       modelId: body.modelId,
+      modelCredential,
       thinkingLevel: parseThinkingLevel(body.thinkingLevel),
       // B5「中途改」：调用方（微信桥）打断请求 → 本次上游 /api/chat 立刻中止，
       // 不写线程、不回执；重跑的那次负责回执。客户端已断开时这个 JSON 也送不到，属预期。
